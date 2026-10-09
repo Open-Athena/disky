@@ -18,6 +18,7 @@
  * interval store's rows carry validity ranges it doesn't select by — a scan
  * whose per-scan sort is gone is the same 409, never another scan's files.
  */
+import { filterJson, hiddenNotFound, isHidden, restrictionFor } from '../_lib/restrict.js'
 import { type Env, requireViewer } from '../_lib/auth.js'
 import { openIndex, pathGens, perScan, readLargest, sizeVariant, storeReady } from '../_lib/index.js'
 import { cacheEnvTag, cacheKeyFor, cacheMatch, cacheStore, serverTiming } from '../_lib/edgeCache.js'
@@ -48,6 +49,13 @@ export const onRequestGet = async (ctx0: Ctx): Promise<Response> => {
 
   const gated = await st.time('auth', requireViewer(ctx as never))
   if (gated instanceof Response) return gated
+  // A path-restricted link (specs/path-scopes.md): a hidden path is absent and
+  // hidden files drop out of the (cached, unrestricted) list on the way out —
+  // the list can then hold fewer than `n`.
+  const restriction = restrictionFor(gated, ctx.env)
+  if (restriction && isHidden(path, restriction)) return hiddenNotFound()
+  const out = (res: Response | Promise<Response>) =>
+    restriction ? Promise.resolve(res).then(r => filterJson(r, (b: { files: { path: string }[] }) => ({ ...b, files: b.files.filter(f => !isHidden(f.path, restriction)) }))) : res
 
   try {
     // An unindexed id, or a `d=` slug matching no scan: a 404, never another scan.
@@ -58,7 +66,7 @@ export const onRequestGet = async (ctx0: Ctx): Promise<Response> => {
     const g = await st.time('pre', pathGens(env, [date]))
     const cacheKey = cacheKeyFor('largest', cacheEnvTag(ctx.env, ctx.request), `${date}/${encodeURIComponent(path)}?n=${n}&g=${g}`, storeKey(ctx.env))
     const hit = await st.time('match', cacheMatch(ctx.env, cacheKey))
-    if (hit) return hit
+    if (hit) return out(hit)
     let h
     try {
       h = await openIndex(env, date, sizeVariant('path'))
@@ -77,7 +85,7 @@ export const onRequestGet = async (ctx0: Ctx): Promise<Response> => {
       rows: r.decoded,
       ...(r.capped ? { capped: true } : {}),
     })
-    return await cacheStore(ctx.env, cacheKey, body, { 'server-timing': st.header() }, ctx.waitUntil?.bind(ctx))
+    return await out(cacheStore(ctx.env, cacheKey, body, { 'server-timing': st.header() }, ctx.waitUntil?.bind(ctx)))
   } catch (e) {
     const msg = String((e as Error).message ?? e)
     if (/D1_ERROR|internal error/i.test(msg)) return new Response(`index backend unavailable, retry: ${msg}`, { status: 503, headers: { 'retry-after': '5' } })
