@@ -66,7 +66,7 @@ beforeAll(async () => {
       FILES.set(searchKey(dirOf(date), role), fixture(`static-filter/${date}/path-index.${file}.parquet`))
     }
   }
-  base = { DB: spied(db), ROOT_LABEL: 'root', GCS_HMAC_KEY_ID: 'k', GCS_HMAC_SECRET: 's' } as Env
+  base = { DB: spied(db), ROOT_LABEL: 'root', GCS_HMAC_KEY_ID: 'k', GCS_HMAC_SECRET: 's', SEARCH_SIDECARS: '1' } as Env
 })
 
 /** Every D1 span query (`index_row_groups` group select) the views send: counted, and delayed `slowMs` (a

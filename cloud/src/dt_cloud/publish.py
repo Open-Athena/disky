@@ -144,12 +144,26 @@ def gen_dir(key: str, layer2_dir: str) -> str | None:
     return m["dir"] if m and len(m["dir"]) > len(layer2_dir) else None
 
 
+# The extras sidecars the site reads from a generation dir (`extras.py`; the site's `_lib/extras.ts`):
+# with the snapshot JSONs, the "small" served subset (`publish -S`).
+EXTRAS_FILES = frozenset({"attr.tsv", "attr.tsv.idx.json"})
+
+
+def is_small(key: str, layer2_dir: str) -> bool:
+    """Whether ``key`` is in the small served subset: anything outside the layer-2 dir (the snapshot
+    JSONs, `snapshots/rules.json`), and inside it only the extras sidecars — never a tier, a
+    listing or a rollup. What a deployment whose path store is served from elsewhere (an interval
+    store) still needs beside it: the page's header JSONs and the provenance its views carry."""
+    return not key.startswith(layer2_dir) or key.rsplit("/", 1)[-1] in EXTRAS_FILES
+
+
 def served(
     objs: list[Obj],
     layer2_dir: str,
     *,
     listings: bool = True,
     pointed: set[str] | None = None,
+    small: bool = False,
 ) -> tuple[list[Obj], dict[str, tuple[int, int]]]:
     """The objects `publish` copies, and the unpointed generations it leaves
     out (`{gen dir: (objects, bytes)}`). Without ``listings`` the canonical
@@ -157,11 +171,14 @@ def served(
     every `index/<gen>/` none of them names does too — the site reads
     generations only through their pointers, so a superseded one in R2 is
     dead weight (specs/storage-consolidation.md phase 1). Everything outside
-    a generation dir (snapshot JSONs, sidecars beside the layer-2) is kept."""
+    a generation dir (snapshot JSONs, sidecars beside the layer-2) is kept.
+    With ``small``, only the small subset (`is_small`)."""
     keep = {p.rstrip("/") for p in pointed} if pointed is not None else None
     out: list[Obj] = []
     dropped: dict[str, tuple[int, int]] = {}
     for o in objs:
+        if small and not is_small(o.key, layer2_dir):
+            continue
         if not listings and is_listing(o.key, layer2_dir):
             continue
         d = gen_dir(o.key, layer2_dir) if keep is not None else None
@@ -257,18 +274,19 @@ def publish(
     workers: int = 8,
     listings: bool = True,
     pointed: set[str] | None = None,
+    small: bool = False,
 ) -> Report:
     """Copy the scan's served subset to R2, skipping what's already there.
     Dry-run lists the keys it would copy on stdout and touches nothing.
     `listings=False` leaves the canonical per-bucket listings (`is_listing`)
     in GCS only. ``pointed`` (the D1 pointer dirs, `index_footer.pointers`)
     leaves out every `index/<gen>/` dir none of them names (`served`); None
-    copies every generation."""
+    copies every generation. ``small`` copies only the small subset (`is_small`)."""
     prefixes = prefixes or served_prefixes(scan, subdir, layer2)
     if src_bucket is None:
         from .deploy import data_bucket
         src_bucket = data_bucket()
-    objs, dropped = served(list_source(src_bucket, prefixes), layer2.format(scan=scan), listings=listings, pointed=pointed)
+    objs, dropped = served(list_source(src_bucket, prefixes), layer2.format(scan=scan), listings=listings, pointed=pointed, small=small)
     for d in sorted(dropped):
         n, b = dropped[d]
         err(f"publish-r2 {scan}: left out unpointed generation {d}/ ({n} objects, {b:,} B)")

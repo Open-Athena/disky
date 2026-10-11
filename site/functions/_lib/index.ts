@@ -29,6 +29,8 @@
  * Parsing the tier parquet's own footer is never an option: a floor-free
  * tier's ~27k-group footer exceeds the Worker's memory.
  */
+import type { Store } from '@rdub/file-tree'
+import { R2Store } from '@rdub/file-tree/stores/r2'
 import { S3Store } from '@rdub/file-tree/stores/s3'
 import { type FileMetaData, parquetMetadata, parquetMetadataAsync, parquetRead, parquetReadObjects, type RowGroup } from 'hyparquet'
 import type { Env } from './auth.js'
@@ -278,6 +280,17 @@ export function makeStore(env: Env) {
     prefixes: storePrefixes(env, ['listing/', 'snapshots/']),
     ...storeCreds(env),
   })
+}
+
+/** Where the small served files are read: the snapshot JSONs (`snapshots/…`) and the extras sidecars
+ * (`<gen dir>/attr.tsv{,.idx.json}`), under their store keys. `SERVED_R2=1`: from `INDEX_R2` (the job
+ * copies them there, `dt-cloud publish-r2 -S`), so a page's header, scan list and provenance never leave
+ * Cloudflare; unset: through the store seam, as before. A deployment whose `STORE_*` is already R2 reads
+ * the same bytes either way; the seam's other branch goes once every deployment publishes and binds. */
+export function servedStore(env: Env, prefixes: string[]): Store {
+  if (!env.SERVED_R2) return S3Store({ ...storeTarget(env), prefixes, ...storeCreds(env) })
+  if (!env.INDEX_R2) throw new Error('SERVED_R2 is set but the INDEX_R2 binding is missing')
+  return R2Store(env.INDEX_R2 as unknown as Parameters<typeof R2Store>[0], { prefixes })
 }
 
 /** Index variant → parquet key under the generation dir D1 points at

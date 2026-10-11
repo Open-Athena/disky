@@ -2747,6 +2747,7 @@ def discord_webhook(bot_token: str | None, channel: str, guild: str | None, name
 @option("-n", "--dry-run", is_flag=True, help="List the keys that would be copied; copy nothing")
 @option("-p", "--prefix", "prefixes", multiple=True, help="Key prefix to publish (repeatable; default: the scan's served subset — snapshots/<subdir>/<scan>/ + the layer-2 dir)")
 @option("-s", "--subdir", default=None, help="Snapshots subdir of this store (default $SNAPSHOTS_SUBDIR, else none)")
+@option("-S", "--small", is_flag=True, help="Only the small files the site reads beside the path store (its `SERVED_R2`): the snapshot JSONs and each generation's extras sidecars (`attr.tsv{,.idx.json}`); no tier, listing or rollup")
 @option("-w", "--workers", default=8, type=int, help="Concurrent HEADs/uploads (default 8)")
 @argument("scan")
 def publish_r2(
@@ -2757,6 +2758,7 @@ def publish_r2(
     dry_run: bool,
     prefixes: tuple[str, ...],
     subdir: str | None,
+    small: bool,
     workers: int,
     scan: str,
 ) -> None:
@@ -2773,6 +2775,11 @@ def publish_r2(
     so a reindex's superseded `index/<gen>/` never reaches R2; that reads D1
     (`D1_DB_ID` + `CLOUDFLARE_API_TOKEN`/`CLOUDFLARE_ACCOUNT_ID`). `-a`
     copies every generation without it.
+
+    `-S`: a deployment whose path store is served from R2 already (the
+    interval store) publishes just the small files its pages read beside it:
+    `publish-r2 -S -a <scan>` before `index-sync` lists the scan, and
+    `publish-r2 -a -p snapshots/rules.json <scan>` for the registry.
     """
     from . import publish as pub
 
@@ -2791,6 +2798,7 @@ def publish_r2(
         workers=workers,
         listings=not no_listings,
         pointed=pointed,
+        small=small,
     )
 
 
