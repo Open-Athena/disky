@@ -176,7 +176,7 @@ def world(request, tmp_path_factory):
         counter_built: list[sd.Tier] = []
         counter_stacks: dict[int, list[sd.Tier]] = {}
 
-        def build(scan: dict, run: Path, cdelta: list[str], over: list[sd.Tier], out: Path) -> dict:
+        def build(scan: dict, run: Path, cdelta: list[str], over: list[sd.Tier], out: Path, runs: list[Path], deltas: list[list[str]], **kw) -> dict:
             con.execute(f"CREATE OR REPLACE TABLE pnew AS {sd.pnew_sql(cdelta, cintervals + [f for d in deltas for f in d])}")
             heads = {r["q"] for r in pq.read_table(run / "catalog" / "cells.parquet").to_pylist() if r["bucket"] == "" and len(r["q"]) >= 3}
             new = sorted(heads - set(over[-1].alias_table().column("q").to_pylist()))
@@ -184,7 +184,9 @@ def world(request, tmp_path_factory):
             return sd.build_day(con, over, out, D=scan["ts"], R=R, K=K, floor=floor, sx_files=_sx_files(run), cdelta_files=cdelta,
                                 new_members=new, history=history, meas={k: sd.meas_sql(k, [v]) for k, v in meas.items()},
                                 tier={"first": scan["id"], "last": scan["id"], "level": 0, "scans": [scan["id"]]}, rg=cfg["run_rg"],
-                                log=lambda *_: None)
+                                log=lambda *_: None, **kw)
+
+        rebuilds = []  # each scan's run build, again (`rebuild(out, **build_day kwargs)`), over the separate runs before it
 
         for j in range(BASE, len(DAYS)):
             scan = scans[j]
@@ -196,12 +198,14 @@ def world(request, tmp_path_factory):
             cdelta = [str(p) for p in sorted((run / "cdelta").glob("*.parquet"))]
             sa.delta_shards(con, cdelta, run, target_rows=7)
             sa.catalog_delta(con, [base["final"], *(d / "catalog" for d in runs)], shards, [*deltas, cdelta], V, run / "catalog", root / "work" / scan["id"])
-            metas.append(build(scan, run, cdelta, prior, run / "drill"))
+            metas.append(build(scan, run, cdelta, prior, run / "drill", runs, deltas))
+            rebuilds.append(lambda out, _a=(scan, run, cdelta), _p=list(prior), _r=list(runs), _d=list(deltas), **kw:
+                            build(*_a, [sd.Tier(t.root, t.name) for t in _p], out, _r, _d, **kw))  # fresh tiers: their read counts from 0
             over = [prior[0], *(t for _, t in counter)]
             if [t.root for t in over] == [t.root for t in prior]:  # the counter's tiers are the separate runs: the same build
                 tier = sd.Tier(run / "drill", scan["id"])
             else:
-                build(scan, run, cdelta, over, root / "counter" / scan["id"] / "drill")
+                build(scan, run, cdelta, over, root / "counter" / scan["id"] / "drill", runs, deltas)
                 tier = sd.Tier(root / "counter" / scan["id"] / "drill", f"counter-{scan['id']}")
             counter_built.append(tier)
             key = sa.run_key(scan["id"], scan["id"])
@@ -226,7 +230,7 @@ def world(request, tmp_path_factory):
     finally:
         sr.ROOT_RG, sr.IDX_RG = old_rg, old_idx
     return {"cfg": cfg, "base_out": base["out"], "run_dirs": runs, "scans": scans, "merged": merged, "drills": drills, "base": prior[0], "runs": prior[1:],
-            "counter": counter_stacks, "counter_built": counter_built, "metas": metas, "con": con, "backfill": backfill}
+            "counter": counter_stacks, "counter_built": counter_built, "metas": metas, "con": con, "backfill": backfill, "rebuilds": rebuilds}
 
 
 # (name, last scan index, tiers, the level-0 tiers they were built from): every run apart, and the binary counter's
@@ -460,3 +464,80 @@ def test_history_table_equals_rows(world, tmp_path):
     got = sd.history_table(con, [str(base_out), str(run)], terms)
     key = lambda r: (r["s"], r["path"], r["usr"], r["vf"])  # noqa: E731
     assert sorted(got.to_pylist(), key=key) == sorted(want.to_pylist(), key=key)
+
+
+def _tree(d: Path, drop: set[str] = frozenset({"s"})) -> dict[str, object]:
+    """A drill dir's files: bytes, but `meta*.json` parsed, its build times (`s`) dropped."""
+    def strip(x):
+        return {k: strip(v) for k, v in x.items() if k not in drop} if isinstance(x, dict) else x
+
+    import json
+
+    return {str(f.relative_to(d)): strip(json.loads(f.read_text())) if f.name.startswith("meta") else f.read_bytes()
+            for f in sorted(d.rglob("*")) if f.is_file()}
+
+
+@pytest.fixture
+def run_rg(world, monkeypatch):
+    """The world's row-group sizes, as its builds wrote them (`IDX_RG` is read when writing the index levels)."""
+    monkeypatch.setattr(sr, "ROOT_RG", world["cfg"]["rg"])
+    monkeypatch.setattr(sr, "IDX_RG", 3)
+
+
+@pytest.mark.parametrize("i", range(len(DAYS) - BASE), ids=lambda i: f"run{i + 1}")
+def test_prefetch_writes_the_same_bytes(world, run_rg, tmp_path, i):
+    """A run's drill is the same files, byte for byte, and the same `meta.json` (but build times) without prefetch (each miss
+    fetched in the loops), with it, and with it under a byte cache too small for one window (every item its own window, the
+    cache evicting: LRU misses fetched in the loops)."""
+    rebuild = world["rebuilds"][i]
+    rebuild(tmp_path / "serial", threads=0)
+    rebuild(tmp_path / "prefetch", threads=8)
+    rebuild(tmp_path / "tiny", threads=3, cache_bytes=64)
+    want = _tree(tmp_path / "serial")
+    assert len(want) == len(sd.tier_files(world["metas"][i]))
+    assert _tree(tmp_path / "prefetch") == want
+    assert _tree(tmp_path / "tiny") == want
+    # and the fixture's own build (prefetching by default), but its `reads` counts: its tiers' caches were warmed by earlier builds
+    assert _tree(world["runs"][i].root, drop={"s", "reads"}) == _tree(tmp_path / "serial", drop={"s", "reads"})
+
+
+@pytest.mark.parametrize("i", range(len(DAYS) - BASE), ids=lambda i: f"run{i + 1}")
+def test_prefetch_plan_covers_the_reads(world, run_rg, tmp_path, monkeypatch, i):
+    """Each loop's plan holds every group it decodes, so after the prefetch nothing is fetched in the loops (index row
+    groups and footers included). The `rows` plans (settling, base counts, newly heavy directories) are exactly the groups
+    read; a probe's plan (`plan_any`) also holds the later tiers' groups when a tier's decoded rows answer it."""
+    stages: list[dict] = []
+    windows, group_rows = sd.TierReads.windows, sd.CachedGroupFile.group_rows
+
+    def rec_windows(self, plans):
+        stage = {"plan": {(id(gf), g["file"], g["rg"]) for p in plans for gf, g in p}, "read": set(), "any": self.stats["any"]}
+        stages.append(stage)
+        for a, b in windows(self, plans):
+            yield a, b
+        stage["any"] = self.stats["any"] - stage["any"]
+
+    def rec_group_rows(self, g):
+        if stages:
+            stages[-1]["read"].add((id(self), g["file"], g["rg"]))
+        return group_rows(self, g)
+
+    monkeypatch.setattr(sd.TierReads, "windows", rec_windows)
+    monkeypatch.setattr(sd.CachedGroupFile, "group_rows", rec_group_rows)
+    seen: list[sd.TierReads] = []
+    init = sd.TierReads.__init__
+
+    def rec_init(self, *a, **kw):
+        init(self, *a, **kw)
+        seen.append(self)
+
+    monkeypatch.setattr(sd.TierReads, "__init__", rec_init)
+    world["rebuilds"][i](tmp_path / "drill", threads=4)
+    assert [r.requests().get("miss_fetches", 0) for r in seen] == [0, 0]
+    assert all(r.requests()["prefetch_fetches"] > 0 for r in seen)
+    read = 0
+    for st in stages:
+        assert st["read"] <= st["plan"]
+        if not st["any"]:
+            assert st["read"] == st["plan"]
+        read += len(st["read"])
+    assert read > 0
