@@ -24,7 +24,7 @@ beforeAll(async () => {
   seedGeneration(raw, { date: A, gen: 'g', dir: `cw-l2/${A}/index/g`, variants: v, files })
   // The search sidecars: every match listed, exact.
   for (const role of ['rows', 'trigrams', 'rowsSearch'] as const) FILES.set(searchKey(`cw-l2/${A}/index/g`, role), fixture(`v2-search/${SEARCH_FILES[role]}`))
-  base = { DB: db, GCS_HMAC_KEY_ID: 'k', GCS_HMAC_SECRET: 's', STORE_BUCKET: 'my-data', DEV_EMAIL: 'dev@example.test' } as Env
+  base = { DB: db, GCS_HMAC_KEY_ID: 'k', GCS_HMAC_SECRET: 's', SEARCH_SIDECARS: '1', STORE_BUCKET: 'my-data', DEV_EMAIL: 'dev@example.test' } as Env
 })
 
 const cover = async (qs: string) => {

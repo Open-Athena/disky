@@ -45,6 +45,7 @@ export const STORE_VARS = [
   'STORE_REGION',
   'STORE_ACCESS_KEY_ID',
   'STORE_SECRET_ACCESS_KEY',
+  'SERVED_R2',
 ] as const
 export type StoreVar = typeof STORE_VARS[number]
 /** Cleared too (never set): the primary's GCS creds fallback (`storeCreds`). */

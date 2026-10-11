@@ -3,17 +3,16 @@
  * `meta.json`'s `started` (`path-index` writes it; `dt-cloud stamp-started`
  * back-stamps older metas). Only those scans need one, so this reads a meta
  * only for them — usually none. */
-import { S3Store } from '@rdub/file-tree/stores/s3'
 import { startKey, timesNeeded, type ScanTimes } from '../../src/scanSlug.js'
 import type { Env } from './auth.js'
-import { storeCreds, storeTarget } from './index.js'
+import { servedStore } from './index.js'
 import { snapshotsPrefix } from './shared.js'
 
 /** A scan's `meta.started`, or null (no meta, no `started`, an unreadable store). */
 export async function scanStarted(env: Env, id: string): Promise<unknown> {
   try {
     const own = env.STORE_KEY ? snapshotsPrefix(env) : 'snapshots/'
-    const store = S3Store({ ...storeTarget(env), prefixes: [own], ...storeCreds(env) })
+    const store = servedStore(env, [own])
     const { bytes } = await store.get(`${own}${id}/meta.json`)
     return (JSON.parse(new TextDecoder().decode(bytes)) as { started?: unknown }).started ?? null
   } catch {
