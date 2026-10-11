@@ -242,7 +242,9 @@ class JobKind:
 @dataclass(frozen=True)
 class OutputSpec:
     """A structure a run writes: `uri` a prefix (ends `/`) or an object, templated by `{scan}`, `{gen}` (the run's index
-    generation) and `{static_gen:<profile>}` (that static-names profile's live generation).
+    generation) and `{static_gen:<profile>}` (that static-names profile's live generation: `<profile>` a JSON file —
+    relative to the scan-run profile's own dir, e.g. `{static_gen:static-names.json}` beside `job/scan-runs.json` — or
+    an example's name with `STATIC_NAMES_GEN` set).
 
     - `after`: the phase whose end measures it (`record -P`; unset = the run's successful end); `kinds`: the run kinds that write it (empty = all).
     - `exclude`: sub-prefixes (relative) left out of the total.
@@ -297,10 +299,11 @@ def load_profile(path: str | Path | None = None) -> Profile:
     path = path or os.environ.get(PROFILE_ENV)
     if not path:
         raise SystemExit(f"scan-run: no profile: pass -c FILE or set ${PROFILE_ENV} (the deployment's job/scan-runs.json)")
-    return parse_profile(json.loads(Path(path).read_text()))
+    return parse_profile(json.loads(Path(path).read_text()), base=Path(path).parent)
 
 
-def parse_profile(d: Mapping) -> Profile:
+def parse_profile(d: Mapping, base: Path | None = None) -> Profile:
+    """A profile from its JSON. `base`: the file's dir, which a relative `{static_gen:<file>}` resolves against."""
     known = {f.name for f in fields(Profile)}
     if bad := sorted(set(d) - known - {"name", "comment"}):
         raise ValueError(f"scan-run profile: unknown fields {bad}")
@@ -311,7 +314,7 @@ def parse_profile(d: Mapping) -> Profile:
     kw["concurrent"] = tuple(d.get("concurrent", ()))
     kw["jobs"] = tuple(JobKind(kind=j["kind"], where=j.get("where", {}), scan=tuple(j.get("scan", ())),
                                downstream=bool(j.get("downstream", False))) for j in d.get("jobs", ()))
-    kw["outputs"] = tuple(OutputSpec(key=o["key"], uri=o["uri"], after=o.get("after"), kinds=tuple(o.get("kinds", ())),
+    kw["outputs"] = tuple(OutputSpec(key=o["key"], uri=anchor_static_gen(o["uri"], base), after=o.get("after"), kinds=tuple(o.get("kinds", ())),
                                      exclude=tuple(o.get("exclude", ())), split=o.get("split"), rows=o.get("rows"),
                                      manifest=bool(o.get("manifest", False))) for o in d.get("outputs", ()))
     for o in kw["outputs"]:
@@ -419,15 +422,31 @@ class AnyStore:
         return self._for(uri).last_row_end(uri)
 
 
-STATIC_GEN = re.compile(r"\{static_gen:([\w.-]+)\}")
+STATIC_GEN = re.compile(r"\{static_gen:([^{}]+)\}")
 
 
-def static_gen(name: str, env: Mapping[str, str] | None = None) -> str:
-    """The static name index generation of profile `name` (`static_profile.load_profile`: the named example or JSON
-    file, `STATIC_NAMES_GEN` over it), so an output template follows the live generation instead of pinning one."""
+def anchor_static_gen(template: str, base: Path | None) -> str:
+    """`template` with each relative `{static_gen:<file>}` made absolute against `base` (the scan-run profile's dir),
+    so it names the same file from any working dir. An example's name stays a name."""
+    if base is None:
+        return template
+    from .static_profile_examples import EXAMPLES
+
+    def anchor(m: re.Match) -> str:
+        sel = m.group(1)
+        if sel in EXAMPLES or Path(sel).is_absolute():
+            return m.group(0)
+        return f"{{static_gen:{(base / sel).resolve()}}}"
+    return STATIC_GEN.sub(anchor, template)
+
+
+def static_gen(sel: str, env: Mapping[str, str] | None = None) -> str:
+    """The static name index generation of profile `sel` (`static_profile.load_profile`: a JSON file or an example's
+    name, `STATIC_NAMES_GEN` over it), so an output template follows the live generation instead of pinning one. No gen
+    (an example without `STATIC_NAMES_GEN`) is an error naming the variable."""
     from .static_profile import load_profile
     env = dict(os.environ if env is None else env)
-    return load_profile({**env, "STATIC_NAMES_PROFILE": name}).gen
+    return load_profile({**env, "STATIC_NAMES_PROFILE": sel}).need("gen")
 
 
 def fill(template: str, scan: str, gen: str | None) -> str | None:

@@ -936,6 +936,28 @@ def _task(index: int | None) -> int:
     return int(v)
 
 
+@cli.command("profile")
+@option("-f", "--field", "field_name", help="Print only this field (bare: `gen` → its value), e.g. a deploy's check of the site's STATIC_GEN")
+def profile_cmd(field_name: str | None) -> None:
+    """Print the resolved deployment profile ($STATIC_NAMES_PROFILE, env overrides on top) as JSON — a deployment's
+    `job/static-names.json` starts as `STATIC_NAMES_PROFILE=<example> STATIC_NAMES_GEN=<gen> … profile`. `-f`: one
+    field; a missing one (`gen` unset) is an error naming its variable."""
+    from .static_profile import ENV, to_mapping
+
+    p = profile()
+    if field_name is None:
+        print(json.dumps(to_mapping(p), indent=1))
+        return
+    if field_name not in ENV:
+        raise SystemExit(f"static names profile: no field {field_name!r} (one of {', '.join(ENV)})")
+    if field_name == "compact_level":
+        from .static_profile import level_arg
+        print(level_arg(p.compact_level))
+        return
+    v = p.need(field_name)
+    print(v if isinstance(v, str) else json.dumps(to_mapping(p)[field_name]))
+
+
 @cli.command("scans")
 @option("-b", "--bucket", default=data_bucket, help="Data bucket")
 @option("-L", "--layout", "layouts", multiple=True, help="Key template of the scans' `path` sorts, `{id}` the scan id and `{gen}` the store generation; repeat (default: the profile's, $STATIC_NAMES_LAYOUTS)")

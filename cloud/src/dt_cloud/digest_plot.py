@@ -475,7 +475,7 @@ def _leaves(node):
 @option("-o", "--out", type=CP(path_type=Path), default=Path("tmp/digest-plot.png"), help="Output PNG")
 @option("-R", "--redact", is_flag=True, help="No sizes (y labels, call-out) — a public README version")
 @option("-t", "--title", default=None, help="Title (default: '<template title> — <Month Year>')")
-@option("-T", "--template", type=Choice(["gcs", "cw"]), default="gcs", help="Which template's panels (and preset title/host/quota)")
+@option("-T", "--template", type=Choice(["gcs", "cw"]), required=True, help="Which template's panels (and preset title/host/quota): an example preset, no default")
 def main(rows_path: Path, out: Path, redact: bool, title: str | None, template: str) -> None:
     from urllib.parse import urlparse
 

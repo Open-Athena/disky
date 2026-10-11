@@ -242,11 +242,13 @@ def config_from_dict(d: dict, base: DigestConfig | None = None) -> DigestConfig:
         if k in d and (not isinstance(d[k], types) or (isinstance(d[k], bool) and bool not in types)):
             want = " or ".join("null" if t is type(None) else t.__name__ for t in types)
             raise ValueError(f"digest config {k}: expected {want}, got {d[k]!r}")
-    if d.get("template", "gcs") not in TEMPLATES:
+    if base is None and "template" not in d:
+        raise ValueError(f"digest config: no template (one of {TEMPLATES}): a deployment names its own")
+    if "template" in d and d["template"] not in TEMPLATES:
         raise ValueError(f"digest config template: {d['template']!r} is not one of {TEMPLATES}")
     if not 0 <= d.get("reply_hour", 0) <= 23:
         raise ValueError(f"digest config reply_hour: {d['reply_hour']} is not a UTC hour (0–23)")
-    base = base or PRESETS[d.get("template", "gcs")]
+    base = base or PRESETS[d["template"]]
     if "buckets" in d:
         d["buckets"] = {str(name): _bucket(name, b) for name, b in _mapping("buckets", d["buckets"] or {}).items()}
         _check_zones(d["buckets"])

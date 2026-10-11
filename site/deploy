@@ -13,6 +13,18 @@ PROJECT=$(sed -n 's/^name = "\(.*\)"$/\1/p' wrangler.toml)
 if [ -f deploy.env ]; then set -a; . ./deploy.env; set +a; fi
 : "${CLOUDFLARE_ACCOUNT_ID:?deploy: set CLOUDFLARE_ACCOUNT_ID (the Pages project account) in site/deploy.env}"
 
+# One source for the live static name index generation: the deployment's
+# static-names profile file (`STATIC_NAMES_FILE` in deploy.env, repo-relative,
+# e.g. `job/static-names.json` — what its jobs load as `STATIC_NAMES_PROFILE`).
+# Pages takes vars only from wrangler.toml, so every `STATIC_GEN` there must
+# equal the file's `gen`; a mismatch refuses the deploy.
+if [ -n "${STATIC_NAMES_FILE:-}" ]; then
+  gen=$(python3 -c 'import json, sys; g = json.load(open(sys.argv[1])).get("gen"); print(g or ""); sys.exit(0 if g else 1)' "../$STATIC_NAMES_FILE") \
+    || { echo "deploy: $STATIC_NAMES_FILE has no gen" >&2; exit 1; }
+  bad=$(sed -n 's/^STATIC_GEN = "\([^"]*\)".*/\1/p' wrangler.toml | grep -vxF "$gen" | sort -u | tr '\n' ' ' || true)
+  [ -z "$bad" ] || { echo "deploy: wrangler.toml STATIC_GEN ${bad% } ≠ $STATIC_NAMES_FILE gen $gen: set them equal, then deploy" >&2; exit 1; }
+fi
+
 # `--status`: report whether HEAD is deployed (no build/deploy). Delegates to the
 # standalone `cf-status` (queries the CF Pages deployments API, compares to HEAD).
 if [ "${1:-}" = "--status" ]; then exec ./cf-status; fi

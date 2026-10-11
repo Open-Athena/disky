@@ -12,8 +12,8 @@ whose ingest already writes to R2 (r2.rbw.sh) never needs it.
 The served subset's layout is a deployment parameter: snapshots live under
 `snapshots/<SNAPSHOTS_SUBDIR>/<scan>/` (the site's `snapshotsPrefix`), and the
 layer-2 dir — canonical parquets, `index/<gen>/` tiers, `.groups.json`, age
-pyramids — under `LAYER2_PREFIX` (a `{scan}` template; default the base's
-`listing/{scan}/index/`, cw's is `cw-l2/{scan}/`).
+pyramids — under `LAYER2_PREFIX` (a `{scan}` template, `deploy.layer2_prefix`;
+required: each deployment names its own).
 
 Idempotent: an object already in R2 with the same size and md5 is skipped, so a
 re-run (or a backfill over every scan) only moves what's missing or changed.
@@ -46,10 +46,6 @@ err = partial(print, file=sys.stderr)
 # The GCS md5 rides along as object metadata: the durable identity check a
 # re-run compares against (R2's multipart ETag is not an md5).
 MD5_META = "gcs-md5"
-# The base's layer-2 dir: the tiers under `listing/<date>/index/<gen>/` (the raw
-# listing shards beside them under `listing/<date>/<bucket>/` are NOT served).
-# cw keeps its layer 2 under `cw-l2/<scan>/`.
-LAYER2_PREFIX = os.environ.get("LAYER2_PREFIX", "listing/{scan}/index/")
 SNAPSHOTS_SUBDIR = os.environ.get("SNAPSHOTS_SUBDIR", "")
 
 
@@ -60,7 +56,7 @@ def snapshots_prefix(scan: str, subdir: str = SNAPSHOTS_SUBDIR) -> str:
     return f"snapshots/{sub}/{scan}/" if sub else f"snapshots/{scan}/"
 
 
-def served_prefixes(scan: str, subdir: str = SNAPSHOTS_SUBDIR, layer2: str = LAYER2_PREFIX) -> list[str]:
+def served_prefixes(scan: str, subdir: str, layer2: str) -> list[str]:
     """The key prefixes that make up one scan's served subset: the published
     snapshot JSONs and the layer-2 dir, which holds `index/<gen>/` — every
     tier + `.groups.json` manifest + age pyramid the index reader serves — and,
@@ -269,7 +265,7 @@ def publish(
     src_bucket: str | None = None,
     prefixes: list[str] | None = None,
     subdir: str = SNAPSHOTS_SUBDIR,
-    layer2: str = LAYER2_PREFIX,
+    layer2: str,
     dry_run: bool = False,
     workers: int = 8,
     listings: bool = True,
