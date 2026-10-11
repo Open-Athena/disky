@@ -29,7 +29,7 @@
 import { parquetReadObjects, type FileMetaData, type RowGroup } from 'hyparquet'
 import { deserializeTCompactProtocol, readVarInt, readZigZag } from 'hyparquet/src/thrift.js'
 import type { CatalogMeta, Member } from './staticCatalog.js'
-import type { Found, HitCache, HitSource } from './staticFilter.js'
+import type { Found, HitCache, HitOpts, HitSource } from './staticFilter.js'
 import { type Blobs, cmp, decodeFlat, type FlatSchema, type Hit, type IndexCache, scanAt } from './staticNames.js'
 import { subBlobs } from './staticRuns.js'
 import { compressors } from './zstd.js'
@@ -451,6 +451,8 @@ export type DrillAnswer =
   | { source: 'roots'; kind: Kind; c: string; upper: number; hits: Hit[]; io: DrillIo }
   /** `scans`: narrower than the state's when the catalog's stack was cut (`CatalogLookup`). */
   | { source: 'rollup' | 'catalog'; kind: Kind; c: string; upper: number; rollup: Rollup; io: DrillIo; scans?: string[] }
+/** Roots bounded at more than the caller's `maxRows` (`Drill.bounded`): not read. */
+export interface DrillOver { source: 'over'; upper: number }
 
 /** The catalog's per-member lookup (the fleet root's rollup): the base's, or the base's and its runs' (`scans`: the
  *  ones its cells are exact on, when its own stack was cut at a broken tier). */
@@ -593,7 +595,10 @@ export class Drill {
   }
 
   /** `t`'s (lowercase) view at `P`, on any scan of `state` (default: the current one). */
-  async view(t: string, P: string, state?: DrillState): Promise<DrillAnswer> {
+  view(t: string, P: string, state?: DrillState): Promise<DrillAnswer> { return this.bounded(t, P, state) as Promise<DrillAnswer> }
+
+  /** `view`, except roots bounded past `maxRows` are not read (`over`). */
+  async bounded(t: string, P: string, state?: DrillState, maxRows?: number): Promise<DrillAnswer | DrillOver> {
     if (occurs(t, P.toLowerCase(), await this.hexRuns())) return { source: 'plain' }
     const st = state ?? await this.state()
     const { tiers } = st
@@ -619,6 +624,7 @@ export class Drill {
     const sels = await perTier(tiers, (x, i) => x.files[kind].roots.select(lo(cs[i]), hi(cs[i]), io, thr))
     const upper = sels.reduce((s, x) => s + x.rows, 0)
     if (sels.every(s => s.groups) && upper <= thr) {
+      if (maxRows != null && upper > maxRows) return { source: 'over', upper }
       // Hits straight from the columns (no row object per root: a member's ~80K roots, decoded per isolate).
       const parts = await perTier(tiers, async (x, i) => sels[i].groups!.length ? x.files[kind].roots.read<Hit>(lo(cs[i]), hi(cs[i]), sels[i].groups!, io, hitOf) : [])
       const c = cs[cs.length - 1]
@@ -665,7 +671,7 @@ const HELD = 400_000
 /** The filter's heavy source over a drill: a view's match roots, or its rollup, exact on the live tiers' scans
  *  (`Found.scans`). Plain views and non-members decline (null): the caller reads as before. */
 export class DrillSource implements HitSource {
-  private held = new Map<string, Promise<DrillAnswer>>()
+  private held = new Map<string, Promise<DrillAnswer | DrillOver>>()
   private sizes = new Map<string, number>()
   /** `cache`: roots answers across isolates (the colo's Cache API) — decoding a member's ~80K roots from the
    *  drill's parquet is seconds of an edge isolate's CPU, each new isolate again. */
@@ -676,15 +682,17 @@ export class DrillSource implements HitSource {
     return st.version === 'base' ? `${t}\0${P}` : `${t}\0${P}@${st.version}`
   }
 
-  /** `t`'s view at `P` on the tiers of `st` (isolate-held). */
-  answer(t: string, P: string, st: DrillState): Promise<DrillAnswer> {
+  /** `t`'s view at `P` on the tiers of `st` (isolate-held; `maxRows`: one not held yet whose roots are bounded past
+   *  it is `over`, and not held). */
+  answer(t: string, P: string, st: DrillState, maxRows?: number): Promise<DrillAnswer | DrillOver> {
     const k = DrillSource.key(t, P, st)
     let p = this.held.get(k)
     if (p) { this.held.delete(k); this.held.set(k, p); return p }
-    p = this.drill.view(t, P, st)
+    p = this.drill.bounded(t, P, st, maxRows)
     this.held.set(k, p)
     p.then(a => {
       this.sizes.set(k, a.source === 'roots' ? a.hits.length : 'rollup' in a ? a.rollup.cells.length : 0)
+      if (a.source === 'over') { this.held.delete(k); this.sizes.delete(k) }
       let n = [...this.sizes.values()].reduce((s, x) => s + x, 0)
       for (const old of this.held.keys()) {
         if (n <= HELD || old === k) break
@@ -697,13 +705,13 @@ export class DrillSource implements HitSource {
 
   /** `key`'s view under `under`, exact on the live tiers' scans. A tier that fails to load is cut (`Drill.broke`)
    *  and the view asked again over the tiers before it; no usable tier at all declines (null). */
-  async hits(key: string, under: string): Promise<Found | null> {
+  async hits(key: string, under: string, opts?: HitOpts): Promise<Found | null> {
     const t0 = Date.now()
     for (let tries = 0; ; tries++) {
       const st = await this.drill.state()
       if (!st.tiers.length) return null
       try {
-        return await this.hitsOn(key, under, st, t0)
+        return await this.hitsOn(key, under, st, t0, opts)
       } catch (e) {
         if (!(e instanceof TierError) || tries > st.tiers.length) throw e
         this.drill.broke(e.dir, e)
@@ -711,11 +719,12 @@ export class DrillSource implements HitSource {
     }
   }
 
-  private async hitsOn(key: string, under: string, st: DrillState, t0: number): Promise<Found | null> {
+  private async hitsOn(key: string, under: string, st: DrillState, t0: number, opts?: HitOpts): Promise<Found | null> {
     const k = DrillSource.key(key, under, st)
     if (this.cache && !this.held.has(k)) {
       const hits = await this.cache.get(k)
       if (hits) {
+        if (opts?.maxRows != null && hits.length > opts.maxRows) { opts.over = true; return null }
         const kind: Kind = [...key].length <= 2 ? 'short' : 'long'
         const p = Promise.resolve<DrillAnswer>({ source: 'roots', kind, c: key, upper: hits.length, hits, io: newIo() })
         this.held.set(k, p); this.sizes.set(k, hits.length)
@@ -723,7 +732,9 @@ export class DrillSource implements HitSource {
       }
     }
     const fresh = !this.held.has(k)
-    const a = await this.answer(key, under, st)
+    const a = await this.answer(key, under, st, opts?.maxRows)
+    // Over the caller's rows: bounded so before the read, or held with that many roots.
+    if (a.source === 'over' || (a.source === 'roots' && opts?.maxRows != null && a.hits.length > opts.maxRows)) { opts!.over = true; return null }
     if (fresh && a.source === 'roots' && this.cache) await this.cache.put(k, a.hits).catch(() => {})
     if (a.source === 'plain' || a.source === 'none') return null
     // An answer narrowed by the catalog's broken tier is not held: once that tier loads, the view widens again.
