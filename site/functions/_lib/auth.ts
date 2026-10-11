@@ -84,6 +84,14 @@ export interface Env {
   FILTER_PHASE2_MS?: string
   /** Worker-served indexes (the static name index's suffix shards and catalog). */
   INDEX_R2?: R2Bucket
+  /** `1`: the small served files — snapshot JSONs (`snapshots/…`: `meta.json`, `lifecycle.json`,
+   *  `age.json`, `rules.json`) and the extras sidecars (`<gen dir>/attr.tsv{,.idx.json}`) — are read
+   *  from `INDEX_R2` under their store keys (`index.ts` `servedStore`; the job's `dt-cloud publish-r2 -S`
+   *  copies them there); unset = through the store seam (`STORE_*`). */
+  SERVED_R2?: string
+  /** `1`: the scans' generations carry the filter's search sidecars (`path-index -S`): a filter the
+   *  static index doesn't answer reads them (`_lib/search.ts`). Unset = none are built, never probed. */
+  SEARCH_SIDECARS?: string
   /** `intervals`: the dates `INTERVAL_STORE_GEN` holds read their path store from the change-interval
    *  store on `INDEX_R2` (`index.ts` `openInterval`, specs/interval-store.md); `opt-in`: only requests
    *  with `ps=iv` (`withPathStore`); unset = per-scan stores. */

@@ -4,9 +4,8 @@
  * header/footer text. The tier decides only what is *shown* (`card.ts`): the
  * data read is the same. */
 import { FilterRejected } from '../indexedOnly.js'
-import { S3Store } from '@rdub/file-tree/stores/s3'
 import type { Env } from '../auth.js'
-import { pathScans, storeCreds, storeTarget, type Lens } from '../index.js'
+import { pathScans, servedStore, type Lens } from '../index.js'
 import { loadRegistry, canonId } from '../identity.js'
 import { loadLedger } from '../ledger.js'
 import { scanTimes } from '../scanTimes.js'
@@ -64,7 +63,7 @@ export async function resolveScan(env: Env, d: string | undefined): Promise<stri
 async function scanUsers(env: Env, date: string): Promise<UserInfo[]> {
   try {
     const own = env.STORE_KEY ? snapshotsPrefix(env) : 'snapshots/'
-    const store = S3Store({ ...storeTarget(env), prefixes: [own], ...storeCreds(env) })
+    const store = servedStore(env, [own])
     const { bytes } = await store.get(`${own}${date}/meta.json`)
     return (JSON.parse(new TextDecoder().decode(bytes)) as { users?: UserInfo[] }).users ?? []
   } catch {

@@ -15,7 +15,7 @@
  */
 import { type Ctx, json, requireScope, requireViewer } from '../_lib/auth.js'
 import { snapshotsPrefix, traceJoins } from '../_lib/shared.js'
-import { ivRetry, type Lens, makeStore, pathGens, withPathStore, pathScans, storeReady } from '../_lib/index.js'
+import { ivRetry, type Lens, pathGens, withPathStore, pathScans, servedStore, storeReady } from '../_lib/index.js'
 import { hasLedger, ledgerHead } from '../_lib/ledger.js'
 import { classKey, ownerKey, ownerOk, parseClasses, parseOwner, QueryError, queryParam } from '../_lib/scope.js'
 import { hexNote, hexQuery, liveTotal, rollupTotal, staticFilterStore, staticLiteral, staticTag } from '../_lib/staticFilter.js'
@@ -35,7 +35,7 @@ import { isScanId } from '../../src/scanSlug.js'
 
 /** Scans present as snapshot dirs but absent from the index (oldest first). */
 async function unindexedScans(env: Ctx['env'], indexed: Set<string>): Promise<string[]> {
-  const store = makeStore(env)
+  const store = servedStore(env, [snapshotsPrefix(env)])
   const out: string[] = []
   let cursor: string | undefined
   do {
@@ -53,7 +53,7 @@ type Meta = { total_bytes?: number; total_objects?: number; buckets?: Record<str
 
 async function readMeta(env: Ctx['env'], date: string): Promise<Meta | null> {
   try {
-    const { bytes } = await makeStore(env).get(`${snapshotsPrefix(env)}${date}/meta.json`)
+    const { bytes } = await servedStore(env, [snapshotsPrefix(env)]).get(`${snapshotsPrefix(env)}${date}/meta.json`)
     return JSON.parse(new TextDecoder().decode(bytes)) as Meta
   } catch (e) {
     console.log(`series /: no meta.json point for ${date}: ${(e as Error).message}`)

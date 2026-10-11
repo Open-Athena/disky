@@ -838,8 +838,9 @@ async function readView(env: Env, o: ViewOpts, cov: Coverage = {}): Promise<Read
     // sort's); a lens without assignments keeps the old read.
     const pathIdx = !tiers.length && !lens ? (sort === 'path' && fine ? fine : withTrace(await openFine(env, date, 'path'), tr)) : null
     const store = !!pathIdx && isStore(pathIdx)
-    // The search sidecars sit beside the scan's own path sort: an interval-store handle searches there.
-    const searchIdx = pathIdx && pathIdx.asOf != null ? withTrace(await openFine(perScan(env), date, 'path'), tr) : pathIdx
+    // The search sidecars sit beside the scan's own path sort: an interval-store handle searches there
+    // (a deployment that builds none never opens that per-scan sort for them).
+    const searchIdx = pathIdx && pathIdx.asOf != null && env.SEARCH_SIDECARS ? withTrace(await openFine(perScan(env), date, 'path'), tr) : pathIdx
     const pq = query.ast
     const traceSearch = (what: string, f: SearchFound) => tr?.('search', performance.now() - t0, `${what} ${f.stats.mode} c${f.stats.candidates} ${f.stats.layout === 2 ? `r${f.stats.rowsRgs}` : `n${f.stats.namesRgs} g${f.stats.pathRgs}`}${f.truncated ? ' cut' : ''}`)
     if (rootHit) {
@@ -1694,7 +1695,9 @@ export async function buildView(env0: Env, o: ViewOpts): Promise<View> {
   const { path, query } = o
   const dP = path === '' ? 0 : path.split('/').length
   const cov: Coverage = {}
-  const [v, ex] = await Promise.all([readView(env, o, cov), extrasFor(env, o.date, path)])
+  const t0 = performance.now()
+  // The provenance sidecar, beside the read (its own `extras` term in the trace: the served seam's).
+  const [v, ex] = await Promise.all([readView(env, o, cov), extrasFor(env, o.date, path).then(x => { o.trace?.('extras', performance.now() - t0); return x })])
   if (!v) {
     return { tree: { n: rootName(path, env), k: 'dir', b: 0, o: 0 }, tier: 'none', index: 'none', threshold: 0, nodes: 0, truncated: false, ...(query ? { matches: [], matched: [], ...coverageFields(cov) } : {}) }
   }

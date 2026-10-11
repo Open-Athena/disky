@@ -50,7 +50,7 @@ beforeAll(async () => {
   }
   for (const date of [SEARCH, SEARCH_PQ]) sidecar(date, V2_FILES)
   sidecar(SEARCH_V1, V1_FILES)
-  env = { DB: db, ROOT_LABEL: 'root', GCS_HMAC_KEY_ID: 'k', GCS_HMAC_SECRET: 's' } as Env
+  env = { DB: db, ROOT_LABEL: 'root', GCS_HMAC_KEY_ID: 'k', GCS_HMAC_SECRET: 's', SEARCH_SIDECARS: '1' } as Env
 })
 
 const allRows = async (date: string): Promise<Row[]> => readRects(await openIndex(env, date), [{ dLo: 1, dHi: 1e9, pLo: '', pHi: '￿' }])
