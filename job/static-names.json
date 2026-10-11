@@ -12,7 +12,6 @@
   "key_id": "gcs-static-index-r2-key-id",
   "secret": "gcs-static-index-r2-secret"
  },
- "r2_endpoint": null,
  "project": "oa-internal-450019",
  "region": "us-east1",
  "image": null,
