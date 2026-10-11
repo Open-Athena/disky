@@ -448,10 +448,28 @@ interval_store_step() {
 # ~50. Both finish before index-sync lists the scan. Each is never fatal on
 # its own (its `if` alerts and records the phase); `job/scan-runs.json` names
 # them `concurrent`, so each phase starts where `publish` ended.
+# index-sync's row-group upload (`-r`, most of its time) runs beside them too:
+# staged rows stay invisible until the pointer flips below (every reader filters
+# on the pointer's gen). xtrace stays off around the credentials check.
+index_sync_creds() { [ -n "${CLOUDFLARE_API_TOKEN:+set}" ] && [ -n "${CLOUDFLARE_ACCOUNT_ID:-}" ]; }
+ROWS_PID=""
+{ set +x; } 2>/dev/null
+if index_sync_creds; then
+  (
+    if dt-cloud index-sync -r -d "/gcs/$DATA/$INDEX_DIR" -g "$GEN" -k "$INDEX_DIR" "$SNAP_ID"; then
+      phase "index-sync rows"
+    else
+      echo "WARN: index-sync -r failed (the pointer step below re-syncs in full)" >&2
+      phase "index-sync rows" "failed"
+    fi
+  ) & ROWS_PID=$!
+fi
+set -x
 static_names_step & SN_PID=$!
 interval_store_step & IV_PID=$!
 wait "$SN_PID"
 wait "$IV_PID"
+[ -z "$ROWS_PID" ] || wait "$ROWS_PID"
 
 # Footer-in-D1: sync the path-index parquet footer into the site's D1 so the
 # reader skips the cold-isolate footer parse (specs/done/path-agnostic-serving.md
@@ -459,9 +477,13 @@ wait "$IV_PID"
 # Batch secretVariables; without them the site falls back to parsing the footer,
 # so this never blocks the snapshot. Disable xtrace for the WHOLE block first:
 # even the `[ -n "$CLOUDFLARE_API_TOKEN" ]` test echoes the token under `set -x`.
+# The rows were staged above (`-r`); `-p` checks them against each footer and
+# flips the pointers, which lists the scan. If that refuses, a full sync redoes
+# rows + pointers.
 { set +x; } 2>/dev/null
-if [ -n "${CLOUDFLARE_API_TOKEN:+set}" ] && [ -n "${CLOUDFLARE_ACCOUNT_ID:-}" ]; then
-  dt-cloud index-sync -d "/gcs/$DATA/$INDEX_DIR" -g "$GEN" -k "$INDEX_DIR" "$SNAP_ID" \
+if index_sync_creds; then
+  dt-cloud index-sync -p -d "/gcs/$DATA/$INDEX_DIR" -g "$GEN" -k "$INDEX_DIR" "$SNAP_ID" \
+    || dt-cloud index-sync -d "/gcs/$DATA/$INDEX_DIR" -g "$GEN" -k "$INDEX_DIR" "$SNAP_ID" \
     || echo "WARN: index-sync failed (the site keeps serving the previous generation)" >&2
 else
   echo "WARN: no CLOUDFLARE_API_TOKEN/ACCOUNT_ID — skipping index-sync (scan stays unlisted)" >&2
