@@ -337,6 +337,32 @@ The other choice, dropping an alias forward (writing the diverged member's own r
 - **10-08, tiered vs the base alone.** All 605 comparable cases are equal: every child both name is equal, and so are the totals (kept + remainder). That leaves out the 48 new-member cases, which the base drill cannot answer. 546 views are identical. In the other 59, a restated kept set names other children on every date, exactly as a rebuild through 10-09 does.
 - **Read cost** (laptop over GCS): 0.40 s median and 5.0 s max per case for both dates.
 
+### Drill time (T2022, 2026-10-10, profiled)
+
+`sn-drill-2026-10-10-2022-215101` (us-east1, 2 tasks × spot n2-highmem-16, `build -k task -p 16 -M 90GB`, prior tiers read through the gcsfuse mount `/gcs/oa-gcs-usage-dvx`; logs saved under `tmp/drill-logs.tsv` in the profiling worktree). The job was created at 21:51:02 and succeeded at 22:25:41: **34.7 min, all of it the short task's**. The long task finished at 22:06:52, 18.8 min before it.
+
+| Stage | long (task 0) | short (task 1) |
+|---|---:|---:|
+| queue → running, image pull | 58 s | 58 s |
+| `pnew` (new paths, DuckDB; **both tasks compute it**) | 61 s | 58 s |
+| new members' history (DuckDB) / delta roots + classes | 40 s / 18 s | ≈ 30 s (`short_day_roots`, `meas`, the `tdir`…`nk` SQL) |
+| **probes** (Python, serial `reads.any`) | **399 s** (36,370 probes) | **1,068 s** (134,535 probes) |
+| **settling** (Python, serial `_value_on` / `_series` reads) | **285 s** (429 dirs, 422 restated) | **780 s** (656 dirs, 625 restated) |
+| newly heavy dirs' earlier roots | 25 s (9 dirs, 745,817 rows) | 36 s (18 dirs, 1,498,651 rows) |
+| write (`write_kind`, `write_state`) + upload | ≈ 21 s | ≈ 21 s |
+| task total | 15.0 min | 33.6 min |
+
+**Where it goes: serial, latency-bound reads.** Probes plus settling are 1,848 of the short task's 2,015 s (92%) and 684 of the long's 900 s (76%). Both are single-threaded Python loops that call `TierReads.any` / `.rows` per item, and each cache miss is a `Tier.fetch`: `open` + `seek` + `read` of a 2,048-row group (≈ 53 KB average) through gcsfuse. The short task fetched 25,761 groups (1.37 GB) and 331 index spans (43 MB): 26.1K fetches in ≈ 1,850 s is **≈ 70 ms per fetch**, which is about the whole time. That is GCS first-byte latency, not bandwidth (0.74 MB/s), and not CPU: the decoding (`to_pylist` of each group, 501K decoded `any` checks over 5 tiers) is a few ms per group, ≈ 1–2 min at most. Compute (DuckDB) is ≈ 2 min per task, and writing plus uploading ≈ 20 s. The long task's 133K + 11K fetches, at 11 ms per probe, follow the same pattern. By the 10-09 run's numbers (7.5 + 20 min of probes, 7.5 + 14.7 min of settling), the "probes bisect within cached groups" change helped, but the fetch count still sets the time.
+
+**Levers, by estimated saving on the job's critical path (the short task):**
+1. **Concurrent group fetches (≈ −25 to −28 min).** Probes are independent, and settling's reads are known per directory up front. Plan first: walk `select` (the index level, cached; 331 spans) for every probe range, and collect the distinct data groups that the decode path needs. Then fetch them with ≈ 64 in flight (a thread pool; GCS ranged reads release the GIL) into the group cache, and only then run the existing loops over warm caches. 26K fetches at 64-way ≈ 30 s, plus ≈ 1–2 min of decoding, so the short task drops from ≈ 34 to ≈ 5–6 min, and the long from 15 to ≈ 4–5 min. `GROUP_CACHE` (2,048 groups) must grow to hold the prefetched set: 1.37 GB of compressed bytes is well within the 123 GB box. Cache the raw bytes and decode lazily. Settling needs a second plan pass, because `_value_on` / `_series` ranges come from `cand`, not `probes`, but `cand` is fully known before `_settle` loops.
+2. **Ranged GCS reads instead of gcsfuse `open` per fetch (part of 1, or ≈ −30% alone).** `GcsTier.fetch` already exists, but `build` uses `Tier` over the mount. A pooled `google-cloud-storage` (or `gcsfs`) client avoids gcsfuse's per-open stat round trip, so roughly 1 round trip per fetch instead of ≈ 2. Alone that is maybe 70 → 40–50 ms per fetch (short ≈ −8 to −10 min). With 1, it mostly matters for throughput under concurrency.
+3. **Coalesce adjacent groups (≈ −30–50% of the fetches, alone).** Probes are sorted `(q, dir, child)`, so consecutive misses tend to be neighbouring groups of the same file. One request per contiguous run of needed groups (bounded at a few MB), as `_load` already does for index spans, would cut the round-trip count. This overlaps with 1, which makes it secondary once fetches are concurrent.
+4. **Rebalance across more tasks (≈ −18 min alone; small after 1).** Today it is long ‖ short, 15 vs 34 min. Splitting the short kind by `q` range into 2–3 tasks (probes, settling and newly heavy dirs are all per `(q, dir)`, so a `q`-range partition is exact) would give ≈ 12–13 min per short task, and the job would become max(long 15, short/3 + 2.5 setup) ≈ 15 min. It costs per-part outputs (roots/rollups files cut at `q` boundaries already, so parts concatenate), a `dcount` per part, and a `meta` join of N parts. After lever 1 both kinds are ≈ 5 min and setup-bound, so this is only worth it if 1 slips.
+5. **Small change: compute `pnew` once (≈ −1 min of VM time, 0 on the critical path).** Both tasks spend ≈ 60 s building it. It could be one SQL output both read, but since both tasks run it concurrently it does not shorten the job.
+
+Not worth chasing: write + upload (≈ 20 s), the DuckDB stages (≈ 2 min), and job start (≈ 1 min, spot provisioning plus image pull).
+
 ### R2 layout for the reader (`oa-gcs-usage-index`)
 
 - `static-names/2026-10-08c/drill/…`: the base (unchanged).
