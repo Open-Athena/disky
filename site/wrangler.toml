@@ -41,6 +41,7 @@ bucket_name = "oa-gcs-usage-index"
 enabled = true
 
 [vars]
+SERVED_R2 = "1"   # snapshot JSONs (meta/age/lifecycle/rules) + extras read from INDEX_R2, not GCS (the job copies them: `publish-r2 -S`)
 STORE = "gcs"                   # the store this build serves (`src/stores.ts` registry key; vite.config.ts)
 PROD_HOST = "gcs.oa.dev"        # `g d` toggles with DEV_HOST (src/hosts.ts)
 DEV_HOST = "dev.gcs.oa.dev"
@@ -140,6 +141,7 @@ database_id = "e52398b7-5538-4bc4-83db-3355a1b5ef9a"
 migrations_dir = "migrations/gcs"
 
 [env.preview.vars]
+SERVED_R2 = "1"   # snapshot JSONs (meta/age/lifecycle/rules) + extras read from INDEX_R2, not GCS (the job copies them: `publish-r2 -S`)
 PATH_STORE = "intervals"   # every request reads the interval store (INDEX_R2) for the scans its generation holds; others read per-scan (`_lib/index.ts`)
 INTERVAL_STORE_GEN = "2026-10-09b"   # the interval store generation the opt-in reads
 STATIC_BENCH = "1"   # /api/static-bench: R2 read timings for the static name-search prototype
