@@ -15,7 +15,7 @@
  *  `maxRows` (V = 100K plus two row groups of slack, so every non-member and the lightest members) are read
  *  whole once per isolate (and once per colo through the Cache API); heavier ones, and every one- or
  *  two-character literal, ask the `heavy` source — the drilldown (`staticDrill.ts`, `FILTER_STATIC_HEAVY=1`):
- *  the match roots under the view path when they are few, else the path's per-child rollup — and otherwise
+ *  the match roots under the view path when they are few, else the path's per-child rollup, its drawn children nested (`view.ts` `rollupRead`) — and otherwise
  *  decline, so the caller keeps today's read.
  *
  *  Dates: an answer carries the scans it covers (`Found.scans`; absent = every scan of the store). The light
@@ -72,7 +72,13 @@ export const fromDrill = (found: Found | null): boolean => found?.io.from === 'd
  *  strict descendants are wanted. */
 /** `firstPaint`: a view's fast first paint asks — a source may answer coarser now (`^q`'s fleet root from its
  *  catalog while its range is not yet read), the full read following. */
-export interface HitOpts { firstPaint?: boolean }
+export interface HitOpts {
+  firstPaint?: boolean
+  /** A nested read's budget (`view.ts` `nestRollup`): a source whose answer would be more than this many match
+   *  roots — bounded so from its index before a read, or held with that many — declines (null) and sets `over`. */
+  maxRows?: number
+  over?: boolean
+}
 
 export interface HitSource {
   hits(key: string, under: string, opts?: HitOpts): Promise<Found | null>
@@ -161,11 +167,11 @@ export class SuffixHits implements HitSource {
 
   /** A literal the light reader declines: the heavy source's; without one, the catalog's buckets at the fleet
    *  root (`catalogRoot`), and nothing below it (`declined`: `term-too-common`). */
-  private async heavyHits(key: string, root: string): Promise<Found | null> {
+  private async heavyHits(key: string, root: string, opts?: HitOpts): Promise<Found | null> {
     if (!this.opts.heavy) return root === '' && this.opts.catalog ? catalogRoot(this.opts.catalog, key) : null
-    const got = await this.opts.heavy.hits(key, root)
+    const got = await this.opts.heavy.hits(key, root, opts)
     if (got) this.declinedHeavy.delete(key)
-    else {
+    else if (!opts?.over) {
       this.declinedHeavy.add(key)
       if (this.declinedHeavy.size > 1024) this.declinedHeavy.delete(this.declinedHeavy.values().next().value!)
     }
@@ -175,9 +181,9 @@ export class SuffixHits implements HitSource {
   async hits(key: string, root: string, opts?: HitOpts): Promise<Found | null> {
     // Anchored keys (`^q`, `q$`, `^q$`): the anchored source's (`staticAnchors.ts`), else nobody's.
     if (parseKey(key).mode) return this.opts.anchored ? this.opts.anchored.hits(key, root, opts) : null
-    if (shortLiteral(key)) return this.heavyHits(key, root)
+    if (shortLiteral(key)) return this.heavyHits(key, root, opts)
     const got = await this.all(key)
-    if (!got) return this.heavyHits(key, root)
+    if (!got) return this.heavyHits(key, root, opts)
     const scans = got.scans ? { scans: got.scans } : {}
     if (root === '') return { hits: got.hits, io: got.io, ...scans }
     // One array per (literal, root) while the literal is held: the view's per-isolate phase 1 is keyed by it.
@@ -335,8 +341,10 @@ export function liveTotal(hits: Hit[], date: string, keep: (usr: string | null) 
  *  16: a heavy literal on a scan its drilldown doesn't cover — past a run with no live `drill/` — is
  *  `scan-not-indexed`, never the walk's "no matches"; 17: any static literal on a scan the generation doesn't hold — newer
  *  than its newest (published, not yet appended) or before its base — or that its answer doesn't cover is `scan-not-indexed`
- *  on every deployment, indexed-only or not: the walk answered it before, missing small matches). */
-const RESPONSE_V = 17
+ *  on every deployment, indexed-only or not: the walk answered it before, missing small matches; 18: a heavy literal's
+ *  rollup view nests — its drawn children answered in turn, to `FILTER_SUBDIV_LEVELS` below the view, in the view and
+ *  both sides of a diff). */
+const RESPONSE_V = 18
 
 /** The query's substring matchers (positive and negative): the literals the hex-run rule applies to. */
 const subMatchers = (ast: QueryAst | undefined): Extract<Matcher, { kind: 'sub' }>[] =>
