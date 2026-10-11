@@ -22,7 +22,7 @@
     {"key": "dir-cache", "uri": "gs://oa-gcs-usage-dvx/listing/{scan}/dir-cache/", "after": "path-index", "kinds": ["scan"]},
     {"key": "path-index", "uri": "gs://oa-gcs-usage-dvx/listing/{scan}/index/{gen}/", "split": "stem", "rows": "groups", "after": "path-index upload"},
     {"key": "snapshot", "uri": "gs://oa-gcs-usage-dvx/snapshots/{scan}/", "after": "publish"},
-    {"key": "static", "uri": "gs://oa-gcs-usage-dvx/static-names/2026-10-08c/manifests/{scan}.json", "manifest": true, "kinds": ["scan"]}
+    {"key": "static", "uri": "gs://oa-gcs-usage-dvx/static-names/{static_gen:gcs}/manifests/{scan}.json", "manifest": true, "kinds": ["scan"]}
   ],
   "prices": {"n2-highmem-32": 2.0962, "n2-highmem-16": 1.0481, "n2-highmem-8": 0.5241, "n2-standard-32": 1.5539, "n2-standard-8": 0.3885},
   "spot_factor": 0.3,
