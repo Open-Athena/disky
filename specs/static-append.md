@@ -363,6 +363,14 @@ The other choice, dropping an alias forward (writing the diverged member's own r
 
 Not worth chasing: write + upload (≈ 20 s), the DuckDB stages (≈ 2 min), and job start (≈ 1 min, spot provisioning plus image pull).
 
+**Implemented (levers 1–3, `static_drill`):** every serial read loop (probes, settling, base counts below the floor, newly heavy directories' earlier roots) first plans its reads from the index alone and prefetches them, then runs unchanged over the warm caches.
+- **Plan:** `TierReads.plan_any` / `plan_rows` list the groups each item decodes. `CachedGroupFile.peek` selects without touching the reads' state, so `meta.json`'s `reads` counts stay what they were without a plan. Settling's plan (`_settle_plan`) is each non-new candidate's roots range, except a heavy child's: exactly what `_value_on` reads (and `_series` reads a subset of it). A probe's plan stops where a tier's index settles it, and holds the later tiers' groups when a tier's decoded rows settle it (a superset there only).
+- **Prefetch:** first the index row groups of every item (`prefetch_index`), then the data groups per window, with `-j` (default 64) requests in flight. Requests are coalesced per file (runs ≤ 64 KB apart, ≤ 8 MB each), and footers are fetched alongside. The raw bytes go into a `ByteCache`, an LRU over compressed bytes capped at `-C` GB (default ⅛ of the RAM, ≈ 16 GB on the n2-highmem-16). Decoding is still lazy, through the 2,048-group LRU per file.
+- **Windows:** past the cap, the loop runs window by window, each prefetched in turn. A single item past the cap gets a window of its own, and its evicted bytes are fetched in the loop (correct, only slower).
+- **Ranged GCS reads:** `build` reads the prior tiers' groups with ranged GCS reads (`Tier(ranged=…)`, one pooled client sized to `-j`) instead of `open`/`seek` through gcsfuse. Everything else still reads the mount. `-F` keeps gcsfuse.
+- **Expected effect:** short task ≈ 34 → 5–6 min, long ≈ 15 → 4–5 min, so the job takes ≈ 6–7 min instead of 35.
+- **Checks:** output byte-identical on the fixtures (with and without prefetch, under a cache too small for one window, and against the pre-change code). The tests assert that nothing is fetched inside the loops after the prefetch. With 70 ms injected per fetch, a fixture run's build went from 19–49 s serial to ≈ 2.5 s.
+
 ### R2 layout for the reader (`oa-gcs-usage-index`)
 
 - `static-names/2026-10-08c/drill/…`: the base (unchanged).

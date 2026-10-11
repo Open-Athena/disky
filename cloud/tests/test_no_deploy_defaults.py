@@ -153,13 +153,14 @@ def test_profile_cmd_prints_the_file_and_its_fields(tmp_path: Path, monkeypatch)
     f = tmp_path / "static-names.json"
     f.write_text(json.dumps({**to_mapping(CW), "gen": "2026-10-10cw"}))
     monkeypatch.setenv("STATIC_NAMES_PROFILE", str(f))
+    monkeypatch.setenv("R2_ENDPOINT", "https://acct.r2.example")  # ambient (a deployment's `.envrc`): never printed into a profile
     profile.cache_clear()
     try:
         out = [CliRunner().invoke(sn, ["profile", *a]) for a in (["-f", "gen"], ["-f", "layouts"], ["-f", "compact_level"], [])]
         assert [(r.exit_code, r.output) for r in out[:3]] == [
             (0, "2026-10-10cw\n"), (0, '["cw-l2/{id}/index/{gen}/path-index.parquet"]\n'), (0, "5\n"),
         ]
-        assert json.loads(out[3].output) == {**to_mapping(CW), "gen": "2026-10-10cw"}
+        assert json.loads(out[3].output) == {k: v for k, v in {**to_mapping(CW), "gen": "2026-10-10cw"}.items() if k != "r2_endpoint"}
         f.write_text(json.dumps(to_mapping(CW)))
         profile.cache_clear()
         r = CliRunner().invoke(sn, ["profile", "-f", "gen"])
