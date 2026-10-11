@@ -138,7 +138,16 @@ def _group_rows(md: "pq.FileMetaData") -> list[dict]:
 
 
 def _remote(parquet_path: str) -> bool:
-    return parquet_path.startswith(("gs://", "oa-"))
+    return parquet_path.startswith("gs://")
+
+
+def bucket_base(base: str) -> str:
+    """A tier location's root as given (`-b`, `$DATA_BUCKET`): an fsspec URL or a
+    local/mounted path (absolute, or `.`-relative) as is; a bare name is a GCS
+    bucket (`gs://<name>`)."""
+    if "://" in base or base.startswith(("/", ".")):
+        return base
+    return f"gs://{base}"
 
 
 def exists(parquet_path: str) -> bool:
@@ -205,8 +214,8 @@ def groups_blob(schema: dict, rows: list[dict]) -> str:
 
 
 def _write(out: str, data: bytes) -> None:
-    """Bytes to a local/mounted path, a bucket-relative `oa-…` / `gs://` path
-    (gcsfs), or another fsspec URL (`blobfs`: `r2://`, `s3://`)."""
+    """Bytes to a local/mounted path, a `gs://` URL (gcsfs), or another fsspec
+    URL (`blobfs`: `r2://`, `s3://`)."""
     if _remote(out):
         import gcsfs
 
@@ -530,22 +539,21 @@ def pointers(db_id: str = D1_DB_ID) -> list[tuple[str, str, str]]:
 # generation dir: `path` = every row sorted `(depth, path)`, `bysize` = the same
 # rows sorted `(⌊log2 size⌋ desc, path)`. Both are cut by the engine's
 # `write_tiers` (`index-write` / `path-index`); the by-user copies are the same
-# two sorts led by `usr`, where the deployment attributes (`INDEX_VARIANTS`
-# names `user`; gcs). No coarse tiers: every byte floor is a prefix of `bysize`.
+# two sorts led by `usr`, written only where the scan attributes ownership (a
+# layer 2 with a `usr` column). No coarse tiers: every byte floor is a prefix of
+# `bysize`. Which variants a deployment has is a property of its generations,
+# not config: `index-sync` / `index-blob` skip an absent file, and `index-gc -r`
+# retires only the rows D1 holds.
 STORE_SORTS: dict[str, str] = {"path": "path-index.parquet", "bysize": "path-index-bysize.parquet"}
 USER_SORTS: dict[str, str] = {"user": "path-index-by-user.parquet", "bysize-user": "path-index-bysize-by-user.parquet"}
-# `$INDEX_VARIANTS` (the deployment's `wrangler.toml` / job env): `path`, or
-# `path,user` for a deployment that writes the by-user sorts.
-_ENV_VARIANTS = tuple(v for v in os.environ.get("INDEX_VARIANTS", "path,user").split(",") if v)
-HAS_USER_SORTS = "user" in _ENV_VARIANTS
-# The store sorts this deployment syncs — what `index-gc -r` retires for scans
-# past the retention window (their pointers stay; the reader range-reads the
-# `.groups.parquet` cold tier beside the parquet instead).
-SORT_VARIANTS = tuple(STORE_SORTS) + (tuple(USER_SORTS) if HAS_USER_SORTS else ())
+# Every store sort — what `index-gc -r` retires for scans past the retention
+# window (their pointers stay; the reader range-reads the `.groups.parquet`
+# cold tier beside the parquet instead).
+SORT_VARIANTS = (*STORE_SORTS, *USER_SORTS)
 
 # Index variants the site reads (functions/_lib/index.ts `indexKey` mirrors
-# this). D1 keys (date, variant).
-INDEX_VARIANTS: dict[str, str] = {**STORE_SORTS, **(USER_SORTS if HAS_USER_SORTS else {})}
+# this), by served file name. D1 keys (date, variant).
+INDEX_VARIANTS: dict[str, str] = {**STORE_SORTS, **USER_SORTS}
 # The age chart's backend: multi-scale path-major pyramid tiers, one per bin
 # (specs/done/age-index.md, Phase B — supersedes the single-bin `age-index.parquet`).
 # Standalone indexes, own base names; the footer's (depth, path, b) stats prune
@@ -562,9 +570,9 @@ INDEX_VARIANTS["over-time"] = "over-time.parquet"
 
 def cold_path(base: str, gdir: str, variant: str) -> str:
     """Where (date, variant)'s cold footer tier lives: the pointer's dir
-    ``gdir`` under ``base`` (a bucket name — `oa-…` → gcsfs —, a mounted dir, or an
-    fsspec URL like `r2://bucket`)."""
-    return groups_parquet_path(f"{base.rstrip('/')}/{gdir}/{INDEX_VARIANTS[variant]}")
+    ``gdir`` under ``base`` (a bucket name — a GCS bucket, `bucket_base` —, a
+    mounted dir, or an fsspec URL like `r2://bucket`)."""
+    return groups_parquet_path(f"{bucket_base(base).rstrip('/')}/{gdir}/{INDEX_VARIANTS[variant]}")
 
 
 def retire_d1(

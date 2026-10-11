@@ -1,6 +1,9 @@
-"""Example deployment profiles for the static name index (`static_profile.Profile`), selected with
-`STATIC_NAMES_PROFILE=<name>`: Open Athena's two deployments, as full worked examples. Any field can be overridden by
-its env var (`static_profile.ENV`); the R2 endpoint (it names the Cloudflare account) is always env (`R2_ENDPOINT`).
+"""Example deployment profiles for the static name index (`static_profile.Profile`), selectable with
+`STATIC_NAMES_PROFILE=<name>`: Open Athena's two deployments, as worked examples. Illustrative, not live: they carry no
+generation (`gen`), which moves with every compaction. A deployment's live profile is a JSON file on its own branch
+(`job/static-names.json`, `STATIC_NAMES_PROFILE=<path>`; `dt-cloud static-names profile` prints one to start from), so a
+compaction is a branch commit, never a `cloud` one. Any field can be overridden by its env var (`static_profile.ENV`); the
+R2 endpoint (it names the Cloudflare account) is always env (`R2_ENDPOINT`).
 """
 from __future__ import annotations
 
@@ -15,11 +18,11 @@ PROJECT = "oa-internal-450019"
 GCS = Profile(
     name="gcs",
     layouts=("listing/{id}/path-index.parquet", "listing/{id}/index/{gen}/path-index.parquet"),
-    bucket="oa-gcs-usage-dvx", scratch="oa-gcs-usage-scratch", gen="2026-10-08c",
+    bucket="oa-gcs-usage-dvx", scratch="oa-gcs-usage-scratch",
     r2_bucket="oa-gcs-usage-index", r2_secrets={"key_id": "gcs-static-index-r2-key-id", "secret": "gcs-static-index-r2-secret"},
     project=PROJECT, region="us-east1", sa=f"gcs-usage-job@{PROJECT}.iam.gserviceaccount.com", drill=True, anchors=True,
-    # New generations (the next compaction) are built with the rule; `2026-10-08c` (built before it) and its runs keep
-    # the full index, as their `scans.json` records no `hex_runs`.
+    # New generations are built with the rule; one built before it keeps the full index for its runs, as its
+    # `scans.json` records no `hex_runs`.
     hex_runs="16,8",
     # Carries stop below level 5: a compaction is due after ~2^5 = 32 scans (~32 days of daily scans).
     compact_level=5,
@@ -31,7 +34,7 @@ GCS = Profile(
 CW = Profile(
     name="cw",
     layouts=("cw-l2/{id}/index/{gen}/path-index.parquet",),
-    bucket="oa-gcs-usage-dvx", scratch="oa-gcs-usage-scratch", gen="2026-10-10cw",
+    bucket="oa-gcs-usage-dvx", scratch="oa-gcs-usage-scratch",
     r2_bucket="oa-cw-s3-usage-index",
     r2_secrets={"endpoint": "cw-s3-r2-endpoint", "key_id": "cw-s3-r2-access-key-id", "secret": "cw-s3-r2-secret-access-key"},
     project=PROJECT, region="us-east1", sa=f"cw-s3-job@{PROJECT}.iam.gserviceaccount.com",

@@ -9,10 +9,9 @@ from pathlib import Path
 import pytest
 
 from dt_cloud.scan_runs import (
-    ALL, Output, Phase, PrintSink, Record, Run, SqliteSink, cost, fill, measure, measure_after, parse_profile, record,
+    ALL, Output, Phase, PrintSink, Record, Run, SqliteSink, cost, fill, load_profile, measure, measure_after, parse_profile, record,
     record_sql,
 )
-from dt_cloud.static_profile_examples import EXAMPLES
 from dt_cloud.scan_runs_backfill import classify, failure_of, log_filter, phases_of, reconstruct, task_lines
 
 SITE = Path(__file__).parents[2] / "site"
@@ -23,12 +22,36 @@ def ts(s: str) -> int:
     return int(dt.datetime.fromisoformat(s).replace(tzinfo=dt.timezone.utc).timestamp())
 
 
-def test_fill_static_gen_follows_the_named_profile_and_its_env_override(monkeypatch):
-    t = "gs://d/static-names/{static_gen:cw}/manifests/{scan}.json"
-    monkeypatch.delenv("STATIC_NAMES_GEN", raising=False)
-    assert fill(t, "2026-10-10T1201", None) == f"gs://d/static-names/{EXAMPLES['cw'].gen}/manifests/2026-10-10T1201.json"
+def test_fill_static_gen_follows_the_profile_file_and_its_env_override(monkeypatch, tmp_path):
+    """`{static_gen:<file>}`: the deployment's own profile file (relative to the scan-run profile's dir, anchored at
+    load so any working dir resolves it), `STATIC_NAMES_GEN` over it; an absolute path is kept as is."""
+    job = tmp_path / "job"
+    job.mkdir()
+    (job / "static-names.json").write_text(json.dumps({"name": "cw", "gen": "2026-10-10cw"}))
+    (job / "scan-runs.json").write_text(json.dumps({"outputs": [
+        {"key": "static", "uri": "gs://d/static-names/{static_gen:static-names.json}/manifests/{scan}.json", "manifest": True},
+        {"key": "abs", "uri": f"gs://d/{{static_gen:{job}/static-names.json}}/"},
+        {"key": "named", "uri": "gs://d/{static_gen:cw}/"},
+    ]}))
+    monkeypatch.chdir(tmp_path)  # not the profile's dir: the relative file is still found
+    p = load_profile(str(job / "scan-runs.json"))
+    assert [o.uri for o in p.outputs] == [
+        f"gs://d/static-names/{{static_gen:{job.resolve()}/static-names.json}}/manifests/{{scan}}.json",
+        f"gs://d/{{static_gen:{job}/static-names.json}}/",
+        "gs://d/{static_gen:cw}/",
+    ]
+    assert [fill(o.uri, "2026-10-10T1201", None) for o in p.outputs[:2]] == [
+        "gs://d/static-names/2026-10-10cw/manifests/2026-10-10T1201.json",
+        "gs://d/2026-10-10cw/",
+    ]
     monkeypatch.setenv("STATIC_NAMES_GEN", "2026-11-01cw")
-    assert fill(t, "2026-10-10T1201", None) == "gs://d/static-names/2026-11-01cw/manifests/2026-10-10T1201.json"
+    assert fill(p.outputs[0].uri, "2026-10-10T1201", None) == "gs://d/static-names/2026-11-01cw/manifests/2026-10-10T1201.json"
+    # An example names no live generation: only `STATIC_NAMES_GEN` gives it one.
+    assert fill(p.outputs[2].uri, "2026-10-10T1201", None) == "gs://d/2026-11-01cw/"
+    monkeypatch.delenv("STATIC_NAMES_GEN")
+    with pytest.raises(SystemExit) as e:
+        fill(p.outputs[2].uri, "2026-10-10T1201", None)
+    assert str(e.value) == "static names: no gen in the deployment profile: set STATIC_NAMES_GEN (or STATIC_NAMES_PROFILE)"
 
 
 class FakeStore:
