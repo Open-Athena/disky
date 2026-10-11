@@ -51,6 +51,20 @@ ALIAS_SCHEMA = pa.schema([pa.field("q", pa.string(), nullable=False), pa.field("
 ROLLUP_COLS = "q VARCHAR, dir VARCHAR, kind TINYINT, child VARCHAR, vf BIGINT, b BIGINT, o BIGINT"
 
 
+def insert_rows(con, table: str, rows: list[tuple]) -> None:
+    """`rows` appended to DuckDB table `table` (its columns, in order), as one Arrow table: `executemany` took minutes for a
+    few hundred thousand rows (the probes' and settling's inserts were ~17% of gcs 10-11's short drill)."""
+    if not rows:
+        return
+    schema = con.execute(f"SELECT * FROM {table} LIMIT 0").to_arrow_table().schema
+    t = pa.table([pa.array(col, f.type) for col, f in zip(zip(*rows), schema)], schema=schema)
+    con.register("_insert_rows", t)
+    try:
+        con.execute(f"INSERT INTO {table} SELECT * FROM _insert_rows")
+    finally:
+        con.unregister("_insert_rows")
+
+
 # ── Tiers ──────────────────────────────────────────────────────────────────
 
 
@@ -101,7 +115,8 @@ class CachedGroupFile(sr.GroupFile):
         self._entries: dict[int, list[dict]] = {}
         self._peeked: dict[int, list[dict]] = {}
         self._md: dict[str, pq.FileMetaData] = {}
-        self._groups: OrderedDict[tuple[str, int], list[dict]] = OrderedDict()
+        self._groups: OrderedDict[tuple[str, int], tuple[pa.Table, list[tuple]]] = OrderedDict()
+        self._spans: dict[tuple[int, int], tuple[list[dict], list[tuple], list[tuple]]] = {}
         self.cap_groups = cache_groups
         self.raw: ByteCache | None = None
         self.fetch_io: Counter = Counter()
@@ -128,6 +143,9 @@ class CachedGroupFile(sr.GroupFile):
     def _read_rgs(self, file: str, start: int, data: bytes, rgs: list[int]) -> dict[int, list[dict]]:
         pf = pq.ParquetFile(self.Spans(self.size_of(file), [self.footer(file), (start, data)]), metadata=self._meta(file))
         return {g: pf.read_row_group(g).to_pylist() for g in rgs}
+
+    def _read_table(self, file: str, start: int, data: bytes, rg: int) -> pa.Table:
+        return pq.ParquetFile(self.Spans(self.size_of(file), [self.footer(file), (start, data)]), metadata=self._meta(file)).read_row_group(rg)
 
     def _load(self, tops: list[dict]) -> None:
         missing = [t for t in tops if t["rg"] not in self._entries]
@@ -165,14 +183,32 @@ class CachedGroupFile(sr.GroupFile):
             self._peeked[t["rg"]] = self._read_rgs(self.index_file, t["offset"], data, [t["rg"]])[t["rg"]]
         return self._peeked[t["rg"]]
 
+    def _span(self, a: int, b: int) -> tuple[list[dict], list[tuple], list[tuple]]:
+        """The entries of index row groups `top[a:b]` and their last / first keys, built once per span (a per-call build
+        over the ~1K entries a top row group holds was most of a probe's time)."""
+        s = self._spans.get((a, b))
+        if s is None:
+            entries = [e for t in self.top[a:b] for e in self._peek_top(t)]
+            s = self._spans[(a, b)] = (entries, [(e["q_max"], e["k_max"]) for e in entries], [(e["q_min"], e["k_min"]) for e in entries])
+        return s
+
+    def _sel(self, a: int, b: int, lo, hi) -> list[dict]:
+        from bisect import bisect_left
+
+        entries, his, los = self._span(a, b)
+        a2 = bisect_left(his, lo)
+        return entries[a2:max(a2, bisect_left(los, hi))]
+
     def peek(self, lo, hi) -> list[dict]:
         """`select(lo, hi)`'s groups, leaving the reads' state and counts as they were (planning: the loops' own `select`
         loads the index row groups and counts them, as without a plan)."""
+        from bisect import bisect_left
+
         if self.top is None:
             return super().select(lo, hi)[0]
-        entries = [e for t in self.tops(lo, hi) for e in self._peek_top(t)]
-        a, b = self._meet(entries, lo, hi)
-        return entries[a:b]
+        a = bisect_left(self._top_hi, lo)
+        b = max(a, bisect_left(self._top_lo, hi))
+        return self._sel(a, b, lo, hi) if a < b else []
 
     def select(self, lo, hi, cap: int | None = None):
         from bisect import bisect_left
@@ -187,12 +223,15 @@ class CachedGroupFile(sr.GroupFile):
         if cap is not None and inner > cap:
             return None, inner
         self._load(self.top[a:b])
-        entries = [e for t in self.top[a:b] for e in self._entries[t["rg"]]]
-        a2, b2 = self._meet(entries, lo, hi)
-        sel = entries[a2:b2]
+        sel = self._sel(a, b, lo, hi)
         return sel, sum(g["rows"] for g in sel)
 
-    def group_rows(self, g: dict) -> tuple[list[dict], list[tuple]]:
+    def group_rows(self, g: dict) -> tuple[pa.Table, dict[str, list]]:
+        """Group `g` decoded (cached): its rows as a table, and per `q` its rows' span `[s, e)` (the group is sorted on
+        `(q, key)`) with their keys, listed when first bisected. Rows become Python dicts only when a range of them is returned
+        (`rows_in`): converting whole groups was most of the probes' and settling's time."""
+        import numpy as np
+
         k = (g["file"], g["rg"])
         if k in self._groups:
             self._groups.move_to_end(k)
@@ -200,22 +239,45 @@ class CachedGroupFile(sr.GroupFile):
         data = self._get(g["file"], g["offset"], g["offset"] + g["length"])
         self.io["groups_read"] += 1
         self.io["group_bytes"] += len(data)
-        rows = self._read_rgs(g["file"], g["offset"], data, [g["rg"]])[g["rg"]]
-        self._groups[k] = (rows, [(r["q"], r[self.key]) for r in rows])
+        t = self._read_table(g["file"], g["offset"], data, g["rg"])
+        d = t.column("q").combine_chunks().dictionary_encode()  # sorted: the dictionary is in order, the indices ascending
+        idx, n = d.indices.to_numpy(), len(d.dictionary)
+        starts, ends = np.searchsorted(idx, np.arange(n), "left"), np.searchsorted(idx, np.arange(n), "right")
+        self._groups[k] = (t, {v: [int(s), int(e), None] for v, s, e in zip(d.dictionary.to_pylist(), starts, ends)})
         if len(self._groups) > self.cap_groups:
             self._groups.popitem(last=False)
         return self._groups[k]
 
-    def rows_in(self, lo, hi) -> list[dict]:
-        """The rows with `lo ≤ (q, key) < hi` (each group is sorted on it: bisected)."""
+    def _bounds(self, lo, hi):
+        """Per group meeting `[lo, hi)` (one `q`: the builder's ranges are a member's): `(table, i, j)`, its rows `[i, j)`
+        the ones in range."""
         from bisect import bisect_left
 
+        if lo[0] != hi[0]:
+            raise ValueError(f"{lo!r}, {hi!r}: a range within one q")
         groups, _ = self.select(lo, hi)
-        out = []
         for g in groups:
-            rows, keys = self.group_rows(g)
-            out += rows[bisect_left(keys, lo):bisect_left(keys, hi)]
+            t, runs = self.group_rows(g)
+            run = runs.get(lo[0])
+            if run is None:
+                yield t, 0, 0
+                continue
+            s, e, keys = run
+            if keys is None:
+                keys = run[2] = t.column(self.key).slice(s, e - s).to_pylist()
+            yield t, s + bisect_left(keys, lo[1]), s + bisect_left(keys, hi[1])
+
+    def rows_in(self, lo, hi) -> list[dict]:
+        """The rows with `lo ≤ (q, key) < hi` (each group is sorted on it: bisected)."""
+        out = []
+        for t, i, j in self._bounds(lo, hi):
+            if j > i:
+                out += t.slice(i, j - i).to_pylist()
         return out
+
+    def has_in(self, lo, hi) -> bool:
+        """Is some row in `[lo, hi)`? (`rows_in`'s groups decoded, as it does; no rows converted.)"""
+        return any([j > i for _, i, j in self._bounds(lo, hi)])
 
 
 class Tier:
@@ -392,7 +454,7 @@ class TierReads:
                 self.stats["any_index"] += 1
                 return True
             self.stats["any_decoded"] += 1
-            if gf.rows_in(L, H):
+            if gf.has_in(L, H):
                 return True
         return False
 
@@ -688,7 +750,7 @@ def long_day_roots(con, prev: pa.Table, new_members: list[str], sx_files: list[s
     con.unregister("prev_in")
     con.execute("CREATE OR REPLACE TABLE newq (q VARCHAR)")
     if new_members:
-        con.executemany("INSERT INTO newq VALUES (?)", [(m,) for m in new_members])
+        insert_rows(con, "newq", [(m,) for m in new_members])
     con.execute("CREATE OR REPLACE TABLE mq AS SELECT q FROM pm")
     con.execute(f"DROP TABLE IF EXISTS dg; CREATE TABLE dg ({sr.DIGEST_COLS})")
     chunks = [(f, w) for f in sx_files for w in sr.chunk_wheres(f, chunk_rows)]
@@ -852,7 +914,7 @@ def day_rollups(con, prior: list[Tier], kind: str, D: int, *, R: int, K: int, fl
         existed = []
         for a, b in reads.windows(reads.plan(ranges, "any")):
             existed += [reads.any(*r) for r in ranges[a:b]]
-        con.executemany("INSERT INTO pr VALUES (?, ?, ?, ?)", [(c, d, x, e) for (c, d, x), e in zip(probes, existed)])
+        insert_rows(con, "pr", [(c, d, x, e) for (c, d, x), e in zip(probes, existed)])
         log(f"drill {kind}: {len(probes):,} probes in {monotonic() - t1:.0f}s ({reads.io()}; requests {reads.requests()})")
     doc["probes"] = len(probes)
     doc["probes_existed"] = con.execute("SELECT count(*) FILTER (WHERE existed) FROM pr").fetchone()[0]
@@ -913,7 +975,7 @@ def day_rollups(con, prior: list[Tier], kind: str, D: int, *, R: int, K: int, fl
         counts = []
         for a, b in reads.windows(reads.plan(ranges, "rows")):
             counts += [len(reads.rows(c, lo, hi, only=o)) for c, lo, hi, o in ranges[a:b]]
-        con.executemany("INSERT INTO bx VALUES (?, ?, ?)", [(c, d, n) for (c, d), n in zip(unknown, counts)])
+        insert_rows(con, "bx", [(c, d, n) for (c, d), n in zip(unknown, counts)])
         log(f"drill {kind}: {len(unknown):,} base counts below the measurement's floor in {monotonic() - t1:.0f}s")
     doc["base_counted"] = len(unknown)
     con.execute(f"""CREATE OR REPLACE TABLE newh AS SELECT nh.q, nh.dir, nh.k FROM nh LEFT JOIN bx USING (q, dir)
@@ -976,7 +1038,7 @@ def _settle(con, D: int, K: int, reads: TierReads) -> int:
         _settle_dirs(aff[a:b], kept, others, cands, hdr, opens, rest, heavy_tot, ctx, D, K, reads, out)
     restated = sum(1 for r in out if r[2] == KIND_FULL)
     if out:
-        con.executemany("INSERT INTO rup VALUES (?, ?, ?, ?, ?, ?, ?)", out)
+        insert_rows(con, "rup", out)
     return restated
 
 
@@ -1030,7 +1092,7 @@ def _settle_ctx(con, aff: list[tuple], cands: set[tuple]) -> dict:
     """What settling reads, loaded in one query each (a lookup per directory would scan `dr` and `stf`): the prior cells of the
     affected directories and of the candidates' own directories, which of those are heavy, and today's rows under each candidate."""
     con.execute("CREATE OR REPLACE TABLE sk (q VARCHAR, dir VARCHAR)")
-    con.executemany("INSERT INTO sk VALUES (?, ?)", [*aff, *sorted({(c, f"{d}/{x}") for c, d, x in cands})])
+    insert_rows(con, "sk", [*aff, *sorted({(c, f"{d}/{x}") for c, d, x in cands})])
     cells: dict[tuple, dict[tuple, list]] = {}
     for c, d, kind, child, vf, b, o in con.execute(f"""SELECT q, dir, kind, child, vf, b, o FROM stf SEMI JOIN (SELECT DISTINCT q, dir FROM sk) USING (q, dir)
             WHERE kind IN ({KIND_KEPT}, {KIND_REST})""").fetchall():
@@ -1042,7 +1104,7 @@ def _settle_ctx(con, aff: list[tuple], cands: set[tuple]) -> dict:
         for root in (True, False):
             ranges.add((c, *_child_range(d, x, root)))
     if ranges:
-        con.executemany("INSERT INTO sr_ VALUES (?, ?, ?)", sorted(ranges))
+        insert_rows(con, "sr_", sorted(ranges))
     today: dict[tuple, list] = {r: [] for r in ranges}
     for c, lo, hi, path, usr, vf, vt, size, n in con.execute("""SELECT r.q, r.lo, r.hi, d.path, d.usr, d.vf, d.vt, d.size, d.n_files
             FROM sr_ AS r JOIN dr AS d ON d.q = r.q AND d.path >= r.lo AND d.path < r.hi""").fetchall():
@@ -1057,7 +1119,7 @@ def _heavy_totals(con, keys: list[tuple[str, str]]) -> dict[tuple[str, str], tup
     if not keys:
         return {}
     con.execute("CREATE OR REPLACE TABLE hk (q VARCHAR, dir VARCHAR)")
-    con.executemany("INSERT INTO hk VALUES (?, ?)", keys)
+    insert_rows(con, "hk", keys)
     heavy = {(c, d) for c, d in con.execute("SELECT q, dir FROM hdr SEMI JOIN hk USING (q, dir)").fetchall()}
     tot = {(c, d): (int(b), int(o)) for c, d, b, o in con.execute("""SELECT q, dir, sum(b), sum(o) FROM (
             SELECT q, dir, b, o FROM kc SEMI JOIN hk USING (q, dir) UNION ALL SELECT q, dir, b, o FROM rc SEMI JOIN hk USING (q, dir))
