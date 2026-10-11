@@ -54,14 +54,7 @@ async function prepare(env: ExecEnv, db: D1Database, req: DispatchReq): Promise<
     )
     if (!up.ok) return refuse(500, 'plan.json write failed', { status: up.status, detail: (await up.text()).slice(0, 300) })
 
-    const script = [
-      'set -euo pipefail',
-      // Ping the site on exit (success or failure) so it reflects the run now.
-      `trap 'curl -fsS -m 60 -o /dev/null -H "Authorization: Bearer $SITE_TOKEN" "$SITE_URL/api/plan-sweep/jobs" || true' EXIT`,
-      `RUN="${runMnt}"`,
-      `dt-cloud plan-sweep manifest --plan "$RUN/plan.json" -d "$SWEEP_DATE" -o "$RUN"`,
-      `dt-cloud plan-sweep execute ${req.mode === 'real' ? '--for-real ' : ''}"$RUN"`,
-    ].join('\n')
+    const script = planSweepScript(runMnt, req.mode === 'real')
 
     // the executor deletes from the plan's bucket (`SWEEP_BUCKET` in the job env)
     const spec = sweepBatchSpec(cfg, jobSa, script, plan.bucket, { JOB_ID: jobId, SWEEP_DATE: date, SITE_URL: req.siteUrl },
@@ -85,6 +78,16 @@ async function prepare(env: ExecEnv, db: D1Database, req: DispatchReq): Promise<
   }
   return { prefixes, launch }
 }
+
+/** The Batch task's script: expand the run dir's `plan.json` into a manifest (`plan-sweep manifest PLAN_PATH`, the
+ *  plan positional), then execute it, pinging the site on exit (success or failure) so it reflects the run now. */
+export const planSweepScript = (runMnt: string, forReal: boolean): string => [
+  'set -euo pipefail',
+  `trap 'curl -fsS -m 60 -o /dev/null -H "Authorization: Bearer $SITE_TOKEN" "$SITE_URL/api/plan-sweep/jobs" || true' EXIT`,
+  `RUN="${runMnt}"`,
+  'dt-cloud plan-sweep manifest "$RUN/plan.json" -d "$SWEEP_DATE" -o "$RUN"',
+  `dt-cloud plan-sweep execute ${forReal ? '--for-real ' : ''}"$RUN"`,
+].join('\n')
 
 export const planSweep: Executor = {
   dateRe: SCAN_ID_RE,
