@@ -23,7 +23,7 @@ import pandas as pd
 from click import Choice, UsageError, argument, group, option
 
 from .identity import IDENTITIES_ENV, load_identities
-from .deploy import data_bucket, site_token, site_url as resolve_site_url
+from .deploy import data_bucket, layer2_prefix as resolve_layer2, site_token, site_url as resolve_site_url
 from .secrets import env_secret, secret
 from .index_footer import INDEX_VARIANTS
 from .prefixes import load_prefix_map
@@ -768,7 +768,7 @@ def index_recut(check: bool, mem: str, threads: int, row_group_rows: int, tiers:
 @option("-b", "--bucket", envvar="DATA_BUCKET", required=True, help="Data bucket the D1 `path` dirs resolve against; default $DATA_BUCKET")
 @option("-g", "--gen", required=True, help="Generation id for the published index dirs (the run's, e.g. the job's $GEN)")
 @option("-K", "--group-size", default=None, type=int, help="Scans per sealed group (default: dt_cloud.overtime.OVER_TIME_GROUP_SIZE)")
-@option("-l", "--layer2-prefix", default=None, help="Layer-2 dir template with `{scan}` (default: $LAYER2_PREFIX, e.g. cw-l2/{scan}/)")
+@option("-l", "--layer2-prefix", default=None, help="Layer-2 dir template with `{scan}` (default $LAYER2_PREFIX; one of the two is required)")
 @option("-m", "--mem", default="8GB", help="DuckDB memory limit")
 @option("-n", "--dry-run", is_flag=True, help="Print the groups that would be built; write nothing")
 @option("-o", "--out", "out_dir", type=Path, required=True, help="Work dir for the group builds")
@@ -808,7 +808,7 @@ def over_time_groups(
     from .overtime import OVER_TIME_GROUP_SIZE, multiscan_row, sealed_groups, sync_manifest, synced_groups, write_over_time_index
 
     K = group_size or OVER_TIME_GROUP_SIZE
-    l2 = layer2_prefix or os.environ.get("LAYER2_PREFIX") or "cw-l2/{scan}/"
+    l2 = resolve_layer2(layer2_prefix, "-l/--layer2-prefix")
     root = publish_root or f"/gcs/{bucket}"
     data = data_root or root
     dates = sorted({d for d, v in synced_variants(store=store) if v == "path"})
@@ -883,8 +883,8 @@ def over_time_churn_cmd(groups: tuple[str, ...]) -> None:
 @option("-b", "--bucket", envvar="DATA_BUCKET", required=True, help="Data bucket holding the index tiers; default $DATA_BUCKET")
 @option("-d", "--dir", "listing_dir", default=None, help="Local/mounted dir holding the parquets (default: <bucket>/<key>)")
 @option("-F", "--sorts-only", is_flag=True, help="Only the store's sorts (path, bysize, and their by-user copies where written)")
-@option("-g", "--gen", required=True, help="Generation stamp these files belong to (the run's GEN; `legacy` for the pre-generation listing/<date>/ layout)")
-@option("-k", "--key", default=None, help="Bucket-relative dir the parquets live under — what the site reads (default: listing/<date>/index/<gen>; listing/<date> for gen `legacy`)")
+@option("-g", "--gen", required=True, help="Generation stamp these files belong to (the run's GEN; `legacy` for a pre-generation layout)")
+@option("-k", "--key", required=True, help="Bucket-relative dir the parquets live under — what the site reads (the deployment's layout, e.g. `<layer-2>/index/<gen>`)")
 @option("-L", "--local", is_flag=True, help="Write to the local wrangler D1 instead of --remote")
 @option("-p", "--pointer-only", is_flag=True, help="Only flip the pointers, after `-r` staged the rows: refuses (exit 1, nothing flipped) unless every present variant's rows in D1 match its footer; a variant already pointed at this generation is a no-op")
 @option("-r", "--rows-only", is_flag=True, help="Only upload the row groups (+ the cold footer files), tagged with the generation — invisible until `-p` flips the pointers. Re-runnable (rows are INSERT OR REPLACE)")
@@ -897,7 +897,7 @@ def index_sync(
     listing_dir: str | None,
     sorts_only: bool,
     gen: str,
-    key: str | None,
+    key: str,
     local: bool,
     pointer_only: bool,
     rows_only: bool,
@@ -935,17 +935,17 @@ def index_sync(
     if local and (rows_only or pointer_only):
         raise UsageError("-r/-p run against the remote D1 only")
 
-    key = key or (f"listing/{date}" if gen == "legacy" else f"listing/{date}/index/{gen}")
-    base = listing_dir or f"{bucket}/{key}"
+    base = listing_dir or f"gs://{bucket}/{key}"
     todo = variants or tuple(INDEX_VARIANTS)
     if sorts_only:
         todo = tuple(v for v in todo if v in SORT_VARIANTS)
     if age_only:
         todo = tuple(v for v in todo if v.startswith("age-pyramid"))
-    # A deployment produces only some variants (gcs's `path-index` writes no
-    # age pyramid or over-time tier; a generation before the store has no
-    # `bysize`); an absent file is skipped, not fatal — otherwise every variant
-    # after it in `INDEX_VARIANTS` order went unsynced.
+    # A generation holds only some variants (`path-index` writes no age
+    # pyramid or over-time tier; by-user sorts only where the scan attributes
+    # ownership; a generation before the store has no `bysize`); an absent
+    # file is skipped, not fatal — otherwise every variant after it in
+    # `INDEX_VARIANTS` order went unsynced.
     skipped = []
     present = []
     for variant in todo:
@@ -1090,9 +1090,9 @@ def labels(attributions: tuple[str, ...], identities_path: str | None, listings:
 @option("-a", "--all", "all_dates", is_flag=True, help="Every scan with a synced pointer (instead of DATES)")
 @option("-b", "--bucket", envvar="DATA_BUCKET", required=True, help="Data bucket holding the index tiers; default $DATA_BUCKET")
 @option("-d", "--dir", "listing_dir", default=None, help="Local/mounted/gs:// dir holding the parquets (default: gs://<bucket>/<key>); one DATE only")
-@option("-g", "--gen", default=None, help="Generation the files belong to (`legacy` for listing/<date>/); default: each variant's D1 pointer dir")
+@option("-g", "--gen", default=None, help="Generation the files belong to: `{gen}` in -k (needs -k); default: each variant's D1 pointer dir")
 @option("-J", "--from-json", is_flag=True, help="Build the .groups.parquet from the .groups.json already beside the tier, not the tier's own footer (implies -P)")
-@option("-k", "--key", default=None, help="Bucket-relative dir the parquets live under (default: listing/<date>/index/<gen>; listing/<date> for gen `legacy`)")
+@option("-k", "--key", default=None, help="Bucket-relative dir template the parquets live under, `{date}` = the scan id, `{gen}` = -g (the deployment's layout, e.g. `<prefix>/{date}/index/{gen}`); default: each variant's D1 pointer dir")
 @option("-n", "--dry-run", is_flag=True, help="Print what would be written; write nothing")
 @option("-P", "--parquet-only", is_flag=True, help="Only the cold footer tier (`.groups.parquet`); leave the .groups.json as it is")
 @option("-s", "--store", default="primary", help="The store whose pointers name the dirs (no -g): `primary` (default) or a secondary store's `STORES_JSON` key")
@@ -1130,6 +1130,10 @@ def index_blob(
         raise UsageError("give DATES or -a, not both")
     if listing_dir and (all_dates or len(dates) > 1):
         raise UsageError("-d names one scan's dir: one DATE only")
+    if gen is not None and key is None:
+        raise UsageError("-g needs -k: the bucket-relative dir is the deployment's layout (no default)")
+    if key is not None and "{gen}" in key and gen is None:
+        raise UsageError("-k names `{gen}`: pass -g")
     by_pointer = not (listing_dir or gen is not None or key is not None)
     synced = synced_variants(store=store) if all_dates or by_pointer else []
     todo_dates = sorted({d for d, _ in synced}) if all_dates else list(dates)
@@ -1141,9 +1145,8 @@ def index_blob(
         for variant in todo_vars:
             if listing_dir:
                 base = listing_dir
-            elif gen is not None or key is not None:
-                k = key or (f"listing/{date}" if gen == "legacy" else f"listing/{date}/index/{gen}")
-                base = f"gs://{bucket}/{k}"
+            elif key is not None:
+                base = f"gs://{bucket}/{key.format(date=date, gen=gen)}"
             else:
                 if (date, variant) not in have:
                     continue
@@ -2742,11 +2745,12 @@ def discord_webhook(bot_token: str | None, channel: str, guild: str | None, name
 @main.command("publish-r2")
 @option("-a", "--all-gens", is_flag=True, help="Copy every `index/<gen>/` under the scan, pointed or not (no D1 read); default: only the generations a D1 `index_schema` row names")
 @option("-b", "--bucket", "src_bucket", default=None, help="Source GCS scan store (default $DATA_BUCKET)")
-@option("-l", "--layer2", default=None, help="Layer-2 dir template, `{scan}` = the scan id (default $LAYER2_PREFIX, else listing/{scan}/index/; cw: cw-l2/{scan}/)")
+@option("-l", "--layer2", default=None, help="Layer-2 dir template, `{scan}` = the scan id (default $LAYER2_PREFIX; one of the two is required)")
 @option("-L", "--no-listings", is_flag=True, help="Leave the canonical per-bucket listings (`<layer-2 dir>/<bucket>.parquet`) in GCS only; copy the tiers + snapshot JSONs")
 @option("-n", "--dry-run", is_flag=True, help="List the keys that would be copied; copy nothing")
 @option("-p", "--prefix", "prefixes", multiple=True, help="Key prefix to publish (repeatable; default: the scan's served subset — snapshots/<subdir>/<scan>/ + the layer-2 dir)")
 @option("-s", "--subdir", default=None, help="Snapshots subdir of this store (default $SNAPSHOTS_SUBDIR, else none)")
+@option("-S", "--small", is_flag=True, help="Only the small files the site reads beside the path store (its `SERVED_R2`): the snapshot JSONs and each generation's extras sidecars (`attr.tsv{,.idx.json}`); no tier, listing or rollup")
 @option("-w", "--workers", default=8, type=int, help="Concurrent HEADs/uploads (default 8)")
 @argument("scan")
 def publish_r2(
@@ -2757,6 +2761,7 @@ def publish_r2(
     dry_run: bool,
     prefixes: tuple[str, ...],
     subdir: str | None,
+    small: bool,
     workers: int,
     scan: str,
 ) -> None:
@@ -2773,9 +2778,15 @@ def publish_r2(
     so a reindex's superseded `index/<gen>/` never reaches R2; that reads D1
     (`D1_DB_ID` + `CLOUDFLARE_API_TOKEN`/`CLOUDFLARE_ACCOUNT_ID`). `-a`
     copies every generation without it.
+
+    `-S`: a deployment whose path store is served from R2 already (the
+    interval store) publishes just the small files its pages read beside it:
+    `publish-r2 -S -a <scan>` before `index-sync` lists the scan, and
+    `publish-r2 -a -p snapshots/rules.json <scan>` for the registry.
     """
     from . import publish as pub
 
+    l2 = resolve_layer2(layer2, "-l/--layer2")
     pointed = None
     if not all_gens:
         from .index_footer import pointers
@@ -2786,11 +2797,12 @@ def publish_r2(
         src_bucket=src_bucket or data_bucket(),
         prefixes=list(prefixes) or None,
         subdir=pub.SNAPSHOTS_SUBDIR if subdir is None else subdir,
-        layer2=layer2 or pub.LAYER2_PREFIX,
+        layer2=l2,
         dry_run=dry_run,
         workers=workers,
         listings=not no_listings,
         pointed=pointed,
+        small=small,
     )
 
 

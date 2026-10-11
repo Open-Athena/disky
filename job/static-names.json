@@ -1,0 +1,30 @@
+{
+ "name": "gcs",
+ "layouts": [
+  "listing/{id}/path-index.parquet",
+  "listing/{id}/index/{gen}/path-index.parquet"
+ ],
+ "bucket": "oa-gcs-usage-dvx",
+ "scratch": "oa-gcs-usage-scratch",
+ "gen": "2026-10-08c",
+ "r2_bucket": "oa-gcs-usage-index",
+ "r2_secrets": {
+  "key_id": "gcs-static-index-r2-key-id",
+  "secret": "gcs-static-index-r2-secret"
+ },
+ "r2_endpoint": null,
+ "project": "oa-internal-450019",
+ "region": "us-east1",
+ "image": null,
+ "sa": "gcs-usage-job@oa-internal-450019.iam.gserviceaccount.com",
+ "r2_sa": null,
+ "machine": "n2-highmem-16",
+ "ssd_gb": 750,
+ "spot": true,
+ "append_tasks": 16,
+ "drill": true,
+ "anchors": true,
+ "src": [],
+ "hex_runs": "16,8",
+ "compact_level": 5
+}

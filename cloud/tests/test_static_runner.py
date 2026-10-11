@@ -333,11 +333,12 @@ def test_job_ids_are_batch_safe():
 
 
 def test_profile_is_an_example_with_env_over_it():
-    """cw's example, with a staged source tree and on-demand VMs by env; every other field the example's."""
-    env = {"STATIC_NAMES_PROFILE": "cw", "STATIC_NAMES_SPOT": "0", "STATIC_NAMES_SRC": "/gcs/a/x,/gcs/a/y", "R2_ENDPOINT": "https://e",
+    """cw's example (no generation of its own: by env), with a staged source tree and on-demand VMs by env; every
+    other field the example's."""
+    env = {"STATIC_NAMES_PROFILE": "cw", "STATIC_NAMES_GEN": "2026-10-10cw", "STATIC_NAMES_SPOT": "0", "STATIC_NAMES_SRC": "/gcs/a/x,/gcs/a/y", "R2_ENDPOINT": "https://e",
            "STATIC_NAMES_IMAGE": "registry/job@sha256:1"}
     p = load_profile(env)
-    assert p == Profile(**{**CW.__dict__, "spot": False, "src": ("/gcs/a/x", "/gcs/a/y"), "r2_endpoint": "https://e", "image": "registry/job@sha256:1"})
+    assert p == Profile(**{**CW.__dict__, "gen": "2026-10-10cw", "spot": False, "src": ("/gcs/a/x", "/gcs/a/y"), "r2_endpoint": "https://e", "image": "registry/job@sha256:1"})
     assert sd.ready(p) == p
     # The examples pin no image: the caller passes the one it runs.
     with pytest.raises(SystemExit) as e:

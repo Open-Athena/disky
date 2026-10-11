@@ -10,4 +10,4 @@
 # orchestrator's code.
 set -euo pipefail
 cd "$(dirname "$0")/.."
-exec env STATIC_NAMES_PROFILE=gcs dt-cloud static-names runs add -c "$@"
+exec env STATIC_NAMES_PROFILE=job/static-names.json dt-cloud static-names runs add -c "$@"

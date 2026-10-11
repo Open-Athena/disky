@@ -74,7 +74,7 @@ def test_snapshot_scans_lists_sub_daily_dirs(tmp_path: Path):
 
 @pytest.mark.parametrize("args", [
     ["index-dir", "BAD"],
-    ["index-sync", "-b", "bkt", "-g", "g1", "BAD"],
+    ["index-sync", "-b", "bkt", "-g", "g1", "-k", "k", "BAD"],
     ["job", "submit-listing", "-d", "BAD"],
     ["path-index", "-d", "BAD", "-l", "x.parquet"],
 ])

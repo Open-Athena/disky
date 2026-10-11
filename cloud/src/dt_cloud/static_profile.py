@@ -2,9 +2,10 @@
 run. Nothing here assumes a deployment: the generic stages read the profile, and missing config is an error naming
 the variable to set.
 
-Loaded (`load_profile`) from `STATIC_NAMES_PROFILE` — a named example (`static_profile_examples.EXAMPLES`: `gcs`,
-`cw`) or a JSON file of `Profile` fields — then each field's env var on top (`ENV`), so a deployment can select an
-example, check in its own file, or set every field by env.
+Loaded (`load_profile`) from `STATIC_NAMES_PROFILE` — a JSON file of `Profile` fields (a deployment's own, on its
+branch: `job/static-names.json`) or a named example (`static_profile_examples.EXAMPLES`: `gcs`, `cw`; illustrative, no
+`gen`) — then each field's env var on top (`ENV`), so a deployment can check in its own file, start from an example, or
+set every field by env.
 """
 from __future__ import annotations
 
@@ -156,6 +157,13 @@ def from_mapping(d: Mapping) -> Profile:
         if k in d:
             d[k] = tuple(d[k])
     return Profile(**d)
+
+
+def to_mapping(p: Profile) -> dict:
+    """`p` as a JSON-able mapping of every field: what a deployment checks in as its profile file (`from_mapping`'s
+    inverse)."""
+    return {f.name: (list(v) if isinstance(v := getattr(p, f.name), tuple) else dict(v) if isinstance(v, Mapping) else v)
+            for f in fields(Profile)}
 
 
 def load_profile(env: Mapping[str, str] | None = None) -> Profile:

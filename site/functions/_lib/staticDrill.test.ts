@@ -90,7 +90,7 @@ beforeAll(async () => {
       FILES.set(searchKey(dirOf(date), role), fixture(`static-filter/${date}/path-index.${file}.parquet`))
     }
   }
-  base = { DB: db, ROOT_LABEL: 'root', GCS_HMAC_KEY_ID: 'k', GCS_HMAC_SECRET: 's' } as Env
+  base = { DB: db, ROOT_LABEL: 'root', GCS_HMAC_KEY_ID: 'k', GCS_HMAC_SECRET: 's', SEARCH_SIDECARS: '1' } as Env
 })
 
 const n = (x: bigint) => Number(x)
@@ -285,7 +285,7 @@ describe('the map\'s views from the drilldown (`/api/subtree`)', () => {
     expect(n).toBe(256)
   }, 30_000) // ~1.5 s alone; past the 5 s default when the whole suite runs in parallel
 
-  it('rollup answers: a cell per kept child (match roots marked), the rest in `(other)`; the matched totals exact', async () => {
+  it('rollup answers, one level (`depth=1`): a cell per kept child (match roots marked), the rest in `(other)`; the matched totals exact', async () => {
     const drill = newDrill()
     const got: unknown[] = []
     const want: unknown[] = []
@@ -295,7 +295,7 @@ describe('the map\'s views from the drilldown (`/api/subtree`)', () => {
       for (const d of DATES) {
         const exp = expected.views[t][P][d]!
         // Every child drawn (a 1-byte floor): the kept ones by name, the remainder as `(other)`.
-        const v = await view(envStatic(), d, P, t, { threshold: 0.5 })
+        const v = await view(envStatic(), d, P, t, { threshold: 0.5, maxDepth: 1 })
         const kept = keptOf(a)
         const keptExp = Object.entries(exp).filter(([c]) => kept.includes(c))
         const all = total(exp), k = total(Object.fromEntries(keptExp))
@@ -371,14 +371,14 @@ describe('a heavy literal on a scan its drilldown doesn\'t cover (a run with no 
 })
 
 describe('the diff from the drilldown (`/api/diff`)', () => {
-  it('a rollup: each kept child\'s two scans\' totals, the remainder\'s Δ in `(other)`', async () => {
+  it('a rollup, one level (`depth=1`): each kept child\'s two scans\' totals, the remainder\'s Δ in `(other)`', async () => {
     const drill = newDrill()
     const got: unknown[] = []
     const want: unknown[] = []
     for (const t of TERMS) for (const P of expected.paths.filter(p => p !== 'nope')) {
       const a = await drill.view(t, P)
       if (!('rollup' in a)) continue
-      const d = await buildDiff(envStatic(), { from: A, to: B, path: P, w: W, h: H, minArea: MIN_AREA, atten: ATTEN, top: 10_000, query: q(t), threshold: 0.5 })
+      const d = await buildDiff(envStatic(), { from: A, to: B, path: P, w: W, h: H, minArea: MIN_AREA, atten: ATTEN, top: 10_000, query: q(t), threshold: 0.5, depth: 1 })
       const ea = expected.views[t][P][A]!, eb = expected.views[t][P][B]!
       const kept = keptOf(a)
       const named = kept.filter(c => ea[c] || eb[c]).sort()
@@ -539,5 +539,260 @@ describe('no drilldown (`FILTER_STATIC_HEAVY` off): a heavy literal never reads 
       ['bk', 'rollup', { n: 3000, b: 1023750, o: 3000 }, { children: 1, kept: 1, rows: 3000 }],
       ['bk/fill', 'rollup', { n: 3000, b: 1023750, o: 3000 }, { children: 3000, kept: 3, rows: 3000 }],
     ])
+  })
+})
+
+// --- nested rollup views: brute force from the objects --------------------------------------------
+
+/** Each scan's paths from its store generation's `path` sort, every owner slice summed: `[bytes, objects]`. */
+const scanRows = new Map<string, Map<string, [number, number]>>()
+async function loadScanRows(): Promise<void> {
+  if (scanRows.size) return
+  const fs = await import(/* @vite-ignore */ 'node:fs' as string) as { readFileSync(p: string): Uint8Array }
+  const { parquetReadObjects } = await import('hyparquet')
+  const { compressors } = await import('./zstd')
+  for (const d of DATES) {
+    const b = fs.readFileSync(fixture(`static-filter/${d}/path-index.parquet`))
+    const rows = await parquetReadObjects({ file: b.buffer.slice(b.byteOffset, b.byteOffset + b.byteLength) as ArrayBuffer, columns: ['path', 'size', 'n_files'], compressors }) as { path: string; size: bigint | number; n_files: bigint | number }[]
+    const m = new Map<string, [number, number]>()
+    for (const r of rows) { const e = m.get(r.path) ?? [0, 0]; m.set(r.path, [e[0] + Number(r.size), e[1] + Number(r.n_files)]) }
+    scanRows.set(d, m)
+  }
+}
+const parent = (p: string) => p.includes('/') ? p.slice(0, p.lastIndexOf('/')) : ''
+const depthOf = (p: string) => p === '' ? 0 : p.split('/').length
+
+/** `t`'s matched `[bytes, objects]` at every path strictly under `P` on `date` (Σ match roots at or under it, the
+ *  outermost paths under P whose name holds the literal), and the roots. Brute force from the objects. */
+function matchedUnder(t: string, P: string, date: string): { m: Map<string, [number, number]>; roots: Set<string> } {
+  const qp = q(t), m = new Map<string, [number, number]>(), roots = new Set<string>()
+  for (const [p, [b, o]] of scanRows.get(date)!) {
+    if (!(P === '' || p.startsWith(P + '/')) || !qp(p)) continue
+    let outer = true
+    for (let a = parent(p); a.length > P.length; a = parent(a)) if (qp(a)) { outer = false; break }
+    if (!outer) continue
+    roots.add(p)
+    for (let a = p; a.length > P.length; a = parent(a)) { const e = m.get(a) ?? [0, 0]; m.set(a, [e[0] + b, e[1] + o]) }
+  }
+  return { m, roots }
+}
+
+/** The nested view's spec, brute force: P's rollup children by name (the drill's kept ones), each drawn over its
+ *  level's threshold `T·2^(d−dP−1)`; a drawn non-root child at most two levels below P, at least 64² px and more
+ *  than one object, answered (heaviest first, at most `reads`, plus `force`) — a rollup: its kept children, nesting
+ *  again; match roots: every path under it with matches, down to the roots. Numbers from the objects only; the
+ *  drill says only which answer a path gets and a rollup's kept names. */
+async function bruteNest(t: string, P: string, date: string, T: number, o: { reads?: number; force?: Set<string>; maxDepth?: number; noRoots?: boolean } = {}) {
+  const drill = newDrill()
+  const { m, roots } = matchedUnder(t, P, date)
+  const dP = depthOf(P)
+  const thr = (d: number) => T * ATTEN ** Math.max(0, d - dP - 1)
+  const capD = dP + Math.min(3, o.maxDepth ?? Infinity)
+  const kidsWith = (dir: string) => [...m.keys()].filter(p => parent(p) === dir)
+  const named = new Map<string, string[]>()
+  const rollupOf = async (dir: string) => {
+    const a = await drill.view(t, dir)
+    if (!('rollup' in a)) throw new Error(`${t}@${dir}: ${a.source}`)
+    named.set(dir, keptOf(a).map(c => dir === '' ? c : `${dir}/${c}`).filter(c => m.has(c)))
+  }
+  await rollupOf(P)
+  const nested = new Set([P])
+  const wants = (p: string) => !roots.has(p) && depthOf(p) < capD && (!!o.force?.has(p) || (m.get(p)![0] >= thr(depthOf(p)) && m.get(p)![0] >= T * 4096 / MIN_AREA && m.get(p)![1] > 1))
+  let frontier = named.get(P)!.filter(wants)
+  let reads = 0, left = 0
+  while (frontier.length) {
+    frontier.sort((x, y) => m.get(y)![0] - m.get(x)![0] || (x < y ? -1 : 1))
+    const next: string[] = []
+    for (const p of frontier) {
+      if (!o.force?.has(p)) { if (reads >= (o.reads ?? Infinity)) { left++; continue } reads++ }
+      const a = await drill.view(t, p)
+      if (a.source === 'roots' && o.noRoots) { left++; continue }
+      nested.add(p)
+      if ('rollup' in a) { await rollupOf(p); next.push(...named.get(p)!.filter(wants)) }
+      else if (a.source === 'roots') {
+        // The forest: every path under p with matches, children of non-roots.
+        const walk = (dir: string) => { const ks = kidsWith(dir); named.set(dir, ks); for (const k of ks) if (!roots.has(k)) walk(k) }
+        walk(p)
+      } else throw new Error(`${t}@${p}: ${a.source}`)
+    }
+    frontier = next
+  }
+  type N = [string, number, number, ...unknown[]]
+  const known = new Set([...named.values()].flat())
+  const build = (dir: string): N[] => {
+    const ks = (named.get(dir) ?? []).filter(k => (o.maxDepth == null || depthOf(k) <= dP + o.maxDepth) && m.get(k)![0] >= thr(depthOf(k)))
+    if (!ks.length) return []
+    const out: N[] = ks.map(k => { const [b, ob] = m.get(k)!; const c = build(k); return [k.split('/').pop()!, b, ob, ...(roots.has(k) ? ['m'] : []), ...(c.length ? [c] : [])] as N })
+    const [tb, to] = dir === P ? [...m].filter(([p]) => parent(p) === P).reduce((s, [, [b, ob]]) => [s[0] + b, s[1] + ob], [0, 0]) : m.get(dir)!
+    const rest = [tb - out.reduce((s, x) => s + x[1], 0), to - out.reduce((s, x) => s + x[2], 0)]
+    if (rest[0] > thr(depthOf(ks[0]))) out.push(['(other)', rest[0], rest[1]])
+    return out.sort((x, y) => (x[0] < y[0] ? -1 : 1))
+  }
+  const matched = [...known].filter(p => roots.has(p)).map(p => [p, ...m.get(p)!]).sort((x, y) => ((x[0] as string) < (y[0] as string) ? -1 : 1))
+  const kept = new Set<string>()
+  const keep = (dir: string) => { for (const k of named.get(dir) ?? []) if ((o.maxDepth == null || depthOf(k) <= dP + o.maxDepth) && m.get(k)![0] >= thr(depthOf(k))) { kept.add(k); keep(k) } }
+  keep(P)
+  return { tree: build(P), matched, nested, left, m, kept }
+}
+
+/** A view's tree as `bruteNest` spells it: per child `[name, bytes, objects, 'm'?, children?]`, by name. */
+const shape = (n: ViewNode): unknown[] => (n.c ?? []).map(c => [c.n, c.b, c.o, ...(c.m ? ['m'] : []), ...(c.c?.length ? [shape(c)] : [])]).sort((x, y) => ((x[0] as string) < (y[0] as string) ? -1 : 1))
+
+describe('a heavy literal\'s rollup view nests (the drawn children answered in turn)', () => {
+  beforeAll(loadScanRows)
+
+  /** Every (term, path) the drill answers with a rollup (or the catalog, at the fleet root). */
+  const rollupViews = async () => {
+    const drill = newDrill(), out: [string, string][] = []
+    for (const t of TERMS) for (const P of expected.paths.filter(p => p !== 'nope')) if ('rollup' in await drill.view(t, P)) out.push([t, P])
+    return out
+  }
+
+  it('node for node = brute force from the objects, at the root and below, both scans, two thresholds', async () => {
+    const got: unknown[] = []
+    const want: unknown[] = []
+    let nestedAny = 0
+    for (const [t, P] of await rollupViews()) for (const d of DATES) for (const T of [0.5, 40]) {
+      const v = await view(envStatic(), d, P, t, { threshold: T })
+      const b = await bruteNest(t, P, d, T)
+      if (b.nested.size > 1) nestedAny++
+      const [tb, to] = [...b.m].filter(([p]) => parent(p) === P).reduce((s, [, [x, y]]) => [s[0] + x, s[1] + y], [0, 0])
+      got.push([t, P, d, T, v.tier, v.tree.b, v.tree.o, shape(v.tree), matchedRows(v), v.interiors ?? null])
+      want.push([t, P, d, T, 'rollup', tb, to, b.tree, b.matched, null])
+    }
+    expect(got).toEqual(want)
+    expect([got.length, nestedAny]).toEqual([52, 44])
+  })
+
+  it('spelled out: `0` at the fleet root draws the bucket, its `fill` and the K = 3 heaviest files there', async () => {
+    const v = await view(envStatic(), A, '', '0', { threshold: 0.5 })
+    expect(shape(v.tree)).toEqual([
+      ['bk', 1023750, 3000, [
+        ['fill', 1023750, 3000, [['(other)', 250 * 4095 - 3 * 2048, 2997], ['f00011', 2048, 1, 'm'], ['f00023', 2048, 1, 'm'], ['f00035', 2048, 1, 'm']]],
+      ]],
+    ])
+    expect(v.tree.c![0].c![0].c!.filter(c => c.m).map(c => c.k)).toEqual(['file', 'file', 'file'])
+  })
+
+  it('`depth=N` caps the nest at P + N; the first paint and a floor read nest nothing', async () => {
+    const got: unknown[] = []
+    const want: unknown[] = []
+    for (const [t, P] of (await rollupViews()).filter(([, P]) => P === '' || P === 'bk')) for (const maxDepth of [1, 2]) {
+      const v = await view(envStatic(), A, P, t, { threshold: 0.5, maxDepth })
+      got.push([t, P, maxDepth, shape(v.tree)])
+      want.push([t, P, maxDepth, (await bruteNest(t, P, A, 0.5, { maxDepth })).tree])
+    }
+    expect(got).toEqual(want)
+    const fp = await view(envStatic(), A, '', '0', { threshold: 0.5, firstPaint: true })
+    expect(shape(fp.tree)).toEqual([['bk', 1023750, 3000]])
+  })
+
+  it('the read budget: past `nestReads` answers a child stays one exact tile, and `interiors` says how many', async () => {
+    const got: unknown[] = []
+    const want: unknown[] = []
+    for (const [t, P] of await rollupViews()) for (const reads of [0, 1]) {
+      const v = await view(envStatic(), A, P, t, { threshold: 0.5, nestReads: reads })
+      const b = await bruteNest(t, P, A, 0.5, { reads })
+      got.push([t, P, reads, shape(v.tree), v.interiors ?? null])
+      want.push([t, P, reads, b.tree, b.left ? { read: b.nested.size - 1, skipped: b.left, reason: `${b.left} over the read budget` } : null])
+    }
+    expect(got).toEqual(want)
+    expect(got.filter(g => (g as unknown[])[4]).length).toBe(17)
+  })
+
+  it('the rows budget: a roots answer bounded past the rows left is not read (one exact tile); rollups still nest', async () => {
+    const got: unknown[] = []
+    const want: unknown[] = []
+    for (const [t, P] of await rollupViews()) {
+      const v = await view(envStatic(), A, P, t, { threshold: 0.5, phase2Rows: 0 })
+      const b = await bruteNest(t, P, A, 0.5, { noRoots: true })
+      got.push([t, P, shape(v.tree), v.interiors ?? null])
+      want.push([t, P, b.tree, b.left ? { read: b.nested.size - 1, skipped: b.left, reason: `${b.left} over the read budget` } : null])
+    }
+    expect(got).toEqual(want)
+    expect(got.filter(g => (g as unknown[])[3]).length).toBe(7)
+  })
+
+  it('the time budget: a nest past it is `late` (kept briefly, upgraded), its totals still exact', async () => {
+    const slow: HitSource = { hits: async (k, u) => u === '' || u === 'bk' ? drillSource(drillBlobs()).hits(k, u) : new Promise(r => setTimeout(() => r(drillSource(drillBlobs()).hits(k, u)), 200)) }
+    const v = await view(envStatic(heavyStore(slow)), A, '', '0', { threshold: 0.5, phase2Ms: 50 })
+    expect([shape(v.tree), v.interiors, v.tree.b, v.tree.o]).toEqual([
+      [['bk', 1023750, 3000, [['fill', 1023750, 3000]]]],
+      { read: 1, skipped: 1, reason: '1 past the time budget', late: 1 },
+      1023750, 3000,
+    ])
+  })
+
+  it('the diff nests both sides alike (each nests every path either answered): every row = brute force from the objects', async () => {
+    const got: unknown[] = []
+    const want: unknown[] = []
+    let deep = 0, forced = 0
+    for (const [t, P] of await rollupViews()) for (const T of [0.5, 40, 300, 2000]) {
+      const d = await buildDiff(envStatic(), { from: A, to: B, path: P, w: W, h: H, minArea: MIN_AREA, atten: ATTEN, top: 10_000, query: q(t), threshold: T })
+      const [a0, b0] = [await bruteNest(t, P, A, T), await bruteNest(t, P, B, T)]
+      const force = new Set([...a0.nested, ...b0.nested])
+      if (force.size > Math.min(a0.nested.size, b0.nested.size)) forced++
+      const [sa, sb] = [await bruteNest(t, P, A, T, { force }), await bruteNest(t, P, B, T, { force })]
+      const top = (s: typeof sa): [number, number] => [...s.m].filter(([p]) => parent(p) === P).reduce<[number, number]>((x, [, [b, o]]) => [x[0] + b, x[1] + o], [0, 0])
+      const at = (s: typeof sa, p: string): [number, number] | null => (p === P ? top(s) : s.m.get(p)) ?? null
+      const st = (x: [number, number] | null, y: [number, number] | null): DiffRow['s'] => !x ? 'added' : !y ? 'removed' : x[0] !== y[0] || x[1] !== y[1] ? 'changed' : 'unchanged'
+      const rows: unknown[][] = []
+      const rel = (p: string) => P === '' ? p : p.slice(P.length + 1)
+      const walk = (p: string) => {
+        const x = at(sa, p), y = at(sb, p)
+        const names = [...new Set([...sa.kept, ...sb.kept])].filter(c => parent(c) === p).sort()
+        const expand = !!(x || y) && st(x, y) !== 'unchanged' && names.length > 0
+        if (p !== P) rows.push([rel(p), st(x, y), x?.[0] ?? 0, y?.[0] ?? 0, x?.[1] ?? 0, y?.[1] ?? 0, expand])
+        if (!expand) return
+        for (const c of names) walk(c)
+        const sum = (s: typeof sa) => names.reduce<[number, number]>((r, c) => { const v = at(s, c); return v ? [r[0] + v[0], r[1] + v[1]] : r }, [0, 0])
+        const ra: [number, number] = [(x?.[0] ?? 0) - sum(sa)[0], (x?.[1] ?? 0) - sum(sa)[1]], rb: [number, number] = [(y?.[0] ?? 0) - sum(sb)[0], (y?.[1] ?? 0) - sum(sb)[1]]
+        if (ra[0] > 0 || rb[0] > 0) rows.push([p === P ? '(other)' : `${rel(p)}/(other)`, st(ra[0] > 0 ? ra : null, rb[0] > 0 ? rb : null), Math.max(0, ra[0]), Math.max(0, rb[0]), ra[0] > 0 ? ra[1] : 0, rb[0] > 0 ? rb[1] : 0, false])
+      }
+      walk(P)
+      if (rows.some(r => (r[0] as string).includes('/'))) deep++
+      const byPath = (rs: unknown[][]) => rs.sort((x, y) => ((x[0] as string) < (y[0] as string) ? -1 : 1))
+      got.push([t, P, T, d.total_a, d.total_b, d.objects_a, d.objects_b, d.lookups, byPath(d.rows.map(r => [r.p, r.s, r.a, r.b, r.oa, r.ob, !!r.x, ...(r.l ? [r.l] : [])]))])
+      want.push([t, P, T, top(sa)[0], top(sb)[0], top(sa)[1], top(sb)[1], 0, byPath(rows.filter(r => r[6] || r[1] !== 'unchanged'))])
+    }
+    expect(got).toEqual(want)
+    expect([got.length, deep, forced]).toEqual([52, 21, 8])
+  })
+
+  it('inside a roots answer a folder drawn on one side only takes the other side\'s total from the answer, not a lookup', async () => {
+    // `bin` at the fleet root: a rollup of `bk`, whose answer is its roots — `bk/s/y/a.bin` (100 → 30 bytes) and
+    // `bk/s/z/b.bin` (5000 → 6000). At T = 10, `bk/s/y` (depth 3: 40 bytes) is drawn on A only, nonzero on B.
+    const [vA, vB, open] = [scanAt(A), scanAt(B), 4291747200000]
+    const hit = (path: string, vf: number, vt: number, size: number): Hit => ({ path, depth: path.split('/').length, usr: '', vf, vt, size: BigInt(size), n: 1n })
+    const cell = (vf: number, b: number) => ({ kind: 1 as const, child: 'bk', vf, b: BigInt(b), o: 2n })
+    const src: HitSource = {
+      async hits(_k, u) {
+        if (u === '') return { rollup: { dir: '', kept: 1, rows: 3, children: 1, cells: [cell(vA, 5100), cell(vB, 6030)] }, io: { from: 'drill' } }
+        if (u === 'bk') return { hits: [hit('bk/s/y/a.bin', vA, vB, 100), hit('bk/s/y/a.bin', vB, open, 30), hit('bk/s/z/b.bin', vA, vB, 5000), hit('bk/s/z/b.bin', vB, open, 6000)], io: { from: 'drill' } }
+        return null
+      },
+    }
+    const d = await buildDiff(envStatic(heavyStore(src)), { from: A, to: B, path: '', w: W, h: H, minArea: MIN_AREA, atten: ATTEN, top: 100, query: q('bin'), threshold: 10 })
+    expect([d.lookups, d.rows.map(r => [r.p, r.s, r.a, r.b, r.x ?? null, r.l ?? null])]).toEqual([0, [
+      ['bk', 'changed', 5100, 6030, true, null],
+      ['bk/s', 'changed', 5100, 6030, true, null],
+      ['bk/s/y', 'changed', 100, 30, true, null],
+      ['bk/s/z', 'changed', 5000, 6000, true, null],
+      ['bk/s/z/b.bin', 'changed', 5000, 6000, null, null],
+      ['bk/s/y/a.bin', 'changed', 100, 30, null, null],
+    ]])
+  })
+
+  it('a light literal (its roots answer at P) is unchanged: the same view as the search sidecars\'', async () => {
+    const got: unknown[] = []
+    const want: unknown[] = []
+    for (const t of ['tomat', 'bin', 'x', 'om']) for (const P of ['', 'bk', 'bk/data']) {
+      if ((await newDrill().view(t, P)).source !== 'roots') continue
+      const [s, r] = await Promise.all([view(envStatic(), A, P, t), view(base, A, P, t)])
+      got.push([t, P, sansP1(s), matchedRows(s)])
+      want.push([t, P, sansP1(r), matchedRows(r)])
+    }
+    expect(got).toEqual(want)
+    expect(got.length).toBe(10)
   })
 })

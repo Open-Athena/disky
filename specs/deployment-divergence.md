@@ -354,6 +354,58 @@ Every deployment change ships through the branch's own image rebuild and/or `pul
 | P4 | gcs per-scan path store on R2 (`publish-r2` stage + backfill, `STORE_BUCKET` → R2) | gcs | R2 storage + egress-free copy cost; site switch |
 | Later | Unify the D1 lineages (`migrations/gcs` vs `migrations/cw`: same tables, different numbering, `deletion_runs.plan`/`manifest`, `admin_emails`, `pyramid_multiscans`); unify executors (`sweep` vs `plan-sweep`); move shared buckets to a `shared` stack | root + Ryan | each is a design decision |
 
+### 6.1 Done on `cloud` (branch `no-defaults`): no deployment defaults, one static-gen source
+
+Recommendations from §4 rows "By-user sorts", "Static profile location", "`over-time-groups` layer-2 default" and "`publish.py` layer-2 default", plus the other deployment-shaped defaults a grep of `cloud/src` turned up. Each is now the deployment's to name, and a missing one is an error naming the flag or variable ([[generic-code-no-deploy-defaults]]).
+
+| What | Was | Now |
+|---|---|---|
+| `publish-r2` layer 2 | `$LAYER2_PREFIX`, else gcs's `listing/{scan}/index/` (`publish.py`) | `-l`/`$LAYER2_PREFIX` required (`deploy.layer2_prefix`; must contain `{scan}`), resolved before any D1 read |
+| `over-time-groups` layer 2 | `-l`/`$LAYER2_PREFIX`, else cw's `cw-l2/{scan}/` | same requirement |
+| `$INDEX_VARIANTS` | read at import, default gcs's `path,user` | **not read**. The variant set is the generation's files: `index-sync`/`index-blob` already skip absent files, and `index-gc -r` retires only the sort rows D1 holds (`SORT_VARIANTS` = all four sorts). Deriving beats a required knob: nothing to set, nothing to drift. Dead `INDEX_VARIANTS` lines dropped from `daily-ingest.yml` and `wrangler.r2*.toml` (the site never read it) |
+| `index-sync -k` | default `listing/<date>/index/<gen>` (gcs's layout) | required |
+| `index-blob -g` | built `listing/<date>/index/<gen>` | `-g` needs `-k`; `-k` is a template (`{date}`, `{gen}`) |
+| bare bucket → GCS | `index_footer._remote`: paths starting `oa-` were GCS (an OA bucket-name heuristic); any other bucket name was a *local relative path* (so `index-gc -r` on a non-`oa-` `$DATA_BUCKET` found no cold footer and kept every row) | `bucket_base`: a bare name is `gs://<name>`; URLs and `/`- or `.`-paths as given; `index-sync` without `-d` reads `gs://<bucket>/<key>` |
+| digest template | `config_from_dict` defaulted `template` to `gcs`; `digest_plot -T` defaulted `gcs` | both required |
+| static-names live gen | in `static_profile_examples.GCS/CW` (`2026-10-08c`, `2026-10-10cw`): every compaction needed a `cloud` commit | examples carry **no `gen`** (illustrative). A deployment's live profile is a JSON file on its branch, `STATIC_NAMES_PROFILE=<path>`. New `dt-cloud static-names profile [-f FIELD]` prints the resolved profile (start the file from it) or one field |
+| `{static_gen:<profile>}` | example name only (`[\w.-]+`) | also a file path; a relative one resolves against the scan-run profile's own dir (anchored at load), so `job/scan-runs.json` names `{static_gen:static-names.json}`. A profile with no gen is an error, not `None` in the URI |
+| site `STATIC_GEN` | hand-copied into `wrangler.toml` | still a wrangler var (Pages takes vars only from `wrangler.toml`), but `site/deploy` refuses when any `STATIC_GEN` differs from the file's `gen`, when `deploy.env` sets `STATIC_NAMES_FILE=job/static-names.json` |
+
+So a compaction is one branch commit: bump `gen` in `job/static-names.json`, set `STATIC_GEN` to match (deploy checks), rebuild the image. `scan-runs.json` follows by itself.
+
+Not changed (deliberately, follow-ups):
+- `plan-sweep manifest`'s `-l` default `/gcs/<data>/cw-l2/<date>/<bucket>.parquet`: the whole `plan-sweep` executor (CLI + `site/functions/_lib/{planDispatch,cwBatch,executor}.ts`: `sweep/cw/runs/`, `cw-s3-job-grant`, `EXECUTOR` default `plan-sweep`) is cw-shaped; converge it with the executor unification (§6 "Later"), plumbing `LAYER2_PREFIX` into the Batch env then. **Bug found on the way:** `planDispatch.ts` runs `dt-cloud plan-sweep manifest --plan "$RUN/plan.json" …`, but the command takes the plan as a positional argument and has no `--plan` option (since `a02b24fd`, 9/28), so a cw plan-sweep dispatch fails: `dt-cloud plan-sweep manifest --plan x.json -d … -o …` exits 2 with "No such option '--plan'" (checked locally; not checked against a live run).
+- `interval_profiles/gcs.json` (live interval gen `2026-10-09b`) is still on `cloud`. Its loader already takes a path (`-P`/`$INTERVAL_STORE_PROFILE`); same move as static: copy it to `job/interval-store.json` on gcs, point the job at it, then drop it from `cloud`.
+- `UA = "gcs-usage-…"` in `healthcheck.py`/`site.py`, `scan-started --listing-prefix listing` (the generic lister's layout, not a deployment's) and `GCS_USAGE_ATTR_MAX_DEPTH`: naming, not behavior.
+
+#### What each deployment must do before merging this
+
+Checked against `gcs` @ `60b6e1b5` and `cw-s3` @ `9511238a` (job scripts, Batch submitters, `scan-runs.json`, workflows, wrangler).
+
+Already fine (no action):
+- `-k` on every `index-sync` call: gcs `run.sh`; cw `cw-run.sh`, `cw-meta-run.sh`, `cw-reindex.sh`; both copies of `daily-ingest.yml`.
+- `LAYER2_PREFIX` wherever cw runs `publish-r2` or `over-time-groups`: `cw-run.sh`, `cw-meta-run.sh`, `cw-overtime.sh`, `cw-publish-submit.sh`. gcs runs neither.
+- `INDEX_VARIANTS`: gcs never set it; cw's `export INDEX_VARIANTS=path` (`cw-run.sh`, `cw-meta-run.sh`, `cw-reindex.sh`) and the `INDEX_VARIANTS` lines in its wrangler tomls are now no-ops. Drop them at leisure. cw's `index-sync` now also probes `path-index{,-bysize}-by-user.parquet` and lists them as skipped (cw's `index-write` writes no by-user sort: no `usr` column).
+- `index-gc -r` on gcs: `$DATA_BUCKET=oa-gcs-usage-dvx` resolves to `gs://oa-gcs-usage-dvx` as before.
+- `job/digest.yml` names `template:` on both.
+
+**Must add before merging** (otherwise every static-names append fails with `static names: no gen in the deployment profile: set STATIC_NAMES_GEN (or STATIC_NAMES_PROFILE)`, and `scan-run record`'s `static` output errors):
+
+gcs:
+1. `job/static-names.json`: `STATIC_NAMES_PROFILE=gcs STATIC_NAMES_GEN=2026-10-08c dt-cloud static-names profile > job/static-names.json` (on the merged code; check `anchors: true`, `hex_runs: "16,8"`, `compact_level: 5` came through; `image` stays `null`, the caller passes `STATIC_NAMES_IMAGE`).
+2. `job/run.sh` (the `static-names runs add` call ~l.408 and the resume hint in the Slack message ~l.414) and `job/static-daily.sh`: `STATIC_NAMES_PROFILE=gcs` → `STATIC_NAMES_PROFILE=/app/job/static-names.json` in the image (or `"$(dirname "$0")/static-names.json"`, which works both in the image and in a checkout).
+3. `job/scan-runs.json` `static` output: `{static_gen:gcs}` → `{static_gen:static-names.json}`.
+4. `site/deploy.env`: `STATIC_NAMES_FILE=job/static-names.json` (then `site/deploy` checks both `STATIC_GEN = "2026-10-08c"` lines).
+
+cw:
+1. `job/static-names.json`: `STATIC_NAMES_PROFILE=cw STATIC_NAMES_GEN=2026-10-10cw dt-cloud static-names profile > job/static-names.json` (`anchors` per the P1 row when that build lands).
+2. `job/cw-run.sh` (~l.240): `STATIC_NAMES_PROFILE=cw` → the file (as gcs 2).
+3. `job/static-names.sh`: both Batch envs (`ENV_JSON` ~l.99 and the default `ENVJ` ~l.125) set `"STATIC_NAMES_PROFILE": "cw"` → `"/app/job/static-names.json"` (an absolute in-image path: the tasks `cd /stage`). This needs the tasks to run the branch's own image, which has `/app/job/`; with a staged `SRC` the image's `/app/job` is still there.
+4. `job/scan-runs.json` `static` output: `{static_gen:cw}` → `{static_gen:static-names.json}`.
+5. `site/deploy.env`: `STATIC_NAMES_FILE=job/static-names.json`.
+
+Any operator `.envrc` or ad-hoc command with `STATIC_NAMES_PROFILE=gcs|cw` keeps working only with `STATIC_NAMES_GEN` beside it.
+
 ## Open questions and unverified claims
 
 - Whether cw generations already carry `.groups.parquet` (needed by `-r`). Inferred from the shared cut in `index.py`, not checked in GCS.
