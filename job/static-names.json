@@ -1,0 +1,30 @@
+{
+ "name": "cw",
+ "layouts": [
+  "cw-l2/{id}/index/{gen}/path-index.parquet"
+ ],
+ "bucket": "oa-gcs-usage-dvx",
+ "scratch": "oa-gcs-usage-scratch",
+ "gen": "2026-10-10cw",
+ "r2_bucket": "oa-cw-s3-usage-index",
+ "r2_secrets": {
+  "endpoint": "cw-s3-r2-endpoint",
+  "key_id": "cw-s3-r2-access-key-id",
+  "secret": "cw-s3-r2-secret-access-key"
+ },
+ "r2_endpoint": null,
+ "project": "oa-internal-450019",
+ "region": "us-east1",
+ "image": null,
+ "sa": "cw-s3-job@oa-internal-450019.iam.gserviceaccount.com",
+ "r2_sa": "cw-s3-job@oa-internal-450019.iam.gserviceaccount.com",
+ "machine": "n2-highmem-16",
+ "ssd_gb": 750,
+ "spot": true,
+ "append_tasks": 16,
+ "drill": true,
+ "anchors": false,
+ "src": [],
+ "hex_runs": "16,8",
+ "compact_level": 5
+}

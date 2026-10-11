@@ -237,7 +237,7 @@ STATIC_PID=""
 if [ "${STATIC_NAMES:-0}" = "1" ] && [ "${REPROC:-0}" != "1" ]; then
   SN_BEGAN=$(date +%s)
   (
-    STATIC_NAMES_PROFILE=cw dt-cloud static-names runs add -c "$SNAP_ID" \
+    STATIC_NAMES_PROFILE=/app/job/static-names.json dt-cloud static-names runs add -c "$SNAP_ID" \
       || echo "WARN: static-names runs add failed for $SNAP_ID (exit $?)" >&2
     echo "PHASE static-names: ${SECONDS}s (wall, overlapped)" >&2
     scan_run -P static-names -b "$SN_BEGAN" -q overlapped
