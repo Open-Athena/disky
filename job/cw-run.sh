@@ -222,6 +222,31 @@ dt-cloud index-write -m "${DUCKDB_MEM:-16GB}" -t "${IMPORT_JOBS:-8}" -o "$WORK/i
 mkdir -p "/gcs/$DATA/$INDEX_KEY"
 cp "$WORK"/index/*.parquet "/gcs/$DATA/$INDEX_KEY/"  # path-index + coarse tiers + age-index
 phase index-write
+# 4b'. The static name index (specs/static-append.md): append this scan (and any earlier one still pending, in
+# scan-id order) to cw's generation as a run — Batch stages, then R2, then `manifests/<scan>.json` — so the map's
+# `?f=` filter and /names answer it statically. On when STATIC_NAMES=1 (the cron sets it, with STATIC_NAMES_IMAGE =
+# this job's image): the stages run as this job's account (`cw-s3-job`, cw's profile; it holds the scratch bucket).
+# See specs/cw-static-names.md. It reads the index tiers just copied (found by their GCS layout, not D1), and its
+# stages are separate Batch jobs this VM only waits on, so it starts here in the background (an `overlapped` phase
+# in job/scan-runs.json, recorded from when it began) and `index-sync` below waits for it, up to
+# STATIC_NAMES_WAIT_S (default 40 min): a scan is listed once it is searchable, as on gcs. Past the wait the scan is
+# listed anyway (its filter reads "not indexed yet" until the append lands) and the job waits for the stage before
+# finishing. Never fatal: a scan the index doesn't hold is caught up by a later run's `-c`. Exit 3 = not the next
+# scan yet.
+STATIC_PID=""
+if [ "${STATIC_NAMES:-0}" = "1" ] && [ "${REPROC:-0}" != "1" ]; then
+  SN_BEGAN=$(date +%s)
+  (
+    STATIC_NAMES_PROFILE=cw dt-cloud static-names runs add -c "$SNAP_ID" \
+      || echo "WARN: static-names runs add failed for $SNAP_ID (exit $?)" >&2
+    echo "PHASE static-names: ${SECONDS}s (wall, overlapped)" >&2
+    scan_run -P static-names -b "$SN_BEGAN" -q overlapped
+  ) &
+  STATIC_PID=$!
+  for ((i = 0; i < ${STATIC_NAMES_WAIT_S:-2400} / 10; i++)); do kill -0 "$STATIC_PID" 2>/dev/null || break; sleep 10; done
+  kill -0 "$STATIC_PID" 2>/dev/null && echo "WARN: static-names still running after ${STATIC_NAMES_WAIT_S:-2400}s; listing $SNAP_ID before it is searchable" >&2
+  phase static-wait
+fi
 if [ -n "${CLOUDFLARE_API_TOKEN:+set}" ] && [ -n "${CLOUDFLARE_ACCOUNT_ID:-}" ]; then  # `:+set`: xtrace must not print the token
   dt-cloud index-sync -d "/gcs/$DATA/$INDEX_KEY" -g "$GEN" -k "$INDEX_KEY" "$SNAP_ID" \
     || echo "WARN: index-sync failed (the site keeps serving the previous generation)" >&2
@@ -274,25 +299,6 @@ if [ -n "${CLOUDFLARE_API_TOKEN:+set}" ] && [ -n "${CLOUDFLARE_ACCOUNT_ID:-}" ];
 fi
 phase index-gc
 
-# 4f. The static name index (specs/static-append.md): append this scan (and any earlier one still pending, in
-# scan-id order) to cw's generation as a run — Batch stages, then R2, then `manifests/<scan>.json` — so the map's
-# `?f=` filter and /names answer it statically. On when STATIC_NAMES=1 (the cron sets it, with STATIC_NAMES_IMAGE =
-# this job's image): the stages run as this job's account (`cw-s3-job`, cw's profile; it holds the scratch bucket).
-# See specs/cw-static-names.md. Its stages are separate Batch jobs this VM only waits on, so it runs in the
-# background, beside the warm-up, probe and digest (an `overlapped` phase in job/scan-runs.json, recorded from
-# when it began); the job waits for it before finishing. Never fatal: a scan the index doesn't hold reads "not
-# indexed" until a later run's `-c` catches it up. Exit 3 = not the next scan yet.
-STATIC_PID=""
-if [ "${STATIC_NAMES:-0}" = "1" ] && [ "${REPROC:-0}" != "1" ]; then
-  SN_BEGAN=$(date +%s)
-  (
-    STATIC_NAMES_PROFILE=cw dt-cloud static-names runs add -c "$SNAP_ID" \
-      || echo "WARN: static-names runs add failed for $SNAP_ID (exit $?)" >&2
-    echo "PHASE static-names: ${SECONDS}s (wall, overlapped)" >&2
-    scan_run -P static-names -b "$SN_BEGAN" -q overlapped
-  ) &
-  STATIC_PID=$!
-fi
 
 # 4b. Warm the site's subtree + diff caches for this scan (the colo cache, plus
 # the global KV tier once `CACHE_KV` is bound in site/wrangler.toml) so the
