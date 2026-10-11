@@ -393,6 +393,30 @@ fi
 cp /tmp/rules.json "/gcs/$DATA/snapshots/rules.json" 2>/dev/null || true
 phase publish
 
+# Serving off GCS (the site's `SERVED_R2`): the small files its pages read beside
+# the path store — this scan's snapshot JSONs and its generation's extras
+# (`attr.tsv` + index) — and the rules registry, copied to the R2 index bucket
+# before index-sync lists the scan. The key is the static index's
+# (`gcs-static-index-r2-*`, Batch secretVariables). Never fatal: until it's
+# re-run (`publish-r2 -S -a <scan>`, idempotent), the site reads those from
+# GCS only while `SERVED_R2` is off.
+{ set +x; } 2>/dev/null
+if [ -n "${R2_ACCESS_KEY_ID:+set}" ] && [ -n "${CLOUDFLARE_ACCOUNT_ID:-}" ]; then
+  r2pub() {
+    R2_ENDPOINT=${R2_ENDPOINT:-https://$CLOUDFLARE_ACCOUNT_ID.r2.cloudflarestorage.com} R2_BUCKET=oa-gcs-usage-index \
+      LAYER2_PREFIX='listing/{scan}/index/' dt-cloud publish-r2 "$@"
+  }
+  if r2pub -S -a "$SNAP_ID" && r2pub -a -p snapshots/rules.json "$SNAP_ID"; then
+    set -x; phase publish-r2
+  else
+    rc=$?; set -x
+    slack_post "⚠️ \`dt-cloud\` $SNAP_ID: the R2 copy of its snapshot files failed (exit $rc) — with \`SERVED_R2\` on, its meta/age/lifecycle/extras are missing. Resume: \`dt-cloud publish-r2 -S -a $SNAP_ID\` (R2 env + \`LAYER2_PREFIX='listing/{scan}/index/'\`)."
+    phase publish-r2 "failed (exit $rc)"
+  fi
+else
+  set -x; echo "WARN: no R2 key in the env — skipping publish-r2 (the site's SERVED_R2 reads would miss $SNAP_ID)" >&2
+fi
+
 # Static name index (specs/static-append.md): append this scan to the search
 # index on R2 — every per-scan stage, the heavy-literal drill included — before
 # index-sync lists the scan, so it appears already searchable. `-c` first

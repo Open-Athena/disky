@@ -129,6 +129,8 @@ cat > "$spec" <<EOF
           "SLACK_BOT_TOKEN": "projects/$PROJECT/secrets/gcs-alert-slack-bot-token/versions/latest",
           "SLACK_WEBHOOK": "projects/$PROJECT/secrets/gcs-alert-slack-webhook/versions/latest",
           "CLOUDFLARE_API_TOKEN": "projects/$PROJECT/secrets/cf-pages-token/versions/latest",
+          "R2_ACCESS_KEY_ID": "projects/$PROJECT/secrets/gcs-static-index-r2-key-id/versions/latest",
+          "R2_SECRET_ACCESS_KEY": "projects/$PROJECT/secrets/gcs-static-index-r2-secret/versions/latest",
           "GCS_USAGE_TOKEN": "projects/$PROJECT/secrets/gcs-sheet-sync-token/versions/latest",
           "DISCORD_GCS_USAGE_WEBHOOK": "projects/$PROJECT/secrets/gcs-usage-discord-webhook/versions/latest",
           "DISCORD_BOT_TOKEN": "projects/$PROJECT/secrets/marin-discord-bot-token/versions/latest"
