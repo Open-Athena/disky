@@ -940,13 +940,15 @@ def _task(index: int | None) -> int:
 @option("-f", "--field", "field_name", help="Print only this field (bare: `gen` → its value), e.g. a deploy's check of the site's STATIC_GEN")
 def profile_cmd(field_name: str | None) -> None:
     """Print the resolved deployment profile ($STATIC_NAMES_PROFILE, env overrides on top) as JSON — a deployment's
-    `job/static-names.json` starts as `STATIC_NAMES_PROFILE=<example> STATIC_NAMES_GEN=<gen> … profile`. `-f`: one
-    field; a missing one (`gen` unset) is an error naming its variable."""
+    `job/static-names.json` starts as `STATIC_NAMES_PROFILE=<example> STATIC_NAMES_GEN=<gen> … profile`; the R2 endpoint
+    is left out (always env). `-f`: one field; a missing one (`gen` unset) is an error naming its variable."""
     from .static_profile import ENV, to_mapping
 
     p = profile()
     if field_name is None:
-        print(json.dumps(to_mapping(p), indent=1))
+        # Never the R2 endpoint: it names the Cloudflare account and is always env (`R2_ENDPOINT`), so an ambient one
+        # mustn't land in a tracked profile file.
+        print(json.dumps({k: v for k, v in to_mapping(p).items() if k != "r2_endpoint"}, indent=1))
         return
     if field_name not in ENV:
         raise SystemExit(f"static names profile: no field {field_name!r} (one of {', '.join(ENV)})")

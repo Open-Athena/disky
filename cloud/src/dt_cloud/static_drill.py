@@ -36,30 +36,104 @@ FILE_ROWS = 50_000_000
 RUN_RG = 2048
 #: Decoded row groups kept per group file by the builder's reads.
 GROUP_CACHE = 2048
+#: Concurrent ranged reads when the builder prefetches the groups its loops will read (`build -j`); ≤ 1: no prefetch, the
+#: loops fetch each miss in turn.
+FETCH_THREADS = 64
+#: Prefetched raw bytes held at most, as a fraction of the machine's RAM (`build -C` overrides): beyond it, the loops run in
+#: windows (each prefetched in turn) and the byte cache evicts least recently used.
+CACHE_RAM_FRACTION = 1 / 8
+#: Prefetch coalescing: needed groups of one file at most this far apart are one request, of at most `COALESCE_SPAN` bytes.
+COALESCE_GAP = 64 << 10
+COALESCE_SPAN = 8 << 20
 DCOUNT_SCHEMA = pa.schema([pa.field("q", pa.string(), nullable=False), pa.field("dir", pa.string(), nullable=False),
                            pa.field("rows", pa.int64(), nullable=False)])
 ALIAS_SCHEMA = pa.schema([pa.field("q", pa.string(), nullable=False), pa.field("canonical", pa.string(), nullable=False)])
 ROLLUP_COLS = "q VARCHAR, dir VARCHAR, kind TINYINT, child VARCHAR, vf BIGINT, b BIGINT, o BIGINT"
 
 
+def insert_rows(con, table: str, rows: list[tuple]) -> None:
+    """`rows` appended to DuckDB table `table` (its columns, in order), as one Arrow table: `executemany` took minutes for a
+    few hundred thousand rows (the probes' and settling's inserts were ~17% of gcs 10-11's short drill)."""
+    if not rows:
+        return
+    schema = con.execute(f"SELECT * FROM {table} LIMIT 0").to_arrow_table().schema
+    t = pa.table([pa.array(col, f.type) for col, f in zip(zip(*rows), schema)], schema=schema)
+    con.register("_insert_rows", t)
+    try:
+        con.execute(f"INSERT INTO {table} SELECT * FROM _insert_rows")
+    finally:
+        con.unregister("_insert_rows")
+
+
 # ── Tiers ──────────────────────────────────────────────────────────────────
+
+
+def ram_bytes() -> int:
+    import os
+
+    return os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES")
+
+
+class ByteCache:
+    """Raw (compressed) byte spans of group files, keyed `(group file, file, offset)`, least recently used evicted past
+    `cap` bytes; shared by a build's group files. Only the calling thread touches it (fetch threads return bytes)."""
+
+    def __init__(self, cap: int):
+        self.cap, self.size = cap, 0
+        self._d: OrderedDict[tuple, bytes] = OrderedDict()
+        self.evicted = 0
+
+    def __contains__(self, key) -> bool:
+        return key in self._d
+
+    def get(self, key) -> bytes | None:
+        data = self._d.get(key)
+        if data is not None:
+            self._d.move_to_end(key)
+        return data
+
+    def put(self, key, data: bytes) -> None:
+        if key in self._d:
+            self.size -= len(self._d.pop(key))
+        self._d[key] = data
+        self.size += len(data)
+        while self.size > self.cap and len(self._d) > 1:
+            _, old = self._d.popitem(last=False)
+            self.size -= len(old)
+            self.evicted += 1
 
 
 class CachedGroupFile(sr.GroupFile):
     """`static_roots.GroupFile` (two-level) with its index row groups, parsed footers and decoded data groups cached, and
-    `rows_in` reading group by group: the builder probes many small ranges of the same files."""
+    `rows_in` reading group by group: the builder probes many small ranges of the same files. With a `ByteCache` (`raw`),
+    a fetch is first looked up there (`TierReads.prefetch` fills it); `io` counts the reads as without it (a decode of a
+    group not decoded, a load of index row groups), `fetch_io` the requests actually made."""
 
     def __init__(self, *args, key: str, cache_groups: int = GROUP_CACHE, **kw):
         super().__init__(*args, **kw)
         self.key = key
         self._entries: dict[int, list[dict]] = {}
+        self._peeked: dict[int, list[dict]] = {}
         self._md: dict[str, pq.FileMetaData] = {}
-        self._groups: OrderedDict[tuple[str, int], list[dict]] = OrderedDict()
+        self._groups: OrderedDict[tuple[str, int], tuple[pa.Table, list[tuple]]] = OrderedDict()
+        self._spans: dict[tuple[int, int], tuple[list[dict], list[tuple], list[tuple]]] = {}
         self.cap_groups = cache_groups
+        self.raw: ByteCache | None = None
+        self.fetch_io: Counter = Counter()
         if self.top is not None:
             self._top_lo = [(t["q_min"], t["k_min"]) for t in self.top]
             self._top_hi = [(t["q_max"], t["k_max"]) for t in self.top]
         self.io.update(groups_read=0, group_bytes=0)
+
+    def _get(self, file: str, lo: int, hi: int) -> bytes:
+        """Bytes `[lo, hi)` of `file`: the byte cache's span (prefetched), else a fetch (a miss)."""
+        if self.raw is not None:
+            data = self.raw.get((self, file, lo))
+            if data is not None and len(data) == hi - lo:
+                return data
+        self.fetch_io["miss_fetches"] += 1
+        self.fetch_io["miss_bytes"] += hi - lo
+        return self.fetch(file, lo, hi)
 
     def _meta(self, file: str) -> pq.FileMetaData:
         if file not in self._md:
@@ -70,15 +144,71 @@ class CachedGroupFile(sr.GroupFile):
         pf = pq.ParquetFile(self.Spans(self.size_of(file), [self.footer(file), (start, data)]), metadata=self._meta(file))
         return {g: pf.read_row_group(g).to_pylist() for g in rgs}
 
+    def _read_table(self, file: str, start: int, data: bytes, rg: int) -> pa.Table:
+        return pq.ParquetFile(self.Spans(self.size_of(file), [self.footer(file), (start, data)]), metadata=self._meta(file)).read_row_group(rg)
+
     def _load(self, tops: list[dict]) -> None:
         missing = [t for t in tops if t["rg"] not in self._entries]
         if not missing:
             return
         start, end = missing[0]["offset"], missing[-1]["offset"] + missing[-1]["length"]
-        data = self.fetch(self.index_file, start, end)
         self.io["index_reads"] += 1
-        self.io["index_bytes"] += len(data)
+        self.io["index_bytes"] += end - start
+        if all(t["rg"] in self._peeked or (self.raw is not None and (self, self.index_file, t["offset"]) in self.raw) for t in missing):
+            for t in missing:
+                self._entries[t["rg"]] = self._peek_top(t)
+                self._peeked.pop(t["rg"], None)
+            return
+        self.fetch_io["miss_fetches"] += 1
+        self.fetch_io["miss_bytes"] += end - start
+        data = self.fetch(self.index_file, start, end)
         self._entries.update(self._read_rgs(self.index_file, start, data, [t["rg"] for t in missing]))
+
+    def tops(self, lo, hi) -> list[dict]:
+        """The index row groups `select(lo, hi)` loads (no cap)."""
+        from bisect import bisect_left
+
+        a = bisect_left(self._top_hi, lo)
+        b = max(a, bisect_left(self._top_lo, hi))
+        return self.top[a:b]
+
+    def missing_tops(self, lo, hi) -> list[dict]:
+        return [t for t in self.tops(lo, hi) if t["rg"] not in self._entries and t["rg"] not in self._peeked]
+
+    def _peek_top(self, t: dict) -> list[dict]:
+        if t["rg"] in self._entries:
+            return self._entries[t["rg"]]
+        if t["rg"] not in self._peeked:
+            data = self._get(self.index_file, t["offset"], t["offset"] + t["length"])
+            self._peeked[t["rg"]] = self._read_rgs(self.index_file, t["offset"], data, [t["rg"]])[t["rg"]]
+        return self._peeked[t["rg"]]
+
+    def _span(self, a: int, b: int) -> tuple[list[dict], list[tuple], list[tuple]]:
+        """The entries of index row groups `top[a:b]` and their last / first keys, built once per span (a per-call build
+        over the ~1K entries a top row group holds was most of a probe's time)."""
+        s = self._spans.get((a, b))
+        if s is None:
+            entries = [e for t in self.top[a:b] for e in self._peek_top(t)]
+            s = self._spans[(a, b)] = (entries, [(e["q_max"], e["k_max"]) for e in entries], [(e["q_min"], e["k_min"]) for e in entries])
+        return s
+
+    def _sel(self, a: int, b: int, lo, hi) -> list[dict]:
+        from bisect import bisect_left
+
+        entries, his, los = self._span(a, b)
+        a2 = bisect_left(his, lo)
+        return entries[a2:max(a2, bisect_left(los, hi))]
+
+    def peek(self, lo, hi) -> list[dict]:
+        """`select(lo, hi)`'s groups, leaving the reads' state and counts as they were (planning: the loops' own `select`
+        loads the index row groups and counts them, as without a plan)."""
+        from bisect import bisect_left
+
+        if self.top is None:
+            return super().select(lo, hi)[0]
+        a = bisect_left(self._top_hi, lo)
+        b = max(a, bisect_left(self._top_lo, hi))
+        return self._sel(a, b, lo, hi) if a < b else []
 
     def select(self, lo, hi, cap: int | None = None):
         from bisect import bisect_left
@@ -93,48 +223,78 @@ class CachedGroupFile(sr.GroupFile):
         if cap is not None and inner > cap:
             return None, inner
         self._load(self.top[a:b])
-        entries = [e for t in self.top[a:b] for e in self._entries[t["rg"]]]
-        a2, b2 = self._meet(entries, lo, hi)
-        sel = entries[a2:b2]
+        sel = self._sel(a, b, lo, hi)
         return sel, sum(g["rows"] for g in sel)
 
-    def group_rows(self, g: dict) -> tuple[list[dict], list[tuple]]:
+    def group_rows(self, g: dict) -> tuple[pa.Table, dict[str, list]]:
+        """Group `g` decoded (cached): its rows as a table, and per `q` its rows' span `[s, e)` (the group is sorted on
+        `(q, key)`) with their keys, listed when first bisected. Rows become Python dicts only when a range of them is returned
+        (`rows_in`): converting whole groups was most of the probes' and settling's time."""
+        import numpy as np
+
         k = (g["file"], g["rg"])
         if k in self._groups:
             self._groups.move_to_end(k)
             return self._groups[k]
-        data = self.fetch(g["file"], g["offset"], g["offset"] + g["length"])
+        data = self._get(g["file"], g["offset"], g["offset"] + g["length"])
         self.io["groups_read"] += 1
         self.io["group_bytes"] += len(data)
-        rows = self._read_rgs(g["file"], g["offset"], data, [g["rg"]])[g["rg"]]
-        self._groups[k] = (rows, [(r["q"], r[self.key]) for r in rows])
+        t = self._read_table(g["file"], g["offset"], data, g["rg"])
+        d = t.column("q").combine_chunks().dictionary_encode()  # sorted: the dictionary is in order, the indices ascending
+        idx, n = d.indices.to_numpy(), len(d.dictionary)
+        starts, ends = np.searchsorted(idx, np.arange(n), "left"), np.searchsorted(idx, np.arange(n), "right")
+        self._groups[k] = (t, {v: [int(s), int(e), None] for v, s, e in zip(d.dictionary.to_pylist(), starts, ends)})
         if len(self._groups) > self.cap_groups:
             self._groups.popitem(last=False)
         return self._groups[k]
 
-    def rows_in(self, lo, hi) -> list[dict]:
-        """The rows with `lo ≤ (q, key) < hi` (each group is sorted on it: bisected)."""
+    def _bounds(self, lo, hi):
+        """Per group meeting `[lo, hi)` (one `q`: the builder's ranges are a member's): `(table, i, j)`, its rows `[i, j)`
+        the ones in range."""
         from bisect import bisect_left
 
+        if lo[0] != hi[0]:
+            raise ValueError(f"{lo!r}, {hi!r}: a range within one q")
         groups, _ = self.select(lo, hi)
-        out = []
         for g in groups:
-            rows, keys = self.group_rows(g)
-            out += rows[bisect_left(keys, lo):bisect_left(keys, hi)]
+            t, runs = self.group_rows(g)
+            run = runs.get(lo[0])
+            if run is None:
+                yield t, 0, 0
+                continue
+            s, e, keys = run
+            if keys is None:
+                keys = run[2] = t.column(self.key).slice(s, e - s).to_pylist()
+            yield t, s + bisect_left(keys, lo[1]), s + bisect_left(keys, hi[1])
+
+    def rows_in(self, lo, hi) -> list[dict]:
+        """The rows with `lo ≤ (q, key) < hi` (each group is sorted on it: bisected)."""
+        out = []
+        for t, i, j in self._bounds(lo, hi):
+            if j > i:
+                out += t.slice(i, j - i).to_pylist()
         return out
+
+    def has_in(self, lo, hi) -> bool:
+        """Is some row in `[lo, hi)`? (`rows_in`'s groups decoded, as it does; no rows converted.)"""
+        return any([j > i for _, i, j in self._bounds(lo, hi)])
 
 
 class Tier:
     """One tier's drill files: the base generation's `drill/` or a run's `<run>/drill/`, under a local directory (or a
     bucket mount); `GcsTier` reads the same files by ranged GCS reads."""
 
-    def __init__(self, root: Path | str, name: str | None = None):
+    def __init__(self, root: Path | str, name: str | None = None, ranged=None):
+        """`ranged`: `(bucket, prefix)` (a `google.cloud.storage` bucket and the tier's key prefix in it): read groups by ranged
+        GCS reads, while everything else (DuckDB's reads, listings, metadata) goes through `root` (the bucket's mount)."""
         self.root = Path(root) if not isinstance(root, Path) else root
         self.name = name or str(root)
+        self.ranged = ranged
         self.meta = json.loads(self.read("meta.json"))
         self._alias_table: pa.Table | None = None
         self._aliases: dict[str, str] | None = None
         self._gf: dict[tuple[str, str], CachedGroupFile | None] = {}
+        self._sizes: dict[str, int] = {}
 
     # storage
     def read(self, rel: str) -> bytes:
@@ -144,12 +304,18 @@ class Tier:
         return (self.root / rel).exists()
 
     def fetch(self, rel: str, lo: int, hi: int) -> bytes:
+        """Bytes `[lo, hi)` of `rel` (thread-safe: the builder's prefetch calls it from a pool)."""
+        if self.ranged is not None:
+            b, prefix = self.ranged
+            return b.blob(f"{prefix}/{rel}").download_as_bytes(start=lo, end=hi - 1, checksum=None)
         with open(self.root / rel, "rb") as fh:
             fh.seek(lo)
             return fh.read(hi - lo)
 
     def size_of(self, rel: str) -> int:
-        return (self.root / rel).stat().st_size
+        if rel not in self._sizes:
+            self._sizes[rel] = (self.root / rel).stat().st_size
+        return self._sizes[rel]
 
     def local(self, rel: str) -> str:
         """A path DuckDB can read."""
@@ -245,10 +411,18 @@ class TierReads:
     """A kind's roots across tiers, combined (smallest `vt` per `(path, usr, vf)`), through each tier's two-level index
     and its own canonical for the member."""
 
-    def __init__(self, tiers: list[Tier], kind: str):
+    def __init__(self, tiers: list[Tier], kind: str, threads: int = 0, cache_bytes: int | None = None):
+        """`threads` > 1: `windows` prefetches the groups a loop will read, that many requests at once, into a byte cache of
+        `cache_bytes` (default `CACHE_RAM_FRACTION` of the RAM); else the loops fetch each miss in turn."""
         self.kind = kind
         self.items = [(t, t.group_file(kind, "roots")) for t in tiers]
         self.stats: Counter = Counter()
+        self.threads = threads
+        self.fetch_io: Counter = Counter()
+        self.raw = ByteCache(cache_bytes or int(ram_bytes() * CACHE_RAM_FRACTION)) if threads > 1 else None
+        for _, gf in self.items:
+            if gf is not None:
+                gf.raw = self.raw
 
     def rows(self, c: str, lo: str, hi: str, only: int | None = None) -> list[dict]:
         """Combined roots of member `c` with `lo ≤ path < hi` (`only`: one tier's)."""
@@ -280,7 +454,7 @@ class TierReads:
                 self.stats["any_index"] += 1
                 return True
             self.stats["any_decoded"] += 1
-            if gf.rows_in(L, H):
+            if gf.has_in(L, H):
                 return True
         return False
 
@@ -290,6 +464,121 @@ class TierReads:
             if gf is not None:
                 out.update(gf.io)
         return dict(out)
+
+    def requests(self) -> dict:
+        """The requests actually made: prefetched (coalesced spans) and misses (fetched in the loops)."""
+        out: Counter = Counter(self.fetch_io)
+        for _, gf in self.items:
+            if gf is not None:
+                out.update(gf.fetch_io)
+        if self.raw is not None:
+            out["evicted"] = self.raw.evicted
+        return dict(out)
+
+    # planning: the groups a loop's reads decode, from the index alone (its row groups prefetched first)
+
+    def _ranges(self, c: str, lo: str, hi: str, only: int | None = None):
+        for i, (t, gf) in enumerate(self.items):
+            if gf is not None and (only is None or i == only):
+                ci = t.canon(c, self.kind)
+                yield gf, (ci, lo), (ci, hi)
+
+    def plan_rows(self, c: str, lo: str, hi: str, only: int | None = None) -> list[tuple]:
+        """The groups `rows(c, lo, hi, only)` decodes, as `(group file, group)`."""
+        return [(gf, g) for gf, L, H in self._ranges(c, lo, hi, only) for g in gf.peek(L, H)]
+
+    def plan_any(self, c: str, lo: str, hi: str) -> list[tuple]:
+        """The groups `any(c, lo, hi)` may decode: each tier's up to one whose index settles it. A superset only where a tier's
+        decoded rows settle it (the later tiers' are planned, not read)."""
+        out = []
+        for gf, L, H in self._ranges(c, lo, hi):
+            sel = gf.peek(L, H)
+            if not sel:
+                continue
+            if any(L <= (g["q_min"], g["k_min"]) < H or L <= (g["q_max"], g["k_max"]) < H for g in sel):
+                break
+            out += [(gf, g) for g in sel]
+        return out
+
+    def plan(self, queries: list[tuple], how: str) -> list[list[tuple]]:
+        """Each query's plan (`how`: `rows` / `any`), its index row groups prefetched first; empty plans without prefetch."""
+        if self.raw is None:
+            return [[] for _ in queries]
+        self.prefetch_index(queries)
+        f = self.plan_rows if how == "rows" else self.plan_any
+        return [f(*qq) for qq in queries]
+
+    def _pool(self):
+        from concurrent.futures import ThreadPoolExecutor
+
+        return ThreadPoolExecutor(max_workers=self.threads, thread_name_prefix="drill-fetch")
+
+    def _fetch_spans(self, need: list[tuple]) -> None:
+        """`need`: `(group file, file, offset, length)` not cached → the byte cache, one request per run of them in a file
+        (`COALESCE_GAP` apart, at most `COALESCE_SPAN`), `threads` at once; footers of their files first."""
+        by_file: dict[tuple, list[tuple[int, int]]] = {}
+        for gf, f, off, n in need:
+            by_file.setdefault((gf, f), []).append((off, n))
+        feet = [(gf, f) for gf, f in by_file if f not in gf.foot]
+        runs = []
+        for (gf, f), spans in by_file.items():
+            spans = sorted(set(spans))
+            cur = [spans[0]]
+            for off, n in spans[1:]:
+                end = cur[-1][0] + cur[-1][1]
+                if off - end <= COALESCE_GAP and off + n - cur[0][0] <= COALESCE_SPAN:
+                    cur.append((off, n))
+                else:
+                    runs.append((gf, f, cur))
+                    cur = [(off, n)]
+            runs.append((gf, f, cur))
+
+        def get(run):
+            gf, f, spans = run
+            lo, hi = spans[0][0], max(o + n for o, n in spans)
+            return run, lo, gf.fetch(f, lo, hi)
+
+        with self._pool() as pool:
+            for (gf, f), foot in zip(feet, pool.map(lambda x: x[0].footer(x[1]), feet)):
+                gf.foot[f] = foot
+            for (gf, f, spans), lo, data in pool.map(get, runs):
+                self.fetch_io["prefetch_fetches"] += 1
+                self.fetch_io["prefetch_bytes"] += len(data)
+                for off, n in spans:
+                    self.raw.put((gf, f, off), data[off - lo:off - lo + n])
+
+    def prefetch_index(self, queries: list[tuple]) -> None:
+        """The index row groups of `queries` (`(c, lo, hi[, only])`, every tier's), loaded ahead, concurrently."""
+        need = {(gf, gf.index_file, t["offset"], t["length"]) for qq in queries for gf, L, H in self._ranges(*qq) if gf.top is not None
+                for t in gf.missing_tops(L, H) if (gf, gf.index_file, t["offset"]) not in self.raw}
+        if need:
+            self._fetch_spans(sorted(need, key=lambda x: (id(x[0]), x[1], x[2])))
+
+    def windows(self, plans: list[list[tuple]]):
+        """Prefetch the groups of each item's plan (`plan_rows` / `plan_any`), in order, and yield `(a, b)`: the items whose
+        groups are now cached (their new bytes within the cache's cap; an item past it alone). Without prefetch: `(0, n)`."""
+        n = len(plans)
+        if self.raw is None or not n:
+            if n:
+                yield 0, n
+            return
+        a = 0
+        while a < n:
+            need: dict[tuple, int] = {}
+            size, b = 0, a
+            while b < n:
+                new = {(gf, g["file"], g["offset"]): g["length"] for gf, g in plans[b]
+                       if (gf, g["file"], g["offset"]) not in self.raw and (gf, g["file"], g["offset"]) not in need}
+                add = sum(new.values())
+                if b > a and size + add > self.raw.cap:
+                    break
+                need.update(new)
+                size += add
+                b += 1
+            if need:
+                self._fetch_spans(sorted(((gf, f, off, ln) for (gf, f, off), ln in need.items()), key=lambda x: (id(x[0]), x[1], x[2])))
+            yield a, b
+            a = b
 
 
 # ── Reading base ⊕ runs (the Worker's logic) ───────────────────────────────
@@ -461,7 +750,7 @@ def long_day_roots(con, prev: pa.Table, new_members: list[str], sx_files: list[s
     con.unregister("prev_in")
     con.execute("CREATE OR REPLACE TABLE newq (q VARCHAR)")
     if new_members:
-        con.executemany("INSERT INTO newq VALUES (?)", [(m,) for m in new_members])
+        insert_rows(con, "newq", [(m,) for m in new_members])
     con.execute("CREATE OR REPLACE TABLE mq AS SELECT q FROM pm")
     con.execute(f"DROP TABLE IF EXISTS dg; CREATE TABLE dg ({sr.DIGEST_COLS})")
     chunks = [(f, w) for f in sx_files for w in sr.chunk_wheres(f, chunk_rows)]
@@ -621,8 +910,12 @@ def day_rollups(con, prior: list[Tier], kind: str, D: int, *, R: int, K: int, fl
     con.execute("CREATE OR REPLACE TABLE pr (q VARCHAR, dir VARCHAR, child VARCHAR, existed BOOLEAN)")
     if probes:
         t1 = monotonic()
-        con.executemany("INSERT INTO pr VALUES (?, ?, ?, ?)", [(c, d, x, reads.any(c, f"{d}/{x}/", f"{d}/{x}0")) for c, d, x in probes])
-        log(f"drill {kind}: {len(probes):,} probes in {monotonic() - t1:.0f}s ({reads.io()})")
+        ranges = [(c, f"{d}/{x}/", f"{d}/{x}0") for c, d, x in probes]
+        existed = []
+        for a, b in reads.windows(reads.plan(ranges, "any")):
+            existed += [reads.any(*r) for r in ranges[a:b]]
+        insert_rows(con, "pr", [(c, d, x, e) for (c, d, x), e in zip(probes, existed)])
+        log(f"drill {kind}: {len(probes):,} probes in {monotonic() - t1:.0f}s ({reads.io()}; requests {reads.requests()})")
     doc["probes"] = len(probes)
     doc["probes_existed"] = con.execute("SELECT count(*) FILTER (WHERE existed) FROM pr").fetchone()[0]
     con.execute("""CREATE OR REPLACE TABLE nkc AS SELECT nk.*,
@@ -678,7 +971,11 @@ def day_rollups(con, prior: list[Tier], kind: str, D: int, *, R: int, K: int, fl
     con.execute("CREATE OR REPLACE TABLE bx (q VARCHAR, dir VARCHAR, rows BIGINT)")
     if unknown:
         t1 = monotonic()
-        con.executemany("INSERT INTO bx VALUES (?, ?, ?)", [(c, d, len(reads.rows(c, d + "/", d + "0", only=0))) for c, d in unknown])
+        ranges = [(c, d + "/", d + "0", 0) for c, d in unknown]
+        counts = []
+        for a, b in reads.windows(reads.plan(ranges, "rows")):
+            counts += [len(reads.rows(c, lo, hi, only=o)) for c, lo, hi, o in ranges[a:b]]
+        insert_rows(con, "bx", [(c, d, n) for (c, d), n in zip(unknown, counts)])
         log(f"drill {kind}: {len(unknown):,} base counts below the measurement's floor in {monotonic() - t1:.0f}s")
     doc["base_counted"] = len(unknown)
     con.execute(f"""CREATE OR REPLACE TABLE newh AS SELECT nh.q, nh.dir, nh.k FROM nh LEFT JOIN bx USING (q, dir)
@@ -687,10 +984,12 @@ def day_rollups(con, prior: list[Tier], kind: str, D: int, *, R: int, K: int, fl
     if doc["heavy_new"]:
         con.execute("CREATE OR REPLACE TABLE rtr (q VARCHAR, dir VARCHAR, k INTEGER, path VARCHAR, usr VARCHAR, vf BIGINT, vt BIGINT, size BIGINT, n_files BIGINT)")
         got: dict[str, list] = {k: [] for k in ("q", "dir", "k", "path", "usr", "vf", "vt", "size", "n_files")}
-        for c, d, k in con.execute("SELECT q, dir, k FROM newh WHERE q NOT IN (SELECT q FROM newq) ORDER BY q, dir").fetchall():
-            for r in reads.rows(c, d + "/", d + "0"):
-                for col, v in zip(got, (c, d, k, r["path"], r["usr"], r["vf"], r["vt"], r["size"], r["n_files"])):
-                    got[col].append(v)
+        nh = con.execute("SELECT q, dir, k FROM newh WHERE q NOT IN (SELECT q FROM newq) ORDER BY q, dir").fetchall()
+        for a, b in reads.windows(reads.plan([(c, d + "/", d + "0") for c, d, _ in nh], "rows")):
+            for c, d, k in nh[a:b]:
+                for r in reads.rows(c, d + "/", d + "0"):
+                    for col, v in zip(got, (c, d, k, r["path"], r["usr"], r["vf"], r["vt"], r["size"], r["n_files"])):
+                        got[col].append(v)
         log(f"drill {kind}: {doc['heavy_new']:,} newly heavy, {len(got['q']):,} earlier roots read in {monotonic() - t0:.0f}s ({reads.io()})")
         con.register("rtr_in", pa.table(got))
         con.execute("INSERT INTO rtr SELECT * FROM rtr_in")
@@ -735,6 +1034,26 @@ def _settle(con, D: int, K: int, reads: TierReads) -> int:
     ctx = _settle_ctx(con, aff, cands)
     out: list[tuple] = []
     restated = 0
+    for a, b in reads.windows(_settle_plan(aff, others, cands, heavy_tot, reads)):
+        _settle_dirs(aff[a:b], kept, others, cands, hdr, opens, rest, heavy_tot, ctx, D, K, reads, out)
+    restated = sum(1 for r in out if r[2] == KIND_FULL)
+    if out:
+        insert_rows(con, "rup", out)
+    return restated
+
+
+def _settle_plan(aff: list[tuple], others: dict, cands: set, heavy_tot: dict, reads: TierReads) -> list[list[tuple]]:
+    """Per affected directory, the groups settling it reads: each candidate child's roots (`_value_on`; `_series` reads a
+    subset), but a heavy one's (its cells)."""
+    if reads.raw is None:
+        return [[] for _ in aff]
+    per = [[(c, *_child_range(d, x, root)) for x, root, _, _, new in others.get((c, d), [])
+            if not new and (c, d, x) in cands and (root or (c, f"{d}/{x}") not in heavy_tot)] for c, d in aff]
+    reads.prefetch_index([r for rs in per for r in rs])
+    return [[g for r in rs for g in reads.plan_rows(*r)] for rs in per]
+
+
+def _settle_dirs(aff, kept, others, cands, hdr, opens, rest, heavy_tot, ctx, D: int, K: int, reads: TierReads, out: list[tuple]) -> None:
     for key in aff:
         c, d = key
         kn, hb, ho = hdr[key]
@@ -751,7 +1070,6 @@ def _settle(con, D: int, K: int, reads: TierReads) -> int:
         leaving = [child for child, *_ in ks if child not in keep]
         entering = [child for _, child, origin in top if origin == "in"]
         if leaving or entering:
-            restated += 1
             out += _restate(ctx, c, d, D, keep, ks, ot, leaving, hb + opens[key], o_new, reads)
             continue
         out.append((c, d, KIND_DELTA, "", len(keep), hb + opens[key], o_new))
@@ -768,16 +1086,13 @@ def _settle(con, D: int, K: int, reads: TierReads) -> int:
                 rdb, rdn = rdb + db, rdn + dn
         if rdb or rdn:
             out.append((c, d, KIND_REST, "", D, rb + rdb, ro + rdn))
-    if out:
-        con.executemany("INSERT INTO rup VALUES (?, ?, ?, ?, ?, ?, ?)", out)
-    return restated
 
 
 def _settle_ctx(con, aff: list[tuple], cands: set[tuple]) -> dict:
     """What settling reads, loaded in one query each (a lookup per directory would scan `dr` and `stf`): the prior cells of the
     affected directories and of the candidates' own directories, which of those are heavy, and today's rows under each candidate."""
     con.execute("CREATE OR REPLACE TABLE sk (q VARCHAR, dir VARCHAR)")
-    con.executemany("INSERT INTO sk VALUES (?, ?)", [*aff, *sorted({(c, f"{d}/{x}") for c, d, x in cands})])
+    insert_rows(con, "sk", [*aff, *sorted({(c, f"{d}/{x}") for c, d, x in cands})])
     cells: dict[tuple, dict[tuple, list]] = {}
     for c, d, kind, child, vf, b, o in con.execute(f"""SELECT q, dir, kind, child, vf, b, o FROM stf SEMI JOIN (SELECT DISTINCT q, dir FROM sk) USING (q, dir)
             WHERE kind IN ({KIND_KEPT}, {KIND_REST})""").fetchall():
@@ -789,7 +1104,7 @@ def _settle_ctx(con, aff: list[tuple], cands: set[tuple]) -> dict:
         for root in (True, False):
             ranges.add((c, *_child_range(d, x, root)))
     if ranges:
-        con.executemany("INSERT INTO sr_ VALUES (?, ?, ?)", sorted(ranges))
+        insert_rows(con, "sr_", sorted(ranges))
     today: dict[tuple, list] = {r: [] for r in ranges}
     for c, lo, hi, path, usr, vf, vt, size, n in con.execute("""SELECT r.q, r.lo, r.hi, d.path, d.usr, d.vf, d.vt, d.size, d.n_files
             FROM sr_ AS r JOIN dr AS d ON d.q = r.q AND d.path >= r.lo AND d.path < r.hi""").fetchall():
@@ -804,7 +1119,7 @@ def _heavy_totals(con, keys: list[tuple[str, str]]) -> dict[tuple[str, str], tup
     if not keys:
         return {}
     con.execute("CREATE OR REPLACE TABLE hk (q VARCHAR, dir VARCHAR)")
-    con.executemany("INSERT INTO hk VALUES (?, ?)", keys)
+    insert_rows(con, "hk", keys)
     heavy = {(c, d) for c, d in con.execute("SELECT q, dir FROM hdr SEMI JOIN hk USING (q, dir)").fetchall()}
     tot = {(c, d): (int(b), int(o)) for c, d, b, o in con.execute("""SELECT q, dir, sum(b), sum(o) FROM (
             SELECT q, dir, b, o FROM kc SEMI JOIN hk USING (q, dir) UNION ALL SELECT q, dir, b, o FROM rc SEMI JOIN hk USING (q, dir))
@@ -944,10 +1259,12 @@ def base_meta(R: int, K: int, rg: int | None = None) -> dict:
 
 def build_day(con, prior: list[Tier], out: Path, *, D: int, R: int, K: int, floor: int, sx_files: list[str], cdelta_files: list[str],
               new_members: list[str], history: pa.Table | None, meas: dict[str, str], tier: dict, chunk_rows: int = 1 << 24,
-              file_rows: int = FILE_ROWS, rg: int | None = None, kinds: tuple[str, ...] = KINDS, log=err, rule=None) -> dict:
+              file_rows: int = FILE_ROWS, rg: int | None = None, kinds: tuple[str, ...] = KINDS, log=err, rule=None,
+              threads: int = FETCH_THREADS, cache_bytes: int | None = None) -> dict:
     """A scan's `drill/` in `out`: each kind's delta roots, rollups, indexes and `dcount` (long: and the run's alias map), and
     with both kinds `meta.json` last (one kind: its part, `meta.<kind>.json`; `join_meta` makes `meta.json` of the two). Needs
-    table `pnew (depth, path)`; `meas[kind]` is a query of the base's `(q, dir, rows)` at ≥ `floor` rows."""
+    table `pnew (depth, path)`; `meas[kind]` is a query of the base's `(q, dir, rows)` at ≥ `floor` rows. `threads`,
+    `cache_bytes`: the prior tiers' reads' prefetch (`TierReads`); the output is the same without it."""
     t0 = monotonic()
     out.mkdir(parents=True, exist_ok=True)
     meta: dict = {**tier, **base_meta(R, K, rg), "D": D, "floor": floor}
@@ -960,9 +1277,10 @@ def build_day(con, prior: list[Tier], out: Path, *, D: int, R: int, K: int, floo
         else:
             meta["short_delta"] = short_day_roots(con, cdelta_files, rule)
         con.execute(f"CREATE OR REPLACE TABLE meas AS {meas[kind]}")
-        reads = TierReads(prior, kind)
+        reads = TierReads(prior, kind, threads, cache_bytes)
         meta[f"{kind}_day"] = day_rollups(con, prior, kind, D, R=R, K=K, floor=floor, reads=reads, log=log)
         meta[f"{kind}_day"]["reads"] = reads.io()
+        log(f"drill {kind}: requests {reads.requests()}")
         meta.update(write_kind(con, out, kind, file_rows=file_rows, rg=meta["rg"]))
         write_state(con, out, kind)
         meta[f"{kind}_day"]["s"] = round(monotonic() - t1, 1)
@@ -1116,6 +1434,16 @@ def _gcs():
     return storage.Client()
 
 
+def _pooled_gcs(threads: int):
+    """A GCS client whose connection pool holds `threads` connections (the default 10 would serialize the prefetch)."""
+    from requests.adapters import HTTPAdapter
+
+    client = _gcs()
+    n = max(threads, 10)
+    client._http.mount("https://", HTTPAdapter(pool_connections=n, pool_maxsize=n))
+    return client
+
+
 def _prior_runs(bucket: str, gen: str, date: str) -> list[dict]:
     """The live runs before `date` (the newest earlier manifest's)."""
     from .static_append import _state
@@ -1135,9 +1463,12 @@ def _new_members(mount: str, prefix: str, run: str, prev: pa.Table) -> list[str]
 @cli.command("build")
 @option("-b", "--bucket", default=data_bucket, help="Bucket")
 @option("-c", "--chunk-rows", default=1 << 24, type=int, help="Suffix rows per member-loop chunk")
+@option("-C", "--cache-gb", type=float, help=f"Prefetched group bytes held at most (default: {CACHE_RAM_FRACTION:g} of the RAM)")
 @option("-d", "--scan", "date", required=True, help="The run's scan id")
 @option("-f", "--floor", "floor_rows", default=10_000, type=int, help="The base measurement's floor (`roots measure -f`)")
+@option("-F", "--fuse-reads", is_flag=True, help="Read the prior tiers' groups through the mount, not by ranged GCS reads")
 @option("-g", "--gen", required=True, help="Base generation")
+@option("-j", "--fetch-threads", default=FETCH_THREADS, type=int, help="Concurrent group reads of the prior tiers (≤ 1: no prefetch)")
 @option("-k", "--kind", default="both", type=Choice(["both", "long", "short", "task"]),
         help="Build one kind (`task`: long for Batch task 0, short for task 1): the two run as parallel tasks, the second to finish writes `meta.json`")
 @option("-K", "--keep", "K", default=256, type=int, help="Children kept by name per heavy directory")
@@ -1149,7 +1480,8 @@ def _new_members(mount: str, prefix: str, run: str, prev: pa.Table) -> list[str]
 @option("-R", "--read-rows", "R", default=100_000, type=int, help="Heavy: more stored root rows under the directory")
 @option("-t", "--to", "to_url", help="Write here instead (`gs://bucket/prefix`, e.g. the scratch bucket for a trial), not `deltas/<D>/drill/`")
 @option("-T", "--tmp", default="/stage/tmp", help="DuckDB spill dir")
-def build_cmd(bucket, chunk_rows, date, floor_rows, gen, kind, K, mount, mem, dry_run, out, threads, R, to_url, tmp) -> None:
+def build_cmd(bucket, chunk_rows, cache_gb, date, floor_rows, fuse_reads, gen, fetch_threads, kind, K, mount, mem, dry_run, out, threads, R,
+              to_url, tmp) -> None:
     """The scan's run's `drill/` (`deltas/<scan id>/drill/`, written once: refused if its files are there): delta roots, classes,
     rollups, indexes, `dcount`, `meta.json` last. Prior tiers: the base's `drill/` and the live runs' (the newest earlier
     manifest's; each must have its drill)."""
@@ -1174,7 +1506,9 @@ def build_cmd(bucket, chunk_rows, date, floor_rows, gen, kind, K, mount, mem, dr
         raise SystemExit(f"gs://{dst_bucket}/{dst}/: {'/'.join(kinds)} already built (a run's drill is written once)")
     runs = _prior_runs(bucket, gen, date)
     base = Path(mount) / prefix
-    prior = [Tier(base / "drill", "base"), *(Tier(base / r["key"] / "drill", r["key"]) for r in runs)]
+    gb = None if fuse_reads else _pooled_gcs(fetch_threads).bucket(bucket)
+    prior = [Tier(base / rel, name, ranged=None if gb is None else (gb, f"{prefix}/{rel}"))
+             for rel, name in [("drill", "base"), *((f"{r['key']}/drill", r["key"]) for r in runs)]]
     for t in prior[1:]:
         if t.meta.get("last") != t.name.split("/")[-1].split("_")[-1]:
             raise SystemExit(f"{t.name}: its drill is for {t.meta.get('last')}")
@@ -1202,7 +1536,7 @@ def build_cmd(bucket, chunk_rows, date, floor_rows, gen, kind, K, mount, mem, dr
     shutil.rmtree(outp, ignore_errors=True)
     meta = build_day(con, prior, outp, D=scan_epoch(date), R=R, K=K, floor=floor_rows, sx_files=sx, cdelta_files=cdelta,
                      new_members=new_members, history=history, meas=meas, chunk_rows=chunk_rows, rg=RUN_RG, kinds=kinds,
-                     rule=sn.gen_rule_at(bucket, gen),
+                     rule=sn.gen_rule_at(bucket, gen), threads=fetch_threads, cache_bytes=int(cache_gb * 2 ** 30) if cache_gb else None,
                      tier={"gen": gen, "first": date, "last": date, "level": 0, "scans": [date], "prior": [t.name for t in prior]})
     if not dry_run:
         held = {f.name: f.read_bytes() for f in outp.glob("meta*.json")}
