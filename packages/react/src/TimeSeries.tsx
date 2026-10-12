@@ -45,21 +45,20 @@ export interface Series<T> {
 export interface Annotation {
   x: number
   y: number
-  /** A band callout: the label sits centred between `y0` and `y` (inside the
-   *  band) instead of beside the point, and is skipped when the band is too
-   *  thin on screen to hold it. */
+  /** A band callout: the label hugs the upper trace inside `[y0, y]`, and is
+   *  skipped when the trace is off screen or the band is too thin to hold it. */
   y0?: number
   label: string
   below?: boolean
 }
 
-/** A band callout needs this many px of band to sit inside. */
-const MIN_BAND_PX = 13
 /** Annotation font size, and the box estimate collision culling uses: a
  *  semibold digit run is ~0.62 em wide per char, a line ~1.15 em tall. */
 const ANNO_PT = 10.5
 const ANNO_CHAR_W = ANNO_PT * 0.62
 const ANNO_LINE_H = ANNO_PT * 1.15
+const BAND_INSET = 2
+const MIN_BAND_PX = ANNO_LINE_H + 2 * BAND_INSET
 
 interface PlacedAnnotation { a: Annotation; px: number; py: number; anchor: 'start' | 'middle' | 'end'; dx: number }
 
@@ -84,11 +83,11 @@ function placeAnnotations(
     let py: number
     let y0: number
     if (a.y0 != null) {
-      const t = Math.max(top, Math.min(yToPx(a.y), yToPx(a.y0)))
+      const t = Math.min(yToPx(a.y), yToPx(a.y0))
       const b = Math.min(top + plotH, Math.max(yToPx(a.y), yToPx(a.y0)))
-      if (b - t < MIN_BAND_PX) continue
-      py = (t + b) / 2
-      y0 = py - ANNO_LINE_H / 2
+      if (t < top || b - t < MIN_BAND_PX) continue
+      y0 = t + BAND_INSET
+      py = y0 + ANNO_LINE_H / 2
     } else {
       py = yToPx(a.y) + (a.below ? 14 : -7)
       y0 = py - ANNO_PT // `py` is the baseline

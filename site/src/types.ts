@@ -6,7 +6,7 @@ export interface TreeNode {
   k?: 'file' | 'dir'
   b: number
   o: number
-  d?: number                   // bytes-weighted mean created date, epoch days
+  d?: number                   // byte-weighted listing date, epoch days (GCS: created; S3/R2/local: modified)
   a?: number                   // last-read epoch day (access logs; MAX over the whole subtree)
   us?: [string, number][]      // top users -> bytes
   cb?: Record<string, number>  // non-STANDARD class -> bytes ("2" NL, "3" CL, "4" AR); STANDARD = b - sum
@@ -49,7 +49,7 @@ export const userBytes = (n: Pick<TreeNode, 'us'>): number => (n.us ?? []).reduc
 export const unownedBytes = (n: Pick<TreeNode, 'b' | 'us'>): number => Math.max(0, n.b - userBytes(n))
 
 export interface AgeRow {
-  d: number   // created day, epoch days (site aggregates to day/week/month)
+  d: number   // listing day, epoch days (GCS: created; S3/R2/local: modified)
   d1?: string // top-level dir (whole-fleet age.json only; the per-path `age` index omits it — specs/done/age-index.md)
   u?: string  // owning user
   a?: number  // last-read epoch day of the row's dir (access logs; subtree MAX, like TreeNode.a); absent = no read observed

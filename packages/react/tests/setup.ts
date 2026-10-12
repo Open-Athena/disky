@@ -1,4 +1,7 @@
-import '@testing-library/jest-dom/vitest'
+import { expect } from 'vitest'
+import * as matchers from '@testing-library/jest-dom/matchers'
+
+expect.extend(matchers)
 
 // jsdom doesn't ship a ResizeObserver; the Treemap uses one to track its
 // container size. Stub it out so component tests don't crash.
