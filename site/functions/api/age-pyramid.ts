@@ -64,8 +64,9 @@ export const onRequestGet = async (ctx0: { request: Request; env: Env }): Promis
   const meta = { outputBin: bin, tier: plan.outputTier?.name ?? null, binBudget }
   // Reuse the finest rows when the planner chose that tier; else read the coarser one.
   const rows = bin === fine ? baseRows : await readPoint(await openIndex(ctx.env, date, `age-pyramid-${bin}`), depth, path, COLS)
-  const lo = from.getTime()
-  const hi = to.getTime()
+  // Planner extents select a tier; only caller-supplied bounds trim its bins.
+  const lo = Number.isNaN(fromMs) ? -Infinity : fromMs
+  const hi = Number.isNaN(toMs) ? Infinity : toMs
   const records = rows
     .map(r => ({ dt: num(r.binstart), b: num(r.b), o: num(r.o) }))
     .filter(r => r.dt >= lo && r.dt <= hi)
@@ -75,5 +76,5 @@ export const onRequestGet = async (ctx0: { request: Request; env: Env }): Promis
 
 const json = (body: unknown): Response =>
   new Response(JSON.stringify(body), {
-    headers: { 'content-type': 'application/json', 'cache-control': 'private, max-age=86400' },
+    headers: { 'content-type': 'application/json', 'cache-control': 'private, no-cache' },
   })

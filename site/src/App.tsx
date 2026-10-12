@@ -58,6 +58,7 @@ import { selOf } from './scanSlug'
 import { SizeOverTime } from './SizeOverTime'
 import { useStore, useStoreFetch } from './store'
 import { listingTime } from './listingTime'
+import { knownBucket, storeDefaultColor } from './stores'
 import { perf } from './perf'
 import { useDocTitle } from './title'
 import { TypedPrefixModal } from './TypedPrefix'
@@ -664,7 +665,7 @@ function AppContent() {
     queryKey: ['age', store.key, asof, drillPath, ageBudget],
     queryFn: async () => {
       const pf = perf.start('age', `${drillPath || '/'}@${asof}|b${ageBudget}`)
-      const r = await pf.track(sfetch(`/api/age-pyramid?date=${asof}&path=${encodeURIComponent(drillPath)}&bin_budget=${ageBudget}`, { credentials: 'include' }))
+      const r = await pf.track(sfetch(`/api/age-pyramid?date=${asof}&path=${encodeURIComponent(drillPath)}&bin_budget=${ageBudget}`, { credentials: 'include', cache: 'no-cache' }))
       if (!r.ok) { pf.fail(); throw new Error(`age ${r.status}`) }
       const j = await r.json() as { records: { dt: number; b: number; o: number }[] }
       // No rows (no age tier for this deploy, or a prefix below the index
@@ -685,7 +686,7 @@ function AppContent() {
     queryKey: ['age', store.key, diffPrev, drillPath, ageBudget],
     queryFn: async () => {
       const pf = perf.start('age', `${drillPath || '/'}@${diffPrev}|b${ageBudget}`)
-      const r = await pf.track(sfetch(`/api/age-pyramid?date=${diffPrev}&path=${encodeURIComponent(drillPath)}&bin_budget=${ageBudget}`, { credentials: 'include' }))
+      const r = await pf.track(sfetch(`/api/age-pyramid?date=${diffPrev}&path=${encodeURIComponent(drillPath)}&bin_budget=${ageBudget}`, { credentials: 'include', cache: 'no-cache' }))
       if (!r.ok) { pf.fail(); throw new Error(`age ${r.status}`) }
       const j = await r.json() as { records: { dt: number; b: number; o: number }[] }
       if (j.records.length) pf.decoded(); else pf.empty()
@@ -720,8 +721,9 @@ function AppContent() {
   [meta])
   // No explicit `?c=` → a scope-appropriate default; an explicit pick always
   // wins: an attribution store colors by owner (on a one-owner view the
-  // interesting axis is who else is in there), any other by tree.
-  const lensDefaultMode: ColorMode = store.owners ? 'user' : 'tree'
+  // interesting axis is who else is in there), any other by tree, unless the
+  // deployment selects a different default.
+  const lensDefaultMode: ColorMode = storeDefaultColor(store)
   const mode: ColorMode = (MODES as string[]).includes(modeP ?? '') ? (modeP as ColorMode) : lensDefaultMode
   const setMode = (m: ColorMode) => setModeP(m === lensDefaultMode ? undefined : m)
   // The scan carries attribution (the owner axis and user coloring apply) —
@@ -1039,9 +1041,9 @@ function AppContent() {
   // instead of silently rendering the root view at a bogus address. Only an
   // unscoped root lists every bucket: under a filter or owner scope a real
   // bucket with nothing in scope is absent from it, and is "no matches", not
-  // a 404.
+  // a 404. Display thresholds can also omit configured small buckets.
   const seg0 = drillPath.split('/')[0]
-  if (!scopeQs && baseTree?.c && seg0 && !baseTree.c.some(k => k.n === seg0)) {
+  if (!scopeQs && baseTree?.c && seg0 && !knownBucket(seg0, store, baseTree.c)) {
     return (
       <main>
         <SiteNav />
