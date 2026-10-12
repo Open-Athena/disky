@@ -1,0 +1,43 @@
+# Private deployment config. Install this deployment's own secrets before deploy.
+name = "oa-r2-usage"
+pages_build_output_dir = "dist"
+compatibility_date = "2026-10-08"
+compatibility_flags = ["enable_request_signal"]
+
+[[kv_namespaces]]
+binding = "CACHE_KV"
+id = "30572c48b81a4950883ff11f1d9a5c59"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "oa-r2-usage-db"
+database_id = "3bd87725-4f09-4316-877c-d089563a992e"
+migrations_dir = "migrations/cw"
+
+[observability]
+enabled = true
+
+[vars]
+STORE = "oa-r2"
+AUTH_MODE = "app"
+ROOT_LABEL = "Open Athena R2"
+BASE_SCOPE = "oa-r2"
+STORE_SCHEME = "r2://"
+STORE_BUCKETS = "marin-na,marin-discord,oa-cw-s3-usage-index,oa-gcs-usage-index"
+STORE_BUCKET = "oa-r2-usage-index"
+STORE_REGION = "auto"
+STORE_PREFIXES = "listing/,snapshots/"
+SNAPSHOTS_SUBDIR = "r2"
+SEARCH_SIDECARS = "1"
+PROD_HOST = "r2.oa.dev"
+DEV_HOST = "dev.r2.oa.dev"
+VIEWER_DOMAINS = "openathena.ai"
+STAFF_DOMAIN = ""
+ADMIN_EMAILS = "1"
+DISKY_LABELS = "app=disky,deployment=oa-r2"
+REPO_URL = "https://github.com/Open-Athena/marin-gcs-usage"
+
+# No PUBLIC_READ, source credentials, sweep executor or static generation.
+# Required private secrets before deployment:
+# SESSION_SECRET, a sign-in transport, and STORE_ENDPOINT / STORE_ACCESS_KEY_ID /
+# STORE_SECRET_ACCESS_KEY from the index-reader token, not the publisher token.

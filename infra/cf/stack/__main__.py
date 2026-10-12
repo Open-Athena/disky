@@ -14,6 +14,7 @@ points here with `main: stack/` (`Pulumi.yaml.example`).
 `pulumi preview` is read-only; `up` is a human's call.
 """
 import hashlib
+import json
 import sys
 from pathlib import Path
 
@@ -22,7 +23,7 @@ import pulumi_cloudflare as cloudflare
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from capture_trigger import CaptureTrigger  # noqa: E402
-from cfn_dashboard import AccessApp, BranchAlias, CfnDashboard, Store  # noqa: E402
+from cfn_dashboard import AccessApp, BranchAlias, CfnDashboard, Store, _only_permission_group  # noqa: E402
 
 cfg = pulumi.Config()
 account_id = cfg.require("accountId")
@@ -120,3 +121,52 @@ if captures_bucket:
         moved_from_root=cfg.get_bool("capturesMovedFromRoot") or False,
     )
     pulumi.export("captures_queue", trigger.queue.queue_name)
+
+# Deployment-owned RO credentials: source listings and the site's derived
+# reads are distinct from CfnDashboard's derived-index publisher credential.
+source_buckets = cfg.get_object("sourceBuckets")
+if source_buckets is not None and source_buckets != ["marin-na", "marin-discord", "oa-cw-s3-usage-index", "oa-gcs-usage-index"]:
+    raise pulumi.RunError("Review the explicit OA source-bucket inventory before changing sourceBuckets")
+if source_buckets is not None:
+    read_group = cloudflare.get_account_api_token_permission_groups_list_output(
+        account_id=account_id, name="Workers R2 Storage Bucket Item Read",
+    ).apply(lambda result: _only_permission_group(result, "Workers R2 Storage Bucket Item Read"))
+
+    def readonly_token(name: str, buckets: list[str]) -> cloudflare.AccountToken:
+        return cloudflare.AccountToken(
+            name,
+            account_id=account_id,
+            name=f"oa-r2-usage {name}",
+            policies=[{
+                "effect": "allow", "permission_groups": [{"id": read_group}],
+                "resources": json.dumps({f"com.cloudflare.edge.r2.bucket.{account_id}_default_{bucket}": "*" for bucket in buckets}),
+            }],
+            opts=pulumi.ResourceOptions(ignore_changes=["policies"]),
+        )
+
+    source_reader = readonly_token("source-reader", source_buckets)
+    index_reader = readonly_token("index-reader", [cfg.require("r2Bucket")])
+    private_index = cloudflare.R2ManagedDomain(
+        "index-private", account_id=account_id, bucket_name=dash.r2.name, enabled=False,
+    )
+    for role, token in [("source", source_reader), ("index", index_reader)]:
+        pulumi.export(f"{role}_s3_access_key_id", pulumi.Output.secret(token.id))
+        pulumi.export(f"{role}_s3_secret_access_key", pulumi.Output.secret(token.value.apply(lambda value: hashlib.sha256(value.encode()).hexdigest())))
+
+# Separate D1-only job credential. Cloudflare's D1 API permissions are account-
+# scoped; the job's reviewed profile pins writes to this deployment's database.
+if cfg.get_bool("d1Publisher"):
+    d1_group = cloudflare.get_account_api_token_permission_groups_list_output(
+        account_id=account_id, name="D1 Write",
+    ).apply(lambda result: _only_permission_group(result, "D1 Write"))
+    d1_publisher = cloudflare.AccountToken(
+        "d1-publisher",
+        account_id=account_id,
+        name="oa-r2-usage D1 publisher",
+        policies=[{
+            "effect": "allow", "permission_groups": [{"id": d1_group}],
+            "resources": json.dumps({f"com.cloudflare.api.account.{account_id}": "*"}),
+        }],
+        opts=pulumi.ResourceOptions(ignore_changes=["policies"]),
+    )
+    pulumi.export("d1_publish_token", pulumi.Output.secret(d1_publisher.value))

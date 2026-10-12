@@ -1,0 +1,8 @@
+name: oa-r2-usage-gcp
+description: Independent remote scan infrastructure for r2.oa.dev
+runtime:
+  name: python
+  options:
+    virtualenv: ../.venv
+backend:
+  url: file://./state

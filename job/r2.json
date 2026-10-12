@@ -1,0 +1,25 @@
+{
+  "project": "oa-internal-450019",
+  "region": "us-west1",
+  "job_account": "oa-r2-usage-job",
+  "builder_account": "oa-r2-usage-builder",
+  "image_repository": "oa-r2-usage",
+  "data_bucket": "oa-r2-usage-data",
+  "scratch_bucket": "oa-r2-usage-scratch",
+  "serving_bucket": "oa-r2-usage-index",
+  "account": "74981a43be0de7712369306c7b19133d",
+  "database_id": "3bd87725-4f09-4316-877c-d089563a992e",
+  "database_name": "oa-r2-usage-db",
+  "buckets": ["marin-na", "marin-discord", "oa-cw-s3-usage-index", "oa-gcs-usage-index"],
+  "machine": "e2-standard-8",
+  "memory_mib": 28000,
+  "disk_gb": 100,
+  "timeout_seconds": 7200,
+  "secrets": {
+    "SOURCE_ACCESS_KEY_ID": "oa-r2-source-access-key-id",
+    "SOURCE_SECRET_ACCESS_KEY": "oa-r2-source-secret-access-key",
+    "R2_ACCESS_KEY_ID": "oa-r2-index-access-key-id",
+    "R2_SECRET_ACCESS_KEY": "oa-r2-index-secret-access-key",
+    "CLOUDFLARE_API_TOKEN": "oa-r2-d1-token"
+  }
+}

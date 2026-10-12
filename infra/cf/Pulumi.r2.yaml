@@ -1,0 +1,19 @@
+config:
+  oa-r2-usage-cf:accountId: 74981a43be0de7712369306c7b19133d
+  oa-r2-usage-cf:zoneId: 169959d6aafcbfd77764b8efafa3a509
+  oa-r2-usage-cf:pagesProject: oa-r2-usage
+  oa-r2-usage-cf:productionBranch: r2-prod
+  oa-r2-usage-cf:domain: r2.oa.dev
+  oa-r2-usage-cf:d1Name: oa-r2-usage-db
+  oa-r2-usage-cf:kvName: oa-r2-usage-cache
+  oa-r2-usage-cf:r2Bucket: oa-r2-usage-index
+  oa-r2-usage-cf:d1Publisher: true
+  oa-r2-usage-cf:sourceBuckets:
+    - marin-na
+    - marin-discord
+    - oa-cw-s3-usage-index
+    - oa-gcs-usage-index
+  oa-r2-usage-cf:branchAliases:
+    - domain: dev.r2.oa.dev
+      branch: r2
+encryptionsalt: v1:B1xVw+MI7So=:v1:2UhG5vh1Su4VvPvy:m2JftNanzN5Y3fW0TQ42vGtu2ikikg==

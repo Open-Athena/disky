@@ -1,0 +1,369 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.12"
+# dependencies = ["click", "duckdb"]
+# ///
+"""Plan, submit and run this deployment's metadata-only remote scan."""
+
+from datetime import datetime, timezone
+from json import dumps, loads
+from os import environ
+from pathlib import Path
+from re import escape, fullmatch
+from shutil import copy2, copytree, ignore_patterns
+from shlex import join
+from subprocess import run
+from sys import stderr
+
+from click import ClickException, argument, group, option
+
+
+HERE = Path(__file__).resolve().parent
+
+
+def profile() -> dict:
+    return loads((HERE / "r2.json").read_text())
+
+
+def build_command(context: Path, tag: str, config: dict) -> list[str]:
+    if not fullmatch(r"[a-z0-9][a-z0-9._-]{0,127}", tag):
+        raise ValueError("Choose a lowercase image tag of at most 128 characters")
+    image = f"{config['region']}-docker.pkg.dev/{config['project']}/{config['image_repository']}/scan:{tag}"
+    return [
+        "gcloud", "builds", "submit", str(context),
+        "--project", config["project"], "--region", config["region"],
+        "--config", str(context / "job/cloudbuild.yaml"),
+        "--service-account", f"projects/{config['project']}/serviceAccounts/{config['builder_account']}@{config['project']}.iam.gserviceaccount.com",
+        "--gcs-source-staging-dir", f"gs://{config['scratch_bucket']}/builds/source",
+        "--polling-interval", "15",
+        "--substitutions", f"_IMAGE={image}",
+    ]
+
+
+def verify_uploads(publisher: object, bucket: str, files: list[tuple[str, int]]) -> None:
+    for key, size in files:
+        actual = publisher.head_object(Bucket=bucket, Key=key)["ContentLength"]
+        if actual != size:
+            raise ValueError(f"Published object size mismatch: {key}: {actual} != {size}")
+
+
+def build_age(path: Path, out: Path) -> None:
+    from duckdb import connect
+    from dt_cloud.index import write_age_pyramid
+
+    with connect() as con:
+        con.execute("SET memory_limit='12GB'; SET threads=8")
+        write_age_pyramid(con, str(path), out)
+        verify_age(con, path, out)
+
+
+def verify_age(
+    con: object,
+    path: Path,
+    out: Path,
+) -> None:
+    from dt_cloud.index import AGE_PYRAMID_BINS
+    from pyarrow.parquet import read_metadata
+
+    population = con.execute(
+        "SELECT split_part(path, '/', 1), sum(size)::BIGINT, count(*) FROM read_parquet(?) WHERE kind = 'file' AND mtime > 0 GROUP BY 1 ORDER BY 1",
+        [str(path)],
+    ).fetchall()
+    root = (sum(row[1] for row in population), sum(row[2] for row in population))
+    for bin in AGE_PYRAMID_BINS:
+        tier = out / f"age-pyramid-{bin}.parquet"
+        floor = int(read_metadata(tier).metadata[b"coarse_floor"])
+        expected = [(bucket, size, count) for bucket, size, count in population if size >= floor]
+        actual = con.execute(
+            "SELECT path, sum(b)::BIGINT, sum(o)::BIGINT FROM read_parquet(?) WHERE depth = 1 GROUP BY path ORDER BY path",
+            [str(tier)],
+        ).fetchall()
+        fleet = con.execute("SELECT coalesce(sum(b), 0)::BIGINT, coalesce(sum(o), 0)::BIGINT FROM read_parquet(?) WHERE depth = 0", [str(tier)]).fetchone()
+        if actual != expected or fleet != root:
+            raise ValueError(f"Age pyramid {bin} does not match the dated path population")
+
+
+def job_spec(image: str, config: dict) -> dict:
+    repository = f"{config['region']}-docker.pkg.dev/{config['project']}/{config['image_repository']}/scan"
+    if not fullmatch(escape(repository) + r"@sha256:[a-f0-9]{64}", image):
+        raise ValueError("Image must be pinned by digest in this deployment's scan repository")
+    variables = {
+        "AWS_DEFAULT_REGION": "auto",
+        "AWS_EC2_METADATA_DISABLED": "true",
+        "CLOUDFLARE_ACCOUNT_ID": config["account"],
+        "D1_DB_ID": config["database_id"],
+        "D1_DB_NAME": config["database_name"],
+        "DISK_TREE_R2_ENDPOINT_URL": f"https://{config['account']}.r2.cloudflarestorage.com",
+        "DUCKDB_MEM": "12GB",
+        "DUCKDB_THREADS": "8",
+        "DISKY_LABELS": "app=disky,deployment=oa-r2,component=scan",
+    }
+    return {
+        "taskGroups": [{
+            "taskCount": 1,
+            "parallelism": 1,
+            "taskSpec": {
+                "runnables": [{"container": {
+                    "imageUri": image,
+                    "volumes": ["/mnt/disks/r2-stage:/stage"],
+                }}],
+                "computeResource": {"cpuMilli": 8000, "memoryMib": config["memory_mib"]},
+                "maxRetryCount": 0,
+                "maxRunDuration": f"{config['timeout_seconds']}s",
+                "environment": {
+                    "variables": variables,
+                    "secretVariables": {
+                        name: f"projects/{config['project']}/secrets/{secret}/versions/latest"
+                        for name, secret in config["secrets"].items()
+                    },
+                },
+                "volumes": [{"mountPath": "/mnt/disks/r2-stage", "deviceName": "r2-stage"}],
+            },
+        }],
+        "allocationPolicy": {
+            "instances": [{"policy": {
+                "machineType": config["machine"],
+                "provisioningModel": "STANDARD",
+                "disks": [{"deviceName": "r2-stage", "newDisk": {"type": "pd-balanced", "sizeGb": config["disk_gb"]}}],
+            }}],
+            "serviceAccount": {"email": f"{config['job_account']}@{config['project']}.iam.gserviceaccount.com"},
+            "labels": {"app": "disky", "deployment": "oa-r2", "component": "scan"},
+        },
+        "labels": {"app": "disky", "deployment": "oa-r2", "component": "scan"},
+        "logsPolicy": {"destination": "CLOUD_LOGGING"},
+    }
+
+
+def verify_scan(
+    work: Path,
+    config: dict,
+    scan: str,
+) -> dict:
+    from duckdb import connect
+
+    con = connect()
+    listing = str(work / "listing/*/shard-*.parquet")
+    counts = con.execute(
+        "SELECT bucket, sum(size_bytes)::BIGINT, count(*) FROM read_parquet(?) GROUP BY bucket ORDER BY bucket",
+        [listing],
+    ).fetchall()
+    expected = {bucket: {"bytes": 0, "objects": 0} for bucket in config["buckets"]}
+    for bucket, size, count in counts:
+        if bucket not in expected:
+            raise ValueError(f"Unexpected listing bucket: {bucket}")
+        expected[bucket] = {"bytes": size, "objects": count}
+    path = str(work / "index/path-index.parquet")
+    totals = con.execute("SELECT path, size, n_files FROM read_parquet(?) WHERE depth = 1 ORDER BY path", [path]).fetchall()
+    indexed = {bucket: {"bytes": size, "objects": count} for bucket, size, count in totals}
+    if indexed != {bucket: value for bucket, value in expected.items() if value["objects"]}:
+        raise ValueError("Per-bucket path totals do not match the complete listing")
+    expected_totals = {"bytes": sum(value["bytes"] for value in expected.values()), "objects": sum(value["objects"] for value in expected.values())}
+    meta = loads((work / "snap/meta.json").read_text())
+    if {"bytes": meta["total_bytes"], "objects": meta["total_objects"]} != expected_totals:
+        raise ValueError("Snapshot totals do not match the complete listing")
+    age = loads((work / "snap/age.json").read_text())
+    known = con.execute(
+        "SELECT coalesce(sum(size_bytes), 0)::BIGINT, count(*) FROM read_parquet(?) WHERE created IS NOT NULL",
+        [listing],
+    ).fetchone()
+    if (sum(row["b"] for row in age), sum(row["o"] for row in age)) != known:
+        raise ValueError("Last-modified histogram does not match the dated listing population")
+    verify_age(con, Path(path), work / "index")
+    from dt_cloud.bysize_check import check_views
+
+    checks = check_views(path, str(work / "index/path-index-bysize.parquet"), con=con)
+    if not all(check.exact for check in checks):
+        raise ValueError("Bysize totals do not match the path sort")
+    return {"scan": scan, "date_basis": "last_modified", "buckets": expected, "totals": expected_totals}
+
+
+@group()
+def main() -> None:
+    """OA R2 remote metadata scans; plan emits a reviewable Batch spec."""
+
+
+@main.command()
+@option("-n", "--dry-run", is_flag=True, help="Stage the minimal source context and print the build command without uploading")
+@argument("tag")
+def build(dry_run: bool, tag: str) -> None:
+    root = HERE.parent
+    context = root / "tmp" / f"oa-r2-build-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S%fZ')}"
+    command = build_command(context, tag, profile())
+    context.mkdir(parents=True, exist_ok=False)
+    for directory in ("src", "cloud/src"):
+        copytree(root / directory, context / directory, ignore=ignore_patterns("__pycache__", "*.pyc"))
+    for filename in ("README.md", "pyproject.toml", "uv.lock", "cloud/pyproject.toml", "job/Dockerfile", "job/cloudbuild.yaml", "job/r2.json", "job/r2-scan"):
+        target = context / filename
+        target.parent.mkdir(parents=True, exist_ok=True)
+        copy2(root / filename, target)
+    print(join(command), file=stderr)
+    if not dry_run:
+        run(command, check=True)
+
+
+@main.command()
+@argument("image")
+def plan(image: str) -> None:
+    print(dumps(job_spec(image, profile()), indent=2))
+
+
+@main.command()
+@option("-g", "--generation", help="Archived generation to backfill (requires --scan)")
+@option("-n", "--name", required=True, help="New Batch job name, starting oa-r2-scan-")
+@option("-s", "--scan", help="Backfill age indexes for this existing scan (requires --generation)")
+@argument("image")
+def submit(generation: str | None, name: str, scan: str | None, image: str) -> None:
+    if not fullmatch(r"oa-r2-scan-[a-z0-9-]+", name) or len(name) > 63:
+        raise ClickException("Choose an oa-r2-scan- job name of at most 63 characters")
+    config = profile()
+    scratch = HERE.parent / "tmp"
+    scratch.mkdir(exist_ok=True)
+    spec = scratch / f"{name}.json"
+    planned = job_spec(image, config)
+    if scan or generation:
+        if not scan or not generation:
+            raise ClickException("Backfill requires both --scan and --generation")
+        validate_archive(scan, generation)
+        task = planned["taskGroups"][0]["taskSpec"]
+        task["runnables"][0]["container"].update(entrypoint="python", commands=["job/r2-scan", "backfill-age", scan, generation])
+        for secret in ("SOURCE_ACCESS_KEY_ID", "SOURCE_SECRET_ACCESS_KEY"):
+            del task["environment"]["secretVariables"][secret]
+    spec.write_text(dumps(planned, indent=2) + "\n")
+    run([
+        "gcloud", "batch", "jobs", "submit", name,
+        "--project", config["project"], "--location", config["region"], "--config", str(spec),
+    ], check=True)
+
+
+def validate_archive(scan: str, generation: str) -> None:
+    if not fullmatch(r"\d{4}-\d{2}-\d{2}T\d{4}", scan) or not fullmatch(r"\d{8}T\d{12}Z", generation):
+        raise ClickException("Choose an exact archived scan and generation")
+
+
+@main.command(name="backfill-age")
+@argument("scan")
+@argument("generation")
+def backfill_age(scan: str, generation: str) -> None:
+    if "BATCH_TASK_INDEX" not in environ:
+        raise ClickException("Age backfills run only on the remote Batch job")
+    validate_archive(scan, generation)
+    from google.cloud.storage import Client
+    from boto3 import client
+
+    config = profile()
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+    work = Path("/stage") / stamp
+    work.mkdir(parents=True, exist_ok=False)
+    data = Client(project=config["project"]).bucket(config["data_bucket"])
+    source = work / "path-index.parquet"
+    data.blob(f"scans/{scan}/{generation}/index/path-index.parquet").download_to_filename(str(source))
+    out = work / "index"
+    build_age(source, out)
+    publisher = client("s3", endpoint_url=environ["DISK_TREE_R2_ENDPOINT_URL"], region_name="auto", aws_access_key_id=environ["R2_ACCESS_KEY_ID"].strip(), aws_secret_access_key=environ["R2_SECRET_ACCESS_KEY"].strip())
+    key = f"listing/{scan}/index/{stamp}"
+    uploaded = []
+    for path in sorted(out.iterdir()):
+        data.blob(f"age-backfills/{scan}/{stamp}/{path.name}").upload_from_filename(str(path), if_generation_match=0)
+        object_key = f"{key}/{path.name}"
+        publisher.upload_file(str(path), config["serving_bucket"], object_key)
+        uploaded.append((object_key, path.stat().st_size))
+    verify_uploads(publisher, config["serving_bucket"], uploaded)
+    sync = ["dt-cloud", "index-sync", scan, "-A", "-b", f"r2://{config['serving_bucket']}", "-d", str(out), "-g", stamp, "-k", key]
+    run([*sync, "-r"], check=True)
+    run([*sync, "-p"], check=True)
+    data.blob(f"age-backfills/{scan}/{stamp}/_SUCCESS.json").upload_from_string(dumps({"scan": scan, "source_generation": generation, "age_generation": stamp}), content_type="application/json", if_generation_match=0)
+
+
+@main.command(name="verify")
+@option("-s", "--scan", required=True, help="Scan identifier for the verification manifest")
+@argument("work", type=Path)
+def verify(scan: str, work: Path) -> None:
+    print(dumps(verify_scan(work, profile(), scan), indent=2))
+
+
+@main.command(name="run")
+def scan_run() -> None:
+    if "BATCH_TASK_INDEX" not in environ:
+        raise ClickException("The full scan runs only on its remote Batch job")
+    config = profile()
+    for name in config["secrets"]:
+        if not environ.get(name):
+            raise ClickException(f"Missing runtime secret: {name}")
+    stamp = datetime.now(timezone.utc)
+    scan = stamp.strftime("%Y-%m-%dT%H%M")
+    generation = stamp.strftime("%Y%m%dT%H%M%S%fZ")
+    work = Path("/stage") / generation
+    work.mkdir(parents=True, exist_ok=False)
+    source = {
+        **environ,
+        "AWS_ACCESS_KEY_ID": environ["SOURCE_ACCESS_KEY_ID"].strip(),
+        "AWS_SECRET_ACCESS_KEY": environ["SOURCE_SECRET_ACCESS_KEY"].strip(),
+    }
+    endpoint = environ["DISK_TREE_R2_ENDPOINT_URL"]
+    for bucket in config["buckets"]:
+        print(f"Listing metadata: {bucket}", file=stderr, flush=True)
+        run([
+            "disk-tree", "bulk-list", f"r2://{bucket}", "-E", endpoint,
+            "-o", str(work / "listing" / bucket), "-P", "4", "-w", "4",
+        ], env=source, check=True)
+    run([
+        "dt-cloud", "path-index", "-S", "-U", "-d", scan,
+        "-l", str(work / "listing/*/shard-*.parquet"),
+        "-P", str(work / "index/path-index.parquet"), "-o", str(work / "snap"),
+    ], check=True)
+    build_age(work / "index/path-index.parquet", work / "index")
+    report = verify_scan(work, config, scan)
+    report["generation"] = generation
+    (work / "verification.json").write_text(dumps(report, indent=2) + "\n")
+    from dt_cloud.index_footer import extract, write_groups_blob, write_groups_parquet
+
+    from dt_cloud.index import AGE_PYRAMID_VARIANTS
+
+    for variant in ("path-index", "path-index-bysize", *AGE_PYRAMID_VARIANTS.values()):
+        path = str(work / "index" / f"{variant}.parquet")
+        schema, rows = extract(path)
+        write_groups_blob(path, schema, rows)
+        write_groups_parquet(path, schema, rows)
+    from google.cloud.storage import Client
+
+    data = Client(project=config["project"]).bucket(config["data_bucket"])
+    for path in sorted(work.rglob("*")):
+        if path.is_file() and not any(part.startswith(".") for part in path.relative_to(work).parts):
+            data.blob(f"scans/{scan}/{generation}/{path.relative_to(work)}").upload_from_filename(str(path), if_generation_match=0)
+    from boto3 import client
+
+    publisher = client(
+        "s3",
+        endpoint_url=endpoint,
+        region_name="auto",
+        aws_access_key_id=environ["R2_ACCESS_KEY_ID"].strip(),
+        aws_secret_access_key=environ["R2_SECRET_ACCESS_KEY"].strip(),
+    )
+    key = f"listing/{scan}/index/{generation}"
+    uploaded = []
+    for directory, prefix in ((work / "index", key), (work / "snap", f"snapshots/r2/{scan}")):
+        for path in sorted(directory.iterdir()):
+            if path.is_file():
+                object_key = f"{prefix}/{path.name}"
+                publisher.upload_file(str(path), config["serving_bucket"], object_key)
+                uploaded.append((object_key, path.stat().st_size))
+    manifest = dumps(report).encode()
+    publisher.put_object(Bucket=config["serving_bucket"], Key=f"{key}/verification.json", Body=manifest)
+    uploaded.append((f"{key}/verification.json", len(manifest)))
+    verify_uploads(publisher, config["serving_bucket"], uploaded)
+    # Stage every variant's rows before any complete scan becomes visible.
+    sync = [
+        "dt-cloud", "index-sync", scan,
+        "-b", f"r2://{config['serving_bucket']}", "-d", str(work / "index"),
+        "-g", generation, "-k", key,
+    ]
+    for variant in ("path", "bysize", *AGE_PYRAMID_VARIANTS.values()):
+        sync.extend(("-v", variant))
+    run([*sync, "-r"], check=True)
+    run([*sync, "-p"], check=True)
+    data.blob(f"scans/{scan}/{generation}/_SUCCESS.json").upload_from_string(dumps(report), content_type="application/json", if_generation_match=0)
+    print(dumps(report))
+
+
+if __name__ == "__main__":
+    main()
