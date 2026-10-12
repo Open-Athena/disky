@@ -13,6 +13,7 @@ import { AttributionRules } from './AttributionRules'
 import { DiffTreemap, DiffHeader, useDiffModel } from './DiffTreemap'
 import { DiffTable } from './DiffTable'
 import { DiskSpace } from './DiskSpace'
+import { DiskSpaceDiff, diskDiffScan } from './DiskSpaceDiff'
 import type { DiffData } from './diffModel'
 import { ScanCombobox } from './ScanCombobox'
 import { ago, buildUserIndex, epochDaysToDate } from './colors'
@@ -187,10 +188,10 @@ function AppContent() {
   const rules: Rules | null = rulesQ.data ?? null
   // Ledger actions record which scan the actor was viewing.
   useEffect(() => setCurrentScan(asof ?? undefined), [asof])
-  const scanQuery = <T,>(name: string) => ({
-    queryKey: [name, store.key, asof],
-    queryFn: () => sfetch(`${store.base}/${asof}/${name}.json`).then(r => r.json() as Promise<T>),
-    enabled: !!asof,
+  const scanQuery = <T,>(name: string, scan = asof) => ({
+    queryKey: [name, store.key, scan],
+    queryFn: () => sfetch(`${store.base}/${scan}/${name}.json`).then(r => r.json() as Promise<T>),
+    enabled: !!scan,
     staleTime: Infinity,
   })
   // `?f=` (name filter) and `?o=` (owner axis): the page's scope, sent to the
@@ -335,6 +336,12 @@ function AppContent() {
   const fromScan = from && asof ? latestScan(from, earlier, times) : null
   const startMiss = useMemo(() => fromMiss(from, asof, scans, times), [from, asof, scans, times])
   const diffPrev = startMiss ? null : fromScan ?? spanScan ?? prevScan
+  // A store whose scans carry physical disk readings (`meta.disk_space`) compares them across the diff;
+  // any other store never fetches the earlier scan's meta (`diskDiffScan`).
+  const beforeMetaQ = useQuery({
+    ...scanQuery<Meta>('meta', diffPrev),
+    enabled: diskDiffScan(metaQ.data?.disk_space, diffPrev) != null,
+  })
   // Hour-rounded span back from `to` — the previous scan clears it, anything
   // else round-trips as its own span (nearest-scan resolution recovers it,
   // and the link keeps following `latest`).
@@ -1486,6 +1493,7 @@ function AppContent() {
               <span className="loading"> · aligning {fmtS(diffPrev)} → {fmtS(asof)}…</span>
             )}
           </span>} />
+          <DiskSpaceDiff before={beforeMetaQ.data?.disk_space} after={meta?.disk_space} />
           {/* The slot keeps the treemap's height through a reload: the last
               diff dims under the marker, or (first load) a skeleton stands in.
               The height held is the one the last settled map actually drew
