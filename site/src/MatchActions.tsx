@@ -177,7 +177,7 @@ export function RowActsView({ state, confirmT, act, warm, canTrash, assigning, f
       ref={focus?.ref} {...focus?.handlers} onMouseEnter={onIntent} onFocus={onIntent}>
       {state.s === 'idle' && <>
         {canTrash && (
-          <Tooltip content="Stage this row’s matches for deletion (not the rest of the row; listed when you click) — an admin approves and dispatches from /staged">
+          <Tooltip placement="right" content="Stage this row’s matches for deletion (not the rest of the row; listed when you click) — an admin approves and dispatches from /staged">
             <button type="button" className="trash" onClick={() => void act.start({ kind: 'stage' })} aria-label="trash"><FaRegTrashCan /></button>
           </Tooltip>
         )}

@@ -519,7 +519,7 @@ describe('<TimeSeries> series flags + band callouts', () => {
     expect(yLabelsOf(container)).toEqual(['10', '12', '14', '16', '18', '20'])
   })
 
-  it('a band callout (y0) sits centred inside the band, and a band too thin to hold it gets none', () => {
+  it('a band callout (y0) hugs the upper trace inside the band, and a band too thin to hold it gets none', () => {
     const pts = [{ t: 0, top: 80, bot: 30 }, { t: 1, top: 31, bot: 30 }]
     const { container } = withSize(() =>
       render(
@@ -538,9 +538,28 @@ describe('<TimeSeries> series flags + band callouts', () => {
     const anno = [...container.querySelectorAll('svg text[paint-order="stroke"]')]
     expect(anno.map(t => t.textContent)).toEqual(['tall'])
     const { yToPx } = geom(400, 200, 0, 1, 0, 80 * 1.05)
-    expect(Number(anno[0].getAttribute('y'))).toBeCloseTo((yToPx(80) + yToPx(30)) / 2, 6)
+    expect(Number(anno[0].getAttribute('y'))).toBeCloseTo(yToPx(80) + 2 + 10.5 * 1.15 / 2, 6)
     expect(anno[0].getAttribute('dominant-baseline')).toBe('middle')
     expect(anno[0].getAttribute('clip-path')).toMatch(/^url\(#dt-ts-clip-\w+\)$/)
+  })
+
+  it('a fitted axis does not detach an off-screen band label onto the viewport edge', () => {
+    const { container } = withSize(() => render(
+      <TimeSeries
+        series={[{ key: 'top', points: [{ t: 0, y: 80 }, { t: 1, y: 100 }], fit: true }]}
+        getX={p => p.t}
+        getY={p => p.y}
+        yFrom="data"
+        annotations={[
+          { x: 0, y: 120, y0: 0, label: 'off screen' },
+          { x: 1, y: 100, y0: 0, label: 'visible edge' },
+        ]}
+      />,
+    ))
+    const anno = [...container.querySelectorAll('svg text[paint-order="stroke"]')]
+    expect(anno.map(t => t.textContent)).toEqual(['visible edge'])
+    const { yToPx } = geom(400, 200, 0, 1, 79, 101)
+    expect(Number(anno[0].getAttribute('y'))).toBeCloseTo(yToPx(100) + 2 + 10.5 * 1.15 / 2, 6)
   })
 
   it('a series that goes negative extends a zero-anchored axis below 0, with the 0 grid line emphasised', () => {

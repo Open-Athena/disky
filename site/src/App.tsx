@@ -57,6 +57,7 @@ import { hrefWithScan, NoScanMatch } from './NoScanMatch'
 import { selOf } from './scanSlug'
 import { SizeOverTime } from './SizeOverTime'
 import { useStore, useStoreFetch } from './store'
+import { listingTime } from './listingTime'
 import { perf } from './perf'
 import { useDocTitle } from './title'
 import { TypedPrefixModal } from './TypedPrefix'
@@ -147,6 +148,7 @@ function AppContent() {
   const navType = useNavigationType()
   const navigate = useNavigate()
   const store = useStore()
+  const time = listingTime(store.scheme)
   const sfetch = useStoreFetch()
   // Legacy `?path=<prefix>` links (cw-s3 drilled by query param until the
   // union): forward to the URL-path form, keeping the other params.
@@ -1159,8 +1161,8 @@ function AppContent() {
           <label className="tb-ctl">
             <span className="lbl">color</span>
             <Explain text={
-              effMode === 'date' ? <>Object <b>creation time</b>, from the bucket listings (each cell = the byte-weighted mean of its objects). {store.objectsNote}</>
-              : effMode === 'read' ? <><b>Last read</b> — the most recent GET/HEAD/LIST anywhere under each cell, from the GCS usage logs (logging began {readRange ? epochDaysToDate(readRange.min) : '—'}). Brick-red = <b>never read</b> since then: prime deletion candidates.</>
+              effMode === 'date' ? <>Object <b>{time.description}</b>, from the bucket listings (each cell = the byte-weighted mean of its objects). {store.objectsNote}</>
+              : effMode === 'read' ? <><b>Last observed read</b> — the most recent logged GET/HEAD/LIST anywhere under each cell (logging began {readRange ? epochDaysToDate(readRange.min) : '—'}). Brick-red = <b>no observed reads</b> since then. Logs may omit events; absence is not proof of no access.</>
               : effMode === 'user' ? <>Dominant <b>owner</b> of each cell; the legend lists the top users of the current view.</>
               : <>Top-level directory each cell belongs to.</>
             }>
@@ -1525,17 +1527,17 @@ function AppContent() {
       <section id="mtime">
         {/* Granularity is auto-picked (and user-switchable) inside AgeChart, so
             the heading stays unit-free rather than lying about "month". */}
-        <h2>Bytes by creation date{' '}
+        <h2>Bytes by {time.noun} date{' '}
           <Tooltip content={<>
-            When each stored byte was <b>written</b> — the object’s creation time from the listing.
-            {store.objectsNote}{readRange ? <>{' '}The other time axis is <b>last read</b> (from the usage logs, since {epochDaysToDate(readRange.min)}) —
-            color by it to see which vintages nobody has touched.</> : null}{' '}The chart’s color axis is its own (right):
+            The object’s <b>{time.description}</b> from the listing.
+            {store.objectsNote}{readRange ? <>{' '}The other time axis is <b>last observed read</b> (from the usage logs, since {epochDaysToDate(readRange.min)}) —
+            color by it to see which vintages have no recorded reads. Logs may omit events.</> : null}{' '}The chart’s color axis is its own (right):
             it follows the map’s until you pick one.
           </>}><span className="info" tabIndex={0} aria-label="about this chart">ⓘ</span></Tooltip>
         </h2>
         {ageQ.isPending && !!asof && <Skeleton height={220} label="loading ages…" />}
         {age.length > 0 && (
-          <AgeChart rows={age} baseRows={diffPrev ? ageBase : undefined} diffLabels={diffPrev && asof ? { from: fmtS(diffPrev), to: fmtS(asof) } : undefined} catOrder={catOrder} mode={ageMode} onMode={m => setAgeModeP(m)} modes={ageModes} userIdx={userIdx} readRange={ageReadRange} />
+          <AgeChart rows={age} baseRows={diffPrev ? ageBase : undefined} diffLabels={diffPrev && asof ? { from: fmtS(diffPrev), to: fmtS(asof) } : undefined} catOrder={catOrder} mode={ageMode} onMode={m => setAgeModeP(m)} modes={ageModes} userIdx={userIdx} readRange={ageReadRange} scheme={store.scheme} />
         )}
       </section>
       )}
