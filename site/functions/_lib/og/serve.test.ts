@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { cardSvg, type CardData } from './card'
 import { expDay, imagePath, ogKey } from './sign'
-import { anonymousPage, serveCard, stampPage, type OgEnv } from './serve'
+import { anonymousPage, serveCard, siteOf, stampPage, type OgEnv } from './serve'
 import { anonymousPolicy } from './policy'
 
 const mocks = vi.hoisted(() => ({
@@ -71,7 +71,7 @@ describe('restricted anonymous OG responses', () => {
     const response = await serveCard({ request: request(path), env: env() })
     expect(textNodes(await response.text())).toEqual(['CW storage', 'Private storage dashboard', '', 'Sign in to explore storage', ''])
     expect([mocks.live.mock.calls.length, mocks.data.mock.calls, mocks.head.mock.calls]).toEqual([1, [], []])
-    expect(mocks.match.mock.calls.map(call => call[0].url)).toEqual(['https://cw.example/og/map.png?policy=generic&r=2'])
+    expect(mocks.match.mock.calls.map(call => call[0].url)).toEqual(['https://cw.example/og/map.png?policy=generic&r=3'])
   })
 
   it('valid explicit shares remain detailed and private', async () => {
@@ -90,7 +90,7 @@ describe('restricted anonymous OG responses', () => {
     await stampPage(env(), new URL('https://cw.example/secret/path?f=private'), new Response('shell'))
     expect(mocks.stamp.mock.calls.map(call => call[1])).toEqual([{
       title: 'CW storage', desc: 'Private storage dashboard. Sign in to explore storage.',
-      image: 'https://cw.example/og/map.png?policy=generic&r=2', imageType: 'image/png', page: 'https://cw.example/secret/path',
+      image: 'https://cw.example/og/map.png?policy=generic&r=3', imageType: 'image/png', page: 'https://cw.example/secret/path',
     }])
     expect([mocks.data.mock.calls, mocks.scan.mock.calls, mocks.head.mock.calls]).toEqual([[], [], []])
   })
@@ -105,8 +105,8 @@ describe('restricted anonymous OG responses', () => {
       const image = new URL(call[1].image)
       return [image.searchParams.get('path'), image.searchParams.get('s'), image.searchParams.get('policy'), image.searchParams.get('r')]
     })).toEqual([
-      ['secret', '2026-10-12T1201', 'generic', '2'],
-      ['secret', '2026-10-13T1201', 'generic', '2'],
+      ['secret', '2026-10-12T1201', 'generic', '3'],
+      ['secret', '2026-10-13T1201', 'generic', '3'],
     ])
   })
 
@@ -155,7 +155,7 @@ describe('restricted anonymous OG responses', () => {
     expect([response.headers.get('x-og-tier'), response.headers.get('cache-control'), textNodes(await response.text())])
       .toEqual(['anon', 'public, max-age=0, must-revalidate', ['CW storage', 'secret/path', 'scan 2026-10-12T1201', '99 TiB · 123 objects']])
     expect(mocks.match.mock.calls.map(call => call[0].url)).toEqual([
-      'https://cw.example/og/map.png?policy=shape&r=2&s=2026-10-12T1201&tier=anon&h=0',
+      'https://cw.example/og/map.png?policy=shape&r=3&s=2026-10-12T1201&tier=anon&h=0',
     ])
   })
 
@@ -164,12 +164,39 @@ describe('restricted anonymous OG responses', () => {
     const response = await serveCard({ request: request('/og/map.png?policy=shape&r=2'), env: env({ OG_ANONYMOUS: 'generic' }) })
     expect([textNodes(await response.text()), mocks.match.mock.calls.map(call => call[0].url)]).toEqual([
       ['CW storage', 'Private storage dashboard', '', 'Sign in to explore storage', ''],
-      ['https://cw.example/og/map.png?policy=generic&r=2'],
+      ['https://cw.example/og/map.png?policy=generic&r=3'],
     ])
   })
 
   it('missing and unknown policy values fail closed; public deployments keep public cards', () => {
     expect([{}, { OG_ANONYMOUS: 'invalid' }, { OG_ANONYMOUS: 'shape' }, { AUTH_MODE: 'public' }, { AUTH_MODE: 'public', OG_ANONYMOUS: 'invalid' }].map(anonymousPolicy))
       .toEqual(['generic', 'generic', 'shape', 'shape', 'generic'])
+  })
+
+  it('configured preview defaults match the deployment’s frontend color default', () => {
+    expect([undefined, 'w', 'tree', 'invalid'].map(c => siteOf(env({ OG_DEFAULT_COLOR: c }))))
+      .toEqual([
+        { name: 'CW storage', scheme: 'gs://' },
+        { name: 'CW storage', scheme: 'gs://', defaultColor: 'date' },
+        { name: 'CW storage', scheme: 'gs://', defaultColor: 'tree' },
+        { name: 'CW storage', scheme: 'gs://' },
+      ])
+  })
+
+  it('HTML image URLs and render caches retain distinct selected color modes', async () => {
+    const deployment = env({ OG_CARDS: '1', OG_ANONYMOUS: 'shape' })
+    for (const c of ['t', 'u']) {
+      await stampPage(deployment, new URL(`https://cw.example/?c=${c}`), new Response('shell'))
+      const image = mocks.stamp.mock.calls.at(-1)![1].image
+      await serveCard({ request: new Request(image), env: deployment })
+    }
+    expect(mocks.stamp.mock.calls.map(call => {
+      const params = new URL(call[1].image).searchParams
+      return [params.get('c'), params.get('r'), params.get('s')]
+    })).toEqual([['t', '3', '2026-10-12T1201'], ['u', '3', '2026-10-12T1201']])
+    expect(mocks.data.mock.calls.map(call => call[3])).toEqual([
+      { c: 't', d: '2026-10-12T1201' }, { c: 'u', d: '2026-10-12T1201' },
+    ])
+    expect(mocks.match.mock.calls.map(call => new URL(call[0].url).searchParams.get('c'))).toEqual(['t', 'u'])
   })
 })

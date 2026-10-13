@@ -59,6 +59,7 @@ import { SizeOverTime } from './SizeOverTime'
 import { useStore, useStoreFetch } from './store'
 import { listingTime } from './listingTime'
 import { knownBucket, storeDefaultColor } from './stores'
+import { colorModeCodec as modeCodec, mapColorMode } from './colorMode'
 import { perf } from './perf'
 import { useDocTitle } from './title'
 import { TypedPrefixModal } from './TypedPrefix'
@@ -80,17 +81,6 @@ const MODES: ColorMode[] = ['read', 'user', 'date', 'tree']
  * accepts the legacy forms and the rewrite is ours. (The retired mark
  * coloring — `m`/`marks`/`mark`/`fate` — decodes to nothing: the default.)
  */
-const MODE_CODES: Record<string, string> = { tree: 't', date: 'w', read: 'r', user: 'u' }
-const MODE_ALIASES: Record<string, string> = {
-  t: 'tree', tree: 'tree',
-  w: 'date', written: 'date', age: 'date', date: 'date',
-  r: 'read', read: 'read',
-  u: 'user', user: 'user',
-}
-const modeCodec = {
-  encode: (v: string | undefined) => (v === undefined ? undefined : MODE_CODES[v] ?? v),
-  decode: (e: string | undefined) => (e === undefined ? undefined : MODE_ALIASES[e] ?? e),
-}
 const shadeCodec = {
   encode: (v: string | undefined) => (v === 'class' ? 'c' : undefined),
   decode: (e: string | undefined): string | undefined => (e === 'c' || e === 'class' ? 'class' : undefined),
@@ -724,7 +714,6 @@ function AppContent() {
   // interesting axis is who else is in there), any other by tree, unless the
   // deployment selects a different default.
   const lensDefaultMode: ColorMode = storeDefaultColor(store)
-  const mode: ColorMode = (MODES as string[]).includes(modeP ?? '') ? (modeP as ColorMode) : lensDefaultMode
   const setMode = (m: ColorMode) => setModeP(m === lensDefaultMode ? undefined : m)
   // The scan carries attribution (the owner axis and user coloring apply) —
   // from the scan's meta, not the current view, which may hold no user bytes
@@ -732,7 +721,7 @@ function AppContent() {
   const hasAttr = !!meta?.users?.length
   // The page bar's controls, each on what backs it (`pageBar.ts`).
   const bar = barControls({ owners: store.owners, hasAttr, classes: store.prices, readRange: !!readRange })
-  const effMode: ColorMode = bar.color.includes(mode) ? mode : bar.color.includes('user') ? 'user' : 'tree'
+  const effMode = mapColorMode(modeP, bar.color, lensDefaultMode)
   // The age chart's color axis: an explicit `?ac=` wins; otherwise it follows
   // the map. The read axis needs strata that carry `a` (scans published from
   // 8/29 on) — without them it's offered disabled and the chart falls back to
@@ -920,7 +909,7 @@ function AppContent() {
   // move it.
   const pickUser = (u: string, switchMode = true) => {
     setOwnerUser(u)
-    if (switchMode && mode !== 'user') setMode('user')
+    if (switchMode && effMode !== 'user') setMode('user')
   }
   const pickUnowned = () => setOP('unowned')
   const clearHl = () => setOP(undefined)
