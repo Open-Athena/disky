@@ -140,7 +140,7 @@ if daily_enabled:
         "r2-daily", project=project, region=region, name="oa-r2-usage-daily",
         description="Metadata-only daily scan of the four approved OA R2 buckets",
         schedule="15 7 * * *", time_zone="Etc/UTC", attempt_deadline="180s",
-        retry_config={"retry_count": 0},
+        retry_config={"retry_count": 0, "max_retry_duration": "0s"},
         http_target={
             "uri": f"https://batch.googleapis.com/v1/projects/{project}/locations/{region}/jobs",
             "http_method": "POST", "headers": {"Content-Type": "application/json"},

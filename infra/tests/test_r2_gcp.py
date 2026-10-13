@@ -93,7 +93,7 @@ def test_independent_resources_and_optional_scheduler(daily_enabled: bool):
                 "role": "roles/iam.serviceAccountUser", "member": "serviceAccount:oa-r2-usage-scheduler@oa-internal-450019.iam.gserviceaccount.com",
             }
             daily = resources[("r2-daily", "gcp:cloudscheduler/job:Job")]["inputs"]
-            assert (daily["schedule"], daily["timeZone"], daily["retryConfig"]) == ("15 7 * * *", "Etc/UTC", {"retryCount": 0})
+            assert (daily["schedule"], daily["timeZone"], daily["retryConfig"]) == ("15 7 * * *", "Etc/UTC", {"retryCount": 0, "maxRetryDuration": "0s"})
             target = daily["httpTarget"]
             assert target["oauthToken"] == {"serviceAccountEmail": "oa-r2-usage-scheduler@oa-internal-450019.iam.gserviceaccount.com", "scope": "https://www.googleapis.com/auth/cloud-platform"}
             planned = loads(b64decode(target["body"]))
