@@ -8,6 +8,13 @@ import { pickScanSelection } from './scanSelection'
 // How often an unpinned tab re-checks for newly published scans.
 export const SCANS_POLL_MS = 5 * 60_000
 
+/** Capture/publication details use the viewer's timezone, labelled explicitly. */
+export function fmtTimestamp(at: string, timeZone?: string): string {
+  return new Date(at).toLocaleString('en-US', {
+    year: 'numeric', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit', timeZoneName: 'short', timeZone,
+  })
+}
+
 
 // Scan labels: drop the redundant year for the current one, so a list of
 // same-year scans reads as `8/17` rather than `2026-08-17`. Scan ids are

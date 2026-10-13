@@ -51,7 +51,7 @@ import { MultiSelect } from './MultiSelect'
 import { SiteNav, topbarH } from './SiteNav'
 import { canvasWidth } from './canvas'
 import type { MenuEntry } from './SiteNav'
-import { DAY, encodeScan, fromMiss, pendingNote, latestScan, nearestScan, noScansYet, scanInstant, useScan } from './scan'
+import { DAY, encodeScan, fmtTimestamp, fromMiss, pendingNote, latestScan, nearestScan, noScansYet, scanInstant, useScan } from './scan'
 import { scanCmp } from './scanSlug'
 import { hrefWithScan, NoScanMatch } from './NoScanMatch'
 import { selOf } from './scanSlug'
@@ -1045,14 +1045,15 @@ function AppContent() {
 
   const segs = drillPath.split('/').filter(Boolean)
   const pathScheme = store.bucketSchemes?.[segs[0]] ?? store.scheme
-  const recordedAt = meta?.disk_space?.captured_at ?? meta?.published
+  const capturedAt = meta?.captured_at ?? meta?.disk_space?.captured_at
+  const recordedAt = capturedAt ?? meta?.published
   const scanTip = meta && (
     <div className="scan-tip">
-      {meta.disk_space && (
-        <div>captured {new Date(meta.disk_space.captured_at).toISOString().replace('T', ' ').slice(0, 16)} UTC</div>
+      {capturedAt && (
+        <div>captured {fmtTimestamp(capturedAt)}</div>
       )}
       {meta.published && (
-        <div>published {new Date(meta.published).toISOString().replace('T', ' ').slice(0, 16)} UTC</div>
+        <div>published {fmtTimestamp(meta.published)}</div>
       )}
       <div><b>{fmtBytes(meta.total_bytes)}</b> · <b>{fmtN(meta.total_objects)}</b> objects across {store.rootLabel}</div>
       {estCost && (
