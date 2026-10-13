@@ -3,10 +3,11 @@
 // previous scan — from the D1 rows `dt-cloud scan-run record | backfill`
 // writes. DIY SVG: a duration strip over all runs, a phase bar per row, and a
 // phase timeline per run.
-import { useEffect, useLayoutEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent, type ReactNode, type RefObject } from 'react'
+import { useLayoutEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent, type ReactNode, type RefObject } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 import { SiteNav } from './SiteNav'
+import { useDocTitle } from './title'
 import { SiteKbd } from './SiteKbd'
 import { Tooltip } from './Tooltip'
 import { axisTicks } from './runChart'
@@ -144,7 +145,7 @@ export function ScansPage() {
   const { bytes, delta } = useBytes()
   const [kind, setKind] = useState('')
   const [status, setStatus] = useState('')
-  useEffect(() => { document.title = 'Scan runs' }, [])
+  useDocTitle('Scans')
   const runs = q.data?.runs ?? []
   const order = useMemo(() => phaseOrder(runs.flatMap(r => r.spans.map((s, i) => ({ phase: s.phase, seq: i })))), [runs])
   const color = colorer(order)
@@ -309,7 +310,7 @@ export function ScanRunPage() {
   const q = useScanRun(id)
   const list = useScanRuns()
   const slug = useMinSlug(DEFAULT_STORE)
-  useEffect(() => { document.title = q.data ? `Scan run ${q.data.run.scan}` : 'Scan run' }, [q.data])
+  useDocTitle(q.data ? q.data.run.scan : 'Scan', 'Scans')
   const order = useMemo(() => phaseOrder((list.data?.runs ?? []).flatMap(r => r.spans.map((s, i) => ({ phase: s.phase, seq: i })))), [list.data])
   const color = colorer(order.length ? order : (q.data?.spans ?? []).map(s => s.phase))
   const d = q.data
@@ -334,8 +335,8 @@ export function ScanRunPage() {
         </p>
         {r.status === 'failed' && <div className="sr-failure"><b>Failed {d.failed_at ? (d.failed_at.startsWith('after') ? d.failed_at : `in ${d.failed_at}`) : ''}</b>{r.error && <div><code>{r.error}</code></div>}</div>}
         <dl className="sr-facts">
-          <div><dt>run id</dt><dd><code>{r.run_id}</code></dd></div>
-          {r.job_name && <div><dt>Batch job</dt><dd><code>{r.job_name}</code>{r.region && <span className="dim"> · {r.region}</span>}</dd></div>}
+          <div><dt>run id</dt><dd>{d.project ? <a href={logsHref(d.project, r)} target="_blank" rel="noreferrer"><code>{r.run_id}</code></a> : <code>{r.run_id}</code>}</dd></div>
+          {r.job_name && <div><dt>Batch job</dt><dd>{d.project && r.region ? <a href={batchHref(d.project, r.region, r.job_name)} target="_blank" rel="noreferrer"><code>{r.job_name}</code></a> : <code>{r.job_name}</code>}{r.region && <span className="dim"> · {r.region}</span>}</dd></div>}
           {r.gen && <div><dt>index generation</dt><dd><code>{r.gen}</code></dd></div>}
           {r.image && <div><dt>image</dt><dd><code>{r.image}</code></dd></div>}
           <div><dt>recorded by</dt><dd>{r.source === 'job' ? 'the job' : 'backfill (Batch, logs, the bucket)'}</dd></div>
