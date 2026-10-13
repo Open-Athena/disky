@@ -21,7 +21,7 @@ import { warmSubtree } from '../../api/subtree.js'
 import { colorModeCodec } from '../../../src/colorMode.js'
 import type { ColorMode } from '../../../src/types.js'
 
-const RENDER_VERSION = '4'
+const RENDER_VERSION = '5'
 
 export type OgEnv = Env & {
   ASSETS: { fetch: (req: Request) => Promise<Response> }

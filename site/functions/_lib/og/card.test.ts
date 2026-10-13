@@ -20,6 +20,15 @@ const texts = (svg: string) => [...svg.matchAll(/<text[^>]*>([^<]*)<\/text>/g)].
 const count = (svg: string, cls: string) => (svg.match(new RegExp(`class="${cls}"`, 'g')) ?? []).length
 
 describe('cardSvg', () => {
+  it('shows the root title once, while keeping the site name on drill cards', () => {
+    const root = { ...data('anon'), site: 'Public R2 Treemap Demo', title: 'Public R2 Treemap Demo' }
+    expect(texts(cardSvg(root))).toEqual([
+      'Public R2 Treemap Demo', 'scan 2026-10-02', '51.1 TiB · 179,327,698 objects',
+    ])
+    const svg = cardSvg(root)
+    expect([...svg.matchAll(/<text x="40" y="([^"]+)"[^>]*font-size="([^"]+)"[^>]*>/g)].map(m => [m[1], m[2]]))
+      .toEqual([['60', '32'], ['92', '20'], ['598', '24']])
+  })
   it('anon: shapes only; the text is the header and the total, nothing naming a child or a person', () => {
     const svg = cardSvg(data('anon'))
     expect([texts(svg), count(svg, 'tile'), count(svg, 'kid')]).toEqual([
