@@ -52,6 +52,7 @@ function place(): PlacedCell<N>[] {
 }
 
 const label = (c: PlacedCell<N>) => (c.node as N).n
+const round = (n: number) => Number(n.toFixed(8))
 
 describe('reclaimTitleColumns', () => {
   const columns = [
@@ -60,11 +61,18 @@ describe('reclaimTitleColumns', () => {
     { it: 'lower', x: 120, y: 20, w: 80, h: 60 },
   ]
 
+  it('accounts for reclaimed space in one shared area scale for every sibling', () => {
+    const raised = reclaimTitleColumns(columns, 100, 80, 20)
+    const scales = raised.map((r, i) => Number((r.w * r.h / (columns[i].w * columns[i].h)).toFixed(8)))
+    expect(scales).toEqual([1.08695652, 1.08695652, 1.08695652])
+    expect(raised.map(r => Number((r.w * r.h).toFixed(8)))).toEqual([10434.7826087, 1739.13043478, 5217.39130435])
+  })
+
   it('stretches a complete right column together and preserves its bottom edge', () => {
-    expect(reclaimTitleColumns(columns, 100, 80, 20)).toEqual([
-      { it: 'left', x: 0, y: 0, w: 120, h: 80 },
-      { it: 'upper', x: 120, y: -20, w: 80, h: 25 },
-      { it: 'lower', x: 120, y: 5, w: 80, h: 75 },
+    expect(reclaimTitleColumns(columns, 100, 80, 20).map(r => ({ ...r, x: round(r.x), w: round(r.w) }))).toEqual([
+      { it: 'left', x: 0, y: 0, w: 130.43478261, h: 80 },
+      { it: 'upper', x: 130.43478261, y: -20, w: 69.56521739, h: 25 },
+      { it: 'lower', x: 130.43478261, y: 5, w: 69.56521739, h: 75 },
     ])
     expect(columns).toEqual([
       { it: 'left', x: 0, y: 0, w: 120, h: 80 },
@@ -104,9 +112,9 @@ describe('title-space placement', () => {
 
   it('lifts right columns within the parent stroke and hit-tests their reclaimed region', () => {
     const cells = layoutCells(top, [root], 'shared', config)
-    expect(cells[0].children.map(c => [label(c), c.x, c.y, c.w, c.h])).toEqual([
-      ['left', 1, 20, 99, 79],
-      ['right', 100, 1, 99, 98],
+    expect(cells[0].children.map(c => [label(c), ...[c.x, c.y, c.w, c.h].map(round)])).toEqual([
+      ['left', 1, 20, 109.62711864, 79],
+      ['right', 110.62711864, 1, 88.37288136, 98],
     ])
     expect(cells[0].titleWidth).toBe(60)
     expect([hitTest(cells, 30, 10)?.node, hitTest(cells, 150, 10)?.node]).toEqual([branch, branch.children![1]])
@@ -114,9 +122,9 @@ describe('title-space placement', () => {
 
   it('preserves the gaps inset while reclaiming the strip', () => {
     const cells = layoutCells(top, [root], 'gaps', { ...config, tilingFor: () => 'gaps' })
-    expect(cells[0].children.map(c => [label(c), c.x, c.y, c.w, c.h])).toEqual([
-      ['left', 3, 20, 97, 77],
-      ['right', 100, 3, 97, 94],
+    expect(cells[0].children.map(c => [label(c), ...[c.x, c.y, c.w, c.h].map(round)])).toEqual([
+      ['left', 3, 20, 106.64327485, 77],
+      ['right', 109.64327485, 3, 87.35672515, 94],
     ])
   })
 

@@ -693,13 +693,14 @@ describe('<Treemap> reclaimed titles', () => {
       const title = parent.querySelector(':scope > .dt-treemap-lbl') as HTMLElement
       const kids = [...parent.querySelectorAll(':scope > .dt-treemap-inner > .dt-treemap-cell')] as HTMLElement[]
       expect(title.style.width).toBe('98px')
-      expect(kids.map(el => [el.style.left, el.style.top, el.style.width, el.style.height])).toEqual([
-        ['0px', '0px', '199.5px', '279.5px'],
-        ['199.5px', '-19.5px', '199.5px', '299px'],
+      const geometry = (el: HTMLElement) => [el.style.left, el.style.top, el.style.width, el.style.height].map(s => Number(parseFloat(s).toFixed(8)))
+      expect(kids.map(geometry)).toEqual([
+        [0, 0, 206.2247191, 279.5],
+        [206.2247191, -19.5, 192.7752809, 299],
       ])
       rerender(<Treemap root={columns} {...props} reclaimTitleSpace renderer="canvas" cellHref={n => `/${n.n}`} />)
       const right = container.querySelector('a[href="/right"]') as HTMLElement
-      expect([right.style.left, right.style.top, right.style.width, right.style.height]).toEqual(['200px', '0.5px', '199.5px', '299px'])
+      expect(geometry(right)).toEqual([206.7247191, 0.5, 192.7752809, 299])
       rerender(<Treemap root={columns} {...props} reclaimTitleSpace sizeAlign="right" />)
       expect((container.querySelector('.dt-treemap-map > .dt-treemap-cell > .dt-treemap-lbl') as HTMLElement).style.width).toBe('')
       expect([...container.querySelectorAll('.dt-treemap-inner > .dt-treemap-cell')].map(el => (el as HTMLElement).style.top)).toEqual(['0px', '0px'])

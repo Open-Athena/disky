@@ -96,7 +96,7 @@ export interface LayoutConfig<T> {
   ) => Tiling
 }
 
-/** Stretch complete right-hand columns into a title strip without crossing a sibling. */
+/** Reclaim a title strip while preserving every sibling's original area ratio. */
 export function reclaimTitleColumns<T>(
   rects: Rect<T>[],
   titleRight: number,
@@ -115,8 +115,19 @@ export function reclaimTitleColumns<T>(
     rightmost = Math.max(rightmost, r.x + r.w)
   }
   if (boundary === undefined) return rects
-  const scale = (bodyHeight + lift) / bodyHeight
-  return rects.map(r => r.x >= boundary - epsilon ? { ...r, y: r.y * scale - lift, h: r.h * scale } : r)
+  const width = rects.reduce((max, r) => Math.max(max, r.x + r.w), 0)
+  const raisedHeight = bodyHeight + lift
+  // One area multiplier for BOTH partitions. The raised partition grows
+  // vertically and narrows horizontally; the unraised partition widens.
+  // Their widths still sum to the parent width, and every tile gets the same
+  // added area per byte. The wider left partition also protects the title.
+  const areaScale = width * raisedHeight / (width * bodyHeight + boundary * lift)
+  const rightScale = areaScale * bodyHeight / raisedHeight
+  const newBoundary = boundary * areaScale
+  const heightScale = raisedHeight / bodyHeight
+  return rects.map(r => r.x >= boundary - epsilon
+    ? { ...r, x: newBoundary + (r.x - boundary) * rightScale, w: r.w * rightScale, y: r.y * heightScale - lift, h: r.h * heightScale }
+    : { ...r, x: r.x * areaScale, w: r.w * areaScale })
 }
 
 /** One nested layout for DOM, canvas, outlines and exports. Child coordinates are local to the inner box. */
