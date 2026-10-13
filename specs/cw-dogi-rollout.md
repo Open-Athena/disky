@@ -4,7 +4,9 @@ Ryan wants dynamic OpenGraph images on CW, with the reusable implementation owne
 
 ## October 13 handoff
 
-The infrastructure cutover's scheduled primary scan and background compaction have passed; the OG rollout can now proceed independently of migration verification. Shared `cloud` remains unmerged. Required privacy/color checkpoints include `e2265223`, `03793a97` and the complete `500e55d4` commit (including the DOM-free core `parseColor` export); resvg needs integer RGB rather than fractional HSL. Later shared header/shortcut changes are `1211feaa` plus the mandatory `/og` catch-all routing follow-up `c56a1525`, renderer revision `r=5`. Preserve CW's strict anonymous generic policy and deployment-specific configuration; do not copy the public R2 deployment's name, scopes or public-label policy. Public R2 rollout results are peer evidence, not CW preview/production verification. No source checkpoint, merge or OG deployment has been performed here.
+The infrastructure cutover's scheduled primary scan and background compaction have passed. Ryan authorized committing the migration, merging upstream and rolling out dOGIs. Migration checkpoint `1e47685c` and merge `f20e5c0f` retain CW-owned configuration; `cloud` through `362ca1a6` is merged without rebasing. Required privacy/color checkpoints include `e2265223`, `03793a97` and the complete `500e55d4` commit (including the DOM-free core `parseColor` export); resvg needs integer RGB rather than fractional HSL. Shared header/shortcut changes include `1211feaa` plus the mandatory `/og` catch-all routing follow-up `c56a1525`, renderer revision `r=5`. CW's explicit policy is `OG_CARDS=1`, `OG_ANONYMOUS=generic`, `OG_DEFAULT_COLOR=t`, with no `PUBLIC_READ`. Public R2 configuration and label policy were not copied. Public R2 rollout results are peer evidence, not CW deployment verification.
+
+The read-only `job/cw-dogi.py schema` check confirmed applied migration `0010_og_tokens.sql` and table `og_tokens`; no migration apply is needed. Static Twitter branding is corrected, and `/og.jpg` is generated from the shared generic card renderer, without protected data. `site/scripts/render-og-fallback.mjs` renders a named generic PNG without a network listener; JPEG conversion uses the project's existing `sips` convention. Merged validation passed all 1,944 site tests (one skip) and both typechecks/builds. New configuration/manual-launcher and verification-helper tests pass. Live preview and production checks are the next gate, using one temporary detailed-preview token revoked in `finally`, with no token or credential URLs printed.
 
 ## Observed state — 2026-10-12
 
@@ -33,6 +35,6 @@ Use the existing server-side renderer, shared data access, credential checks and
 5. Verify plain root/deep links disclose no protected data. Verify valid detailed shares show the intended view, and invalid/expired/revoked shares downgrade safely, including warmed-cache cases. Verify image URLs change after a new scan.
 6. Deploy production only after preview verification and approval of the resulting public-card policy. Explain that already-cached Slack previews may need a fresh link fetch; deployment cannot retract a previously copied preview.
 
-No production configuration, migration or deployment has been changed for this request yet.
+Production deployment has not changed for this request yet; the source configuration is prepared for the reviewed rollout.
 
 [the completed dOGI spec]: done/dogi.md

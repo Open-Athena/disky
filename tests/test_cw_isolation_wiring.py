@@ -72,3 +72,28 @@ def test_both_site_environments_dispatch_and_describe_cw_only(environment: str) 
         "STORE_BUCKETS": DATA + ",oa-cw-s3-usage-index", "STORE_BUCKET": "oa-cw-s3-usage-index",
         "ROOT_TITLE": f"Data behind this site: scans, indexes and listings in {DATA} (GCS) and oa-cw-s3-usage-index (R2)",
     }
+
+
+@pytest.mark.parametrize("environment", ["production", "preview"])
+def test_both_site_environments_keep_anonymous_cards_generic(environment: str) -> None:
+    config = tomllib.loads((ROOT / "site/wrangler.toml").read_text())
+    variables = config["vars"] if environment == "production" else config["env"]["preview"]["vars"]
+    assert {key: variables.get(key) for key in ("OG_CARDS", "OG_ANONYMOUS", "OG_DEFAULT_COLOR", "AUTH_MODE", "PUBLIC_READ")} == {
+        "OG_CARDS": "1", "OG_ANONYMOUS": "generic", "OG_DEFAULT_COLOR": "t", "AUTH_MODE": "app", "PUBLIC_READ": None,
+    }
+
+
+@pytest.mark.parametrize("args", [["run", "shards", "1"], ["r2-batch", "2026-10-10cw"]])
+def test_manual_static_launcher_uses_cw_only(args: list[str], tmp_path: Path) -> None:
+    result = run(["bash", str(ROOT / "job/static-names.sh"), *args], capture_output=True, text=True, check=True,
+                 cwd=ROOT, env={"PATH": os.environ["PATH"], "DRY": "1", "SRC": "image", "TMPDIR": str(tmp_path)})
+    spec = json.loads(result.stdout)
+    task = spec["taskGroups"][0]["taskSpec"]
+    assert {"image": task["runnables"][0]["container"]["imageUri"], "account": spec["allocationPolicy"]["serviceAccount"],
+            "buckets": [volume["gcs"]["remotePath"] for volume in task["volumes"] if "gcs" in volume],
+            "secrets": task["environment"].get("secretVariables", {})} == {
+        "image": IMAGE.rsplit(":", 1)[0] + "@sha256:4e53f34a042122498d9c9762c6ccf4b85fd2887f215575a3cf1bde922ed9c413",
+        "account": {"email": f"cw-s3-job@{PROJECT}.iam.gserviceaccount.com"},
+        "buckets": [DATA, "oa-cw-s3-usage-scratch"] if args[0] == "run" else [DATA],
+        "secrets": {} if args[0] == "run" else {key: f"projects/{PROJECT}/secrets/{value}/versions/latest" for key, value in R2_SECRETS.items()},
+    }

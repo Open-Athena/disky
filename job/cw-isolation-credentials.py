@@ -319,7 +319,7 @@ def deploy_site(apply: bool, environment: str) -> None:
         verify_credentials(outputs)
         report["log"] = wrangler(outputs, ["pages", "deploy", str(ROOT / "site/dist"), "--project-name", config["name"],
                                           "--branch", "main" if environment == "production" else "dev",
-                                          "--commit-dirty=true", "--commit-message", "Uncommitted CW infrastructure isolation"])
+                                          "--commit-dirty=true", "--commit-message", "CW deployment verification"])
         report["action"] = "deployed; live checks required"
     print(json.dumps(report, indent=2))
 

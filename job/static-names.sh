@@ -2,8 +2,8 @@
 # cw's static name index (specs/architecture/static-name-search.md, "Pipeline"; the base in specs/cw-static-names.md)
 # on GCP Batch in us-east1, beside the data bucket. Every stage is `dt-cloud static-names …` from this checkout's
 # committed `cloud/src/dt_cloud` (staged content-addressed by its git tree), in the pinned job image, with the
-# bucket mounted at /gcs/$B and a local SSD at /stage. The generations live beside gcs's in the shared data bucket
-# (`gs://$B/static-names/<gen>/`, cw's named `cw-…`) and are served from cw's own R2 bucket (`R2_BUCKET`).
+# bucket mounted at /gcs/$B and a local SSD at /stage. The generations live in CW's data bucket
+# (`gs://$B/static-names/<gen>/`) and are served from CW's own R2 bucket (`R2_BUCKET`).
 #
 #   job/static-names.sh stage-src                 # upload HEAD's dt_cloud tree → gs://$B/static-names/src/<tree>/ (prints <tree>)
 #   job/static-names.sh run KIND TASKS ARGS…      # one Batch job of TASKS tasks, each `python -m dt_cloud.$MODULE KIND -m /gcs/$B ARGS…`
@@ -14,25 +14,25 @@
 #   job/static-names.sh wait JOB                  # wait for a submitted job
 #   job/static-names.sh r2-batch GEN [ARGS…]      # `static-names r2-copy -g GEN` as a 1-task Batch job as the cw job account
 #                                                 # (`cw-s3-job`), with the R2 key the scan job already uses for `publish-r2`
-#                                                 # (Secret Manager `cw-s3-r2-{endpoint,access-key-id,secret-access-key}`):
+#                                                 # (Secret Manager endpoint plus the isolated CW publisher pair):
 #                                                 # GCS → R2 bucket $R2_BUCKET, idempotent (size + md5)
 #
 # Env: MODULE (static_names), MACHINE (n2-highmem-16), SSD (750; n2 16-vCPU needs ≥2 local SSDs of 375), PARALLELISM (TASKS),
 # SPOT (1: spot VMs, 3 retries), MAX_RUN_SECONDS (14400), IMAGE (the pinned job image digest), SRC (a staged tree; default
 # HEAD's; `image`: the image's own installed dt_cloud + pyrmts), NO_MOUNT=1 (no `-m`), NO_SCRATCH=1 (no scratch mount), ENV_JSON (the tasks' Batch
-# `environment`), SA (the build stages' service account: `gcs-usage-job`, the one with the scratch bucket), R2_BUCKET
+# `environment`), SA (the build stages' service account: `cw-s3-job`), R2_BUCKET
 # (oa-cw-s3-usage-index), JOB_ID, DRY=1.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 PROJECT=oa-internal-450019
 REGION=us-east1
-B=oa-gcs-usage-dvx
-S=oa-gcs-usage-scratch
-REPO=us-central1-docker.pkg.dev/$PROJECT/cloud-run-source-deploy/gcs-usage-snapshot
-SA=${SA:-gcs-usage-job@$PROJECT.iam.gserviceaccount.com}
+B=${DATA_BUCKET:-oa-cw-s3-usage-data}
+S=${STATIC_NAMES_SCRATCH:-oa-cw-s3-usage-scratch}
+REPO=us-central1-docker.pkg.dev/$PROJECT/cw-s3-usage/scan
+SA=${SA:-cw-s3-job@$PROJECT.iam.gserviceaccount.com}
 R2_BUCKET=${R2_BUCKET:-oa-cw-s3-usage-index}
-# The gcs job image as of 2026-10-08 (duckdb 1.5.6, pyarrow 22.0.0), pinned so a rerun computes with the same engines.
-IMAGE=${IMAGE:-$REPO@sha256:6974a8b71e56469bb8180495c13c170decdc10aefe695cd0f8c5200fb3ac520a}
+# The verified isolated CW image, pinned so a rerun computes with the same engines.
+IMAGE=${IMAGE:-$REPO@sha256:4e53f34a042122498d9c9762c6ccf4b85fd2887f215575a3cf1bde922ed9c413}
 MACHINE=${MACHINE:-n2-highmem-16}
 SSD=${SSD:-750}
 
@@ -94,11 +94,11 @@ r2-batch)
   GEN=${2:?GEN}
   shift 2
   ENV_JSON=$(python3 -c 'import json, sys
-s = "projects/%s/secrets/cw-s3-r2-%s/versions/latest"
+s = "projects/%s/secrets/%s/versions/latest"
 p = sys.argv[2]
 print(json.dumps({"variables": {"R2_BUCKET": sys.argv[1], "STATIC_NAMES_PROFILE": "/app/job/static-names.json"},
-                  "secretVariables": {"R2_ENDPOINT": s % (p, "endpoint"), "R2_ACCESS_KEY_ID": s % (p, "access-key-id"),
-                                      "R2_SECRET_ACCESS_KEY": s % (p, "secret-access-key")}}))' "$R2_BUCKET" "$PROJECT")
+                  "secretVariables": {"R2_ENDPOINT": s % (p, "cw-s3-r2-endpoint"), "R2_ACCESS_KEY_ID": s % (p, "cw-s3-isolated-r2-access-key-id"),
+                                      "R2_SECRET_ACCESS_KEY": s % (p, "cw-s3-isolated-r2-secret-access-key")}}))' "$R2_BUCKET" "$PROJECT")
   ENV_JSON=$ENV_JSON SA=cw-s3-job@$PROJECT.iam.gserviceaccount.com NO_SCRATCH=1 MODULE=static_names NO_MOUNT=1 MACHINE=${R2_MACHINE:-n2-highmem-4} \
     SSD=375 PARALLELISM=1 JOB_ID=${JOB_ID:-sn-r2-$(date -u +%Y%m%d-%H%M%S)} exec "$0" run r2-copy 1 -g "$GEN" "$@"
   ;;
@@ -123,7 +123,7 @@ PYTHONPATH=/stage/src python3 -u -m dt_cloud.${MODULE:-static_names} $KIND $MOUN
   fi
   # Every task reads cw's deployment profile (`dt_cloud.static_profile_examples.CW`: buckets, layouts, gen, R2).
   ENVJ=${ENV_JSON:-'{"variables": {"STATIC_NAMES_PROFILE": "/app/job/static-names.json"}}'}
-  # NO_SCRATCH=1: no scratch mount (an account without the scratch bucket, e.g. `cw-s3-job` for the R2 copy).
+  # NO_SCRATCH=1: no scratch mount when the task only publishes completed artifacts.
   SCRATCH_RO="" SCRATCH_VOL=""
   if [ -z "${NO_SCRATCH:-}" ]; then
     SCRATCH_RO="\"/mnt/disks/gcs/$S:/gcs/$S:ro\", "
