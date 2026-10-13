@@ -2,10 +2,12 @@
  * the vendored wasm (the pieces the Function uses). Writes
  * `tmp/og-sample-{anon,full}.png` for a look. */
 import { beforeAll, describe, expect, it } from 'vitest'
-import { cardSvg, type CardData } from './card'
+import { cardSvg, svgColor, type CardData } from './card'
 import { ensureWasm, svgToPng } from './render'
 import { ownerColors, tilesOf } from './data'
 import type { TreeNode } from '../../../src/types'
+import { Resvg } from '@resvg/resvg-wasm'
+import { slotColor } from '../../../src/colors'
 
 // Node's fs, loaded dynamically: the Functions typecheck has no Node types.
 interface Fs { mkdir(p: string, o: { recursive: boolean }): Promise<unknown>; readFile(p: string): Promise<Uint8Array>; writeFile(p: string, d: Uint8Array): Promise<void> }
@@ -42,6 +44,21 @@ describe('svgToPng', () => {
       await writeFile(`tmp/og-sample-${tier}.png`, png)
     }
     expect(dims).toEqual([[1200, 630], [1200, 630]])
+  })
+
+  it('renders every fractional tree hue as its intended RGB, not black', () => {
+    const fills = Array.from({ length: 7 }, (_, i) => slotColor(0, i, 7))
+    const rects = fills.map((fill, i) => `<rect x="${i * 10}" width="10" height="10" fill="${svgColor(fill)}"/>`).join('')
+    const renderer = new Resvg(`<svg xmlns="http://www.w3.org/2000/svg" width="70" height="10">${rects}</svg>`)
+    try {
+      const pixels = renderer.render().pixels
+      expect(fills.map((_, i) => Array.from(pixels.slice((5 * 70 + i * 10 + 5) * 4, (5 * 70 + i * 10 + 5) * 4 + 4)))).toEqual([
+        [25, 142, 204, 255], [27, 137, 215, 255], [28, 132, 225, 255],
+        [37, 126, 228, 255], [48, 121, 229, 255], [58, 118, 231, 255], [69, 115, 232, 255],
+      ])
+    } finally {
+      renderer.free()
+    }
   })
 
   it('renders each selected map palette through the real SVG and WASM pipeline', async () => {

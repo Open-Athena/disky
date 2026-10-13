@@ -34,6 +34,14 @@ describe('cardSvg', () => {
       3, 2,
     ])
   })
+  it('an explicitly public map labels both levels without a signed tier', () => {
+    const svg = cardSvg({ ...data('anon'), publicLabels: true })
+    expect(texts(svg)).toEqual([
+      'marin GCS', 'marin-us-central2/checkpoints', 'scan 2026-10-02',
+      'step-1000 20.0 TiB', 'step-2000 10.0 TiB', 'secret-run-a 30.0 TiB',
+      'secret-run-b 15.0 TiB', '51.1 TiB · 179,327,698 objects', 'Grace 30.0 TiB', 'Hedy 25.0 TiB',
+    ])
+  })
   it('heatmap: anon draws the grid with no names; full names rows, columns and cells', () => {
     const grid = { rows: ['Katherine', 'Edsger'], cols: ['Katherine', 'Edsger', 'Alan'], cells: [[0, 0, 178 * T], [1, 1, 50 * T], [1, 2, 0.02 * T]] as [number, number, number][] }
     const d = (tier: 'anon' | 'full') => ({ ...data(tier), title: 'assigner × assignee', tiles: [], legend: undefined, grid })
