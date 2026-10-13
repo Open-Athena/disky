@@ -38,6 +38,7 @@ class ScanReporter:
         self.scan = scan
         self.generation = generation
         self.started = int(time())
+        self.job = None
         self.failed_phase = "initialize"
 
     def write(self, **kwargs: object) -> None:
@@ -51,6 +52,7 @@ class ScanReporter:
                 D1Sink(profile()["database_id"]), load_profile(HERE / "r2-scan-runs.json"),
                 self.scan, uid, int(time()), gen=self.generation,
                 store=AnyStore() if kwargs.get("phase") == "archive" else None,
+                job=self.job,
                 **kwargs,
             )
             print(f"scan-run: {self.scan} {uid} {rec.run.status}", file=stderr, flush=True)
@@ -58,6 +60,25 @@ class ScanReporter:
             print(f"scan-run reporting failed (scan continues): {type(exc).__name__}: {exc}", file=stderr, flush=True)
 
     def __enter__(self) -> "ScanReporter":
+        # The Batch-assigned task-group resource is exposed on the VM's instance metadata.
+        # Reading the local metadata needs no Batch API or additional IAM.
+        from urllib.request import Request, urlopen
+
+        try:
+            name = environ.get("OA_R2_JOB_NAME")
+            if not name:
+                request = Request("http://metadata.google.internal/computeMetadata/v1/instance/attributes/cloudbatch-task-group", headers={"Metadata-Flavor": "Google"})
+                with urlopen(request, timeout=5) as response:
+                    group_name = response.read().decode().strip()
+                match = fullmatch(r"projects/[^/]+/locations/" + escape(profile()["region"]) + r"/jobs/([a-z][a-z0-9-]{0,62})/taskGroups/[^/]+", group_name)
+                if not match:
+                    raise ValueError("Invalid Batch task-group resource in instance metadata")
+                name = match[1]
+            if not fullmatch(r"[a-z][a-z0-9-]{0,62}", name):
+                raise ValueError("Invalid Batch job ID in instance metadata")
+            self.job = {**job_spec(environ["OA_R2_IMAGE"], profile()), "name": f"projects/{profile()['project']}/locations/{profile()['region']}/jobs/{name}"}
+        except (Exception, SystemExit) as exc:
+            print(f"Batch link metadata unavailable: {type(exc).__name__}", file=stderr, flush=True)
         print(f"OA-R2-SCAN-START {self.scan} {self.generation}", file=stderr, flush=True)
         self.write(start=True)
         return self
@@ -152,6 +173,7 @@ def job_spec(image: str, config: dict) -> dict:
         "DISK_TREE_R2_ENDPOINT_URL": f"https://{config['account']}.r2.cloudflarestorage.com",
         "DUCKDB_MEM": "12GB",
         "DUCKDB_THREADS": "8",
+        "OA_R2_IMAGE": image,
         "DISKY_LABELS": "app=disky,deployment=oa-r2,component=scan",
     }
     return {
@@ -266,9 +288,16 @@ def plan(image: str) -> None:
 @main.command()
 @option("-g", "--generation", help="Archived generation to backfill (requires --scan)")
 @option("-n", "--name", required=True, help="New Batch job name, starting oa-r2-scan-")
+@option("-m", "--meta-only", is_flag=True, help="Scan only this deployment's derived storage")
 @option("-s", "--scan", help="Backfill age indexes for this existing scan (requires --generation)")
 @argument("image")
-def submit(generation: str | None, name: str, scan: str | None, image: str) -> None:
+def submit(
+    generation: str | None,
+    name: str,
+    meta_only: bool,
+    scan: str | None,
+    image: str,
+) -> None:
     if not fullmatch(r"oa-r2-scan-[a-z0-9-]+", name) or len(name) > 63:
         raise ClickException("Choose an oa-r2-scan- job name of at most 63 characters")
     config = profile()
@@ -276,6 +305,11 @@ def submit(generation: str | None, name: str, scan: str | None, image: str) -> N
     scratch.mkdir(exist_ok=True)
     spec = scratch / f"{name}.json"
     planned = job_spec(image, config)
+    planned["taskGroups"][0]["taskSpec"]["environment"]["variables"]["OA_R2_JOB_NAME"] = name
+    if meta_only:
+        if scan or generation:
+            raise ClickException("Meta-only and age backfill are separate job modes")
+        planned["taskGroups"][0]["taskSpec"]["environment"]["variables"]["OA_R2_META_ONLY"] = "1"
     if scan or generation:
         if not scan or not generation:
             raise ClickException("Backfill requires both --scan and --generation")
@@ -389,8 +423,31 @@ def scan_run() -> None:
     scan = stamp.strftime("%Y-%m-%dT%H%M")
     generation = stamp.strftime("%Y%m%dT%H%M%S%fZ")
     work = Path("/stage") / generation
+    if environ.get("OA_R2_META_ONLY") == "1":
+        execute_meta(config, scan, generation, work)
+        return
     with ScanReporter(scan, generation) as reporter:
         execute_scan(config, scan, generation, work, reporter)
+        with reporter.phase("meta"):
+            execute_meta(config, scan, generation, work / "meta")
+
+
+class MetaReporter:
+    """The primary reporter owns the meta phase; secondary indexes use their own store namespace."""
+
+    @contextmanager
+    def phase(self, name: str):
+        print(f"META-PHASE {name}", file=stderr, flush=True)
+        yield
+
+
+def execute_meta(
+    config: dict,
+    scan: str,
+    generation: str,
+    work: Path,
+) -> None:
+    execute_scan({**config, "buckets": [config["data_bucket"], config["serving_bucket"]]}, scan, generation, work, MetaReporter(), meta=True)
 
 
 def execute_scan(
@@ -398,7 +455,8 @@ def execute_scan(
     scan: str,
     generation: str,
     work: Path,
-    reporter: ScanReporter,
+    reporter: ScanReporter | MetaReporter,
+    meta: bool = False,
 ) -> None:
     for name in config["secrets"]:
         if not environ.get(name):
@@ -406,17 +464,18 @@ def execute_scan(
     work.mkdir(parents=True, exist_ok=False)
     source = {
         **environ,
-        "AWS_ACCESS_KEY_ID": environ["SOURCE_ACCESS_KEY_ID"].strip(),
-        "AWS_SECRET_ACCESS_KEY": environ["SOURCE_SECRET_ACCESS_KEY"].strip(),
+        "AWS_ACCESS_KEY_ID": environ["R2_ACCESS_KEY_ID" if meta else "SOURCE_ACCESS_KEY_ID"].strip(),
+        "AWS_SECRET_ACCESS_KEY": environ["R2_SECRET_ACCESS_KEY" if meta else "SOURCE_SECRET_ACCESS_KEY"].strip(),
     }
     endpoint = environ["DISK_TREE_R2_ENDPOINT_URL"]
     with reporter.phase("listing"):
         for bucket in config["buckets"]:
             print(f"Listing metadata: {bucket}", file=stderr, flush=True)
-            run([
-                "disk-tree", "bulk-list", f"r2://{bucket}", "-E", endpoint,
-                "-o", str(work / "listing" / bucket), "-P", "4", "-w", "4",
-            ], env=source, check=True)
+            scheme = "gcs" if meta and bucket == config["data_bucket"] else "r2"
+            command = ["disk-tree", "bulk-list", f"{scheme}://{bucket}", "-o", str(work / "listing" / bucket), "-P", "4", "-w", "4"]
+            if scheme == "r2":
+                command.extend(("-E", endpoint))
+            run(command, env=source, check=True)
     with reporter.phase("path-index"):
         run([
             "dt-cloud", "path-index", "-S", "-U", "-d", scan,
@@ -444,7 +503,7 @@ def execute_scan(
     with reporter.phase("archive"):
         for path in sorted(work.rglob("*")):
             if path.is_file() and not any(part.startswith(".") for part in path.relative_to(work).parts):
-                data.blob(f"scans/{scan}/{generation}/{path.relative_to(work)}").upload_from_filename(str(path), if_generation_match=0)
+                data.blob(f"{'meta-scans' if meta else 'scans'}/{scan}/{generation}/{path.relative_to(work)}").upload_from_filename(str(path), if_generation_match=0)
     from boto3 import client
 
     publisher = client(
@@ -454,10 +513,10 @@ def execute_scan(
         aws_access_key_id=environ["R2_ACCESS_KEY_ID"].strip(),
         aws_secret_access_key=environ["R2_SECRET_ACCESS_KEY"].strip(),
     )
-    key = f"listing/{scan}/index/{generation}"
+    key = f"{'meta-l2' if meta else 'listing'}/{scan}/index/{generation}"
     uploaded = []
     with reporter.phase("upload"):
-        for directory, prefix in ((work / "index", key), (work / "snap", f"snapshots/r2/{scan}")):
+        for directory, prefix in ((work / "index", key), (work / "snap", f"snapshots/{'meta' if meta else 'r2'}/{scan}")):
             for path in sorted(directory.iterdir()):
                 if path.is_file():
                     object_key = f"{prefix}/{path.name}"
@@ -470,6 +529,7 @@ def execute_scan(
     # Stage every variant's rows before any complete scan becomes visible.
     sync = [
         "dt-cloud", "index-sync", scan,
+        "-s", "meta" if meta else "primary",
         "-b", f"r2://{config['serving_bucket']}", "-d", str(work / "index"),
         "-g", generation, "-k", key,
     ]
@@ -478,7 +538,7 @@ def execute_scan(
     with reporter.phase("publish"):
         run([*sync, "-r"], check=True)
         run([*sync, "-p"], check=True)
-        data.blob(f"scans/{scan}/{generation}/_SUCCESS.json").upload_from_string(dumps(report), content_type="application/json", if_generation_match=0)
+        data.blob(f"{'meta-scans' if meta else 'scans'}/{scan}/{generation}/_SUCCESS.json").upload_from_string(dumps(report), content_type="application/json", if_generation_match=0)
     print(dumps(report))
 
 

@@ -12,6 +12,12 @@ config = module["profile"]()
 image = "us-west1-docker.pkg.dev/oa-internal-450019/oa-r2-usage/scan@sha256:" + "a" * 64
 
 
+@pytest.fixture(autouse=True)
+def batch_identity(monkeypatch) -> None:
+    monkeypatch.setenv("OA_R2_JOB_NAME", "oa-r2-scan-test")
+    monkeypatch.setenv("OA_R2_IMAGE", image)
+
+
 def test_profile_accepts_only_own_full_scans_and_immutable_archive() -> None:
     from dt_cloud.scan_runs import load_profile
     from dt_cloud.scan_runs_backfill import classify
@@ -26,6 +32,9 @@ def test_profile_accepts_only_own_full_scans_and_immutable_archive() -> None:
         ("path-index", "gs://oa-r2-usage-data/scans/{scan}/{gen}/index/", "archive"),
         ("snapshot", "gs://oa-r2-usage-data/scans/{scan}/{gen}/snap/", "archive"),
     ])
+    meta = job(image)
+    meta["taskGroups"][0]["taskSpec"]["environment"] = {"variables": {"OA_R2_META_ONLY": "1"}}
+    assert classify(reporting, meta) is None
 
 
 def test_backfill_cli_delegates_to_installed_workspace_with_own_source(monkeypatch, tmp_path: Path) -> None:
@@ -116,6 +125,31 @@ def test_reporting_outage_does_not_fail_successful_scan(monkeypatch, capsys) -> 
     ]
 
 
+def test_scheduler_reporter_reads_local_task_group_metadata_without_batch_iam(monkeypatch) -> None:
+    from io import BytesIO
+    from dt_cloud import scan_runs
+    from urllib import request
+
+    sink = scan_runs.SqliteSink(":memory:")
+    monkeypatch.setattr(scan_runs, "D1Sink", lambda db: sink)
+    monkeypatch.setenv("BATCH_JOB_UID", "scheduled-uid")
+    monkeypatch.delenv("OA_R2_JOB_NAME")
+    calls = []
+
+    def metadata(req, timeout):
+        calls.append((req.full_url, req.get_header("Metadata-flavor"), timeout))
+        return BytesIO(b"projects/965762293918/locations/us-west1/jobs/job-generated/taskGroups/group0")
+
+    monkeypatch.setattr(request, "urlopen", metadata)
+    with module["ScanReporter"]("2026-10-13T0716", "20261013T071607992442Z"):
+        pass
+    assert calls == [("http://metadata.google.internal/computeMetadata/v1/instance/attributes/cloudbatch-task-group", "Google", 5)]
+    assert sink.query("SELECT job_name, region, machine, spot, tasks, image, status FROM scan_runs") == [{
+        "job_name": "job-generated", "region": "us-west1", "machine": "e2-standard-8", "spot": 0, "tasks": 1,
+        "image": "scan@sha256:" + "a" * 64, "status": "succeeded",
+    }]
+
+
 def test_remote_build_uses_only_own_identity_and_staging() -> None:
     assert module["build_command"](Path("context"), "first", config) == [
         "gcloud", "builds", "submit", "context",
@@ -151,6 +185,7 @@ def test_job_uses_only_r2_resources_and_secret_containers() -> None:
             "DISK_TREE_R2_ENDPOINT_URL": "https://74981a43be0de7712369306c7b19133d.r2.cloudflarestorage.com",
             "DUCKDB_MEM": "12GB",
             "DUCKDB_THREADS": "8",
+                "OA_R2_IMAGE": image,
             "DISKY_LABELS": "app=disky,deployment=oa-r2,component=scan",
         },
         "secretVariables": {

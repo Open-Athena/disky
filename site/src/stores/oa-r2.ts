@@ -3,7 +3,7 @@ import type { Store } from '../stores'
 const store: Store = {
   key: 'oa-r2',
   label: 'OA R2',
-  title: 'Open Athena — R2 storage',
+  title: 'Open Athena R2',
   desc: 'Open Athena Cloudflare R2 storage: treemaps, snapshot diffs and last-modified distributions.',
   path: '/',
   scheme: 'r2://',
@@ -11,6 +11,7 @@ const store: Store = {
   ogImage: '/og.jpg',
   prices: false,
   defaultColor: 'date',
+  reclaimTitleSpace: true,
   emailSignIn: false,
   staging: false,
   owners: false,

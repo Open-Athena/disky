@@ -9,7 +9,8 @@
       "kind": "scan",
       "where": {
         "image": "^us-west1-docker\\.pkg\\.dev/oa-internal-450019/oa-r2-usage/scan@sha256:",
-        "entrypoint": "^$"
+        "entrypoint": "^$",
+        "no_env": ["OA_R2_META_ONLY"]
       },
       "scan": [
         {"log": "^OA-R2-SCAN-START (\\S+)"},
