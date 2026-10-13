@@ -18,9 +18,15 @@ The public R2 deployment was 344 commits behind shared `cloud`, so it received a
 
 Deployment-owner handoffs were delivered to GCS and CW. OA R2 reports the color fix deployed to dev/prod, retaining generic anonymous privacy and its written default. CW acknowledged the rollout and is waiting for its first isolated scheduled scan gate. GCS has not yet acknowledged; its deployment must explicitly retain `OG_ANONYMOUS=shape` before integrating the shared privacy changes.
 
+Follow-up `r=4`: Ryan's live unfurl exposed fractional HSL components rendering black, missed by the initial two-child/integral-hue fixture and dimension-only checks. Shared `500e55d4` normalizes card HSL fills via a DOM-free core parser, adds exact seven-shade real-WASM pixel assertions, and labels explicitly public maps without changing their unsigned tier or private policies. Public R2's bounded `1e6d60d2` passed [RGB preview CI] and [RGB production CI]. Chrome verified actual tree/written PNGs in dev and the labeled, correctly colored tree PNG in prod; production metadata advertises `r=4` and the improved product description. The [fresh public tree unfurl] uses an otherwise ignored parameter to distinguish it from consumers' cached old page URLs. See [SVG color follow-up] for cause, test coverage, and disclosure boundaries.
+
 [preview privacy contract]: dogi-privacy.md
 [local color-mode comparison]: http://127.0.0.1:3269/tmp/og-color-preview.html
 [public tree view]: https://r2.rbw.sh/?c=t
 [public written view]: https://r2.rbw.sh/?c=w
 [timestamp preview CI]: https://github.com/runsascoded/disky/actions/runs/38395163362
 [timestamp production CI]: https://github.com/runsascoded/disky/actions/runs/38395810383
+[RGB preview CI]: https://github.com/runsascoded/disky/actions/runs/38401939974
+[RGB production CI]: https://github.com/runsascoded/disky/actions/runs/38402673967
+[fresh public tree unfurl]: https://r2.rbw.sh/?c=t&card=4
+[SVG color follow-up]: dogi-svg-colors.md
