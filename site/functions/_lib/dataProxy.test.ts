@@ -1,9 +1,9 @@
 import { describe, expect, it, vi } from 'vitest'
-import { onRequest } from './[[path]]'
-import type { Env } from '../_lib/auth'
+import { onRequest } from '../data/[[path]]'
+import type { Env } from './auth'
 
 const get = vi.hoisted(() => vi.fn(async (key: string) => ({ bytes: new TextEncoder().encode(JSON.stringify({ key })), contentType: 'application/json' })))
-vi.mock('../_lib/index.js', () => ({ storeReady: () => true, servedStore: () => ({ get }), pathScans: vi.fn() }))
+vi.mock('./index.js', () => ({ storeReady: () => true, servedStore: () => ({ get }), pathScans: vi.fn() }))
 
 const env: Env = {
   BASE_SCOPE: 'oa-r2', PUBLIC_READ: '1', SNAPSHOTS_SUBDIR: 'r2',
