@@ -688,7 +688,9 @@ describe('<Treemap> reclaimed titles', () => {
     })
     const canvas = vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue(context as unknown as CanvasRenderingContext2D)
     try {
-      const { container, rerender } = render(<Treemap root={columns} {...props} reclaimTitleSpace />)
+      const { container, rerender } = render(<Treemap root={columns} {...props} reclaimTitleSpace branchOutline="#aaa" />)
+      const frames = () => [...container.querySelectorAll('.dt-treemap-branch-frames rect')].map(el => ['x', 'y', 'width', 'height', 'stroke', 'stroke-width'].map(k => el.getAttribute(k)))
+      expect(frames()).toEqual([['0.5', '0.5', '399', '299', '#aaa', '1']])
       const parent = container.querySelector('.dt-treemap-map > .dt-treemap-cell')!
       const title = parent.querySelector(':scope > .dt-treemap-lbl') as HTMLElement
       const kids = [...parent.querySelectorAll(':scope > .dt-treemap-inner > .dt-treemap-cell')] as HTMLElement[]
@@ -698,7 +700,8 @@ describe('<Treemap> reclaimed titles', () => {
         [0, 0, 206.2247191, 279.5],
         [206.2247191, -19.5, 192.7752809, 299],
       ])
-      rerender(<Treemap root={columns} {...props} reclaimTitleSpace renderer="canvas" cellHref={n => `/${n.n}`} />)
+      rerender(<Treemap root={columns} {...props} reclaimTitleSpace branchOutline="#aaa" renderer="canvas" cellHref={n => `/${n.n}`} />)
+      expect(frames()).toEqual([['0.5', '0.5', '399', '299', '#aaa', '1']])
       const right = container.querySelector('a[href="/right"]') as HTMLElement
       expect(geometry(right)).toEqual([206.7247191, 0.5, 192.7752809, 299])
       rerender(<Treemap root={columns} {...props} reclaimTitleSpace sizeAlign="right" />)

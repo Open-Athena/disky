@@ -3,7 +3,8 @@ import type { CSSProperties, ReactNode } from 'react'
 import { CONTAINER_BG, contrastEdge, DEFAULT_PALETTE, slotColor } from './colors'
 import { DustHatch } from './DustHatch'
 import type { FoldedNode, LayoutConfig } from './layout'
-import { edgeEmphFactor, isFolded, layoutCells, layoutChildren } from './layout'
+import { edgeEmphFactor, flattenPlaced, isFolded, layoutCells, layoutChildren } from './layout'
+import { colorResolver } from './cssColor'
 import { foldSmall, foldThin, squarify, squarifyRemainder } from './squarify'
 import { TreemapCanvas, renderMapToCanvas, type CanvasHit } from './TreemapCanvas'
 import { OutlineOverlay } from './OutlineOverlay'
@@ -123,6 +124,8 @@ export interface TreemapProps<T> {
   collapseChains?: boolean
   /** Let complete columns right of a branch's title fill its unused strip. Default: false. */
   reclaimTitleSpace?: boolean
+  /** Quiet one-pixel frames around rendered parent groups, above descendant fills. Off when unset. */
+  branchOutline?: string
   /** Optional extra content rendered inside the cell after the label. */
   renderCellExtra?: (n: T, path: T[], ctx: CellCtx) => ReactNode
   /** Tooltip body; return null to suppress the tooltip. */
@@ -527,6 +530,7 @@ export function Treemap<T>({
   formatSize = defaultFormat,
   collapseChains = false,
   reclaimTitleSpace = false,
+  branchOutline,
   colorForCell,
   lens,
   renderCellExtra,
@@ -882,14 +886,14 @@ export function Treemap<T>({
     // The canvas renderer paints from these; the DOM renderer doesn't, but the
     // outline overlay needs the geometry either way — so build them whenever an
     // `outlineGroups` overlay is present, not only for the canvas renderer.
-    if (renderer !== 'canvas' && !outlineGroups) return []
+    if (renderer !== 'canvas' && !outlineGroups && !branchOutline) return []
     const cfg: LayoutConfig<T> = {
       getSize, getLabel, childrenOf, showLabels, collapseChains, borderWidth, edgeEmphasis, fold, layTiles, tilingFor,
       getTitleWidth: reclaimTitleSpace ? getTitleWidth : undefined,
     }
     return layoutCells(rects, path, rootMode, cfg)
   }, [
-    renderer, !!outlineGroups, rects, path, rootMode, getSize, getLabel, childrenOf,
+    renderer, !!outlineGroups, branchOutline, rects, path, rootMode, getSize, getLabel, childrenOf,
     showLabels, collapseChains, borderWidth, edgeEmphasis, fold, layTiles, tilingFor, reclaimTitleSpace, getTitleWidth,
   ])
 
@@ -1351,6 +1355,18 @@ export function Treemap<T>({
         )
         src = off
       }
+      if (branchOutline) {
+        const framed = document.createElement('canvas')
+        framed.width = src.width
+        framed.height = src.height
+        const ctx = framed.getContext('2d')!
+        ctx.drawImage(src, 0, 0)
+        ctx.scale(src.width / size.w, src.height / size.h)
+        ctx.strokeStyle = colorResolver(mapRef.current)(branchOutline)
+        ctx.lineWidth = 1
+        for (const c of flattenPlaced(placedCells)) if (c.hasKids) ctx.strokeRect(c.x + 0.5, c.y + 0.5, Math.max(0, c.boxW - 1), Math.max(0, c.boxH - 1))
+        src = framed
+      }
       const cs = getComputedStyle(mapRef.current)
       const ink = cs.color || 'rgb(230, 230, 238)'
       const transparent = (c: string | undefined) => !c || c === 'transparent' || c === 'rgba(0, 0, 0, 0)'
@@ -1375,7 +1391,7 @@ export function Treemap<T>({
     },
     [
       exportOpts, path, node, getLabel, getSize, formatSize, onExport, size, rects, rootMode,
-      styleOpts, sizeAlign, inlineSizeMinWidth, dustTexture,
+      styleOpts, sizeAlign, inlineSizeMinWidth, dustTexture, branchOutline, placedCells,
       childrenOf, showLabels, collapseChains, borderWidth, edgeEmphasis, fold, layTiles, tilingFor, reclaimTitleSpace, getTitleWidth,
     ],
   )
@@ -1574,6 +1590,9 @@ export function Treemap<T>({
         {outlineGroups && size.w > 0 && size.h > 0 && (
           <OutlineOverlay<T> cells={placedCells} width={size.w} height={size.h} groups={outlineGroups} />
         )}
+        {branchOutline && <svg className="dt-treemap-branch-frames" width={size.w} height={size.h} aria-hidden style={{ position: 'absolute', inset: 0, pointerEvents: 'none', zIndex: 1 }}>
+          {flattenPlaced(placedCells).filter(c => c.hasKids).map((c, i) => <rect key={i} x={c.x + 0.5} y={c.y + 0.5} width={Math.max(0, c.boxW - 1)} height={Math.max(0, c.boxH - 1)} fill="none" stroke={branchOutline} strokeWidth={1} />)}
+        </svg>}
         {failed?.key === viewKey ? (
           <div className="dt-treemap-status error" style={STATUS_STYLE}>
             {renderLoadError
