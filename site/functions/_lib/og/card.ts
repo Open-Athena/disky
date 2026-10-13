@@ -132,10 +132,11 @@ export function cardSvg(d: CardData): string {
   const out: string[] = []
   out.push(`<svg xmlns="http://www.w3.org/2000/svg" width="${CARD_W}" height="${CARD_H}" viewBox="0 0 ${CARD_W} ${CARD_H}">`)
   out.push(`<rect width="${CARD_W}" height="${CARD_H}" fill="${BG}"/>`)
-  out.push(text(40, 52, clip(d.site, 400, 22), 22, { fill: MUTED, weight: 600 }))
-  out.push(text(40, 92, clip(d.title, 1120, 32), 32, { weight: 600 }))
-  out.push(text(40, 124, clip(d.subtitle, 1120, 20), 20, { fill: MUTED }))
-  const [mx, my, mw, mh] = [40, 144, 1120, 410]
+  const rootTitle = d.site === d.title
+  if (!rootTitle) out.push(text(40, 52, clip(d.site, 1120, 22), 22, { fill: MUTED, weight: 600 }))
+  out.push(text(40, rootTitle ? 60 : 92, clip(d.title, 1120, 32), 32, { weight: 600 }))
+  out.push(text(40, rootTitle ? 92 : 124, clip(d.subtitle, 1120, 20), 20, { fill: MUTED }))
+  const [mx, my, mw, mh] = [40, rootTitle ? 112 : 144, 1120, rootTitle ? 442 : 410]
   const tiles = d.tiles.filter(t => t.b > 0)
   if (d.grid?.cells.length) {
     out.push(gridSvg(d.grid, full, mx, my, mw, mh))

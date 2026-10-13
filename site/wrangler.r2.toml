@@ -35,7 +35,7 @@ enabled = true
 [vars]
 STORE = "r2"                     # build-time: the `src/stores.ts` registry key (vite.config.ts)
 AUTH_MODE = "public"             # build-time: no sign-in wall (src/auth.ts)
-ROOT_LABEL = "public R2"
+ROOT_LABEL = "Public R2 Treemap Demo"
 OG_CARDS = "1"
 STORE_SCHEME = "r2://"
 BASE_SCOPE = "r2"
