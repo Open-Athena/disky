@@ -46,7 +46,7 @@ export function PreviewLinks() {
       <h2>Preview links</h2>
       <p>
         Links minted with “Copy link with preview”: their unfurl card shows the full view (labels, sizes, owners) for that exact page and params.
-        Plain links unfurl as unlabelled shapes. Revoke to send a view back to the anonymous card.
+        Plain links follow this site's anonymous preview policy and carry no detailed-preview token. Revoke to send a view back to the anonymous card.
       </p>
       <div className="table-scroll">
         <table className="grants">
