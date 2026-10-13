@@ -28,6 +28,11 @@ project = gcp_cfg.require("project")
 region = gcp_cfg.require("region")
 adopt = Adopt(cfg.get_bool("adopting") or False)
 job_dir = Path(__file__).resolve().parents[2] / "job"
+retain_shared_access = cfg.get_bool("retainSharedAccess")
+if retain_shared_access is None:
+    retain_shared_access = True
+if not retain_shared_access and not cfg.get_bool("prepareIsolation"):
+    raise ValueError("retainSharedAccess=false requires the isolated foundation")
 
 STACK = "cw-s3"
 if pulumi.get_stack() != STACK:
@@ -53,7 +58,7 @@ job = JobAccount(
     account_id="cw-s3-job",
     display_name="cw-s3 CoreWeave scan jobs",
     roles=[
-        "roles/artifactregistry.reader",
+        *(["roles/artifactregistry.reader"] if retain_shared_access else []),
         "roles/batch.agentReporter",
         "roles/batch.jobsEditor",
         "roles/logging.logWriter",
@@ -81,10 +86,11 @@ secrets = Secrets(
     adopt=adopt,
     existing=True,
     grants_existing=False,
+    grant_only=None if retain_shared_access else set(CW_SECRETS) - {"cw-s3-r2-access-key-id", "cw-s3-r2-secret-access-key"},
 )
-# The Cloudflare token is gcs's secret (its stack owns the container); the cw
-# jobs read it too.
-cf_token = grant_secret("cf-pages-token-cw-accessor", project=project, secret_id="cf-pages-token", member=job.member, member_email=job.email_literal, adopt=adopt)
+shared_ready = []
+if retain_shared_access:
+    shared_ready.append(grant_secret("cf-pages-token-cw-accessor", project=project, secret_id="cf-pages-token", member=job.member, member_email=job.email_literal, adopt=adopt))
 
 legacy = "gcs-usage-job@" + f"{project}.iam.gserviceaccount.com"
 legacy_dispatch = "gcs-usage-dispatch@" + f"{project}.iam.gserviceaccount.com"
@@ -98,11 +104,9 @@ if cfg.get_bool("legacyJobAccess"):
         member=f"serviceAccount:{legacy_dispatch}",
     )
 
-# The jobs' work dir and snapshots live in gcs's data bucket (gcs's stack owns it).
-data = grant_bucket("oa-gcs-usage-dvx-cw-job", bucket="oa-gcs-usage-dvx", role="roles/storage.objectAdmin", member=job.member, member_email=job.email_literal, adopt=adopt)
-# The static name index's per-scan stages (specs/cw-static-names.md, IAM option ii) run as this account; their shuffle
-# lives in gcs's scratch bucket (7-day expiry; gcs's stack owns it).
-scratch = grant_bucket("oa-gcs-usage-scratch-cw-job", bucket="oa-gcs-usage-scratch", role="roles/storage.objectAdmin", member=job.member, member_email=job.email_literal, adopt=adopt)
+if retain_shared_access:
+    for bucket in ("oa-gcs-usage-dvx", "oa-gcs-usage-scratch"):
+        shared_ready.append(grant_bucket(f"{bucket}-cw-job", bucket=bucket, role="roles/storage.objectAdmin", member=job.member, member_email=job.email_literal, adopt=adopt))
 
 # Additive isolation resources precede a later, explicitly reviewed cron cutover.
 isolation_ready = []
@@ -111,7 +115,7 @@ if cfg.get_bool("prepareIsolation"):
     isolation_ready.extend(prepare_credentials(project, job.member))
     isolation_ready.extend(prepare_dispatcher(dispatch.member))
 
-ready = [job, secrets, cf_token, data, scratch, *isolation_ready]
+ready = [job, secrets, *shared_ready, *isolation_ready]
 scan = BatchCron(
     "cw-usage-snapshot",
     project=project,
