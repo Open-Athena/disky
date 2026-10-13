@@ -341,7 +341,6 @@ function AppContent() {
     scans[scans.indexOf(to) + 1] === from
       ? undefined
       : Math.max(3600_000, Math.round((scanInstant(to, times) - scanInstant(from, times)) / 3600_000) * 3600_000)
-  const pickBefore = (scan: string) => { if (asof) setSpan(spanTo(asof, scan)) }
   // A brush on the size chart hands back the scan ids its ends sit on (else a
   // prefix, which resolves to the latest scan matching it — never a date-only
   // id read as its whole day), and the pair becomes the page's `?d=` (after + span).
@@ -350,7 +349,7 @@ function AppContent() {
     const toScan = brushScan(to)
     const fromScan = brushScan(from)
     if (!toScan || !fromScan || scanCmp(toScan, fromScan, times) <= 0) return
-    setRange(toScan, spanTo(toScan, fromScan))
+    setRange(toScan, spanTo(toScan, fromScan), fromScan)
   }
   const diffWindow: [string, string] | undefined = diffPrev && asof ? [diffPrev, asof] : undefined
   // Two orthogonal, low-key toggles for the diff window (see scan.ts grammar):
@@ -1418,7 +1417,7 @@ function AppContent() {
             {/* Both endpoints: the window's start, and the page's scan again
                 (the bar's picker — one scan, stated where the diff reads). */}
             <Explain text={<>The diff window's start — the size chart's shaded band reads from here to the scan. Drag on the size chart to set both ends.</>}>
-              <ScanCombobox value={diffPrev} scans={earlier} onChange={startPinned ? setFrom : pickBefore} label="Diff from scan" fmt={fmtS} />
+              <ScanCombobox value={diffPrev} scans={earlier} onChange={setFrom} label="Diff from scan" fmt={fmtS} />
             </Explain>
             <Explain text={startPinned
               ? <>Start is <b>pinned</b> to this scan — the window's near end stays put as new scans arrive. Click to track a duration back from the end instead.</>
