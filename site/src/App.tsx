@@ -1045,6 +1045,7 @@ function AppContent() {
   }
 
   const segs = drillPath.split('/').filter(Boolean)
+  const pathScheme = store.bucketSchemes?.[segs[0]] ?? store.scheme
   const recordedAt = meta?.disk_space?.captured_at ?? meta?.published
   const scanTip = meta && (
     <div className="scan-tip">
@@ -1111,8 +1112,8 @@ function AppContent() {
   const here = mapPath?.[mapPath.length - 1]
   // The deepest crumb is a tap-to-open path card (the full `<scheme>…/` prefix +
   // copy) rather than another drill link — it's where the page already is.
-  const crumbFullPath = pathText(store.scheme, segs, true)
-  const crumbCopy = pathCopy(store.scheme, segs, true)
+  const crumbFullPath = pathText(pathScheme, segs, true)
+  const crumbCopy = pathCopy(pathScheme, segs, true)
   const crumbs = (
     <span className="tb-path" aria-label="Drilled path">
       <RootCrumb treeName={mapTree?.n} rootLabel={rootLabel} rootTitle={rootTitle} scopeWord={store.rootLabel} here={!segs.length} onClick={() => drillTo([])} />
@@ -1121,7 +1122,7 @@ function AppContent() {
           <span className="sep">/</span>
           {i === segs.length - 1
             ? <PathPopover label={sg} fullPath={crumbFullPath} copy={crumbCopy} />
-            : <Tooltip content={<code>{pathText(store.scheme, segs.slice(0, i + 1))}</code>}><button type="button" onClick={() => drillTo(segs.slice(0, i + 1))}>{sg}</button></Tooltip>}
+            : <Tooltip content={<code>{pathText(pathScheme, segs.slice(0, i + 1))}</code>}><button type="button" onClick={() => drillTo(segs.slice(0, i + 1))}>{sg}</button></Tooltip>}
         </span>
       ))}
     </span>

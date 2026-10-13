@@ -17,7 +17,8 @@ import type { OwnerIndex } from './owners'
 import { ClassMixTip, Tooltip } from './Tooltip'
 import type { ColorMode, Pricing, TreeNode } from './types'
 import { CLASS_NAMES, classMix, fmtN, fmtUsd, ratePerByte, unownedBytes } from './types'
-import { SettingsMenu, useRenderer, useTiling } from './prefs'
+import { SettingsMenu, useRenderer, useTiling, useTitleSpace } from './prefs'
+import { useStore } from './store'
 import { useUnits } from './units'
 import { usePerfCommit } from './perf'
 import { listingTime } from './listingTime'
@@ -220,7 +221,9 @@ export function Treemap({ root, mode, shade = 'none', userIdx, dateRange, readRa
   const liToggle = (m: LiMetric) => setLiP(LI_METRIC_CHIPS.map(([k]) => k).filter(k => liMetrics.has(k) !== (k === m)).join(''))
   // Tiling is a user preference (header toggle): `shared` by default.
   const [tiling] = useTiling()
+  const store = useStore()
   const [renderer] = useRenderer()
+  const [titleSpace] = useTitleSpace()
   // Macro/micro hue for a cell, relative to the drilled root (see childRanks).
   // Every cell path starts with the drilled path, so the view root sits at a
   // fixed index — NOT `len - 2 - depth`: a collapsed chain (`run/…/checkpoints`
@@ -243,7 +246,8 @@ export function Treemap({ root, mode, shade = 'none', userIdx, dateRange, readRa
     [drillLen],
   )
 
-  const uriOf = (path: TreeNode[]) => scheme + path.slice(1).map(n => n.n).join('/')
+  const schemeOf = (path: TreeNode[]) => store.bucketSchemes?.[path[1]?.n] ?? scheme
+  const uriOf = (path: TreeNode[]) => schemeOf(path) + path.slice(1).map(n => n.n).join('/')
 
   // Fold merger: first-class TreeNode aggregating us/d so folded tiles keep
   // real tooltips (upstream calls this at every nesting level).
@@ -593,7 +597,7 @@ export function Treemap({ root, mode, shade = 'none', userIdx, dateRange, readRa
     )
     return (
       <>
-        <PathBar path={path} scheme={scheme} onDrill={onPathChange} />
+        <PathBar path={path} scheme={schemeOf(path)} onDrill={onPathChange} />
         <div className="nums">
           {fmtBytes(n.b)} · {fmtN(n.o)} objects · {((100 * n.b) / root.b).toFixed(2)}% of total
           {n.d != null && <> · mean {time.label} {epochDaysToMonth(n.d)}</>}
@@ -637,7 +641,8 @@ export function Treemap({ root, mode, shade = 'none', userIdx, dateRange, readRa
       getId={(_n, p) => uriOf(p)}
       formatSize={fmtBytes}
       collapseChains
-      reclaimTitleSpace
+      reclaimTitleSpace={titleSpace === 'reclaim'}
+      branchOutline="color-mix(in oklab, var(--ink) 30%, transparent)"
       mergeSmall={mergeSmall}
       colorForCell={colorForCell}
       // Opaque cells. Upstream's default fades every nesting level by 0.82,
@@ -673,7 +678,7 @@ export function Treemap({ root, mode, shade = 'none', userIdx, dateRange, readRa
       // current view, so the panel never collapses to an empty stub.
       renderTipDefault={(n, p) => (
         <div className="tip-viewcard">
-          <div className="vc-scope">{p.length > 1 ? pathText(scheme, p.slice(1).map(x => x.n)) : n.n}</div>
+          <div className="vc-scope">{p.length > 1 ? pathText(schemeOf(p), p.slice(1).map(x => x.n)) : n.n}</div>
           <div className="nums">
             {fmtBytes(n.b)} · {fmtN(n.o)} objects · {root.b ? ((100 * n.b) / root.b).toFixed(2) : 0}% of total
             {n.d != null && <> · mean {time.label} {epochDaysToMonth(n.d)}</>}
