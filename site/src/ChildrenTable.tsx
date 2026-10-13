@@ -8,6 +8,7 @@ import type { UserIndexEntry } from './colors'
 import type { OwnerIndex } from './owners'
 import { OwnerBar, ownerShares } from './OwnerBar'
 import { useStore } from './store'
+import { listingTime } from './listingTime'
 import { Tooltip } from './Tooltip'
 import { elideMid } from './CopyName'
 import { AssignSelect } from './AssignSelect'
@@ -66,6 +67,7 @@ export function ChildrenTable({ node, segs, scheme, ownerIdx, userIdx, onPickUse
   // Owner assignment (`Store.owners`) is any signed-in viewer's, alongside. Both are the
   // subtree's store's flags: a secondary store has neither.
   const store = useStore()
+  const time = listingTime(scheme)
   const staging = store.staging
   const canStage = useCanStage()
   const stage = useStage()
@@ -224,7 +226,7 @@ export function ChildrenTable({ node, segs, scheme, ownerIdx, userIdx, onPickUse
               onClick={() => setSort(s => ({ k: 'd', asc: s.k === 'd' ? !s.asc : false }))}
               title="sort"
             >
-              created{sort.k === 'd' ? (sort.asc ? ' ▲' : ' ▼') : ''}
+              {time.label}{sort.k === 'd' ? (sort.asc ? ' ▲' : ' ▼') : ''}
               {dMax > dMin && (
                 <Tooltip content={<>
                   <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6, whiteSpace: 'nowrap' }}>
@@ -232,9 +234,9 @@ export function ChildrenTable({ node, segs, scheme, ownerIdx, userIdx, onPickUse
                     <span className="gradbar" style={{ background: dateGradientCss(), width: 90, height: 8, borderRadius: 2, display: 'inline-block' }} />
                     {epochDaysToMonthShort(dMax)}
                   </span>
-                  <div style={{ opacity: 0.7, marginTop: 3 }}>Swatch colour = each row’s write date (a directory’s byte-weighted mean), old → new, over the rows listed here.</div>
+                  <div style={{ opacity: 0.7, marginTop: 3 }}>Swatch colour = each row’s {time.description} (a directory’s byte-weighted mean), old → new, over the rows listed here.</div>
                 </>}>
-                  <span className="info" tabIndex={0} onClick={e => e.stopPropagation()} aria-label="about the created colour"> ⓘ</span>
+                  <span className="info" tabIndex={0} onClick={e => e.stopPropagation()} aria-label={`about the ${time.label} colour`}> ⓘ</span>
                 </Tooltip>
               )}
             </th>
