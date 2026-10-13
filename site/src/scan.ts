@@ -3,6 +3,7 @@ import { useQueries, useQuery, type UseQueryResult } from '@tanstack/react-query
 import { useUrlAlias, useUrlState } from 'use-prms'
 import { canonicalizeSel, decodeSel, encodeScan, encodeSel, exactSlug, latestScan, minPrefix, minSlug, legacyDateParam, legacyFromParam, mergeSel, scanCmp, scanMatches, scanNeighbors, scanParts, selSlug, sortScans, startKey, timesNeeded, type ScanSel, type ScanTimes } from './scanSlug'
 import { storeUrl, type Store } from './stores'
+import { pickScanSelection } from './scanSelection'
 
 // How often an unpinned tab re-checks for newly published scans.
 export const SCANS_POLL_MS = 5 * 60_000
@@ -119,7 +120,7 @@ export interface Scan {
   label: ScanLabel
   dMatches: string[]
   dP: string | undefined
-  /** Pin the "after" scan; the latest scan (or undefined) clears the pin. */
+  /** Pick the "after" scan, preserving an existing pinned-end mode. */
   setDP: (v: string | undefined) => void
   /** Diff look-back in ms; undefined = the previous scan (or a pinned `from`). */
   span: number | undefined
@@ -133,7 +134,7 @@ export interface Scan {
    *  older `asof` is already pinned.) */
   setEndPin: (pin: boolean) => void
   /** Pin + look-back in one URL write (a chart brush sets both). */
-  setRange: (d: string | undefined, ms: number | undefined) => void
+  setRange: (d: string | undefined, ms: number | undefined, before?: string) => void
   scansQ: UseQueryResult<string[]>
 }
 
@@ -249,9 +250,7 @@ export function useScan(store: Store, indexed?: readonly string[] | null | 'load
   const from = sel?.from
   const dMatches = useMemo(() => scanMatches(dP, scans, times), [dP, scans, times])
   const { asof, miss, pending } = picked
-  // Write the {end, before} pair verbatim — `before` is a span OR a pinned
-  // `from`, never both. Callers that pass a `d` equal to the latest scan mean
-  // "float" and drop it; `setEndPin` is the one path that pins at latest.
+  // Write the {end, before} pair verbatim; start pins and spans are exclusive.
   const write = (d: string | undefined, span0: number | undefined, from0: string | undefined) =>
     setSel(d || span0 || from0
       ? { ...(d ? { d } : {}), ...(span0 ? { span: span0 } : {}), ...(from0 ? { from: from0 } : {}) }
@@ -261,9 +260,12 @@ export function useScan(store: Store, indexed?: readonly string[] | null | 'load
   // prefix (`minPrefix`): the shortest of its day, hour and minute that names it
   // for good — never a day or hour that holds (or may yet hold) another scan.
   const exact = (v: string | undefined) => (v ? minPrefix(v, scans, times) : undefined)
-  const setRange = (v: string | undefined, ms: number | undefined) =>
-    write(v && v !== floating.scan ? exact(v) : undefined, ms, undefined)
-  const setDP = (v: string | undefined) => write(v && v !== floating.scan ? exact(v) : undefined, span, from)
+  const pick = (v: string | undefined, ms: number | undefined, before?: string) => {
+    const next = pickScanSelection(sel, v, floating.scan, ms, before)
+    write(next?.d === dP ? dP : exact(next?.d), next?.span, next?.from === from ? from : exact(next?.from))
+  }
+  const setRange = (v: string | undefined, ms: number | undefined, before?: string) => pick(v, ms, before)
+  const setDP = (v: string | undefined) => pick(v, span)
   const setSpan = (ms: number | undefined) => write(dP, ms, undefined)
   const setFrom = (v: string | undefined) => write(dP, undefined, exact(v))
   const setEndPin = (pin: boolean) => write(pin ? exact(asof ?? undefined) : undefined, span, from)
