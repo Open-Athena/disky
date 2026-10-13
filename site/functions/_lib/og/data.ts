@@ -125,7 +125,7 @@ export interface Site { name: string; scheme: string; defaultColor?: ColorMode }
 /** The map card for a view (`routes.ts` params). Errors become a card that
  * says so, never a throw: an unfurl must always get an image. */
 export async function mapCard(env: Env, site: Site, title: string, params: Record<string, string>, tier: OgTier): Promise<CardData> {
-  const base = { tier, site: site.name, title, tiles: [] as CardTile[] }
+  const base = { tier, site: site.name, title, tiles: [] as CardTile[], ...(env.PUBLIC_READ ? { publicLabels: true } : {}) }
   const date = await resolveScan(env, params.d)
   if (!date) return { ...base, subtitle: '', total: '', empty: 'no scans yet' }
   const path = params.path ?? ''

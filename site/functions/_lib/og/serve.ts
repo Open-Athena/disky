@@ -21,7 +21,7 @@ import { warmSubtree } from '../../api/subtree.js'
 import { colorModeCodec } from '../../../src/colorMode.js'
 import type { ColorMode } from '../../../src/types.js'
 
-const RENDER_VERSION = '3'
+const RENDER_VERSION = '4'
 
 export type OgEnv = Env & {
   ASSETS: { fetch: (req: Request) => Promise<Response> }
@@ -89,7 +89,9 @@ export async function stampPage(env: OgEnv, url: URL, html: Response): Promise<R
   if (OWN_TITLES.has(pv.kind)) return stampMeta(html, { image, imageType: 'image/png', page: url.href })
   return stampMeta(html, {
     title: pv.title,
-    desc: `${siteOf(env).name}: storage snapshot preview. Comparison links preview the after snapshot, not the diff.`,
+    desc: env.PUBLIC_READ
+      ? `${siteOf(env).name}: explore storage by size and path; browse folders and compare scans.`
+      : `${siteOf(env).name}: storage snapshot preview. Comparison links preview the after snapshot, not the diff.`,
     image,
     imageType: 'image/png',
     page: url.href,

@@ -35,6 +35,13 @@ beforeEach(() => {
 })
 
 describe('map cards honor the dashboard color axis', () => {
+  it('labels only maps with an explicitly public base read scope', async () => {
+    expect([
+      (await card('t')).publicLabels,
+      (await mapCard({ PUBLIC_READ: '1' }, { name: 'Public demo', scheme: 'r2://' }, 'root', { c: 't' }, 'anon')).publicLabels,
+      (await mapCard({}, { name: 'Private demo', scheme: 'r2://' }, 'root', { publicLabels: '1' }, 'anon')).publicLabels,
+    ]).toEqual([undefined, true, undefined])
+  })
   it.each(['t', 'tree'])('c=%s uses directory ranks and child hue fans, not owner colors', async c => {
     expect(colors(await card(c))).toEqual([
       { name: 'a', color: 'hsl(212 78% 52%)', kids: [{ name: 'a1', color: 'hsl(201 78% 45%)' }, { name: 'a2', color: 'hsl(223 78% 59%)' }] },
