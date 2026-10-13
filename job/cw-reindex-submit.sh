@@ -13,11 +13,11 @@ set -euo pipefail
 PROJECT=oa-internal-450019
 REGION=us-central1
 SA=cw-s3-job@$PROJECT.iam.gserviceaccount.com
-IMAGE=${IMAGE:-us-central1-docker.pkg.dev/$PROJECT/cloud-run-source-deploy/gcs-usage-snapshot:cw}
+IMAGE=${IMAGE:-us-central1-docker.pkg.dev/$PROJECT/cw-s3-usage/scan:cw}
 MACHINE=${MACHINE:-n2-standard-8}
 MEMORY_MIB=${MEMORY_MIB:-30000}
 MAX_RUN_SECONDS=${MAX_RUN_SECONDS:-28800}  # up to ~78 scans × a few min each
-DATA_BUCKET=${DATA_BUCKET:-oa-gcs-usage-dvx}
+DATA_BUCKET=${DATA_BUCKET:-oa-cw-s3-usage-data}
 JOB_ID=${JOB_ID:-cw-reindex-$(date -u +%Y%m%d-%H%M%S)}
 
 vars() {
@@ -59,7 +59,7 @@ cat > "$spec" <<EOF
       "environment": {
         "variables": $(vars),
         "secretVariables": {
-          "CLOUDFLARE_API_TOKEN": "projects/$PROJECT/secrets/cf-pages-token/versions/latest"
+          "CLOUDFLARE_API_TOKEN": "projects/$PROJECT/secrets/cw-s3-cf-pages-token/versions/latest"
         }
       }
     }

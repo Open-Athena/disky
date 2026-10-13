@@ -20,6 +20,7 @@ import pulumi
 import pulumi_gcp as gcp
 
 from gcp_jobs import Adopt, BatchCron, JobAccount, Secrets, cost_labels, grant_bucket, grant_secret, labeled_provider
+from cw_isolation import prepare_credentials, prepare_dispatcher, prepare_isolation
 
 cfg = pulumi.Config()
 gcp_cfg = pulumi.Config("gcp")
@@ -103,7 +104,14 @@ data = grant_bucket("oa-gcs-usage-dvx-cw-job", bucket="oa-gcs-usage-dvx", role="
 # lives in gcs's scratch bucket (7-day expiry; gcs's stack owns it).
 scratch = grant_bucket("oa-gcs-usage-scratch-cw-job", bucket="oa-gcs-usage-scratch", role="roles/storage.objectAdmin", member=job.member, member_email=job.email_literal, adopt=adopt)
 
-ready = [job, secrets, cf_token, data, scratch]
+# Additive isolation resources precede a later, explicitly reviewed cron cutover.
+isolation_ready = []
+if cfg.get_bool("prepareIsolation"):
+    isolation_ready.extend(prepare_isolation(project, job.member))
+    isolation_ready.extend(prepare_credentials(project, job.member))
+    isolation_ready.extend(prepare_dispatcher(dispatch.member))
+
+ready = [job, secrets, cf_token, data, scratch, *isolation_ready]
 scan = BatchCron(
     "cw-usage-snapshot",
     project=project,

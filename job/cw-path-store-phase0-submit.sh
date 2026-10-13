@@ -17,11 +17,11 @@ set -euo pipefail
 PROJECT=oa-internal-450019
 REGION=us-central1
 SA=cw-s3-job@$PROJECT.iam.gserviceaccount.com
-IMAGE=${IMAGE:-us-central1-docker.pkg.dev/$PROJECT/cloud-run-source-deploy/gcs-usage-snapshot:cw}
+IMAGE=${IMAGE:-us-central1-docker.pkg.dev/$PROJECT/cw-s3-usage/scan:cw}
 MACHINE=${MACHINE:-n2-standard-8}
 MEMORY_MIB=${MEMORY_MIB:-30000}
-L2_URI=${L2_URI:-gs://oa-gcs-usage-dvx/cw-l2/2026-09-30T1203/marin-us-east-02a.parquet}
-OUT_URI=${OUT_URI:-gs://oa-gcs-usage-dvx/path-store-phase0/2026-09-30T1203}
+L2_URI=${L2_URI:-gs://oa-cw-s3-usage-data/cw-l2/2026-09-30T1203/marin-us-east-02a.parquet}
+OUT_URI=${OUT_URI:-gs://oa-cw-s3-usage-scratch/path-store-phase0/2026-09-30T1203}
 JOB_ID=${JOB_ID:-cw-path-store-phase0-$(date -u +%Y%m%d-%H%M%S)}
 
 spec=$(mktemp)

@@ -14,5 +14,5 @@ def test_cw_profile_static_output_tracks_the_cw_generation(monkeypatch):
     [static] = [o for o in load_profile(JOB / "scan-runs.json").outputs if o.key == "static"]
     gen = json.loads((JOB / "static-names.json").read_text())["gen"]
     assert fill(static.uri, "2026-10-10T1201", None) == (
-        f"gs://oa-gcs-usage-dvx/static-names/{gen}/manifests/2026-10-10T1201.json"
+        f"gs://oa-cw-s3-usage-data/static-names/{gen}/manifests/2026-10-10T1201.json"
     )

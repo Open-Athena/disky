@@ -14,7 +14,7 @@
 #
 # Self-reference is fine and intended: this scan lists the bucket it writes to,
 # so each scan sees the previous meta scan's own output (one scan late, and a
-# rounding error next to gcs's 2.4 TiB `listing/` + `access/`).
+# small addition to the historical CW artifacts).
 #
 # Not here (vs cw-run.sh): the lifecycle snapshot (no rules on these buckets to
 # show), the Slack digest thread (no audience for a daily "our storage" post —
@@ -58,8 +58,8 @@ export SITE_URL=${SITE_URL:-https://cw-s3.oa.dev}
 export SNAPSHOTS_SUBDIR=${SNAPSHOTS_SUBDIR:-$STORE}                  # snapshots/meta/ (`STORES_JSON` says the same)
 export LAYER2_PREFIX=${LAYER2_PREFIX:-"$STORE-l2/{scan}/"}          # this store's layer-2 dir (`dt-cloud publish-r2 -l`)
 
-ROOTS=${META_ROOTS:-"gcs://oa-gcs-usage-dvx r2://oa-cw-s3-usage-index"}
-DATA=${DATA_BUCKET:-oa-gcs-usage-dvx}
+ROOTS=${META_ROOTS:-"gcs://oa-cw-s3-usage-data r2://oa-cw-s3-usage-index"}
+DATA=${DATA_BUCKET:-oa-cw-s3-usage-data}
 export DATA_BUCKET=$DATA
 PROCS=${LISTING_PROCS:-4}
 WORKERS=${LISTING_WORKERS:-4}

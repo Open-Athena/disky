@@ -18,8 +18,8 @@
 #
 # Env: L2_URI, OUT_URI, WORK_DIR (default /stage/phase0).
 set -euxo pipefail
-L2_URI=${L2_URI:-gs://oa-gcs-usage-dvx/cw-l2/2026-09-30T1203/marin-us-east-02a.parquet}
-OUT_URI=${OUT_URI:-gs://oa-gcs-usage-dvx/path-store-phase0/2026-09-30T1203}
+L2_URI=${L2_URI:-gs://oa-cw-s3-usage-data/cw-l2/2026-09-30T1203/marin-us-east-02a.parquet}
+OUT_URI=${OUT_URI:-gs://oa-cw-s3-usage-scratch/path-store-phase0/2026-09-30T1203}
 WORK=${WORK_DIR:-/stage/phase0}
 mkdir -p "$WORK/store" "$WORK/report"
 cd /app

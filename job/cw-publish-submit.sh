@@ -11,9 +11,9 @@
 #   PARALLELISM=8 job/cw-publish-submit.sh …            # concurrent tasks (default 4)
 #
 # Each task streams its scan GCS → R2 through the APIs (no bucket mount); the
-# job SA reads GCS via ADC and the R2 creds are the `cw-s3-r2-*` secrets, as
+# job SA reads GCS via ADC and the R2 creds are the isolated CW secrets, as
 # in cw-batch-submit.sh. It copies only the `index/<gen>/` dirs D1 points at
-# (so it reads D1: `D1_DB_ID` + the `cf-pages-token` secret) and, as the scan
+# (so it reads D1: `D1_DB_ID` + the `cw-s3-cf-pages-token` secret) and, as the scan
 # job's 4c (`-L`), leaves the per-bucket rollups in GCS.
 set -euo pipefail
 
@@ -23,8 +23,8 @@ SCANS=("$@")
 PROJECT=oa-internal-450019
 REGION=us-central1
 SA=cw-s3-job@$PROJECT.iam.gserviceaccount.com
-IMAGE=${IMAGE:-us-central1-docker.pkg.dev/$PROJECT/cloud-run-source-deploy/gcs-usage-snapshot:cw}
-DATA_BUCKET=${DATA_BUCKET:-oa-gcs-usage-dvx}
+IMAGE=${IMAGE:-us-central1-docker.pkg.dev/$PROJECT/cw-s3-usage/scan:cw}
+DATA_BUCKET=${DATA_BUCKET:-oa-cw-s3-usage-data}
 R2_BUCKET=${R2_BUCKET:-oa-cw-s3-usage-index}
 PARALLELISM=${PARALLELISM:-4}
 JOB_ID=${JOB_ID:-cw-publish-r2-$(date -u +%Y%m%d-%H%M%S)}
@@ -62,10 +62,10 @@ print(json.dumps({
                     "CLOUDFLARE_ACCOUNT_ID": os.environ.get("CLOUDFLARE_ACCOUNT_ID", "74981a43be0de7712369306c7b19133d"),
                 },
                 "secretVariables": {
-                    "CLOUDFLARE_API_TOKEN": f"projects/{P}/secrets/cf-pages-token/versions/latest",
+                    "CLOUDFLARE_API_TOKEN": f"projects/{P}/secrets/cw-s3-cf-pages-token/versions/latest",
                     "R2_ENDPOINT": f"projects/{P}/secrets/cw-s3-r2-endpoint/versions/latest",
-                    "R2_ACCESS_KEY_ID": f"projects/{P}/secrets/cw-s3-r2-access-key-id/versions/latest",
-                    "R2_SECRET_ACCESS_KEY": f"projects/{P}/secrets/cw-s3-r2-secret-access-key/versions/latest",
+                    "R2_ACCESS_KEY_ID": f"projects/{P}/secrets/cw-s3-isolated-r2-access-key-id/versions/latest",
+                    "R2_SECRET_ACCESS_KEY": f"projects/{P}/secrets/cw-s3-isolated-r2-secret-access-key/versions/latest",
                 },
             },
         },

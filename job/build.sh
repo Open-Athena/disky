@@ -17,7 +17,7 @@ PROJECT=${PROJECT:-oa-internal-450019}
 # `latest` (the gcs deployment's image, built from its own branch).
 JOB=${JOB:-cw-run.sh}
 TAG=${TAG:-cw}
-IMAGE=${IMAGE:-us-central1-docker.pkg.dev/$PROJECT/cloud-run-source-deploy/gcs-usage-snapshot:$TAG}
+IMAGE=${IMAGE:-us-central1-docker.pkg.dev/$PROJECT/cw-s3-usage/scan:$TAG}
 
 echo "building $IMAGE (Cloud Build; context = repo root, minus .gcloudignore)" >&2
 exec gcloud builds submit --project "$PROJECT" --config cloudbuild.yaml --substitutions "_IMAGE=$IMAGE,_JOB=$JOB" .

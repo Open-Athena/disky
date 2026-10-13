@@ -60,10 +60,10 @@ ADMIN_EMAILS = "1"
 # Sweep executor config (specs/oa-decoupling.md step 0; today's cwBatch/gcp.ts
 # values, which `cloud` stops defaulting): the plan-sweep job's data bucket,
 # GCP project, image and CoreWeave S3 endpoint.
-DATA_BUCKET = "oa-gcs-usage-dvx"
+DATA_BUCKET = "oa-cw-s3-usage-data"
 GCP_PROJECT = "oa-internal-450019"
 META_TREE_URL = "https://cw-s3.oa.dev/meta"  # /scans outputs link into the meta tree
-SWEEP_IMAGE = "us-central1-docker.pkg.dev/oa-internal-450019/cloud-run-source-deploy/gcs-usage-snapshot:cw"
+SWEEP_IMAGE = "us-central1-docker.pkg.dev/oa-internal-450019/cw-s3-usage/scan:cw"
 DISKY_LABELS = "app=disky,deployment=cw-s3"  # cost labels on executor jobs (specs/cost-labels.md)
 SWEEP_S3_ENDPOINT = "https://cwobject.com"
 REPO_URL = "https://github.com/Open-Athena/marin-gcs-usage"  # the site's "Source on GitHub" link (build-time)
@@ -110,7 +110,7 @@ STORE_REGION = "auto"
 # Functions its data. The store reuses the primary's R2 secrets (same bucket,
 # named by binding in `secrets`), so no new Pages secret is needed.
 STORES_EXTRA = "meta"
-STORES_JSON = '{"meta":{"scope":"admin","vars":{"ROOT_LABEL":"Marin usage — meta","SNAPSHOTS_SUBDIR":"meta","STORE_SCHEME":"gs://","STORE_BUCKETS":"oa-gcs-usage-dvx,oa-cw-s3-usage-index","STORE_PREFIXES":"meta-l2/,snapshots/meta/","STORE_BUCKET":"oa-cw-s3-usage-index","STORE_REGION":"auto","ROOT_TITLE":"Data behind this site: scans, indexes and listings in oa-gcs-usage-dvx (GCS) and oa-cw-s3-usage-index (R2)"},"secrets":{"STORE_ENDPOINT":"STORE_ENDPOINT","STORE_ACCESS_KEY_ID":"STORE_ACCESS_KEY_ID","STORE_SECRET_ACCESS_KEY":"STORE_SECRET_ACCESS_KEY"}}}'
+STORES_JSON = '{"meta":{"scope":"admin","vars":{"ROOT_LABEL":"Marin usage — meta","SNAPSHOTS_SUBDIR":"meta","STORE_SCHEME":"gs://","STORE_BUCKETS":"oa-cw-s3-usage-data,oa-cw-s3-usage-index","STORE_PREFIXES":"meta-l2/,snapshots/meta/","STORE_BUCKET":"oa-cw-s3-usage-index","STORE_REGION":"auto","ROOT_TITLE":"Data behind this site: scans, indexes and listings in oa-cw-s3-usage-data (GCS) and oa-cw-s3-usage-index (R2)"},"secrets":{"STORE_ENDPOINT":"STORE_ENDPOINT","STORE_ACCESS_KEY_ID":"STORE_ACCESS_KEY_ID","STORE_SECRET_ACCESS_KEY":"STORE_SECRET_ACCESS_KEY"}}}'
 
 # Static name search (specs/architecture/static-name-search.md, specs/static-append.md): the map's `?f=` filter
 # and /names read cw's static name index from its R2 bucket (INDEX_R2, below; generation `STATIC_GEN` under
@@ -184,10 +184,10 @@ ADMIN_EMAILS = "1"
 # Sweep executor config (specs/oa-decoupling.md step 0; today's cwBatch/gcp.ts
 # values, which `cloud` stops defaulting): the plan-sweep job's data bucket,
 # GCP project, image and CoreWeave S3 endpoint.
-DATA_BUCKET = "oa-gcs-usage-dvx"
+DATA_BUCKET = "oa-cw-s3-usage-data"
 GCP_PROJECT = "oa-internal-450019"
 META_TREE_URL = "https://cw-s3.oa.dev/meta"  # /scans outputs link into the meta tree
-SWEEP_IMAGE = "us-central1-docker.pkg.dev/oa-internal-450019/cloud-run-source-deploy/gcs-usage-snapshot:cw"
+SWEEP_IMAGE = "us-central1-docker.pkg.dev/oa-internal-450019/cw-s3-usage/scan:cw"
 DISKY_LABELS = "app=disky,deployment=cw-s3"  # cost labels on executor jobs (specs/cost-labels.md)
 SWEEP_S3_ENDPOINT = "https://cwobject.com"
 VIEWER_DOMAINS = "coreweave.com"
@@ -217,7 +217,7 @@ STORE_REGION = "auto"
 # Functions its data. The store reuses the primary's R2 secrets (same bucket,
 # named by binding in `secrets`), so no new Pages secret is needed.
 STORES_EXTRA = "meta"
-STORES_JSON = '{"meta":{"scope":"admin","vars":{"ROOT_LABEL":"Marin usage — meta","SNAPSHOTS_SUBDIR":"meta","STORE_SCHEME":"gs://","STORE_BUCKETS":"oa-gcs-usage-dvx,oa-cw-s3-usage-index","STORE_PREFIXES":"meta-l2/,snapshots/meta/","STORE_BUCKET":"oa-cw-s3-usage-index","STORE_REGION":"auto","ROOT_TITLE":"Data behind this site: scans, indexes and listings in oa-gcs-usage-dvx (GCS) and oa-cw-s3-usage-index (R2)"},"secrets":{"STORE_ENDPOINT":"STORE_ENDPOINT","STORE_ACCESS_KEY_ID":"STORE_ACCESS_KEY_ID","STORE_SECRET_ACCESS_KEY":"STORE_SECRET_ACCESS_KEY"}}}'
+STORES_JSON = '{"meta":{"scope":"admin","vars":{"ROOT_LABEL":"Marin usage — meta","SNAPSHOTS_SUBDIR":"meta","STORE_SCHEME":"gs://","STORE_BUCKETS":"oa-cw-s3-usage-data,oa-cw-s3-usage-index","STORE_PREFIXES":"meta-l2/,snapshots/meta/","STORE_BUCKET":"oa-cw-s3-usage-index","STORE_REGION":"auto","ROOT_TITLE":"Data behind this site: scans, indexes and listings in oa-cw-s3-usage-data (GCS) and oa-cw-s3-usage-index (R2)"},"secrets":{"STORE_ENDPOINT":"STORE_ENDPOINT","STORE_ACCESS_KEY_ID":"STORE_ACCESS_KEY_ID","STORE_SECRET_ACCESS_KEY":"STORE_SECRET_ACCESS_KEY"}}}'
 
 # Static name search (specs/architecture/static-name-search.md, specs/static-append.md): the map's `?f=` filter
 # and /names read cw's static name index from its R2 bucket (INDEX_R2, below; generation `STATIC_GEN` under

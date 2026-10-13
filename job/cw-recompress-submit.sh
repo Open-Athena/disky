@@ -37,8 +37,8 @@ set -euo pipefail
 PROJECT=oa-internal-450019
 REGION=us-central1
 SA=cw-s3-job@$PROJECT.iam.gserviceaccount.com
-IMAGE=${IMAGE:-us-central1-docker.pkg.dev/$PROJECT/cloud-run-source-deploy/gcs-usage-snapshot:cw}
-DATA_BUCKET=${DATA_BUCKET:-oa-gcs-usage-dvx}
+IMAGE=${IMAGE:-us-central1-docker.pkg.dev/$PROJECT/cw-s3-usage/scan:cw}
+DATA_BUCKET=${DATA_BUCKET:-oa-cw-s3-usage-data}
 PARALLELISM=${PARALLELISM:-4}
 JOB_ID=${JOB_ID:-cw-recompress-$(date -u +%Y%m%d-%H%M%S)}
 

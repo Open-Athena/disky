@@ -12,11 +12,11 @@ set -euo pipefail
 PROJECT=oa-internal-450019
 REGION=us-central1
 SA=cw-s3-job@$PROJECT.iam.gserviceaccount.com
-IMAGE=${IMAGE:-us-central1-docker.pkg.dev/$PROJECT/cloud-run-source-deploy/gcs-usage-snapshot:cw}
+IMAGE=${IMAGE:-us-central1-docker.pkg.dev/$PROJECT/cw-s3-usage/scan:cw}
 MACHINE=${MACHINE:-n2-standard-8}
 MEMORY_MIB=${MEMORY_MIB:-30000}
 MAX_RUN_SECONDS=${MAX_RUN_SECONDS:-14400}  # 5 groups × 16 scans on the first backfill
-DATA_BUCKET=${DATA_BUCKET:-oa-gcs-usage-dvx}
+DATA_BUCKET=${DATA_BUCKET:-oa-cw-s3-usage-data}
 JOB_ID=${JOB_ID:-cw-overtime-$(date -u +%Y%m%d-%H%M%S)}
 
 vars() {
@@ -59,10 +59,10 @@ cat > "$spec" <<EOF
       "environment": {
         "variables": $(vars),
         "secretVariables": {
-          "CLOUDFLARE_API_TOKEN": "projects/$PROJECT/secrets/cf-pages-token/versions/latest",
+          "CLOUDFLARE_API_TOKEN": "projects/$PROJECT/secrets/cw-s3-cf-pages-token/versions/latest",
           "R2_ENDPOINT": "projects/$PROJECT/secrets/cw-s3-r2-endpoint/versions/latest",
-          "R2_ACCESS_KEY_ID": "projects/$PROJECT/secrets/cw-s3-r2-access-key-id/versions/latest",
-          "R2_SECRET_ACCESS_KEY": "projects/$PROJECT/secrets/cw-s3-r2-secret-access-key/versions/latest"
+          "R2_ACCESS_KEY_ID": "projects/$PROJECT/secrets/cw-s3-isolated-r2-access-key-id/versions/latest",
+          "R2_SECRET_ACCESS_KEY": "projects/$PROJECT/secrets/cw-s3-isolated-r2-secret-access-key/versions/latest"
         }
       }
     }

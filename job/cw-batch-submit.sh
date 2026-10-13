@@ -25,12 +25,12 @@ if [ -n "${PIN:-}" ]; then unset IMAGE MACHINE MEMORY_MIB DATA_BUCKET SWEEP_BUCK
 PROJECT=oa-internal-450019
 REGION=us-central1
 SA=cw-s3-job@$PROJECT.iam.gserviceaccount.com
-export IMAGE=${IMAGE:-us-central1-docker.pkg.dev/$PROJECT/cloud-run-source-deploy/gcs-usage-snapshot:cw}  # exported: stage 4f runs on it
+export IMAGE=${IMAGE:-us-central1-docker.pkg.dev/$PROJECT/cw-s3-usage/scan:cw}  # exported: stage 4f runs on it
 # Measured on a 92M-object scan: 1.1 GB RSS listing, 1.8 GB import. The lister
 # is network-bound (many concurrent range requests), so vCPUs buy more than RAM.
 MACHINE=${MACHINE:-n2-standard-8}
 MEMORY_MIB=${MEMORY_MIB:-30000}
-DATA_BUCKET=${DATA_BUCKET:-oa-gcs-usage-dvx}
+DATA_BUCKET=${DATA_BUCKET:-oa-cw-s3-usage-data}
 JOB_ID=${JOB_ID:-cw-scan-$(date -u +%Y%m%d-%H%M%S)}
 
 labels() {  # cost labels (specs/cost-labels.md): $DISKY_LABELS + component $1, as JSON; {} when unset
@@ -54,7 +54,7 @@ v = {
     **({"DISKY_LABELS": os.environ["DISKY_LABELS"]} if os.environ.get("DISKY_LABELS") else {}),
     "SWEEP_BUCKET": g("SWEEP_BUCKET", "marin-us-east-02a"),
     "SWEEP_S3_ENDPOINT": g("SWEEP_S3_ENDPOINT", "https://cwobject.com"),
-    "DATA_BUCKET": g("DATA_BUCKET", "oa-gcs-usage-dvx"),
+    "DATA_BUCKET": g("DATA_BUCKET", "oa-cw-s3-usage-data"),
     "WORK_DIR": g("WORK_DIR", "/stage/cw"),
     # boto/aws-sdk needs a region even though CAIOS ignores it
     "AWS_DEFAULT_REGION": "us-east-1",
@@ -113,11 +113,11 @@ cat > "$spec" <<EOF
           "AWS_ACCESS_KEY_ID": "projects/$PROJECT/secrets/cw-s3-access-key-id/versions/latest",
           "AWS_SECRET_ACCESS_KEY": "projects/$PROJECT/secrets/cw-s3-secret-access-key/versions/latest",
           "SLACK_BOT_TOKEN": "projects/$PROJECT/secrets/cw-s3-slack-bot-token/versions/latest",
-          "CLOUDFLARE_API_TOKEN": "projects/$PROJECT/secrets/cf-pages-token/versions/latest",
+          "CLOUDFLARE_API_TOKEN": "projects/$PROJECT/secrets/cw-s3-cf-pages-token/versions/latest",
           "SITE_TOKEN": "projects/$PROJECT/secrets/cw-s3-job-grant/versions/latest",
           "R2_ENDPOINT": "projects/$PROJECT/secrets/cw-s3-r2-endpoint/versions/latest",
-          "R2_ACCESS_KEY_ID": "projects/$PROJECT/secrets/cw-s3-r2-access-key-id/versions/latest",
-          "R2_SECRET_ACCESS_KEY": "projects/$PROJECT/secrets/cw-s3-r2-secret-access-key/versions/latest"
+          "R2_ACCESS_KEY_ID": "projects/$PROJECT/secrets/cw-s3-isolated-r2-access-key-id/versions/latest",
+          "R2_SECRET_ACCESS_KEY": "projects/$PROJECT/secrets/cw-s3-isolated-r2-secret-access-key/versions/latest"
         }
       }
     }

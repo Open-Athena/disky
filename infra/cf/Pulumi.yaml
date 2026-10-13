@@ -6,7 +6,7 @@
 # shared gs://oa-pulumi backend (keyed by <project>/<stack>).
 name: gcs-usage-cf
 description: Cloudflare resources for the storage-usage dashboards — Pages project shell, custom domain + oa.dev CNAME, D1, cache KV, and (cw-s3) the R2 serving bucket + token. Deployments + app config stay with site/deploy (wrangler).
-main: stack/
+main: cw_stack.py
 backend:
   url: gs://oa-pulumi
 runtime:

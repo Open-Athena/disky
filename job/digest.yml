@@ -11,13 +11,13 @@ root: gs://{DATA_BUCKET}/snapshots/cw
 state: digest/cw/{channel}/{variant}
 discord_state: digest/discord/{webhook}
 discord_webhook_env: null
-icons_base: https://gcs-usage-icons.pages.dev
+icons_base: https://oa-cw-s3-usage-icons.pages.dev
 icons_dir: job/icons-cw
 # plots go to the icons project's `cw` preview branch, never the production
-# alias that serves the shared arrow avatars
-plot_project: gcs-usage-icons
+# alias that serves CW's arrow avatars
+plot_project: oa-cw-s3-usage-icons
 plot_branch: cw
-plot_base: https://cw.gcs-usage-icons.pages.dev
+plot_base: https://cw.oa-cw-s3-usage-icons.pages.dev
 # sender: the headline as the reply's sender name + a trend-arrow avatar, one
 # reply per UTC day from its first scan at/after `reply_hour` (12:01Z = 8:01 am ET)
 variant: sender

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Submit the "meta" self-scan to GCP Batch: a daily scan of the storage the
-# deployments themselves write — the GCS data bucket (`oa-gcs-usage-dvx`: gcs's
-# `listing/` + `access/`, cw's `cw-l2/`, snapshots, sweep records) and cw's R2
+# CW deployment itself writes — its GCS data bucket (`oa-cw-s3-usage-data`:
+# `cw-l2/`, snapshots, digest state and sweep records) and its R2
 # serving bucket — published as the cw-s3 deployment's secondary store `meta`
 # (specs/multi-store.md phase 3; the chain is job/cw-meta-run.sh).
 #
@@ -10,7 +10,7 @@
 #   PIN=1 DRY=1 ./job/cw-meta-submit.sh  # the canonical/cron body (ambient env ignored)
 #
 # Scheduling (once, after the first manual run is verified — the go is Ryan's):
-# its own daily Cloud Scheduler job, independent of the 12-hourly `cw-usage-
+# its own daily Cloud Scheduler job, independent of the six-hourly `cw-usage-
 # snapshot`. Under specs/batch-iac.md it is one more line in the ops Pulumi
 # program (`infra/gcp/__main__.py`):
 #     meta = cron("cw-meta-snapshot", "0 9 * * *", "cw-meta-submit.sh")
@@ -18,12 +18,12 @@
 # hand it is the same body via `gcloud scheduler jobs create http cw-meta-snapshot
 # --schedule '0 9 * * *' --time-zone Etc/UTC --uri <batch jobs URI> --http-method
 # POST --oauth-service-account-email <job SA> --message-body-from-file <body>`.
-# 09:00 UTC keeps it clear of both scans' 00:01 / 12:01 starts.
+# 09:00 UTC falls between the main scan's six-hourly starts.
 #
 # Same image as the cw scan (`:cw`, built by `JOB=cw-run.sh job/build.sh`; it
 # needs the build that carries multi-store's `dt-cloud --store`), same job SA
 # (reads + writes the data bucket via the FUSE mount; lists it via ADC), and the
-# `cw-s3-r2-*` secrets twice: as `R2_*` for `publish-r2`, and as `AWS_*` so the
+# isolated R2 secrets twice: as `R2_*` for `publish-r2`, and as `AWS_*` so the
 # lister's `r2://` backend can list the R2 bucket. No CAIOS creds — this job
 # never touches CoreWeave.
 set -euo pipefail
@@ -35,13 +35,12 @@ if [ -n "${PIN:-}" ]; then unset IMAGE MACHINE MEMORY_MIB DATA_BUCKET; fi
 PROJECT=oa-internal-450019
 REGION=us-central1
 SA=cw-s3-job@$PROJECT.iam.gserviceaccount.com
-IMAGE=${IMAGE:-us-central1-docker.pkg.dev/$PROJECT/cloud-run-source-deploy/gcs-usage-snapshot:cw}
-# The objects here are few and large (parquet shards, JSONs): ~4.3k in R2 and
-# low millions in GCS (gcs's listing/dir-cache shards + access logs), so this is
-# a fraction of the CoreWeave scan's 54 M keys. Half its machine.
+IMAGE=${IMAGE:-us-central1-docker.pkg.dev/$PROJECT/cw-s3-usage/scan:cw}
+# The CW artifacts are few and large (parquet shards and JSONs), a fraction
+# of the CoreWeave source's key count. Half the main scan's machine.
 MACHINE=${MACHINE:-n2-standard-4}
 MEMORY_MIB=${MEMORY_MIB:-15000}
-DATA_BUCKET=${DATA_BUCKET:-oa-gcs-usage-dvx}
+DATA_BUCKET=${DATA_BUCKET:-oa-cw-s3-usage-data}
 JOB_ID=${JOB_ID:-cw-meta-scan-$(date -u +%Y%m%d-%H%M%S)}
 
 labels() {  # cost labels (specs/cost-labels.md): $DISKY_LABELS + component $1, as JSON; {} when unset
@@ -60,10 +59,10 @@ g = (lambda k, d="": d) if pin else os.environ.get
 v = {
     # the stack's cost labels (PIN keeps them: `submitter_spec` passes them through)
     **({"DISKY_LABELS": os.environ["DISKY_LABELS"]} if os.environ.get("DISKY_LABELS") else {}),
-    "DATA_BUCKET": g("DATA_BUCKET", "oa-gcs-usage-dvx"),
+    "DATA_BUCKET": g("DATA_BUCKET", "oa-cw-s3-usage-data"),
     # The scan's roots (`<scheme>://<bucket>`, space-separated; the first is the
     # store's primary root): the GCS data bucket, then cw's R2 serving bucket.
-    "META_ROOTS": g("META_ROOTS", "gcs://oa-gcs-usage-dvx r2://oa-cw-s3-usage-index"),
+    "META_ROOTS": g("META_ROOTS", "gcs://oa-cw-s3-usage-data r2://oa-cw-s3-usage-index"),
     "WORK_DIR": g("WORK_DIR", "/stage/meta"),
     # boto needs a region even though R2 ignores it
     "AWS_DEFAULT_REGION": "auto",
@@ -107,13 +106,13 @@ cat > "$spec" <<EOF
       "environment": {
         "variables": $(vars),
         "secretVariables": {
-          "AWS_ACCESS_KEY_ID": "projects/$PROJECT/secrets/cw-s3-r2-access-key-id/versions/latest",
-          "AWS_SECRET_ACCESS_KEY": "projects/$PROJECT/secrets/cw-s3-r2-secret-access-key/versions/latest",
+          "AWS_ACCESS_KEY_ID": "projects/$PROJECT/secrets/cw-s3-isolated-r2-access-key-id/versions/latest",
+          "AWS_SECRET_ACCESS_KEY": "projects/$PROJECT/secrets/cw-s3-isolated-r2-secret-access-key/versions/latest",
           "R2_ENDPOINT": "projects/$PROJECT/secrets/cw-s3-r2-endpoint/versions/latest",
-          "R2_ACCESS_KEY_ID": "projects/$PROJECT/secrets/cw-s3-r2-access-key-id/versions/latest",
-          "R2_SECRET_ACCESS_KEY": "projects/$PROJECT/secrets/cw-s3-r2-secret-access-key/versions/latest",
+          "R2_ACCESS_KEY_ID": "projects/$PROJECT/secrets/cw-s3-isolated-r2-access-key-id/versions/latest",
+          "R2_SECRET_ACCESS_KEY": "projects/$PROJECT/secrets/cw-s3-isolated-r2-secret-access-key/versions/latest",
           "SLACK_BOT_TOKEN": "projects/$PROJECT/secrets/cw-s3-slack-bot-token/versions/latest",
-          "CLOUDFLARE_API_TOKEN": "projects/$PROJECT/secrets/cf-pages-token/versions/latest",
+          "CLOUDFLARE_API_TOKEN": "projects/$PROJECT/secrets/cw-s3-cf-pages-token/versions/latest",
           "SITE_TOKEN": "projects/$PROJECT/secrets/cw-s3-job-grant/versions/latest"
         }
       }
