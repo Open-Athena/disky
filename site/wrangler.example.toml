@@ -118,6 +118,7 @@ ROOT_LABEL = "my buckets"                   # the store root's crumb label
 # binding = "INDEX_R2"
 # bucket_name = "<index bucket>"
 # OG_CARDS = "1"                             # detailed/shape metadata stamping; does not disable direct image routes
+# OG_DEFAULT_COLOR = "w"                     # match Store.defaultColor if set: t=tree, w=written, r=read, u=owner
 # OG_ANONYMOUS = "generic"                   # private default: no data reads/totals/names on plain links; explicit shares may be detailed
 #                                           # "shape" explicitly permits anonymous geometry + totals (GCS's approved policy)
 #                                           # public AUTH_MODE defaults to shape; unknown values fail closed to generic

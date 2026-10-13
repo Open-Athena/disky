@@ -20,12 +20,17 @@ import { canonId, loadRegistry } from '../identity.js'
 import { openPlanId, planDigest, planItemLines } from '../plans.js'
 import { NoScanMatch, resolveScan } from './data.js'
 import { warmSubtree } from '../../api/subtree.js'
+import { colorModeCodec } from '../../../src/colorMode.js'
+import type { ColorMode } from '../../../src/types.js'
 
 export type OgEnv = Env & PolicyEnv & {
   ASSETS: { fetch: (req: Request) => Promise<Response> }
   /** Stamp detailed/shape HTML metadata. Generic private metadata remains safe
    * even when unset; this does not disable direct image routes. */
   OG_CARDS?: string
+  /** Match the frontend Store.defaultColor when configured; otherwise infer
+   * owner vs tree from the scan's attribution, as the dashboard does. */
+  OG_DEFAULT_COLOR?: string
 }
 
 const uncachedHtml = (response: Response): Response => {
@@ -54,7 +59,13 @@ export const DRAWN: ReadonlySet<OgKind> = new Set(['map', 'staged', 'users', 'us
  * middleware only swaps their image. */
 const OWN_TITLES: ReadonlySet<OgKind> = new Set(['staged', 'users', 'user', 'assignments'])
 
-export const siteOf = (env: OgEnv): Site => ({ name: env.ROOT_LABEL ?? 'storage', scheme: env.STORE_SCHEME ?? 'gs://' })
+export const siteOf = (env: OgEnv): Site => {
+  const c = colorModeCodec.decode(env.OG_DEFAULT_COLOR)
+  return {
+    name: env.ROOT_LABEL ?? 'storage', scheme: env.STORE_SCHEME ?? 'gs://',
+    ...(c && ['tree', 'date', 'read', 'user'].includes(c) ? { defaultColor: c as ColorMode } : {}),
+  }
+}
 
 let keyMemo: { secret: string; key: Promise<CryptoKey> } | null = null
 /** The OG key for this deployment, or null when it has no `SESSION_SECRET`. */
