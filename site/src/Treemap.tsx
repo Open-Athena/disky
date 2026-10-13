@@ -637,6 +637,7 @@ export function Treemap({ root, mode, shade = 'none', userIdx, dateRange, readRa
       getId={(_n, p) => uriOf(p)}
       formatSize={fmtBytes}
       collapseChains
+      reclaimTitleSpace
       mergeSmall={mergeSmall}
       colorForCell={colorForCell}
       // Opaque cells. Upstream's default fades every nesting level by 0.82,
