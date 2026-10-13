@@ -5,6 +5,7 @@
 # ///
 """Plan, submit and run this deployment's metadata-only remote scan."""
 
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from json import dumps, loads
 from os import environ
@@ -14,6 +15,7 @@ from shutil import copy2, copytree, ignore_patterns
 from shlex import join
 from subprocess import run
 from sys import stderr
+from time import time
 
 from click import ClickException, argument, group, option
 
@@ -23,6 +25,60 @@ HERE = Path(__file__).resolve().parent
 
 def profile() -> dict:
     return loads((HERE / "r2.json").read_text())
+
+
+class ScanReporter:
+    """Best-effort telemetry; a reporting outage must not interrupt index publication."""
+
+    def __init__(
+        self,
+        scan: str,
+        generation: str,
+    ) -> None:
+        self.scan = scan
+        self.generation = generation
+        self.started = int(time())
+        self.failed_phase = "initialize"
+
+    def write(self, **kwargs: object) -> None:
+        from dt_cloud.scan_runs import AnyStore, D1Sink, load_profile, record
+
+        try:
+            uid = environ["BATCH_JOB_UID"].strip()
+            if not uid:
+                raise ValueError("Empty BATCH_JOB_UID")
+            rec = record(
+                D1Sink(profile()["database_id"]), load_profile(HERE / "r2-scan-runs.json"),
+                self.scan, uid, int(time()), gen=self.generation,
+                store=AnyStore() if kwargs.get("phase") == "archive" else None,
+                **kwargs,
+            )
+            print(f"scan-run: {self.scan} {uid} {rec.run.status}", file=stderr, flush=True)
+        except (Exception, SystemExit) as exc:
+            print(f"scan-run reporting failed (scan continues): {type(exc).__name__}: {exc}", file=stderr, flush=True)
+
+    def __enter__(self) -> "ScanReporter":
+        print(f"OA-R2-SCAN-START {self.scan} {self.generation}", file=stderr, flush=True)
+        self.write(start=True)
+        return self
+
+    @contextmanager
+    def phase(self, name: str):
+        self.failed_phase = name
+        began = int(time())
+        yield
+        print(f"PHASE {name}: {int(time()) - self.started}s", file=stderr, flush=True)
+        self.write(phase=name, began=began)
+
+    def __exit__(
+        self,
+        exc_type: type | None,
+        exc: BaseException | None,
+        traceback: object,
+    ) -> None:
+        # Error types and exit codes are safe to report without serializing credentials or request bodies.
+        code = getattr(exc, "returncode", 1) if exc is not None else 0
+        self.write(exit_code=code, failed_phase=self.failed_phase if exc else None, error=exc_type.__name__ if exc_type else None)
 
 
 def build_command(context: Path, tag: str, config: dict) -> list[str]:
@@ -192,7 +248,7 @@ def build(dry_run: bool, tag: str) -> None:
     context.mkdir(parents=True, exist_ok=False)
     for directory in ("src", "cloud/src"):
         copytree(root / directory, context / directory, ignore=ignore_patterns("__pycache__", "*.pyc"))
-    for filename in ("README.md", "pyproject.toml", "uv.lock", "cloud/pyproject.toml", "job/Dockerfile", "job/cloudbuild.yaml", "job/r2.json", "job/r2-scan"):
+    for filename in ("README.md", "pyproject.toml", "uv.lock", "cloud/pyproject.toml", "job/Dockerfile", "job/cloudbuild.yaml", "job/r2.json", "job/r2-scan-runs.json", "job/r2-scan"):
         target = context / filename
         target.parent.mkdir(parents=True, exist_ok=True)
         copy2(root / filename, target)
@@ -281,18 +337,57 @@ def verify(scan: str, work: Path) -> None:
     print(dumps(verify_scan(work, profile(), scan), indent=2))
 
 
+@main.command(name="backfill-runs")
+@option("-n", "--dry-run", is_flag=True, help="Print the reconstructed records without writing D1")
+@option("-w", "--save-inputs", type=Path, help="Save the own Batch jobs and task logs for replay and review")
+def backfill_runs(dry_run: bool, save_inputs: Path | None) -> None:
+    """Reconstruct full R2 scans from own Batch jobs, logs and immutable archives."""
+    from dt_cloud.gcp import log_entries
+    from dt_cloud.scan_runs import AnyStore, D1Sink, as_json, load_profile, write_all
+    from dt_cloud.scan_runs_backfill import classify, fetch_jobs, reconstruct
+
+    reporting = load_profile(HERE / "r2-scan-runs.json")
+    jobs = [job for job in fetch_jobs(reporting.project, reporting.regions) if classify(reporting, job)]
+    if not jobs:
+        print("No OA R2 full scan jobs found", file=stderr)
+        return
+    query = 'log_id("batch_task_logs") AND (' + " OR ".join(f"labels.job_uid={dumps(job['uid'])}" for job in jobs) + ")"
+    logs = log_entries(query, reporting.project, limit=200_000, asc=True)
+    if save_inputs:
+        save_inputs.mkdir(parents=True, exist_ok=True)
+        (save_inputs / "jobs.json").write_text(dumps(jobs, indent=2) + "\n")
+        (save_inputs / "logs.json").write_text(dumps(logs, indent=2) + "\n")
+    now = int(time())
+    records = reconstruct(reporting, jobs, logs, AnyStore(), now)
+    if not dry_run:
+        write_all(D1Sink(profile()["database_id"]), records, now)
+    print(dumps([as_json(rec) for rec in records], indent=2))
+    print(f"OA R2 scan-run backfill: {len(records)} runs", file=stderr)
+
+
 @main.command(name="run")
 def scan_run() -> None:
     if "BATCH_TASK_INDEX" not in environ:
         raise ClickException("The full scan runs only on its remote Batch job")
     config = profile()
-    for name in config["secrets"]:
-        if not environ.get(name):
-            raise ClickException(f"Missing runtime secret: {name}")
     stamp = datetime.now(timezone.utc)
     scan = stamp.strftime("%Y-%m-%dT%H%M")
     generation = stamp.strftime("%Y%m%dT%H%M%S%fZ")
     work = Path("/stage") / generation
+    with ScanReporter(scan, generation) as reporter:
+        execute_scan(config, scan, generation, work, reporter)
+
+
+def execute_scan(
+    config: dict,
+    scan: str,
+    generation: str,
+    work: Path,
+    reporter: ScanReporter,
+) -> None:
+    for name in config["secrets"]:
+        if not environ.get(name):
+            raise ClickException(f"Missing runtime secret: {name}")
     work.mkdir(parents=True, exist_ok=False)
     source = {
         **environ,
@@ -300,19 +395,23 @@ def scan_run() -> None:
         "AWS_SECRET_ACCESS_KEY": environ["SOURCE_SECRET_ACCESS_KEY"].strip(),
     }
     endpoint = environ["DISK_TREE_R2_ENDPOINT_URL"]
-    for bucket in config["buckets"]:
-        print(f"Listing metadata: {bucket}", file=stderr, flush=True)
+    with reporter.phase("listing"):
+        for bucket in config["buckets"]:
+            print(f"Listing metadata: {bucket}", file=stderr, flush=True)
+            run([
+                "disk-tree", "bulk-list", f"r2://{bucket}", "-E", endpoint,
+                "-o", str(work / "listing" / bucket), "-P", "4", "-w", "4",
+            ], env=source, check=True)
+    with reporter.phase("path-index"):
         run([
-            "disk-tree", "bulk-list", f"r2://{bucket}", "-E", endpoint,
-            "-o", str(work / "listing" / bucket), "-P", "4", "-w", "4",
-        ], env=source, check=True)
-    run([
-        "dt-cloud", "path-index", "-S", "-U", "-d", scan,
-        "-l", str(work / "listing/*/shard-*.parquet"),
-        "-P", str(work / "index/path-index.parquet"), "-o", str(work / "snap"),
-    ], check=True)
-    build_age(work / "index/path-index.parquet", work / "index")
-    report = verify_scan(work, config, scan)
+            "dt-cloud", "path-index", "-S", "-U", "-d", scan,
+            "-l", str(work / "listing/*/shard-*.parquet"),
+            "-P", str(work / "index/path-index.parquet"), "-o", str(work / "snap"),
+        ], check=True)
+    with reporter.phase("age-index"):
+        build_age(work / "index/path-index.parquet", work / "index")
+    with reporter.phase("verify"):
+        report = verify_scan(work, config, scan)
     report["generation"] = generation
     (work / "verification.json").write_text(dumps(report, indent=2) + "\n")
     from dt_cloud.index_footer import extract, write_groups_blob, write_groups_parquet
@@ -327,9 +426,10 @@ def scan_run() -> None:
     from google.cloud.storage import Client
 
     data = Client(project=config["project"]).bucket(config["data_bucket"])
-    for path in sorted(work.rglob("*")):
-        if path.is_file() and not any(part.startswith(".") for part in path.relative_to(work).parts):
-            data.blob(f"scans/{scan}/{generation}/{path.relative_to(work)}").upload_from_filename(str(path), if_generation_match=0)
+    with reporter.phase("archive"):
+        for path in sorted(work.rglob("*")):
+            if path.is_file() and not any(part.startswith(".") for part in path.relative_to(work).parts):
+                data.blob(f"scans/{scan}/{generation}/{path.relative_to(work)}").upload_from_filename(str(path), if_generation_match=0)
     from boto3 import client
 
     publisher = client(
@@ -341,16 +441,17 @@ def scan_run() -> None:
     )
     key = f"listing/{scan}/index/{generation}"
     uploaded = []
-    for directory, prefix in ((work / "index", key), (work / "snap", f"snapshots/r2/{scan}")):
-        for path in sorted(directory.iterdir()):
-            if path.is_file():
-                object_key = f"{prefix}/{path.name}"
-                publisher.upload_file(str(path), config["serving_bucket"], object_key)
-                uploaded.append((object_key, path.stat().st_size))
-    manifest = dumps(report).encode()
-    publisher.put_object(Bucket=config["serving_bucket"], Key=f"{key}/verification.json", Body=manifest)
-    uploaded.append((f"{key}/verification.json", len(manifest)))
-    verify_uploads(publisher, config["serving_bucket"], uploaded)
+    with reporter.phase("upload"):
+        for directory, prefix in ((work / "index", key), (work / "snap", f"snapshots/r2/{scan}")):
+            for path in sorted(directory.iterdir()):
+                if path.is_file():
+                    object_key = f"{prefix}/{path.name}"
+                    publisher.upload_file(str(path), config["serving_bucket"], object_key)
+                    uploaded.append((object_key, path.stat().st_size))
+        manifest = dumps(report).encode()
+        publisher.put_object(Bucket=config["serving_bucket"], Key=f"{key}/verification.json", Body=manifest)
+        uploaded.append((f"{key}/verification.json", len(manifest)))
+        verify_uploads(publisher, config["serving_bucket"], uploaded)
     # Stage every variant's rows before any complete scan becomes visible.
     sync = [
         "dt-cloud", "index-sync", scan,
@@ -359,9 +460,10 @@ def scan_run() -> None:
     ]
     for variant in ("path", "bysize", *AGE_PYRAMID_VARIANTS.values()):
         sync.extend(("-v", variant))
-    run([*sync, "-r"], check=True)
-    run([*sync, "-p"], check=True)
-    data.blob(f"scans/{scan}/{generation}/_SUCCESS.json").upload_from_string(dumps(report), content_type="application/json", if_generation_match=0)
+    with reporter.phase("publish"):
+        run([*sync, "-r"], check=True)
+        run([*sync, "-p"], check=True)
+        data.blob(f"scans/{scan}/{generation}/_SUCCESS.json").upload_from_string(dumps(report), content_type="application/json", if_generation_match=0)
     print(dumps(report))
 
 

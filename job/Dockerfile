@@ -7,5 +7,5 @@ COPY src ./src
 COPY cloud/pyproject.toml ./cloud/
 COPY cloud/src ./cloud/src
 RUN uv sync --frozen --no-dev --no-editable --package dt-cloud --extra s3
-COPY job/r2.json job/r2-scan ./job/
+COPY job/r2.json job/r2-scan-runs.json job/r2-scan ./job/
 ENTRYPOINT ["python", "job/r2-scan", "run"]

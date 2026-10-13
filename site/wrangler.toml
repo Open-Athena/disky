@@ -35,6 +35,7 @@ VIEWER_DOMAINS = "openathena.ai"
 STAFF_DOMAIN = ""
 ADMIN_EMAILS = "1"
 DISKY_LABELS = "app=disky,deployment=oa-r2"
+GCP_PROJECT = "oa-internal-450019"
 REPO_URL = "https://github.com/Open-Athena/marin-gcs-usage"
 
 # No PUBLIC_READ, source credentials, sweep executor or static generation.

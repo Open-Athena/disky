@@ -2,6 +2,7 @@ from datetime import datetime, timezone
 from json import loads
 from pathlib import Path
 from runpy import run_path
+from subprocess import CalledProcessError
 
 import pytest
 
@@ -9,6 +10,72 @@ import pytest
 module = run_path(str(Path(__file__).resolve().parents[1] / "r2-scan"))
 config = module["profile"]()
 image = "us-west1-docker.pkg.dev/oa-internal-450019/oa-r2-usage/scan@sha256:" + "a" * 64
+
+
+def test_profile_accepts_only_own_full_scans_and_immutable_archive() -> None:
+    from dt_cloud.scan_runs import load_profile
+    from dt_cloud.scan_runs_backfill import classify
+
+    reporting = load_profile(Path(module["HERE"]) / "r2-scan-runs.json")
+    def job(image_uri: str, entrypoint: str = "") -> dict:
+        return {"name": "projects/p/locations/us-west1/jobs/job-generated", "taskGroups": [{"taskSpec": {"runnables": [{"container": {"imageUri": image_uri, "entrypoint": entrypoint}}]}}]}
+
+    assert [classify(reporting, value) for value in [job(image), job(image, "python"), job(image.replace("oa-r2-usage/scan", "cw-s3-usage/scan"))]] == [reporting.jobs[0], None, None]
+    assert (reporting.store, [(out.key, out.uri, out.after) for out in reporting.outputs]) == ("primary", [
+        ("listing", "gs://oa-r2-usage-data/scans/{scan}/{gen}/listing/", "archive"),
+        ("path-index", "gs://oa-r2-usage-data/scans/{scan}/{gen}/index/", "archive"),
+        ("snapshot", "gs://oa-r2-usage-data/scans/{scan}/{gen}/snap/", "archive"),
+    ])
+
+
+@pytest.mark.parametrize("fails", [False, True])
+def test_live_reporter_keeps_phase_and_records_scan_exit(monkeypatch, fails: bool) -> None:
+    from dt_cloud import scan_runs
+
+    sink = scan_runs.SqliteSink(":memory:")
+    monkeypatch.setattr(scan_runs, "D1Sink", lambda db: sink)
+    monkeypatch.setenv("BATCH_JOB_UID", "own-uid")
+    reporter_type = module["ScanReporter"]
+    clock = iter([100, 100, 110, 120, 120, 125, 130])
+    monkeypatch.setitem(reporter_type.__init__.__globals__, "time", lambda: next(clock))
+    def execute() -> None:
+        with reporter_type("2026-10-13T0716", "20261013T071607992442Z") as reporter:
+            with reporter.phase("listing"):
+                pass
+            if fails:
+                with reporter.phase("path-index"):
+                    raise CalledProcessError(7, ["path-index", "private-value"])
+
+    if fails:
+        with pytest.raises(CalledProcessError):
+            execute()
+    else:
+        execute()
+    assert sink.query("SELECT run_id, scan, status, source, store, started_ts, finished_ts, failed_phase, error, gen FROM scan_runs") == [{
+        "run_id": "own-uid", "scan": "2026-10-13T0716", "status": "failed" if fails else "succeeded", "source": "job", "store": "primary",
+        "started_ts": 100, "finished_ts": 130 if fails else 125, "failed_phase": "path-index" if fails else None, "error": "CalledProcessError" if fails else None,
+        "gen": "20261013T071607992442Z",
+    }]
+    assert sink.query("SELECT phase, seq, started_ts, finished_ts, status FROM scan_run_phases") == [{"phase": "listing", "seq": 0, "started_ts": 110, "finished_ts": 120, "status": "done"}]
+
+
+def test_reporting_outage_does_not_fail_successful_scan(monkeypatch, capsys) -> None:
+    from sys import stderr
+    from dt_cloud import scan_runs
+
+    def unavailable(db: str) -> None:
+        raise ConnectionError("D1 unavailable")
+
+    monkeypatch.setattr(scan_runs, "D1Sink", unavailable)
+    monkeypatch.setenv("BATCH_JOB_UID", "own-uid")
+    monkeypatch.setitem(module["ScanReporter"].write.__globals__, "stderr", stderr)
+    with module["ScanReporter"]("2026-10-13T0716", "20261013T071607992442Z"):
+        pass
+    assert capsys.readouterr().err.splitlines() == [
+        "OA-R2-SCAN-START 2026-10-13T0716 20261013T071607992442Z",
+        "scan-run reporting failed (scan continues): ConnectionError: D1 unavailable",
+        "scan-run reporting failed (scan continues): ConnectionError: D1 unavailable",
+    ]
 
 
 def test_remote_build_uses_only_own_identity_and_staging() -> None:
