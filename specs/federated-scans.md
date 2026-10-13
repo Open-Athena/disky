@@ -26,7 +26,7 @@ The through-line: **one scan artifact, many readers** — a project's own site (
 
 ## Phases
 
-1. **(near-term)** Single-union-index r2.rbw.sh — DT daily ingestion → one r2 index bucket → union Map. (In progress; store seam done.)
+1. **(live migration bridge)** Single-union-index r2.rbw.sh — DT daily ingestion → one r2 index bucket → union Map. Retain this while replacing source ownership incrementally.
 2. **Multi-location union reader** — reader config = N `{store, prefix, creds}` locations; union their roots at read time. r2.rbw.sh reads the three buckets' sidecars instead of a pre-merged index.
 3. **Per-project embed** — publish the viz as an embeddable route/widget; ctbk/crashes/jct host it at `/files`, reading their own sidecar (single location).
 4. **Sidecar ownership** — each project's own job writes its sidecar (or a dedicated sidecar bucket), using shared Disky CLI/library code. The aggregate deployment does not orchestrate source scans or hold source listing/write credentials.
