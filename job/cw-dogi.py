@@ -120,14 +120,14 @@ def verify(
     config = tomllib.loads((ROOT / "site/wrangler.toml").read_text())
     variables = config["vars"] if environment == "production" else config["env"]["preview"]["vars"]
     label = variables["ROOT_LABEL"]
-    version = "5"
+    version = "6"
     origin = HOSTS[environment]
     image_path = f"/og/map.png?policy=generic&r={version}"
     output.mkdir(mode=0o700, parents=True, exist_ok=False)
     report = {"environment": environment, "anonymous_pages": [], "anonymous_images": [], "detailed": "not-requested", "ok": False}
     with SafeSession() as http:
         http.headers["User-Agent"] = "cw-dogi-verification/1.0"
-        for i, path in enumerate(["/", "/__og_privacy_probe__/absent?d=19000101&f=private", "/users", "/assignments", "/staged", "/meta"]):
+        for i, path in enumerate(["/", "/__og_privacy_probe__/absent?d=19000101&f=private", "/users", "/assignments", "/staged", "/meta", "/__og_privacy_probe__?section=diff&d=19000101-18990101"]):
             response = http.get(origin + path, timeout=90)
             if response.status_code != 200:
                 raise ClickException(f"Anonymous page {i} failed: HTTP {response.status_code}")
@@ -143,7 +143,7 @@ def verify(
         generic = png(http.get(origin + image_path, timeout=90), "anon")
         (output / "generic.png").write_bytes(generic)
         for i, path in enumerate([image_path, "/og/map.png?path=__og_privacy_probe__&d=19000101&f=private&policy=shape&publicLabels=1",
-                                  "/og/map.png?sig=bad", "/og/staged.png", "/og/users.png", "/og/user.png?id=private", "/og/assignments.png"]):
+                                  "/og/map.png?sig=bad", "/og/staged.png", "/og/users.png", "/og/user.png?id=private", "/og/assignments.png", "/og/diff.png?path=private&d=19000101-18990101&sig=bad"]):
             body = png(http.get(origin + path, timeout=90), "anon")
             if body != generic:
                 raise ClickException(f"Anonymous image {i} differs from the generic card")
