@@ -287,14 +287,14 @@ def plan(image: str) -> None:
 
 @main.command()
 @option("-g", "--generation", help="Archived generation to backfill (requires --scan)")
-@option("-n", "--name", required=True, help="New Batch job name, starting oa-r2-scan-")
 @option("-m", "--meta-only", is_flag=True, help="Scan only this deployment's derived storage")
+@option("-n", "--name", required=True, help="New Batch job name, starting oa-r2-scan-")
 @option("-s", "--scan", help="Backfill age indexes for this existing scan (requires --generation)")
 @argument("image")
 def submit(
     generation: str | None,
-    name: str,
     meta_only: bool,
+    name: str,
     scan: str | None,
     image: str,
 ) -> None:
