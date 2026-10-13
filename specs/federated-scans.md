@@ -1,6 +1,6 @@
 # Federated scans — portable per-location scans, a union reader, an embeddable viz
 
-Status: **implementation design** (2026-10-13). Ryan confirmed project-owned scans/infra and a read-only aggregate dashboard, including Awair. The current Disky-owned daily union scan remains a migration bridge, not the target model. The as-of resolution and publication contract below are proposed implementation decisions; they are not yet shipped.
+Status: **first shared implementation slice** (2026-10-13). Ryan confirmed project-owned scans/infra and a read-only aggregate dashboard, including Awair. The pure catalog/resolver/pin/diff model, tree/age/history adapters and reusable cutoff picker are implemented and tested on root. A development-only fixture at `/dev/federated-scans` exercises the picker three times over an unchanged treemap renderer. Live remote-source fetching, producer exports and production integration are not implemented yet. The Disky-owned daily union scan remains a migration bridge, not the target model.
 
 ## The idea
 
@@ -68,8 +68,8 @@ Legacy date-only IDs must not be treated as invented midnight instants. Use docu
 
 - No eligible scan before T is unknown coverage, not an empty bucket. Do not substitute the first future scan.
 - A genuinely empty, complete scan is a known zero.
-- A failed/in-progress capture is not published as a new usable scan. The prior successful scan remains eligible and visibly ages.
-- A source whose most recent eligible scan is old is carried forward and labelled stale relative to the selected cutoff, not silently dropped.
+- A failed/in-progress capture is not published as a new usable scan. The prior successful scan remains eligible; its age and capture window belong in picker/details, not repeated per-node notices.
+- A source whose most recent eligible scan is old is carried forward, not silently dropped. Expose its observation time/freshness in picker/details; ordinary tree/table rendering does not need to announce asynchronous schedules.
 - A known scan that cannot be read is unavailable. Retry/read the same immutable revision; do not silently resolve to another scan. A partial fleet view may still show the readable sources, but must say which sources are unavailable and label its total partial.
 - A source omitted by configuration/authorization is not a zero-size source. Private artifacts require their own allowlist/auth treatment; never expose them through the public aggregate.
 
@@ -91,7 +91,9 @@ One compact control says “As of …” or “Latest observed”, not “Scanne
 
 Use a custom popover: day groups with project-labelled time chips arranged horizontally when space allows, wrapping/stacking on narrow screens. This is presentation grouping only; day grouping must not round the selected cutoff or collapse multiple intraday events into one fake scan. A daily preset, if offered, explicitly means end of that viewer-local day; URLs carry an unambiguous UTC instant. Provide “latest” and previous/next update navigation.
 
-Alongside the selected cutoff, show a compact freshness summary and an expandable source table: project, selected capture time/window, age at cutoff, scan status and coverage. The fleet view might say “4/4 sources · oldest observation 2d ago”. A drill highlights its own source timestamp but keeps the fleet cutoff. Users should not need four separate pickers for the common case.
+The picker includes an expandable source table: project, selected capture time/window and coverage; freshness/status can be added there as producer scheduling metadata becomes available. A drill keeps the fleet cutoff and pinned source reference. Source timing may be inspected in picker/details, but must not leak into every table row or treemap tile. Page-level notices are for meaningful unknown/unavailable coverage or read failures, not the mere fact that projects run at different times. Users should not need four separate pickers for the common case.
+
+Use the same `FederatedScanPicker` for main as-of, diff-from and diff-to: three independently controlled instances with the same resolver/event semantics. Display groups use the viewer's timezone; exact input and serialized values are UTC ISO instants. The initial implementation exposes exact UTC text input, latest observed, previous/next events, wrapping project-labelled chips and source capture details, with keyboard/outside-dismiss and phone viewport constraints.
 
 The picker cannot own the semantics alone. A source-aware resolution layer must also serve tree/table/totals, drilling, diffs, over-time and OG. Existing treemap layout and one-source parquet readers can remain largely unchanged behind that boundary.
 
@@ -100,6 +102,8 @@ The picker cannot own the semantics alone. A source-aware resolution layer must 
 Resolve both cutoffs independently, then diff each source's chosen before/after scans. An unchanged source reference contributes zero observed change. A missing/unavailable endpoint produces unknown change for that source, not an added/deleted bucket. Show totals for comparable coverage, with separately identified coverage/configuration changes; adding Awair to the dashboard is not storage growth.
 
 The default federated over-time curve is a step function of latest observations at the union event times, not interpolation implying continuous fleet measurement. Sources contribute unknown before their first eligible scan and retain their last observation afterward, with coverage/freshness visible. A root total with incomplete coverage is partial. Source-specific charts can show their own scan samples directly.
+
+The mtime/date-distribution renderer does not need a multi-source rendering mode. Combine the selected sources' absolute epoch-day rows, qualifying directory/group identities by their mount. Preserve each object's timestamp, owner/access facets and bin totals; never shift bins by source scan time. Any relative-age lens uses the shared selected cutoff, not a separate source-local “now”. The existing GCS-created versus S3/R2-modified distinction remains a timestamp-semantic issue, not a scan-schedule issue.
 
 ## URLs, caching and existing seams
 
@@ -111,8 +115,10 @@ Code seams requiring adapters: `src/scan.ts` consumes one `scans.json` and retur
 
 ## First implementation slices
 
-1. Define/validate the source catalog and publication manifest. Build the pure shared cutoff→vector resolver and event timeline, with exact fixtures for staggered scans, ties, failed/incomplete publications, empty versus unknown, capture windows, backfills, withdrawals, stable pins, and coverage-changing diffs.
+1. **Implemented shared foundation:** `site/src/federatedScans.ts` validates source catalogs and immutable pins; resolves cutoff→vector; enumerates union events; distinguishes comparable deltas from coverage changes. `federatedViews.ts` composes pinned root responses, qualifies unchanged age rows, and emits carried-forward step values. `FederatedScanPicker.tsx` is exercised three times in the development-only fixture. Exact unit and browser regressions cover staggered scans, ties, pending publications, empty versus unknown, windows, backfills, withdrawals, stable pins, coverage changes, timezone grouping, URL independence, invalid dates, focus restoration and phone constraints. See [source catalog contract] for the producer boundary. No live reader/scheduler cutover has occurred.
 2. Awair owner publishes a small complete export of the already-public `pyramid/` scope, using its own job/infra. Treat its existing shard health inventory as a discovery aid, not a complete scan manifest. No expansion of the aggregate's source-listing token.
 3. Add an opt-in federated preview using Awair plus an existing source adapter; implement root totals/TM and one-source drill with provenance first. Add the custom cutoff picker and exact source freshness table, then diff/step history/OG against the same resolver.
 4. Have ctbk, crashes and jc-taxes independently publish the contract. Keep legacy union history as a distinct source/legacy route during validation; never count it together with the same projects' new exports. Retire the centralized daily scanner only after its covered projects have working owner-side publications and readback checks. Preserve old artifacts/history and rollback.
 5. Infrastructure changes and project-side jobs are owner-reviewed handoffs. This design does not authorize changing source bucket exposure, broadening tokens, applying another project's IaC, or deleting the current scanner/history prematurely.
+
+[source catalog contract]: federated-source-catalog.md
