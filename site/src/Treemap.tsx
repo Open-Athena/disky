@@ -20,6 +20,7 @@ import { CLASS_NAMES, classMix, fmtN, fmtUsd, ratePerByte, unownedBytes } from '
 import { SettingsMenu, useRenderer, useTiling } from './prefs'
 import { useUnits } from './units'
 import { usePerfCommit } from './perf'
+import { listingTime } from './listingTime'
 
 // Legend rows inline only the metrics toggled on (swatch + name always show).
 // URL param `?li=` — a subset of "spc" (size / percent / cost); absent = "s"
@@ -210,6 +211,7 @@ export function Treemap({ root, mode, shade = 'none', userIdx, dateRange, readRa
   onBrush?: (name: string | null) => void
 }) {
   usePerfCommit('treemap')
+  const time = listingTime(scheme)
   const { fmtBytes, fmtBytesLike } = useUnits()
   const [liP, setLiP] = useUrlState('li', stringParam('s'))
   const liMetrics = useMemo(() => new Set([...(liP ?? 's')].filter((m): m is LiMetric => m === 's' || m === 'p' || m === 'c')), [liP])
@@ -516,8 +518,8 @@ export function Treemap({ root, mode, shade = 'none', userIdx, dateRange, readRa
         <>
           {mode === 'read' && readRange ? (
             <>
-              <Tooltip content={`No reads observed since access logging began (${epochDaysToDate(readRange.min)}) — activity before that predates the logs, so "never read" really means "not read in the observed window".`}>
-                <span className="li has-tt"><span className="sw" style={{ background: 'var(--never-read)' }} />never read*</span>
+              <Tooltip content={`No reads observed since access logging began (${epochDaysToDate(readRange.min)}). Logs may omit events; this is not proof of no access.`}>
+                <span className="li has-tt"><span className="sw" style={{ background: 'var(--never-read)' }} />no observed reads</span>
               </Tooltip>
               <span className="li gradli">
                 {epochDaysToDate(readRange.min)}
@@ -594,10 +596,10 @@ export function Treemap({ root, mode, shade = 'none', userIdx, dateRange, readRa
         <PathBar path={path} scheme={scheme} onDrill={onPathChange} />
         <div className="nums">
           {fmtBytes(n.b)} · {fmtN(n.o)} objects · {((100 * n.b) / root.b).toFixed(2)}% of total
-          {n.d != null && <> · mean created {epochDaysToMonth(n.d)}</>}
+          {n.d != null && <> · mean {time.label} {epochDaysToMonth(n.d)}</>}
           {n.a != null
             ? <> · last read {epochDaysToDate(n.a)}</>
-            : readRange && !n.n.startsWith('(') && <> · <span className="never-read">no reads since {epochDaysToDate(readRange.min)}</span></>}
+            : readRange && !n.n.startsWith('(') && <> · <span className="never-read">no observed reads since {epochDaysToDate(readRange.min)}</span></>}
         </div>
         {classes}
         {users}
@@ -673,7 +675,7 @@ export function Treemap({ root, mode, shade = 'none', userIdx, dateRange, readRa
           <div className="vc-scope">{p.length > 1 ? pathText(scheme, p.slice(1).map(x => x.n)) : n.n}</div>
           <div className="nums">
             {fmtBytes(n.b)} · {fmtN(n.o)} objects · {root.b ? ((100 * n.b) / root.b).toFixed(2) : 0}% of total
-            {n.d != null && <> · mean created {epochDaysToMonth(n.d)}</>}
+            {n.d != null && <> · mean {time.label} {epochDaysToMonth(n.d)}</>}
           </div>
           <div className="vc-hint">Hover a cell for its details · click one to open it.</div>
         </div>

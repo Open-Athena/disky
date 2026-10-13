@@ -112,6 +112,8 @@ One gate (`_lib/auth.ts`, `@open-athena/auth` over D1): `identify` → `Identity
 
 ## Development
 
+During ongoing implementation, treat a concrete bug report about the code we own as an implied request to fix it: reproduce, implement, verify, and coordinate the deployment handoff without requiring a second prompt. Honor explicitly read-only requests. Code-fix authority does not imply unrelated infrastructure applies, permission changes, or another session's live cutover. Report separately what is fixed locally and what is actually deployed.
+
 ```bash
 # Python setup — one uv workspace: the engine (root) + the cloud overlay
 # (`cloud/`, package `dt-cloud`) share ONE `uv.lock` and one `.venv`.

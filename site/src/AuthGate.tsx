@@ -3,7 +3,7 @@ import { useQuery } from '@tanstack/react-query'
 import { useLocation, useNavigate } from 'react-router-dom'
 import { AuthGate as Gate, deniedEmail, RequestAccessForm, SignInPanel, useForgetWhoami } from '@open-athena/auth/react'
 import { AUTH_MODE, devIdentity, WHOAMI_SOURCE } from './auth'
-import { DEFAULT_STORE } from './stores'
+import { DEFAULT_STORE, storeEmailAuth } from './stores'
 
 /** The public Google client id, or null where Google sign-in isn't configured
  *  (the wall then offers only the emailed code). One fetch per page load. */
@@ -100,7 +100,7 @@ function LoginWall({ next, error }: { next?: string; error?: string }) {
               // width (440 max − 2×32 padding), less on a narrow phone.
               buttonOptions: { theme: 'filled_blue', size: 'large', text: 'continue_with', shape: 'rectangular', width: Math.min(376, Math.max(240, window.innerWidth - 112)) },
             } : undefined}
-            emailAuth={{ startEndpoint: '/auth/email/start', verifyEndpoint: '/auth/email/code' }}
+            emailAuth={storeEmailAuth(DEFAULT_STORE)}
             onSignedIn={() => { forget(); if (next) navigate(next, { replace: true }) }}
             classNames={{ root: 'signin-panel', googleButton: 'signin', switchAccount: 'signin-switch', divider: 'signin-or' }}
           />

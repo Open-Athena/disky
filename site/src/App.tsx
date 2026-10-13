@@ -57,6 +57,9 @@ import { hrefWithScan, NoScanMatch } from './NoScanMatch'
 import { selOf } from './scanSlug'
 import { SizeOverTime } from './SizeOverTime'
 import { useStore, useStoreFetch } from './store'
+import { listingTime } from './listingTime'
+import { knownBucket, storeDefaultColor } from './stores'
+import { colorModeCodec as modeCodec, mapColorMode } from './colorMode'
 import { perf } from './perf'
 import { useDocTitle } from './title'
 import { TypedPrefixModal } from './TypedPrefix'
@@ -78,17 +81,6 @@ const MODES: ColorMode[] = ['read', 'user', 'date', 'tree']
  * accepts the legacy forms and the rewrite is ours. (The retired mark
  * coloring — `m`/`marks`/`mark`/`fate` — decodes to nothing: the default.)
  */
-const MODE_CODES: Record<string, string> = { tree: 't', date: 'w', read: 'r', user: 'u' }
-const MODE_ALIASES: Record<string, string> = {
-  t: 'tree', tree: 'tree',
-  w: 'date', written: 'date', age: 'date', date: 'date',
-  r: 'read', read: 'read',
-  u: 'user', user: 'user',
-}
-const modeCodec = {
-  encode: (v: string | undefined) => (v === undefined ? undefined : MODE_CODES[v] ?? v),
-  decode: (e: string | undefined) => (e === undefined ? undefined : MODE_ALIASES[e] ?? e),
-}
 const shadeCodec = {
   encode: (v: string | undefined) => (v === 'class' ? 'c' : undefined),
   decode: (e: string | undefined): string | undefined => (e === 'c' || e === 'class' ? 'class' : undefined),
@@ -147,6 +139,7 @@ function AppContent() {
   const navType = useNavigationType()
   const navigate = useNavigate()
   const store = useStore()
+  const time = listingTime(store.scheme)
   const sfetch = useStoreFetch()
   // Legacy `?path=<prefix>` links (cw-s3 drilled by query param until the
   // union): forward to the URL-path form, keeping the other params.
@@ -662,7 +655,7 @@ function AppContent() {
     queryKey: ['age', store.key, asof, drillPath, ageBudget],
     queryFn: async () => {
       const pf = perf.start('age', `${drillPath || '/'}@${asof}|b${ageBudget}`)
-      const r = await pf.track(sfetch(`/api/age-pyramid?date=${asof}&path=${encodeURIComponent(drillPath)}&bin_budget=${ageBudget}`, { credentials: 'include' }))
+      const r = await pf.track(sfetch(`/api/age-pyramid?date=${asof}&path=${encodeURIComponent(drillPath)}&bin_budget=${ageBudget}`, { credentials: 'include', cache: 'no-cache' }))
       if (!r.ok) { pf.fail(); throw new Error(`age ${r.status}`) }
       const j = await r.json() as { records: { dt: number; b: number; o: number }[] }
       // No rows (no age tier for this deploy, or a prefix below the index
@@ -683,7 +676,7 @@ function AppContent() {
     queryKey: ['age', store.key, diffPrev, drillPath, ageBudget],
     queryFn: async () => {
       const pf = perf.start('age', `${drillPath || '/'}@${diffPrev}|b${ageBudget}`)
-      const r = await pf.track(sfetch(`/api/age-pyramid?date=${diffPrev}&path=${encodeURIComponent(drillPath)}&bin_budget=${ageBudget}`, { credentials: 'include' }))
+      const r = await pf.track(sfetch(`/api/age-pyramid?date=${diffPrev}&path=${encodeURIComponent(drillPath)}&bin_budget=${ageBudget}`, { credentials: 'include', cache: 'no-cache' }))
       if (!r.ok) { pf.fail(); throw new Error(`age ${r.status}`) }
       const j = await r.json() as { records: { dt: number; b: number; o: number }[] }
       if (j.records.length) pf.decoded(); else pf.empty()
@@ -718,9 +711,9 @@ function AppContent() {
   [meta])
   // No explicit `?c=` → a scope-appropriate default; an explicit pick always
   // wins: an attribution store colors by owner (on a one-owner view the
-  // interesting axis is who else is in there), any other by tree.
-  const lensDefaultMode: ColorMode = store.owners ? 'user' : 'tree'
-  const mode: ColorMode = (MODES as string[]).includes(modeP ?? '') ? (modeP as ColorMode) : lensDefaultMode
+  // interesting axis is who else is in there), any other by tree, unless the
+  // deployment selects a different default.
+  const lensDefaultMode: ColorMode = storeDefaultColor(store)
   const setMode = (m: ColorMode) => setModeP(m === lensDefaultMode ? undefined : m)
   // The scan carries attribution (the owner axis and user coloring apply) —
   // from the scan's meta, not the current view, which may hold no user bytes
@@ -728,7 +721,7 @@ function AppContent() {
   const hasAttr = !!meta?.users?.length
   // The page bar's controls, each on what backs it (`pageBar.ts`).
   const bar = barControls({ owners: store.owners, hasAttr, classes: store.prices, readRange: !!readRange })
-  const effMode: ColorMode = bar.color.includes(mode) ? mode : bar.color.includes('user') ? 'user' : 'tree'
+  const effMode = mapColorMode(modeP, bar.color, lensDefaultMode)
   // The age chart's color axis: an explicit `?ac=` wins; otherwise it follows
   // the map. The read axis needs strata that carry `a` (scans published from
   // 8/29 on) — without them it's offered disabled and the chart falls back to
@@ -916,7 +909,7 @@ function AppContent() {
   // move it.
   const pickUser = (u: string, switchMode = true) => {
     setOwnerUser(u)
-    if (switchMode && mode !== 'user') setMode('user')
+    if (switchMode && effMode !== 'user') setMode('user')
   }
   const pickUnowned = () => setOP('unowned')
   const clearHl = () => setOP(undefined)
@@ -1037,9 +1030,9 @@ function AppContent() {
   // instead of silently rendering the root view at a bogus address. Only an
   // unscoped root lists every bucket: under a filter or owner scope a real
   // bucket with nothing in scope is absent from it, and is "no matches", not
-  // a 404.
+  // a 404. Display thresholds can also omit configured small buckets.
   const seg0 = drillPath.split('/')[0]
-  if (!scopeQs && baseTree?.c && seg0 && !baseTree.c.some(k => k.n === seg0)) {
+  if (!scopeQs && baseTree?.c && seg0 && !knownBucket(seg0, store, baseTree.c)) {
     return (
       <main>
         <SiteNav />
@@ -1159,8 +1152,8 @@ function AppContent() {
           <label className="tb-ctl">
             <span className="lbl">color</span>
             <Explain text={
-              effMode === 'date' ? <>Object <b>creation time</b>, from the bucket listings (each cell = the byte-weighted mean of its objects). {store.objectsNote}</>
-              : effMode === 'read' ? <><b>Last read</b> — the most recent GET/HEAD/LIST anywhere under each cell, from the GCS usage logs (logging began {readRange ? epochDaysToDate(readRange.min) : '—'}). Brick-red = <b>never read</b> since then: prime deletion candidates.</>
+              effMode === 'date' ? <>Object <b>{time.description}</b>, from the bucket listings (each cell = the byte-weighted mean of its objects). {store.objectsNote}</>
+              : effMode === 'read' ? <><b>Last observed read</b> — the most recent logged GET/HEAD/LIST anywhere under each cell (logging began {readRange ? epochDaysToDate(readRange.min) : '—'}). Brick-red = <b>no observed reads</b> since then. Logs may omit events; absence is not proof of no access.</>
               : effMode === 'user' ? <>Dominant <b>owner</b> of each cell; the legend lists the top users of the current view.</>
               : <>Top-level directory each cell belongs to.</>
             }>
@@ -1525,17 +1518,17 @@ function AppContent() {
       <section id="mtime">
         {/* Granularity is auto-picked (and user-switchable) inside AgeChart, so
             the heading stays unit-free rather than lying about "month". */}
-        <h2>Bytes by creation date{' '}
+        <h2>Bytes by {time.noun} date{' '}
           <Tooltip content={<>
-            When each stored byte was <b>written</b> — the object’s creation time from the listing.
-            {store.objectsNote}{readRange ? <>{' '}The other time axis is <b>last read</b> (from the usage logs, since {epochDaysToDate(readRange.min)}) —
-            color by it to see which vintages nobody has touched.</> : null}{' '}The chart’s color axis is its own (right):
+            The object’s <b>{time.description}</b> from the listing.
+            {store.objectsNote}{readRange ? <>{' '}The other time axis is <b>last observed read</b> (from the usage logs, since {epochDaysToDate(readRange.min)}) —
+            color by it to see which vintages have no recorded reads. Logs may omit events.</> : null}{' '}The chart’s color axis is its own (right):
             it follows the map’s until you pick one.
           </>}><span className="info" tabIndex={0} aria-label="about this chart">ⓘ</span></Tooltip>
         </h2>
         {ageQ.isPending && !!asof && <Skeleton height={220} label="loading ages…" />}
         {age.length > 0 && (
-          <AgeChart rows={age} baseRows={diffPrev ? ageBase : undefined} diffLabels={diffPrev && asof ? { from: fmtS(diffPrev), to: fmtS(asof) } : undefined} catOrder={catOrder} mode={ageMode} onMode={m => setAgeModeP(m)} modes={ageModes} userIdx={userIdx} readRange={ageReadRange} />
+          <AgeChart rows={age} baseRows={diffPrev ? ageBase : undefined} diffLabels={diffPrev && asof ? { from: fmtS(diffPrev), to: fmtS(asof) } : undefined} catOrder={catOrder} mode={ageMode} onMode={m => setAgeModeP(m)} modes={ageModes} userIdx={userIdx} readRange={ageReadRange} scheme={store.scheme} />
         )}
       </section>
       )}
