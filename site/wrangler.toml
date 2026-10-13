@@ -21,6 +21,7 @@ enabled = true
 STORE = "oa-r2"
 AUTH_MODE = "app"
 ROOT_LABEL = "Open Athena R2"
+OG_DEFAULT_COLOR = "w"
 BASE_SCOPE = "oa-r2"
 STORE_SCHEME = "r2://"
 STORE_BUCKETS = "marin-na,marin-discord,oa-cw-s3-usage-index,oa-gcs-usage-index"
