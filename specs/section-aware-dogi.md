@@ -1,9 +1,21 @@
 # Section-aware dynamic OpenGraph cards
 
-Status: implementation in CW as shared `[cloud]` candidates; coordinate upstream pickup without editing another owner's checkout. Ryan requested a real diff card for `/marin-us-east-02a?d=26092812-26091700#diff`, plus sticky diff endpoint modes.
+Status: implemented and deployed to CW dev (`76525346`, application checkpoint `98b76238`), not production. Shared pickup commits are `e2cea646` (sticky endpoint intent) and `dabc0edb` (section-aware diff cards, including the DOM-free delta-color subpath). `98b76238` updates the CW-only privacy verifier for renderer revision 6. Coordinate upstream pickup without editing another owner's checkout. Ryan requested a real diff card for `/marin-us-east-02a?d=26092812-26091700#diff`, plus sticky diff endpoint modes.
 
 Fragments never reach the server. Sharing/minting must promote the known `#diff` (legacy `#changes`) to `section=diff` and retain the fragment for browser navigation. An ordinary span URL may still depict the main snapshot; do not assume every date range means the diff section. Section/card kind is part of preview-token authorization. Both resolved scan identities must be signed and cache-keyed; changing either changes the image URL. Anonymous CW links remain generic, and invalid/expired/revoked capabilities must downgrade before protected reads/cache access.
 
 Render real comparison data through existing `buildDiff` and the DOM-free diff tree model: areas describe movement by default (or the URL's max-size mode), signed deltas are labelled separately from layout weights, and colors match the dashboard's grew/shrank convention. Preserve first-scanned semantics and bounded/partial-result caveats. Never label an after-snapshot-only card as a diff. Full title/description/image metadata describe the same comparison.
 
 An explicit scan-picker selection should pin that endpoint. Pinned/latest and pinned/duration intent round-trips in existing `d=` grammar; selecting another endpoint, latest, or a chart brush must not silently discard a requested pin. Duration presets/toggles are the explicit way to return to duration mode. Tests cover codec roundtrips and source selection transitions; CIC verifies real pickers and sharing. No access-grant widening, preview-token minting or production promotion is implicit in tests. Live full-card verification needs an explicitly approved temporary preview capability or a local synthetic fixture.
+
+## Verification checkpoint
+
+Full site suite: 1,956 passed, one skipped. Core treemap: 171 passed. Both TypeScript projects and preview build pass. Five CW verification-helper tests pass. Exact tests cover section-aware URL promotion/minting, map-token rejection for diff views, both scan pins in signed image URLs, original-view credential validation, revoked warmed diff downgrade before protected reads, scan misses, signed labels versus layout weights, and URL mode roundtrips. The real resvg/fonts pipeline renders [the synthetic diff example]; it contains no private storage values.
+
+[Live anonymous checks] pass seven exact generic HTML metadata and eight byte-identical generic PNG cases, including bogus/absent diff requests. [Authenticated serving checks] match production history/tree/search/diff/series and repeated trees, normalizing only the configured dev root label. Chrome in the OA profile verified the requested old comparison, changing the before picker (`26091700` → `26091812`), reload retaining its pin, explicitly toggling to duration, a new before selection re-pinning, then choosing latest after (`26101318`) with both pins still present and checked. The chart-brush transition is unit-tested, not claimed as browser-tested. Share opens for the restored requested comparison; Copy link has not been clicked.
+
+Production promotion and a live temporary detailed diff capability/revocation check remain pending. Ryan was asked for action-time approval to mint that one preview-only capability, never post it, and immediately revoke it; no guest access grant or live OG token was created by these checks. Existing cached Slack unfurls do not automatically refresh on deployment. Explicit `section=diff` (minted from `#diff`) and a valid preview/access credential are needed for a detailed CW comparison card.
+
+[the synthetic diff example]: ../site/tmp/og-diff-demo.png
+[Live anonymous checks]: ../tmp/section-aware-dogi-live-anonymous/_SUCCESS.json
+[Authenticated serving checks]: ../tmp/section-aware-dogi-live-serving/_SUCCESS.json
