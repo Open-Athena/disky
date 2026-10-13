@@ -91,6 +91,7 @@ ROOT_LABEL = "my buckets"                   # the store root's crumb label
 
 # --- Link previews (specs/done/dogi.md) ---
 # OG_CARDS = "1"                              # any value: every page gets its own preview card; unset = the static `og.jpg`
+# OG_DEFAULT_COLOR = "w"                      # optional tree/written/read/owner default; match the dashboard setting
 
 # Secrets — `wrangler pages secret put`, never in this file:
 # secret SESSION_SECRET                     required wherever anyone signs in: signs session cookies and card URLs

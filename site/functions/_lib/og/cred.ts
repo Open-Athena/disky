@@ -5,12 +5,12 @@
 
 export type Cred = { t: string } | { g: string }
 
-/** Image params → the card's view (no `t` / `g` / `v`), the `/staged` plan
- * version `v`, and the credential (null: none, so the card is anonymous). */
-export function splitImageParams(params: Record<string, string>): { view: Record<string, string>; v?: string; cred: Cred | null } {
-  const { t, g, v, ...view } = params
+/** Separate render metadata (version and pinned scan) from the original
+ * credential view and the explicit share credential. */
+export function splitImageParams(params: Record<string, string>): { view: Record<string, string>; v?: string; scan?: string; cred: Cred | null } {
+  const { t, g, v, s, r: _render, ...view } = params
   const cred: Cred | null = t ? { t } : g ? { g } : null
-  return { view, ...(v ? { v } : {}), cred }
+  return { view, ...(v ? { v } : {}), ...(s ? { scan: s } : {}), cred }
 }
 
 /** The image params for a page view: its view, `/staged`'s version, and the

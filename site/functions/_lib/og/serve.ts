@@ -9,7 +9,7 @@ import { mapCard, type Site } from './data.js'
 import { assignmentsCard, stagedCard, userCard, usersCard } from './pages.js'
 import { ensureWasm, FONT_FILES, svgToPng } from './render.js'
 import { pageView, type OgKind } from './routes.js'
-import { expDay, IMAGE_TTL_DAYS, imagePath, ogKey, resolveImage, type OgTier } from './sign.js'
+import { imagePath, ogKey, resolveImage, type OgTier } from './sign.js'
 import { credLive, pageTier } from './tier.js'
 import { imageParams, splitImageParams } from './cred.js'
 import { warmUrls } from './warm.js'
@@ -18,11 +18,16 @@ import { canonId, loadRegistry } from '../identity.js'
 import { openPlanId, planDigest } from '../plans.js'
 import { resolveScan } from './data.js'
 import { warmSubtree } from '../../api/subtree.js'
+import { colorModeCodec } from '../../../src/colorMode.js'
+import type { ColorMode } from '../../../src/types.js'
+
+const RENDER_VERSION = '3'
 
 export type OgEnv = Env & {
   ASSETS: { fetch: (req: Request) => Promise<Response> }
   /** Set (any value) to stamp dynamic cards; unset = the static `og.jpg`. */
   OG_CARDS?: string
+  OG_DEFAULT_COLOR?: string
 }
 
 /** The kinds this build draws; the rest keep their static card. */
@@ -33,7 +38,13 @@ export const DRAWN: ReadonlySet<OgKind> = new Set(['map', 'staged', 'users', 'us
  * middleware only swaps their image. */
 const OWN_TITLES: ReadonlySet<OgKind> = new Set(['staged', 'users', 'user', 'assignments'])
 
-export const siteOf = (env: OgEnv): Site => ({ name: env.ROOT_LABEL ?? 'storage', scheme: env.STORE_SCHEME ?? 'gs://' })
+export const siteOf = (env: OgEnv): Site => {
+  const c = colorModeCodec.decode(env.OG_DEFAULT_COLOR)
+  return {
+    name: env.ROOT_LABEL ?? 'storage', scheme: env.STORE_SCHEME ?? 'gs://',
+    ...(c && ['tree', 'date', 'read', 'user'].includes(c) ? { defaultColor: c as ColorMode } : {}),
+  }
+}
 
 let keyMemo: { secret: string; key: Promise<CryptoKey> } | null = null
 /** The OG key for this deployment, or null when it has no `SESSION_SECRET`. */
@@ -62,18 +73,23 @@ export async function stampPage(env: OgEnv, url: URL, html: Response): Promise<R
   if (!env.OG_CARDS) return html
   const pv = pageView(url, siteOf(env).name)
   if (!pv || !DRAWN.has(pv.kind)) return html
-  const keyP = deploymentKey(env)
-  if (!keyP) return html
-  const key = await keyP
   const { tier, day, cred } = await pageTier(env, pv.kind, pv.params, url, now())
+  const keyP = deploymentKey(env)
+  if (tier === 'full' && !keyP) return html
+  const key = keyP ? await keyP : null
   // The image's view: the page's, plus `/staged`'s plan version and, for a
   // full card, the credential it re-checks.
   const v = pv.kind === 'staged' ? await stagedVersion(env) : null
-  const image = url.origin + await imagePath(key, pv.kind, imageParams(pv.params, v, cred), tier, day)
+  const scan = pv.kind === 'staged' ? null : await resolveScan(env, pv.params.d)
+  const params = { ...imageParams(pv.params, v, cred), ...(scan ? { s: scan } : {}), r: RENDER_VERSION }
+  const image = url.origin + await imagePath(key, pv.kind, params, tier, day)
+  const headers = new Headers(html.headers)
+  headers.set('cache-control', 'private, no-store')
+  html = new Response(html.body, { status: html.status, headers })
   if (OWN_TITLES.has(pv.kind)) return stampMeta(html, { image, imageType: 'image/png', page: url.href })
   return stampMeta(html, {
     title: pv.title,
-    desc: `${siteOf(env).name}: an interactive storage map of this view: who owns what, by size.`,
+    desc: `${siteOf(env).name}: storage snapshot preview. Comparison links preview the after snapshot, not the diff.`,
     image,
     imageType: 'image/png',
     page: url.href,
@@ -133,20 +149,22 @@ export async function serveCard(ctx: { request: Request; env: OgEnv; waitUntil?:
   const t = now()
   const r0 = await resolveImage(keyP ? await keyP : null, url, t)
   if (!r0) return new Response('not a card', { status: 404 })
-  const { view, v, cred } = splitImageParams(r0.params)
+  const { view, v, scan: pinnedScan, cred } = splitImageParams(r0.params)
   const r = r0.tier === 'full' && !(await credLive(env, r0.kind, view, cred, t))
     ? { ...r0, tier: 'anon' as const, why: cred ? 'revoked or expired' : 'no credential' }
     : r0
   const head = env.DB ? await ledgerHead(env).catch(() => 0) : 0
+  const scan = r.kind === 'staged' ? null : pinnedScan ?? await resolveScan(env, view.d)
+  const renderView = scan ? { ...view, d: scan } : view
   // An anonymous render is one per view (+ version), whatever credential the URL named.
-  const keyParams = r.tier === 'full' ? r0.params : { ...view, ...(v ? { v } : {}) }
+  const keyParams = { ...(r.tier === 'full' ? r0.params : { ...view, ...(v ? { v } : {}) }), ...(scan ? { s: scan } : {}), r: RENDER_VERSION }
   const cacheKey = new Request(`${url.origin}${await imagePath(null, r.kind, keyParams, 'anon')}${Object.keys(keyParams).length ? '&' : '?'}tier=${r.tier}&h=${head}`)
   const cache = (caches as unknown as { default: Cache }).default
-  if (ctx.waitUntil) ctx.waitUntil(warmView(env, url.origin, r.kind, view, ctx.waitUntil))
+  if (ctx.waitUntil) ctx.waitUntil(warmView(env, url.origin, r.kind, renderView, ctx.waitUntil))
   const hit = await cache.match(cacheKey)
-  if (hit) return withTier(hit, r.tier, r.why)
+  if (hit) return withTier(hit, r.tier, r.why, !!pinnedScan || !!v)
   const t0 = Date.now()
-  const data = await cardData(env, r.kind, view, r.tier, url)
+  const data = await cardData(env, r.kind, renderView, r.tier, url)
   if (!data) return new Response('no such card', { status: 404 })
   const t1 = Date.now()
   await ensureWasm(RESVG)
@@ -165,13 +183,13 @@ export async function serveCard(ctx: { request: Request; env: OgEnv; waitUntil?:
   const put = cache.put(cacheKey, new Response(res.clone().body, { headers: { ...Object.fromEntries(res.headers), 'cache-control': 'public, max-age=86400' } }))
   if (ctx.waitUntil) ctx.waitUntil(put)
   else await put
-  return withTier(res, r.tier, r.why)
+  return withTier(res, r.tier, r.why, !!pinnedScan || !!v)
 }
 
 /** The response with this fetch's tier header (and the cache policy its tier needs). */
-function withTier(res: Response, tier: OgTier, why?: string): Response {
+function withTier(res: Response, tier: OgTier, why?: string, pinned = false): Response {
   const h = new Headers(res.headers)
   h.set('x-og-tier', why ? `anon (${why})` : tier)
-  h.set('cache-control', tier === 'full' ? 'private, no-store' : 'public, max-age=86400')
+  h.set('cache-control', tier === 'full' ? 'private, no-store' : pinned ? 'public, max-age=86400' : 'public, max-age=0, must-revalidate')
   return new Response(res.body, { status: res.status, headers: h })
 }

@@ -46,6 +46,7 @@ import { perf } from './perf'
 import { useDocTitle } from './title'
 import { TypedPrefixModal } from './TypedPrefix'
 import type { AgeRow, ColorMode, Meta, Pricing, Rules, TreeNode } from './types'
+import { colorModeCodec as modeCodec, mapColorMode } from './colorMode'
 import { CLASS_COLORS, CLASS_NAMES, CLASS_PRICE_US, MODE_LABELS, classMix, fmtN, fmtUsd, ratePerByte } from './types'
 import { SiteKbd } from './SiteKbd'
 import { useUnits } from './units'
@@ -63,17 +64,6 @@ const MODES: ColorMode[] = ['read', 'user', 'date', 'tree']
  * accepts the legacy forms and the rewrite is ours. (The retired mark
  * coloring — `m`/`marks`/`mark`/`fate` — decodes to nothing: the default.)
  */
-const MODE_CODES: Record<string, string> = { tree: 't', date: 'w', read: 'r', user: 'u' }
-const MODE_ALIASES: Record<string, string> = {
-  t: 'tree', tree: 'tree',
-  w: 'date', written: 'date', age: 'date', date: 'date',
-  r: 'read', read: 'read',
-  u: 'user', user: 'user',
-}
-const modeCodec = {
-  encode: (v: string | undefined) => (v === undefined ? undefined : MODE_CODES[v] ?? v),
-  decode: (e: string | undefined) => (e === undefined ? undefined : MODE_ALIASES[e] ?? e),
-}
 const shadeCodec = {
   encode: (v: string | undefined) => (v === 'class' ? 'c' : undefined),
   decode: (e: string | undefined): string | undefined => (e === 'c' || e === 'class' ? 'class' : undefined),
@@ -628,7 +618,7 @@ function AppContent() {
   const hasAttr = !!meta?.users?.length
   // The page bar's controls, each on what backs it (`pageBar.ts`).
   const bar = barControls({ owners: store.owners, hasAttr, classes: store.prices, readRange: !!readRange })
-  const effMode: ColorMode = bar.color.includes(mode) ? mode : bar.color.includes('user') ? 'user' : 'tree'
+  const effMode = mapColorMode(mode, bar.color, lensDefaultMode)
   // The age chart's color axis: an explicit `?ac=` wins; otherwise it follows
   // the map. The read axis needs strata that carry `a` (scans published from
   // 8/29 on) — without them it's offered disabled and the chart falls back to
