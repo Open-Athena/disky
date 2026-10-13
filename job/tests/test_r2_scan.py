@@ -28,6 +28,44 @@ def test_profile_accepts_only_own_full_scans_and_immutable_archive() -> None:
     ])
 
 
+def test_backfill_cli_delegates_to_installed_workspace_with_own_source(monkeypatch, tmp_path: Path) -> None:
+    callback = module["backfill_runs"].callback
+    namespace = callback.__globals__
+    entry = tmp_path / "project/bin/dt-cloud"
+    monkeypatch.setitem(namespace, "which", lambda name: str(entry))
+    monkeypatch.setitem(namespace, "python_prefix", str(tmp_path / "standalone"))
+    monkeypatch.setitem(namespace, "environ", {"PYTHONPATH": "original-source", "TEST_FLAG": "1"})
+    calls = []
+    monkeypatch.setitem(namespace, "run", lambda command, **kwargs: calls.append((command, kwargs)))
+    callback(True, Path("tmp/inputs"))
+    root = module["HERE"].parent
+    assert calls == [(
+        [str(entry.parent / "python"), str(module["HERE"] / "r2-scan"), "backfill-runs", "-n", "-w", "tmp/inputs"],
+        {"env": {"PYTHONPATH": f"{root / 'src'}:{root / 'cloud/src'}:original-source", "TEST_FLAG": "1"}, "check": True},
+    )]
+
+
+def test_backfill_cli_stays_in_versioned_venv_with_symlinked_bin(monkeypatch, tmp_path: Path, capsys) -> None:
+    from sys import stderr
+    from dt_cloud import scan_runs_backfill
+
+    root = tmp_path / "project/.venv"
+    version = root / "3.13.7/bin"
+    version.mkdir(parents=True)
+    (root / "bin").symlink_to(version)
+    callback = module["backfill_runs"].callback
+    namespace = callback.__globals__
+    monkeypatch.setitem(namespace, "which", lambda name: str(root / "bin/dt-cloud"))
+    monkeypatch.setitem(namespace, "python_prefix", str(root))
+    monkeypatch.setitem(namespace, "stderr", stderr)
+    calls = []
+    monkeypatch.setitem(namespace, "run", lambda command, **kwargs: calls.append((command, kwargs)))
+    monkeypatch.setattr(scan_runs_backfill, "fetch_jobs", lambda project, regions: [])
+    callback(True, None)
+    assert calls == []
+    assert capsys.readouterr().err == "No OA R2 full scan jobs found\n"
+
+
 @pytest.mark.parametrize("fails", [False, True])
 def test_live_reporter_keeps_phase_and_records_scan_exit(monkeypatch, fails: bool) -> None:
     from dt_cloud import scan_runs

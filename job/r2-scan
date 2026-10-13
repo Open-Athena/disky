@@ -11,10 +11,10 @@ from json import dumps, loads
 from os import environ
 from pathlib import Path
 from re import escape, fullmatch
-from shutil import copy2, copytree, ignore_patterns
+from shutil import copy2, copytree, ignore_patterns, which
 from shlex import join
 from subprocess import run
-from sys import stderr
+from sys import prefix as python_prefix, stderr
 from time import time
 
 from click import ClickException, argument, group, option
@@ -342,6 +342,21 @@ def verify(scan: str, work: Path) -> None:
 @option("-w", "--save-inputs", type=Path, help="Save the own Batch jobs and task logs for replay and review")
 def backfill_runs(dry_run: bool, save_inputs: Path | None) -> None:
     """Reconstruct full R2 scans from own Batch jobs, logs and immutable archives."""
+    entry = which("dt-cloud")
+    if entry is None:
+        raise ClickException("Install this workspace's dt-cloud package before backfilling runs")
+    interpreter = Path(entry).parent / "python"
+    if Path(python_prefix).resolve() != interpreter.parent.parent.resolve():
+        # UV's standalone build/plan environment has no workspace packages; use the installed CLI's environment.
+        command = [str(interpreter), str(HERE / "r2-scan"), "backfill-runs"]
+        if dry_run:
+            command.append("-n")
+        if save_inputs:
+            command.extend(("-w", str(save_inputs)))
+        root = HERE.parent
+        source = f"{root / 'src'}:{root / 'cloud/src'}"
+        run(command, env={**environ, "PYTHONPATH": source + (":" + environ["PYTHONPATH"] if environ.get("PYTHONPATH") else "")}, check=True)
+        return
     from dt_cloud.gcp import log_entries
     from dt_cloud.scan_runs import AnyStore, D1Sink, as_json, load_profile, write_all
     from dt_cloud.scan_runs_backfill import classify, fetch_jobs, reconstruct
