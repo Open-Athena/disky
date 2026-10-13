@@ -199,4 +199,12 @@ describe('restricted anonymous OG responses', () => {
     ])
     expect(mocks.match.mock.calls.map(call => new URL(call[0].url).searchParams.get('c'))).toEqual(['t', 'u'])
   })
+
+  it('public anonymous previews do not require a session-signing secret', async () => {
+    const response = await stampPage(env({ AUTH_MODE: 'public', OG_CARDS: '1', SESSION_SECRET: undefined }), new URL('https://public.example/?c=t'), new Response('shell'))
+    expect([response.headers.get('cache-control'), mocks.stamp.mock.calls.map(call => {
+      const image = new URL(call[1].image)
+      return [image.origin, image.pathname, Object.fromEntries(image.searchParams)]
+    })]).toEqual(['private, no-store', [['https://public.example', '/og/map.png', { c: 't', policy: 'shape', r: '3', s: '2026-10-12T1201' }]]])
+  })
 })

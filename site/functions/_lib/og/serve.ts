@@ -96,8 +96,8 @@ export async function stampPage(env: OgEnv, url: URL, html: Response): Promise<R
   if (tier === 'anon' && anonymousPolicy(env) === 'generic') return uncachedHtml(stampMeta(html, genericMeta(env, url)))
   if (!env.OG_CARDS) return html
   const keyP = deploymentKey(env)
-  if (!keyP) return html
-  const key = await keyP
+  if (tier === 'full' && !keyP) return html
+  const key = keyP ? await keyP : null
   // The image's view: the page's, plus `/staged`'s plan version and, for a
   // full card, the credential it re-checks.
   const v = pv.kind === 'staged' ? await stagedVersion(env) : null
