@@ -8,7 +8,10 @@ The public `/files/list?prefix=pyramid%2F&limit=10` endpoint was verified live o
 
 The existing RAC demo read-only token returned `AccessDenied` on a bounded `ListObjectsV2(Bucket="awair", MaxKeys=1)` probe on 2026-10-13. The daily-ingest workflow currently scans `ctbk`, `crashes`, and `jc-taxes`; adding an unconditional Awair listing now would fail the job. No credentials were printed, no sensor object contents were read, and no data was published by this check.
 
-Next: confirm the public prefix with the Awair maintainer, grant the existing scan token read/list access to `awair` (or provision a separate bucket-scoped RO token), update the workflow's source allowlist with prefix filtering, and run a bounded cloud/GHA scan. Reuse the current index bucket/D1 and daily refresh; a separate deployment is unnecessary for another intentionally public demo source. Do not scan the entire account or download sensor parquet contents on the laptop.
+Direction updated 2026-10-13: Ryan wants project-owned scans and infrastructure, with `r2.rbw.sh` only reading their exports. Do not broaden the aggregate's scan token or add Awair to its central daily listing job. Follow [the federated scan contract]: Awair's own job publishes complete immutable manifests and serving artifacts for its already-public `pyramid/` scope; the aggregate resolves its latest scan at or before a shared cutoff, alongside other independently scanned projects. Awair owns schedule, source credentials, publication storage and IaC; the demo owns only reader/cache resources. Its existing live shard inventory is a useful discovery input, not an atomic completed scan export.
+
+Next: agree the producer manifest contract, prepare the Awair-owner handoff, then wire its read-only export into a federated preview. No whole-account scanning or sensor-parquet downloads on the laptop.
 
 [the R2 demo]: https://r2.rbw.sh/
 [the serving Worker]: https://awair-serve.ryan-0dc.workers.dev
+[the federated scan contract]: federated-scans.md
