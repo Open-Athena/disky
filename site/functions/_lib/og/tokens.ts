@@ -9,6 +9,7 @@ import { canRedeem, hashToken } from '@open-athena/auth'
 import { d1GrantStore } from '@open-athena/auth/d1'
 import { pageView } from './routes.js'
 import { B62, canonical, expDay, expired, randomToken } from './sign.js'
+import { shareSection } from '../../../src/shareSection.js'
 
 export const TOKEN_CHARS = 10
 
@@ -25,13 +26,13 @@ export interface Mint {
 /** Mint a token for `pageUrl`'s view and record it. Null when the URL has no
  * card of its own. */
 export async function mint(db: D1Database, site: string, pageUrl: URL, by: string, now: number, days = TOKEN_DAYS_DEFAULT, token = randomToken(TOKEN_CHARS)): Promise<Mint | null> {
-  const u = new URL(pageUrl.href)
+  const u = shareSection(pageUrl)
   u.searchParams.delete('og')
   const pv = pageView(u, site)
   if (!pv) return null
   const day = expDay(now, Math.min(Math.max(1, Math.floor(days)), TOKEN_DAYS_MAX))
   await db.prepare('INSERT INTO og_tokens (token, kind, view, page, minted_by, minted_ts, exp_day) VALUES (?, ?, ?, ?, ?, ?, ?)')
-    .bind(token, pv.kind, canonical(pv.params), u.pathname + u.search, by, now, day).run()
+    .bind(token, pv.kind, canonical(pv.params), u.pathname + u.search + u.hash, by, now, day).run()
   u.searchParams.set('og', token)
   return { token, url: u.href, expDay: day }
 }
