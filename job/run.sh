@@ -325,8 +325,10 @@ compgen -G "$XG" > /dev/null && HAVE_ACCESS=1
 # and point webdata at the local copies — gcsfuse reads are ~20-50 MB/s and
 # webdata makes several passes, so local NVMe scans win by an order of magnitude.
 # DuckDB spill goes to the same disk.
+# Each listing's `_SUCCESS.json` goes too: path-index reads the scan's start
+# (`meta.started`) from the markers beside its `-l` globs.
 if [ -n "${STAGE_DIR:-}" ]; then
-  SG=("${G[@]}" "${AG[@]}")
+  SG=("${G[@]}" "${G[@]/%\*.parquet/_SUCCESS.json}" "${AG[@]}")
   [ "$HAVE_ACCESS" = "1" ] && SG+=("$XG")
   dt-cloud stage -o "$STAGE_DIR" "${SG[@]}"
   export DUCKDB_TMP=${DUCKDB_TMP:-$STAGE_DIR/.duckdb-tmp}
