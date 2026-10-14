@@ -2479,8 +2479,16 @@ export async function readRootHistoryRows(env: Env, dates: string[], lens?: Lens
 /** The scans the interval store holds (none when it is off). */
 export const ivHeldDates = async (env: Env): Promise<string[]> => (intervalsOn(env) ? [...(await ivScans(env)).keys()] : [])
 
+/** The interval store's newest scan ordinal (`vf`/`vt` units); null when it is off or empty. */
+export async function ivHorizon(env: Env): Promise<number | null> {
+  if (!intervalsOn(env)) return null
+  const ords = [...(await ivScans(env)).values()]
+  return ords.length ? Math.max(...ords) : null
+}
+
 /** `asks` on every one of `dates` the interval store holds, from one read of their versions (close records
- *  combined) — not one read per scan — then each date's live rows. `index` is the handle's `<mode>:<gen>`
+ *  combined: `rows`, live over `[vf, vt)` scan ordinals) — not one read per scan — then each date's live rows;
+ *  `hz` is the newest held date's ordinal. `index` is the handle's `<mode>:<gen>`
  *  identity, the same as a per-date handle's. Null when the store is off or holds none of `dates`. */
 export async function readAsksHistory(
   env: Env,
@@ -2489,7 +2497,7 @@ export async function readAsksHistory(
   asks: Ask[],
   keep: (r: Row) => boolean,
   { fields, maxGroups = 60, pre, lens }: { fields?: (keyof Row)[]; maxGroups?: number; pre?: Pre; lens?: Lens } = {},
-): Promise<{ byDate: Map<string, Row[]>; versions: number; groups: number; index: string } | null> {
+): Promise<{ byDate: Map<string, Row[]>; rows: Row[]; hz: number; versions: number; groups: number; index: string } | null> {
   if (!intervalsOn(env) || !dates.length) return null
   const scoped = asOfScans(env, dates)
   const state = await ivState(scoped)
@@ -2502,7 +2510,7 @@ export async function readAsksHistory(
   const history = { ...handle, historyRange: range, runs: handle.runs?.map(r => ({ ...r, historyRange: range })) }
   const { rows, groups } = await readAsks(history, asks, keep, { versions: true, maxGroups, pre, lens, ...(fields ? { columns: columnsFor(handle, fields) } : {}) })
   const byDate = new Map(held.map(date => [date, liveAt({ ...handle, asOf: state.scans.get(date)! }, rows)]))
-  return { byDate, versions: rows.length, groups, index: `${handle.mode}:${'gen' in handle ? handle.gen : ''}` }
+  return { byDate, rows, hz: range[1], versions: rows.length, groups, index: `${handle.mode}:${'gen' in handle ? handle.gen : ''}` }
 }
 
 /** Raw rows (pre-`toRow` records) for a single `(depth, path)` point lookup —
