@@ -175,6 +175,24 @@ describe('owner totals after a new assignment', () => {
     const cold = (await seed(LEDGER + NEXT)).iv
     for (const b of [next, ...rest]) expect(fold(b)).toEqual(fold(await coldTotals(cold, b.scan)))
   })
+
+  it('writes nothing per scan when an owner changes on prefixes already priced', async () => {
+    vi.resetModules()
+    const { ownerTotals } = await import('./ownerTotals')
+    const env = (await seed(LEDGER)).iv
+    for (const date of [S1, S2, S3]) await ownerTotals(env, date)
+    const cached = () => env.DB!.prepare('SELECT scan, updated_ts, length(body) AS n FROM owner_prefix_aggs ORDER BY scan').all()
+    const before = (await cached()).results
+    // `gs://bk/m/` changes hands: already priced on every scan.
+    await env.DB!.prepare(`INSERT INTO actions (id, actor, ts, scan, pattern, set_owner, owner) VALUES (3, 'ops', 3, '${S2}', 'gs://bk/m/', 1, 'carol')`).run()
+    await env.DB!.prepare(`INSERT INTO owner_prefixes (action_id, prefix, owner, ts) VALUES (3, 'gs://bk/m/', 'carol', 3)`).run()
+    const n = r2Reads.length
+    const after = [await ownerTotals(env, S1), await ownerTotals(env, S2), await ownerTotals(env, S3)]
+    expect(after.map(b => [b.scan, b.head, b.computed.prefixes])).toEqual([[S1, 3, 0], [S2, 3, 0], [S3, 3, 0]])
+    expect(r2Reads.slice(n)).toEqual([])
+    expect((await cached()).results).toEqual(before)
+    expect((await env.DB!.prepare('SELECT count(*) AS n FROM owner_totals').first<{ n: number }>())!.n).toBe(0)
+  })
 })
 
 /** What a read did per-scan: the store's `listing/` keys it fetched. */

@@ -6,11 +6,12 @@
  * Cost model: one point lookup per live assignment prefix plus the depth-1 roots.
  * A prefix's bytes/objects on a scan never change (the scan's index is
  * immutable), so they are kept per (scan, index) in D1 (`owner_prefix_aggs`)
- * and only prefixes not priced yet are read. The folded body is cached per
- * (scan, ledger head) (`owner_totals`, one head at a time): a new assignment
- * changes the head, and the refold re-reads just its new prefixes — not every
- * live one (~1,260 on gcs, ~22 s a scan), which made an owner-lens series
- * (one fold per scan) time out after any assignment. */
+ * and only prefixes not priced yet are read — a new assignment's on every
+ * interval-store scan at once. Folding the ledger over a scan's cached prefixes
+ * is cheap (~0.1 s), so a folded body is only memoized in the isolate: an owner
+ * change writes nothing per scan. (Folded bodies stored per (scan, ledger head)
+ * cost ~290 KB × every scan on each change; re-pricing every live prefix on a
+ * new head, ~22 s a scan on gcs, made an owner-lens series time out.) */
 import type { Env } from './auth.js'
 import { columnsFor, ivHeldDates, openIndex, slices, readAsks, readAsksHistory, type Ask, type Row } from './index.js'
 import { loadLedger } from './ledger.js'
@@ -166,45 +167,14 @@ async function compute(env: Env, date: string, owners: Map<string, OwnerRow>, he
   }
 }
 
-/** The owner totals for `date` at the current ledger head, persisted in D1
- * (`owner_totals`, keyed by scan + head). */
+/** The owner totals for `date` at the current ledger head: folded from the scan's cached prefixes (a refold
+ * after an owner change reads and writes nothing per scan), memoized per (scan, head) in the isolate. */
 export async function ownerTotals(env: Env, date: string): Promise<OwnerTotalsBody> {
   const { ownerRows, head } = await loadLedger(env)
-  const key = `${date}:${head}`
-  return shared(memo, key, async () => {
-    const cached = await env.DB!.prepare('SELECT body FROM owner_totals WHERE scan = ? AND head = ?').bind(date, head).first<{ body: string }>()
-    if (cached) {
-      const body = JSON.parse(cached.body) as OwnerTotalsBody
-      if (body.v === MANIFEST_VERSION) return body
-    }
-    const body = await compute(env, date, foldLatest(ownerRows), head)
-    // Every reader keys by the live head, so bodies of older heads are dead
-    // weight: drop them as this one lands.
-    await env.DB!.batch([
-      env.DB!.prepare('INSERT OR REPLACE INTO owner_totals (scan, head, body, claims, computed_ts, ms) VALUES (?, ?, ?, ?, ?, ?)')
-        .bind(date, head, JSON.stringify(body), JSON.stringify(body.assignments), body.computed.at, body.computed.ms),
-      env.DB!.prepare('DELETE FROM owner_totals WHERE head < ?').bind(head),
-    ])
-    return body
-  }, MEMO_WAIT)
+  return shared(memo, `${date}:${head}`, () => compute(env, date, foldLatest(ownerRows), head), MEMO_WAIT)
 }
 
-// Assignments alone, per (scan, head): a fraction of the body.
-const assignmentsMemo = new Map<string, Promise<AssignmentRow[]>>()
-
-/** The live assignments priced against `date` — what a user lens folds. A lens
- * series reads one per scan, so they are stored beside the body
- * (`owner_totals.claims`) and fetched alone. */
+/** The live assignments priced against `date` — what a user lens folds. */
 export async function ownerAssignments(env: Env, date: string): Promise<AssignmentRow[]> {
-  const { head } = await loadLedger(env)
-  const full = memo.get(`${date}:${head}`)
-  if (full) return (await full).assignments
-  const key = `${date}:${head}`
-  return shared(assignmentsMemo, key, async () => {
-    const row = await env.DB!.prepare('SELECT claims FROM owner_totals WHERE scan = ? AND head = ?').bind(date, head).first<{ claims: string }>()
-    // Rows stored before `uo` (manifest v2) recompute with the body.
-    const rows = row ? JSON.parse(row.claims) as AssignmentRow[] : null
-    if (rows && rows.every(r => r.uo)) return rows
-    return (await ownerTotals(env, date)).assignments
-  }, MEMO_WAIT)
+  return (await ownerTotals(env, date)).assignments
 }
