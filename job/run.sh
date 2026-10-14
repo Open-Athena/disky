@@ -560,12 +560,14 @@ wait "$IV_PID"
 # even the `[ -n "$CLOUDFLARE_API_TOKEN" ]` test echoes the token under `set -x`.
 # The rows were staged above (`-r`); `-p` checks them against each footer and
 # flips the pointers, which lists the scan. If that refuses, a full sync redoes
-# rows + pointers.
+# rows + pointers. `-M` records the scan's start (`index_schema.started`, from
+# its meta.json) and fills any older date-only pointer still without one.
 begin_phase index-sync
 { set +x; } 2>/dev/null
 if index_sync_creds; then
-  dt-cloud index-sync -p -d "/gcs/$DATA/$INDEX_DIR" -g "$GEN" -k "$INDEX_DIR" "$SNAP_ID" \
-    || dt-cloud index-sync -d "/gcs/$DATA/$INDEX_DIR" -g "$GEN" -k "$INDEX_DIR" "$SNAP_ID" \
+  SNAPS=$(dirname "/gcs/$DATA/$SNAP_PATH")
+  dt-cloud index-sync -p -M "$SNAPS" -d "/gcs/$DATA/$INDEX_DIR" -g "$GEN" -k "$INDEX_DIR" "$SNAP_ID" \
+    || dt-cloud index-sync -M "$SNAPS" -d "/gcs/$DATA/$INDEX_DIR" -g "$GEN" -k "$INDEX_DIR" "$SNAP_ID" \
     || echo "WARN: index-sync failed (the site keeps serving the previous generation)" >&2
 else
   echo "WARN: no CLOUDFLARE_API_TOKEN/ACCOUNT_ID — skipping index-sync (scan stays unlisted)" >&2
