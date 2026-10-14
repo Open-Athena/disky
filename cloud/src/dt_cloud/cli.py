@@ -534,6 +534,7 @@ def healthcheck(date: str | None, max_age_days: int, as_json: bool, subdir: str 
 
 
 @main.command()
+@option("-a", "--against", default=None, help="Exact-request mode: compare complete JSON responses against this base URL using the same viewer credential")
 @option("-b", "--budget", default=None, type=float, help="Fail a scenario whose slowest request exceeds this many seconds")
 @option("-c", "--cold", is_flag=True, help="Key subtree and diff reads past the edge cache (a random `minArea` ≈ the default), to measure uncached cost")
 @option("-d", "--date", default=None, help="Query-set mode: the scan to query (default: the truth set's)")
@@ -542,6 +543,7 @@ def healthcheck(date: str | None, max_age_days: int, as_json: bool, subdir: str 
 @option("-o", "--out", default=None, help="Write the run record to this path or prefix (`…/` or `gs://…/` → `<prefix><ts>.json`)")
 @option("-q", "--hit", default=None, help="Filter term the filter-hit scenario searches for (default: the largest bucket's largest child)")
 @option("-Q", "--queries", default=None, help="Query-set mode: a query set (YAML, local or gs://; `dt_cloud.bench.queryset`) to score against `-T`")
+@option("-R", "--request", "requests", multiple=True, help="Replay an exact relative /api/ GET (repeatable); skips automatic scenario discovery and retains detailed server timings/error excerpts")
 @option("-r", "--repeat", default=1, type=int, help="Query-set mode: requests per query × view (the first decides the verdict; timings are medians)")
 @option("-s", "--subdir", default=None, help="Snapshot subdir under /data/ (default: $SNAPSHOTS_SUBDIR)")
 @option("-S", "--serial", is_flag=True, help="Send each scenario's requests one at a time (default: concurrently, as a page load does)")
@@ -549,7 +551,7 @@ def healthcheck(date: str | None, max_age_days: int, as_json: bool, subdir: str 
 @option("-T", "--truth", default=None, help="Query-set mode: the ground truth (`dt-cloud bench-truth -o`'s dir or gs:// prefix)")
 @option("-u", "--url", default=None, help="Site base URL (default: $SITE_URL)")
 @option("-x", "--param", "params", multiple=True, help="Query-set mode: extra query params for every request, e.g. `ps=iv` (repeatable)")
-def probe(budget: float | None, cold: bool, date: str | None, as_json: bool, only: tuple[str, ...], out: str | None, hit: str | None, queries: str | None, repeat: int, subdir: str | None, serial: bool, token: str | None, truth: str | None, url: str | None, params: tuple[str, ...]) -> None:
+def probe(against: str | None, budget: float | None, cold: bool, date: str | None, as_json: bool, only: tuple[str, ...], out: str | None, hit: str | None, queries: str | None, requests: tuple[str, ...], repeat: int, subdir: str | None, serial: bool, token: str | None, truth: str | None, url: str | None, params: tuple[str, ...]) -> None:
     """Replay the site's page loads (root, largest bucket, a matching and a
     non-matching path filter) against a live deployment.
 
@@ -570,10 +572,14 @@ def probe(budget: float | None, cold: bool, date: str | None, as_json: bool, onl
 
     import random
 
-    from .probe import cold_min_area, http_fetch, record, resolve_targets, run, scenarios, summarize
+    from .probe import Targets, cold_min_area, compare_requests, http_fetch, record, request_paths, resolve_targets, run, scenarios, summarize
     from .site import creds
 
     base, tok = creds(token, url)
+    if against and not requests:
+        raise UsageError("--against requires exact --request paths")
+    if requests and (queries or truth or params or only or repeat != 1 or hit or subdir):
+        raise UsageError("exact-request mode cannot combine with query-set or automatic scenario options")
     if queries or truth:
         if not (queries and truth):
             raise UsageError("query-set mode needs both -Q and -T")
@@ -606,15 +612,35 @@ def probe(budget: float | None, cold: bool, date: str | None, as_json: bool, onl
         return
     sub = subdir if subdir is not None else os.environ.get("SNAPSHOTS_SUBDIR", "")
     fetch = http_fetch(base, tok)
-    t = resolve_targets(fetch, sub, hit)
     min_area = cold_min_area(random.Random()) if cold else ""
-    err(f"probe {base} @ {t.date} (vs {t.prev}; bucket {t.bucket}; filter hit {t.hit!r}{'; cold' if cold else ''})")
-    results = run(fetch, scenarios(t, min_area), parallel=not serial)
+    if requests:
+        try:
+            paths = request_paths(requests, min_area)
+        except ValueError as exc:
+            raise UsageError(str(exc)) from exc
+        t = Targets(date or "", None, "", "")
+        cases = {"requests": paths}
+        err(f"probe {base}: {len(paths)} exact requests{'; cold subtree/diff keys' if cold else ''}")
+    else:
+        t = resolve_targets(fetch, sub, hit)
+        cases = scenarios(t, min_area)
+        err(f"probe {base} @ {t.date} (vs {t.prev}; bucket {t.bucket}; filter hit {t.hit!r}{'; cold' if cold else ''})")
+    comparison = None
+    if against:
+        results, before, parity = compare_requests(fetch, http_fetch(against, tok), paths, parallel=not serial)
+        comparison = {"base": against, "results": [asdict(r) for r in before], "parity": parity}
+    else:
+        results = run(fetch, cases, parallel=not serial)
     ok, lines = summarize(results, round(budget * 1000) if budget is not None else None)
+    if comparison:
+        ok = ok and all(p["equal"] for p in comparison["parity"])
+        err(f"complete JSON parity: {sum(p['equal'] for p in comparison['parity'])}/{len(paths)} against {against}")
     for line in lines:
         err(line)
     err("PASS" if ok else "FAIL")
     rec = {**record(base, t, results), "cold": cold}
+    if comparison:
+        rec["comparison"] = comparison
     if out:
         path = f"{out}{rec['ts']}.json" if out.endswith("/") else out
         with fsspec.open(path, "w") as fh:
