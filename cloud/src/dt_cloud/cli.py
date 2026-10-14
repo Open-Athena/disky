@@ -2928,3 +2928,7 @@ main.add_command(_scan_runs)
 from .scan_started import stamp_started as _stamp_started  # noqa: E402
 
 main.add_command(_stamp_started)
+
+from .job_token import cli as _job_token  # noqa: E402
+
+main.add_command(_job_token)
