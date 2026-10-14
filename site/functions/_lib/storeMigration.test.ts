@@ -1,22 +1,18 @@
 import { describe, expect, it } from 'vitest'
-import { migrations, sqliteD1 } from './testD1'
+import { LINEAGES, migrationNamed, migrations, sqliteD1 } from './testD1'
 
-// The store-scoped index migration (specs/multi-store.md phase 1), in the `cw`
-// D1 lineage (the only one `cloud` carries; gcs's lives on the `gcs` branch),
-// applied over a seeded DB with foreign keys ON (as D1 enforces them): existing
-// rows become the primary store's, nothing else moves, and the rebuilt pointer
-// admits a second store's scan under the same id.
-// `after`: what follows the store migration in its lineage today — a new
-// migration is added here deliberately (and must not touch the index tables
-// this file's specs pin).
-const CASES = [
-  { lineage: 'cw', file: '0006_store_scoped_index.sql', after: ['0009_allowlist_read_only.sql', '0010_og_tokens.sql', '0011_run_progress.sql', '0012_agent_tokens_assign.sql', '0013_access_log_location.sql', '0014_plan_items_as_of.sql', '0015_stage_replies.sql', '0016_scan_runs.sql', '0017_plan_items_kind.sql', '0018_session_log.sql', '0019_owner_prefix_aggs.sql', '0020_owner_prefix_hist.sql'] },
-] as const
+// The store-scoped index migration (specs/multi-store.md phase 1), in each D1
+// lineage this branch carries, applied over a seeded DB with foreign keys ON
+// (as D1 enforces them): existing rows become the primary store's, nothing
+// else moves, and the rebuilt pointer admits a second store's scan under the
+// same id. No later migration may touch the index tables this file's specs pin.
 
 const SCHEMA_COLS = 'store, date, variant, version, schema_json, floor_bytes, gen, dir'
+const STEM = 'store_scoped_index'
 
-describe.each(CASES)('$lineage/$file', ({ lineage, file, after }) => {
+describe.each(LINEAGES)(`%s/…_${STEM}.sql`, lineage => {
   const seeded = async () => {
+    const file = await migrationNamed(lineage, STEM)
     const { raw } = await sqliteD1(lineage, { before: file })
     raw.exec(`
       INSERT INTO plans (id, name, state, created_by, created_ts) VALUES (1, 'Staged', 'open', 'ann@example.test', 1);
@@ -33,9 +29,11 @@ describe.each(CASES)('$lineage/$file', ({ lineage, file, after }) => {
     return raw
   }
 
-  it('is followed in its lineage by exactly the migrations listed', async () => {
-    const names = (await migrations(lineage)).map(m => m.name)
-    expect(names.slice(names.indexOf(file))).toEqual([file, ...after])
+  it('is followed by no migration that touches the index tables', async () => {
+    const [all, file] = [await migrations(lineage), await migrationNamed(lineage, STEM)]
+    const later = all.slice(all.findIndex(m => m.name === file) + 1)
+    const code = (sql: string) => sql.replace(/--[^\n]*/g, '')
+    expect([later.length > 0, later.filter(m => /\bindex_(schema|row_groups)\b/.test(code(m.sql))).map(m => m.name)]).toEqual([true, []])
   })
 
   it('keeps every row, as the primary store, with foreign keys intact', async () => {

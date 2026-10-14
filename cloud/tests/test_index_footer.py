@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import io
-from pathlib import Path
 import urllib.error
 import urllib.request
 
@@ -186,7 +185,7 @@ def test_sync_d1_packs_inserts_greedily_under_the_byte_limit(tmp_path, monkeypat
     assert [t.split(", ")[3] for stmt in tuples for t in stmt] == [str(i) for i in range(12)]
 
 
-def test_gc_d1_deletes_only_generations_no_pointer_names(monkeypatch):
+def test_gc_d1_deletes_only_generations_no_pointer_names(monkeypatch, d1_lineage):
     """The gc statement against a real SQLite: rows of the pointer's gen stay,
     every other gen of that date goes, other dates untouched."""
     import re
@@ -195,11 +194,10 @@ def test_gc_d1_deletes_only_generations_no_pointer_names(monkeypatch):
     from dt_cloud.index_footer import gc_d1
 
     con = sqlite3.connect(":memory:")
-    # The schema from the cw lineage, whichever shape it has: one squashed
+    # The schema from each lineage, whichever shape it has: one squashed
     # `0001_init.sql` (creates every table itself), or the migration that
     # introduced `index_row_groups` on top of an earlier `index_schema`.
-    mig = Path(__file__).parents[2] / "site/migrations/cw"
-    (ddl_path,) = [f for f in sorted(mig.glob("*.sql")) if "CREATE TABLE index_row_groups" in f.read_text()]
+    (ddl_path,) = [f for f in d1_lineage.migrations() if "CREATE TABLE index_row_groups" in f.read_text()]
     ddl = ddl_path.read_text()
     if "CREATE TABLE index_schema" not in ddl:
         con.executescript("CREATE TABLE index_schema (date TEXT, variant TEXT, version INTEGER, schema_json TEXT, floor_bytes INTEGER, PRIMARY KEY (date, variant));")
