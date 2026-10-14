@@ -38,6 +38,10 @@ export interface Store {
   desc: string     // meta description / unfurl description
   path: string     // app route
   scheme: string   // URI scheme for treemap paths/tooltips
+  /** The dir `~` abbreviates (path segments), for a store captured from a
+   *  home directory; unset on bucket stores, where the share console's Hide
+   *  field refuses `~` lines (`hideScopes`). */
+  home?: string[]
   /** Mixed-provider stores can label each bucket with its actual URI scheme. */
   bucketSchemes?: Record<string, string>
   base: string     // layer-3 data root

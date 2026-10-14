@@ -163,7 +163,8 @@ class Secrets(ComponentResource):
 
     `secrets` maps secret id → labels (or `None`). `existing` covers the
     containers; `grants_existing` the accessor bindings (default: the same), for
-    a new account taking over live secrets.
+    a new account taking over live secrets. `grant_only` selects accessor grants
+    without removing any secret containers; None preserves the all-secrets default.
     """
 
     def __init__(
@@ -177,12 +178,16 @@ class Secrets(ComponentResource):
         adopt: Adopt,
         existing: bool = False,
         grants_existing: bool | None = None,
+        grant_only: set[str] | None = None,
         opts: ResourceOptions | None = None,
     ):
+        if grant_only is not None and not grant_only.issubset(secrets):
+            raise ValueError("grant_only must be a subset of the managed secret ids")
         super().__init__("disky:gcp:Secrets", name, None, opts)
         if grants_existing is None:
             grants_existing = existing
         self.secrets: dict[str, gcp.secretmanager.Secret] = {}
+        self.grants: dict[str, gcp.secretmanager.SecretIamMember] = {}
         for sid, labels in secrets.items():
             path = f"projects/{project}/secrets/{sid}"
             secret = gcp.secretmanager.Secret(
@@ -194,17 +199,18 @@ class Secrets(ComponentResource):
                 opts=adopt.opts(existing, path, parent=self, protect=True),
             )
             self.secrets[sid] = secret
-            grant_secret(
-                f"{sid}-accessor",
-                project=project,
-                secret_id=sid,
-                member=accessor,
-                member_email=accessor_email,
-                adopt=adopt,
-                existing=grants_existing,
-                parent=self,
-                depends_on=[secret],
-            )
+            if grant_only is None or sid in grant_only:
+                self.grants[sid] = grant_secret(
+                    f"{sid}-accessor",
+                    project=project,
+                    secret_id=sid,
+                    member=accessor,
+                    member_email=accessor_email,
+                    adopt=adopt,
+                    existing=grants_existing,
+                    parent=self,
+                    depends_on=[secret],
+                )
         self.register_outputs({})
 
 
