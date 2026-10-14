@@ -79,7 +79,7 @@ Where the combination can't be exact it declines (`BoolDecline`) instead of gues
 A term no source answers declines with that term (`declined: 'term'`), and the refusal is the term's own (`term-too-common` with no heavy source, `anchor-not-indexed`, `scan-not-indexed`). An answer whose terms' answers don't cover the scan (a heavy term past the drill base) is `scan-not-indexed`.
 
 - **Indexed-only (gcs):** a decline is the 400 `too-broad` ("These terms match too much here to combine exactly; open a folder, or make a term more specific.") on subtree, diff and series, before any walk; the client shows it inline (`filterCaps.ts` `REFUSAL`) and keeps the last good view (`refusalOf`).
-- **Otherwise (cw, r2, local):** a decline reads as before — the search sidecars, else the thresholded walk — which sets `partial` / `approximate` with its reason when it may miss matches. A compound query on a scan outside the generation also reads as before there (a single literal is `scan-not-indexed` on every deployment).
+- **Otherwise (cw, r2, local):** a decline reads as before — the search sidecars, else the thresholded walk — which sets `partial` / `approximate` with its reason when it may miss matches. A compound query on a scan outside the generation (or one a term's answer doesn't cover) is `scan-not-indexed` on every deployment, as a single literal is: no fallback for a missing index.
 - Not built from the costing above: per-term totals with "apply alone" links in the refusal, co-descent for "every positive term heavy", OR by inclusion–exclusion over rollups. Build them if the real-data decline count says declines are common.
 
 ### Tests

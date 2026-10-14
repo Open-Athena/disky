@@ -877,8 +877,9 @@ async function readView(env: Env, o: ViewOpts, cov: Coverage = {}): Promise<Read
     const pq = query.ast
     // A compound query of literals (`a b`, `a|b`, `a -b`, `-b`; `staticBool.ts`) from the static name index: the
     // match roots and excluded paths on any scan its answers cover, exact. Where it can't be exact (too broad
-    // to combine, a term no source answers, a scan it doesn't cover) an indexed-only deployment refuses, and
-    // any other reads as before (the search or the thresholded walk, flagged).
+    // to combine, a term no source answers) an indexed-only deployment refuses, and any other reads as before (the
+    // search or the thresholded walk, flagged); a scan it doesn't cover is `scan-not-indexed` on every deployment,
+    // as for a single literal — never the walk's answer for a missing index.
     const bplan = !lens && !classes ? boolPlan(pq) : null
     let sb: BoolAnswer | null = null
     if (compound(bplan)) {
@@ -888,7 +889,7 @@ async function readView(env: Env, o: ViewOpts, cov: Coverage = {}): Promise<Read
       if (got && 'answer' in got) {
         sb = got.answer
         if ((await dirsOnlyOf(sfs, [date])).length) noteCoverage(cov, 'dirsOnly', DIRS_ONLY)
-      } else if (indexedOnly(env)) throw new FilterRejected(got?.reject ?? reject('scan-not-indexed'))
+      } else if (indexedOnly(env) || got?.reject.code === 'scan-not-indexed') throw new FilterRejected(got?.reject ?? reject('scan-not-indexed'))
     }
     const traceSearch = (what: string, f: SearchFound) => tr?.('search', performance.now() - t0, `${what} ${f.stats.mode} c${f.stats.candidates} ${f.stats.layout === 2 ? `r${f.stats.rowsRgs}` : `n${f.stats.namesRgs} g${f.stats.pathRgs}`}${f.truncated ? ' cut' : ''}`)
     if (rootHit) {

@@ -237,11 +237,14 @@ describe('compound queries (AND / OR / NOT, `staticBool.ts`) on the map routes',
     const light: StaticFilterStore = { source: new SuffixHits(new StaticNames(blobsOf(filterFiles)), { maxRows: 40 }), scans: async () => [A, B], gen: 'fixture' }
     expect(await call(subtree, `date=${A}&path=bk&${enc('tomat -0')}`, envOf(true, light))).toEqual(refusal('term-too-common'))
   })
-  it('a scan outside the generation: flag set `scan-not-indexed`; unset, the search as before', async () => {
+  it('a scan outside the generation: `scan-not-indexed`, flag set or not (never the search / walk), on subtree and diff', async () => {
     expect(await Promise.all([
       call(subtree, `date=${B}&path=bk&${enc('tomat -bin')}`, envOf(true, store([A]))),
       call(subtree, `date=${B}&path=bk&${enc('tomat -bin')}`, envOf(false, store([A]))),
-    ])).toEqual([refusal('scan-not-indexed'), [200, 'ok']])
+      call(subtree, `date=${B}&path=bk&${enc('tomat|ckpt')}`, envOf(false, store([A]))),
+      call(diff, `from=${A}&to=${B}&path=bk&${enc('-ttl')}`, envOf(false, store([A]))),
+      call(subtree, `date=${A}&path=bk&${enc('tomat -bin')}`, envOf(false, store([A]))),
+    ])).toEqual([refusal('scan-not-indexed'), refusal('scan-not-indexed'), refusal('scan-not-indexed'), refusal('scan-not-indexed'), [200, 'ok']])
   })
   it('a view root holding a negative term matches nothing: an empty view, no refusal', async () => {
     const j = await (await subtree({ request: new Request(`http://localhost/api/x?date=${A}&path=bk/tmp&${enc('bin -tmp')}`), env: envOf(true) })).json() as Record<string, unknown>
@@ -436,13 +439,13 @@ describe('flag unset: a static literal on a scan the generation doesn\'t hold is
     expect([JSON.parse(only).tier.split('+')[0], only]).toEqual(['static', both])
   })
 
-  it('a query the static index can\'t answer (regex, glob, two terms) still walks the uncovered scan; a view root the literal holds is the plain view', async () => {
+  it('a query the static index can\'t answer (regex, glob) still walks the uncovered scan; a compound of literals is refused; a view root the literal holds is the plain view', async () => {
     expect(await Promise.all([
       tierOf(`date=${B}&path=bk&q=tom.*t&qs=regex`, newer()),
       tierOf(`date=${B}&path=bk&q=${encodeURIComponent('tom*t')}`, newer()),
-      tierOf(`date=${B}&path=bk&q=${encodeURIComponent('tomat bin')}`, newer()),
+      call(subtree, `date=${B}&path=bk&q=${encodeURIComponent('tomat bin')}`, newer()),
       call(subtree, `date=${B}&path=bk/data/tomato&q=tomat`, newer()),
-    ])).toEqual([[200, 'bysize'], [200, 'search'], [200, 'search'], [200, 'ok']])
+    ])).toEqual([[200, 'bysize'], [200, 'search'], refusal('scan-not-indexed'), [200, 'ok']])
   })
 })
 
