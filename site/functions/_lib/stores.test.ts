@@ -6,7 +6,7 @@ import { indexDir, openIndex, pathScans, storeTarget, storeCreds } from './index
 import { overTimeDataset } from './overTime'
 import { REQ, Req, reqOf, snapshotsPrefix } from './shared'
 import { LENS_PRIMARY_ONLY, primaryOnly, secondaryStores, storeEnv, storeKey, withStore } from './stores'
-import { sqliteD1 } from './testD1'
+import { LINEAGES, migrationNamed, sqliteD1 } from './testD1'
 import { onRequestGet as owners } from '../api/owners'
 import { onRequestGet as subtree } from '../api/subtree'
 
@@ -161,13 +161,11 @@ const META_ROWS = (d: string, d2: string) => `
     ('meta', '${d}', 'meta:path', 'g1', 0, 0, 1, 'a', 'b', 1, 0, 1, '[1,"ZSTD",[]]');
 `
 const envs = (db: Env['DB']) => ({ primary: { ...PRIMARY, DB: db } as Env, meta: storeEnv({ ...PRIMARY, DB: db } as Env, 'meta', META) })
-const STORE_MIGRATION = { cw: '0006_store_scoped_index.sql' } as const
+const d = '2026-07-01', d2 = '2026-07-02'
 
-describe.each([
-  { lineage: 'cw' as const, d: '2026-07-01', d2: '2026-07-02' },
-])('D1, $lineage lineage', ({ lineage, d, d2 }) => {
+describe.each(LINEAGES)('D1, %s lineage', lineage => {
   it('primary reads work on the un-migrated schema (their SQL predates stores); a secondary store refuses loudly', async () => {
-    const { db, raw } = await sqliteD1(lineage, { before: STORE_MIGRATION[lineage] })
+    const { db, raw } = await sqliteD1(lineage, { before: await migrationNamed(lineage, 'store_scoped_index') })
     raw.exec(PRIMARY_ROWS(d))
     const { primary, meta } = envs(db)
     const h = await openIndex(primary, d)
