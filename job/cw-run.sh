@@ -65,7 +65,7 @@ export SCAN_BUCKETS=$BUCKETS SWEEP_BUCKET=$BUCKET SWEEP_S3_ENDPOINT=$ENDPOINT
 unset CW_BUCKETS CW_BUCKET CW_ENDPOINT
 DATA=${DATA_BUCKET:-oa-cw-s3-usage-data}
 export DATA_BUCKET=$DATA
-PROCS=${LISTING_PROCS:-8}
+PROCS=${LISTING_PROCS:-$(nproc)}
 WORKERS=${LISTING_WORKERS:-8}
 # Snapshot ids are sub-daily: the bucket can move >40 TiB between morning and
 # evening during a cleanup push, so a date-only id would silently overwrite.
@@ -179,7 +179,7 @@ for b in $BUCKETS; do
     -o "$WORK/listing/$b" -P "$PROCS" -w "$WORKERS" -x clear
   phase "list $b"
   env DISK_TREE_ROOT="$WORK/l2/$b" \
-    disk-tree import -e stream -j "${IMPORT_JOBS:-8}" -m -p storage_class_id \
+    disk-tree import -e stream -j "${IMPORT_JOBS:-$(nproc)}" -m -p storage_class_id \
       -s s3 -t "${DATE}T00:00:00+00:00" -l "$WORK/listing/$b/shard-*.parquet" -b "$b"
   SRC+=("$b=$(ls "$WORK/l2/$b"/scans/*.parquet | head -1)")
   phase "import $b"
@@ -218,7 +218,7 @@ phase layer-2
 # a file D1 points at; `index-sync` lands the footers in D1 and flips the
 # pointer last, so a reader sees the old complete set or the new one.
 INDEX_KEY="cw-l2/$SNAP_ID/index/$GEN"
-dt-cloud index-write -m "${DUCKDB_MEM:-16GB}" -t "${IMPORT_JOBS:-8}" -o "$WORK/index" "${SRC[@]}"
+dt-cloud index-write -m "${DUCKDB_MEM:-16GB}" -t "${IMPORT_JOBS:-$(nproc)}" -o "$WORK/index" "${SRC[@]}"
 mkdir -p "/gcs/$DATA/$INDEX_KEY"
 cp "$WORK"/index/*.parquet "/gcs/$DATA/$INDEX_KEY/"  # path-index + coarse tiers + age-index
 phase index-write

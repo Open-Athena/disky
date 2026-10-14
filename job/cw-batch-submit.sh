@@ -26,9 +26,10 @@ PROJECT=oa-internal-450019
 REGION=us-central1
 SA=cw-s3-job@$PROJECT.iam.gserviceaccount.com
 export IMAGE=${IMAGE:-us-central1-docker.pkg.dev/$PROJECT/cw-s3-usage/scan:cw}  # exported: stage 4f runs on it
-# Measured on a 92M-object scan: 1.1 GB RSS listing, 1.8 GB import. The lister
-# is network-bound (many concurrent range requests), so vCPUs buy more than RAM.
-MACHINE=${MACHINE:-n2-standard-8}
+# Measured on a 92M-object scan: 1.1 GB RSS listing, 1.8 GB import. The listing
+# is CPU-bound (92% of 8 vCPUs on 02a, 10/13), so vCPUs buy more than RAM.
+MACHINE=${MACHINE:-n2-standard-16}
+CPU_MILLI=$(( ${MACHINE##*-} * 1000 ))
 MEMORY_MIB=${MEMORY_MIB:-30000}
 DATA_BUCKET=${DATA_BUCKET:-oa-cw-s3-usage-data}
 JOB_ID=${JOB_ID:-cw-scan-$(date -u +%Y%m%d-%H%M%S)}
@@ -100,7 +101,7 @@ cat > "$spec" <<EOF
           "volumes": ["/mnt/disks/gcs/$DATA_BUCKET:/gcs/$DATA_BUCKET:rw", "/mnt/disks/stage:/stage:rw"]
         }
       }],
-      "computeResource": {"cpuMilli": 8000, "memoryMib": $MEMORY_MIB},
+      "computeResource": {"cpuMilli": $CPU_MILLI, "memoryMib": $MEMORY_MIB},
       "maxRetryCount": 0,
       "maxRunDuration": "14400s",
       "volumes": [
