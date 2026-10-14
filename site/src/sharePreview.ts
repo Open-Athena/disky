@@ -5,6 +5,7 @@
 // since its bearer gets in anyway).
 import { useCallback, useState } from 'react'
 import { DEFAULT_STORE } from './stores'
+import { shareSection } from './shareSection'
 
 export const SHARE_DAYS = 30
 
@@ -22,7 +23,7 @@ export function withoutOg(href: string): string | null {
 /** The page link to share: `href` minus any `og=` / `key=` it carried, plus
  * the ones given. */
 export function shareUrl(href: string, add: { og?: string; key?: string } = {}): string {
-  const u = new URL(href)
+  const u = shareSection(new URL(href))
   u.searchParams.delete('og')
   u.searchParams.delete('key')
   if (add.og) u.searchParams.set('og', add.og)

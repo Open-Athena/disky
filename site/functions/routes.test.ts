@@ -2,7 +2,8 @@ import { describe, expect, it, vi } from 'vitest'
 
 // The stamp itself (wasm-backed) is out of scope: any call to it fails the test.
 const stampPage = vi.fn(async () => { throw new Error('stamped a non-HTML response') })
-vi.mock('./_lib/og/serve.js', () => ({ stampPage }))
+const anonymousPage = vi.fn(async (): Promise<Response | null> => null)
+vi.mock('./_lib/og/serve.js', () => ({ stampPage, anonymousPage }))
 const { onRequest } = await import('./_middleware')
 const run = (url: string, upstream: Response, method = 'GET') =>
   onRequest({ request: new Request(url, { method }), env: {} as never, next: async () => upstream })
@@ -81,4 +82,12 @@ describe('the middleware keeps the isolate alive for the colo puts', () => {
     const res = await onRequest({ request: new Request('https://gcs.example.test/api/x'), env: {} as never, next: async () => new Response('{}', { headers: { 'content-type': 'application/json' } }), waitUntil: p => { kept.push(p) } })
     expect([res.status, kept.length, await Promise.all(kept)]).toEqual([200, 1, [undefined]])
   })
+})
+
+it('private anonymous unfurls bypass route handlers that read protected metadata', async () => {
+  const generic = html()
+  anonymousPage.mockResolvedValueOnce(generic)
+  const next = vi.fn(async () => new Response('protected staging counts'))
+  const result = await onRequest({ request: new Request('https://cw.example/staged'), env: {} as never, next })
+  expect([result === generic, next.mock.calls]).toEqual([true, []])
 })

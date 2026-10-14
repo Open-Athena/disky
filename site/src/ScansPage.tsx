@@ -3,10 +3,11 @@
 // previous scan — from the D1 rows `dt-cloud scan-run record | backfill`
 // writes. DIY SVG: a duration strip over all runs, a phase bar per row, and a
 // phase timeline per run.
-import { useEffect, useLayoutEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent, type ReactNode, type RefObject } from 'react'
+import { useLayoutEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent, type ReactNode, type RefObject } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 import { SiteNav } from './SiteNav'
+import { useDocTitle } from './title'
 import { SiteKbd } from './SiteKbd'
 import { Tooltip } from './Tooltip'
 import { axisTicks } from './runChart'
@@ -18,7 +19,7 @@ import {
   batchHref, logsHref, mapHref, metaHref, type OutputDelta, phaseOrder, type PhaseSpan, type RunSummary, type ScanRun,
   type ScanRunPhase, type PhaseIssue, type PhaseRecovery, overlappingFailures, phaseFill, phaseOutcome, runOutcome,
 } from './scanRunsModel'
-import { colorer, fmtDur, getJson, type Links, PhaseBar, Status, useScanRuns, utc } from './scanRunsUi'
+import { colorer, fmtDur, fmtRunTime, getJson, type Links, PhaseBar, runDay, Status, useScanRuns } from './scanRunsUi'
 import './scans.scss'
 
 type DetailResponse = Links & {
@@ -93,14 +94,14 @@ function DurationStrip({ runs, color, onPick }: { runs: RunSummary[]; color: (p:
   const x = (t: number) => L + ((t - t0) / span) * (W - L - R)
   const y = (h: number) => H - B - (h / top) * (H - T - B)
   const bw = Math.max(1.5, Math.min(14, ((W - L - R) / pts.length) * 0.7))
-  const days = [...new Set(pts.map(p => new Date(p.run.started_ts! * 1000).toISOString().slice(0, 10)))]
+  const days = [...new Set(pts.map(p => runDay(p.run.started_ts!)))]
   const labelEvery = Math.max(1, Math.ceil(days.length / Math.max(2, Math.floor(W / 90))))
   return (
     <div className="sr-svgwrap" ref={ref}>
       <svg className="sr-strip" width={W} height={H} viewBox={`0 0 ${W} ${H}`} role="img" aria-label="Run duration over time, by phase">
         {ticks.map(h => <g key={h}><line className="grid" x1={L} x2={W - R} y1={y(h)} y2={y(h)} /><text className="tick" x={L - 6} y={y(h) + 4} textAnchor="end">{h}h</text></g>)}
         {days.filter((_, i) => i % labelEvery === 0).map(d => {
-          const t = Date.parse(`${d}T00:00:00Z`) / 1000
+          const t = Date.parse(`${d}T00:00:00`) / 1000
           return <text key={d} className="tick" x={Math.min(W - R - 16, Math.max(L + 16, x(t)))} y={H - 6} textAnchor="middle">{d.slice(5)}</text>
         })}
         {pts.map(p => {
@@ -146,7 +147,7 @@ export function ScansPage() {
   const { bytes, delta } = useBytes()
   const [kind, setKind] = useState('')
   const [status, setStatus] = useState('')
-  useEffect(() => { document.title = 'Scan runs' }, [])
+  useDocTitle('Scans')
   const runs = q.data?.runs ?? []
   const order = useMemo(() => phaseOrder(runs.flatMap(r => r.spans.map((s, i) => ({ phase: s.phase, seq: i })))), [runs])
   const color = colorer(order)
@@ -173,7 +174,7 @@ export function ScansPage() {
         <div className="runs-wrap">
           <table className="runs sr-runs">
             <thead><tr>
-              <th>scan</th><th>status</th><th className="hide-sm">started (UTC)</th>
+              <th>scan</th><th>status</th><th className="hide-sm">started (local time)</th>
               <th className="num">duration</th><th className="hide-md">phases</th>
               <th className="num"><Tooltip content="Bytes of the run's top-level outputs (listing, index, snapshot, …).">wrote</Tooltip></th>
               <th className="num"><Tooltip content="Against the previous scan's same structures. Green grew, red shrank.">Δ prev</Tooltip></th>
@@ -189,7 +190,7 @@ export function ScansPage() {
                     <td className="nb"><Link to={scanHref(r.run_id)}><code>{r.scan}</code></Link>
                       {(kinds.length > 1 || s.downstream > 0) && <div className="sr-kind">{kinds.length > 1 && r.kind}{s.downstream > 0 && <Tooltip content={`${s.downstream} downstream job${s.downstream > 1 ? 's' : ''} (listing fan-out, …)`}><span>{kinds.length > 1 ? ' + ' : '+ '}{s.downstream} job{s.downstream > 1 ? 's' : ''}</span></Tooltip>}</div>}</td>
                     <td><Status run={r} failedAt={s.failed_at} issues={s.phase_issues} /></td>
-                    <td className="nb hide-sm">{utc(r.started_ts)}</td>
+                    <td className="nb hide-sm">{fmtRunTime(r.started_ts)}</td>
                     <td className="num nb">{s.secs == null ? <span className="dim">—</span> : fmtDur(s.secs)}</td>
                     <td className="hide-md"><PhaseBar spans={s.spans} secs={s.secs} color={color} width={130} /></td>
                     <td className="num nb">{bytes(s.out_bytes)}</td>
@@ -290,11 +291,11 @@ function RunList({ runs, links, title }: { runs: ScanRun[]; links: Links; title:
     <h3>{title}</h3>
     <div className="runs-wrap">
       <table className="runs">
-        <thead><tr><th>run</th><th>kind</th><th>Batch status</th><th>started (UTC)</th><th className="num">duration</th><th>machine</th><th className="num">cost</th><th>links</th></tr></thead>
+        <thead><tr><th>run</th><th>kind</th><th>Batch status</th><th>started (local time)</th><th className="num">duration</th><th>machine</th><th className="num">cost</th><th>links</th></tr></thead>
         <tbody>{runs.map(r => (
           <tr key={r.run_id} className={r.status === 'failed' ? 'failed' : undefined}>
             <td className="nb">{r.parent && r.kind !== 'phase-recovery' ? <code>{r.job_name ?? r.run_id}</code> : <Link to={scanHref(r.run_id)}><code>{r.job_name ?? r.run_id}</code></Link>}</td>
-            <td>{r.kind}</td><td><Status run={r} /></td><td className="nb">{utc(r.started_ts)}</td>
+            <td>{r.kind}</td><td><Status run={r} /></td><td className="nb">{fmtRunTime(r.started_ts)}</td>
             <td className="num nb">{r.started_ts != null && r.finished_ts != null ? fmtDur(r.finished_ts - r.started_ts) : '—'}</td>
             <td className="nb">{r.machine ?? '—'}{r.tasks && r.tasks > 1 ? ` × ${r.tasks}` : ''}{r.spot ? ' (spot)' : ''}</td>
             <td className="num nb">{r.cost_usd == null ? '—' : usd(r.cost_usd)}</td>
@@ -311,7 +312,7 @@ export function ScanRunPage() {
   const q = useScanRun(id)
   const list = useScanRuns()
   const slug = useMinSlug(DEFAULT_STORE)
-  useEffect(() => { document.title = q.data ? `Scan run ${q.data.run.scan}` : 'Scan run' }, [q.data])
+  useDocTitle(q.data ? q.data.run.scan : 'Scan', 'Scans')
   const order = useMemo(() => phaseOrder((list.data?.runs ?? []).flatMap(r => r.spans.map((s, i) => ({ phase: s.phase, seq: i })))), [list.data])
   const color = colorer(order.length ? order : (q.data?.spans ?? []).map(s => s.phase))
   const d = q.data
@@ -328,7 +329,7 @@ export function ScanRunPage() {
       {q.isLoading ? <p>Loading run…</p> : q.error ? <p className="err">{q.error.message}</p> : d && r && <>
         <h1><code>{r.scan}</code>{kinds.size > 1 && <> <span className="dim">{r.kind}</span></>}</h1>
         <p className="sub">
-          <Status run={r} failedAt={d.failed_at} issues={d.phase_issues} /> · {utc(r.started_ts)} → {r.finished_ts ? utc(r.finished_ts).slice(11) : '…'} UTC
+          <Status run={r} failedAt={d.failed_at} issues={d.phase_issues} /> · {fmtRunTime(r.started_ts)} → {r.finished_ts ? fmtRunTime(r.finished_ts) : '…'}
           {d.secs != null && <> · {fmtDur(d.secs)}</>}
           {r.machine && <> · {r.machine}{r.spot ? ' (spot)' : ''}</>}
           {r.cost_usd != null && <> · ~{usd(r.cost_usd)}</>}
@@ -338,12 +339,12 @@ export function ScanRunPage() {
         {r.status === 'failed' && <div className="sr-failure"><b>Failed {d.failed_at ? (d.failed_at.startsWith('after') ? d.failed_at : `in ${d.failed_at}`) : ''}</b>{r.error && <div><code>{r.error}</code></div>}</div>}
         {d.phase_issues?.map(i => <div className={`sr-failure${i.recovery ? ' recovered' : ''}`} key={i.phase}>
           <b>{i.phase}: {i.outcome} in the original attempt.</b>{' '}
-          {i.recovery ? <>Recovered by <Link to={scanHref(i.recovery.run_id)}>a subsequent attempt</Link> at {utc(i.recovery.finished_ts)} UTC.</> : 'The Batch job completed, but this phase did not. No successful recovery is recorded.'}
+          {i.recovery ? <>Recovered by <Link to={scanHref(i.recovery.run_id)}>a subsequent attempt</Link> at {fmtRunTime(i.recovery.finished_ts)}.</> : 'The Batch job completed, but this phase did not. No successful recovery is recorded.'}
         </div>)}
         {r.kind === 'phase-recovery' && r.parent && <p className="sub">Phase recovery for <Link to={scanHref(r.parent)}>the original scan run</Link>. This attempt has its own clock; it does not replace the original timings.</p>}
         <dl className="sr-facts">
-          <div><dt>run id</dt><dd><code>{r.run_id}</code></dd></div>
-          {r.job_name && <div><dt>Batch job</dt><dd><code>{r.job_name}</code>{r.region && <span className="dim"> · {r.region}</span>}</dd></div>}
+          <div><dt>run id</dt><dd>{d.project ? <a href={logsHref(d.project, r)} target="_blank" rel="noreferrer"><code>{r.run_id}</code></a> : <code>{r.run_id}</code>}</dd></div>
+          {r.job_name && <div><dt>Batch job</dt><dd>{d.project && r.region ? <a href={batchHref(d.project, r.region, r.job_name)} target="_blank" rel="noreferrer"><code>{r.job_name}</code></a> : <code>{r.job_name}</code>}{r.region && <span className="dim"> · {r.region}</span>}</dd></div>}
           {r.gen && <div><dt>index generation</dt><dd><code>{r.gen}</code></dd></div>}
           {r.image && <div><dt>image</dt><dd><code>{r.image}</code></dd></div>}
           <div><dt>recorded by</dt><dd>{r.source === 'job' ? 'the job' : 'backfill (Batch, logs, the bucket)'}</dd></div>
@@ -355,7 +356,7 @@ export function ScanRunPage() {
           <h3>Phase recovery attempts</h3>
           <p className="dim">Each attempt is linked to its original phase. Durations exclude the gap between attempts and are not added to the original job duration.</p>
           {d.recoveries.map(a => <div className="sr-recovery" key={a.run.run_id}>
-            <div><b>{a.phases.map(p => p.phase).join(', ')}</b>{' · '}<Status run={a.run} />{' · '}{a.secs == null ? '—' : fmtDur(a.secs)}{' · '}{utc(a.run.started_ts)} → {utc(a.run.finished_ts)} UTC{' · '}<Link to={scanHref(a.run.run_id)}>attempt details</Link>{' · '}<Links run={a.run} links={d} /></div>
+            <div><b>{a.phases.map(p => p.phase).join(', ')}</b>{' · '}<Status run={a.run} />{' · '}{a.secs == null ? '—' : fmtDur(a.secs)}{' · '}{fmtRunTime(a.run.started_ts)} → {fmtRunTime(a.run.finished_ts)}{' · '}<Link to={scanHref(a.run.run_id)}>attempt details</Link>{' · '}<Links run={a.run} links={d} /></div>
             {a.phases.map(p => p.note && <p className="dim" key={p.phase}>{p.note}</p>)}
           </div>)}
         </>}

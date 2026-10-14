@@ -17,9 +17,11 @@ import type { OwnerIndex } from './owners'
 import { ClassMixTip, Tooltip } from './Tooltip'
 import type { ColorMode, Pricing, TreeNode } from './types'
 import { CLASS_NAMES, classMix, fmtN, fmtUsd, ratePerByte, unownedBytes } from './types'
-import { SettingsMenu, useRenderer, useTiling } from './prefs'
+import { SettingsMenu, useRenderer, useTiling, useTitleSpace } from './prefs'
+import { useStore } from './store'
 import { useUnits } from './units'
 import { usePerfCommit } from './perf'
+import { listingTime } from './listingTime'
 
 // Legend rows inline only the metrics toggled on (swatch + name always show).
 // URL param `?li=` — a subset of "spc" (size / percent / cost); absent = "s"
@@ -210,6 +212,7 @@ export function Treemap({ root, mode, shade = 'none', userIdx, dateRange, readRa
   onBrush?: (name: string | null) => void
 }) {
   usePerfCommit('treemap')
+  const time = listingTime(scheme)
   const { fmtBytes, fmtBytesLike } = useUnits()
   const [liP, setLiP] = useUrlState('li', stringParam('s'))
   const liMetrics = useMemo(() => new Set([...(liP ?? 's')].filter((m): m is LiMetric => m === 's' || m === 'p' || m === 'c')), [liP])
@@ -218,7 +221,9 @@ export function Treemap({ root, mode, shade = 'none', userIdx, dateRange, readRa
   const liToggle = (m: LiMetric) => setLiP(LI_METRIC_CHIPS.map(([k]) => k).filter(k => liMetrics.has(k) !== (k === m)).join(''))
   // Tiling is a user preference (header toggle): `shared` by default.
   const [tiling] = useTiling()
+  const store = useStore()
   const [renderer] = useRenderer()
+  const [titleSpace] = useTitleSpace()
   // Macro/micro hue for a cell, relative to the drilled root (see childRanks).
   // Every cell path starts with the drilled path, so the view root sits at a
   // fixed index — NOT `len - 2 - depth`: a collapsed chain (`run/…/checkpoints`
@@ -241,7 +246,8 @@ export function Treemap({ root, mode, shade = 'none', userIdx, dateRange, readRa
     [drillLen],
   )
 
-  const uriOf = (path: TreeNode[]) => scheme + path.slice(1).map(n => n.n).join('/')
+  const schemeOf = (path: TreeNode[]) => store.bucketSchemes?.[path[1]?.n] ?? scheme
+  const uriOf = (path: TreeNode[]) => schemeOf(path) + path.slice(1).map(n => n.n).join('/')
 
   // Fold merger: first-class TreeNode aggregating us/d so folded tiles keep
   // real tooltips (upstream calls this at every nesting level).
@@ -516,8 +522,8 @@ export function Treemap({ root, mode, shade = 'none', userIdx, dateRange, readRa
         <>
           {mode === 'read' && readRange ? (
             <>
-              <Tooltip content={`No reads observed since access logging began (${epochDaysToDate(readRange.min)}) — activity before that predates the logs, so "never read" really means "not read in the observed window".`}>
-                <span className="li has-tt"><span className="sw" style={{ background: 'var(--never-read)' }} />never read*</span>
+              <Tooltip content={`No reads observed since access logging began (${epochDaysToDate(readRange.min)}). Logs may omit events; this is not proof of no access.`}>
+                <span className="li has-tt"><span className="sw" style={{ background: 'var(--never-read)' }} />no observed reads</span>
               </Tooltip>
               <span className="li gradli">
                 {epochDaysToDate(readRange.min)}
@@ -591,13 +597,13 @@ export function Treemap({ root, mode, shade = 'none', userIdx, dateRange, readRa
     )
     return (
       <>
-        <PathBar path={path} scheme={scheme} onDrill={onPathChange} />
+        <PathBar path={path} scheme={schemeOf(path)} onDrill={onPathChange} />
         <div className="nums">
           {fmtBytes(n.b)} · {fmtN(n.o)} objects · {((100 * n.b) / root.b).toFixed(2)}% of total
-          {n.d != null && <> · mean created {epochDaysToMonth(n.d)}</>}
+          {n.d != null && <> · mean {time.label} {epochDaysToMonth(n.d)}</>}
           {n.a != null
             ? <> · last read {epochDaysToDate(n.a)}</>
-            : readRange && !n.n.startsWith('(') && <> · <span className="never-read">no reads since {epochDaysToDate(readRange.min)}</span></>}
+            : readRange && !n.n.startsWith('(') && <> · <span className="never-read">no observed reads since {epochDaysToDate(readRange.min)}</span></>}
         </div>
         {classes}
         {users}
@@ -635,6 +641,8 @@ export function Treemap({ root, mode, shade = 'none', userIdx, dateRange, readRa
       getId={(_n, p) => uriOf(p)}
       formatSize={fmtBytes}
       collapseChains
+      reclaimTitleSpace={titleSpace === 'reclaim'}
+      branchOutline="color-mix(in oklab, var(--ink) 30%, transparent)"
       mergeSmall={mergeSmall}
       colorForCell={colorForCell}
       // Opaque cells. Upstream's default fades every nesting level by 0.82,
@@ -670,10 +678,10 @@ export function Treemap({ root, mode, shade = 'none', userIdx, dateRange, readRa
       // current view, so the panel never collapses to an empty stub.
       renderTipDefault={(n, p) => (
         <div className="tip-viewcard">
-          <div className="vc-scope">{p.length > 1 ? pathText(scheme, p.slice(1).map(x => x.n)) : n.n}</div>
+          <div className="vc-scope">{p.length > 1 ? pathText(schemeOf(p), p.slice(1).map(x => x.n)) : n.n}</div>
           <div className="nums">
             {fmtBytes(n.b)} · {fmtN(n.o)} objects · {root.b ? ((100 * n.b) / root.b).toFixed(2) : 0}% of total
-            {n.d != null && <> · mean created {epochDaysToMonth(n.d)}</>}
+            {n.d != null && <> · mean {time.label} {epochDaysToMonth(n.d)}</>}
           </div>
           <div className="vc-hint">Hover a cell for its details · click one to open it.</div>
         </div>

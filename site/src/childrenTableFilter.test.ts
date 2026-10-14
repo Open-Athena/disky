@@ -13,7 +13,7 @@ vi.mock('./plans', () => ({ useStage: () => ({ error: null, mutate: (v: { prefix
 vi.mock('./perf', () => ({ usePerfCommit: () => {} }))
 vi.mock('./units', () => ({ useUnits: () => ({ fmtBytes: (b: number) => `${b} B` }) }))
 vi.mock('use-prms', () => ({ intParam: () => ({}), useUrlState: () => [20, () => {}] }))
-vi.mock('./Tooltip', () => ({ Tooltip: ({ content, children }: { content: ReactNode; children: ReactNode }) => createElement('span', { 'data-tip': typeof content === 'string' ? content : '' }, children) }))
+vi.mock('./Tooltip', () => ({ Tooltip: ({ content, children, placement }: { content: ReactNode; children: ReactNode; placement?: string }) => createElement('span', { 'data-tip': typeof content === 'string' ? content : '', 'data-placement': placement }, children) }))
 // A filtered row's controls as a marker naming what it acts on; the selection's action records its deps.
 vi.mock('./MatchActions', async () => {
   const { createElement: h } = await import('react')
@@ -149,6 +149,9 @@ describe('the children table under a filter', () => {
     expect(rows(html).map(r => /data-tip="(Stage[^"]*)"/.exec(actionsCell(r))?.[1])).toEqual([
       ...Array(3).fill('Stage this file for deletion (exactly this object) — an admin approves and dispatches from /staged'),
       'Stage this folder for deletion — an admin approves and dispatches from /staged',
+    ])
+    expect(rows(html).map(r => /data-tip="Stage[^"]*" data-placement="([^"]*)"/.exec(actionsCell(r))?.[1])).toEqual([
+      'right', 'right', 'right', 'right',
     ])
   })
 })

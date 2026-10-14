@@ -8,7 +8,7 @@ import type { Targets } from './filterCover'
 // as text: what's left is each state's exact markup.
 vi.mock('./Tooltip', async () => {
   const { createElement: h } = await import('react')
-  return { Tooltip: ({ content, children }: { content: ReactNode; children: ReactNode }) => h('span', { className: 'tt' }, children, h('span', { className: 'tt-tip' }, content)) }
+  return { Tooltip: ({ content, children, placement }: { content: ReactNode; children: ReactNode; placement?: string }) => h('span', { className: 'tt', 'data-placement': placement }, children, h('span', { className: 'tt-tip' }, content)) }
 })
 vi.mock('./AssignSelect', async () => {
   const { createElement: h } = await import('react')
@@ -27,7 +27,7 @@ const render = (state: ActState, o: { warm?: 'cold' | 'warming' | 'ready'; confi
   state, confirmT: o.confirmT ?? null, act, warm: o.warm ?? 'cold', canTrash: true, assigning: true, fmtBytes: (b: number) => `${b} B`, scheme: 'gs://',
 }))
 
-const TRASH = '<span class="tt"><button type="button" class="trash" aria-label="trash"><svg></svg></button><span class="tt-tip">Stage this row’s matches for deletion (not the rest of the row; listed when you click) — an admin approves and dispatches from /staged</span></span><select aria-label="assign owner">assign…</select>'
+const TRASH = '<span class="tt" data-placement="right"><button type="button" class="trash" aria-label="trash"><svg></svg></button><span class="tt-tip">Stage this row’s matches for deletion (not the rest of the row; listed when you click) — an admin approves and dispatches from /staged</span></span><select aria-label="assign owner">assign…</select>'
 const box = (inner: string, live: string, attrs = '') => `<span class="mact"${attrs} tabindex="-1">${inner}<span class="act-live" role="status" aria-live="polite">${live}</span></span>`
 const X = '<button type="button" class="act x" aria-label="dismiss">×</button>'
 const SPIN = '<span class="spin" aria-hidden="true"></span>'
@@ -84,7 +84,7 @@ describe('a filtered row\'s controls, per state', () => {
       render({ s: 'done', req, text: 'staged 3 folders', undo: { plan_id: 4, keys: ['gs://b/x/'] } }),
     ]).toEqual([
       box('', `<span class="act-st ok">✓ assigned 1,234 files → you</span>${X}`),
-      box('', `<span class="act-st ok">✓ staged 3 folders</span><button type="button" class="act">undo</button>${X}`),
+      box('', `<span class="act-st ok">✓ staged 3 folders</span><a class="act" href="/staged">review staged</a><button type="button" class="act">undo</button>${X}`),
     ])
   })
   it('over the cap after resolving: the reason, muted, in the controls\' place (no red)', () => {

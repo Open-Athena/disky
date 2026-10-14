@@ -2011,7 +2011,95 @@ def sweep_undo(only_buckets: tuple[str, ...], bulk: bool, dry_run: bool, bulk_op
 
 @main.group()
 def access() -> None:
-    """GCS usage-log (access-log) ingest — layer-1a/2a parquet + watermarks."""
+    """Access-log ingest and provider diagnostics."""
+
+
+@access.command("r2-query")
+@option("-a", "--account", envvar="CLOUDFLARE_ACCOUNT_ID", required=True, help="Cloudflare account ID")
+@option("-b", "--bucket", required=True, help="Source R2 bucket")
+@option("-f", "--from", "start", required=True, help="Inclusive query start, ISO timestamp with timezone")
+@option("-l", "--limit", default=100, type=int, help="Bounded diagnostic sample size (1–2000)")
+@option("-o", "--output", type=Path, help="Save private provider response to this local file")
+@option("-t", "--to", "end", required=True, help="Query end, ISO timestamp with timezone")
+def access_r2_query(
+    account: str,
+    bucket: str,
+    start: str,
+    limit: int,
+    output: Path | None,
+    end: str,
+) -> None:
+    """Query a bounded sample; NOT a complete daily export or watermark.
+
+    Requires $CF_OBSERVABILITY_TOKEN (or $CLOUDFLARE_API_TOKEN) with Workers
+    Observability Write permission.
+    Responses may contain private object keys, IPs and actor identities.
+    """
+    from .r2_access import query_body, query_events
+
+    token = os.environ.get("CF_OBSERVABILITY_TOKEN") or os.environ.get("CLOUDFLARE_API_TOKEN")
+    if not token:
+        raise UsageError("set CF_OBSERVABILITY_TOKEN (Workers Observability Write)")
+    try:
+        response = query_events(account, token, query_body(bucket, start, end, limit=limit))
+    except (ValueError, RuntimeError) as exc:
+        raise UsageError(str(exc)) from exc
+    payload = json.dumps(response, indent=2) + "\n"
+    if output is None:
+        print(payload, end="")
+    else:
+        fd = os.open(output, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w") as stream:
+            os.fchmod(stream.fileno(), 0o600)
+            stream.write(payload)
+        print(f"saved bounded provider response to {output}; no ingest watermark advanced", file=sys.stderr)
+
+
+@access.command("r2-export")
+@option("-a", "--account", envvar="CLOUDFLARE_ACCOUNT_ID", required=True, help="Cloudflare account ID")
+@option("-b", "--bucket", required=True, help="Source R2 bucket")
+@option("-f", "--from", "start", required=True, help="Query start, ISO timestamp with timezone")
+@option("-l", "--limit", default=2000, type=int, help="Events per cursor page (1–2000)")
+@option("-n", "--max-pages", default=20, type=int, help="Refuse export if this page cap is reached")
+@option("-o", "--output", type=Path, required=True, help="New private archive file; existing files refused")
+@option("-t", "--to", "end", required=True, help="Query end, ISO timestamp with timezone")
+def access_r2_export(
+    account: str,
+    bucket: str,
+    start: str,
+    limit: int,
+    max_pages: int,
+    output: Path,
+    end: str,
+) -> None:
+    """Drain a bounded window into a private archive; print only a summary.
+
+    Refuses sampled or incomplete queries. Query exhaustion does not prove
+    complete provider delivery. No ingest watermark is advanced.
+    """
+    from .r2_access import export_window, query_body, query_events
+
+    token = os.environ.get("CF_OBSERVABILITY_TOKEN") or os.environ.get("CLOUDFLARE_API_TOKEN")
+    if not token:
+        raise UsageError("set CF_OBSERVABILITY_TOKEN (Workers Observability Write)")
+    if output.exists():
+        raise UsageError("output already exists; use a new archive path")
+    try:
+        archive = export_window(
+            query_body(bucket, start, end, limit=limit),
+            fetch=lambda body: query_events(account, token, body),
+            max_pages=max_pages,
+        )
+    except (ValueError, RuntimeError) as exc:
+        raise UsageError(str(exc)) from exc
+    archive["account"] = account
+    # Exclusive create prevents overwriting a concurrent collector's output.
+    # A later scheduled collector must publish this before its own watermark.
+    fd = os.open(output, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, "w") as stream:
+        json.dump(archive, stream, indent=2)
+        stream.write("\n")
+    print(json.dumps(archive["summary"], sort_keys=True))
 
 
 @access.command("ingest")
