@@ -228,6 +228,31 @@ describe('owner prefix history', () => {
     }
   })
 
+  it('concurrent folds after a new assignment share one pricing and all fold from history', async () => {
+    vi.resetModules()
+    const { ownerTotals } = await import('./ownerTotals')
+    const env = (await seed(LEDGER)).iv
+    for (const date of [S1, S2, S3]) await ownerTotals(env, date)
+    await env.DB!.prepare(`INSERT INTO actions (id, actor, ts, scan, pattern, set_owner, owner) VALUES (4, 'ops', 4, '${S2}', 'gs://bk/small/', 1, 'dan')`).run()
+    await env.DB!.prepare(`INSERT INTO owner_prefixes (action_id, prefix, owner, ts) VALUES (4, 'gs://bk/small/', 'dan', 4)`).run()
+    // D1's latency: each statement's result arrives a few ms later, so concurrent folds interleave as on the edge.
+    const late = <T extends object>(o: T): T => new Proxy(o, { get(t, k) {
+      const v = Reflect.get(t, k)
+      if (typeof v !== 'function') return v
+      if (k === 'prepare' || k === 'bind') return (...a: unknown[]) => late(v.apply(t, a))
+      return async (...a: unknown[]) => { await new Promise(r => setTimeout(r, 5)); return v.apply(t, a) }
+    } })
+    const slow = { ...env, DB: late(env.DB!) } as Env
+    const got = await Promise.allSettled([S1, S2, S3].map(d => ownerTotals(slow, d)))
+    expect(got.map(g => g.status === 'fulfilled' ? [g.value.scan, g.value.computed.hist] : [g.status, String(g.reason)])).toEqual([[S1, true], [S2, true], [S3, true]])
+    vi.resetModules()
+    const { ownerTotals: coldTotals } = await import('./ownerTotals')
+    const cold = (await seed(LEDGER + `
+      INSERT INTO actions (id, actor, ts, scan, pattern, set_owner, owner) VALUES (4, 'ops', 4, '${S2}', 'gs://bk/small/', 1, 'dan');
+      INSERT INTO owner_prefixes (action_id, prefix, owner, ts) VALUES (4, 'gs://bk/small/', 'dan', 4);`)).perScan
+    for (const g of got) if (g.status === 'fulfilled') expect(fold(g.value)).toEqual(fold(await coldTotals(cold, g.value.scan)))
+  })
+
   it('a new assignment writes one history row, and no per-scan row', async () => {
     vi.resetModules()
     const { ownerTotals } = await import('./ownerTotals')
