@@ -44,7 +44,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from .digest import (
-    AVATAR_REV, HOURS_PER_WEEK, TIB, DigestConfig, Quota, Reply, Unit,
+    AVATAR_REV, HOURS_PER_WEEK, TIB, DigestConfig, PlotUnavailable, Quota, Reply, Unit,
     _dlink, _md, _pct, _pct_val, _span, _tb, deg, list_scans, load_window, scan_slugs, scan_ts,
 )
 
@@ -440,5 +440,5 @@ class Cw:
 
         token = site_token()
         if not token:
-            raise SystemExit("digest image: no site token ($SITE_TOKEN)")
+            raise PlotUnavailable("digest image: no site token ($SITE_TOKEN)")
         Path(out).write_bytes(post_json(self.cfg.site_url, token, "/api/digest-image", image_body(month, m, self.cfg)))
