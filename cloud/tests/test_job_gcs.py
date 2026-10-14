@@ -3,7 +3,6 @@ controller. Deployment-specific (project ids, machine shapes), so kept out of th
 from json import loads
 import json
 import os
-import re
 from os import environ
 from pathlib import Path
 from shutil import which
@@ -12,7 +11,7 @@ from subprocess import run
 import pytest
 
 from dt_cloud.scan_runs import load_profile
-from dt_cloud.scan_runs_backfill import classify, reconstruct
+from dt_cloud.scan_runs_backfill import classify, failure_of, reconstruct
 from dt_cloud.scan_tasks import task_spec
 from test_scan_tasks import CONTEXT, IMAGE, SCAN, controller
 
@@ -110,8 +109,8 @@ def test_error_marker_matches_the_traced_err_trap():
     script = "\n".join(trap + ["set -x", "false", 'echo "$SR_ERR"'])
     traced = run(["bash", "-c", script], capture_output=True, text=True)
     assert traced.stderr.splitlines() == ["+ false", "++ scan_err 1 4 false", "++ SR_ERR='exit 1: false (run.sh:4)'", "+ echo 'exit 1: false (run.sh:4)'"]
-    assert re.match(profile.error_marker, traced.stderr.splitlines()[1]).groupdict() == {"rc": "1", "line": "4", "cmd": "false"}
-    assert re.match(profile.error_marker, "++ fail_alert 1 237 dt-cloud stage -o /stage").groupdict() == {"rc": "1", "line": "237", "cmd": "dt-cloud stage -o /stage"}
+    assert failure_of(profile, {}, list(enumerate(traced.stderr.splitlines()))) == "exit 1: false (line 4)"
+    assert failure_of(profile, {}, [(0, "++ fail_alert 1 237 dt-cloud stage -o /stage")]) == "exit 1: dt-cloud stage -o /stage (line 237)"
 
 
 @pytest.mark.parametrize("code, scratch, expected", [

@@ -214,8 +214,7 @@ if [ "${NOP_IF_PUBLISHED:-0}" = "1" ] && [ -f "/gcs/$DATA/$SNAP_PATH/meta.json" 
   [ "${SKIP_ACCESS:-0}" = "1" ] || dt-cloud access ingest ${ACCESS_ARGS:-} \
     || echo "WARN: access ingest failed (watermark self-heals next run)" >&2
   echo "SNAPSHOT-JOB-NOP $SNAP_ID (already published)"
-  # `finish -x 0` keeps a NOP run a NOP
-  [ "${DT_RECORD:-}" = off ] || [ -z "${BATCH_JOB_UID:-}" ] || dt-cloud scan-run record -N -k "$SR_KIND" "$SNAP_ID"
+  sr nop  # the EXIT trap's `finish -x 0` keeps it a NOP
   exit 0
 fi
 
