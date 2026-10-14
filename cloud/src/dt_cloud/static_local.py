@@ -21,13 +21,18 @@ anchored terms on a generation without `anchors/meta.json`.
 
 With a URL store, the generation's files are mirrored into the work dir first; afterwards the new files go up, every
 run's files before its liveness markers (`meta.json`s), and the manifests last, so no reader sees a manifest whose runs
-are incomplete.
+are incomplete. Then the runs a carry folded are deleted from the store (`append_runner.prune_folded`: those listed by no
+manifest but the newest and those superseded less than `-G` s ago, 1 h by default; a folded run keeps its `cdelta/` and `scans.json`, which later appends refold).
 """
 from __future__ import annotations
 
 import json
+import resource
 import shutil
+import sys
 import tempfile
+import threading
+import time
 from contextlib import contextmanager
 from pathlib import Path
 from time import monotonic
@@ -40,8 +45,11 @@ from . import static_catalog as sc
 from . import static_drill as sd
 from . import static_names as sn
 from . import static_roots as sr
-from .append_runner import COMPACT_LEVEL, LocalRunStore, latest_key, run_key, scans_of
+from .append_runner import COMPACT_LEVEL, GRACE_S, MIN_GRACE_S, LocalRunStore, latest_key, prune_folded, rm_local, run_key, scans_of
+from .blobstore import Store, mirror
+from .blobstore import upload_new as _upload_new
 from .hex_runs import parse_rule, rule_json
+from .static_merge import FOLDED_RETAIN
 from .static_names import PREFIX, err, q
 
 #: Ranges, shard rows: one machine, so a few ranges (DuckDB parallelizes within each) and the staged path's shard size.
@@ -53,45 +61,72 @@ MAX_ROWS = 100_000
 R_ROWS, K_KEPT, FLOOR = 100_000, 256, 10_000
 
 
-# ── The store: a local dir or an fsspec URL ────────────────────────────────
+# ── Resource peaks: what a job sizing needs, reported by every run ─────────
 
 
-class Store:
-    """The readers' key space: `root` a local dir or a URL. `listing(prefix)` is `{key: size}`."""
+GB = 1 << 30
 
-    def __init__(self, root: str):
-        from disk_tree.blobfs import fs_for, is_url
 
-        self.root = root.rstrip("/")
-        self.url = is_url(root)
-        if self.url:
-            self.fs, self.base = fs_for(self.root)
-            self.base = self.base.rstrip("/")
+def rss_peak_gb() -> float:
+    """This process's peak RSS so far (`ru_maxrss`: bytes on macOS, KiB on Linux)."""
+    m = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    return round(m / (GB if sys.platform == "darwin" else GB >> 10), 2)
+
+
+class DiskPeak:
+    """Peak bytes used on the work dir's filesystem above its level at start, sampled every `every_s` on a daemon
+    thread (DuckDB's spill and the stages' intermediates land there between samples, so a stage's peak is a lower
+    bound to within one interval). `take()` returns the peak since the previous `take()` (one stage) and resets it.
+    The filesystem is the job's own scratch, so other writers' bytes count too; on a shared disk this over-states."""
+
+    def __init__(self, path: Path, every_s: float = 2.0):
+        self.path, self.every_s = path, every_s
+        self.base = shutil.disk_usage(path).used
+        self.peak = self.total = 0
+        self.stop = threading.Event()
+        self.thread = threading.Thread(target=self.run, daemon=True)
+        self.thread.start()
+
+    def sample(self) -> None:
+        used = max(0, shutil.disk_usage(self.path).used - self.base)
+        self.peak, self.total = max(self.peak, used), max(self.total, used)
+
+    def run(self) -> None:
+        while not self.stop.wait(self.every_s):
+            self.sample()
+
+    def take(self) -> float:
+        self.sample()
+        peak, self.peak = self.peak, 0
+        return round(peak / GB, 2)
+
+    def close(self) -> float:
+        self.stop.set()
+        self.thread.join()
+        self.sample()
+        return round(self.total / GB, 2)
+
+
+# ── The store: a local dir or an fsspec URL (`blobstore`) ──────────────────
+
+class GenStore:
+    """A generation of `store` (`prefix`, e.g. `static-names/<gen>`) as an `append_runner.PruneTarget`: its keys relative
+    to the generation."""
+
+    def __init__(self, store: Store, prefix: str):
+        self.store, self.prefix = store, prefix
 
     def listing(self, prefix: str) -> dict[str, int]:
-        if not self.url:
-            d = Path(self.root) / prefix
-            return {p.relative_to(self.root).as_posix(): p.stat().st_size for p in sorted(d.rglob("*")) if p.is_file()} if d.is_dir() else {}
-        found = self.fs.find(f"{self.base}/{prefix}", detail=True)
-        return {k[len(self.base) + 1:]: int(v["size"]) for k, v in sorted(found.items()) if v.get("type", "file") == "file"}
+        return {k[len(self.prefix) + 1:]: n for k, n in self.store.listing(f"{self.prefix}/{prefix}".rstrip("/")).items()}
 
-    def exists(self, key: str) -> bool:
-        return (Path(self.root) / key).is_file() if not self.url else self.fs.exists(f"{self.base}/{key}")
+    def mtimes(self, prefix: str) -> dict[str, float]:
+        return {k[len(self.prefix) + 1:]: t for k, t in self.store.mtimes(f"{self.prefix}/{prefix}".rstrip("/")).items()}
 
-    def get(self, key: str, dst: Path) -> None:
-        dst.parent.mkdir(parents=True, exist_ok=True)
-        if self.url:
-            self.fs.get(f"{self.base}/{key}", str(dst))
-        else:
-            shutil.copyfile(Path(self.root) / key, dst)
+    def read_json(self, key: str) -> dict:
+        return self.store.read_json(f"{self.prefix}/{key}")
 
-    def put(self, src: Path, key: str) -> None:
-        if self.url:
-            self.fs.put(str(src), f"{self.base}/{key}")
-        else:
-            dst = Path(self.root) / key
-            dst.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copyfile(src, dst)
+    def delete(self, keys: list[str]) -> None:
+        self.store.delete([f"{self.prefix}/{k}" for k in keys])
 
 
 def publish_order(keys: list[str]) -> list[str]:
@@ -108,23 +143,8 @@ def publish_order(keys: list[str]) -> list[str]:
 
 
 def upload_new(store: Store, local: Path, prefix: str, before: dict[str, int]) -> list[str]:
-    """Every file under `local` (the mirror of `prefix`) not in `before` → `store`, in `publish_order`. Files in `before`
-    are never rewritten (a generation's files are written once)."""
-    keys = [p.relative_to(local).as_posix() for p in local.rglob("*") if p.is_file()]
-    new = publish_order([k for k in keys if f"{prefix}/{k}" not in before])
-    for k in new:
-        store.put(local / k, f"{prefix}/{k}")
-    return new
-
-
-def mirror(store: Store, prefix: str, local: Path) -> dict[str, int]:
-    """`prefix` (a generation) copied into `local` (files already there with the same size are kept); returns the listing."""
-    listing = store.listing(prefix)
-    for key, size in listing.items():
-        dst = local / key[len(prefix) + 1:]
-        if not (dst.is_file() and dst.stat().st_size == size):
-            store.get(key, dst)
-    return listing
+    """`blobstore.upload_new` in this store's `publish_order`."""
+    return _upload_new(store, local, prefix, before, publish_order)
 
 
 # ── Scans ──────────────────────────────────────────────────────────────────
@@ -167,15 +187,18 @@ def build_gen(scans: dict, mount: str, gen_dir: Path, work: Path, *, gen: str, r
               max_rows: int = MAX_ROWS, R: int = R_ROWS, K: int = K_KEPT, floor: int = FLOOR, threads: int = 4, mem: str = "4GB") -> dict:
     """A base generation over `scans` (`scans.json`'s doc; their files under `mount`) in `gen_dir`, every stage in turn:
     ranges → coalesced versions → suffix map → shards → sidecar → census → members → cells → short literals → catalog
-    → drill. Returns a summary (rows, files, seconds per stage)."""
-    t0, times = monotonic(), {}
+    → drill. Returns a summary (rows, files, and per stage its seconds, peak work-disk GiB and peak RSS GiB so far)."""
+    t0, times, peaks = monotonic(), {}, {}
+    gen_dir.mkdir(parents=True, exist_ok=True)
+    work.mkdir(parents=True, exist_ok=True)
+    disk = DiskPeak(work)
 
     def done(stage: str, t: float) -> float:
         times[stage] = round(monotonic() - t, 1)
-        err(f"build {gen}: {stage} in {times[stage]}s")
+        peaks[stage] = {"disk_gb": disk.take(), "rss_gb": rss_peak_gb()}
+        err(f"build {gen}: {stage} in {times[stage]}s (work disk peak {peaks[stage]['disk_gb']} GiB, RSS peak {peaks[stage]['rss_gb']} GiB)")
         return monotonic()
 
-    gen_dir.mkdir(parents=True, exist_ok=True)
     tmp = work / "duckdb"
     con = sn.connect(threads, mem, tmp)
     doc = {**{k_: v for k_, v in scans.items() if k_ != "mount"}, **rule_json(rule)}
@@ -224,9 +247,10 @@ def build_gen(scans: dict, mount: str, gen_dir: Path, work: Path, *, gen: str, r
     t = done("catalog", t)
     drill = build_base_drill(con, gen_dir, R=R, K=K, floor=floor, rule=rule)
     done("drill", t)
+    disk.close()
     return {"gen": gen, "scans": len(doc["scans"]), "ranges": k, "suffix_rows": int(sum(side.column("rows").to_pylist())),
             "shards": len(shard_names), "members": members["members"], "cells_rows": meta["cells_rows"], "drill": drill,
-            "s": round(monotonic() - t0, 1), "stages": times}
+            "s": round(monotonic() - t0, 1), "stages": times, "peaks": peaks}
 
 
 def build_base_drill(con, gen_dir: Path, *, R: int, K: int, floor: int, rule) -> dict:
@@ -282,6 +306,7 @@ def append_scan(con, gen_dir: Path, scan: dict, mount: str, work: Path, *, gen: 
     and published (`manifests/<id>.json`): `static_append`'s per-range append over the refolded open versions, the run's
     shards and catalog delta, the drill's run (`static_drill.build_day`), then `publish_run`."""
     t0 = monotonic()
+    disk = DiskPeak(work)
     d = scan["id"]
     store = LocalRunStore(gen_dir, work / "lease", gen)
     base = store.read_json("scans.json")
@@ -317,8 +342,9 @@ def append_scan(con, gen_dir: Path, scan: dict, mount: str, work: Path, *, gen: 
     shutil.rmtree(cat_work, ignore_errors=True)
     drill = run_drill(con, gen_dir, run, scan, runs, days, gen=gen, rule=rule)
     manifest = sa.publish_run(store, d, rule, max_level=compact_level)
-    err(f"add {d}: published {len(manifest['runs'])} runs in {monotonic() - t0:.1f}s")
-    return {"scan": d, "drill": drill, "runs": [r["key"] for r in manifest["runs"]], "s": round(monotonic() - t0, 1)}
+    peak = {"disk_gb": disk.close(), "rss_gb": rss_peak_gb()}
+    err(f"add {d}: published {len(manifest['runs'])} runs in {monotonic() - t0:.1f}s (work disk peak {peak['disk_gb']} GiB, RSS peak {peak['rss_gb']} GiB)")
+    return {"scan": d, "drill": drill, "runs": [r["key"] for r in manifest["runs"]], "s": round(monotonic() - t0, 1), "peak": peak}
 
 
 def run_drill(con, gen_dir: Path, run: Path, scan: dict, runs: list[dict], days: list[str], *, gen: str, rule) -> dict:
@@ -355,6 +381,11 @@ def merge_due(gen_dir: Path, work: Path, *, gen: str, rule, compact_level: int |
 
     store = LocalRunStore(gen_dir, work / "lease", gen)
     return merge_pending(store, gen_dir, tmp=work / "merge", rule=rule, max_level=compact_level, heartbeat_s=None)
+
+
+def now() -> float:
+    """The prune's clock (tests move it past the grace)."""
+    return time.time()
 
 
 # ── CLI ────────────────────────────────────────────────────────────────────
@@ -419,18 +450,22 @@ def build_cmd(floor, gen, k, K, layouts, mem, shard_rows, store_root, threads, R
 @command("add")
 @option("-C", "--compact-level", default=COMPACT_LEVEL, type=IntRange(min=1), help="The binary counter's compaction level (carries stop below it)")
 @option("-g", "--gen", required=True, help="The base generation (`<store>/static-names/GEN/`)")
+@option("-G", "--grace-s", default=GRACE_S, type=IntRange(min=MIN_GRACE_S), help=f"Keep a superseded manifest's runs this many seconds (default {GRACE_S}, at least {MIN_GRACE_S})")
 @option("-L", "--layout", "layouts", multiple=True, required=True, help="Key template of the scans' `path` sorts under -s; repeat")
 @option("-M", "--mem", default="4GB", help="DuckDB memory limit")
+@option("-n", "--prune-dry-run", is_flag=True, help="Report the folded runs the prune would delete from the store; delete nothing")
 @option("-N", "--no-merge", is_flag=True, help="Skip the due carries (a later `add` merges them)")
 @option("-o", "--out", "store_root", required=True, help="The store: a dir or URL, the readers' INDEX_R2 root")
 @option("-p", "--threads", default=4, type=IntRange(min=1), help="DuckDB threads")
 @option("-s", "--scans", "scans_root", required=True, help="Where the scans are: a dir or URL, the root of -L's keys")
 @option("-t", "--through", help="Last scan id to append (inclusive; default: the newest)")
 @option("-w", "--work", help="Local work dir (default: a temporary one, removed after); a URL store's generation is mirrored into it")
-def add_cmd(compact_level, gen, layouts, mem, no_merge, store_root, threads, scans_root, through, work) -> None:
+def add_cmd(compact_level, gen, grace_s, layouts, mem, prune_dry_run, no_merge, store_root, threads, scans_root, through, work) -> None:
     """Append every scan after the generation's newest (base + runs), oldest first, each as a run published by its
     manifest; then the binary counter's due carries. The generation's files are never rewritten; new ones go to the store
-    data first, `meta.json`s next, manifests last. Prints a JSON summary."""
+    data first, `meta.json`s next, manifests last. Then, the publish done, the runs a carry folded are deleted from the
+    store, kept while a manifest superseded less than `-G` s ago lists them (`append_runner.prune_folded`; a folded run's `cdelta/` and `scans.json` stay: later
+    appends refold them). Prints a JSON summary."""
     _check_gen(gen)
     store = Store(store_root)
     prefix = f"{PREFIX}/{gen}"
@@ -451,4 +486,8 @@ def add_cmd(compact_level, gen, layouts, mem, no_merge, store_root, threads, sca
                  for s in pending]
         merged = None if no_merge or not pending else merge_due(gen_dir, w, gen=gen, rule=rule, compact_level=compact_level)
         uploaded = upload_new(store, gen_dir, prefix, before)
-    print(json.dumps({"gen": gen, "after": have[-1], "added": added, "merge": merged, "files": len(uploaded)}, indent=1))
+        prune = prune_folded(GenStore(store, prefix), now=now(), grace_s=grace_s, retain=FOLDED_RETAIN, dry_run=prune_dry_run, log=err)
+        if not prune_dry_run:
+            rm_local(gen_dir, prune["keys"])  # the mirror too: a later `add` over this work dir must not upload them again
+    print(json.dumps({"gen": gen, "after": have[-1], "added": added, "merge": merged, "files": len(uploaded),
+                      "prune": {k: v for k, v in prune.items() if k != "keys"}}, indent=1))
