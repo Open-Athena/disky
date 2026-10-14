@@ -1,4 +1,5 @@
-import { Treemap } from '@rdub/treemap'
+import { TitleSpaceToggle, Treemap } from '@rdub/treemap'
+import { useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { FederatedScanPicker } from '../FederatedScanPicker'
 import { federatedDeltas, parseSourceCatalog, resolveFederation, utcInstant, type SourceCatalog } from '../federatedScans'
@@ -29,6 +30,8 @@ function cutoff(value: string | null, fallback: string): string {
 }
 
 export default function FederatedScansPreview() {
+  const [reclaimTitleSpace, setReclaimTitleSpace] = useState(false)
+  const [renderer, setRenderer] = useState<'dom' | 'canvas'>('dom')
   const [params, setParams] = useSearchParams()
   const { fmtBytes } = useUnits()
   let values: typeof defaults
@@ -52,7 +55,11 @@ export default function FederatedScansPreview() {
     <div className="fp-main-controls">{(['at', 'before', 'after'] as const).map(key => <FederatedScanPicker key={key} catalogs={catalogs} value={values[key]} now={now}
       label={key === 'at' ? 'As of' : key === 'before' ? 'Compare from' : 'Compare to'} onChange={at => setParams(p => { const next = new URLSearchParams(p); next.set(key, at); return next })} />)}</div>
     <div className="fp-preview-totals">{fmtBytes(tree.b)} · {tree.o.toLocaleString()} objects{missing.length > 0 && <span role="status"> · Partial coverage: no earlier scan for {missing.join(', ')}</span>}</div>
-    <div style={{ height: 320 }}><Treemap<TreeNode> root={tree} getChildren={n => n.c} getLabel={n => n.n} getSize={n => n.b} formatSize={fmtBytes} collapseChains /></div>
+    <div style={{ display: 'flex', gap: 16, flexWrap: 'wrap', marginBlock: 12 }}>
+      <TitleSpaceToggle checked={reclaimTitleSpace} onChange={setReclaimTitleSpace} />
+      <label>Renderer <select value={renderer} onChange={e => setRenderer(e.target.value as 'dom' | 'canvas')}><option value="dom">DOM</option><option value="canvas">Canvas</option></select></label>
+    </div>
+    <div style={{ height: 320 }}><Treemap<TreeNode> root={tree} getChildren={n => n.c} getLabel={n => n.n} getSize={n => n.b} formatSize={fmtBytes} collapseChains renderer={renderer} reclaimTitleSpace={reclaimTitleSpace} branchOutline="color-mix(in oklab, var(--ink) 30%, transparent)" /></div>
     <h2>Diff</h2>
     {values.before > values.after && <p role="status">Reverse comparison: changes are “to” minus “from”.</p>}
     <table className="fp-preview-table"><thead><tr><th>Project</th><th>Bytes change</th><th>Objects change</th></tr></thead>
