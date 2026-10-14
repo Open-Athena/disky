@@ -168,7 +168,9 @@ const scaleMix = (mix: Record<string, number>, b: number): Record<string, number
   return tot ? Object.fromEntries(Object.entries(mix).map(([c, x]) => [c, (x * b) / tot])) : mix
 }
 
-export function Treemap({ root, mode, shade = 'none', userIdx, dateRange, readRange, hl, onPickUser, onPickUnowned, onClearHl, pricing, lens, ownerLensed, scheme = 'gs://', redact, ownerIdx, initialPath, path, onPathChange, objects = false, onOpen, brush, onBrush, band, onBand }: {
+export function Treemap({ root, mode, shade = 'none', userIdx, dateRange, readRange, hl, onPickUser, onPickUnowned, onClearHl, pricing, lens, ownerLensed, scheme = 'gs://', redact, ownerIdx, initialPath, path, onPathChange, objects = false, onOpen, brush, onBrush, band, onBand, stagedRings = true }: {
+  /** Ring the open plan's staged items (off where every cell is one: /staged). */
+  stagedRings?: boolean
   root: TreeNode
   mode: ColorMode
   /** Secondary color axis — see `ShadeMode`. Default `none`. */
@@ -252,7 +254,8 @@ export function Treemap({ root, mode, shade = 'none', userIdx, dateRange, readRa
     [drillLen],
   )
 
-  const staged = useStagedIndex()
+  const stagedAll = useStagedIndex()
+  const staged = stagedRings ? stagedAll : null
   const schemeOf = (path: TreeNode[]) => store.bucketSchemes?.[path[1]?.n] ?? scheme
   const uriOf = (path: TreeNode[]) => schemeOf(path) + path.slice(1).map(n => n.n).join('/')
 
