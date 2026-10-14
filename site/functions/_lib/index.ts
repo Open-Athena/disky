@@ -130,6 +130,8 @@ interface D1Handle {
   /** An interval-store sort read as of a scan (`openInterval`): its epoch. Every group and row is
    *  tested `vf ≤ asOf < vt` (specs/interval-store.md §2.6). */
   asOf?: number
+  /** A bounded history read plans versions overlapping this inclusive scan range. */
+  historyRange?: [number, number]
   /** Where the handle's own files are read from, when not the deployment's store (the interval
    *  store on `INDEX_R2`). */
   src?: ByteStore
@@ -1172,8 +1174,9 @@ async function pqGroups(h: PqHandle, pass0: (g: NonNullable<FooterGroup['bounds'
   // A run's group can matter once a version in it opened by then, live or not (its close records end versions).
   const D = h.asOf
   const run = !!h.run
+  const range = h.historyRange
   const pass = D == null ? pass0 : (g: { vfMin?: number; vtMax?: number } & NonNullable<FooterGroup['bounds']>) =>
-    (g.vfMin == null || g.vfMin <= D) && (run || g.vtMax == null || D < g.vtMax) && pass0(g)
+    (g.vfMin == null || g.vfMin <= (range?.[1] ?? D)) && (run || g.vtMax == null || (range?.[0] ?? D) < g.vtMax) && pass0(g)
   const sel = h.footer.groups.filter(fg => !fg.bounds || pass(fg.bounds))
   h.trace?.('fgroups', sel.length)
   const all = (await mapLimit(sel, GROUP_READS, fg => readFooterGroup(h, fg))).flat()
@@ -1530,13 +1533,17 @@ const tiersOf = (h: IndexHandle): IndexHandle[] => [h, ...(h.runs ?? [])]
 /** Rows of every tier combined, one per version (`(depth, path, usr, vf)`; the smallest `vt`), then those live at
  *  the handle's scan: `interval_read.combine` + `live_rows`. */
 export function combineLive(h: IndexHandle, rows: Row[]): Row[] {
+  return liveAt(h, combineVersions(rows))
+}
+
+function combineVersions(rows: Row[]): Row[] {
   const best = new Map<string, Row>()
   for (const r of rows) {
     const k = `${r.depth}\0${r.path}\0${r.usr ?? ''}\0${r.vf}`
     const c = best.get(k)
     if (!c || r.vt! < c.vt!) best.set(k, r)
   }
-  return liveAt(h, [...best.values()])
+  return [...best.values()]
 }
 
 /** Decoded row groups, per isolate (LRU by an estimated byte size).
@@ -2366,11 +2373,11 @@ export async function readAsks(
   h: IndexHandle,
   asks: Ask[],
   keep: (r: Row) => boolean,
-  { columns, maxGroups = 60, spanCap = 4000, stop, rememberWide }: { columns?: string[]; maxGroups?: number; spanCap?: number; stop?: () => boolean; rememberWide?: boolean } = {},
+  { columns, maxGroups = 60, spanCap = 4000, stop, rememberWide, versions = false, pre, lens }: { columns?: string[]; maxGroups?: number; spanCap?: number; stop?: () => boolean; rememberWide?: boolean; versions?: boolean; pre?: Pre; lens?: Lens } = {},
 ): Promise<{ rows: Row[]; groups: number }> {
   // `rememberWide`: a lookup this isolate already found too wide (same generation, asks and budget) throws
   // before any span query — the answer can't change while the generation stands.
-  const wideKey = rememberWide ? `${h.mode}\0${h.date}\0${h.variant}\0${'gen' in h ? h.gen : ''}\0${maxGroups}\0${asks.map(a => `${a.depth}:${'path' in a ? a.path : `${a.under}/`}`).join('\n')}` : null
+  const wideKey = rememberWide ? `${h.mode}\0${h.date}\0${h.variant}\0${'gen' in h ? h.gen : ''}\0${maxGroups}\0${lens?.key ?? ''}\0${asks.map(a => `${a.depth}:${'path' in a ? a.path : `${a.under}/`}`).join('\n')}` : null
   const known = wideKey != null ? tooWide.get(wideKey) : undefined
   if (known) throw new Error(`lookup too wide: ${known} (cap ${maxGroups}, remembered)`)
   // One rectangle per depth over its asks' [min, max] path, halved while it
@@ -2404,7 +2411,7 @@ export async function readAsks(
       let cand: Span[]
       h.trace?.('askspan', 1)
       try {
-        cand = await selectSpans(h, [rect], cap)
+        cand = await selectSpans(h, [rect], cap, 0, lens)
       } catch (e) {
         if (!(e instanceof TooWide) || part.length === 1) throw e
         const m = part.length >> 1
@@ -2438,11 +2445,11 @@ export async function readAsks(
           const j = jsons.get(s.rg)
           return j ? (await readGroupVersions(t, j, columns)).filter(keep) : []
         })
-        : await readGroupsCached(t, mine.flatMap(s => { const json = jsons.get(s.rg); return json ? [{ rg: s.rg, json }] : [] }), rows => rows.filter(keep), stop, true)
+        : await readGroupsCached(t, mine.flatMap(s => { const json = jsons.get(s.rg); return json ? [{ rg: s.rg, json }] : [] }), rows => rows.filter(keep), stop, true, pre)
       return per.flat()
     })))
     h.trace?.('groups', now() - t0)
-    return { rows: combineLive(h, got.flat()), groups: spans.length }
+    return { rows: versions ? combineVersions(got.flat()) : combineLive(h, got.flat()), groups: spans.length }
   }
   const jsons = await fetchGroupJson(h, spans.map(s => s.rg))
   h.trace?.('rgjson', now() - t0)
@@ -2452,11 +2459,58 @@ export async function readAsks(
   const perGroup = columns
     ? await mapLimit(spans, GROUP_READS, async s => {
       const j = jsons.get(s.rg)
-      return j ? (await readGroup(h, j, columns)).filter(keep) : []
+      return j ? (await (versions ? readGroupVersions : readGroup)(h, j, columns)).filter(keep) : []
     })
-    : await readGroupsCached(h, spans.flatMap(s => { const json = jsons.get(s.rg); return json ? [{ rg: s.rg, json }] : [] }), rows => rows.filter(keep), stop)
+    : await readGroupsCached(h, spans.flatMap(s => { const json = jsons.get(s.rg); return json ? [{ rg: s.rg, json }] : [] }), rows => rows.filter(keep), stop, versions, pre)
   h.trace?.('groups', now() - t0)
   return { rows: perGroup.flat(), groups: spans.length }
+}
+
+/** Fleet-root owner slices across held scans, with close records combined before
+ * testing each date. One bounded plan/decode, not a separate root read per scan.
+ * Missing slice sorts or uncovered dates are left to the canonical reader. */
+export async function readRootHistoryRows(env: Env, dates: string[], lens?: Lens): Promise<Map<string, Row[]> | null> {
+  const got = await readAsksHistory(slices(env), dates, lens ? 'bysize-user' : 'path', [{ depth: 1, under: '' }], r => r.depth === 1 && (!lens || r.usr === lens.key), { maxGroups: 60, pre: depth => depth === 1, lens })
+  if (!got) return null
+  if (got.versions > 100_000) throw new Error('root history too wide: more than 100000 versions')
+  return got.byDate
+}
+
+/** The scans the interval store holds (none when it is off). */
+export const ivHeldDates = async (env: Env): Promise<string[]> => (intervalsOn(env) ? [...(await ivScans(env)).keys()] : [])
+
+/** The interval store's newest scan ordinal (`vf`/`vt` units); null when it is off or empty. */
+export async function ivHorizon(env: Env): Promise<number | null> {
+  if (!intervalsOn(env)) return null
+  const ords = [...(await ivScans(env)).values()]
+  return ords.length ? Math.max(...ords) : null
+}
+
+/** `asks` on every one of `dates` the interval store holds, from one read of their versions (close records
+ *  combined: `rows`, live over `[vf, vt)` scan ordinals) — not one read per scan — then each date's live rows;
+ *  `hz` is the newest held date's ordinal. `index` is the handle's `<mode>:<gen>`
+ *  identity, the same as a per-date handle's. Null when the store is off or holds none of `dates`. */
+export async function readAsksHistory(
+  env: Env,
+  dates: string[],
+  variant: string,
+  asks: Ask[],
+  keep: (r: Row) => boolean,
+  { fields, maxGroups = 60, pre, lens }: { fields?: (keyof Row)[]; maxGroups?: number; pre?: Pre; lens?: Lens } = {},
+): Promise<{ byDate: Map<string, Row[]>; rows: Row[]; hz: number; versions: number; groups: number; index: string } | null> {
+  if (!intervalsOn(env) || !dates.length) return null
+  const scoped = asOfScans(env, dates)
+  const state = await ivState(scoped)
+  const held = dates.filter(d => state.scans.has(d))
+  if (!held.length) return null
+  const latest = held.reduce((a, b) => state.scans.get(a)! > state.scans.get(b)! ? a : b)
+  const handle = await openInterval(scoped, latest, variant)
+  if (!handle) return null
+  const range: [number, number] = [Math.min(...held.map(d => state.scans.get(d)!)), state.scans.get(latest)!]
+  const history = { ...handle, historyRange: range, runs: handle.runs?.map(r => ({ ...r, historyRange: range })) }
+  const { rows, groups } = await readAsks(history, asks, keep, { versions: true, maxGroups, pre, lens, ...(fields ? { columns: columnsFor(handle, fields) } : {}) })
+  const byDate = new Map(held.map(date => [date, liveAt({ ...handle, asOf: state.scans.get(date)! }, rows)]))
+  return { byDate, rows, hz: range[1], versions: rows.length, groups, index: `${handle.mode}:${'gen' in handle ? handle.gen : ''}` }
 }
 
 /** Raw rows (pre-`toRow` records) for a single `(depth, path)` point lookup —

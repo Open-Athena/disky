@@ -115,6 +115,7 @@ const under = (p: string, root: string): boolean => root === '' || p.startsWith(
 export interface HitReader {
   read(key: string, maxRows?: number): Promise<{ io: Io; fold: FirstHits | null; version?: string; scans?: string[] }>
   snapshot?(): Promise<{ version: string; scans: string[] }>
+  defaultMaxRows?(key: string, baseMaxRows: number): Promise<number>
 }
 
 /** The light source: the literal's suffix range from the shards, folded to its first hits once (per
@@ -139,7 +140,8 @@ export class SuffixHits implements HitSource {
     const p = shared(this.held, vkey, async () => {
       const cached = await this.opts.cache?.get(vkey)
       if (cached) return { hits: cached, io: { from: 'cache', version }, scans: snap?.scans }
-      const { io, fold, version: read = 'base', scans } = await this.names.read(key, this.opts.maxRows ?? MAX_ROWS)
+      const maxRows = this.opts.maxRows ?? await this.names.defaultMaxRows?.(key, MAX_ROWS) ?? MAX_ROWS
+      const { io, fold, version: read = 'base', scans } = await this.names.read(key, maxRows)
       if (!fold) return null
       // A stack cut mid-read (a broken tier) is another version's answer: never cached (or held) under this one.
       if (read === version) await this.opts.cache?.put(vkey, fold.hits)
