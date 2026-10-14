@@ -383,6 +383,11 @@ def discordify(text: str, emoji: dict[str, str]) -> str:
 # ---- templates ------------------------------------------------------------------
 
 
+class PlotUnavailable(Exception):
+    """A template can't draw its plot here (e.g. the site draws it, and there is no site token): fatal to a post,
+    a note in a dry run, whose text needs no image."""
+
+
 class Template(Protocol):
     """A digest style over one deployment's :class:`DigestConfig`.
 
@@ -787,8 +792,8 @@ def post_digest_discord(tpl: Template, root: str, month: dt.date, webhook: str, 
 
 
 def dry_run(tpl: Template, root: str, month: dt.date, variant: str | None = None, plot_dir=None) -> str:
-    """Render the plot (into ``plot_dir``, default the temp dir) and return the
-    OP + every reply (+ the open day's provisional reply, last) as text;
+    """Render the plot (into ``plot_dir``, default the temp dir; skipped with a note when the template can't draw it
+    here, `PlotUnavailable`) and return the OP + every reply (+ the open day's provisional reply, last) as text;
     posts and hosts nothing."""
     import tempfile
 
@@ -797,8 +802,11 @@ def dry_run(tpl: Template, root: str, month: dt.date, variant: str | None = None
     if not data:
         raise SystemExit(f"digest: no scans for {month:%Y-%m}")
     out = Path(plot_dir or tempfile.gettempdir()) / f"{tpl.cfg.slug}-{month:%Y%m}.png"
-    tpl.render_plot(data, month, out, root)
-    _err(f"rendered plot → {out}")
+    try:
+        tpl.render_plot(data, month, out, root)
+        _err(f"rendered plot → {out}")
+    except PlotUnavailable as e:
+        _err(f"plot not rendered: {e}")
     lines = [tpl.op_body(data, month, "<plot-url>"), "", f"--- replies ({variant}: username | body | icon) ---"]
     open_ = tpl.provisional(data, variant) if tpl.cfg.provisional else None
     for u in tpl.units(data, variant) + ([open_] if open_ else []):
