@@ -44,3 +44,14 @@ export function pathText(scheme: string, segs: string[], dir = false): string {
 export function pathCopy(scheme: string, segs: string[], dir = false): string {
   return scheme === 'file:///' ? '/' + segs.join('/') + (dir && segs.length ? '/' : '') : pathUri(scheme, segs, dir)
 }
+
+/** A browser path's segments, each decoded once (`toUrlPath`'s inverse). Old
+ * hand-written URLs can carry a literal `%`; those stay literal names. */
+export function fromUrlPath(path: string): string[] {
+  return path.split('/').filter(Boolean).map(s => {
+    try { return decodeURIComponent(s) } catch { return s }
+  })
+}
+
+/** Each actual dir name encoded, URL delimiters and literal `%` included. */
+export const toUrlPath = (segs: string[]): string => segs.map(encodeURIComponent).join('/')

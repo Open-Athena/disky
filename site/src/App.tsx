@@ -20,7 +20,7 @@ import { ChildrenTable } from './ChildrenTable'
 import { LargestFiles } from './LargestFiles'
 import { FitSelect } from './FitSelect'
 import { PathPopover } from './PathPopover'
-import { pathCopy, pathText } from './pathCrumbs'
+import { fromUrlPath, pathCopy, pathText, toUrlPath } from './pathCrumbs'
 import { listsObjects, openHref } from './objects'
 import { Busy, Skeleton } from './Busy'
 import { useRules } from './rules'
@@ -381,7 +381,7 @@ function AppContent() {
   // and every level of the drilled path gets its own subtree query, grafted
   // in depth order — interactive drills hit each level's cache as they go,
   // and a cold deep link fans the whole chain out in parallel.
-  const graftPath = pathname.slice((store.path === '/' ? '' : store.path).length).split('/').filter(Boolean).join('/')
+  const graftPath = fromUrlPath(pathname.slice((store.path === '/' ? '' : store.path).length)).join('/')
   const canW = canvasWidth(typeof window === 'undefined' ? 1280 : window.innerWidth)
   // Perf-mark keys (`perf.ts`): what tells one load of a widget from another
   // on this page — path, scan(s), canvas width, scope.
@@ -639,7 +639,8 @@ function AppContent() {
   // `/my-bucket/some/dir`, not `/?p=my-bucket/some/dir`. View
   // options stay query params (`?c`, `?mt`, …); the section stays in the `#hash`.
   const storeBase = store.path === '/' ? '' : store.path
-  const drillPath = pathname.slice(storeBase.length).replace(/^\/+/, '')
+  // Decoded once: a dir name with spaces or URL delimiters travels encoded (`toUrlPath`).
+  const drillPath = fromUrlPath(pathname.slice(storeBase.length)).join('/')
   // Per-path created-time strata for `AgeChart`, keyed on the drilled prefix so
   // it follows the drill exactly instead of showing the whole fleet at every
   // depth (specs/done/age-index.md). Root (`drillPath === ''`, depth 0) is the fleet
@@ -697,7 +698,7 @@ function AppContent() {
   const drillTo = (segs: string[]) => {
     const q = new URLSearchParams(search)
     q.delete('open')
-    navigate({ pathname: segs.length ? `${storeBase}/${segs.join('/')}` : store.path, search: q.size ? `?${q}` : '' })
+    navigate({ pathname: segs.length ? `${storeBase}/${toUrlPath(segs)}` : store.path, search: q.size ? `?${q}` : '' })
   }
   // `?open=<name>`: an object under the drilled directory, shown in the leaf
   // viewer below the map (objects.ts `openHref`). Opening pushes history, so

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { isFold, pathCopy, pathCrumbs, pathLead, pathText, pathUri } from './pathCrumbs'
+import { fromUrlPath, isFold, pathCopy, pathCrumbs, pathLead, pathText, pathUri, toUrlPath } from './pathCrumbs'
 import type { Crumb } from './pathCrumbs'
 
 describe('pathCrumbs', () => {
@@ -47,5 +47,16 @@ describe('pathLead / pathText / pathCopy', () => {
     expect(pathCopy('file:///', ['Users', 'ryan', 'c'], true)).toBe('/Users/ryan/c/')
     expect(pathCopy('file:///', [])).toBe('/')
     expect(pathCopy('gs://', ['b', 'x'])).toBe('gs://b/x')
+  })
+})
+
+describe('browser path encoding', () => {
+  it('round-trips a folder with spaces, URL delimiters, Unicode and a literal escape', () => {
+    const segs = ['bk', 'Downloads', '2025 tax returns', '100% #1? café', '%20']
+    expect(toUrlPath(segs)).toBe('bk/Downloads/2025%20tax%20returns/100%25%20%231%3F%20caf%C3%A9/%2520')
+    expect(fromUrlPath('/bk/Downloads/2025%20tax%20returns/100%25%20%231%3F%20caf%C3%A9/%2520')).toEqual(segs)
+  })
+  it('a hand-written literal `%` stays a name; empty segments drop', () => {
+    expect(fromUrlPath('/bucket//100%/')).toEqual(['bucket', '100%'])
   })
 })
