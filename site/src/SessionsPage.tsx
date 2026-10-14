@@ -3,10 +3,14 @@ import { useQuery } from '@tanstack/react-query'
 import { memo, useCallback, useMemo, useRef, useState } from 'react'
 import { Link, useParams, useSearchParams } from 'react-router-dom'
 import type { SessionRow, StoredEvent } from '../functions/_lib/sessionLogShape'
+import { useRegistry } from './identities'
+import { NO_AUTOFILL } from './noAutofill'
+import { useUserEmails } from './owners'
 import { relAgo } from './prefixes'
-import { fmtClock, fmtDuration, fmtOffset, LANES, type Line, ticks, timeline, uaLabel } from './sessionsModel'
+import { fmtClock, fmtDuration, fmtOffset, LANES, type Line, ticks, timeline, uaLabel, viewerOf } from './sessionsModel'
 import { SiteNav } from './SiteNav'
 import { Tooltip } from './Tooltip'
+import { UserChip } from './UserChip'
 import { useDocTitle } from './title'
 
 // /admin/sessions[/:sid] — the session log's viewer (specs/session-log.md),
@@ -50,9 +54,10 @@ function SessionList() {
   return (
     <>
       <h1>Sessions</h1>
-      <p className="dim">What signed-in viewers did while the session log was on: most recently active first. Open one for its timeline.</p>
+      <p className="dim">What signed-in viewers did while the session log was on: most recently active first. Click a session's last-active time for its timeline.</p>
       <div className="sessions-filters">
-        <label>user <input value={email} onChange={e => set('u', e.target.value || null)} placeholder="email contains…" size={22} /></label>
+        {/* Not a sign-in field: `NO_AUTOFILL`, and no "email" in its name or placeholder (password managers offered saved logins here). */}
+        <label>viewer <input type="search" name="session-viewer" value={email} onChange={e => set('u', e.target.value || null)} placeholder="address contains…" size={22} {...NO_AUTOFILL} /></label>
         <label>active since <input type="date" value={since} onChange={e => set('since', e.target.value || null)} /></label>
         <label><input type="checkbox" checked={errors} onChange={e => set('err', e.target.checked ? '1' : null)} /> with errors</label>
       </div>
@@ -60,13 +65,13 @@ function SessionList() {
       <div className="table-scroll">
         <table className="sessions">
           <thead>
-            <tr><th>user</th><th>last active</th><th>started</th><th className="num">duration</th><th className="num">events</th><th className="num">errors</th><th>browser</th><th>build</th></tr>
+            <tr><th>viewer</th><th>last active</th><th>started</th><th className="num">duration</th><th className="num">events</th><th className="num">errors</th><th>browser</th><th>build</th></tr>
           </thead>
           <tbody>
             {(q.data?.sessions ?? []).map(s => (
               <tr key={s.sid} className={s.n_errors ? 'has-err' : ''}>
-                <td><Link to={`/admin/sessions/${s.sid}`}>{s.email ?? <em>anonymous</em>}</Link>{s.via && s.via !== 'session' && <span className="dim"> · {s.via}</span>}</td>
-                <td><Tooltip content={fmtTime(s.last_ms)}><span className="when">{relAgo(s.last_ms / 1000)}</span></Tooltip></td>
+                <td><Who s={s} /></td>
+                <td><Tooltip cell content={<>{fmtTime(s.last_ms)} · open its timeline</>}><Link className="when" to={`/admin/sessions/${s.sid}`}>{relAgo(s.last_ms / 1000)}</Link></Tooltip></td>
                 <td>{fmtTime(s.started_ms)}</td>
                 <td className="num">{fmtDuration(s.last_ms - s.started_ms)}</td>
                 <td className="num">{s.n_events.toLocaleString()}</td>
@@ -81,6 +86,36 @@ function SessionList() {
         </table>
       </div>
     </>
+  )
+}
+
+/** A session's viewer: a `UserChip` when the address maps to a known user (`viewerOf`), else the address; a
+ *  share-link session is tagged as such. The chip's hover card links to the user's page, so the row's link to the
+ *  session's timeline is a separate target (the last-active time). */
+function Who({ s, size }: { s: Pick<SessionRow, 'email' | 'via'>; size?: number }) {
+  const emails = useUserEmails(true)
+  const v = viewerOf(s, emails, useRegistry())
+  const guest = v.kind === 'guest' || ((v.kind === 'user' || v.kind === 'email') && v.guest)
+  return (
+    <span className="session-who">
+      {v.kind === 'user' && <UserChip who={v.id} size={size} extra={<div className="uc-sub">{v.email}</div>} />}
+      {v.kind === 'email' && <span>{v.email}</span>}
+      {v.kind === 'anonymous' && <em>anonymous</em>}
+      {guest && <>{v.kind !== 'guest' && <span className="dim"> · </span>}<GuestTag bare={v.kind === 'guest'} /></>}
+    </span>
+  )
+}
+
+/** A share-link (grant) session. The session log keeps the identity's address and `via`, not the grant's id or
+ *  label, so this can't name or link the specific link: it points at the links table instead. */
+function GuestTag({ bare }: { bare: boolean }) {
+  return (
+    <Tooltip placement="right" content={<>
+      Signed in through a share link{bare ? ' with no bound address' : ''}. The session log doesn't record which link;{' '}
+      <Link to="/admin">the links table</Link> lists them with their activity.
+    </>}>
+      <span className="guest-tag">guest link</span>
+    </Tooltip>
   )
 }
 
@@ -127,7 +162,7 @@ function SessionView({ sid }: { sid: string }) {
   }
   return (
     <>
-      <h1>{s.email ?? 'anonymous'}</h1>
+      <h1><Who s={s} size={28} /></h1>
       <p className="session-meta">
         {fmtTime(s.started_ms)} · {fmtDuration(s.last_ms - s.started_ms)} · {s.n_events.toLocaleString()} events ·{' '}
         {s.n_errors ? <b className="err">{s.n_errors} errors</b> : '0 errors'} · {uaLabel(s.ua)} · build <code>{s.build ?? '—'}</code> · <code className="dim">{s.sid}</code>
@@ -168,7 +203,7 @@ const EventRow = memo(function EventRow({ l, t0, hot, focused, rowRef, onHover }
       <td className="num"><code className="dim">{fmtClock(l.t, t0)}</code></td>
       <td><span className={`lane-dot lane-${l.lane}`} aria-hidden /> {l.k}</td>
       <td className="ev">{l.text}</td>
-      <td>{l.url && <Tooltip content={<>The view as it was at this moment: <code>{l.url}</code></>}><a href={l.url} target="_blank" rel="noreferrer">open view ↗</a></Tooltip>}</td>
+      <td>{l.url && <Tooltip cell content={<>The view as it was at this moment: <code>{l.url}</code></>}><a href={l.url} target="_blank" rel="noreferrer">open view ↗</a></Tooltip>}</td>
     </tr>
   )
 })
