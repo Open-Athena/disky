@@ -24,8 +24,8 @@ listed by immutable manifests:
 - **R2**: each manifest's runs (their liveness markers last), checked there, then the manifest, last (`r2_publish`).
 - **Prune**: the scratch bucket's earlier open-version states, once the scan's is complete and published (`prune_state`);
   and on every store a manifest is published to (GCS, R2, a local or URL store), after the publish, the runs a carry
-  folded, with one revision of grace (`plan_prune`, `prune_folded`): those neither the newest manifest nor the one before
-  it lists, each inside one of the newest's runs; a store's `retain` keeps what later appends read of a folded run.
+  folded (`plan_prune`, `prune_folded`): those listed by no manifest but the newest and the ones superseded less than
+  `GRACE_S` (1 h) ago, each inside one of the newest's runs; a store's `retain` keeps what later appends read of a folded run.
 
 Readers take the greatest manifest key (`manifest_keys`: `<scan id>.json` or `<scan id>.m<NNN>.json`, which sort by scan,
 then revision), so a revision is served as soon as it is written.
@@ -268,6 +268,9 @@ class LocalRunStore:
     def keys(self, prefix: str) -> list[str]:
         return sorted(self.listing(prefix))
 
+    def mtimes(self, prefix: str) -> dict[str, float]:
+        return {k: (self.root / k).stat().st_mtime for k in self.listing(prefix)}
+
     def exists(self, key: str) -> bool:
         return (self.root / key).is_file()
 
@@ -335,6 +338,10 @@ class GcsRunStore:
 
     def keys(self, prefix: str) -> list[str]:
         return sorted(self.listing(prefix))
+
+    def mtimes(self, prefix: str) -> dict[str, float]:
+        blobs = self.client.list_blobs(self.bucket, prefix=f"{self.prefix}/{prefix}")
+        return {x.name.removeprefix(self.prefix + "/"): x.updated.timestamp() for x in blobs}
 
     def exists(self, key: str) -> bool:
         return self.b.blob(f"{self.prefix}/{key}").exists()
@@ -849,26 +856,44 @@ def run_span(key: str) -> tuple[str, str] | None:
     return (first, last) if key.startswith("deltas/") and SCAN_ID.fullmatch(first) and SCAN_ID.fullmatch(last) else None
 
 
-def plan_prune(listing: Collection[str], runs_of: dict[str, Collection[str]], retain: Collection[str] = ()) -> list[str]:
-    """The keys to delete once a manifest is published: the files of every run a carry folded, with one revision of
-    grace. `listing`: the store's generation-relative keys (its `manifests/` and `deltas/` at least); `runs_of`: the run
-    keys each of the newest two manifests among them lists (more are ignored). Of the run dirs under `deltas/`, a file is
-    deleted when its run is
+#: How long a superseded manifest's runs are kept (`plan_prune`): ≫ readers' 5 min cache of the newest manifest, so a
+#: reader holding any manifest it may still serve never 404s, however many manifests land at once (a catch-up, a carry
+#: right after a publish).
+GRACE_S = 3600
+#: The least grace a CLI accepts (twice the readers' 5 min manifest cache).
+MIN_GRACE_S = 600
 
-    - listed by neither the newest manifest M nor the one immediately before it (a reader holding that one, cached,
-      never 404s), and
-    - inside one run M lists (its scan span within that run's): a run some carry folded into it. A dir no manifest lists
-      that isn't, is kept: an append in flight (its scan is past M's), or a merge in flight (its output spans several of
-      M's runs, until its revision lists it);
+
+def grace_manifests(manifests: Collection[tuple[str, float]], now: float, grace_s: float = GRACE_S) -> list[str]:
+    """The manifests whose runs a prune keeps, oldest first, from `(key, mtime)` pairs (generation-relative keys, epoch
+    seconds; non-manifest keys ignored): the newest, and each superseded less than `grace_s` before `now`, its
+    superseded time the next manifest's (in key order: readers' order) write time. `[]` without a manifest."""
+    t = dict(manifests)
+    ms = manifest_keys(t)
+    return [k for k, nxt in zip(ms, ms[1:]) if now - t[nxt] < grace_s] + ms[-1:]
+
+
+def plan_prune(listing: Collection[str], manifests: Collection[tuple[str, float]], runs_of: dict[str, Collection[str]], now: float, *,
+               grace_s: float = GRACE_S, retain: Collection[str] = ()) -> list[str]:
+    """The keys to delete once a manifest is published: the files of every run a carry folded, kept for `grace_s` after
+    the last manifest listing them was superseded. `listing`: the store's generation-relative keys (its `deltas/` at
+    least); `manifests`: its manifests as `(key, mtime)`; `runs_of`: the run keys each manifest `grace_manifests` keeps
+    lists (the newest, and those superseded within the grace: usually 2–3; others are ignored, a missing one raises
+    `KeyError`). Of the run dirs under `deltas/`, a file is deleted when its run is
+
+    - listed by none of those manifests (a reader holding one, cached, never 404s), and
+    - inside one run the newest manifest M lists (its scan span within that run's): a run some carry folded into it. A
+      dir no manifest lists that isn't, is kept: an append in flight (its scan is past M's), or a merge in flight (its
+      output spans several of M's runs, until its revision lists it);
 
     and its run-relative path is not under `retain` (prefixes, or exact names: what later appends still read of a folded
     run, e.g. the static index's `cdelta/`). Never a manifest, nor a file of the base generation (outside `deltas/`).
     Sorted; `[]` without a manifest."""
-    ms = manifest_keys(listing)
-    if not ms:
+    kept = grace_manifests(manifests, now, grace_s)
+    if not kept:
         return []
-    newest = [run_span(k) for k in runs_of[ms[-1]]]
-    keep = {*runs_of[ms[-1]], *(runs_of[ms[-2]] if len(ms) > 1 else ())}
+    newest = [run_span(k) for k in runs_of[kept[-1]]]
+    keep = {r for m in kept for r in runs_of[m]}
     out = []
     for key in sorted(listing):
         run, sep, rel = key.partition("/")[2].partition("/")
@@ -884,24 +909,28 @@ def plan_prune(listing: Collection[str], runs_of: dict[str, Collection[str]], re
 
 
 class PruneTarget(Protocol):
-    """A store `prune_folded` deletes from: `listing(prefix)` (`{key: size}`, generation-relative), `read_json(key)`,
-    `delete(keys)`."""
+    """A store `prune_folded` deletes from: `listing(prefix)` (`{key: size}`, generation-relative), `mtimes(prefix)`
+    (`{key: write time}`, epoch seconds), `read_json(key)`, `delete(keys)`."""
 
     def listing(self, prefix: str) -> dict[str, int]: ...
+    def mtimes(self, prefix: str) -> dict[str, float]: ...
     def read_json(self, key: str) -> dict: ...
     def delete(self, keys: list[str]) -> None: ...
 
 
-def prune_folded(target: PruneTarget, *, retain: Collection[str] = (), dry_run: bool = False, where: str = "",
-                 log: Callable[[str], None] = err) -> dict:
-    """Delete from `target` the runs its own newest manifest's carries folded (`plan_prune`, over its listing and its
-    newest two manifests: a store copied from another, as R2 from GCS, is planned by what its readers read), each run
-    logged with its objects and bytes. Call it after a publish to `target` succeeds. Returns `{manifest, previous, runs:
-    [{key, objects, bytes}], objects, bytes, deleted, keys}` (`deleted` 0 on a `dry_run`)."""
-    listing = {**target.listing("manifests/"), **target.listing("deltas/")}
-    ms = manifest_keys(listing)
-    runs_of = {k: [r["key"] for r in target.read_json(k)["runs"]] for k in ms[-2:]}
-    keys = plan_prune(listing, runs_of, retain)
+def prune_folded(target: PruneTarget, *, now: float | None = None, grace_s: float = GRACE_S, retain: Collection[str] = (),
+                 dry_run: bool = False, where: str = "", log: Callable[[str], None] = err) -> dict:
+    """Delete from `target` the runs its own manifests' carries folded (`plan_prune` over its listing and its manifests'
+    write times, reading only the manifests `grace_manifests` keeps: a store copied from another, as R2 from GCS, is
+    planned by what its readers read), each run logged with its objects and bytes. Call it after a publish to `target`
+    succeeds. `now`: epoch seconds (default the clock). Returns `{manifest, grace, runs: [{key, objects, bytes}], objects,
+    bytes, deleted, keys}` (`grace`: the superseded manifests kept; `deleted` 0 on a `dry_run`)."""
+    now = time.time() if now is None else now
+    manifests = list(target.mtimes("manifests/").items())
+    listing = target.listing("deltas/")
+    kept = grace_manifests(manifests, now, grace_s)
+    runs_of = {k: [r["key"] for r in target.read_json(k)["runs"]] for k in kept}
+    keys = plan_prune(listing, manifests, runs_of, now, grace_s=grace_s, retain=retain)
     runs: dict[str, dict] = {}
     for k in keys:
         r = runs.setdefault("/".join(k.split("/", 2)[:2]), {"objects": 0, "bytes": 0})
@@ -912,10 +941,10 @@ def prune_folded(target: PruneTarget, *, retain: Collection[str] = (), dry_run: 
     for key, r in runs.items():
         log(f"prune{where}: {verb} {key}/ ({r['objects']} objects, {r['bytes']:,} B)")
     log(f"prune{where}: {verb} {len(runs)} folded runs, {len(keys)} objects, {total:,} B"
-        + (f" (newest {ms[-1]}, grace {ms[-2] if len(ms) > 1 else 'none'})" if ms else " (no manifest)"))
+        + (f" (newest {kept[-1]}; superseded within {grace_s:g} s: {', '.join(kept[:-1]) or 'none'})" if kept else " (no manifest)"))
     if keys and not dry_run:
         target.delete(keys)
-    return {"manifest": ms[-1] if ms else None, "previous": ms[-2] if len(ms) > 1 else None,
+    return {"manifest": kept[-1] if kept else None, "grace": kept[:-1],
             "runs": [{"key": k, **r} for k, r in runs.items()], "objects": len(keys), "bytes": total,
             "deleted": 0 if dry_run else len(keys), "keys": keys}
 
@@ -930,6 +959,12 @@ class R2RunStore:
         out = {}
         for page in self.client.get_paginator("list_objects_v2").paginate(Bucket=self.bucket, Prefix=f"{self.root}/{prefix}"):
             out.update({o["Key"].removeprefix(self.root + "/"): int(o["Size"]) for o in page.get("Contents", [])})
+        return out
+
+    def mtimes(self, prefix: str) -> dict[str, float]:
+        out = {}
+        for page in self.client.get_paginator("list_objects_v2").paginate(Bucket=self.bucket, Prefix=f"{self.root}/{prefix}"):
+            out.update({o["Key"].removeprefix(self.root + "/"): o["LastModified"].timestamp() for o in page.get("Contents", [])})
         return out
 
     def read_json(self, key: str) -> dict:

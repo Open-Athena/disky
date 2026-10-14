@@ -4,7 +4,9 @@ manifest when the check fails), the Batch poll's cap, `exit_on`'s exit codes, an
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import dataclass
+from datetime import datetime, timezone
 
 import pytest
 
@@ -154,7 +156,8 @@ def _listing(runs: list[str], manifests: dict[str, list[str]]) -> dict[str, int]
     return {**{k: 5 for k in BASE}, **{f"{r}/{f}": i + 1 for r in runs for i, f in enumerate(RUN_FILES)}, **{m: 9 for m in manifests}}
 
 
-#: The binary counter over four scans, a carry after the 2nd and the 4th: each manifest's runs.
+
+#: The binary counter over five scans, a carry after the 2nd and the 4th: each manifest's runs.
 CHAIN = {
     f"{S1}.json": [_run(S1)],
     f"{S2}.json": [_run(S1), _run(S2)],
@@ -162,8 +165,11 @@ CHAIN = {
     f"{S3_}.json": [_run(S1, S2), _run(S3_)],
     f"{S4}.json": [_run(S1, S2), _run(S3_), _run(S4)],
     f"{S4}.m001.json": [_run(S1, S4)],
+    f"{S5}.json": [_run(S1, S4), _run(S5)],
 }
-ALL_RUNS = [_run(S1), _run(S2), _run(S1, S2), _run(S3_), _run(S4), _run(S1, S4)]
+ALL_RUNS = [_run(S1), _run(S2), _run(S1, S2), _run(S3_), _run(S4), _run(S1, S4), _run(S5)]
+#: Now, and a day.
+T, DAY = 1_800_000_000, 86_400
 
 
 def _upto(last: str) -> dict[str, list[str]]:
@@ -172,32 +178,54 @@ def _upto(last: str) -> dict[str, list[str]]:
     return {f"manifests/{m}": CHAIN[m] for m in names[:names.index(last) + 1]}
 
 
+def _times(m: dict[str, list[str]], recent: dict[str, float] | None = None) -> list[tuple[str, float]]:
+    """`(key, mtime)` of manifests `m`: a day apart, the last a day before `T`, but those `recent` names (`<name>.json`)
+    at the times it gives."""
+    recent = recent or {}
+    return [(k, recent.get(k.removeprefix("manifests/"), T - (len(m) - i) * DAY)) for i, k in enumerate(m)]
+
+
 def _files(*runs: str, files: tuple[str, ...] = RUN_FILES) -> list[str]:
     return sorted(f"{r}/{f}" for r in runs for f in files)
 
 
-def test_plan_prune_keeps_one_revision_of_grace():
-    """Right after a carry's revision, the runs it folded are still listed by the manifest before it: kept. Once the next
-    manifest lands, they go; the revision's own run, and the runs the newest lists, stay."""
-    m = _upto(f"{S2}.m001.json")
-    runs = [_run(S1), _run(S2), _run(S1, S2)]
-    assert ar.plan_prune(_listing(runs, m), m) == []
-    m = _upto(f"{S3_}.json")
-    runs = [*runs, _run(S3_)]
-    assert ar.plan_prune(_listing(runs, m), m) == _files(_run(S1), _run(S2))
-    m = _upto(f"{S4}.m001.json")
-    # `S1`, `S2` folded two revisions back (a store not pruned meanwhile): gone; `S1_S2`, `S3`, `S4` the grace manifest's
-    assert ar.plan_prune(_listing(ALL_RUNS, m), m) == _files(_run(S1), _run(S2))
+#: A catch-up: three manifests within a minute (`S4`'s, the carry's revision of it, `S5`'s), the rest days old.
+CATCH_UP = {f"{S4}.json": T, f"{S4}.m001.json": T + 20, f"{S5}.json": T + 40}
 
 
-def test_plan_prune_reads_only_the_newest_two_manifests():
-    """Older manifests' runs are irrelevant: passing only the newest two plans the same; missing one of them raises."""
-    m = _upto(f"{S4}.json")
-    newest = {k: m[k] for k in list(m)[-2:]}
-    listing = _listing(ALL_RUNS[:5], m)
-    assert ar.plan_prune(listing, newest) == ar.plan_prune(listing, m) == _files(_run(S1), _run(S2))
+def test_a_catch_up_within_a_minute_prunes_nothing_they_list():
+    """A minute after a catch-up of three manifests, every manifest superseded within the grace is kept (`S3`'s too:
+    superseded by `S4`'s, a minute ago), so a reader holding any of them never 404s: only `S1`, `S2` go, folded by `S2`'s
+    revision days ago. (One revision of grace would have kept only `S4.m001` and `S5`, deleting `S1_S2`, `S3` and `S4`,
+    which a reader holding `S4`'s manifest, cached 40 s ago, still reads.)"""
+    m = _upto(f"{S5}.json")
+    times = _times(m, CATCH_UP)
+    assert ar.grace_manifests(times, T + 60) == [f"manifests/{x}" for x in (f"{S3_}.json", f"{S4}.json", f"{S4}.m001.json", f"{S5}.json")]
+    assert ar.plan_prune(_listing(ALL_RUNS, m), times, m, T + 60) == _files(_run(S1), _run(S2))
+
+
+def test_past_the_grace_the_folded_runs_go():
+    """The same manifests, `now` past the grace window: only the newest is kept, and every run folded into its runs goes.
+    A manifest is kept while its successor's write time is less than `grace_s` before `now`."""
+    m = _upto(f"{S5}.json")
+    times = _times(m, CATCH_UP)
+    assert ar.grace_manifests(times, T + 40 + ar.GRACE_S - 1) == [f"manifests/{S4}.m001.json", f"manifests/{S5}.json"]
+    assert ar.grace_manifests(times, T + 40 + ar.GRACE_S) == [f"manifests/{S5}.json"]
+    assert ar.plan_prune(_listing(ALL_RUNS, m), times, m, T + 40 + ar.GRACE_S) == _files(_run(S1), _run(S2), _run(S1, S2), _run(S3_), _run(S4))
+    # a shorter grace: past it sooner
+    assert ar.plan_prune(_listing(ALL_RUNS, m), times, m, T + 40 + 600, grace_s=600) == _files(_run(S1), _run(S2), _run(S1, S2), _run(S3_), _run(S4))
+
+
+def test_plan_prune_reads_only_the_manifests_in_the_window():
+    """Runs of manifests outside the window are irrelevant: passing only those `grace_manifests` keeps plans the same; one
+    of those missing raises."""
+    m = _upto(f"{S5}.json")
+    times = _times(m, CATCH_UP)
+    kept = ar.grace_manifests(times, T + 60)
+    listing = _listing(ALL_RUNS, m)
+    assert ar.plan_prune(listing, times, {k: m[k] for k in kept}, T + 60) == ar.plan_prune(listing, times, m, T + 60) == _files(_run(S1), _run(S2))
     with pytest.raises(KeyError):
-        ar.plan_prune(listing, {k: m[k] for k in list(m)[-1:]})
+        ar.plan_prune(listing, times, {k: m[k] for k in kept[1:]}, T + 60)
 
 
 def test_plan_prune_keeps_runs_in_flight():
@@ -206,10 +234,10 @@ def test_plan_prune_keeps_runs_in_flight():
     newest's runs that no manifest lists (a superseded merge's output: `S3_S4` under `S1_S4`) is garbage: deleted."""
     m = _upto(f"{S4}.json")
     runs = [_run(S1, S2), _run(S3_), _run(S4), _run(S3_, S4), _run(S5)]
-    assert ar.plan_prune(_listing(runs, m), m) == []
+    assert ar.plan_prune(_listing(runs, m), _times(m), m, T) == []
     m = _upto(f"{S4}.m001.json")
     runs = [_run(S1, S2), _run(S3_), _run(S4), _run(S1, S4), _run(S3_, S4), _run(S5)]
-    assert ar.plan_prune(_listing(runs, m), m) == _files(_run(S3_, S4))
+    assert ar.plan_prune(_listing(runs, m), _times(m), m, T) == _files(_run(S1, S2), _run(S3_), _run(S4), _run(S3_, S4))
 
 
 def test_plan_prune_never_deletes_the_base_manifests_or_retained_files():
@@ -219,50 +247,54 @@ def test_plan_prune_never_deletes_the_base_manifests_or_retained_files():
     m = _upto(f"{S3_}.json")
     runs = [_run(S1), _run(S2), _run(S1, S2), _run(S3_)]
     listing = {**_listing(runs, m), "deltas/README": 1, "deltas/tmp/x.parquet": 1}
-    assert ar.plan_prune(listing, m, retain=("cdelta/", "scans.json")) == _files(_run(S1), _run(S2), files=("served/path.parquet",))
+    assert ar.plan_prune(listing, _times(m), m, T, retain=("cdelta/", "scans.json")) == _files(_run(S1), _run(S2), files=("served/path.parquet",))
     # neither a prefix (no trailing `/`) nor a whole name: retains nothing
-    assert ar.plan_prune(listing, m, retain=("cdelta", "scans")) == _files(_run(S1), _run(S2))
-    assert ar.plan_prune({k: 1 for k in BASE}, {}) == []
+    assert ar.plan_prune(listing, _times(m), m, T, retain=("cdelta", "scans")) == _files(_run(S1), _run(S2))
+    assert ar.plan_prune({k: 1 for k in BASE}, [], {}, T) == []
 
 
-def _write_store(root, listing: dict[str, int], manifests: dict[str, list[str]]) -> None:
+def _write_store(root, listing: dict[str, int], manifests: dict[str, list[str]], times: list[tuple[str, float]]) -> None:
     for k, n in listing.items():
         p = root / k
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(json.dumps({"runs": [{"key": r} for r in manifests[k]]}) if k in manifests else "x" * n)
+    for k, t in times:
+        os.utime(root / k, (t, t))
 
 
 def test_prune_folded_deletes_with_bytes_logged(tmp_path):
-    """Over a local store: the plan's files deleted (emptied dirs too), each run logged with its objects and bytes; a dry
-    run logs the same and deletes nothing; a second prune finds nothing."""
+    """Over a local store, its manifests' mtimes the write times: the plan's files deleted (emptied dirs too), each run
+    logged with its objects and bytes; a dry run logs the same and deletes nothing; a second prune finds nothing."""
     m = _upto(f"{S3_}.json")
-    _write_store(tmp_path, _listing([_run(S1), _run(S2), _run(S1, S2), _run(S3_)], m), m)
+    times = _times(m, {f"{S3_}.json": T - 10})  # `S2`'s revision superseded 10 s ago: in the grace
+    _write_store(tmp_path, _listing([_run(S1), _run(S2), _run(S1, S2), _run(S3_)], m), m, times)
     store = ar.LocalRunStore(tmp_path, tmp_path / "scratch")
+    assert sorted(store.mtimes("manifests/").items()) == sorted(times)
     before = sorted(store.listing(""))
     logs = []
-    doc = ar.prune_folded(store, retain=("cdelta/",), dry_run=True, log=logs.append)
+    doc = ar.prune_folded(store, now=T, retain=("cdelta/",), dry_run=True, log=logs.append)
     keys = _files(_run(S1), _run(S2), files=("served/path.parquet", "scans.json"))
-    assert doc == {"manifest": f"manifests/{S3_}.json", "previous": f"manifests/{S2}.m001.json",
+    assert doc == {"manifest": f"manifests/{S3_}.json", "grace": [f"manifests/{S2}.m001.json"],
                    "runs": [{"key": _run(S1), "objects": 2, "bytes": 4}, {"key": _run(S2), "objects": 2, "bytes": 4}],
                    "objects": 4, "bytes": 8, "deleted": 0, "keys": keys}
-    grace = f"(newest manifests/{S3_}.json, grace manifests/{S2}.m001.json)"
+    kept = f"(newest manifests/{S3_}.json; superseded within 3600 s: manifests/{S2}.m001.json)"
     assert logs == [f"prune: would delete deltas/{S1}/ (2 objects, 4 B)", f"prune: would delete deltas/{S2}/ (2 objects, 4 B)",
-                    f"prune: would delete 2 folded runs, 4 objects, 8 B {grace}"]
+                    f"prune: would delete 2 folded runs, 4 objects, 8 B {kept}"]
     assert sorted(store.listing("")) == before
     logs.clear()
-    doc = ar.prune_folded(store, retain=("cdelta/",), where=" gcs", log=logs.append)
-    assert (doc["deleted"], logs[-1]) == (4, f"prune gcs: deleting 2 folded runs, 4 objects, 8 B {grace}")
+    doc = ar.prune_folded(store, now=T, retain=("cdelta/",), where=" gcs", log=logs.append)
+    assert (doc["deleted"], logs[-1]) == (4, f"prune gcs: deleting 2 folded runs, 4 objects, 8 B {kept}")
     assert sorted(store.listing("")) == sorted(set(before) - set(keys))
     assert sorted(p.relative_to(tmp_path).as_posix() for p in (tmp_path / "deltas" / S1).rglob("*")) == [
         f"deltas/{S1}/cdelta", f"deltas/{S1}/cdelta/r0000.parquet"]
-    assert ar.prune_folded(store, retain=("cdelta/",), log=logs.append)["deleted"] == 0
+    assert ar.prune_folded(store, now=T, retain=("cdelta/",), log=logs.append)["deleted"] == 0
 
 
 class R2Fake:
-    """A boto3 S3 client over `objects` (`{key: bytes}`): `list_objects_v2` in pages of `page` keys, `get_object`, and
-    `delete_objects` (each batch recorded)."""
+    """A boto3 S3 client over `objects` (`{key: (bytes, mtime)}`): `list_objects_v2` in pages of `page` keys,
+    `get_object`, and `delete_objects` (each batch recorded)."""
 
-    def __init__(self, objects: dict[str, bytes], page: int = 2):
+    def __init__(self, objects: dict[str, tuple[bytes, float]], page: int = 2):
         self.objects, self.page, self.batches = dict(objects), page, []
 
     def get_paginator(self, name: str):
@@ -272,12 +304,13 @@ class R2Fake:
             def paginate(self, Bucket, Prefix):
                 keys = sorted(k for k in fake.objects if k.startswith(Prefix))
                 for i in range(0, len(keys), fake.page):
-                    yield {"Contents": [{"Key": k, "Size": len(fake.objects[k])} for k in keys[i:i + fake.page]]}
+                    yield {"Contents": [{"Key": k, "Size": len(fake.objects[k][0]),
+                                         "LastModified": datetime.fromtimestamp(fake.objects[k][1], timezone.utc)} for k in keys[i:i + fake.page]]}
         assert name == "list_objects_v2"
         return Pages()
 
     def get_object(self, Bucket, Key):
-        body = self.objects[Key]
+        body = self.objects[Key][0]
         return {"Body": type("Body", (), {"read": lambda s: body})()}
 
     def delete_objects(self, Bucket, Delete):
@@ -288,13 +321,14 @@ class R2Fake:
 
 
 def test_prune_folded_on_r2_plans_by_r2s_own_manifests():
-    """R2 is planned by its own manifests, which may lag GCS's: here R2's newest is `S4`'s own (GCS's revision, folding
-    `S1_S2`, `S3`, `S4`, not copied yet), so only what that one's predecessor folded goes."""
+    """R2 is planned by its own manifests and their `LastModified`, which may lag GCS's: here R2's newest is `S4`'s own
+    (GCS's revision, folding `S1_S2`, `S3`, `S4`, not copied yet), so only what `S2`'s revision folded goes."""
     m = _upto(f"{S4}.json")
-    r2 = R2Fake({f"{ROOT}/{k}": (json.dumps({"runs": [{"key": r} for r in m[k]]}).encode() if k in m else b"x" * n)
+    times = dict(_times(m))
+    r2 = R2Fake({f"{ROOT}/{k}": ((json.dumps({"runs": [{"key": r} for r in m[k]]}).encode(), times[k]) if k in m else (b"x" * n, T - DAY))
                  for k, n in _listing(ALL_RUNS[:5], m).items()})
     store = ar.R2RunStore(r2, "r2b", ROOT)
-    doc = ar.prune_folded(store, log=lambda s: None)
+    doc = ar.prune_folded(store, now=T, log=lambda s: None)
     assert (doc["keys"], r2.batches) == (_files(_run(S1), _run(S2)), [[f"{ROOT}/{k}" for k in _files(_run(S1), _run(S2))]])
     assert sorted(store.listing("deltas/")) == _files(_run(S1, S2), _run(S3_), _run(S4))
 

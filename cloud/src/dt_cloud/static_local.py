@@ -21,8 +21,8 @@ anchored terms on a generation without `anchors/meta.json`.
 
 With a URL store, the generation's files are mirrored into the work dir first; afterwards the new files go up, every
 run's files before its liveness markers (`meta.json`s), and the manifests last, so no reader sees a manifest whose runs
-are incomplete. Then the runs a carry folded are deleted from the store (`append_runner.prune_folded`: those neither the
-newest manifest nor the one before it lists; a folded run keeps its `cdelta/` and `scans.json`, which later appends refold).
+are incomplete. Then the runs a carry folded are deleted from the store (`append_runner.prune_folded`: those listed by no
+manifest but the newest and those superseded less than `-G` s ago, 1 h by default; a folded run keeps its `cdelta/` and `scans.json`, which later appends refold).
 """
 from __future__ import annotations
 
@@ -32,6 +32,7 @@ import shutil
 import sys
 import tempfile
 import threading
+import time
 from contextlib import contextmanager
 from pathlib import Path
 from time import monotonic
@@ -44,7 +45,7 @@ from . import static_catalog as sc
 from . import static_drill as sd
 from . import static_names as sn
 from . import static_roots as sr
-from .append_runner import COMPACT_LEVEL, LocalRunStore, latest_key, prune_folded, rm_local, run_key, scans_of
+from .append_runner import COMPACT_LEVEL, GRACE_S, MIN_GRACE_S, LocalRunStore, latest_key, prune_folded, rm_local, run_key, scans_of
 from .hex_runs import parse_rule, rule_json
 from .static_merge import FOLDED_RETAIN
 from .static_names import PREFIX, err, q
@@ -144,6 +145,21 @@ class Store:
             dst.parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(src, dst)
 
+    def mtimes(self, prefix: str) -> dict[str, float]:
+        """`{key: write time}` (epoch s) under `prefix`; a URL store's from its listing (`blobfs`'s reading of the
+        driver's `mtime` / `LastModified` / `created`). Raises when the driver reports none: a prune must not read a
+        manifest as superseded long ago."""
+        if not self.url:
+            d = Path(self.root) / prefix
+            return {p.relative_to(self.root).as_posix(): p.stat().st_mtime for p in sorted(d.rglob("*")) if p.is_file()} if d.is_dir() else {}
+        from disk_tree.blobfs import _info_mtime
+
+        found = self.fs.find(f"{self.base}/{prefix}", detail=True)
+        out = {k[len(self.base) + 1:]: _info_mtime(v) for k, v in sorted(found.items()) if v.get("type", "file") == "file"}
+        if bad := [k for k, t in out.items() if not t]:
+            raise RuntimeError(f"{self.root}: no write time for {bad[0]} (and {len(bad) - 1} more)")
+        return out
+
     def read_json(self, key: str) -> dict:
         return json.loads(self.fs.cat_file(f"{self.base}/{key}") if self.url else (Path(self.root) / key).read_text())
 
@@ -164,6 +180,9 @@ class GenStore:
 
     def listing(self, prefix: str) -> dict[str, int]:
         return {k[len(self.prefix) + 1:]: n for k, n in self.store.listing(f"{self.prefix}/{prefix}".rstrip("/")).items()}
+
+    def mtimes(self, prefix: str) -> dict[str, float]:
+        return {k[len(self.prefix) + 1:]: t for k, t in self.store.mtimes(f"{self.prefix}/{prefix}".rstrip("/")).items()}
 
     def read_json(self, key: str) -> dict:
         return self.store.read_json(f"{self.prefix}/{key}")
@@ -441,6 +460,11 @@ def merge_due(gen_dir: Path, work: Path, *, gen: str, rule, compact_level: int |
     return merge_pending(store, gen_dir, tmp=work / "merge", rule=rule, max_level=compact_level, heartbeat_s=None)
 
 
+def now() -> float:
+    """The prune's clock (tests move it past the grace)."""
+    return time.time()
+
+
 # ── CLI ────────────────────────────────────────────────────────────────────
 
 
@@ -503,6 +527,7 @@ def build_cmd(floor, gen, k, K, layouts, mem, shard_rows, store_root, threads, R
 @command("add")
 @option("-C", "--compact-level", default=COMPACT_LEVEL, type=IntRange(min=1), help="The binary counter's compaction level (carries stop below it)")
 @option("-g", "--gen", required=True, help="The base generation (`<store>/static-names/GEN/`)")
+@option("-G", "--grace-s", default=GRACE_S, type=IntRange(min=MIN_GRACE_S), help=f"Keep a superseded manifest's runs this many seconds (default {GRACE_S}, at least {MIN_GRACE_S})")
 @option("-L", "--layout", "layouts", multiple=True, required=True, help="Key template of the scans' `path` sorts under -s; repeat")
 @option("-M", "--mem", default="4GB", help="DuckDB memory limit")
 @option("-n", "--prune-dry-run", is_flag=True, help="Report the folded runs the prune would delete from the store; delete nothing")
@@ -512,11 +537,11 @@ def build_cmd(floor, gen, k, K, layouts, mem, shard_rows, store_root, threads, R
 @option("-s", "--scans", "scans_root", required=True, help="Where the scans are: a dir or URL, the root of -L's keys")
 @option("-t", "--through", help="Last scan id to append (inclusive; default: the newest)")
 @option("-w", "--work", help="Local work dir (default: a temporary one, removed after); a URL store's generation is mirrored into it")
-def add_cmd(compact_level, gen, layouts, mem, prune_dry_run, no_merge, store_root, threads, scans_root, through, work) -> None:
+def add_cmd(compact_level, gen, grace_s, layouts, mem, prune_dry_run, no_merge, store_root, threads, scans_root, through, work) -> None:
     """Append every scan after the generation's newest (base + runs), oldest first, each as a run published by its
     manifest; then the binary counter's due carries. The generation's files are never rewritten; new ones go to the store
     data first, `meta.json`s next, manifests last. Then, the publish done, the runs a carry folded are deleted from the
-    store, one revision of grace kept (`append_runner.prune_folded`; a folded run's `cdelta/` and `scans.json` stay: later
+    store, kept while a manifest superseded less than `-G` s ago lists them (`append_runner.prune_folded`; a folded run's `cdelta/` and `scans.json` stay: later
     appends refold them). Prints a JSON summary."""
     _check_gen(gen)
     store = Store(store_root)
@@ -538,7 +563,7 @@ def add_cmd(compact_level, gen, layouts, mem, prune_dry_run, no_merge, store_roo
                  for s in pending]
         merged = None if no_merge or not pending else merge_due(gen_dir, w, gen=gen, rule=rule, compact_level=compact_level)
         uploaded = upload_new(store, gen_dir, prefix, before)
-        prune = prune_folded(GenStore(store, prefix), retain=FOLDED_RETAIN, dry_run=prune_dry_run, log=err)
+        prune = prune_folded(GenStore(store, prefix), now=now(), grace_s=grace_s, retain=FOLDED_RETAIN, dry_run=prune_dry_run, log=err)
         if not prune_dry_run:
             rm_local(gen_dir, prune["keys"])  # the mirror too: a later `add` over this work dir must not upload them again
     print(json.dumps({"gen": gen, "after": have[-1], "added": added, "merge": merged, "files": len(uploaded),

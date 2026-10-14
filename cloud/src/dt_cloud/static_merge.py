@@ -2,8 +2,8 @@
 merged-run build plugged into the shared runner's carries (`append_runner`: `plan_carries`, `merge_pending`,
 `publish_revision`, the lease, revision manifests `manifests/<id>.m<NNN>.json`).
 
-Once a revision is published, the runs it folded are deleted (`append_runner.prune_folded`, one revision of grace: a run
-neither the newest manifest nor the one before it lists): on GCS by the merge job (`carry`) and the chain's prune stage,
+Once a revision is published, the runs it folded are deleted (`append_runner.prune_folded`: a run listed by
+no manifest but the newest and those superseded less than `GRACE_S`, 1 h, ago): on GCS by the merge job (`carry`) and the chain's prune stage,
 each folded run keeping `FOLDED_RETAIN` (what later appends refold), and on R2 by the R2 job (`prune -r`), after the
 manifest's copy.
 
@@ -301,16 +301,17 @@ def _summary(doc: dict) -> dict:
 @cli.command("prune")
 @option("-b", "--bucket", default=data_bucket, help="Data bucket")
 @option("-g", "--gen", required=True, help="Base generation")
+@option("-G", "--grace-s", default=ar.GRACE_S, type=IntRange(min=ar.MIN_GRACE_S), help=f"Keep a superseded manifest's runs this many seconds (default {ar.GRACE_S}, at least {ar.MIN_GRACE_S})")
 @option("-n", "--dry-run", is_flag=True, help="Report what would be deleted; delete nothing")
 @option("-r", "--r2", is_flag=True, help="Prune the R2 copy (`R2_ENDPOINT`, `R2_BUCKET`, keys from the env), planned by R2's own manifests; default: GCS")
-def prune_cmd(bucket, gen, dry_run, r2) -> None:
-    """Delete the runs a carry folded (`append_runner.prune_folded`): every run dir neither the newest manifest nor the one
-    before it lists, inside one of the newest's runs. On GCS a folded run keeps `FOLDED_RETAIN` (later appends read it);
+def prune_cmd(bucket, gen, grace_s, dry_run, r2) -> None:
+    """Delete the runs a carry folded (`append_runner.prune_folded`): every run dir listed by no manifest but the newest
+    and those superseded less than `-G` s ago, inside one of the newest's runs. On GCS a folded run keeps `FOLDED_RETAIN` (later appends read it);
     on R2, nothing. Run after a publish to that store (the merge job and the R2 job do)."""
     if r2:
-        doc = ar.prune_folded(ar.r2_run_store(f"{PREFIX}/{gen}"), dry_run=dry_run, where=" r2")
+        doc = ar.prune_folded(ar.r2_run_store(f"{PREFIX}/{gen}"), grace_s=grace_s, dry_run=dry_run, where=" r2")
     else:
-        doc = ar.prune_folded(gcs_store(bucket, None, gen), retain=FOLDED_RETAIN, dry_run=dry_run, where=" gcs")
+        doc = ar.prune_folded(gcs_store(bucket, None, gen), grace_s=grace_s, retain=FOLDED_RETAIN, dry_run=dry_run, where=" gcs")
     print(json.dumps({"gen": gen, "store": "r2" if r2 else "gcs", **_summary(doc)}, indent=1))
 
 
