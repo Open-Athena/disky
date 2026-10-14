@@ -46,4 +46,5 @@ COPY cloud/src ./cloud/src
 RUN uv sync --frozen --no-dev --no-editable --package dt-cloud --extra plot
 COPY --from=site /repo/site/dist ./dist
 COPY job ./job
-ENTRYPOINT ["bash", "job/run.sh"]
+# `supervise` records a platform-terminated or OOM-killed run as failed (specs/scan-job-wrapper.md).
+ENTRYPOINT ["dt-cloud", "scan-run", "supervise", "--", "bash", "job/run.sh"]

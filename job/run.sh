@@ -125,6 +125,11 @@ wall() { echo "$(( $(date +%s) - DT_JOB_START ))s"; }
 SR_ERR=""
 scan_err() { SR_ERR="exit $1: $3 (run.sh:$2)"; }
 trap 'scan_err $? $LINENO "$BASH_COMMAND"' ERR
+# A platform stop (Batch preemption / cancel) exits now, not after the foreground
+# child: `scan-run supervise` (the image's entrypoint) forwards it to the group and
+# records the run failed (specs/scan-job-wrapper.md, the entrypoint).
+trap 'exit 143' TERM
+trap 'exit 130' INT
 
 cd /app
 
