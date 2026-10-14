@@ -21,7 +21,8 @@ anchored terms on a generation without `anchors/meta.json`.
 
 With a URL store, the generation's files are mirrored into the work dir first; afterwards the new files go up, every
 run's files before its liveness markers (`meta.json`s), and the manifests last, so no reader sees a manifest whose runs
-are incomplete.
+are incomplete. Then the runs a carry folded are deleted from the store (`append_runner.prune_folded`: those neither the
+newest manifest nor the one before it lists; a folded run keeps its `cdelta/` and `scans.json`, which later appends refold).
 """
 from __future__ import annotations
 
@@ -43,8 +44,9 @@ from . import static_catalog as sc
 from . import static_drill as sd
 from . import static_names as sn
 from . import static_roots as sr
-from .append_runner import COMPACT_LEVEL, LocalRunStore, latest_key, run_key, scans_of
+from .append_runner import COMPACT_LEVEL, LocalRunStore, latest_key, prune_folded, rm_local, run_key, scans_of
 from .hex_runs import parse_rule, rule_json
+from .static_merge import FOLDED_RETAIN
 from .static_names import PREFIX, err, q
 
 #: Ranges, shard rows: one machine, so a few ranges (DuckDB parallelizes within each) and the staged path's shard size.
@@ -141,6 +143,33 @@ class Store:
             dst = Path(self.root) / key
             dst.parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(src, dst)
+
+    def read_json(self, key: str) -> dict:
+        return json.loads(self.fs.cat_file(f"{self.base}/{key}") if self.url else (Path(self.root) / key).read_text())
+
+    def delete(self, keys: list[str]) -> None:
+        if self.url:
+            if keys:
+                self.fs.rm([f"{self.base}/{k}" for k in keys])
+        else:
+            rm_local(Path(self.root), keys)
+
+
+class GenStore:
+    """A generation of `store` (`prefix`, e.g. `static-names/<gen>`) as an `append_runner.PruneTarget`: its keys relative
+    to the generation."""
+
+    def __init__(self, store: Store, prefix: str):
+        self.store, self.prefix = store, prefix
+
+    def listing(self, prefix: str) -> dict[str, int]:
+        return {k[len(self.prefix) + 1:]: n for k, n in self.store.listing(f"{self.prefix}/{prefix}".rstrip("/")).items()}
+
+    def read_json(self, key: str) -> dict:
+        return self.store.read_json(f"{self.prefix}/{key}")
+
+    def delete(self, keys: list[str]) -> None:
+        self.store.delete([f"{self.prefix}/{k}" for k in keys])
 
 
 def publish_order(keys: list[str]) -> list[str]:
@@ -476,16 +505,19 @@ def build_cmd(floor, gen, k, K, layouts, mem, shard_rows, store_root, threads, R
 @option("-g", "--gen", required=True, help="The base generation (`<store>/static-names/GEN/`)")
 @option("-L", "--layout", "layouts", multiple=True, required=True, help="Key template of the scans' `path` sorts under -s; repeat")
 @option("-M", "--mem", default="4GB", help="DuckDB memory limit")
+@option("-n", "--prune-dry-run", is_flag=True, help="Report the folded runs the prune would delete from the store; delete nothing")
 @option("-N", "--no-merge", is_flag=True, help="Skip the due carries (a later `add` merges them)")
 @option("-o", "--out", "store_root", required=True, help="The store: a dir or URL, the readers' INDEX_R2 root")
 @option("-p", "--threads", default=4, type=IntRange(min=1), help="DuckDB threads")
 @option("-s", "--scans", "scans_root", required=True, help="Where the scans are: a dir or URL, the root of -L's keys")
 @option("-t", "--through", help="Last scan id to append (inclusive; default: the newest)")
 @option("-w", "--work", help="Local work dir (default: a temporary one, removed after); a URL store's generation is mirrored into it")
-def add_cmd(compact_level, gen, layouts, mem, no_merge, store_root, threads, scans_root, through, work) -> None:
+def add_cmd(compact_level, gen, layouts, mem, prune_dry_run, no_merge, store_root, threads, scans_root, through, work) -> None:
     """Append every scan after the generation's newest (base + runs), oldest first, each as a run published by its
     manifest; then the binary counter's due carries. The generation's files are never rewritten; new ones go to the store
-    data first, `meta.json`s next, manifests last. Prints a JSON summary."""
+    data first, `meta.json`s next, manifests last. Then, the publish done, the runs a carry folded are deleted from the
+    store, one revision of grace kept (`append_runner.prune_folded`; a folded run's `cdelta/` and `scans.json` stay: later
+    appends refold them). Prints a JSON summary."""
     _check_gen(gen)
     store = Store(store_root)
     prefix = f"{PREFIX}/{gen}"
@@ -506,4 +538,8 @@ def add_cmd(compact_level, gen, layouts, mem, no_merge, store_root, threads, sca
                  for s in pending]
         merged = None if no_merge or not pending else merge_due(gen_dir, w, gen=gen, rule=rule, compact_level=compact_level)
         uploaded = upload_new(store, gen_dir, prefix, before)
-    print(json.dumps({"gen": gen, "after": have[-1], "added": added, "merge": merged, "files": len(uploaded)}, indent=1))
+        prune = prune_folded(GenStore(store, prefix), retain=FOLDED_RETAIN, dry_run=prune_dry_run, log=err)
+        if not prune_dry_run:
+            rm_local(gen_dir, prune["keys"])  # the mirror too: a later `add` over this work dir must not upload them again
+    print(json.dumps({"gen": gen, "after": have[-1], "added": added, "merge": merged, "files": len(uploaded),
+                      "prune": {k: v for k, v in prune.items() if k != "keys"}}, indent=1))

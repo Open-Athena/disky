@@ -736,10 +736,11 @@ def test_the_chain_appends_strictly_in_scan_id_order():
     assert f.manifests() == ["manifests/2026-08-04.json", "manifests/2026-08-04T1236.json", "manifests/2026-08-04T1236.m001.json"]
     assert [f.stack(n.removeprefix("manifests/")) for n in f.manifests()] == [
         _stack(_l0("2026-08-04")), _stack(_l0("2026-08-04", "2026-08-04T1236")), [("deltas/2026-08-04_2026-08-04T1236", 1)]]
-    # Done: a rerun only re-copies and prunes, then copies the revision the detached merge published.
+    # Done: a rerun only re-copies the newest manifest (the revision the detached merge published: the scan's own lists runs
+    # it folded, which a prune may have deleted) and prunes; the merge stage doesn't copy it again.
     f.jobs.clear()
     assert f.runner().run("2026-08-04T1236") == []
-    assert f.calls() == [_r2("2026-08-04T1236"), _r2("2026-08-04T1236", "2026-08-04T1236.m001")]
+    assert f.calls() == [_r2("2026-08-04T1236", "2026-08-04T1236.m001")]
 
 
 def _stack(runs: list[dict]) -> list[tuple[str, int]]:
@@ -839,7 +840,7 @@ def test_the_cli_merge_and_append_M(monkeypatch):
     assert json.loads(r.output) == {"gen": "g1", "manifest": f"{G1}/manifests/{SCANS[1]}.m001.json", "dry_run": False}
     f.jobs = []
     r = CliRunner().invoke(ia.append_cmd, ["-M", SCANS[1]])
-    assert (r.exit_code, f.calls()) == (0, [_r2(SCANS[1])])
+    assert (r.exit_code, f.calls()) == (0, [_r2(SCANS[1], f"{SCANS[1]}.m001")])
     assert seen == [{"dry_run": False, "merge_wait": None}, {"dry_run": False, "merge_wait": 600.0},
                     {"dry_run": False, "merge": False, "merge_wait": 0}]
     errs.clear()

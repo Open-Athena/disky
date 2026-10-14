@@ -18,11 +18,14 @@ listed by immutable manifests:
   run into its own dir and publishes a **revision** `manifests/<id>.m<NNN>.json` of the newest manifest
   (`publish_revision`), rebased onto a scan's manifest that lands
   meanwhile; one merger per generation (a lease in the scratch bucket); an interrupted merge leaves the newest manifest
-  as it was and resumes (a whole merged dir is reused). Nothing is deleted. The lease's holder mirrors it to R2 beside
+  as it was and resumes (a whole merged dir is reused). The lease's holder mirrors it to R2 beside
   the store (`<prefix>/<gen>/merging.json`, `MergeStatus`; best-effort, never failing the merge) so `/health` can show
   a merge in progress, or stuck.
 - **R2**: each manifest's runs (their liveness markers last), checked there, then the manifest, last (`r2_publish`).
-- **Prune**: the scratch bucket's earlier open-version states, once the scan's is complete and published (`prune_state`).
+- **Prune**: the scratch bucket's earlier open-version states, once the scan's is complete and published (`prune_state`);
+  and on every store a manifest is published to (GCS, R2, a local or URL store), after the publish, the runs a carry
+  folded, with one revision of grace (`plan_prune`, `prune_folded`): those neither the newest manifest nor the one before
+  it lists, each inside one of the newest's runs; a store's `retain` keeps what later appends read of a folded run.
 
 Readers take the greatest manifest key (`manifest_keys`: `<scan id>.json` or `<scan id>.m<NNN>.json`, which sort by scan,
 then revision), so a revision is served as soon as it is written.
@@ -236,6 +239,19 @@ class RunStore(Protocol):
     def release(self, owner: str) -> None: ...
 
 
+def rm_local(root: Path, keys: list[str]) -> None:
+    """Files `keys` (relative to `root`) removed (one already gone is skipped), then each dir they emptied, up to `root`."""
+    root = Path(root)
+    dirs = set()
+    for k in keys:
+        p = root / k
+        p.unlink(missing_ok=True)
+        dirs.update(p.parents[:len(Path(k).parents) - 1])
+    for d in sorted(dirs, key=lambda d: -len(d.parts)):
+        if d.is_dir() and not any(d.iterdir()):
+            d.rmdir()
+
+
 def lease_stale(held: dict, now: datetime, ttl_s: int) -> bool:
     return (now - datetime.fromisoformat(held["at"])).total_seconds() > ttl_s
 
@@ -295,6 +311,10 @@ class LocalRunStore:
         if p.exists() and json.loads(p.read_text())["owner"] == owner:
             p.unlink()
 
+    def delete(self, keys: list[str]) -> None:
+        """`keys` removed (one already gone is skipped), then each emptied dir up to the root."""
+        rm_local(self.root, keys)
+
 
 class GcsRunStore:
     """`RunStore` over the data bucket (`gs://<bucket>/<prefix>/<gen>/`) and the scratch bucket's lease
@@ -353,6 +373,9 @@ class GcsRunStore:
                 except (NotFound, PreconditionFailed):
                     continue
         return {"owner": "?", "at": "?"}
+
+    def delete(self, keys: list[str]) -> None:
+        delete_objects(self.b, [f"{self.prefix}/{k}" for k in keys])
 
     def release(self, owner: str) -> None:
         from google.api_core.exceptions import NotFound, PreconditionFailed
@@ -816,6 +839,116 @@ def prune_state(gcs, root: str, scan: str, plan: Callable[[list[tuple[str, int]]
     return {**out, "deleted": 0 if dry_run else len(names)}
 
 
+# ── Prune: the runs a carry folded ─────────────────────────────────────────
+
+
+def run_span(key: str) -> tuple[str, str] | None:
+    """`(first, last)` of a run key `deltas/<first>[_<last>]`, or None for anything else."""
+    first, _, last = key.removeprefix("deltas/").partition("_")
+    last = last or first
+    return (first, last) if key.startswith("deltas/") and SCAN_ID.fullmatch(first) and SCAN_ID.fullmatch(last) else None
+
+
+def plan_prune(listing: Collection[str], runs_of: dict[str, Collection[str]], retain: Collection[str] = ()) -> list[str]:
+    """The keys to delete once a manifest is published: the files of every run a carry folded, with one revision of
+    grace. `listing`: the store's generation-relative keys (its `manifests/` and `deltas/` at least); `runs_of`: the run
+    keys each of the newest two manifests among them lists (more are ignored). Of the run dirs under `deltas/`, a file is
+    deleted when its run is
+
+    - listed by neither the newest manifest M nor the one immediately before it (a reader holding that one, cached,
+      never 404s), and
+    - inside one run M lists (its scan span within that run's): a run some carry folded into it. A dir no manifest lists
+      that isn't, is kept: an append in flight (its scan is past M's), or a merge in flight (its output spans several of
+      M's runs, until its revision lists it);
+
+    and its run-relative path is not under `retain` (prefixes, or exact names: what later appends still read of a folded
+    run, e.g. the static index's `cdelta/`). Never a manifest, nor a file of the base generation (outside `deltas/`).
+    Sorted; `[]` without a manifest."""
+    ms = manifest_keys(listing)
+    if not ms:
+        return []
+    newest = [run_span(k) for k in runs_of[ms[-1]]]
+    keep = {*runs_of[ms[-1]], *(runs_of[ms[-2]] if len(ms) > 1 else ())}
+    out = []
+    for key in sorted(listing):
+        run, sep, rel = key.partition("/")[2].partition("/")
+        run = f"deltas/{run}"
+        if not key.startswith("deltas/") or not sep or run in keep or (span := run_span(run)) is None:
+            continue
+        if not any(s is not None and s[0] <= span[0] and span[1] <= s[1] for s in newest):
+            continue
+        if any(rel == r or (r.endswith("/") and rel.startswith(r)) for r in retain):
+            continue
+        out.append(key)
+    return out
+
+
+class PruneTarget(Protocol):
+    """A store `prune_folded` deletes from: `listing(prefix)` (`{key: size}`, generation-relative), `read_json(key)`,
+    `delete(keys)`."""
+
+    def listing(self, prefix: str) -> dict[str, int]: ...
+    def read_json(self, key: str) -> dict: ...
+    def delete(self, keys: list[str]) -> None: ...
+
+
+def prune_folded(target: PruneTarget, *, retain: Collection[str] = (), dry_run: bool = False, where: str = "",
+                 log: Callable[[str], None] = err) -> dict:
+    """Delete from `target` the runs its own newest manifest's carries folded (`plan_prune`, over its listing and its
+    newest two manifests: a store copied from another, as R2 from GCS, is planned by what its readers read), each run
+    logged with its objects and bytes. Call it after a publish to `target` succeeds. Returns `{manifest, previous, runs:
+    [{key, objects, bytes}], objects, bytes, deleted, keys}` (`deleted` 0 on a `dry_run`)."""
+    listing = {**target.listing("manifests/"), **target.listing("deltas/")}
+    ms = manifest_keys(listing)
+    runs_of = {k: [r["key"] for r in target.read_json(k)["runs"]] for k in ms[-2:]}
+    keys = plan_prune(listing, runs_of, retain)
+    runs: dict[str, dict] = {}
+    for k in keys:
+        r = runs.setdefault("/".join(k.split("/", 2)[:2]), {"objects": 0, "bytes": 0})
+        r["objects"] += 1
+        r["bytes"] += listing[k]
+    total = sum(listing[k] for k in keys)
+    verb = "would delete" if dry_run else "deleting"
+    for key, r in runs.items():
+        log(f"prune{where}: {verb} {key}/ ({r['objects']} objects, {r['bytes']:,} B)")
+    log(f"prune{where}: {verb} {len(runs)} folded runs, {len(keys)} objects, {total:,} B"
+        + (f" (newest {ms[-1]}, grace {ms[-2] if len(ms) > 1 else 'none'})" if ms else " (no manifest)"))
+    if keys and not dry_run:
+        target.delete(keys)
+    return {"manifest": ms[-1] if ms else None, "previous": ms[-2] if len(ms) > 1 else None,
+            "runs": [{"key": k, **r} for k, r in runs.items()], "objects": len(keys), "bytes": total,
+            "deleted": 0 if dry_run else len(keys), "keys": keys}
+
+
+class R2RunStore:
+    """`PruneTarget` over a generation's copy on R2 (`<root>/…` in `bucket`), over a boto3 S3 `client`."""
+
+    def __init__(self, client, bucket: str, root: str):
+        self.client, self.bucket, self.root = client, bucket, root.rstrip("/")
+
+    def listing(self, prefix: str) -> dict[str, int]:
+        out = {}
+        for page in self.client.get_paginator("list_objects_v2").paginate(Bucket=self.bucket, Prefix=f"{self.root}/{prefix}"):
+            out.update({o["Key"].removeprefix(self.root + "/"): int(o["Size"]) for o in page.get("Contents", [])})
+        return out
+
+    def read_json(self, key: str) -> dict:
+        return json.loads(self.client.get_object(Bucket=self.bucket, Key=f"{self.root}/{key}")["Body"].read())
+
+    def delete(self, keys: list[str]) -> None:
+        for i in range(0, len(keys), 1000):
+            got = self.client.delete_objects(Bucket=self.bucket, Delete={"Objects": [{"Key": f"{self.root}/{k}"} for k in keys[i:i + 1000]], "Quiet": True})
+            if errs := got.get("Errors"):
+                raise RuntimeError(f"R2 delete: {len(errs)} of {len(keys[i:i + 1000])} failed (e.g. {errs[0]})")
+
+
+def r2_run_store(root: str) -> R2RunStore:
+    """The R2 copy of the store at `root` (`<prefix>/<gen>`), from the env (`publish.r2_client`, `publish.r2_bucket`)."""
+    from . import publish as pub
+
+    return R2RunStore(pub.r2_client(), pub.r2_bucket(), root)
+
+
 # ── R2 ─────────────────────────────────────────────────────────────────────
 
 
@@ -874,6 +1007,8 @@ def r2_publish(bucket: str, root: str, manifest: str, *, served: tuple[str, ...]
     for r in runs:
         run = f"{root}/{r['key']}/"
         objs_ = r2_objects(bucket, [run + s for s in served])
+        if not objs_:
+            raise SystemExit(f"r2 {manifest}: {r['key']} has no served files on GCS (folded and pruned?): manifest not copied")
         body += [o for o in objs_ if o.key.removeprefix(run) not in markers]
         tail += sorted((o for o in objs_ if o.key.removeprefix(run) in markers), key=lambda o, run=run: markers.index(o.key.removeprefix(run)))
     t0 = monotonic()
@@ -917,6 +1052,8 @@ class Runner:
     merge: bool = True
     merge_wait: float | None = 0
     timings: dict = field(default_factory=dict)
+    #: The manifests this run's R2 jobs copied (stems): the merge stage doesn't copy one again.
+    copied: set = field(default_factory=set)
 
     store_prefix: ClassVar[str]
     job_prefix: ClassVar[str]
@@ -977,8 +1114,12 @@ class Runner:
         return "the R2 copy and prune only"
 
     def rerun(self, d: str) -> None:
-        """An appended scan, run again: its R2 copy and prune."""
-        self.r2(d)
+        """An appended scan, run again: the R2 copy of the newest manifest (its own, or a revision of it: an older one's
+        folded runs may be pruned) and prune."""
+        keys = self.manifests()
+        stem = keys[-1].rsplit("/", 1)[-1].removesuffix(".json") if keys else d
+        self.r2(d, None if stem == d else stem)
+        self.copied.add(stem)
         self.stage(f"{d} prune", lambda: self.prune(d))
 
     def stage(self, name: str, fn: Callable[[], None]) -> None:
@@ -1102,8 +1243,8 @@ class Runner:
             elif not compact:
                 self.log(f"merge: nothing due ({' '.join(f'L{r["level"]}' for r in m['runs']) or 'no runs'})")
             scan, rev = parse_manifest(keys[-1].rsplit("/", 1)[-1])
-            if rev:
-                self.r2(scan, keys[-1].rsplit("/", 1)[-1].removesuffix(".json"))
+            if rev and (stem := keys[-1].rsplit("/", 1)[-1].removesuffix(".json")) not in self.copied:
+                self.r2(scan, stem)
         except Exception as e:
             if fatal:
                 raise RuntimeError(str(e)) from e

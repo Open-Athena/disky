@@ -20,7 +20,9 @@ Per scan `D`, under `interval-store/<gen>/deltas/<D>/` (data bucket):
 4. `r2` (as the R2 account): each listed run's served files → R2, checked there, then the manifest. A second runnable
    of the publish job's one task (one provisioning, not two), unless the R2 account is another service account; its
    own job when the manifest already exists (a rerun).
-5. `prune` (local): every earlier scan's `state/` in the scratch bucket, once `D`'s is complete (parallel deletes).
+5. `prune` (local): every earlier scan's `state/` in the scratch bucket, once `D`'s is complete (parallel deletes); and
+   the runs a carry folded, on GCS (`append_runner.prune_folded`: one revision of grace, each keeping `FOLDED_RETAIN`).
+   The R2 job prunes R2 the same way after copying its manifest, and the merge job GCS after its revisions.
 
 Then, once after the scans, the **merge stage** (`append_runner`'s deferred carries, non-fatal): the binary counter's due
 carries as one Batch job (`carry`: each merged run — per range `pyrmts.runs.merge_parquets` on its inputs' deltas, min-`vt`,
@@ -80,6 +82,9 @@ PREFIX = ist.PREFIX
 RUN_SORTS = ("path", "bysize", "slices", "slices-bytotal", "slices-bysize-user")
 #: Cost-attribution `component` of every job the append submits (`cost_labels`).
 COMPONENT = "interval-store"
+#: What a folded run keeps on GCS (`append_runner.plan_prune`'s `retain`): its `ranges/` docs (the next scan's
+#: `prev_open_counts` balances its tasks by them) and its pinned `scans.json`, both small. R2 keeps none of it.
+FOLDED_RETAIN = ("ranges/", "scans.json")
 
 PVF = pa.field("pvf", pa.int64(), nullable=False)
 OP = pa.field("op", pa.int8(), nullable=False)
@@ -554,6 +559,9 @@ def gcs_runner(cfg: Config, *, dry_run: bool = False, merge: bool = True, merge_
         k = read_json(f"gs://{p.bucket}/{PREFIX}/{cfg.ranges_gen}/ranges.json")["k"]
         doc = prune_state(client, p.gen, d, k, bucket=p.bucket, scratch=p.scratch, dry_run=dry_run)
         err(json.dumps({k_: v for k_, v in doc.items() if k_ != "delete"} | {"deleted_scans": [x["scan"] for x in doc["delete"]]}))
+        folded = ar.prune_folded(GcsRunStore(p.bucket, None, p.gen, prefix=PREFIX, client=client), retain=FOLDED_RETAIN, dry_run=dry_run,
+                                 where=" gcs")
+        err(json.dumps(_summary(folded)))
 
     return Runner(
         cfg=cfg,
@@ -762,7 +770,12 @@ def carry_cmd(bucket, gen, ranges_gen, scratch, compact_level, mount, mem, max_m
     status = None if dry_run else ar.r2_merge_status(f"{PREFIX}/{gen}")
     doc = ar.merge_pending(store, carry(gen, k, threads=threads, mem=mem), Path(mount) / PREFIX / gen, tmp=Path(tmp), dry_run=dry_run,
                            max_merges=max_merges, max_level=compact_level, status=status)
+    doc["prune"] = _summary(ar.prune_folded(store, retain=FOLDED_RETAIN, dry_run=dry_run, where=" gcs"))
     print(json.dumps(doc, indent=1))
+
+
+def _summary(doc: dict) -> dict:
+    return {k: v for k, v in doc.items() if k != "keys"}
 
 
 @cli.command("r2")
@@ -773,9 +786,26 @@ def carry_cmd(bucket, gen, ranges_gen, scratch, compact_level, mount, mem, max_m
 def r2_cmd(bucket, gen, ranges_gen, scratch, scan, manifest, workers) -> None:
     """Copy the served files of every run the manifest lists GCS → R2 (objects already there with the same size and md5
     skipped), check every one is there, then copy the manifest, last (`append_runner.r2_publish`). R2 via `R2_ENDPOINT`,
-    `R2_BUCKET` and AWS_* (or R2_*) keys."""
+    `R2_BUCKET` and AWS_* (or R2_*) keys. Then, the manifest on R2, the runs a carry folded are deleted there
+    (`append_runner.prune_folded`, planned by R2's own manifests)."""
     doc = ar.r2_publish(bucket, f"{PREFIX}/{gen}", manifest or scan, served=("served/",), workers=workers)
-    print(json.dumps({"gen": gen, "scan": scan, **doc}))
+    pruned = ar.prune_folded(ar.r2_run_store(f"{PREFIX}/{gen}"), where=" r2")
+    print(json.dumps({"gen": gen, "scan": scan, **doc, "prune": _summary(pruned)}))
+
+
+@cli.command("prune")
+@stage_options
+@option("-n", "--dry-run", is_flag=True, help="Report what would be deleted; delete nothing")
+@option("-r", "--r2", is_flag=True, help="Prune the R2 copy (`R2_ENDPOINT`, `R2_BUCKET`, keys from the env), planned by R2's own manifests; default: GCS")
+def prune_cmd(bucket, gen, ranges_gen, scratch, dry_run, r2) -> None:
+    """Delete the runs a carry folded (`append_runner.prune_folded`): every run dir neither the newest manifest nor the one
+    before it lists, inside one of the newest's runs. On GCS a folded run keeps `FOLDED_RETAIN`; on R2, nothing. The
+    chain does it after each publish (GCS: the prune stage and the merge job; R2: the R2 job); this is the same, alone."""
+    if r2:
+        doc = ar.prune_folded(ar.r2_run_store(f"{PREFIX}/{gen}"), dry_run=dry_run, where=" r2")
+    else:
+        doc = ar.prune_folded(GcsRunStore(bucket, None, gen, prefix=PREFIX), retain=FOLDED_RETAIN, dry_run=dry_run, where=" gcs")
+    print(json.dumps({"gen": gen, "store": "r2" if r2 else "gcs", **_summary(doc)}, indent=1))
 
 
 def ready(profile: str | None) -> Config:
