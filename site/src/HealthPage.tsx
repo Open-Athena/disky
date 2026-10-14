@@ -97,7 +97,7 @@ function CoverageEvents({ doc, columns, genesis, now }: { doc: HealthDoc; column
     {rows.map(({ column, events }) => <div className="hl-event-row" key={column}>
       <span className="dim">{COLUMN_LABELS[column]}</span><div className="hl-event-axis">
         {events.filter(e => e.time >= genesis && e.time <= now).map(e => <span key={e.scan} className="hl-event-position" style={{ left: `${100 * (e.time - genesis) / span}%` }}>
-          <Tooltip content={<><b>{COLUMN_LABELS[column]} · {e.scan} · {e.status}</b><div>{new Date(e.time).toISOString().replace('T', ' ').slice(0, 16)} UTC</div></>}>
+          <Tooltip content={<><b>{COLUMN_LABELS[column]} · {e.scan} · {e.status}</b><div>{fmtRunTime(e.time / 1000)}</div></>}>
             <span className={`hl-event hl-${e.status}`} role="img" aria-label={`${COLUMN_LABELS[column]} · ${e.scan} · ${e.status}`}>{cellMark[e.status]}</span>
           </Tooltip>
         </span>)}
