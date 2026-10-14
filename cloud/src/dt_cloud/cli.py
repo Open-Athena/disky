@@ -1064,6 +1064,63 @@ def index_gc(
             err(f"index-gc: WARNING kept {d} [{v}] in D1 — no cold footer at {missing} (backfill: dt-cloud index-blob -P {d})")
 
 
+@main.command("footer-evict")
+@option("-A", "--adopt", is_flag=True, help="First track the store sorts synced before the footer LRU (rows in D1, no `footer_cache` entry, cold footer present) as hot, read today: one GROUP BY over their rows — run once after the migration")
+@option("-b", "--base", envvar="DATA_BUCKET", default=None, help="-A's cold-footer check: where the pointers' dirs live (default $DATA_BUCKET), a mounted dir, or an fsspec URL (`r2://bucket`)")
+@option("-B", "--max-rows", type=int, envvar="FOOTER_CACHE_MAX_ROWS", default=None, help="The budget: the most `index_row_groups` rows the hot entries keep (default $FOOTER_CACHE_MAX_ROWS, else 1,000,000)")
+@option("-g", "--grace", type=int, default=None, help="Seconds an evicted entry keeps its rows (readers' handles outlive a demotion by ≤ 60 s); default 120")
+@option("-n", "--dry-run", is_flag=True, help="Report what one pass would demote and delete; write nothing")
+@option("-s", "--store", default="primary", help="-A: the store whose sorts to adopt (`primary`, or a `STORES_JSON` key); eviction spans every store")
+@option("-W", "--no-wait", is_flag=True, help="One pass only: demote, and delete what earlier passes demoted (the admin route's `POST /api/footer-cache`); default waits out the grace and deletes this pass's too")
+@option("-y", "--max-bytes", type=int, envvar="FOOTER_CACHE_MAX_BYTES", default=None, help="…and the most bytes (text columns + 64 per row; default $FOOTER_CACHE_MAX_BYTES, else no byte cap)")
+def footer_evict(
+    adopt: bool,
+    base: str | None,
+    max_rows: int | None,
+    grace: int | None,
+    dry_run: bool,
+    store: str,
+    no_wait: bool,
+    max_bytes: int | None,
+) -> None:
+    """Evict the footer LRU (specs/done/footer-lru.md) down to its budget: the
+    least recently read `hot` entries (scan, sort, generation) are demoted —
+    readers serve their cold `.groups.parquet` from then on, and a later read
+    refills them — and their `index_row_groups` rows deleted once the grace
+    has passed. The same pass as the site's `POST /api/footer-cache`; what a
+    scan job runs after `index-sync` (in place of `index-gc -r N`). Needs the
+    D1 migration `0022_footer_cache.sql`."""
+    import time
+
+    from . import index_footer as F
+
+    rows = F.DEFAULT_MAX_ROWS if max_rows is None else max_rows
+    grace_s = F.EVICT_GRACE_S if grace is None else grace
+    if adopt:
+        if dry_run:
+            raise UsageError("-A writes (it tracks entries); run it without -n")
+        adopted, skipped = F.adopt(store=store, base=base or data_bucket())
+        for e in adopted:
+            err(f"footer-evict: adopted {e.date} [{e.variant}] gen {e.gen} — {e.rows} rows")
+        for d, v, missing in skipped:
+            err(f"footer-evict: WARNING left {d} [{v}] untracked — no cold footer at {missing}")
+
+    def report(ev: F.Eviction) -> None:
+        n, r, b = ev.hot
+        err(f"footer-evict: {n} hot entries, {r} rows, {b} bytes (budget {rows} rows{'' if max_bytes is None else f', {max_bytes} bytes'})")
+        for e in ev.demoted:
+            err(f"footer-evict: {'would demote' if dry_run else 'demoted'} {e.date} [{e.variant}] gen {e.gen} — {e.rows} rows, last read day {e.last_access_day}")
+        for e in ev.deleted:
+            err(f"footer-evict: {'would delete' if dry_run else 'deleted'} {e.date} [{e.variant}] gen {e.gen} — {e.rows} rows")
+
+    ev = F.evict(rows, max_bytes, grace=grace_s, dry_run=dry_run)
+    report(ev)
+    if ev.demoted and not (dry_run or no_wait):
+        err(f"footer-evict: waiting {grace_s}s for readers' handles before deleting the demoted rows")
+        time.sleep(grace_s)
+        report(F.evict(rows, max_bytes, grace=grace_s))
+
+
 @main.command("index-dir")
 @option("-s", "--store", default="primary", help="The store these index rows belong to (specs/multi-store.md): `primary` (default) or a secondary store's `STORES_JSON` key")
 @option("-v", "--variant", default="path", type=Choice(list(INDEX_VARIANTS)), help="Which variant's dir")

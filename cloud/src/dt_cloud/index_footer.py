@@ -537,9 +537,25 @@ def sync_d1(
         return len(rows)
 
     tok, acct = _creds()
+    # The footer LRU (`footer_cache`, where migrated): a store sort with its cold footer written is an
+    # entry, `filling` while its rows land (a reader serves the cold footer meanwhile) and `hot` once all
+    # have. Other variants stay untracked (trusted, never evicted).
+    cache = footer_cache_present(acct, tok, db_id)
+    track = cache and blob and variant in SORT_VARIANTS
+    if cache:
+        # The swept generations' entries go first: a fill guarded on its entry then lands nothing more.
+        _d1_query(
+            f"DELETE FROM footer_cache WHERE date='{date}' AND variant='{d1v}' AND gen <> '{_sql_escape(gen)}' "
+            f"AND gen <> COALESCE((SELECT gen FROM index_schema WHERE {st}date='{date}' AND variant='{d1v}'), '');",
+            acct, tok, db_id,
+        )
     _d1_query(gc_sql, acct, tok, db_id)
+    if track:
+        _d1_query(_claim_sql(date, d1v, gen, now=_now()), acct, tok, db_id)
     for chunk in _pack(head, [group_values(r) for r in rows], insert_bytes):
         _d1_query(chunk, acct, tok, db_id)
+    if track:
+        _d1_query(_hot_sql(date, d1v, gen, n=len(rows), nbytes=sum(row_bytes(r) for r in rows), now=_now()), acct, tok, db_id)
     # The pointer flip (schema row last), then the retirements: rows, then pointers.
     for sql in pointer_sql:
         _d1_query(sql, acct, tok, db_id)
@@ -617,6 +633,15 @@ def gc_d1(date: str, db_id: str = D1_DB_ID, store: str = PRIMARY_STORE, dry_run:
     if dry_run:
         rows = _d1_query(f"SELECT COUNT(*) AS n FROM index_row_groups {where};", acct, tok, db_id)
         return int(rows[0]["n"]) if rows else 0
+    if footer_cache_present(acct, tok, db_id):
+        # Those generations' LRU entries first (a fill still running then lands nothing more). A
+        # secondary store's variants carry its prefix (this table has no `store` column).
+        vw = "" if store == PRIMARY_STORE else f"variant LIKE '{_sql_escape(store)}:%' AND "
+        _d1_query(
+            f"DELETE FROM footer_cache WHERE {vw}date = '{_sql_escape(date)}' AND gen <> COALESCE("
+            "(SELECT s.gen FROM index_schema s WHERE s.date = footer_cache.date AND s.variant = footer_cache.variant), '');",
+            acct, tok, db_id,
+        )
     rows = _d1_query(f"DELETE FROM index_row_groups {where} RETURNING 1 AS n;", acct, tok, db_id)
     return len(rows)
 
@@ -713,6 +738,7 @@ def retire_d1(
     todo = sorted(((r["date"], names[r["variant"]]) for r in held if r["date"] in old), key=lambda dv: (dv[0], order[dv[1]]))
     retired: list[tuple[str, str, int]] = []
     skipped: list[tuple[str, str, str]] = []
+    cache = bool(todo) and footer_cache_present(acct, tok, db_id)
     for d, v in todo:
         d1v = d1_variant(v, store)
         gdir = dirs.get((d, d1v))
@@ -720,13 +746,178 @@ def retire_d1(
         if cold is None or not has_cold(cold):
             skipped.append((d, v, cold or f"(no pointer for {d} [{v}])"))
             continue
-        rows = _d1_query(
-            f"DELETE FROM index_row_groups WHERE {sw}date = '{_sql_escape(d)}' AND variant = '{_sql_escape(d1v)}' RETURNING 1 AS n;",
-            acct, tok, db_id,
-        )
+        dv = f"date = '{_sql_escape(d)}' AND variant = '{_sql_escape(d1v)}'"
+        if cache:
+            # The footer LRU's eviction order (`footerCache.ts`): every generation's entry `evicting` first
+            # (readers go cold, a running fill lands nothing more), then the rows, then the entries.
+            _d1_query(
+                "INSERT INTO footer_cache (date, variant, gen, state, started_ts) "
+                f"SELECT DISTINCT date, variant, gen, 'evicting', {_now()} FROM index_row_groups WHERE {sw}{dv} "
+                "ON CONFLICT (date, variant, gen) DO UPDATE SET state = 'evicting', started_ts = excluded.started_ts;",
+                acct, tok, db_id,
+            )
+        rows = _d1_query(f"DELETE FROM index_row_groups WHERE {sw}{dv} RETURNING 1 AS n;", acct, tok, db_id)
+        if cache:
+            _d1_query(f"DELETE FROM footer_cache WHERE {dv};", acct, tok, db_id)
         if rows:
             retired.append((d, v, len(rows)))
     return retired, skipped
+
+
+# --- the footer LRU (specs/done/footer-lru.md; the site's `_lib/footerCache.ts`) ---------------------
+#
+# `footer_cache` tracks which (scan, variant, generation) footer sets `index_row_groups` holds: `filling`
+# (rows landing; readers serve the cold `.groups.parquet`), `hot` (complete; readers use D1), `evicting`
+# (demoted; rows deleted after `EVICT_GRACE_S`, then the entry). The site fills entries on a miss and
+# stamps `last_access_day`; `evict` here runs the same pass as its `evictFooters`. On a D1 without the
+# table (`footer_cache_present`) every footer-cache statement is skipped.
+
+# Keep in sync with `_lib/footerCache.ts`.
+ROW_FIXED_BYTES = 64
+EVICT_GRACE_S = 120
+DEFAULT_MAX_ROWS = 1_000_000
+
+
+def _now() -> int:
+    import time
+
+    return int(time.time())
+
+
+def row_bytes(r: dict) -> int:
+    """A row's share of an entry's ``bytes``: its text columns' lengths + ``ROW_FIXED_BYTES``."""
+    return len(r["p_min"]) + len(r["p_max"]) + len(r["u_min"] or "") + len(r["u_max"] or "") + len(r["rg_json"]) + ROW_FIXED_BYTES
+
+
+def footer_cache_present(acct: str, tok: str, db_id: str = D1_DB_ID) -> bool:
+    """Whether this D1 has the footer LRU's table (`site/migrations/cw/0022_footer_cache.sql`)."""
+    return bool(_d1_query("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'footer_cache';", acct, tok, db_id))
+
+
+def _claim_sql(date: str, variant: str, gen: str, *, now: int) -> str:
+    """A sync's claim on its entry: `filling`, whatever it was (the sync's rows are about to land)."""
+    return (
+        "INSERT INTO footer_cache (date, variant, gen, state, started_ts) VALUES "
+        f"('{_sql_escape(date)}', '{_sql_escape(variant)}', '{_sql_escape(gen)}', 'filling', {now}) "
+        "ON CONFLICT (date, variant, gen) DO UPDATE SET state = 'filling', started_ts = excluded.started_ts;"
+    )
+
+
+def _hot_sql(date: str, variant: str, gen: str, *, n: int, nbytes: int, now: int) -> str:
+    """Mark the entry `hot` iff it is still `filling` and holds exactly ``n`` rows."""
+    k = f"date = '{_sql_escape(date)}' AND variant = '{_sql_escape(variant)}' AND gen = '{_sql_escape(gen)}'"
+    return (
+        f"UPDATE footer_cache SET state = 'hot', rows = {n}, bytes = {nbytes}, filled_ts = {now}, last_access_day = {now // 86400} "
+        f"WHERE {k} AND state = 'filling' AND (SELECT COUNT(*) FROM index_row_groups WHERE {k}) = {n};"
+    )
+
+
+@dataclass
+class Entry:
+    """One `footer_cache` entry; ``variant`` as D1 names it (a secondary store's `<store>:` prefix kept)."""
+    date: str
+    variant: str
+    gen: str
+    rows: int
+    bytes: int
+    last_access_day: int
+
+
+@dataclass
+class Eviction:
+    hot: tuple[int, int, int]  # the hot entries' (count, rows, bytes) before the pass
+    demoted: list[Entry]
+    deleted: list[Entry]
+
+
+def _key(e: Entry) -> str:
+    return f"date = '{_sql_escape(e.date)}' AND variant = '{_sql_escape(e.variant)}' AND gen = '{_sql_escape(e.gen)}'"
+
+
+def evict(
+    max_rows: int = DEFAULT_MAX_ROWS,
+    max_bytes: int | None = None,
+    *,
+    grace: int = EVICT_GRACE_S,
+    now: int | None = None,
+    dry_run: bool = False,
+    db_id: str = D1_DB_ID,
+) -> Eviction:
+    """One eviction pass, as the site's `evictFooters`: demote the least recently read `hot` entries
+    (ties: the older scan first) until the rest fit the budget, then delete the rows — then the entry —
+    of every entry demoted at least ``grace`` seconds ago. ``dry_run``: report, write nothing."""
+    tok, acct = _creds()
+    if not footer_cache_present(acct, tok, db_id):
+        raise RuntimeError("no footer_cache table in this D1: apply site/migrations/cw/0022_footer_cache.sql first")
+    now = _now() if now is None else now
+    cols = "date, variant, gen, rows, bytes, last_access_day"
+    order = "ORDER BY last_access_day, date, variant, gen"
+    hot = [Entry(**r) for r in _d1_query(f"SELECT {cols} FROM footer_cache WHERE state = 'hot' {order};", acct, tok, db_id)]
+    rows = sum(e.rows for e in hot)
+    nbytes = sum(e.bytes for e in hot)
+    totals = (len(hot), rows, nbytes)
+    demoted: list[Entry] = []
+    for e in hot:
+        if not (rows > max_rows or (max_bytes is not None and nbytes > max_bytes)):
+            break
+        demoted.append(e)
+        rows -= e.rows
+        nbytes -= e.bytes
+    if not dry_run:
+        for e in demoted:
+            _d1_query(f"UPDATE footer_cache SET state = 'evicting', started_ts = {now} WHERE {_key(e)} AND state = 'hot';", acct, tok, db_id)
+    due = [Entry(**r) for r in _d1_query(f"SELECT {cols} FROM footer_cache WHERE state = 'evicting' AND started_ts <= {now - grace} {order};", acct, tok, db_id)]
+    if not dry_run:
+        for e in due:
+            _d1_query(f"DELETE FROM index_row_groups WHERE {_key(e)};", acct, tok, db_id)
+            _d1_query(f"DELETE FROM footer_cache WHERE {_key(e)} AND state = 'evicting';", acct, tok, db_id)
+    return Eviction(hot=totals, demoted=demoted, deleted=due)
+
+
+def adopt(
+    store: str = PRIMARY_STORE,
+    base: str | None = None,
+    has_cold=exists,
+    db_id: str = D1_DB_ID,
+) -> tuple[list[Entry], list[tuple[str, str, str]]]:
+    """Track the store sorts synced before the footer LRU: each pointed (scan, sort) whose rows are in D1
+    with no `footer_cache` entry becomes `hot`, read today (so eviction orders them by scan, oldest first —
+    what `index-gc -r` did). Only where its cold footer exists (else eviction would leave the scan to the
+    `.groups.json` blob): the rest are returned as skipped, as `retire_d1` does. One GROUP BY over the
+    sorts' rows: run it once after the migration."""
+    if base is None:
+        from .deploy import data_bucket
+
+        base = data_bucket()
+    tok, acct = _creds()
+    sw = "" if check_store(store) == PRIMARY_STORE else f"g.store = '{_sql_escape(store)}' AND "
+    names = {d1_variant(v, store): v for v in SORT_VARIANTS}
+    vin = ", ".join(f"'{_sql_escape(n)}'" for n in names)
+    got = _d1_query(
+        "SELECT g.date AS date, g.variant AS variant, g.gen AS gen, s.dir AS dir, COUNT(*) AS rows, "
+        f"SUM(LENGTH(g.p_min) + LENGTH(g.p_max) + COALESCE(LENGTH(g.u_min), 0) + COALESCE(LENGTH(g.u_max), 0) + LENGTH(g.rg_json) + {ROW_FIXED_BYTES}) AS bytes "
+        "FROM index_row_groups g JOIN index_schema s ON s.date = g.date AND s.variant = g.variant AND s.gen = g.gen "
+        f"WHERE {sw}g.variant IN ({vin}) "
+        "AND NOT EXISTS (SELECT 1 FROM footer_cache c WHERE c.date = g.date AND c.variant = g.variant AND c.gen = g.gen) "
+        "GROUP BY g.date, g.variant, g.gen, s.dir ORDER BY g.date, g.variant;",
+        acct, tok, db_id,
+    )
+    now = _now()
+    adopted: list[Entry] = []
+    skipped: list[tuple[str, str, str]] = []
+    for r in got:
+        cold = cold_path(base, r["dir"], names[r["variant"]])
+        if not has_cold(cold):
+            skipped.append((r["date"], names[r["variant"]], cold))
+            continue
+        e = Entry(date=r["date"], variant=r["variant"], gen=r["gen"], rows=int(r["rows"]), bytes=int(r["bytes"]), last_access_day=now // 86400)
+        _d1_query(
+            "INSERT OR IGNORE INTO footer_cache (date, variant, gen, state, rows, bytes, started_ts, filled_ts, last_access_day) VALUES "
+            f"('{_sql_escape(e.date)}', '{_sql_escape(e.variant)}', '{_sql_escape(e.gen)}', 'hot', {e.rows}, {e.bytes}, {now}, {now}, {e.last_access_day});",
+            acct, tok, db_id,
+        )
+        adopted.append(e)
+    return adopted, skipped
 
 
 def index_dir(date: str, variant: str = "path", db_id: str = D1_DB_ID, store: str = PRIMARY_STORE) -> str | None:
