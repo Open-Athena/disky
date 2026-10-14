@@ -1,0 +1,180 @@
+"""gcs's job scripts (`job/`): the Batch submit spec, `run.sh`'s phases and alerts, the static-names recovery
+controller. Deployment-specific (project ids, machine shapes), so kept out of the shared `cloud` tests."""
+from json import loads
+import json
+import os
+from os import environ
+from pathlib import Path
+from subprocess import run
+
+import pytest
+
+from dt_cloud.scan_runs import load_profile
+from dt_cloud.scan_runs_backfill import classify, reconstruct
+from dt_cloud.scan_tasks import task_spec
+from test_scan_tasks import CONTEXT, IMAGE, SCAN, controller
+
+ROOT_DIR = Path(__file__).resolve().parents[2]
+
+
+def test_manual_labels_and_cron_spec_are_not_frozen_to_a_run(monkeypatch):
+    monkeypatch.setenv("DISKY_LABELS", "app=disky,deployment=gcs")
+    monkeypatch.setenv("JOB_ID", "root-123")
+    monkeypatch.setenv("SNAP_ID", "2026-10-13T1300")
+    monkeypatch.setenv("DRY", "1")
+    script = Path(__file__).parents[2] / "job/batch-submit.sh"
+    manual = json.loads(run(["bash", str(script)], check=True, capture_output=True, text=True).stdout)
+    want = {"app": "disky", "deployment": "gcs", "component": "scan", "scan_run": "root-123", "scan_id": "2026-10-13t1300"}
+    assert (manual["labels"], manual["allocationPolicy"]["labels"]) == (want, want)
+    assert {k: manual["taskGroups"][0]["taskSpec"]["environment"]["variables"][k] for k in ("SNAP_ID", "SCAN_RUN_ID")} == {
+        "SNAP_ID": "2026-10-13T1300", "SCAN_RUN_ID": "root-123",
+    }
+    monkeypatch.setenv("PIN", "1")
+    cron = json.loads(run(["bash", str(script)], check=True, capture_output=True, text=True).stdout)
+    monkeypatch.setenv("SCAN_RUN_ID", "ambient-456")
+    monkeypatch.setenv("SNAP_ID", "2026-10-14T0700")
+    other = json.loads(run(["bash", str(script)], check=True, capture_output=True, text=True).stdout)
+    assert cron == other
+    assert (cron["labels"], cron["allocationPolicy"]["labels"]) == (
+        {"app": "disky", "deployment": "gcs", "component": "scan"}, {"app": "disky", "deployment": "gcs", "component": "scan"},
+    )
+
+
+@pytest.mark.parametrize("context, expected", [
+    ({"BATCH_JOB_UID": "daily-root-uid"}, "daily-root-uid"),
+    ({"BATCH_JOB_UID": "child-uid", "SCAN_RUN_ID": "original-root-uid"}, "original-root-uid"),
+])
+def test_job_start_derives_or_preserves_root_identity(context, expected):
+    source = (Path(__file__).parents[2] / "job/run.sh").read_text().split("\nDATE=", 1)[0]
+    env = {"PATH": os.environ["PATH"], "SNAP_ID": "2026-10-13T1300", **context}
+    result = run(["bash", "-c", source + '\nprintf "%s\\n%s\\n" "$SCAN_RUN_ID" "$SCAN_ID"'], env=env, capture_output=True, text=True)
+    assert (result.returncode, result.stdout.splitlines()) == (0, [expected, "2026-10-13T1300"])
+
+
+def test_recovery_controller_waits_for_success_and_pins_child_image():
+    root = Path(__file__).resolve().parents[2]
+    result = run(["bash", "job/static-names.sh", "resume-after", "drill-job", "2026-10-12T1042"], cwd=root, env={
+        "PATH": environ["PATH"], "DRY": "1", "IMAGE": "registry@sha256:test",
+    }, capture_output=True, text=True)
+    assert (result.returncode, result.stderr) == (0, "")
+    spec = loads(result.stdout)
+    task = spec["taskGroups"][0]["taskSpec"]
+    assert task["environment"] == {"variables": {
+        "GCP_PROJECT": "oa-internal-450019",
+        "CLOUDFLARE_ACCOUNT_ID": "74981a43be0de7712369306c7b19133d",
+        "R2_ENDPOINT": "https://74981a43be0de7712369306c7b19133d.r2.cloudflarestorage.com",
+        "SCAN_ID": "2026-10-12T1042",
+    }}
+    assert task["runnables"][0]["container"]["commands"] == ["-c", "set -euo pipefail; BATCH_REGION=us-east1 dt-cloud job watch -L -i 30 drill-job && cd /app && STATIC_NAMES_PROFILE=job/static-names.json STATIC_NAMES_IMAGE=registry@sha256:test STATIC_NAMES_SPOT=0 dt-cloud static-names runs add -c -M 2026-10-12T1042"]
+    assert (task["maxRetryCount"], spec["allocationPolicy"]["instances"][0]["policy"]["machineType"], spec["allocationPolicy"]["instances"][0]["policy"]["provisioningModel"]) == (0, "n2-highmem-4", "STANDARD")
+
+
+@pytest.mark.parametrize("pin, expected", [("", ("n2-standard-4", 4000, 14000, "8GB", "4", "1")), ("1", ("n2-highmem-32", 8000, 250000, "100GB", "16", None))])
+def test_split_is_manual_only_and_does_not_change_cron(pin, expected):
+    result = run(["bash", "job/batch-submit.sh"], cwd=ROOT_DIR, env={
+        "PATH": environ["PATH"], "DRY": "1", "PIN": pin, "SPLIT_COMPUTE": "1", "IMAGE": IMAGE,
+    }, capture_output=True, text=True)
+    assert (result.returncode, result.stderr) == (0, "")
+    spec = loads(result.stdout)
+    task = spec["taskGroups"][0]["taskSpec"]
+    env = task["environment"]["variables"]
+    assert (spec["allocationPolicy"]["instances"][0]["policy"]["machineType"], task["computeResource"]["cpuMilli"],
+            task["computeResource"]["memoryMib"], env["DUCKDB_MEM"], env["DUCKDB_THREADS"], env.get("SPLIT_COMPUTE")) == expected
+    assert spec["allocationPolicy"]["instances"][0]["policy"]["disks"] == ([] if not pin else [{"newDisk": {"type": "local-ssd", "sizeGb": "1500"}, "deviceName": "stage"}])
+    assert [v for v in task["volumes"] if v.get("deviceName") == "stage"] == ([] if not pin else [{"deviceName": "stage", "mountPath": "/mnt/disks/stage"}])
+    assert env["STAGE_DIR"] == ("/tmp" if not pin else "/stage")
+
+
+def test_downstream_backfill_retains_explicit_parent():
+    profile = load_profile(ROOT_DIR / "job/scan-runs.json")
+    jobs = []
+    for stage in ("compute", "access"):
+        spec = task_spec(controller(), stage, SCAN, CONTEXT)
+        spec.update(uid=stage, name=f"projects/p/locations/us-central1/jobs/{stage}", createTime="2026-10-13T13:20:00Z", status={"state": "RUNNING"})
+        jobs.append(spec)
+    assert [classify(profile, job).kind for job in jobs] == ["compute", "access"]
+    assert [(r.run.run_id, r.run.parent, r.run.kind) for r in reconstruct(profile, jobs, [], None, now=1791900000)] == [
+        ("access", "root-uid", "access"), ("compute", "root-uid", "compute"),
+    ]
+
+
+@pytest.mark.parametrize("code, scratch, expected", [
+    (0, "0", (0, ["START scan-compute", "WORKER compute s g snapshots/s listing/s/index/g/path-index.parquet", "END scan-compute", "POST-PUBLISH"])),
+    (7, "0", (7, ["START scan-compute", "WORKER compute s g snapshots/s listing/s/index/g/path-index.parquet"])),
+    (0, "1", (0, ["START scan-compute", "WORKER compute s g snapshots/s listing/s/index/g/path-index.parquet", "END scan-compute"])),
+])
+def test_controller_waits_for_compute_and_scratch_never_advances_pointers(code, scratch, expected):
+    script = (ROOT_DIR / "job/run.sh").read_text()
+    start = script.index('if [ "${SPLIT_COMPUTE:-0}" = "1" ]; then\n  begin_phase scan-compute')
+    block = script[start:].split("else\nbegin_phase path-index", 1)[0] + "fi\n"
+    preamble = r'''
+set -eu
+SPLIT_COMPUTE=1 SNAP_ID=s GEN=g SNAP_PATH=snapshots/s INDEX_PATH=listing/s/index/g/path-index.parquet
+begin_phase() { printf 'START %s\n' "$*"; }
+phase() { printf 'END %s\n' "$*"; }
+dt-cloud() { printf 'WORKER %s %s %s %s %s\n' "$4" "$5" "$GEN" "$SNAP_PATH" "$INDEX_PATH"; return "$CODE"; }
+'''
+    result = run(["bash", "-c", preamble + block + "printf 'POST-PUBLISH\\n'"], env={"PATH": "/usr/bin:/bin", "CODE": str(code), "SCRATCH": scratch}, capture_output=True, text=True)
+    assert (result.returncode, result.stdout.splitlines()) == expected
+    assert result.stderr == ("SCRATCH — split computation complete; no serving pointers changed\n" if scratch == "1" and code == 0 else "")
+
+
+@pytest.mark.parametrize("overrides, expected", [
+    ({}, (0, "")),
+    ({"JOB_IMAGE": "registry:latest"}, (1, "ERROR: split scan requires a digest-pinned JOB_IMAGE\n")),
+    ({"GATE": "1"}, (1, "ERROR: split scan does not support GATE\n")),
+    ({"SCRATCH": "1"}, (1, "ERROR: split SCRATCH requires SNAP_PATH and INDEX_PATH under scratch/\n")),
+    ({"SCRATCH": "1", "SNAP_PATH": "scratch/check/snapshot", "INDEX_PATH": "scratch/check/index/path-index.parquet"}, (0, "")),
+])
+def test_controller_preflight(overrides, expected):
+    script = (ROOT_DIR / "job/run.sh").read_text()
+    block = script.split('INDEX_PATH=${INDEX_PATH:-$INDEX_DIR/path-index.parquet}\n', 1)[1].split("# Scan-run record", 1)[0]
+    result = run(["bash", "-c", "set -eu\n" + block], env={
+        "PATH": "/usr/bin:/bin", "SPLIT_COMPUTE": "1", "JOB_IMAGE": IMAGE, "BATCH_JOB_UID": "root",
+        "SNAP_PATH": CONTEXT["SNAP_PATH"], "INDEX_PATH": CONTEXT["INDEX_PATH"], **overrides,
+    }, capture_output=True, text=True)
+    assert (result.returncode, result.stderr) == expected
+    assert result.stdout == ""
+
+
+def test_split_bad_image_refused_before_allocating_a_vm():
+    result = run(["bash", "job/batch-submit.sh"], cwd=ROOT_DIR, env={"PATH": environ["PATH"], "SPLIT_COMPUTE": "1", "IMAGE": "registry:latest"}, capture_output=True, text=True)
+    assert (result.returncode, result.stdout, result.stderr) == (1, "", "ERROR: split scan requires a digest-pinned IMAGE\n")
+
+
+@pytest.mark.parametrize("pin, expected", [("", ["zones/us-central1-f"]), ("1", ["regions/us-central1"])])
+def test_manual_zone_override_does_not_change_cron(pin, expected):
+    result = run(["bash", "job/batch-submit.sh"], cwd=ROOT_DIR, env={"PATH": environ["PATH"], "DRY": "1", "PIN": pin, "ZONE": "us-central1-f"}, capture_output=True, text=True)
+    assert (result.returncode, result.stderr) == (0, "")
+    assert loads(result.stdout)["allocationPolicy"]["location"] == {"allowedLocations": expected}
+
+
+def test_four_core_controller_override_keeps_a_satisfiable_request():
+    result = run(["bash", "job/batch-submit.sh"], cwd=ROOT_DIR, env={"PATH": environ["PATH"], "DRY": "1", "MACHINE": "e2-standard-4", "SPLIT_COMPUTE": "1", "IMAGE": IMAGE}, capture_output=True, text=True)
+    assert (result.returncode, result.stderr) == (0, "")
+    spec = loads(result.stdout)
+    assert spec["taskGroups"][0]["taskSpec"]["computeResource"] == {"cpuMilli": 4000, "memoryMib": 14000}
+    assert spec["allocationPolicy"]["instances"][0]["policy"]["machineType"] == "e2-standard-4"
+
+
+@pytest.mark.parametrize("mode, expected_post", [({}, True), ({"SCRATCH": "1"}, False), ({"GATE": "1"}, False)])
+def test_validation_failure_stays_local_but_preserves_exit_and_error(mode, expected_post):
+    script = (ROOT_DIR / "job/run.sh").read_text()
+    functions = "slack_post() {" + script.split("slack_post() {", 1)[1].split("trap 'fail_alert", 1)[0]
+    preamble = r'''
+set -e
+SNAP_ID=s BATCH_JOB_UID=root
+python3() { printf 'POST %s\n' "$SLACK_MSG"; }
+'''
+    invocation = r'''
+trap 'fail_alert $? 300 "worker"' ERR
+trap 'printf "RECORDED %s\n" "$SR_ERR"' EXIT
+worker() { return 7; }
+worker
+printf 'UNEXPECTED SUCCESS\n'
+'''
+    result = run(["bash", "-c", preamble + functions + invocation], env={"PATH": "/usr/bin:/bin", **mode}, capture_output=True, text=True)
+    message = "❌ `dt-cloud` snapshot job failed (s): `worker` exited 7 at run.sh:300\n<https://console.cloud.google.com/logs/query;query=labels.job_uid%3D%22root%22?project=oa-internal-450019|task logs>"
+    assert result.returncode == 7
+    assert result.stdout == (f"POST {message}\n" if expected_post else "") + "RECORDED exit 7: worker (run.sh:300)\n"
+    assert result.stderr == ("" if expected_post else f"Validation alert (Slack suppressed): {message}\n")

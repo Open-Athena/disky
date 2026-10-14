@@ -1,8 +1,5 @@
 from copy import deepcopy
 import json
-from pathlib import Path
-from subprocess import run
-import os
 
 import pytest
 from click.testing import CliRunner
@@ -112,40 +109,6 @@ def test_wrong_scan_refuses():
     with pytest.raises(ValueError) as e:
         select_jobs([root], root, "2026-10-13T1301")
     assert str(e.value) == "root job is labeled for 2026-10-13t1300, not 2026-10-13T1301"
-
-
-def test_manual_labels_and_cron_spec_are_not_frozen_to_a_run(monkeypatch):
-    monkeypatch.setenv("DISKY_LABELS", "app=disky,deployment=gcs")
-    monkeypatch.setenv("JOB_ID", "root-123")
-    monkeypatch.setenv("SNAP_ID", "2026-10-13T1300")
-    monkeypatch.setenv("DRY", "1")
-    script = Path(__file__).parents[2] / "job/batch-submit.sh"
-    manual = json.loads(run(["bash", str(script)], check=True, capture_output=True, text=True).stdout)
-    want = {"app": "disky", "deployment": "gcs", "component": "scan", "scan_run": "root-123", "scan_id": "2026-10-13t1300"}
-    assert (manual["labels"], manual["allocationPolicy"]["labels"]) == (want, want)
-    assert {k: manual["taskGroups"][0]["taskSpec"]["environment"]["variables"][k] for k in ("SNAP_ID", "SCAN_RUN_ID")} == {
-        "SNAP_ID": "2026-10-13T1300", "SCAN_RUN_ID": "root-123",
-    }
-    monkeypatch.setenv("PIN", "1")
-    cron = json.loads(run(["bash", str(script)], check=True, capture_output=True, text=True).stdout)
-    monkeypatch.setenv("SCAN_RUN_ID", "ambient-456")
-    monkeypatch.setenv("SNAP_ID", "2026-10-14T0700")
-    other = json.loads(run(["bash", str(script)], check=True, capture_output=True, text=True).stdout)
-    assert cron == other
-    assert (cron["labels"], cron["allocationPolicy"]["labels"]) == (
-        {"app": "disky", "deployment": "gcs", "component": "scan"}, {"app": "disky", "deployment": "gcs", "component": "scan"},
-    )
-
-
-@pytest.mark.parametrize("context, expected", [
-    ({"BATCH_JOB_UID": "daily-root-uid"}, "daily-root-uid"),
-    ({"BATCH_JOB_UID": "child-uid", "SCAN_RUN_ID": "original-root-uid"}, "original-root-uid"),
-])
-def test_job_start_derives_or_preserves_root_identity(context, expected):
-    source = (Path(__file__).parents[2] / "job/run.sh").read_text().split("\nDATE=", 1)[0]
-    env = {"PATH": os.environ["PATH"], "SNAP_ID": "2026-10-13T1300", **context}
-    result = run(["bash", "-c", source + '\nprintf "%s\\n%s\\n" "$SCAN_RUN_ID" "$SCAN_ID"'], env=env, capture_output=True, text=True)
-    assert (result.returncode, result.stdout.splitlines()) == (0, [expected, "2026-10-13T1300"])
 
 
 def test_exact_job_estimate_and_report():
