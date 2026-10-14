@@ -10,6 +10,7 @@
 #                                                 # other intermediates, 7-day expiry, no soft delete) is mounted at /gcs/$S;
 #                                                 # waits for it and exits nonzero unless every task succeeded
 #   job/static-names.sh wait JOB                  # wait for a submitted job
+#   job/static-names.sh resume-after JOB SCAN     # durable Batch controller: wait for JOB to succeed, then catch up search through SCAN (no carries)
 #   job/static-names.sh r2-batch GEN [ARGS…]      # `static-names r2-copy -g GEN` (GCS → R2 bucket oa-gcs-usage-index, idempotent) as a 1-task Batch job, the R2 key from Secret Manager
 #                                                 # (`gcs-static-index-r2-{key-id,secret}`); R2_ENDPOINT or CLOUDFLARE_ACCOUNT_ID
 #
@@ -79,8 +80,19 @@ wait_job() {
   done
 }
 
-case ${1:?stage-src|run|r2-batch|wait} in
+case ${1:?stage-src|run|r2-batch|wait|resume-after} in
 stage-src) stage_src ;;
+resume-after)
+  WAIT_JOB=${2:?JOB}
+  export SCAN_ID=${3:?SCAN}
+  wait_arg=$(printf '%q' "$WAIT_JOB")
+  scan_arg=$(printf '%q' "$SCAN_ID")
+  image_arg=$(printf '%q' "$IMAGE")
+  COMMAND="set -euo pipefail; BATCH_REGION=us-east1 dt-cloud job watch -L -i 30 $wait_arg && cd /app && STATIC_NAMES_PROFILE=job/static-names.json STATIC_NAMES_IMAGE=$image_arg STATIC_NAMES_SPOT=0 dt-cloud static-names runs add -c -M $scan_arg"
+  ENV_JSON=${ENV_JSON:-'{"variables":{"GCP_PROJECT":"oa-internal-450019","CLOUDFLARE_ACCOUNT_ID":"74981a43be0de7712369306c7b19133d","R2_ENDPOINT":"https://74981a43be0de7712369306c7b19133d.r2.cloudflarestorage.com"}}'}
+  COMMAND="$COMMAND" ENV_JSON="$ENV_JSON" SRC=image MACHINE=n2-highmem-4 SSD=375 NO_MOUNT=1 \
+    JOB_ID=${JOB_ID:-sn-resume-$(date -u +%Y%m%d-%H%M%S)} exec "$0" run resume 1
+  ;;
 r2-batch)
   # The R2 copy as a 1-task Batch job: the R2 key from Secret Manager (`gcs-static-index-r2-{key-id,secret}`,
   # a token for bucket oa-gcs-usage-index only), the endpoint from R2_ENDPOINT (or CLOUDFLARE_ACCOUNT_ID).
@@ -104,7 +116,9 @@ run)
   MEM_MIB=$(( ${MACHINE##*-} * 7700 ))
   MOUNT_ARG=""
   if [ -z "${NO_MOUNT:-}" ]; then MOUNT_ARG="-m /gcs/$B"; fi
-  if [ "${SRC:-}" = image ]; then
+  if [ -n "${COMMAND:-}" ]; then
+    cmd=$COMMAND
+  elif [ "${SRC:-}" = image ]; then
     cmd="set -euo pipefail; mkdir -p /stage/tmp /stage/out && cd /stage && \
 python3 -u -m dt_cloud.${MODULE:-static_names} $KIND $MOUNT_ARG $(printf '%q ' "$@")"
   else
@@ -113,10 +127,29 @@ python3 -u -m dt_cloud.${MODULE:-static_names} $KIND $MOUNT_ARG $(printf '%q ' "
     cmd="set -euo pipefail; mkdir -p /stage/src /stage/tmp /stage/out && cp -r /gcs/$B/static-names/src/$SRC/dt_cloud /gcs/$B/static-names/src/pyrmts-$PYRMTS/pyrmts /stage/src/ && cd /stage && \
 PYTHONPATH=/stage/src python3 -u -m dt_cloud.${MODULE:-static_names} $KIND $MOUNT_ARG $(printf '%q ' "$@")"
   fi
+  if [ "${MODULE:-static_names}" = static_drill ] && [ "$KIND" = build ]; then
+    diagnostics=$(python3 -c 'from dt_cloud.append_runner import drill_exit_diagnostics; print(drill_exit_diagnostics(), end="")')
+    cmd="$diagnostics$cmd"
+  elif [ "${MODULE:-static_names}" = static_anchors ] && [ "$KIND" = run ]; then
+    diagnostics=$(python3 -c 'from dt_cloud.append_runner import drill_exit_diagnostics; print(drill_exit_diagnostics("ANCHOR"), end="")')
+    cmd="$diagnostics$cmd"
+  fi
   ENVJ=${ENV_JSON:-'{}'}
   if [ -n "${SPOT:-}" ]; then MODEL=SPOT; RETRIES=3; else MODEL=STANDARD; RETRIES=0; fi
   # cost labels (specs/cost-labels.md): $DISKY_LABELS + component, {} when unset
-  COST_LABELS=$(python3 -c 'import json, os; d = dict(i.strip().split("=", 1) for i in os.environ.get("DISKY_LABELS", "").split(",") if i.strip()); print(json.dumps({**d, "component": "static-names"} if d else {}))')
+  COST_LABELS=$(dt-cloud cost-labels -c static-names -j)
+  if [ -n "${SCAN_RUN_ID:-}${SCAN_ID:-}" ]; then
+    ENVJ=$(ENVJ="$ENVJ" python3 - <<'PY'
+import json, os
+d = json.loads(os.environ["ENVJ"])
+v = d.setdefault("variables", {})
+for key in ("DISKY_LABELS", "SCAN_RUN_ID", "SCAN_ID"):
+    if os.environ.get(key):
+        v[key] = os.environ[key]
+print(json.dumps(d))
+PY
+)
+  fi
   spec=$(mktemp)
   cat > "$spec" <<EOF
 {
