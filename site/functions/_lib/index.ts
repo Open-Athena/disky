@@ -381,6 +381,16 @@ export function pathScans(env: Env, order: boolean): Promise<{ results: { date: 
     : env.DB!.prepare(`SELECT DISTINCT date FROM index_schema WHERE store = ? AND variant = ?${by}`).bind(storeKey(env), d1Variant(env, 'path')).all<{ date: string }>()
 }
 
+/** The env's store's date-only scans whose start is known: each `path`
+ * pointer's `index_schema.started` (`dt-cloud index-sync -m`, or the
+ * `index-started` backfill) — the scan picker's times, in one query. */
+export function pathScanStarts(env: Env): Promise<{ results: { date: string; started: string }[] }> {
+  const known = "started IS NOT NULL AND date NOT LIKE '%T%'"
+  return isPrimary(env)
+    ? env.DB!.prepare(`SELECT date, started FROM index_schema WHERE variant = 'path' AND ${known}`).all<{ date: string; started: string }>()
+    : env.DB!.prepare(`SELECT date, started FROM index_schema WHERE store = ? AND variant = ? AND ${known}`).bind(storeKey(env), d1Variant(env, 'path')).all<{ date: string; started: string }>()
+}
+
 function fileFor(env: Env, dir: string, variant: string): FileSlice {
   const store = makeStore(env)
   const key = indexKey(dir, variant)
