@@ -13,7 +13,8 @@
  * cost ~290 KB × every scan on each change; re-pricing every live prefix on a
  * new head, ~22 s a scan on gcs, made an owner-lens series time out.) */
 import type { Env } from './auth.js'
-import { columnsFor, ivHeldDates, openIndex, slices, readAsks, readAsksHistory, type Ask, type Row } from './index.js'
+import { columnsFor, ivHeldDates, openIndex, slices, readAsks, type Ask, type Row } from './index.js'
+import { fillHist, histAggs } from './ownerHist.js'
 import { loadLedger } from './ledger.js'
 import { shared } from './shared.js'
 import { addAgg, computeOwners, foldLatest, idxKey, newAgg, type AssignmentRow, type OwnerRow, type OwnerTotals, type PathAgg } from './ownerBands.js'
@@ -32,7 +33,7 @@ export interface OwnerTotalsBody extends OwnerTotals {
   v: number
   scan: string
   head: number
-  computed: { at: number; ms: number; groups: number; prefixes: number; index: string; held?: Priced['timing'] }
+  computed: { at: number; ms: number; groups: number; prefixes: number; index: string; hist?: true }
 }
 
 // Per-isolate memo on top of D1. A fresh estate manifest is a multi-second
@@ -51,21 +52,6 @@ const PREFIX_CACHE_MAX = 1_800_000
 /** The index a scan's prefixes are priced on: a reindex (new generation) prices them again. */
 const indexTag = (idx: { mode: string }): string => `${idx.mode}:${'gen' in idx ? (idx as { gen: string }).gen : ''}`
 
-/** New prefixes a refold prices on every held scan in one interval-store read; more (a scan's first fold, say)
- *  read per scan. */
-const HISTORY_PRICE_MAX = 64
-/** New prefixes priced on every held scan: per scan, each one present there; and the shared read's cost. */
-interface Priced { priced: Map<string, Map<string, PathAgg>>; groups: number; timing: { read: number; store: number; scans: number } }
-const priceMemo = new Map<string, Promise<Priced | null>>()
-
-/** Add `added` (the paths of `missing` a read found; one absent isn't in the scan) to `cache`. */
-function mergePriced(cache: PrefixCache, added: Map<string, PathAgg>, missing: Map<string, number>): void {
-  for (const [path, a] of added) if (!cache.aggs[path]) cache.aggs[path] = a
-  const asked = new Set(cache.asked)
-  for (const [path, depth] of missing) asked.add(`${depth}:${path}`)
-  cache.asked = [...asked].sort()
-}
-
 async function storePriced(env: Env, date: string, tag: string, cache: PrefixCache): Promise<void> {
   const body = JSON.stringify(cache)
   if (body.length > PREFIX_CACHE_MAX) return
@@ -73,49 +59,30 @@ async function storePriced(env: Env, date: string, tag: string, cache: PrefixCac
     .bind(date, tag, body, Math.floor(Date.now() / 1000)).run()
 }
 
-/** `missing` priced on every scan the interval store holds, from one read, and added to each one's cached
- *  prefixes at `tag` (a scan with none yet prices everything on its first fold: its roots aren't cached).
- *  Null when the store's handle isn't `tag`'s. Concurrent refolds over the same new prefixes share it. */
-async function priceHeld(env: Env, tag: string, missing: Map<string, number>): Promise<Priced | null> {
-  const key = `${tag}|${[...missing].map(([path, depth]) => `${depth}:${path}`).sort().join('\n')}`
-  return shared(priceMemo, key, async () => {
-    const t0 = Date.now()
-    const asks: Ask[] = [...missing].map(([path, depth]) => ({ depth, path }))
-    const got = await readAsksHistory(env, await ivHeldDates(env), 'path', asks, r => missing.get(r.path) === r.depth, { fields: FIELDS, maxGroups: maxGroups(asks.length) })
-    if (!got || got.index !== tag) return null
-    const priced = new Map<string, Map<string, PathAgg>>()
-    for (const [date, rows] of got.byDate) {
-      const added = new Map<string, PathAgg>()
-      for (const r of rows) {
-        let a = added.get(r.path)
-        if (!a) added.set(r.path, (a = newAgg()))
-        addAgg(a, r)
-      }
-      priced.set(date, added)
-    }
-    const read = Date.now() - t0
-    // Each scan's cached row gains the new paths in place (`json_patch` / `json_insert`), all in one batch: no
-    // ~260 KB body round trip and parse per scan. A row of another version, or one at the size cap, is left.
-    const asked = [...missing].map(([path, depth]) => `${depth}:${path}`)
-    const appends = asked.map(() => `'$.asked[#]', ?`).join(', ')
-    const now = Math.floor(Date.now() / 1000)
-    await env.DB!.batch([...priced].map(([date, added]) => env.DB!.prepare(
-      `UPDATE owner_prefix_aggs SET body = json_insert(json_set(body, '$.aggs', json_patch(json_extract(body, '$.aggs'), json(?))), ${appends}), updated_ts = ? ` +
-      `WHERE scan = ? AND idx = ? AND json_extract(body, '$.v') = ? AND length(body) <= ?`,
-    ).bind(JSON.stringify(Object.fromEntries(added)), ...asked, now, date, tag, PREFIX_CACHE_VERSION, PREFIX_CACHE_MAX)))
-    const timing = { read, store: Date.now() - t0 - read, scans: priced.size }
-    return { priced, groups: got.groups, timing }
-  }, MEMO_WAIT)
+/** The ledger's prefixes as index lookups: path → depth. */
+function wantOf(owners: Map<string, OwnerRow>): Map<string, number> {
+  const want = new Map<string, number>()
+  for (const p of owners.keys()) {
+    const { path, depth } = idxKey(p)
+    want.set(path, depth)
+  }
+  return want
 }
 
 async function compute(env: Env, date: string, owners: Map<string, OwnerRow>, head: number): Promise<OwnerTotalsBody> {
   const t0 = Date.now()
   const idx = await openIndex(slices(env), date)
   const tag = indexTag(idx)
-  const want = new Map<string, number>() // index path → depth, for point lookups
-  for (const p of owners.keys()) {
-    const { path, depth } = idxKey(p)
-    want.set(path, depth)
+  const want = wantOf(owners)
+  // An interval-store scan folds from the prefixes' history rows (one per prefix, every scan); the rest — other
+  // stores, scans appended since the rows were priced, or a first fill still pending — per scan below.
+  const hist = idx.asOf != null ? await histAggs(slices(env), tag, idx.asOf, want) : null
+  if (hist) {
+    const totals = computeOwners({ owners, aggs: hist.aggs, buckets: hist.buckets })
+    return {
+      v: MANIFEST_VERSION, scan: date, head, ...totals,
+      computed: { at: Math.floor(Date.now() / 1000), ms: Date.now() - t0, groups: hist.groups, prefixes: hist.prefixes, index: idx.mode, hist: true },
+    }
   }
   const row = await env.DB!.prepare('SELECT body FROM owner_prefix_aggs WHERE scan = ? AND idx = ?').bind(date, tag).first<{ body: string }>()
   const prior = row ? JSON.parse(row.body) as PrefixCache : null
@@ -126,14 +93,7 @@ async function compute(env: Env, date: string, owners: Map<string, OwnerRow>, he
   const missing = new Map<string, number>()
   for (const [path, depth] of want) if (!asked.has(`${depth}:${path}`)) { missing.set(path, depth); asks.push({ depth, path }) }
   let groups = 0
-  // A scan already cached at this index with a few new prefixes (the usual new assignment): price them on every
-  // held scan at once, so the refolds of the other scans that follow read nothing.
-  const held = !fresh && missing.size && missing.size <= HISTORY_PRICE_MAX && idx.asOf != null ? await priceHeld(slices(env), tag, missing) : null
-  const mine = held?.priced.get(date)
-  if (mine) {
-    mergePriced(cache, mine, missing)
-    groups = held!.groups
-  } else if (asks.length) {
+  if (asks.length) {
     const isRoot = (r: Row) => fresh && r.depth === 1
     const read = await readAsks(
       idx,
@@ -152,8 +112,9 @@ async function compute(env: Env, date: string, owners: Map<string, OwnerRow>, he
       if (!a) added.set(r.path, (a = newAgg()))
       addAgg(a, r)
     }
+    for (const [path, a] of added) cache.aggs[path] = a
     cache.buckets = [...buckets].sort()
-    mergePriced(cache, added, missing)
+    cache.asked = [...new Set([...cache.asked, ...[...missing].map(([path, depth]) => `${depth}:${path}`)])].sort()
     await storePriced(env, date, tag, cache)
   }
   const aggs = new Map(Object.entries(cache.aggs))
@@ -163,7 +124,7 @@ async function compute(env: Env, date: string, owners: Map<string, OwnerRow>, he
     scan: date,
     head,
     ...totals,
-    computed: { at: Math.floor(Date.now() / 1000), ms: Date.now() - t0, groups, prefixes: missing.size, index: idx.mode, ...(mine ? { held: held!.timing } : {}) },
+    computed: { at: Math.floor(Date.now() / 1000), ms: Date.now() - t0, groups, prefixes: missing.size, index: idx.mode },
   }
 }
 
@@ -177,4 +138,16 @@ export async function ownerTotals(env: Env, date: string): Promise<OwnerTotalsBo
 /** The live assignments priced against `date` — what a user lens folds. */
 export async function ownerAssignments(env: Env, date: string): Promise<AssignmentRow[]> {
   return (await ownerTotals(env, date)).assignments
+}
+
+/** Fill the history rows for the ledger's prefixes not yet priced through the interval store's newest scan,
+ * `n` per call (one read each): the first fill, and catching up after scans are appended. */
+export async function fillOwnerHist(env: Env, n: number): Promise<{ priced: number; remaining: number; groups: number; index: string } | null> {
+  const dates = await ivHeldDates(slices(env))
+  if (!dates.length) return null
+  const idx = await openIndex(slices(env), dates[dates.length - 1])
+  const tag = indexTag(idx)
+  const { ownerRows } = await loadLedger(env)
+  const got = await fillHist(slices(env), tag, wantOf(foldLatest(ownerRows)), n)
+  return got && { ...got, index: tag }
 }
