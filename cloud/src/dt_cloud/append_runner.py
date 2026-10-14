@@ -668,7 +668,17 @@ def task_command(p: Profile, module: str, args: list[str], *, mount: bool = True
         prep += " /stage/src && cp -r " + " ".join(shlex.quote(s) for s in p.src) + " /stage/src/"
         py = "PYTHONPATH=/stage/src " + py
     m = ["-m", f"/gcs/{p.bucket}"] if mount else []
-    return f"set -euo pipefail; {prep} && cd /stage && {py} dt_cloud.{module} {shlex.join([*args, *m])}"
+    diagnostics = ""
+    if module == "static_drill" and args[0] == "build":
+        diagnostics = drill_exit_diagnostics()
+    elif module == "static_anchors" and args[0] == "run":
+        diagnostics = drill_exit_diagnostics("ANCHOR")
+    return f"set -euo pipefail; {diagnostics}{prep} && cd /stage && {py} dt_cloud.{module} {shlex.join([*args, *m])}"
+
+
+def drill_exit_diagnostics(prefix: str = "DRILL") -> str:
+    """The surviving shell records kernel memory counters even when its Python child is SIGKILLed."""
+    return """trap 'rc=$?; printf "PREFIX_EXIT code=%s\\n" "$rc"; for f in /sys/fs/cgroup/memory.events /sys/fs/cgroup/memory.events.local /sys/fs/cgroup/memory/memory.failcnt /sys/fs/cgroup/memory/memory.oom_control; do if [ -r "$f" ]; then printf "PREFIX_CGROUP %s\\n" "$f"; cat "$f"; fi; done' EXIT; """.replace("PREFIX", prefix)
 
 
 def duckdb_args(machine: str) -> list[str]:

@@ -90,6 +90,12 @@ def job_id(stage: str, scan_id: str, now: datetime | None = None) -> str:
     return ar.job_id("sn", stage, scan_id, now)
 
 
+def drill_duckdb_args(machine: str) -> list[str]:
+    """Reserve half the task's memory for Arrow, Python indexes/caches and allocations outside DuckDB's buffer manager."""
+    vcpus = int(machine.rsplit("-", 1)[-1])
+    return ["-M", f"{vcpus * 7700 // 2 // 1024}GB", "-p", str(vcpus)]
+
+
 # ── The chain ──────────────────────────────────────────────────────────────
 
 
@@ -258,7 +264,7 @@ class Runner(ar.Runner):
         if self.exists(f"{run}/drill/meta.json"):
             self.log(f"{d} drill: done")
             return None
-        args = ["build", "-g", self.cfg.gen, "-d", d, "-k", "task", *duckdb_args(self.cfg.machine)]
+        args = ["build", "-g", self.cfg.gen, "-d", d, "-k", "task", *drill_duckdb_args(self.cfg.machine)]
         name, spec = self.job("drill", d, 2, "static_drill", args)
 
         def build():
