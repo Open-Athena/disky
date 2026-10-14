@@ -183,7 +183,10 @@ def test_every_view_at_every_scan_is_the_per_scan_readers(world, local):
 def test_add_with_nothing_pending_is_a_nop(world, local, tmp_path):
     before = {p.relative_to(local["gen"]).as_posix(): p.read_bytes() for p in sorted(local["gen"].rglob("*")) if p.is_file()}
     out = _add(world, local["store"], tmp_path / "work")
-    assert out == {"gen": "g", "after": DATES[-1], "added": [], "merge": None, "files": 0}
+    ids = DATES[BASE:]
+    assert out == {"gen": "g", "after": DATES[-1], "added": [], "merge": None, "files": 0,
+                   "prune": {"manifest": f"manifests/{ids[-1]}.m001.json", "grace": [f"manifests/{d}.json" for d in ids], "runs": [],
+                             "objects": 0, "bytes": 0, "deleted": 0}}
     assert {p.relative_to(local["gen"]).as_posix(): p.read_bytes() for p in sorted(local["gen"].rglob("*")) if p.is_file()} == before
 
 
@@ -290,3 +293,32 @@ def test_run_store_over_a_dir_creates_once_and_leases(tmp_path):
     assert s.lease("y", now + timedelta(seconds=61), 60) is None
     s.release("y")
     assert (tmp_path / "scr" / "interval-store" / "g" / "merge.lease.json").exists() is False
+
+
+def test_add_prunes_the_folded_runs_after_the_grace(world, tmp_path):
+    """The four scans appended one `add` at a time, as if `AGE` s apart (each `add` first ages the store's manifests by
+    that much), grace `-G 600`: once a revision folds runs and is itself superseded past the grace, those runs leave the
+    store but for `interval_append.FOLDED_RETAIN`; the newest manifest still reads as the full rebuild."""
+    import os
+
+    ids = [s["id"] for s in world["scans"][BASE:]]
+    store = tmp_path / "store"
+    _build(world, store, tmp_path / "work-build")
+    gen = store / ist.PREFIX / "g"
+    AGE, GRACE = 700, 600
+    outs = []
+    for d in ids:
+        for p in (gen / "manifests").glob("*.json"):
+            t = p.stat().st_mtime - AGE
+            os.utime(p, (t, t))
+        outs.append(_add(world, store, tmp_path / "work", "g", "-t", d, "-G", str(GRACE)))
+    newest = json.loads(sorted((gen / "manifests").iterdir(), key=lambda p: ar.parse_manifest(p.name))[-1].read_text())
+    live = {r["key"] for r in newest["runs"]}
+    pruned = sorted(r["key"] for o in outs for r in o["prune"]["runs"])
+    assert pruned == sorted(f"deltas/{d}" for d in ids[:2])
+    for key in pruned:
+        assert sorted(p.relative_to(gen / key).as_posix() for p in (gen / key).rglob("*") if p.is_file()) == sorted(
+            [*(f"ranges/{p.name}" for p in (gen / key / "ranges").glob("*")), "scans.json"]), key
+    for t in ia.TABLES:
+        full = build_full(world["scans"], world["root"], tmp_path / f"full-{t}")
+        assert combine([_rows(gen, t), *(_rows(gen / k, t) for k in sorted(live))], t) == combine([_rows(full, t)], t)

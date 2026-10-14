@@ -45,7 +45,8 @@ from . import interval_store as ist
 from . import static_names as sn
 from .append_runner import LocalRunStore, latest_key, run_key, scans_of
 from .blobstore import Store, mirror, upload_new
-from .static_local import DiskPeak, _check_gen, find_scans, rss_peak_gb, workdir
+from . import static_local as sl
+from .static_local import DiskPeak, GenStore, _check_gen, find_scans, rss_peak_gb, workdir
 from .static_names import OPEN, err, q
 
 PREFIX = ist.PREFIX
@@ -235,8 +236,10 @@ def build_cmd(gen, k, layouts, mem, store_root, threads, rg_rows, scans_root, th
 @command("add")
 @option("-C", "--compact-level", type=ar.Level(), default=ar.COMPACT_LEVEL, help=ar.LEVEL_HELP)
 @option("-g", "--gen", required=True, help="The base generation (`<store>/interval-store/GEN/`)")
+@option("-G", "--grace-s", default=ar.GRACE_S, type=IntRange(min=ar.MIN_GRACE_S), help=f"Keep a superseded manifest's runs this many seconds (default {ar.GRACE_S}, at least {ar.MIN_GRACE_S})")
 @option("-L", "--layout", "layouts", multiple=True, required=True, help="Key template of the scans' `path` sorts under -s; repeat")
 @option("-M", "--mem", default="4GB", help="DuckDB memory limit")
+@option("-n", "--prune-dry-run", is_flag=True, help="Report the folded runs the prune would delete from the store; delete nothing")
 @option("-N", "--no-merge", is_flag=True, help="Skip the due carries (a later `add` merges them)")
 @option("-o", "--out", "store_root", required=True, help="The store: a dir or URL, the readers' INDEX_R2 root")
 @option("-p", "--threads", default=4, type=IntRange(min=1), help="DuckDB threads")
@@ -244,10 +247,12 @@ def build_cmd(gen, k, layouts, mem, store_root, threads, rg_rows, scans_root, th
 @option("-s", "--scans", "scans_root", required=True, help="Where the scans are: a dir or URL, the root of -L's keys")
 @option("-t", "--through", help="Last scan id to append (inclusive; default: the newest)")
 @option("-w", "--work", help="Local work dir (default: a temporary one, removed after); a URL store's generation is mirrored into it")
-def add_cmd(compact_level, gen, layouts, mem, no_merge, store_root, threads, rg_rows, scans_root, through, work) -> None:
+def add_cmd(compact_level, gen, grace_s, layouts, mem, prune_dry_run, no_merge, store_root, threads, rg_rows, scans_root, through,
+            work) -> None:
     """Append every scan after the generation's newest (base + runs), oldest first, each as a run published by its
     manifest; then the binary counter's due carries. The generation's published files are never rewritten; new ones go
-    to the store data first, `meta.json`s next, manifests last. Prints a JSON summary."""
+    to the store data first, `meta.json`s next, manifests last. Then the runs a carry folded are deleted from the store
+    (`append_runner.prune_folded`, `-G` grace; a folded run keeps `interval_append.FOLDED_RETAIN`). Prints a JSON summary."""
     _check_gen(gen)
     store = Store(store_root)
     prefix = f"{PREFIX}/{gen}"
@@ -274,4 +279,8 @@ def add_cmd(compact_level, gen, layouts, mem, no_merge, store_root, threads, rg_
         ours = {f"{prefix}/{p.relative_to(gen_dir).as_posix()}" for p in gen_dir.rglob("*") if p.is_file()}
         store.delete([key for key in stale if key not in ours])
         uploaded = upload_new(store, gen_dir, prefix, before, publish_order)
-    print(json.dumps({"gen": gen, "after": have[-1], "added": added, "merge": merged, "files": len(uploaded)}, indent=1))
+        prune = ar.prune_folded(GenStore(store, prefix), now=sl.now(), grace_s=grace_s, retain=ia.FOLDED_RETAIN, dry_run=prune_dry_run, log=err)
+        if not prune_dry_run:
+            ar.rm_local(gen_dir, prune["keys"])  # the mirror too: a later `add` over this work dir must not upload them again
+    print(json.dumps({"gen": gen, "after": have[-1], "added": added, "merge": merged, "files": len(uploaded),
+                      "prune": {k_: v for k_, v in prune.items() if k_ != "keys"}}, indent=1))
