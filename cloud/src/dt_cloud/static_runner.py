@@ -313,6 +313,7 @@ class Runner(ar.Runner):
         cmds.append(self.command("static_names", ["r2-copy", "-g", self.cfg.gen, "-o", f"manifests/{stem}.json"], mount=False))
         name = self.job_name("r2", d)
         spec = self.spec(name, 1, cmds, stage="r2", scratch=False, r2=True, machine="n2-highmem-4", ssd_gb=375)
+        spec = ar.label_batch_spec(spec, "static-names", scan_id=d)
         self.stage(f"{d} r2 ({len(runs)} runs + manifests/{stem}.json)", lambda: self.run_job(name, spec))
 
 

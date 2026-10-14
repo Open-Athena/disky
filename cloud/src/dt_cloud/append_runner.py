@@ -1033,7 +1033,8 @@ class Runner:
     def job(self, stage: str, scan_id: str, tasks: int, module: str, args: list[str], **kw) -> tuple[str, dict]:
         name = self.job_name(stage, scan_id)
         cmd = self.command(module, args, mount=kw.pop("mount", True))
-        return name, self.spec(name, tasks, [cmd], stage=stage, **kw)
+        spec = self.spec(name, tasks, [cmd], stage=stage, **kw)
+        return name, label_batch_spec(spec, spec.get("labels", {}).get("component", self.job_prefix), scan_id=scan_id)
 
     def drilled(self, runs: list[dict]) -> set[str]:
         """The runs carrying a drill (merged only with each other)."""

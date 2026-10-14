@@ -2254,8 +2254,9 @@ def job_logs(asc: bool, grep: str | None, key_markers: bool, limit: int, name: s
 
 @job.command("watch")
 @option("-i", "--interval", default=90, help="Poll interval (seconds)")
+@option("-L", "--no-logs", is_flag=True, help="Watch Batch state only (does not require Logging viewer permissions)")
 @argument("name", required=False)
-def job_watch(interval: int, name: str | None) -> None:
+def job_watch(interval: int, no_logs: bool, name: str | None) -> None:
     """Poll a Batch job to terminal state, then print its key log markers."""
     import time
     from datetime import datetime, timezone
@@ -2268,11 +2269,12 @@ def job_watch(interval: int, name: str | None) -> None:
     while True:
         state = _resolve_job(short)["status"].get("state", "?")
         err(f"{datetime.now(timezone.utc).strftime('%H:%M:%S')} {state}")
-        if state in ("SUCCEEDED", "FAILED", "DELETION_IN_PROGRESS"):
+        if state in ("SUCCEEDED", "FAILED", "CANCELLED", "DELETION_IN_PROGRESS"):
             break
         time.sleep(interval)
-    ctx = Context(job_logs)
-    ctx.invoke(job_logs, asc=True, grep=None, key_markers=True, limit=60, name=short)
+    if not no_logs:
+        ctx = Context(job_logs)
+        ctx.invoke(job_logs, asc=True, grep=None, key_markers=True, limit=60, name=short)
     if state != "SUCCEEDED":
         raise SystemExit(1)
 
@@ -2863,6 +2865,7 @@ def discord_webhook(bot_token: str | None, channel: str, guild: str | None, name
 @option("-L", "--no-listings", is_flag=True, help="Leave the canonical per-bucket listings (`<layer-2 dir>/<bucket>.parquet`) in GCS only; copy the tiers + snapshot JSONs")
 @option("-n", "--dry-run", is_flag=True, help="List the keys that would be copied; copy nothing")
 @option("-p", "--prefix", "prefixes", multiple=True, help="Key prefix to publish (repeatable; default: the scan's served subset — snapshots/<subdir>/<scan>/ + the layer-2 dir)")
+@option("-R", "--require-key", "required", multiple=True, help="Required source key (repeatable): refuse before copying if absent, and verify its R2 size/md5 before success")
 @option("-s", "--subdir", default=None, help="Snapshots subdir of this store (default $SNAPSHOTS_SUBDIR, else none)")
 @option("-S", "--small", is_flag=True, help="Only the small files the site reads beside the path store (its `SERVED_R2`): the snapshot JSONs and each generation's extras sidecars (`attr.tsv{,.idx.json}`); no tier, listing or rollup")
 @option("-w", "--workers", default=8, type=int, help="Concurrent HEADs/uploads (default 8)")
@@ -2874,6 +2877,7 @@ def publish_r2(
     no_listings: bool,
     dry_run: bool,
     prefixes: tuple[str, ...],
+    required: tuple[str, ...],
     subdir: str | None,
     small: bool,
     workers: int,
@@ -2917,6 +2921,7 @@ def publish_r2(
         listings=not no_listings,
         pointed=pointed,
         small=small,
+        required=required,
     )
 
 
@@ -2950,6 +2955,12 @@ main.add_command(_interval_store)
 from .scan_runs import cli as _scan_runs  # noqa: E402
 
 main.add_command(_scan_runs)
+from .scan_cost import cost_cmd as _scan_cost  # noqa: E402
+
+_scan_runs.add_command(_scan_cost)
+from .scan_tasks import task_cmd as _scan_task  # noqa: E402
+
+_scan_runs.add_command(_scan_task)
 
 from .scan_started import stamp_started as _stamp_started  # noqa: E402
 

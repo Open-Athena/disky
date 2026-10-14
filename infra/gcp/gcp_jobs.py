@@ -90,7 +90,7 @@ class Adopt:
 
     on: bool
 
-    def opts(self, existing: bool, import_id: str, **kw) -> ResourceOptions:
+    def opts(self, existing: bool, import_id: pulumi.Input[str], **kw) -> ResourceOptions:
         return ResourceOptions(import_=import_id if self.on and existing else None, **kw)
 
 
@@ -236,7 +236,7 @@ def grant_secret(
 def grant_bucket(
     name: str,
     *,
-    bucket: str,
+    bucket: pulumi.Input[str],
     role: str,
     member: pulumi.Input[str],
     member_email: str,
@@ -250,7 +250,7 @@ def grant_bucket(
         bucket=bucket,
         role=role,
         member=member,
-        opts=adopt.opts(existing, f"b/{bucket} {role} serviceAccount:{member_email}", parent=parent),
+        opts=adopt.opts(existing, pulumi.Output.concat("b/", bucket, f" {role} serviceAccount:{member_email}"), parent=parent),
     )
 
 
