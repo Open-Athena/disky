@@ -1594,7 +1594,7 @@ function AppContent() {
                   .map(([c, b]) => (
                     <tr key={c}>
                       <td>
-                        <Tooltip placement="right" content={<>${CLASS_PRICE_US[c] ?? 0.02}/GiB·mo · {((100 * b) / total).toFixed(1)}% of these bytes</>}>
+                        <Tooltip cell content={<>${CLASS_PRICE_US[c] ?? 0.02}/GiB·mo · {((100 * b) / total).toFixed(1)}% of these bytes</>}>
                           <span className="dotted">{CLASS_NAMES[c] ?? c}</span>
                         </Tooltip>
                       </td>

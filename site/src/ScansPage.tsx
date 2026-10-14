@@ -189,10 +189,10 @@ export function ScansPage() {
                   <tr key={r.run_id} className={r.status === 'failed' ? 'failed' : undefined}>
                     <td className="nb"><Link to={scanHref(r.run_id)}><code>{r.scan}</code></Link>
                       {(kinds.length > 1 || s.downstream > 0) && <div className="sr-kind">{kinds.length > 1 && r.kind}{s.downstream > 0 && <Tooltip content={`${s.downstream} downstream job${s.downstream > 1 ? 's' : ''} (listing fan-out, …)`}><span>{kinds.length > 1 ? ' + ' : '+ '}{s.downstream} job{s.downstream > 1 ? 's' : ''}</span></Tooltip>}</div>}</td>
-                    <td><Status run={r} failedAt={s.failed_at} issues={s.phase_issues} /></td>
+                    <td><Status cell run={r} failedAt={s.failed_at} issues={s.phase_issues} /></td>
                     <td className="nb hide-sm">{fmtRunTime(r.started_ts)}</td>
                     <td className="num nb">{s.secs == null ? <span className="dim">—</span> : fmtDur(s.secs)}</td>
-                    <td className="hide-md"><PhaseBar spans={s.spans} secs={s.secs} color={color} width={130} /></td>
+                    <td className="hide-md"><PhaseBar cell spans={s.spans} secs={s.secs} color={color} width={130} /></td>
                     <td className="num nb">{bytes(s.out_bytes)}</td>
                     <td className={`num nb ${deltaClass(s.delta_bytes)}`}>{delta(s.delta_bytes)}</td>
                     <td className="num nb">{s.cost_usd == null ? <span className="dim">—</span> : usd(s.cost_usd)}</td>
@@ -295,7 +295,7 @@ function RunList({ runs, links, title }: { runs: ScanRun[]; links: Links; title:
         <tbody>{runs.map(r => (
           <tr key={r.run_id} className={r.status === 'failed' ? 'failed' : undefined}>
             <td className="nb">{r.parent && r.kind !== 'phase-recovery' ? <code>{r.job_name ?? r.run_id}</code> : <Link to={scanHref(r.run_id)}><code>{r.job_name ?? r.run_id}</code></Link>}</td>
-            <td>{r.kind}</td><td><Status run={r} /></td><td className="nb">{fmtRunTime(r.started_ts)}</td>
+            <td>{r.kind}</td><td><Status cell run={r} /></td><td className="nb">{fmtRunTime(r.started_ts)}</td>
             <td className="num nb">{r.started_ts != null && r.finished_ts != null ? fmtDur(r.finished_ts - r.started_ts) : '—'}</td>
             <td className="nb">{r.machine ?? '—'}{r.tasks && r.tasks > 1 ? ` × ${r.tasks}` : ''}{r.spot ? ' (spot)' : ''}</td>
             <td className="num nb">{r.cost_usd == null ? '—' : usd(r.cost_usd)}</td>
