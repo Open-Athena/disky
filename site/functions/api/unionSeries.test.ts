@@ -38,16 +38,16 @@ describe.each(LINEAGES)('D1, %s lineage', lineage => {
 
   it('the root: one step per union event, each store’s latest point carried, a store before its first named missing', async () => {
     const [u, p, m] = await Promise.all([body('path='), body('path=&store=primary'), body('path=&store=meta')])
-    // Every scan of a store reads the same fixture: one value per store.
-    const [P] = p.points, [M] = m.points
+    const at = (b: Body, d: string) => b.points.find(x => x.date === d)!
+    const sum = (x: Pt, y: Pt) => ({ b: x.b + y.b, o: x.o + y.o })
     expect([p.points.map(x => x.date), m.points.map(x => x.date)]).toEqual([[Z, A, C], [A, B]])
     expect(u).toEqual({
       path: '',
       points: [
-        { date: Z, b: P.b, o: P.o, missing: ['meta'] },
-        { date: A, b: P.b + M.b, o: P.o + M.o },
-        { date: B, b: P.b + M.b, o: P.o + M.o },
-        { date: C, b: P.b + M.b, o: P.o + M.o },
+        { date: Z, b: at(p, Z).b, o: at(p, Z).o, missing: ['meta'] },
+        { date: A, ...sum(at(p, A), at(m, A)) },
+        { date: B, ...sum(at(p, A), at(m, B)) },
+        { date: C, ...sum(at(p, C), at(m, B)) },
       ],
       union: { view: 'all', sources: [{ store: 'primary', from: Z }, { store: 'meta', from: A }] },
     })
@@ -55,19 +55,21 @@ describe.each(LINEAGES)('D1, %s lineage', lineage => {
 
   it('`split=roots`: every store’s roots, each at its store’s carried point, a root starting at its store’s first scan', async () => {
     const [u, p, m] = await Promise.all([body('path=&split=roots'), body('path=&split=roots&store=primary'), body('path=&split=roots&store=meta')])
-    const at = (b: Body, root: string) => b.roots!.find(r => r.path === root)!.points[0]
-    const [bk, zz, mb] = [at(p, 'bk'), at(p, 'zz'), at(m, 'mb')]
+    const trace = (b: Body, root: string) => b.roots!.find(r => r.path === root)!.points
     const pt = (date: string, r: Pt) => ({ date, b: r.b, o: r.o })
+    const [bk, zz, mb] = [trace(p, 'bk'), trace(p, 'zz'), trace(m, 'mb')]
+    // The primary's `zz` is gone at C; its `bk` changed. Meta's `mb` carries A, then B.
+    expect([bk.map(x => x.date), zz.map(x => x.date), mb.map(x => x.date)]).toEqual([[Z, A, C], [Z, A], [A, B]])
     expect(u.roots).toEqual([
-      { path: 'bk', points: [Z, A, B, C].map(d => pt(d, bk)) },
-      { path: 'zz', points: [Z, A, B, C].map(d => pt(d, zz)) },
-      { path: 'mb', points: [A, B, C].map(d => pt(d, mb)) },
+      { path: 'bk', points: [pt(Z, bk[0]), pt(A, bk[1]), pt(B, bk[1]), pt(C, bk[2])] },
+      { path: 'zz', points: [pt(Z, zz[0]), pt(A, zz[1]), pt(B, zz[1])] },
+      { path: 'mb', points: [pt(A, mb[0]), pt(B, mb[1]), pt(C, mb[1])] },
     ])
     expect(u.points.map(x => [x.date, x.b, x.missing ?? null])).toEqual([
-      [Z, bk.b + zz.b, ['meta']],
-      [A, bk.b + zz.b + mb.b, null],
-      [B, bk.b + zz.b + mb.b, null],
-      [C, bk.b + zz.b + mb.b, null],
+      [Z, bk[0].b + zz[0].b, ['meta']],
+      [A, bk[1].b + zz[1].b + mb[0].b, null],
+      [B, bk[1].b + zz[1].b + mb[1].b, null],
+      [C, bk[2].b + mb[1].b, null],
     ])
   })
 

@@ -1,8 +1,8 @@
 /**
  * Test-only: one deployment of three stores for the union-view tests (`_lib/union.ts`) — the primary
- * (`v2-search`: roots `bk`, `zz`) scanned at Z, A and C; a secondary `meta` (`v2-mount`: root `mb`) on its own
- * schedule, A and B; a secondary `dup` (`v2`: a `bk` root, overlapping the primary's) at A. A test mocks the S3
- * store module with `testStore`'s, as `testStore.ts` says.
+ * (`v2-search`: roots `bk`, `zz`) scanned at Z and A, then `v2` at C (`bk` alone, other content: a real diff); a
+ * secondary `meta` (`v2-mount`: root `mb`) on its own schedule, A and B; a secondary `dup` (`v2`: a `bk` root,
+ * overlapping the primary's) at A. A test mocks the S3 store module with `testStore`'s, as `testStore.ts` says.
  */
 import type { Env } from './auth.js'
 import { type Lineage, sqliteD1 } from './testD1.js'
@@ -28,7 +28,8 @@ export async function unionDeployment(lineage: Lineage): Promise<(views?: Record
     const files = { path: { parquet: `${fx}/path-index.parquet`, groups: `${fx}/path-index.groups.json` }, bysize: { parquet: `${fx}/path-index-bysize.parquet`, groups: `${fx}/path-index-bysize.groups.json` } }
     seedGeneration(raw, { date, gen: 'g', dir: `${store ?? 'primary'}/${date}/index/g`, variants: v, files, store })
   }
-  for (const d of [Z, A, C]) await seed('v2-search', d)
+  for (const d of [Z, A]) await seed('v2-search', d)
+  await seed('v2', C)
   for (const d of [A, B]) await seed('v2-mount', d, 'meta')
   await seed('v2', A, 'dup')
   const base = { DB: db, GCS_HMAC_KEY_ID: 'k', GCS_HMAC_SECRET: 's', STORE_BUCKET: 'my-data', ROOT_LABEL: 'Fleet', STORE_META_ID: 'x' } as Env
