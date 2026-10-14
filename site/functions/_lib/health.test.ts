@@ -1,4 +1,4 @@
-// specs/health-page.md: /api/health over a fake `INDEX_R2` (both stores' `scans.json`, manifests and run files) and the
+// specs/done/health-page.md: /api/health over a fake `INDEX_R2` (both stores' `scans.json`, manifests and run files) and the
 // cw lineage's D1 (`index_schema` path rows, `scan_runs`). The interval store never got scan 04; the static index's
 // run for 05 has no `drill/`; scan 07's job is running.
 import { describe, expect, it } from 'vitest'

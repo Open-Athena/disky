@@ -1,6 +1,6 @@
 # `bysize` keyed on the path's total
 
-**Status:** implemented on `cloud` (writer, reader, `index-recut`); the gcs rollout (image, `index-sync` of the re-cut generations, deploy) is the gcs session's. The interim read-time fix (`completeSlices`) is removed: it made thresholded views ~4× slower, and the re-cut supersedes it.
+**Status:** done: implemented on `cloud` (`f76c83b4`, merge `35c1d4d6`: writer, reader, `index-recut`), and the interval store's `slices-bytotal` keys the same way (`fb9ded0c`), which is what gcs prod serves now. The per-scan re-cut's rollout (image, `index-sync` of the re-cut generations, deploy) was the gcs session's. The interim read-time fix (`completeSlices`) is removed: it made thresholded views ~4× slower, and the re-cut supersedes it.
 
 ## Problem
 

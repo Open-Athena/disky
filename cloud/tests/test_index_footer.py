@@ -164,14 +164,18 @@ def test_sync_d1_packs_inserts_greedily_under_the_byte_limit(tmp_path, monkeypat
     # The cold footer + blob beside the parquet are written before any D1 row: the durable copies.
     assert blobs == [("parquet", "x.parquet", {"version": 1, "schema": []}, rows), ("json", "x.parquet", {"version": 1, "schema": []}, rows)]
     # Generation protocol: sweep unreachable gens, land every group under this
-    # gen, then flip the pointer — nothing is deleted before the flip.
+    # gen, then flip the pointer — nothing is deleted before the flip. (This D1
+    # has no footer LRU table — the probe finds none — so no entry is written.)
+    assert sent.pop(0) == "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'footer_cache';"
     assert sent[0] == (
         "DELETE FROM index_row_groups WHERE date='2026-09-01' AND variant='path' AND gen <> '20260901T070000Z' "
         "AND gen <> COALESCE((SELECT gen FROM index_schema WHERE date='2026-09-01' AND variant='path'), '');"
     )
     assert sent[-1] == (
-        "INSERT OR REPLACE INTO index_schema (date, variant, version, schema_json, floor_bytes, gen, dir) VALUES "
-        "('2026-09-01', 'path', 1, '[]', NULL, '20260901T070000Z', 'listing/2026-09-01/index/20260901T070000Z');"
+        "INSERT INTO index_schema (date, variant, version, schema_json, floor_bytes, gen, dir) VALUES "
+        "('2026-09-01', 'path', 1, '[]', NULL, '20260901T070000Z', 'listing/2026-09-01/index/20260901T070000Z') "
+        "ON CONFLICT DO UPDATE SET version = excluded.version, schema_json = excluded.schema_json, "
+        "floor_bytes = excluded.floor_bytes, gen = excluded.gen, dir = excluded.dir;"
     )
     inserts = sent[1:-1]
     head = "INSERT OR REPLACE INTO index_row_groups (date, variant, gen, rg, d_min, d_max, p_min, p_max, b_max, u_min, u_max, row_start, row_end, rg_json) VALUES "
@@ -224,6 +228,7 @@ def test_gc_d1_deletes_only_generations_no_pointer_names(monkeypatch, d1_lineage
     monkeypatch.setattr(index_footer, "_d1_query", fake_query)
     monkeypatch.setattr(index_footer, "_creds", lambda: ("tok", "acct"))
     assert gc_d1("2026-09-01") == 3
+    assert sent.pop(0) == "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'footer_cache';"
     assert re.sub(r"\s+", " ", sent[0]) == (
         "DELETE FROM index_row_groups WHERE date = '2026-09-01' AND gen <> COALESCE("
         "(SELECT s.gen FROM index_schema s WHERE s.date = index_row_groups.date AND s.variant = index_row_groups.variant), '') RETURNING 1 AS n;"

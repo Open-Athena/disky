@@ -4,8 +4,10 @@ Show each scan job's run the way `/staged` shows deletion runs: when it ran, how
 
 ## Status
 
+Done. Every rollout step landed on both deployments: the migrations (gcs `0040_scan_runs.sql`, cw `0016_scan_runs.sql`), `job/scan-runs.json` and the `scan_run` glue in gcs `job/run.sh` and cw-s3 `job/cw-run.sh`, and `META_TREE_URL` in both `wrangler.toml`s. Later work extends it: concurrent phases (`f4bc4885`), cost labels (`53df1e93`), per-store runs (`bcbe370c`), jobs outside Batch (`a6f56737`). As built, before the rollout:
+
 - Built on `scan-runs` (off `cloud`): migration, `dt-cloud scan-run record | backfill`, `/api/scan-runs`, `/scans` and `/scans/<run>`, tests.
-- **Gated on Ryan's go** (§Rollout): applying the migration to a deployment's D1 (gcs's prod D1 `oa-gcs-usage-auth` is also dev.gcs.oa.dev's, so a dev deploy needs it too) and the backfill's writes. Until then the backfill has run read-only into local SQLite, and the UI was checked on a local stack (`gcs` + `scan-runs`, `./dev --local-db`, the local D1 seeded from the backfill's `-n` SQL).
+- Gated on Ryan's go (§Rollout), since given: applying the migration to a deployment's D1 (gcs's prod D1 `oa-gcs-usage-auth` is also dev.gcs.oa.dev's, so a dev deploy needs it too) and the backfill's writes. Until then the backfill has run read-only into local SQLite, and the UI was checked on a local stack (`gcs` + `scan-runs`, `./dev --local-db`, the local D1 seeded from the backfill's `-n` SQL).
 - The job glue (§Job glue) is for the deployment sessions to apply on `gcs` / `cw-s3`.
 
 ## Decisions

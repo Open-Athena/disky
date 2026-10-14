@@ -1,5 +1,7 @@
 # Staged delete: the `chat-approve` cloud path, upstreamed generic
 
+**Status:** superseded. CP1–7 were built in the old `ui/` edge and engine, which were later deleted (`b102769b`, `be4e0d1f`); the laptop engine and drainer moved to `local` (`75674f23`). `cloud`'s staged flow lives in `site/` (`/staged`, `/api/plans`; [`staged-runs.md`](staged-runs.md)). CP8 (the cloud-function cells) is moot.
+
 **From:** the mgu gcs "delete not mark" pivot (`specs/gcs-toward-union.md` §5 seam 1 + `specs/sweep-plan-union.md`, mgu-side), routed here as roadmap item 3 (`specs/done/mgu-cp-2026-09-16.md`). Cross-repo peer, so **generalize-and-upstream** (`/cp` `handoff: spec`): disk-tree holds the reusable engine, each deployment keeps its policy; gcs eventually imports it.
 
 **Goal:** a public demo against Ryan's **S3 + R2**, in the repo — you log in and do admin dispatches. It doubles as the forcing function to make the ported pieces appropriately generic (S3/R2/GCS, not gcs-only).

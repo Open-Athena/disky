@@ -1,6 +1,8 @@
 # Multi-store deploys: secondary stores at their own URL paths (first user: a `/meta` self-scan)
 
-Status: **phases 1 and 2 implemented on the base** (2026-09-29; not yet deployed or migrated anywhere); phases 3 and 3b open. Proposed 2026-09-29 from the cw-s3 session (Ryan: "(a) multi-store base sg … yes spec it, this is a good direction").
+**Status:** done. Phases 1 and 2 are on the base (2026-09-29). Phase 3, `/meta` on cw-s3, is live (`STORES_EXTRA = "meta"`, `3e2a924b`), and phase 3b's leaf viewer and `/files` retirement landed (`ff5d6b96`, `265923fd`). Not built: 3b's optional "live listing" toggle and `warm-cache --store`. Phase 4 belongs to [`federated-scans.md`](../federated-scans.md).
+
+Proposed 2026-09-29 from the cw-s3 session (Ryan: "(a) multi-store base sg … yes spec it, this is a good direction").
 
 ## Motivation
 

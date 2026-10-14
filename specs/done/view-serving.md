@@ -1,6 +1,8 @@
 # Every read is a view query: tiered index, server-side scope, objects as leaves, AL as-of
 
-**Status:** design 2026-09-06, from Ryan's review of the 9/5–9/6 OOM thread. Supersedes `path-agnostic-serving.md` (whose §1 audit and §2.1/§2.3 mechanics still hold and are referenced, not repeated) and the "floor" option (#3) in `webdata-memory.md`. Written as "how this looks built from scratch today", then an order that gets there by deleting vestiges rather than wrapping them.
+**Status:** superseded. Steps 1–3 shipped (coarse tiers `43b4b33a`, `buildView` `ca6ab5ce`, server-side scope `e4a43d77`). The tier design (coarse / dirs / objects) was then replaced by the unified path store ([`path-store.md`](path-store.md)) and the interval store; marks on objects went with the marks demolition. §6's naming pass was not done.
+
+Design 2026-09-06, from Ryan's review of the 9/5–9/6 OOM thread. Supersedes `path-agnostic-serving.md` (whose §1 audit and §2.1/§2.3 mechanics still hold and are referenced, not repeated) and the "floor" option (#3) in `webdata-memory.md`. Written as "how this looks built from scratch today", then an order that gets there by deleting vestiges rather than wrapping them.
 
 ## 0. The rules
 

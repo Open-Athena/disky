@@ -1,5 +1,11 @@
 # The unified deletion model (opt-in trash) — implementation
 
+**Status:** done. Every checkpoint landed through later specs: the staged set
+and `/api/plans`, `sweep manifest --plan` (`plan_id` on `deletion_runs`),
+`/staged` runs behind the executor's capabilities (`1fbb0e02`,
+`done/staged-runs.md`), and the scope-cut demolition (`227c534c`,
+`done/marks-demolition.md`).
+
 The build plan for the decided seams (`specs/done/gcs-toward-union.md` §5). Both
 branches build to this so they converge by construction; DT upstreams the result
 into `disk_tree` (its `specs/done/mgu-cp-2026-09-16.md` roadmap item 3) once it runs on

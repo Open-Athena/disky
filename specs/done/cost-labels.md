@@ -1,5 +1,7 @@
 # Cost labels: attributing disky's GCP spend
 
+**Status:** done. `$DISKY_LABELS` and a per-job `component` label on `cloud` (`a987151b`, merge `d800dcea`; per-run labels `53df1e93`), applied on gcs (`435138b6`) and cw-s3 (`1a358905`). One step is left, outside the code: an OA billing admin must enable the detailed usage cost export to BigQuery (console only); then run the query in “Billing export to BigQuery” and check that the Batch VM rows carry the labels.
+
 disky's GCP resources (Batch jobs, Cloud Run, Scheduler, Secret Manager, buckets) share a project with other OA work. To report disky's spend, everything disky creates carries cost-attribution labels, and the project's billing account exports detailed usage cost to BigQuery, where a query groups the labeled rows by deployment and component.
 
 ## The setting

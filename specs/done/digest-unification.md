@@ -1,5 +1,7 @@
 # Digest unification: one engine, two templates
 
+**Status:** done. One engine with `gcs` / `cw` templates (`ae8d2183`), presets that carry only template shape (`7723e512`), validated `-C` configs (`012a4ea1`), no deployment defaults (`26b59975`). Both deployments run `dt-cloud digest -C job/digest.yml`. Optional cleanup: drop the `cw-digest` alias.
+
 Step 1 of the gcs/cw unification sequence in [`branch-layout.md`] ("Open": digests → sweep executors → `path-index`/`index-write` → identities into D1 → sheet mirror). Per [branches carry exactly their code]: the posting capability lives on `cloud` as a toolkit; each deployment's policy/config lives on its branch.
 
 ## Before
@@ -91,6 +93,6 @@ Other non-posted differences: the dry-run plot's temp filename (`<slug>-YYYYMM.p
 - **Owners/users section**: neither digest has one today (gcs's owner attribution lives in the site and the retired weekly report). If wanted, it is an optional template section fed from config (on/off) + gcs's owner data — a gcs-branch input, not engine code.
 - [`comms-notify.md`] describes an earlier `disk_tree.notify` engine (plotly, `DigestProfile`), deleted from `cloud` as dead code (`be4e0d1`); this spec supersedes it for the deployed digests.
 
-[`branch-layout.md`]: branch-layout.md
-[branches carry exactly their code]: branch-layout.md#2-proposed-tree
-[`comms-notify.md`]: done/comms-notify.md
+[`branch-layout.md`]: ../branch-layout.md
+[branches carry exactly their code]: ../branch-layout.md#2-proposed-tree
+[`comms-notify.md`]: comms-notify.md

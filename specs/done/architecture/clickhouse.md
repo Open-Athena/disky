@@ -163,9 +163,9 @@ The [reservation journal][reservations] uses a process writer lock and SQLite EX
 
 The synthetic 100K identity screen publishes bootstrap bindings in 0.369 seconds, appends 100 in 0.153 seconds and retries without writes in 0.104 seconds. These exclude scalar/rich ingestion and billion-path lookups. End-to-end scalar/summary publication, new-scan refresh, concurrency tails, a durable service endpoint and reconstructed pre-09-30 object history remain production gates. No trillion-state query trie or universal subsecond guarantee is implied by these component results.
 
-[ch-spec]: ../done/ch-store.md
+[ch-spec]: ../ch-store.md
 [short-query]: short-query-index.md
-[agents]: ../../AGENTS.md
+[agents]: ../../../AGENTS.md
 [schema]: ../../cloud/src/dt_cloud/chstore/schema.py
 [ingest]: ../../cloud/src/dt_cloud/chstore/ingest.py
 [narrow]: ../../cloud/src/dt_cloud/chstore/narrow.py
