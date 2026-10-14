@@ -95,73 +95,36 @@ if [ "${SPLIT_COMPUTE:-0}" = "1" ]; then
   fi
 fi
 
-# Scan-run record (specs/scan-runs-ui.md): this run's phases, outputs and exit
-# in D1 (`scan_runs`), shown at /scans. `dt-cloud scan-run record` never fails
-# the job (it prints and exits 0 on any error) and writes over the D1 HTTP API
-# with the index-sync credentials, so xtrace is off around it. The profile
-# (`job/scan-runs.json`) says what each phase wrote. A SCRATCH / GATE run is
-# not a scan run: nothing is recorded.
+# Scan-run record and alerts (specs/scan-runs-ui.md, specs/scan-job-wrapper.md):
+# `dt-cloud scan-run start / phase-begin / phase-end / phase -- CMD / finish`
+# print the PHASE markers (the backfill parses them from the logs; N is seconds
+# since `$DT_JOB_START`), record the run's phases, outputs and exit in D1
+# (`scan_runs`, shown at /scans), and post failure alerts through `disk-tree
+# notify`'s slack channel (SLACK_BOT_TOKEN + SLACK_ALERT_CHANNEL, the
+# #gcs-usage-alerts channel, falling back to the digest's SLACK_CHANNEL). They
+# never fail the job for their own reasons, take no secret on argv, and redact
+# the profile's `secrets` from what they post or record. The profile
+# (`job/scan-runs.json`) says what each phase wrote, the alert label and the
+# logs link. A SCRATCH / GATE run is not a scan run: nothing is recorded and
+# alerts print instead of posting. A fatal `phase-end -x RC` alerts and exits
+# RC; `-W` warns and continues.
+export DT_JOB_START=${DT_JOB_START:-$(date +%s)}
 export SCAN_RUNS_PROFILE=${SCAN_RUNS_PROFILE:-job/scan-runs.json}
+export SLACK_ALERT_CHANNEL=${SLACK_ALERT_CHANNEL:-${SLACK_CHANNEL:-}}
+if [ "${SCRATCH:-0}" = "1" ] || [ "${GATE:-0}" = "1" ]; then export DT_RECORD=off DT_ALERTS=stderr; fi
 SR_KIND=scan; [ "${REPROC:-0}" = "1" ] && SR_KIND=reproc
 [ "${SCAN_COMPUTE_ONLY:-0}" = "1" ] && SR_KIND=compute
-SR_ERR=""
-scan_run() {
-  { set +x; } 2>/dev/null
-  if [ "${SCRATCH:-0}" != "1" ] && [ "${GATE:-0}" != "1" ] && [ -n "${BATCH_JOB_UID:-}" ]; then
-    (cd /app && dt-cloud scan-run record -k "$SR_KIND" -g "$GEN" ${SCAN_ROOT_UID:+-p "$SCAN_ROOT_UID"} "$@" "$SNAP_ID")
-  fi
-  set -x
-}
-# A phase just ended: the marker line (the backfill parses these from the
-# logs) and its record. `phase NAME [NOTE]`.
-phase() { echo "PHASE $1: ${SECONDS}s (wall${2:+, $2})" >&2; scan_run -P "$1" ${2:+-q "$2"}; }
-begin_phase() { echo "PHASE-START $1: ${SECONDS}s (wall)" >&2; scan_run -A -P "$1" -M; }
-scan_run_exit() { local rc=$?; scan_run -x "$rc" ${SR_ERR:+-e "$SR_ERR"}; exit "$rc"; }
+sr() { dt-cloud scan-run "$@"; }
+wall() { echo "$(( $(date +%s) - DT_JOB_START ))s"; }
 
-# Failure alerting: any command dying under `set -e` posts to Slack before the
-# job exits — otherwise silence is the only failure signal (the success digest
-# is the very last step, so a hard failure posts nothing; both 2026-08-28
-# incidents went unnoticed this way). Alerts go to #gcs-usage-alerts
-# (SLACK_ALERT_CHANNEL, falling back to the digest's SLACK_CHANNEL) so they
-# don't clutter the #gcs-usage digest thread; same transport gating as the
-# digest (chat.postMessage bot token → webhook fallback). Pure python3 — the
-# python:3.12-slim image has no curl (the 2026-09-01 failure alert died on
-# `curl: command not found` and the OOM went unreported). `set +x` FIRST — the
-# request carries the token, which xtrace would echo into Cloud Logging.
-slack_post() {
-  { set +x; } 2>/dev/null
-  local msg=$1 chan="${SLACK_ALERT_CHANNEL:-${SLACK_CHANNEL:-}}"
-  if [ "${SCRATCH:-0}" = "1" ] || [ "${GATE:-0}" = "1" ]; then
-    printf 'Validation alert (Slack suppressed): %s\n' "$msg" >&2
-    return 0
-  fi
-  SLACK_MSG="$msg" SLACK_CHAN="$chan" python3 - <<'PY' || true
-import json, os, urllib.request
-msg, chan = os.environ["SLACK_MSG"], os.environ["SLACK_CHAN"]
-tok, hook = os.environ.get("SLACK_BOT_TOKEN"), os.environ.get("SLACK_WEBHOOK")
-if tok and chan:
-    url, hdrs, body = ("https://slack.com/api/chat.postMessage",
-                       {"Authorization": f"Bearer {tok}"}, {"channel": chan, "text": msg})
-elif hook:
-    url, hdrs, body = hook, {}, {"text": msg}
-else:
-    raise SystemExit(0)
-hdrs["Content-type"] = "application/json; charset=utf-8"
-req = urllib.request.Request(url, json.dumps(body).encode(), hdrs)
-try:
-    urllib.request.urlopen(req, timeout=30).read()
-except Exception as e:  # alerting must never mask the real failure
-    print(f"slack_post failed: {e}", flush=True)
-PY
-}
-fail_alert() {
-  local rc=$1 line=$2 cmd=$3
-  SR_ERR="exit $rc: $cmd (run.sh:$line)"  # the EXIT trap records it (scan_run_exit)
-  local msg="❌ \`dt-cloud\` snapshot job failed ($SNAP_ID): \`${cmd}\` exited $rc at run.sh:$line"
-  [ -n "${BATCH_JOB_UID:-}" ] && msg+=$'\n'"<https://console.cloud.google.com/logs/query;query=labels.job_uid%3D%22$BATCH_JOB_UID%22?project=oa-internal-450019|task logs>"
-  slack_post "$msg"
-}
-trap 'fail_alert $? $LINENO "$BASH_COMMAND"' ERR
+# Any command dying under `set -e` ends the run through the EXIT trap, whose
+# `finish` posts the failure alert (unless a fatal phase already did) with this
+# reason, also recorded as `scan_runs.error` — otherwise silence is the only
+# failure signal (both 2026-08-28 incidents went unnoticed). The backfill finds
+# the reason in the logs by its trace line (`error_marker`).
+SR_ERR=""
+scan_err() { SR_ERR="exit $1: $3 (run.sh:$2)"; }
+trap 'scan_err $? $LINENO "$BASH_COMMAND"' ERR
 
 cd /app
 
@@ -195,10 +158,17 @@ if [ -n "${SWEEP_BENCHMARK_PLAN:-}" ]; then
   exit 0
 fi
 # ACCESS_ONLY (backlog backfill): serial ingest, then exit — no snapshot.
+ACCESS_WARN="the snapshot continues; read recency lags until the next run's ingest (watermarked, it self-heals)"
 if [ "${ACCESS_ONLY:-0}" = "1" ]; then
-  if [ -n "${SCAN_ROOT_UID:-}" ]; then SR_KIND=access; trap scan_run_exit EXIT; scan_run -S -B; begin_phase access-ingest; fi
-  dt-cloud access ingest ${ACCESS_ARGS:-} || exit 1
-  [ -z "${SCAN_ROOT_UID:-}" ] || phase access-ingest
+  if [ -n "${SCAN_ROOT_UID:-}" ]; then
+    trap 'sr finish -x $? ${SR_ERR:+-e "$SR_ERR"}' EXIT
+    sr start -k access -B -g "$GEN" -p "$SCAN_ROOT_UID" "$SNAP_ID"
+    # Never fatal (the snapshot continues without it): a failure warns, and this
+    # downstream run ends clean.
+    sr phase access-ingest -W -m "$ACCESS_WARN" -- dt-cloud access ingest ${ACCESS_ARGS:-}
+  else
+    dt-cloud access ingest ${ACCESS_ARGS:-}
+  fi
   echo "ACCESS-JOB-DONE"
   exit 0
 fi
@@ -233,8 +203,8 @@ fi
 
 # From here on this job is a scan run (the branches above exit as other jobs):
 # record its start (with its Batch facts: machine, SPOT, cost) and its exit.
-trap scan_run_exit EXIT
-scan_run -S -B
+trap 'sr finish -x $? ${SR_ERR:+-e "$SR_ERR"}' EXIT
+sr start -k "$SR_KIND" -B -g "$GEN" ${SCAN_ROOT_UID:+-p "$SCAN_ROOT_UID"} "$SNAP_ID"
 
 # Scheduled retry attempts set NOP_IF_PUBLISHED=1: exit quietly when the
 # snapshot already exists (an earlier attempt won). Manual runs leave it
@@ -244,7 +214,8 @@ if [ "${NOP_IF_PUBLISHED:-0}" = "1" ] && [ -f "/gcs/$DATA/$SNAP_PATH/meta.json" 
   [ "${SKIP_ACCESS:-0}" = "1" ] || dt-cloud access ingest ${ACCESS_ARGS:-} \
     || echo "WARN: access ingest failed (watermark self-heals next run)" >&2
   echo "SNAPSHOT-JOB-NOP $SNAP_ID (already published)"
-  scan_run -N
+  # `finish -x 0` keeps a NOP run a NOP
+  [ "${DT_RECORD:-}" = off ] || [ -z "${BATCH_JOB_UID:-}" ] || dt-cloud scan-run record -N -k "$SR_KIND" "$SNAP_ID"
   exit 0
 fi
 
@@ -255,10 +226,9 @@ fi
 # path; now it hides under the listing's wall time. Non-fatal: a failure is
 # caught at the barrier and the watermark self-heals next run.
 ACCESS_PID=""
-SECONDS=0   # phase-timing baseline (see PHASE markers below)
-begin_phase listing-fanout
+sr phase-begin listing-fanout
 if [ "${SKIP_ACCESS:-0}" != "1" ] && [ "${REPROC:-0}" != "1" ]; then
-  begin_phase access-ingest
+  sr phase-begin access-ingest
   if [ "${SPLIT_COMPUTE:-0}" = "1" ]; then
     dt-cloud scan-run task -s access "$SNAP_ID" & ACCESS_PID=$!
   else
@@ -291,24 +261,25 @@ if [ "${REPROC:-0}" != "1" ]; then
   LZ+=(-L marin-us-central2=central2-listing)
   dt-cloud job submit-listing -d "$SNAP_ID" -W "${LZ[@]}"
 fi
-phase listing-fanout
+sr phase-end listing-fanout
 
 # Barrier: the concurrent access ingest must finish before we stage (stage reads
 # its access/agg shards) and before HAVE_ACCESS is computed just below. Non-fatal.
+ACCESS_RC=0
 if [ -n "$ACCESS_PID" ]; then
-  wait "$ACCESS_PID" || echo "WARN: access ingest failed (snapshot continues; watermark self-heals next run)" >&2
+  wait "$ACCESS_PID" || ACCESS_RC=$?
 fi
-phase access-ingest "overlapped the listing"
+sr phase-end access-ingest -x "$ACCESS_RC" -W -m "$ACCESS_WARN" -q "overlapped the listing"
 if [ "${SPLIT_COMPUTE:-0}" = "1" ]; then
-  begin_phase scan-compute
+  sr phase-begin scan-compute
   GEN="$GEN" SNAP_PATH="$SNAP_PATH" INDEX_PATH="$INDEX_PATH" dt-cloud scan-run task -s compute "$SNAP_ID"
-  phase scan-compute
+  sr phase-end scan-compute
   if [ "${SCRATCH:-0}" = "1" ]; then
     echo "SCRATCH — split computation complete; no serving pointers changed" >&2
     exit 0
   fi
 else
-begin_phase path-index
+sr phase-begin path-index
 G=()
 for b in "${FLEET[@]}"; do
   if [ -f "/gcs/$DATA/listing/$SNAP_ID/$b/_SUCCESS.json" ]; then G+=("/gcs/$DATA/listing/$SNAP_ID/$b/*.parquet")
@@ -366,7 +337,7 @@ if [ "${GATE:-0}" = "1" ]; then
   done
   mkdir -p "/gcs/$DATA/gate/$SNAP_ID"
   cp "$GD"/import-*.log "$GD"/a2a-*.txt "/gcs/$DATA/gate/$SNAP_ID/"
-  echo "PHASE gate: ${SECONDS}s (wall); reports at gs://$DATA/gate/$SNAP_ID/" >&2
+  echo "PHASE gate: $(wall) (wall); reports at gs://$DATA/gate/$SNAP_ID/" >&2
   exit 0
 fi
 
@@ -391,8 +362,8 @@ dt-cloud path-index -d "$DATE" "${L[@]}" "${A[@]}" "${X[@]}" -o "/tmp/snap/$SNAP
   -c "/gcs/$DATA/listing/$SNAP_ID/dir-cache" \
   -P "$PI_DIR/path-index.parquet" ${PATH_INDEX_RG_ROWS:+-r "$PATH_INDEX_RG_ROWS"} -u "${PATH_INDEX_USER_SORT_TIERS:-bysize}" \
   ${PATH_INDEX_SEARCH:+-S}  # PATH_INDEX_SEARCH=1: the filter's search sidecars too (specs/path-store-search.md; off until measured)
-phase path-index
-begin_phase "path-index upload"
+sr phase-end path-index
+sr phase-begin "path-index upload"
 ls -l "$PI_DIR" >&2
 PI_DIR="$PI_DIR" DATA="$DATA" DEST="$(dirname "$INDEX_PATH")" python3 - <<'PY'
 import os, time
@@ -411,11 +382,11 @@ for f in sorted(p for p in src.iterdir() if p.is_file() and not p.name.startswit
     tot += f.stat().st_size
 print(f"path-index upload: {tot / 1e9:.1f} GB in {time.time() - t0:.0f}s → gs://{os.environ['DATA']}/{dest}/", flush=True)
 PY
-phase "path-index upload"
-begin_phase webdata+stage
+sr phase-end "path-index upload"
+sr phase-begin webdata+stage
 dt-cloud rules -o /tmp/rules.json || true  # findings shouldn't block the snapshot
-phase webdata+stage
-begin_phase publish
+sr phase-end webdata+stage
+sr phase-begin publish
 
 # 3. publish to the canonical store — the live site reads these directly
 # (site/functions/data/[[path]].ts), so no site rebuild/deploy is needed.
@@ -429,13 +400,13 @@ LC=(); for b in "${FLEET[@]}"; do LC+=(-b "gs://$b"); done
 dt-cloud lifecycle pull -k "${LC[@]}" -o "/gcs/$DATA/$SNAP_PATH/lifecycle.json" || echo "WARN: lifecycle pull failed" >&2
 if [ "${SCRATCH:-0}" = "1" ]; then
   echo "SCRATCH — published to $SNAP_PATH + $INDEX_PATH; skipping index-sync/healthcheck/series/diff/digest" >&2
-  echo "PHASE total: ${SECONDS}s (wall)" >&2
+  echo "PHASE total: $(wall) (wall)" >&2
   exit 0
 fi
 # attribution rules: the single latest copy the /data/rules.json function serves
 cp /tmp/rules.json "/gcs/$DATA/snapshots/rules.json" 2>/dev/null || true
-phase publish
-begin_phase publish-r2
+sr phase-end publish
+sr phase-begin publish-r2
 
 # Serving off GCS (the site's `SERVED_R2`): the small files its pages read beside
 # the path store — this scan's snapshot JSONs and its generation's extras
@@ -454,17 +425,14 @@ if [ -n "${R2_ACCESS_KEY_ID:+set}" ] && [ -n "${R2_SECRET_ACCESS_KEY:+set}" ] &&
       -R "$SNAP_PATH/meta.json" -R "$SNAP_PATH/age.json" \
       -R "$INDEX_DIR/attr.tsv" -R "$INDEX_DIR/attr.tsv.idx.json" "$SNAP_ID" \
       && r2pub -a -p snapshots/rules.json -R snapshots/rules.json "$SNAP_ID"; then
-    set -x; phase publish-r2
+    set -x; sr phase-end publish-r2
   else
     rc=$?; set -x
-    slack_post "⚠️ \`dt-cloud\` $SNAP_ID: R2 publication failed (exit $rc); D1 pointers were not advanced, so the previous scan remains visible. Repair the R2 copy before resuming index-sync."
-    phase publish-r2 "failed (exit $rc)"
-    exit "$rc"
+    sr phase-end publish-r2 -x "$rc" -m "D1 pointers were not advanced, so the previous scan remains visible. Repair the R2 copy before resuming index-sync." || exit $?
   fi
 else
-  set -x; echo "ERROR: missing R2 credentials — publication blocked; D1 pointers were not advanced" >&2
-  phase publish-r2 "failed (missing credentials)"
-  exit 1
+  set -x
+  sr phase-end publish-r2 -x 1 -q "missing credentials" -m "no R2 credentials: publication blocked; D1 pointers were not advanced, so the previous scan remains visible." || exit $?
 fi
 
 if [ "${SCAN_COMPUTE_ONLY:-0}" = "1" ]; then
@@ -485,15 +453,11 @@ static_names_step() {
   if [ "${SKIP_STATIC_NAMES:-0}" != "1" ] && [ -n "${CLOUDFLARE_ACCOUNT_ID:-}" ]; then
     # The append's Batch tasks run this job's own image (`JOB_IMAGE`), not the profile's pinned default — on
     # 2026-10-10 they ran that stale digest and every task failed (`No module named dt_cloud.static_append`).
-    if R2_ENDPOINT=${R2_ENDPOINT:-https://$CLOUDFLARE_ACCOUNT_ID.r2.cloudflarestorage.com} STATIC_NAMES_PROFILE=/app/job/static-names.json STATIC_NAMES_IMAGE=$JOB_IMAGE \
-        timeout "${STATIC_NAMES_TIMEOUT:-120m}" dt-cloud static-names runs add -c "$SNAP_ID"; then
-      phase static-names
-    else
-      rc=$?
-      echo "WARN: static-names runs add failed for $SNAP_ID (exit $rc$([ $rc = 124 ] && echo ', timed out'))" >&2
-      slack_post "⚠️ \`dt-cloud\` $SNAP_ID: the search index append failed (exit $rc$([ $rc = 124 ] && echo ', timed out after '"${STATIC_NAMES_TIMEOUT:-120m}")) — the scan publishes, search says \"not available\" for it. Resume: \`STATIC_NAMES_PROFILE=job/static-names.json STATIC_NAMES_IMAGE=$JOB_IMAGE dt-cloud static-names runs add -c $SNAP_ID\`."
-      phase static-names "failed (exit $rc)"
-    fi
+    sr phase static-names -W -T "${STATIC_NAMES_TIMEOUT:-120m}" \
+      -m 'the scan publishes; search says "not available" for it' \
+      -R "STATIC_NAMES_PROFILE=job/static-names.json STATIC_NAMES_IMAGE=$JOB_IMAGE dt-cloud static-names runs add -c $SNAP_ID" \
+      -- env R2_ENDPOINT="${R2_ENDPOINT:-https://$CLOUDFLARE_ACCOUNT_ID.r2.cloudflarestorage.com}" STATIC_NAMES_PROFILE=/app/job/static-names.json \
+      STATIC_NAMES_IMAGE="$JOB_IMAGE" dt-cloud static-names runs add -c "$SNAP_ID"
   fi
 }
 
@@ -509,16 +473,12 @@ static_names_step() {
 # pins an older one, without `interval_append`).
 interval_store_step() {
   if [ "${INTERVAL_STORE_APPEND:-1}" = "1" ] && [ -n "${CLOUDFLARE_ACCOUNT_ID:-}" ]; then
-    if R2_ENDPOINT=${R2_ENDPOINT:-https://$CLOUDFLARE_ACCOUNT_ID.r2.cloudflarestorage.com} INTERVAL_STORE_PROFILE=/app/job/interval-store.json \
-        INTERVAL_STORE_IMAGE=${INTERVAL_STORE_IMAGE:-$JOB_IMAGE} DISKY_LABELS=${DISKY_LABELS:-app=disky,deployment=gcs} \
-        timeout "${INTERVAL_STORE_TIMEOUT:-60m}" dt-cloud interval-store append -c -w "${INTERVAL_STORE_MERGE_WAIT:-1800}" "$SNAP_ID"; then
-      phase interval-store
-    else
-      rc=$?
-      echo "WARN: interval-store append failed for $SNAP_ID (exit $rc$([ $rc = 124 ] && echo ', timed out'))" >&2
-      slack_post "⚠️ \`dt-cloud\` $SNAP_ID: the interval store append failed (exit $rc$([ $rc = 124 ] && echo ', timed out after '"${INTERVAL_STORE_TIMEOUT:-60m}")) — the scan publishes and reads per-scan. Resume: \`INTERVAL_STORE_PROFILE=job/interval-store.json INTERVAL_STORE_IMAGE=$JOB_IMAGE dt-cloud interval-store append -c $SNAP_ID\`."
-      phase interval-store "failed (exit $rc)"
-    fi
+    sr phase interval-store -W -T "${INTERVAL_STORE_TIMEOUT:-60m}" \
+      -m "the scan publishes and reads per-scan" \
+      -R "INTERVAL_STORE_PROFILE=job/interval-store.json INTERVAL_STORE_IMAGE=$JOB_IMAGE dt-cloud interval-store append -c $SNAP_ID" \
+      -- env R2_ENDPOINT="${R2_ENDPOINT:-https://$CLOUDFLARE_ACCOUNT_ID.r2.cloudflarestorage.com}" INTERVAL_STORE_PROFILE=/app/job/interval-store.json \
+      INTERVAL_STORE_IMAGE="${INTERVAL_STORE_IMAGE:-$JOB_IMAGE}" DISKY_LABELS="${DISKY_LABELS:-app=disky,deployment=gcs}" \
+      dt-cloud interval-store append -c -w "${INTERVAL_STORE_MERGE_WAIT:-1800}" "$SNAP_ID"
   fi
 }
 
@@ -526,7 +486,7 @@ interval_store_step() {
 # writes its own R2 store; their work runs as separate Batch jobs), so they run
 # side by side: the interval store's ~17 min hides under the name index's
 # ~50. Both finish before index-sync lists the scan. Each is never fatal on
-# its own (its `if` alerts and records the phase); `job/scan-runs.json` names
+# its own (`phase -W` records a failure and warns); `job/scan-runs.json` names
 # them `concurrent`, so each phase starts where `publish` ended.
 # index-sync's row-group upload (`-r`, most of its time) runs beside them too:
 # staged rows stay invisible until the pointer flips below (every reader filters
@@ -535,19 +495,17 @@ index_sync_creds() { [ -n "${CLOUDFLARE_API_TOKEN:+set}" ] && [ -n "${CLOUDFLARE
 ROWS_PID=""
 { set +x; } 2>/dev/null
 if index_sync_creds; then
-  begin_phase "index-sync rows"
+  sr phase-begin "index-sync rows"
   (
     if dt-cloud index-sync -r -d "/gcs/$DATA/$INDEX_DIR" -g "$GEN" -k "$INDEX_DIR" "$SNAP_ID"; then
-      phase "index-sync rows"
+      sr phase-end "index-sync rows"
     else
       echo "WARN: index-sync -r failed (the pointer step below re-syncs in full)" >&2
-      phase "index-sync rows" "failed"
+      sr phase-end "index-sync rows" -q "failed"  # not alerted: the pointer step re-syncs in full
     fi
   ) & ROWS_PID=$!
 fi
 set -x
-if [ "${SKIP_STATIC_NAMES:-0}" != "1" ] && [ -n "${CLOUDFLARE_ACCOUNT_ID:-}" ]; then begin_phase static-names; fi
-if [ "${INTERVAL_STORE_APPEND:-1}" = "1" ] && [ -n "${CLOUDFLARE_ACCOUNT_ID:-}" ]; then begin_phase interval-store; fi
 static_names_step & SN_PID=$!
 interval_store_step & IV_PID=$!
 wait "$SN_PID"
@@ -564,7 +522,7 @@ wait "$IV_PID"
 # flips the pointers, which lists the scan. If that refuses, a full sync redoes
 # rows + pointers. `-M` records the scan's start (`index_schema.started`, from
 # its meta.json) and fills any older date-only pointer still without one.
-begin_phase index-sync
+sr phase-begin index-sync
 { set +x; } 2>/dev/null
 if index_sync_creds; then
   SNAPS=$(dirname "/gcs/$DATA/$SNAP_PATH")
@@ -575,8 +533,8 @@ else
   echo "WARN: no CLOUDFLARE_API_TOKEN/ACCOUNT_ID — skipping index-sync (scan stays unlisted)" >&2
 fi
 set -x
-phase index-sync
-begin_phase healthcheck
+sr phase-end index-sync
+sr phase-begin healthcheck
 
 # Serving invariant: the snapshot published + the footer synced — but is the
 # SITE actually serving this scan? `dt-cloud healthcheck` asserts the scan is
@@ -587,17 +545,13 @@ begin_phase healthcheck
 # agent token (also used by `series` below); skip quietly without it, and on
 # REPROC (no fresh publish to verify). The token rides in env, never the
 # cmdline, so xtrace is safe here.
+HC_RC=0
 if [ -n "${GCS_USAGE_TOKEN:+set}" ] && [ "${REPROC:-0}" != "1" ]; then
-  if dt-cloud healthcheck -d "$SNAP_ID"; then
-    echo "healthcheck OK — $SNAP_ID is servable" >&2
-  else
-    echo "WARN: post-snapshot healthcheck failed for $SNAP_ID" >&2
-    slack_post "⚠️ \`dt-cloud\` $SNAP_ID published but the live site health check failed — data is fine, serving may be degraded (e.g. missing D1 index footer → /users blank). Debug: \`dt-cloud healthcheck -d $SNAP_ID\`."
-  fi
+  dt-cloud healthcheck -d "$SNAP_ID" || HC_RC=$?
 fi
-
-phase healthcheck
-begin_phase warm-cache
+sr phase-end healthcheck -x "$HC_RC" -W \
+  -m "published, but the live site health check failed: data is fine, serving may be degraded (e.g. missing D1 index footer → /users blank). Debug: \`dt-cloud healthcheck -d $SNAP_ID\`."
+sr phase-begin warm-cache
 
 # Warm the site's subtree + diff caches for this scan (colo cache + global
 # KV) so the first viewer of the day gets hits instead of a multi-second
@@ -608,22 +562,20 @@ if [ -n "${GCS_USAGE_TOKEN:+set}" ] && [ "${REPROC:-0}" != "1" ]; then
     || echo "WARN: cache warm-up failed for $SNAP_ID" >&2
 fi
 
-phase warm-cache
-begin_phase probe
+sr phase-end warm-cache
+sr phase-begin probe
 
 # Replay the site's page loads uncached (`dt-cloud probe -c`): every response
 # a 2xx/4xx, and one cold-latency record per scan under probes/ (the time
 # series of what a first viewer waits). Same token, same gating; a failure
 # (a 5xx or a dropped request) warns but never fails the snapshot.
+PROBE_RC=0
 if [ -n "${GCS_USAGE_TOKEN:+set}" ] && [ "${REPROC:-0}" != "1" ]; then
-  if ! dt-cloud probe -c -o "gs://$DATA/probes/"; then
-    echo "WARN: serving probe failed for $SNAP_ID" >&2
-    slack_post "⚠️ \`dt-cloud\` $SNAP_ID: a page-load probe got a 5xx or a dropped request — data is fine, some views may fail. Debug: \`dt-cloud probe -c\`."
-  fi
+  dt-cloud probe -c -o "gs://$DATA/probes/" || PROBE_RC=$?
 fi
-
-phase probe
-begin_phase slack-digest
+sr phase-end probe -x "$PROBE_RC" -W \
+  -m "a page-load probe got a 5xx or a dropped request: data is fine, some views may fail. Debug: \`dt-cloud probe -c\`."
+sr phase-begin slack-digest
 
 # Converge the monthly Shape-C digest thread in Slack (specs/done/slack-digest-
 # shape-c.md): the OP + one reply per scan. Only when SLACK_BOT_TOKEN +
@@ -641,8 +593,8 @@ else
   echo "no Slack bot transport (SLACK_BOT_TOKEN+SLACK_CHANNEL) — skipping usage digest" >&2
 fi
 
-phase slack-digest
-begin_phase discord-digest
+sr phase-end slack-digest
+sr phase-begin discord-digest
 
 # The same month thread in Marin's Discord #gcs-usage (specs/done/discord-
 # digest-twin.md): OP + plot through the channel's app-owned webhook, the bot
@@ -657,8 +609,8 @@ else
   echo "no Discord transport (DISCORD_GCS_USAGE_WEBHOOK+DISCORD_BOT_TOKEN) — skipping Discord digest" >&2
 fi
 
-phase discord-digest
-begin_phase index-gc
+sr phase-end discord-digest
+sr phase-begin index-gc
 
 # Sweep row groups of generations the pointer no longer names (a REPROC's
 # previous generation; every reader handle has expired by now), and retire
@@ -673,7 +625,7 @@ if [ -n "${CLOUDFLARE_API_TOKEN:+set}" ] && [ -n "${CLOUDFLARE_ACCOUNT_ID:-}" ];
   dt-cloud index-gc -r "${INDEX_RETAIN:-30}" "$SNAP_ID" || echo "WARN: index-gc failed" >&2
 fi
 set -x
-phase index-gc
+sr phase-end index-gc
 
-echo "PHASE total: ${SECONDS}s (wall)" >&2
+echo "PHASE total: $(wall) (wall)" >&2
 echo "SNAPSHOT-JOB-DONE $SNAP_ID"

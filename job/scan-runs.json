@@ -19,7 +19,10 @@
   "overlapped": ["access-ingest"],
   "concurrent": ["static-names", "interval-store", "index-sync rows"],
   "nop_marker": "^SNAPSHOT-JOB-NOP ",
-  "error_marker": "^\\+\\+ fail_alert (?P<rc>\\d+) (?P<line>\\d+) (?P<cmd>.*)",
+  "error_marker": "^\\+\\+ (?:fail_alert|scan_err) (?P<rc>\\d+) (?P<line>\\d+) (?P<cmd>.*)",
+  "alerts": {"label": "gcs", "logs_url": "https://console.cloud.google.com/logs/query;query=labels.job_uid%3D%22{job_uid}%22?project={project}"},
+  "secrets": ["AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "CLOUDFLARE_API_TOKEN", "DISCORD_BOT_TOKEN", "DISCORD_GCS_USAGE_WEBHOOK", "GCS_USAGE_TOKEN",
+              "SLACK_BOT_TOKEN", "SLACK_WEBHOOK", "CF_ACCESS_CLIENT_ID", "CF_ACCESS_CLIENT_SECRET", "R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY"],
   "outputs": [
     {"key": "listing", "uri": "gs://oa-gcs-usage-dvx/listing/{scan}/", "exclude": ["dir-cache/", "index/"], "split": "dir",
      "rows": {"json": "_SUCCESS.json", "field": "objects"}, "after": "listing-fanout", "kinds": ["scan"]},

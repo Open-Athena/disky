@@ -6,6 +6,7 @@ import os
 import re
 from os import environ
 from pathlib import Path
+from shutil import which
 from subprocess import run
 
 import pytest
@@ -100,12 +101,17 @@ def test_downstream_backfill_retains_explicit_parent():
 
 
 def test_error_marker_matches_the_traced_err_trap():
-    """`run.sh`'s ERR trap, as xtrace logs it: bash traces a trap's command one level down (`++`), so the backfill's
-    `error_marker` must match that line (`^\\+ fail_alert` never did)."""
+    """`run.sh`'s ERR trap (its own lines), as xtrace logs it: bash traces a trap's command one level down (`++`), so
+    the backfill's `error_marker` must match that line — and the pre-wrapper `fail_alert` trap's, in older logs."""
     profile = load_profile(ROOT_DIR / "job/scan-runs.json")
-    traced = run(["bash", "-c", "set -x; fail_alert() { :; }; trap 'fail_alert $? $LINENO \"$BASH_COMMAND\"' ERR; false"], capture_output=True, text=True).stderr.splitlines()
-    assert traced == ["+ trap 'fail_alert $? $LINENO \"$BASH_COMMAND\"' ERR", "+ false", "++ fail_alert 1 1 false", "++ :"]
-    assert re.match(profile.error_marker, traced[2]).groupdict() == {"rc": "1", "line": "1", "cmd": "false"}
+    lines = (ROOT_DIR / "job/run.sh").read_text().splitlines()
+    trap = [ln for ln in lines if ln.startswith(("scan_err() ", "trap 'scan_err "))]
+    assert trap == ['scan_err() { SR_ERR="exit $1: $3 (run.sh:$2)"; }', "trap 'scan_err $? $LINENO \"$BASH_COMMAND\"' ERR"]
+    script = "\n".join(trap + ["set -x", "false", 'echo "$SR_ERR"'])
+    traced = run(["bash", "-c", script], capture_output=True, text=True)
+    assert traced.stderr.splitlines() == ["+ false", "++ scan_err 1 4 false", "++ SR_ERR='exit 1: false (run.sh:4)'", "+ echo 'exit 1: false (run.sh:4)'"]
+    assert re.match(profile.error_marker, traced.stderr.splitlines()[1]).groupdict() == {"rc": "1", "line": "4", "cmd": "false"}
+    assert re.match(profile.error_marker, "++ fail_alert 1 237 dt-cloud stage -o /stage").groupdict() == {"rc": "1", "line": "237", "cmd": "dt-cloud stage -o /stage"}
 
 
 @pytest.mark.parametrize("code, scratch, expected", [
@@ -115,13 +121,12 @@ def test_error_marker_matches_the_traced_err_trap():
 ])
 def test_controller_waits_for_compute_and_scratch_never_advances_pointers(code, scratch, expected):
     script = (ROOT_DIR / "job/run.sh").read_text()
-    start = script.index('if [ "${SPLIT_COMPUTE:-0}" = "1" ]; then\n  begin_phase scan-compute')
-    block = script[start:].split("else\nbegin_phase path-index", 1)[0] + "fi\n"
+    start = script.index('if [ "${SPLIT_COMPUTE:-0}" = "1" ]; then\n  sr phase-begin scan-compute')
+    block = script[start:].split("else\nsr phase-begin path-index", 1)[0] + "fi\n"
     preamble = r'''
 set -eu
 SPLIT_COMPUTE=1 SNAP_ID=s GEN=g SNAP_PATH=snapshots/s INDEX_PATH=listing/s/index/g/path-index.parquet
-begin_phase() { printf 'START %s\n' "$*"; }
-phase() { printf 'END %s\n' "$*"; }
+sr() { printf '%s %s\n' "$([ "$1" = phase-begin ] && echo START || echo END)" "$2"; }
 dt-cloud() { printf 'WORKER %s %s %s %s %s\n' "$4" "$5" "$GEN" "$SNAP_PATH" "$INDEX_PATH"; return "$CODE"; }
 '''
     result = run(["bash", "-c", preamble + block + "printf 'POST-PUBLISH\\n'"], env={"PATH": "/usr/bin:/bin", "CODE": str(code), "SCRATCH": scratch}, capture_output=True, text=True)
@@ -167,24 +172,19 @@ def test_four_core_controller_override_keeps_a_satisfiable_request():
     assert spec["allocationPolicy"]["instances"][0]["policy"]["machineType"] == "e2-standard-4"
 
 
-@pytest.mark.parametrize("mode, expected_post", [({}, True), ({"SCRATCH": "1"}, False), ({"GATE": "1"}, False)])
-def test_validation_failure_stays_local_but_preserves_exit_and_error(mode, expected_post):
+@pytest.mark.parametrize("mode, expected_env", [({}, "record= alerts="), ({"SCRATCH": "1"}, "record=off alerts=stderr"), ({"GATE": "1"}, "record=off alerts=stderr")])
+def test_a_failure_finishes_the_run_with_the_err_trap_reason(mode, expected_env):
+    """`run.sh`'s own wrapper preamble: an unphased command failing under `set -e` exits with its code, and the EXIT
+    trap's `scan-run finish` gets that code and the ERR trap's reason; a SCRATCH / GATE run records nothing and keeps
+    its alerts on stderr (`DT_RECORD` / `DT_ALERTS`, which the wrapper reads)."""
     script = (ROOT_DIR / "job/run.sh").read_text()
-    functions = "slack_post() {" + script.split("slack_post() {", 1)[1].split("trap 'fail_alert", 1)[0]
-    preamble = r'''
-set -e
-SNAP_ID=s BATCH_JOB_UID=root
-python3() { printf 'POST %s\n' "$SLACK_MSG"; }
+    preamble = script[script.index("export DT_JOB_START="):].split("\ncd /app\n", 1)[0] + "\n"
+    stub = r'''set -e
+dt-cloud() { printf 'DT %s | record=%s alerts=%s\n' "$*" "${DT_RECORD:-}" "${DT_ALERTS:-}"; }
 '''
-    invocation = r'''
-trap 'fail_alert $? 300 "worker"' ERR
-trap 'printf "RECORDED %s\n" "$SR_ERR"' EXIT
-worker() { return 7; }
-worker
-printf 'UNEXPECTED SUCCESS\n'
-'''
-    result = run(["bash", "-c", preamble + functions + invocation], env={"PATH": "/usr/bin:/bin", **mode}, capture_output=True, text=True)
-    message = "❌ `dt-cloud` snapshot job failed (s): `worker` exited 7 at run.sh:300\n<https://console.cloud.google.com/logs/query;query=labels.job_uid%3D%22root%22?project=oa-internal-450019|task logs>"
-    assert result.returncode == 7
-    assert result.stdout == (f"POST {message}\n" if expected_post else "") + "RECORDED exit 7: worker (run.sh:300)\n"
-    assert result.stderr == ("" if expected_post else f"Validation alert (Slack suppressed): {message}\n")
+    body = "trap 'sr finish -x $? ${SR_ERR:+-e \"$SR_ERR\"}' EXIT\nsh -c 'exit 7'\nprintf 'UNEXPECTED SUCCESS\\n'\n"
+    src = stub + preamble + body
+    line = src.splitlines().index("sh -c 'exit 7'") + 1
+    # the caller's bash (the job image's is 5.x): macOS's /bin/bash 3.2 reports this `$LINENO` one short
+    result = run([which("bash"), "-c", src], env={"PATH": "/usr/bin:/bin", **mode}, capture_output=True, text=True)
+    assert (result.returncode, result.stdout, result.stderr) == (7, f"DT scan-run finish -x 7 -e exit 7: sh -c 'exit 7' (run.sh:{line}) | {expected_env}\n", "")
