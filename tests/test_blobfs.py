@@ -147,3 +147,23 @@ def test_remote_write_read_list_put_remove(tmp_path: Path):
     blobfs.remove(p)
     assert blobfs.exists(p) is False
     assert blobfs.list_parquets(d) == ['y.parquet']
+
+
+@pytest.mark.parametrize('kind', ['dir', 'url'])
+def test_glob_find_remove_many_dataset_put(tmp_path: Path, kind: str):
+    """The tree helpers the archive-reading commands use, the same over a
+    local dir and a URL: `glob` answers in the pattern's own form, `find`
+    walks relative paths with sizes, `remove_many` batches deletes, `dataset`
+    scans a parquet in place, `put` copies a local file to either."""
+    d = str(tmp_path / 'root') if kind == 'dir' else f'memory://{uuid4()}'
+    src = tmp_path / 'src.parquet'
+    pd.DataFrame({'path': ['.', 'a'], 'size': [3, 2]}).to_parquet(src, index=False)
+    for rel in ('s1/meta.json', 's2/meta.json', 's2/sub/x.parquet'):
+        blobfs.put(str(src), blobfs.join(d, rel))
+    assert blobfs.glob(blobfs.join(d, '*/meta.json')) == [blobfs.join(d, 's1/meta.json'), blobfs.join(d, 's2/meta.json')]
+    n = src.stat().st_size
+    assert [(k, s) for k, s, _ in blobfs.find(blobfs.join(d, 's2'))] == [('meta.json', n), ('sub/x.parquet', n)]
+    assert blobfs.find(blobfs.join(d, 'absent')) == []
+    assert blobfs.dataset(blobfs.join(d, 's2/sub/x.parquet')).to_table(columns=['path']).column('path').to_pylist() == ['.', 'a']
+    blobfs.remove_many(d, ['s1/meta.json', 's2/meta.json'])
+    assert [k for k, _, _ in blobfs.find(d)] == ['s2/sub/x.parquet']

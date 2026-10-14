@@ -374,10 +374,9 @@ def primary_node(tree: dict, primary: str) -> dict:
 
 def load_tree(root: str, scan: str, primary: str) -> dict:
     """The primary bucket's node of a scan's `tree.json` (`<root>/<scan>/tree.json`)."""
-    import fsspec
+    from disk_tree import blobfs
 
-    with fsspec.open(f"{root}/{scan}/tree.json", "rt") as f:
-        return primary_node(json.load(f), primary)
+    return primary_node(json.loads(blobfs.read_text(f"{root.rstrip('/')}/{scan}/tree.json")), primary)
 
 
 def image_body(month: Month, m: dt.date, cfg: DigestConfig) -> dict:

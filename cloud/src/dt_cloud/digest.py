@@ -430,13 +430,13 @@ def _err(*a) -> None:
 
 def list_scans(root: str) -> list[str]:
     """The scan ids under ``root`` (one ``<id>/meta.json`` per published scan),
-    sorted — ids sort chronologically."""
-    import fsspec
+    sorted — ids sort chronologically. ``root``: a local dir or any URL
+    `blobfs` resolves (`gs://`, `r2://`, `s3://`)."""
+    from disk_tree import blobfs
 
-    fs, _, _ = fsspec.get_fs_token_paths(root)
     return sorted(
         m.group(1)
-        for p in fs.glob(f"{root.split('://', 1)[-1]}/*/meta.json")
+        for p in blobfs.glob(blobfs.join(root.rstrip("/"), "*/meta.json"))
         if (m := META_PATH.search(p))
     )
 
@@ -446,7 +446,7 @@ def load_window(root: str, month: dt.date, scans: list[str] | None = None) -> tu
     month's scans, and ``lead`` = every scan of the last calendar day before it
     (the first delta's baseline; empty for the first month ever). None if the
     month has no scans. ``scans``: ``list_scans(root)``, if already listed."""
-    import fsspec
+    from disk_tree import blobfs
 
     scans = list_scans(root) if scans is None else scans
     pfx = f"{month:%Y-%m}-"
@@ -457,8 +457,7 @@ def load_window(root: str, month: dt.date, scans: list[str] | None = None) -> tu
     lead = [s for s in before if s[:10] == before[-1][:10]] if before else []
 
     def read(s: str) -> tuple[str, dict]:
-        with fsspec.open(f"{root}/{s}/meta.json", "rt") as f:
-            return s, json.load(f)
+        return s, json.loads(blobfs.read_text(f"{root.rstrip('/')}/{s}/meta.json"))
 
     return [read(s) for s in lead], [read(s) for s in in_month]
 
@@ -471,20 +470,22 @@ def state_path(root: str, month: dt.date, state_dir: str) -> str:
 
 
 def load_state(path: str) -> dict:
-    import fsspec
+    """A month's converge state (a local path or a `blobfs` URL); `{}` before
+    the first converge."""
+    from disk_tree import blobfs
 
     try:
-        with fsspec.open(path, "rt") as f:
-            return json.load(f)
+        return json.loads(blobfs.read_text(path))
     except (FileNotFoundError, OSError):
         return {}
 
 
 def save_state(path: str, state: dict) -> None:
-    import fsspec
+    from disk_tree import blobfs
 
-    with fsspec.open(path, "wt", auto_mkdir=True) as f:
-        json.dump(state, f, indent=2)
+    if not blobfs.is_url(path):
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
+    blobfs.write_text(path, json.dumps(state, indent=2))
 
 
 def _wait_reachable(url: str, timeout: float = 90, interval: float = 3) -> None:
