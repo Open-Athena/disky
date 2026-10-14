@@ -45,6 +45,7 @@ import { batchCompletion, batchIsCollapsed, isCurrentlyStaged, stagedMapTree, st
 import { batchAnchor } from './runHistory'
 import { useLocation } from 'react-router-dom'
 import { machineFor } from '../functions/_lib/sweepMachines'
+import { useDocTitle } from './title'
 
 const iso = (ts: number): string => new Date(ts * 1000).toISOString()
 const store = DEFAULT_STORE
@@ -116,6 +117,7 @@ function EmptiedLine({ e, batches }: { e: EmptiedBatch; batches: Map<number, { c
 }
 
 export function StagedPage() {
+  useDocTitle('Staged')
   const { fmtBytes, units, suffixB } = useUnits()
   const ident = useIdent()
   const admin = useIsAdmin()
