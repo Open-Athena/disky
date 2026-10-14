@@ -45,7 +45,7 @@ def provision(
     scope: str,
     url: str | None = None,
     expires_at: int | None = None,
-    note: str = "Read-only snapshot job; separate from the sheet mirror",
+    note: str = "Read-only job grant",
 ) -> str:
     if not scope.endswith(":read") or any(c.isspace() for c in scope):
         raise ValueError("job-token: scope must be one read-only deployment scope (e.g. gcs:read)")

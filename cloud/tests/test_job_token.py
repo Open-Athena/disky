@@ -41,7 +41,7 @@ def test_provision_is_read_only_idempotent_and_never_puts_token_in_argv(monkeypa
     ]
     select = f"SELECT id, name, scopes, revoked_at, disabled_at, expires_at FROM grants WHERE token_hash='{hashed}'"
     assert sql == ([select] if existing else [select,
-        f'INSERT INTO grants (id, token_hash, name, note, subject_json, scopes, redeems, created_at, created_by, expiry_ends_sessions) VALUES (\'{grant_id}\', \'{hashed}\', \'snapshot\', \'Read-only snapshot job; separate from the sheet mirror\', \'{{"name": "snapshot"}}\', \'gcs:read\', 0, 123, \'job-token provisioning\', 1)',
+        f'INSERT INTO grants (id, token_hash, name, note, subject_json, scopes, redeems, created_at, created_by, expiry_ends_sessions) VALUES (\'{grant_id}\', \'{hashed}\', \'snapshot\', \'Read-only job grant\', \'{{"name": "snapshot"}}\', \'gcs:read\', 0, 123, \'job-token provisioning\', 1)',
         select,
     ])
 
