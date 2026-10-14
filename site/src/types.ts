@@ -6,7 +6,7 @@ export interface TreeNode {
   k?: 'file' | 'dir'
   b: number
   o: number
-  d?: number                   // byte-weighted listing date, epoch days (GCS: created; S3/R2/local: modified)
+  d?: number                   // newest listing date at or under the node, epoch days (GCS: created; S3/R2/local: modified)
   a?: number                   // last-read epoch day (access logs; MAX over the whole subtree)
   us?: [string, number][]      // top users -> bytes
   cb?: Record<string, number>  // non-STANDARD class -> bytes ("2" NL, "3" CL, "4" AR); STANDARD = b - sum

@@ -492,10 +492,11 @@ describe('buildView on a store generation', () => {
     ] }))
   })
 
-  it('a v1 generation is unchanged: dirs only, every node `dir`, the fine tier', async () => {
+  it('a v1 generation is unchanged: dirs only, every node `dir`, the fine tier; no date (v1 rows carry no newest stamp)', async () => {
     const v = await buildView(env, { ...base, date: V1, path: '', threshold: 1 })
     expect([v.tier, v.index, v.nodes]).toEqual(['fine', 'd1', 3])
-    expect(v.tree).toEqual(node('root', 'dir', 700, 3, { c: [node('bk', 'dir', 700, 3, { c: [node('b', 'dir', 400, 1), node('a', 'dir', 300, 2)] })] }))
+    const v1 = (n: string, b: number, o: number, rest: Partial<ViewNode> = {}): ViewNode => ({ n, k: 'dir', b, o, ...rest })
+    expect(v.tree).toEqual(v1('root', 700, 3, { c: [v1('bk', 700, 3, { c: [v1('b', 400, 1), v1('a', 300, 2)] })] }))
   })
 
   it('Server-Timing names the sort that answered', async () => {

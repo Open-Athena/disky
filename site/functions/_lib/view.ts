@@ -250,6 +250,8 @@ interface Agg {
   /** Σ size·mtime_mean over rows with a mean, and the bytes weighed. */
   wts: number
   wb: number
+  /** Newest stamp at or under the path (epoch seconds; the rows' `mtime` max) — the wire's `d`; null on v1 rows. */
+  m: number | null
   a: number | null // subtree-max last-read epoch day (read lens); null = never read
   cb: Record<string, number>
   ub: Record<string, number>  // per-user bytes; unowned = b − Σ ub
@@ -265,7 +267,7 @@ interface Agg {
   ver?: { vf: number; vt: number } | null
 }
 
-const newAgg = (): Agg => ({ b: 0, o: 0, wts: 0, wb: 0, a: null, cb: {}, ub: {}, kind: null, nc: null, nd: null })
+const newAgg = (): Agg => ({ b: 0, o: 0, wts: 0, wb: 0, m: null, a: null, cb: {}, ub: {}, kind: null, nc: null, nd: null })
 
 function merge(a: Agg, r: Row): void {
   a.b += r.size
@@ -274,6 +276,7 @@ function merge(a: Agg, r: Row): void {
     a.wts += r.mtime_mean * r.mtime_w
     a.wb += r.mtime_w
   }
+  if (r.mtime != null) a.m = a.m == null ? r.mtime : Math.max(a.m, r.mtime)
   if (r.last_read != null) a.a = a.a == null ? r.last_read : Math.max(a.a, r.last_read)
   if (r.cls2) a.cb['2'] = (a.cb['2'] ?? 0) + r.cls2
   if (r.cls3) a.cb['3'] = (a.cb['3'] ?? 0) + r.cls3
@@ -289,6 +292,7 @@ function merge(a: Agg, r: Row): void {
 function subtract(parent: Agg, kids: Agg[]): Agg {
   const out = newAgg()
   out.a = parent.a // max isn't subtractable; the residual's read day ≤ parent's
+  out.m = parent.m // likewise its newest stamp
   const sum = (f: (a: Agg) => number) => kids.reduce((s, k) => s + f(k), 0)
   out.b = parent.b - sum(a => a.b)
   out.o = Math.max(0, parent.o - sum(a => a.o))
@@ -313,6 +317,7 @@ function scale(a: Agg, frac: number): Agg {
   out.o = a.o * frac
   out.wts = a.wts * frac
   out.wb = a.wb * frac
+  out.m = a.m
   out.a = a.a
   out.kind = a.kind
   out.nc = a.nc
@@ -323,7 +328,9 @@ function scale(a: Agg, frac: number): Agg {
 
 function display(a: Agg): Record<string, unknown> {
   const out: Record<string, unknown> = {}
-  if (a.wb) out.d = Math.round(a.wts / a.wb / 86400)
+  // A folder's date is its newest write, not a byte-weighted mean: a mean of
+  // half-July, half-September reads "August", a date nothing was written on.
+  if (a.m != null) out.d = Math.floor(a.m / 86400)
   if (a.a != null) out.a = a.a
   const desc = (m: Record<string, number>) =>
     Object.fromEntries(Object.entries(m).sort((x, y) => y[1] - x[1]))
@@ -786,6 +793,7 @@ async function readView(env: Env, o: ViewOpts, cov: Coverage = {}): Promise<Read
   if (query && !ol && (!rootHit || negP)) {
     const sumAgg = (into: Agg, from: Agg) => {
       into.b += from.b; into.o += from.o; into.wts += from.wts; into.wb += from.wb
+      if (from.m != null) into.m = into.m == null ? from.m : Math.max(into.m, from.m)
       if (from.a != null) into.a = into.a == null ? from.a : Math.max(into.a, from.a)
       for (const k in from.cb) into.cb[k] = (into.cb[k] ?? 0) + from.cb[k]
       for (const k in from.ub) into.ub[k] = (into.ub[k] ?? 0) + from.ub[k]
@@ -1165,7 +1173,7 @@ async function readView(env: Env, o: ViewOpts, cov: Coverage = {}): Promise<Read
         const a = rootAggOf.get(r)
         if (!a) continue
         // A copy: phase 1's aggregates may be the isolate's (`staticPhase1`), shared across views.
-        rootAggOf.set(r, { ...a, kind: m.kind, wts: m.wts, wb: m.wb, a: m.a, cb: m.cb, nc: m.nc, nd: m.nd })
+        rootAggOf.set(r, { ...a, kind: m.kind, wts: m.wts, wb: m.wb, m: m.m, a: m.a, cb: m.cb, nc: m.nc, nd: m.nd })
       }
       tr?.('details', performance.now() - t0, String(d.mine.size))
       netOf.clear()
@@ -1198,6 +1206,7 @@ async function readView(env: Env, o: ViewOpts, cov: Coverage = {}): Promise<Read
       const copied = new Set<string>()
       const addDetail = (into: Agg, d: Agg) => {
         into.wts += d.wts; into.wb += d.wb
+        if (d.m != null) into.m = into.m == null ? d.m : Math.max(into.m, d.m)
         if (d.a != null) into.a = into.a == null ? d.a : Math.max(into.a, d.a)
         for (const k in d.cb) into.cb[k] = (into.cb[k] ?? 0) + d.cb[k]
       }
@@ -1438,7 +1447,8 @@ async function readView(env: Env, o: ViewOpts, cov: Coverage = {}): Promise<Read
       { path, agg: rootAgg },
       new Map([...aggs].map(([p, agg]) => [p, { depth: aggDepth.get(p)!, agg }])),
       query,
-      (into, from) => { for (const k of ['b', 'o', 'wts', 'wb'] as const) into[k] += from[k]; if (from.a != null) into.a = into.a == null ? from.a : Math.max(into.a, from.a); for (const key of ['cb', 'ub'] as const) for (const [k, v] of Object.entries(from[key])) into[key][k] = (into[key][k] ?? 0) + v },
+      (into, from) => { for (const k of ['b', 'o', 'wts', 'wb'] as const) into[k] += from[k]; if (from.m != null) into.m = into.m == null ? from.m : Math.max(into.m, from.m)
+      if (from.a != null) into.a = into.a == null ? from.a : Math.max(into.a, from.a); for (const key of ['cb', 'ub'] as const) for (const [k, v] of Object.entries(from[key])) into[key][k] = (into[key][k] ?? 0) + v },
       newAgg,
     )
     rootAgg = f.root
@@ -1713,7 +1723,7 @@ async function rollupRead(env: Env, o: ViewOpts, rollup: Rollup, x: { dP: number
     }
     for (const [p, d] of own) {
       const a = exact.get(p)!
-      a.kind = d.kind; a.wts = d.wts; a.wb = d.wb; a.a = d.a; a.cb = d.cb; a.ub = d.ub; a.nc = d.nc; a.nd = d.nd
+      a.kind = d.kind; a.wts = d.wts; a.wb = d.wb; a.m = d.m; a.a = d.a; a.cb = d.cb; a.ub = d.ub; a.nc = d.nc; a.nd = d.nd
     }
     tr?.('details', performance.now() - t0, String(own.size))
   }
@@ -1834,7 +1844,8 @@ class Overlay<K, V> extends Map<K, V> {
 /** `from` summed into `into` (`readView`'s `sumAgg`). */
 function addAgg(into: Agg, from: Agg): void {
   into.b += from.b; into.o += from.o; into.wts += from.wts; into.wb += from.wb
-  if (from.a != null) into.a = into.a == null ? from.a : Math.max(into.a, from.a)
+  if (from.m != null) into.m = into.m == null ? from.m : Math.max(into.m, from.m)
+      if (from.a != null) into.a = into.a == null ? from.a : Math.max(into.a, from.a)
   for (const k in from.cb) into.cb[k] = (into.cb[k] ?? 0) + from.cb[k]
   for (const k in from.ub) into.ub[k] = (into.ub[k] ?? 0) + from.ub[k]
 }

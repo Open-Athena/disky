@@ -1173,7 +1173,7 @@ function AppContent() {
           <label className="tb-ctl">
             <span className="lbl">color</span>
             <Explain text={
-              effMode === 'date' ? <>Object <b>{time.description}</b>, from the bucket listings (each cell = the byte-weighted mean of its objects). {store.objectsNote}</>
+              effMode === 'date' ? <>Object <b>{time.description}</b>, from the bucket listings (a folder’s cell = its newest object). {store.objectsNote}</>
               : effMode === 'read' ? <><b>Last observed read</b> — the most recent logged GET/HEAD/LIST anywhere under each cell (logging began {readRange ? epochDaysToDate(readRange.min) : '—'}). Brick-red = <b>no observed reads</b> since then. Logs may omit events; absence is not proof of no access.</>
               : effMode === 'user' ? <>Dominant <b>owner</b> of each cell; the legend lists the top users of the current view.</>
               : <>Top-level directory each cell belongs to.</>
