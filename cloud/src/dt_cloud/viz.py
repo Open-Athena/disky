@@ -275,7 +275,7 @@ def write_path_index(
     ``dir_cache`` names a directory for the layer-2 rollups (``dir-stats`` /
     ``age-days`` parquet) — attribution-independent per-dir aggregates, cached
     write-through so re-attribution runs skip the 595M-row object scans
-    entirely (specs/dir-agg-cache.md). Immutable per scan date, like the
+    entirely (gcs:specs/dir-agg-cache.md). Immutable per scan date, like the
     listing they derive from.
 
     With ``attributions``, every dir is attributed (deepest-prefix-wins, same

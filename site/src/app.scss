@@ -2139,7 +2139,7 @@ input::placeholder, textarea::placeholder { color: var(--ink-3); opacity: 1; }
 // Legend rows align their avatar with the swatch + text.
 .ri .user-avatar { margin: 0 1px; vertical-align: middle; }
 
-// Bulk assignment over filter matches (BulkBar; `specs/done/selection-actions.md`),
+// Bulk assignment over filter matches (BulkBar; `gcs:specs/done/selection-actions.md`),
 // inline next to the match chip.
 .bulkbar {
   display: inline-flex;
