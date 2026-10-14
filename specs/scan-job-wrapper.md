@@ -1,81 +1,104 @@
-# Shared scan-job wrapper: `dt-cloud scan-run phase` + `dt-cloud notify`
+# Shared scan-job wrapper: `dt-cloud scan-run phase-*` + `disk-tree notify`
 
-Status: **draft for review** (2026-10-14). Sources: the drift audit (`tmp/drift-audit-2026-10-14.md` #3–#4) and each deployment's must-keeps (`tmp/job-wrapper-reqs.md`, from gcs and cw-s3; m3 from its ingest.sh). Nothing is built yet. Circulate to gcs, cw-s3 and m3 before building.
+Status: **revised after review** (2026-10-14). Reviewed by gcs (9 gaps) and cw-s3 (5 gaps); both are folded in below. m3's `disk-tree notify` is now on cloud (`65f0a64e`) and is the one notifier. Not built yet.
+
+Inputs:
+- the drift audit (`tmp/drift-audit-2026-10-14.md` #3–#4);
+- each deployment's must-keeps (`tmp/job-wrapper-reqs.md`);
+- gcs `job/run.sh`, cw `job/cw-run.sh` / `cw-meta-run.sh`, m3 `infra/aws/ingest.sh`.
 
 ## Problem
 
-Each deployment's job script records its phases and alerts on failure its own way:
-- gcs `job/run.sh`: `begin_phase`/`phase` shell functions, ERR + EXIT traps, Slack through `chat.postMessage`;
-- cw `job/cw-run.sh` / `cw-meta-run.sh`: `phase` only (phase starts go unrecorded), an EXIT trap, `slack_alert` through a webhook fallback;
-- m3 `infra/aws/ingest.sh`: `scan-run record -K/-t` calls and no failure alert at all.
-
-That makes three copies of the phase shim and four Slack paths. Every fix (timeouts, secret stripping, scratch suppression) lands in one copy and drifts from the others.
+Each deployment's job script records its phases and alerts on failure its own way. gcs has `begin_phase`/`phase` shell functions, ERR + EXIT traps and `chat.postMessage`. cw has `phase` only, so phase starts go unrecorded, plus `slack_alert`. m3 has `scan-run record -K/-t` calls and, until `disk-tree notify`, no failure alert. That makes three copies of the phase shim and four alert paths, so fixes keep landing in one copy and drifting from the others.
 
 ## Design
 
-All the logic moves to two `dt-cloud` subcommands. What stays in each deployment's shell script is the list of steps and two traps.
+The recording, timing, redaction and alerting move into `dt-cloud`. What stays in each shell script is the step list, two one-line traps, and per-step messages.
 
-### `dt-cloud scan-run phase NAME [opts] -- CMD…`
+### Bracket primitives (the core)
 
-This command runs CMD as one phase of the current run (the run id comes from `-r` or the profile's `run_id_env`, as `record` does today):
-1. Records the phase start (today's `record -A -P NAME`), so phase starts are recorded everywhere, cw included.
-2. Runs CMD, with stdout and stderr passed through, under `-T SECONDS` if given (a timeout reports as exit 124).
-3. On exit 0, records the phase end and measures its outputs (`-o KEY=URI`, `-M` to skip measuring), as `record -P` does today.
-4. On a non-zero exit:
-   - **fatal (default):** records the phase as failed and posts a `fail` alert: phase, exit code or timeout, the job's log link (from the profile, e.g. the Batch task-logs URL built from the job UID). It then exits with CMD's code. The EXIT trap (below) finishes the run.
-   - **`-W` / `--warn` (non-fatal):** records the phase with a note, posts a `warn` alert including a copy-paste resume command (`-R 'CMD'`, defaulting to CMD itself). It then exits 0, so the script continues. This replaces cw's WARN-and-continue steps and gcs's `timeout … || post ⚠️` blocks.
+Most phases aren't a single executable. They're shell functions (`static_names_step`, `r2pub`), compound blocks (`r2pub … && r2pub …`, the per-bucket list/import loop, `publish`'s mkdir/cp/heredoc), env-prefixed commands, or backgrounded `( … ) &` subshells. So the core is a begin/end pair, as gcs's `begin_phase`/`phase` already is.
 
-Other options:
-- `-b EPOCH` / `-q NOTE`: overlapped phases (cw's background static stage) keep working: `phase -b "$BEGAN" -q overlapped`.
-- `-g GEN`: stamps the generation, as `record -g` does.
-- `-K STORE`, plus `-t` and the job-fact flags from `record`: pass through unchanged, for m3/AWS.
+- **`dt-cloud scan-run phase-begin NAME [-b EPOCH] [-g GEN]`** records the phase as running (today's `record -A -P NAME`). It prints `PHASE-START <name>: …` to stderr.
+- **`dt-cloud scan-run phase-end NAME [-x RC] [-W] [-m MSG] [-R RESUME] [-q NOTE] [-o KEY=URI]… [-M]`** records the phase's end and measures its outputs, as `record -P` does today. It prints `PHASE <name>: <N>s (wall[, note])` to stderr. With a non-zero `-x`:
+  - **fatal (default):** records the phase as failed and posts a `fail` alert. It marks the run as alerted (see below) and exits with RC, so the script's `set -e` or its own `exit` ends the run.
+  - **`-W` (non-fatal):** records the phase with a note, posts a `warn` alert, and exits 0, so the script continues.
+  - **`-m MSG`:** the step's own text, saying what the failure means for users ("the scan publishes; search says not available", "D1 pointers not advanced; the previous scan stays visible", "data fine, serving degraded"). It works with or without `-W`. A fatal phase with `-m` (gcs publish-r2) posts that text, styled by severity, and `finish` posts no second generic alert.
+  - **`-R RESUME`:** an explicit, hand-written resume command, quoted in the alert. **Opt-in only.** It never defaults to the command's argv, which can carry env-prefixed secrets or container-only paths.
 
-### `dt-cloud scan-run start` / `finish`
+**PHASE marker lines are a contract.** The scan-runs backfill parses them from Cloud Logging, so they must stay byte-identical to today's. `<N>s` is measured from `$DT_JOB_START`, which the script exports once at the top (`export DT_JOB_START=$(date +%s)`); this replaces the shell's `$SECONDS`. If it's unset, the commands refuse to run (exit 2) rather than print a different clock.
 
-- `start`: today's `record -S`, plus the job facts (`-B`/`-J` on GCP, flags on AWS).
-- `finish -x RC [-e ERR]`: today's `record -x`. On a non-zero code with no phase failure already alerted (the failure came from the script, not a `phase`), it posts the `fail` alert too.
+### `dt-cloud scan-run phase NAME [phase-end opts] [-T SECONDS] -- CMD…` (sugar)
 
-The script's only trap becomes:
+For the steps that are one executable: `phase-begin`, then run CMD, then `phase-end -x $rc` with the same options.
+- **`-T`:** runs CMD in its own session (`setsid`). On timeout it sends TERM to the whole process group, waits a grace period, sends KILL, and reports exit 124, as coreutils `timeout` does. bulk-list's multiprocessing spawn workers and Batch submitters otherwise survive as orphans (memory `pkill-spawn-orphans`).
+
+### Run start and finish
+
+- **`dt-cloud scan-run start [-k scan|reproc|compute|access] [-p PARENT_UID] [job facts]`:** today's `record -S`, plus kind and parent. gcs's ACCESS_ONLY path starts with `-k access`. The facts come from `-B`/`-J` on GCP and from flags on AWS.
+- **`dt-cloud scan-run finish -x RC [-e ERR]`:** today's `record -x`. On a non-zero RC it posts the `fail` alert, unless the run is already marked as alerted. `ERR` is recorded as `scan_runs.err` (shown on /scans) and included in the alert.
+
+The traps become:
 
 ```bash
+trap 'SR_ERR="exit $?: $BASH_COMMAND (${BASH_SOURCE##*/}:$LINENO)"' ERR   # record only; no alert
 trap 'dt-cloud scan-run finish -x $? ${SR_ERR:+-e "$SR_ERR"}' EXIT
 ```
 
-The gcs ERR trap's line and command detail come from `phase` instead: a failure outside any phase reports "exit N after phase X".
+The ERR trap stays because gcs runs many unphased commands (cp, mkdir, heredoc python, the lifecycle pull), and "which one failed" has to survive. Its text passes through redaction (below) before it's recorded or posted.
 
-### `dt-cloud notify LEVEL MESSAGE` (`LEVEL` = `fail` | `warn` | `info`)
+### "Already alerted" is shared state
 
-This is the one alert path. `phase`/`finish` call it, and scripts can too (cw's "unscanned non-empty bucket").
-- Slack through `chat.postMessage` (icon overrides work; webhooks are dropped). The channel is `$SLACK_ALERT_CHANNEL`, else `$SLACK_CHANNEL`. The token is `$SLACK_BOT_TOKEN`. Secrets are stripped of trailing whitespace on every read.
-- **Suppression:** `$DT_ALERTS=stderr` (set by gcs SCRATCH/GATE runs) prints "alert (Slack suppressed): …" to stderr and posts nothing. The same setting skips `scan_runs` writes (`record` already honors the scratch flag; unify it on this one variable).
-- No token configured: print to stderr, exit 0. An alert never fails a job.
-- m3 gets failure alerts from this for free, once its profile names a channel.
+Phases run in background subshells (cw's static stage; gcs's static-names ∥ interval-store ∥ index-sync group), and `finish` runs in the EXIT trap, so the flag can't live in one process. It's a marker file: `${TMPDIR:-/tmp}/dt-scan-run/<run id>.alerted`. A posting `phase-end` or `notify` creates it; `finish` skips its generic alert when it exists. A background phase's failure therefore alerts once, and is still alerted when the foreground ends cleanly but the waited-on stage failed.
+
+### Redaction
+
+Nothing that echoes text (an alert, `ERR`, `-R`, a note) may carry a secret:
+- Every value of the env vars named in the profile's `secrets` list (cw-run's strip list today: `CLOUDFLARE_API_TOKEN`, `SITE_TOKEN`, `SLACK_BOT_TOKEN`, …) is replaced by `<NAME>` before any text is posted or written to D1.
+- Raw argv is never written to a `scan_runs` row.
+- Tokens are read from env only, never from argv, so `set -x` scripts can't leak them through a notify call.
+
+### Notifications: `disk-tree notify` plus a Slack channel
+
+There is one notifier: m3's `disk-tree notify` (engine, standard library only), which ingest.sh and the app spec (`scan-failure-notifications.md`) already depend on. Its contract is kept unchanged:
+- env `PUSHOVER_TOKEN` + `PUSHOVER_USER`, `DISCORD_NOTIFY_WEBHOOK`;
+- `DISK_TREE_NOTIFY` (a comma list, in order) picks the channels; unset means every channel with credentials;
+- CLI `-c CHANNELS -f -l LABEL -p PRIORITY -t TITLE -u URL MESSAGE`; `-f` is a fallback chain;
+- exit 2 when nothing is configured, 1 when every attempt failed.
+
+This adds a **`slack` channel**: `SLACK_BOT_TOKEN` + `SLACK_ALERT_CHANNEL`, posting `chat.postMessage` over urllib so it stays standard library only. Secrets are stripped of trailing whitespace on read. The webhook fallback is dropped; neither gcs nor cw uses it. Alerts post top-level in the alert channel, labelled `alerts.label`, not threaded under the digest. `dt-cloud`'s `phase-end`/`finish` call the same Python function, with the level mapped to priority and title.
+
+**Two separate switches:**
+- `DT_ALERTS=stderr` mutes alerts. They print as "alert (suppressed): …" and nothing posts.
+- Recording is controlled by `record`'s existing scratch flag and its "not a Batch job (no `BATCH_JOB_UID`): no record" check.
+
+gcs SCRATCH/GATE sets both; cw REPROC or one-shot runs may record with alerts muted.
 
 ### Profile additions (`job/*.json`, per deployment, declarative)
 
 ```json
-{"alerts": {"label": "cw-s3", "logs_url": "https://console.cloud.google.com/batch/jobsDetail/regions/{region}/jobs/{job}/logs?project={project}"}}
+{"alerts": {"label": "cw-s3", "logs_url": "https://console.cloud.google.com/logs/query;query=labels.job_uid%3D%22{job_uid}%22?project={project}"},
+ "secrets": ["CLOUDFLARE_API_TOKEN", "SITE_TOKEN", "SLACK_BOT_TOKEN"]}
 ```
 
-- `label`: the prefix on each alert.
-- `logs_url`: a template over the job facts. If absent, alerts carry no link.
-
-There are no deployment defaults in code.
+- `logs_url` is a template over the run's open-ended job facts (`job_uid`, `project`, `region`, `job`, …). If absent, alerts carry no link.
+- There are no deployment defaults in code.
 
 ## What stays deployment-specific
 
-- The step list itself: gcs's concurrent group (static-names ∥ interval-store ∥ index-sync) and pointer flip, the SPLIT_COMPUTE preflight, `REPROC=1` skips.
-- `${VAR:+set}` xtrace guards in the scripts.
-- The post-publish health probe (gcs). Its ⚠️ "data fine, serving degraded" becomes a `notify warn` call.
+- The step list itself: gcs's concurrent group and pointer flip, the SPLIT_COMPUTE preflight, `REPROC=1` skips, cw's per-bucket loops.
+- The per-step `-m` texts and `-R` resume commands.
+- `${VAR:+set}` xtrace guards.
+- The post-publish health probe (gcs), whose result becomes a `phase-end -W -m …`.
 
 ## Migration
 
-1. Build `phase`/`start`/`finish`/`notify` on cloud with tests: exact recorded rows, and the alert payloads captured through a fake Slack client.
-2. Each deployment swaps its shim for these in its own branch, one job run verified by its owner (gcs, cw, m3). The old shell functions are then deleted.
-3. Delete the forked `static-names.sh` / alert helpers that become unused.
-
-## Open questions
-
-- gcs: does anything read the ERR trap's `$BASH_COMMAND` line beyond the alert text? If yes, `phase` can append CMD's argv to the alert.
-- cw: is the webhook fallback still needed anywhere (a channel the bot isn't in)?
-- Should `notify` thread warns under the day's digest message rather than post top-level?
+1. Build on cloud: `phase-begin`/`phase-end`/`phase`/`start`/`finish`, the marker file, redaction, `-T` group kill, and the `slack` channel in `disk-tree notify`. Tests:
+   - exact recorded rows;
+   - byte-exact PHASE lines;
+   - alert payloads through a fake transport;
+   - one alert across a background failure plus `finish`;
+   - redaction of a seeded secret;
+   - `-T` killing a spawned grandchild.
+2. Each deployment swaps its shim on its own branch: gcs, cw, then m3, which already calls `disk-tree notify`. On the first migrated run, a `disk-tree notify -c slack info` smoke test confirms the alert channel receives it (cw hasn't checked recently). Old shell functions are deleted after one verified job run each.
+3. Delete the forked alert helpers and `static-names.sh` copies that become unused.
