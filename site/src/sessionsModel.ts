@@ -22,6 +22,17 @@ export function fmtOffset(ms: number): string {
   return `+${m}:${String(s).padStart(2, '0')}.${String(r).padStart(3, '0')}`
 }
 
+/** A local wall-clock time to the ms (`19:43:09.433`), led by the date (`Oct 13 19:43:09.433`) when its day isn't
+ *  `startMs`'s (the session header carries the start's date). */
+export function fmtClock(ms: number, startMs: number, timeZone?: string): string {
+  const day = (t: number) => new Date(t).toLocaleDateString('en-CA', { timeZone })
+  const p = Object.fromEntries(new Intl.DateTimeFormat('en-US', { hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23', timeZone })
+    .formatToParts(new Date(ms)).map(x => [x.type, x.value]))
+  const clock = `${p.hour}:${p.minute}:${p.second}.${String(((Math.round(ms) % 1000) + 1000) % 1000).padStart(3, '0')}`
+  if (day(ms) === day(startMs)) return clock
+  return `${new Date(ms).toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone })} ${clock}`
+}
+
 const str = (v: unknown): string => (v === undefined || v === null ? '' : String(v))
 
 /** One event as a line of text. */
