@@ -343,8 +343,9 @@ export function liveTotal(hits: Hit[], date: string, keep: (usr: string | null) 
  *  than its newest (published, not yet appended) or before its base — or that its answer doesn't cover is `scan-not-indexed`
  *  on every deployment, indexed-only or not: the walk answered it before, missing small matches; 18: a heavy literal's
  *  rollup view nests — its drawn children answered in turn, to `FILTER_SUBDIV_LEVELS` below the view, in the view and
- *  both sides of a diff). */
-const RESPONSE_V = 18
+ *  both sides of a diff; 19: a budget-cut nest flags `budgetCut` for the client to re-ask — cached 18s from a deploy
+ *  between the two could serve a cut tree unflagged). */
+const RESPONSE_V = 19
 
 /** The query's substring matchers (positive and negative): the literals the hex-run rule applies to. */
 const subMatchers = (ast: QueryAst | undefined): Extract<Matcher, { kind: 'sub' }>[] =>
