@@ -125,26 +125,6 @@ dt-cloud index-write -b "${BUCKETS[0]}" -m "${DUCKDB_MEM:-8GB}" -t "${IMPORT_JOB
 mkdir -p "/gcs/$DATA/$INDEX_KEY"
 cp "$WORK"/index/*.parquet "/gcs/$DATA/$INDEX_KEY/"
 
-# 4b'. The store's own static name index (the site's `?f=` on /meta): `static-names/$META_STATIC_GEN/` in the R2
-# bucket, the store's `STATIC_GEN` in `site/wrangler.toml`'s `STORES_JSON`. One machine (`static-names build` / `add`,
-# as the r2 demo's daily ingest): the first run builds the base generation over every scan so far, later runs
-# append each scan after its newest. Before index-sync, so the scan is searchable once listed; a failure only warns
-# (the scan lists, and its search says "not available").
-STATIC_GEN=${META_STATIC_GEN:-2026-10-14meta}
-if [ -n "${R2_ENDPOINT:+set}" ] && [ -n "${R2_BUCKET:-}" ]; then  # `:+set`: xtrace must not print the creds
-  { set +x; } 2>/dev/null
-  export DISK_TREE_R2_ENDPOINT_URL=$R2_ENDPOINT
-  set -x
-  sn=(-g "$STATIC_GEN" -L "$STORE-l2/{id}/index/{gen}/path-index.parquet" -s "gs://$DATA" -o "r2://$R2_BUCKET"
-      -w "$WORK/static-names" -p "${IMPORT_JOBS:-4}" -M "${DUCKDB_MEM:-8GB}")
-  if python -c 'import sys; from dt_cloud.static_local import Store; sys.exit(0 if Store(sys.argv[1]).exists(sys.argv[2]) else 1)' \
-       "r2://$R2_BUCKET" "static-names/$STATIC_GEN/scans.json"; then
-    dt-cloud static-names add "${sn[@]}" || echo "WARN: static-names add failed for $SNAP_ID (exit $?)" >&2
-  else
-    dt-cloud static-names build "${sn[@]}" -x 16,8 || echo "WARN: static-names build $STATIC_GEN failed (exit $?)" >&2
-  fi
-fi
-
 if [ -n "${CLOUDFLARE_API_TOKEN:+set}" ] && [ -n "${CLOUDFLARE_ACCOUNT_ID:-}" ]; then  # `:+set`: xtrace must not print the token
   dt-cloud index-sync -s "$STORE" -d "/gcs/$DATA/$INDEX_KEY" -g "$GEN" -k "$INDEX_KEY" "$SNAP_ID" \
     || echo "WARN: index-sync failed (the site keeps serving the previous generation)" >&2
@@ -160,6 +140,26 @@ if [ -n "${R2_ENDPOINT:+set}" ] && [ -n "${R2_BUCKET:-}" ]; then  # `:+set`: xtr
     || echo "WARN: publish-r2 failed for $SNAP_ID (the site keeps serving GCS)" >&2
 else
   echo "no R2_ENDPOINT/R2_BUCKET — skipping publish-r2" >&2
+fi
+
+# 4d. The store's own static name index (the site's `?f=` on /meta): `static-names/$META_STATIC_GEN/` in the R2
+# bucket, the store's `STATIC_GEN` in `site/wrangler.toml`'s `STORES_JSON`. One machine (`static-names build` / `add`,
+# as the r2 demo's daily ingest): the first run builds the base generation over every scan so far, later runs
+# append each scan after its newest. It reads the scans' path sorts from R2 (the archive the site reads; GCS is not
+# read), so it runs after 4c has published this scan's. A failure only warns (its search says "not available").
+STATIC_GEN=${META_STATIC_GEN:-2026-10-14meta}
+if [ -n "${R2_ENDPOINT:+set}" ] && [ -n "${R2_BUCKET:-}" ]; then  # `:+set`: xtrace must not print the creds
+  { set +x; } 2>/dev/null
+  export DISK_TREE_R2_ENDPOINT_URL=$R2_ENDPOINT
+  set -x
+  sn=(-g "$STATIC_GEN" -L "$STORE-l2/{id}/index/{gen}/path-index.parquet" -s "r2://$R2_BUCKET" -o "r2://$R2_BUCKET"
+      -w "$WORK/static-names" -p "${IMPORT_JOBS:-4}" -M "${DUCKDB_MEM:-8GB}")
+  if python -c 'import sys; from dt_cloud.static_local import Store; sys.exit(0 if Store(sys.argv[1]).exists(sys.argv[2]) else 1)' \
+       "r2://$R2_BUCKET" "static-names/$STATIC_GEN/scans.json"; then
+    dt-cloud static-names add "${sn[@]}" || echo "WARN: static-names add failed for $SNAP_ID (exit $?)" >&2
+  else
+    dt-cloud static-names build "${sn[@]}" -x 16,8 || echo "WARN: static-names build $STATIC_GEN failed (exit $?)" >&2
+  fi
 fi
 
 echo "META-SCAN-JOB-DONE $SNAP_ID -> gs://$DATA/snapshots/$STORE/$SNAP_ID"
