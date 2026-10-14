@@ -31,6 +31,7 @@ import { LifecycleFold } from './LifecycleFold'
 import { ClassMixTip, Tooltip } from './Tooltip'
 import { Treemap } from './Treemap'
 import type { DateRange, Highlight, ShadeMode } from './Treemap'
+import type { DayBand } from './dayBand'
 import { DEFAULT_SYNTAX, SYNTAXES, syntaxById } from './filterTree'
 import { fetchCover, matchedListOf, prefetchCover, rowCover, rowMatchesOf, useFilterCover } from './filterCover'
 import { HttpError } from './batches'
@@ -225,6 +226,8 @@ function AppContent() {
   // Brushing: the view's child (by name) hovered in either the treemap or its
   // children table, lit in both (a ring on the cell, the row's hover tint).
   const [brush, setBrush] = useState<string | null>(null)
+  // The date brush shared by the map's gradient key and the age chart's bars.
+  const [band, setBand] = useState<DayBand | null>(null)
   useEffect(() => {
     if (fqDraft == null) return
     const t = setTimeout(() => { setFq(fqDraft || undefined); setFqDraft(null) }, 250)
@@ -1302,6 +1305,8 @@ function AppContent() {
             onOpen={p => openObject(p.slice(1).map(n => n.n))}
             brush={brush}
             onBrush={setBrush}
+            band={band}
+            onBand={setBand}
           />{mapStale ? <Busy label={mapRetrying ?? 'loading view…'} /> : mapBusy ? <Busy corner label="filling in…" /> : null}</div>
           {/* A drilled directory with nothing drawable under it: the scope came
               up empty, or (a v1 scan) it holds only objects or directories
@@ -1556,7 +1561,7 @@ function AppContent() {
         </h2>
         {ageQ.isPending && !!asof && <Skeleton height={220} label="loading ages…" />}
         {age.length > 0 && (
-          <AgeChart rows={age} baseRows={diffPrev ? ageBase : undefined} diffLabels={diffPrev && asof ? { from: fmtS(diffPrev), to: fmtS(asof) } : undefined} catOrder={catOrder} mode={ageMode} onMode={m => setAgeModeP(m)} modes={ageModes} userIdx={userIdx} readRange={ageReadRange} scheme={store.scheme} />
+          <AgeChart rows={age} baseRows={diffPrev ? ageBase : undefined} diffLabels={diffPrev && asof ? { from: fmtS(diffPrev), to: fmtS(asof) } : undefined} catOrder={catOrder} mode={ageMode} onMode={m => setAgeModeP(m)} modes={ageModes} userIdx={userIdx} readRange={ageReadRange} scheme={store.scheme} band={band} onBand={setBand} />
         )}
       </section>
       )}
