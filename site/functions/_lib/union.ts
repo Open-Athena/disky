@@ -84,7 +84,7 @@ export const vectorOf = (r: Resolved): { view: string; at: string; sources: { st
 
 /** Each member's context for `request` (`withStore` + `withPathStore`, as a
  * single-store handler builds its own). */
-function memberCtxs(ctx: Ctx, view: UnionView): Ctx[] | Response {
+export function memberCtxs(ctx: Ctx, view: UnionView): Ctx[] | Response {
   const out: Ctx[] = []
   for (const store of view.members) {
     const c = withStore({ ...ctx, request: memberRequest(ctx.request, store) })
@@ -218,5 +218,94 @@ export function unionRoot(view: UnionView, label: string, members: readonly { st
     n: label, k: 'dir',
     b: members.reduce((n, m) => n + m.tree.b, 0), o: members.reduce((n, m) => n + m.tree.o, 0),
     ...(kids.length ? { c: kids } : {}),
+  }
+}
+
+/** A member's refusal of a filter (`q=`) for its mount: its own `{error, code}` (`indexedOnly.ts`), e.g.
+ *  `scan-not-indexed` for a store with no static name index of its own. */
+export interface Refusal { store: string; code: string; error: string }
+
+/** A member's refusal, if its response is one: a 400 whose JSON body carries a `code`. Null otherwise (an answer,
+ *  or any other failure, which the caller passes on as is). */
+export async function refusalOf(store: string, res: Response): Promise<Refusal | null> {
+  if (res.status !== 400 || !res.headers.get('content-type')?.startsWith('application/json')) return null
+  const b = await res.clone().json() as { error?: unknown; code?: unknown }
+  return typeof b.code === 'string' && typeof b.error === 'string' ? { store, code: b.code, error: b.error } : null
+}
+
+/** A refusal as its member answered it (the body `rejectBody` writes). */
+export const refusalResponse = (r: Refusal): Response =>
+  new Response(JSON.stringify({ error: r.error, code: r.code }), { status: 400, headers: { 'content-type': 'application/json' } })
+
+/** The `union` block of a filtered answer: the vector, each refusing member's refusal beside its scan. */
+export const filteredVector = (r: Resolved, refused: readonly Refusal[]) => {
+  const v = vectorOf(r)
+  return { ...v, sources: v.sources.map(s => { const x = refused.find(f => f.store === s.store); return x ? { ...s, refused: { code: x.code, error: x.error } } : s }) }
+}
+
+type Count = { n: number; b: number; o: number }
+type Interiors = { read: number; skipped: number; reason: string; late?: number }
+type RollupInfo = { children: number; kept: number; rows: number | null; bucketsOnly?: true; scopedBelow?: true }
+
+/** The filter fields of a member's `/api/subtree?q=` body that a union root merges. */
+export interface FilteredRoot {
+  tree: ViewNode
+  matches?: string[]
+  matched?: { path: string; b: number; o: number }[]
+  matchCount?: Count
+  matchesCapped?: true
+  rollup?: RollupInfo
+  excluded?: string[]
+  firstPaint?: true
+  interiors?: Interiors
+  partialReason?: string
+  approximateReason?: string
+  dirsOnly?: true
+  hexRuns?: { min: number; tail: number }
+}
+
+const sumOf = <T>(xs: readonly T[], f: (x: T) => number): number => xs.reduce((n, x) => n + f(x), 0)
+const named = (store: string, reason: string): string => `${store}: ${reason}`
+
+/**
+ * A union root's filtered answer (`q=`): every answering member's filtered root (each read under the union's one
+ * threshold), merged as the plain root merges — the tree by `unionRoot`, the match lists concatenated (each
+ * member's paths are under its own roots), `matchCount` and the rollup counts summed, a flag set when any member
+ * set it. A member that refused the filter for its mount (`refused`) contributes nothing and makes the answer
+ * partial, named in `partialReason` (`<store>: <why>`, as each member's own partial reason is) — never a zero
+ * for its mount.
+ */
+export function unionFiltered(view: UnionView, label: string, members: readonly { store: string; date: string; body: FilteredRoot }[], refused: readonly Refusal[]): Omit<FilteredRoot, 'tree'> & { tree: ViewNode; partial?: true; approximate?: true } {
+  const bodies = members.map(m => m.body)
+  const counts = bodies.flatMap(b => (b.matchCount ? [b.matchCount] : []))
+  const rollups = bodies.flatMap(b => (b.rollup ? [b.rollup] : []))
+  const interiors = bodies.flatMap(b => (b.interiors ? [b.interiors] : []))
+  const partial = [...members.flatMap(m => (m.body.partialReason ? [named(m.store, m.body.partialReason)] : [])), ...refused.map(r => named(r.store, r.error))]
+  const approximate = members.flatMap(m => (m.body.approximateReason ? [named(m.store, m.body.approximateReason)] : []))
+  const late = interiors.filter(i => i.late !== undefined)
+  const hex = bodies.find(b => b.hexRuns)?.hexRuns
+  return {
+    ...(hex ? { hexRuns: hex } : {}),
+    matches: bodies.flatMap(b => b.matches ?? []).sort(),
+    matched: bodies.flatMap(b => b.matched ?? []).sort((x, y) => y.b - x.b || (x.path < y.path ? -1 : x.path > y.path ? 1 : 0)),
+    ...(counts.length ? { matchCount: { n: sumOf(counts, c => c.n), b: sumOf(counts, c => c.b), o: sumOf(counts, c => c.o) } } : {}),
+    ...(bodies.some(b => b.matchesCapped) ? { matchesCapped: true as const } : {}),
+    ...(rollups.length ? { rollup: {
+      children: sumOf(rollups, r => r.children), kept: sumOf(rollups, r => r.kept),
+      rows: rollups.some(r => r.rows === null) ? null : sumOf(rollups, r => r.rows!),
+      ...(rollups.some(r => r.bucketsOnly) ? { bucketsOnly: true as const } : {}),
+      ...(rollups.some(r => r.scopedBelow) ? { scopedBelow: true as const } : {}),
+    } } : {}),
+    ...(bodies.some(b => b.excluded) ? { excluded: bodies.flatMap(b => b.excluded ?? []).sort() } : {}),
+    ...(bodies.some(b => b.firstPaint) ? { firstPaint: true as const } : {}),
+    ...(interiors.length ? { interiors: {
+      read: sumOf(interiors, i => i.read), skipped: sumOf(interiors, i => i.skipped),
+      reason: [...new Set(interiors.map(i => i.reason))].join(' · '),
+      ...(late.length ? { late: sumOf(late, i => i.late!) } : {}),
+    } } : {}),
+    ...(partial.length ? { partial: true as const, partialReason: partial.join(' · ') } : {}),
+    ...(approximate.length ? { approximate: true as const, approximateReason: approximate.join(' · ') } : {}),
+    ...(bodies.some(b => b.dirsOnly) ? { dirsOnly: true as const } : {}),
+    tree: unionRoot(view, label, members.map(m => ({ store: m.store, date: m.date, tree: m.body.tree }))),
   }
 }

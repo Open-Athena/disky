@@ -288,10 +288,11 @@ const held = new Map<string, { r2: R2Bucket; store: StaticFilterStore }>()
  *  reads its own generation only (`STATIC_GEN` from its `STORES_JSON` vars), none = `UNINDEXED`. A test injects
  *  its own (`injectedStores`). */
 export function staticFilterStore(env: StaticFilterEnv): StaticFilterStore | null {
+  const on = env.FILTER_STATIC === '1' && !!env.INDEX_R2
+  if (on && env.STORE_KEY !== undefined && !env.STATIC_GEN?.trim()) return UNINDEXED
   const injected = injectedStores.get(env)
   if (injected) return injected
-  if (env.FILTER_STATIC !== '1' || !env.INDEX_R2) return null
-  if (env.STORE_KEY !== undefined && !env.STATIC_GEN?.trim()) return UNINDEXED
+  if (!on || !env.INDEX_R2) return null
   const gen = staticGen(env), pre = staticPrefix(gen)
   const slot = `${gen}|${env.FILTER_STATIC_HEAVY === '1' ? 'h' : ''}|${env.FILTER_STATIC_ANCHORS === '0' ? '' : 'a'}`
   if (held.get(slot)?.r2 !== env.INDEX_R2) {
