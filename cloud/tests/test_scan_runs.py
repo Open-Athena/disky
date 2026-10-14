@@ -91,7 +91,7 @@ PROFILE = parse_profile({
     "overlapped": ["ingest"],
     "concurrent": ["names", "iv"],
     "nop_marker": "^NOP ",
-    "error_marker": "^\\+ fail_alert (?P<rc>\\d+) (?P<line>\\d+) (?P<cmd>.*)",
+    "error_marker": "^\\+\\+ fail_alert (?P<rc>\\d+) (?P<line>\\d+) (?P<cmd>.*)",
     "outputs": [
         {"key": "listing", "uri": "gs://data/listing/{scan}/", "exclude": ["index/"], "split": "dir",
          "rows": {"json": "_SUCCESS.json", "field": "objects"}, "after": "listing", "kinds": ["scan"]},
@@ -403,7 +403,7 @@ LOGS = [
     log("uid-a", "2026-10-08T08:00:00Z", "PHASE total: 3540s (wall)"),
     log("uid-a", "2026-10-08T08:00:01Z", "DONE 2026-10-08"),
     log("uid-r", "2026-10-08T12:20:00Z", "PHASE index: 1200s (wall)"),
-    log("uid-f", "2026-10-07T07:19:00Z", "+ fail_alert 1 222 'dt-cloud job submit-listing -d 2026-10-07'"),
+    log("uid-f", "2026-10-07T07:19:00Z", "++ fail_alert 1 222 'dt-cloud job submit-listing -d 2026-10-07'"),
     log("uid-n", "2026-10-06T07:01:30Z", "NOP 2026-10-06 (already published)"),
 ]
 
@@ -560,7 +560,7 @@ def test_log_filter():
     since = dt.datetime(2026, 9, 9, tzinfo=dt.timezone.utc)
     assert log_filter(PROFILE, since) == (
         'log_id("batch_task_logs") AND timestamp >= "2026-09-09T00:00:00Z" AND ('
-        'textPayload=~"^PHASE " OR textPayload=~"^PHASE-START " OR textPayload=~"^NOP " OR textPayload=~"^\\\\+ fail_alert " OR textPayload=~"^DONE ")'
+        'textPayload=~"^PHASE " OR textPayload=~"^PHASE-START " OR textPayload=~"^NOP " OR textPayload=~"^\\\\+\\\\+ fail_alert " OR textPayload=~"^DONE ")'
     )
 
 
