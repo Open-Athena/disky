@@ -26,7 +26,8 @@ import { lensParam, ME_UNRESOLVED, resolveLens } from '../_lib/me.js'
 import { isScanId } from '../../src/scanSlug.js'
 import { indexedScan, noScan, scanArg } from '../_lib/scanArg.js'
 import { traceJoins } from '../_lib/shared.js'
-import { memberOf, memberRequest, resolveUnion, UnionOverlap, unionFor, unionRoot, vectorOf } from '../_lib/union.js'
+import { type FilteredRoot, filteredVector, type Member, memberOf, memberRequest, type Refusal, refusalOf, refusalResponse, type Resolved, resolveUnion, UnionOverlap, unionFiltered, unionFor, unionRoot, vectorOf } from '../_lib/union.js'
+import { filterThreshold } from '../_lib/filter.js'
 import type { UnionView } from '../_lib/stores.js'
 
 
@@ -216,9 +217,69 @@ async function subtree(ctx0: SubtreeCtx, gate: boolean, member?: MemberRead): Pr
   }
 }
 
-/** The params a union root refuses: each is one store's axis (the ledger's lens and pools, storage classes, the
- *  name filter), not yet composed across members. A drill below the root takes them (its member answers). */
-const UNION_ROOT_UNSCOPED = ['lens', 'o', 'by', 'cl', 'q'] as const
+/** The params a union root refuses: each is one store's axis (the ledger's lens and pools, storage classes), not
+ *  yet composed across members. A drill below the root takes them (its member answers). The name filter (`q`) is
+ *  composed: `unionFilteredRoot`. */
+const UNION_ROOT_UNSCOPED = ['lens', 'o', 'by', 'cl'] as const
+
+/** A union answer's headers: as private as its members' answers; a member's uncacheable one (a budget-cut
+ *  partial) makes it so. */
+const unionHeaders = (reads: readonly Response[]): Record<string, string> => ({
+  'content-type': 'application/json; charset=utf-8',
+  'cache-control': reads.map(r => r.headers.get('cache-control')).find(c => c === 'no-store') ?? reads[0]?.headers.get('cache-control') ?? 'no-store',
+  'x-cache': reads.map(r => r.headers.get('x-cache') ?? '-').join(','),
+})
+
+type FilteredBody = FilteredRoot & { tier: string; index: string; nodes: number; truncated: boolean; budgetCut?: true }
+
+/**
+ * A union root's name filter (`q=`): each ready member answers it for its own roots at its resolved scan through
+ * its own read path — its own static name index (`STORES_JSON` `vars.STATIC_GEN`) and cache keys; a member without
+ * one refuses for its mount (`scan-not-indexed`), never a walk or another store's index. Read twice when more than
+ * one member matches: first each under its own budget (its matched total), then those under the union's one
+ * threshold from the members' matched totals (`filterThreshold`, `&T=` in their keys). Merged by `unionFiltered`;
+ * a refusing member names itself in the `union` vector and `partialReason`. Every member refusing: the first
+ * refusal, as its member gave it.
+ */
+async function unionFilteredRoot(ctx0: SubtreeCtx, view: UnionView, resolved: Resolved, id: Identity | null, o: { w: number; h: number; minArea: number; atten: number; q: string }): Promise<Response> {
+  const ready = resolved.members.filter(m => m.date !== null)
+  const ask = (m: Member, threshold?: number) =>
+    subtree({ ...ctx0, request: memberRequest(ctx0.request, m.store, { date: m.date! }, ['d']) }, true, { id, ...(threshold === undefined ? {} : { threshold }) })
+  const reads = await Promise.all(ready.map(m => ask(m)))
+  const refused: Refusal[] = []
+  const bodies = new Map<number, FilteredBody>()
+  for (const [i, r] of reads.entries()) {
+    if (r.ok) { bodies.set(i, await r.json() as FilteredBody); continue }
+    const x = await refusalOf(ready[i].store, r)
+    if (!x) return r
+    refused.push(x)
+  }
+  if (!bodies.size && refused.length) return refusalResponse(refused[0])
+  const threshold = filterThreshold([...bodies.values()].reduce((n, b) => n + b.tree.b, 0), o.w, o.h, o.minArea)
+  const drawn = [...bodies.keys()].filter(i => bodies.get(i)!.tree.b > 0)
+  if (drawn.length > 1) {
+    const again = await Promise.all(drawn.map(i => ask(ready[i], threshold)))
+    const bad = again.find(r => !r.ok)
+    if (bad) return bad
+    for (const [k, i] of drawn.entries()) { reads[i] = again[k]; bodies.set(i, await again[k].json() as FilteredBody) }
+  }
+  const answered = [...bodies.keys()].sort((a, b) => a - b)
+  const parts = answered.map(i => ({ store: ready[i].store, date: ready[i].date!, body: bodies.get(i)! }))
+  const { tree, ...fields } = unionFiltered(view, ctx0.env.ROOT_LABEL ?? 'all buckets', parts, refused)
+  const bs = parts.map(p => p.body)
+  return new Response(JSON.stringify({
+    date: resolved.date, path: '', w: o.w, h: o.h, minArea: o.minArea, atten: o.atten,
+    tier: bs[0]?.tier ?? 'none', index: bs[0]?.index ?? 'none',
+    threshold: Math.round(threshold),
+    nodes: bs.reduce((n, x) => n + x.nodes, 0),
+    truncated: bs.some(x => x.truncated),
+    union: filteredVector(resolved, refused),
+    q: o.q,
+    ...fields,
+    ...(bs.some(x => x.budgetCut) ? { budgetCut: true } : {}),
+    tree,
+  }), { headers: unionHeaders(answered.map(i => reads[i])) })
+}
 
 /**
  * `/api/subtree` on a union view (`_lib/union.ts`). The root: every member's root read concurrently at its
@@ -245,6 +306,9 @@ async function unionSubtree(ctx0: SubtreeCtx, view: UnionView): Promise<Response
     const w = Math.ceil((Number(url.searchParams.get('w')) || 1280) / QUANT) * QUANT
     const h = Math.ceil((Number(url.searchParams.get('h')) || 800) / QUANT) * QUANT
     const minArea = Number(url.searchParams.get('minArea')) || MIN_AREA_DEFAULT
+    const atten = Number(url.searchParams.get('atten')) || ATTEN_DEFAULT
+    const q = url.searchParams.get('q') ?? ''
+    if (q.trim()) return await unionFilteredRoot(ctx0, view, resolved, id, { w, h, minArea, atten, q })
     const ready = resolved.members.filter(m => m.date !== null)
     const roots = await Promise.all(ready.map(m => ivRetry(() => readRootAgg(m.ctx.env, { date: m.date!, path: '' }))))
     const total = roots.reduce((n, r) => n + (r?.b ?? 0), 0)
@@ -256,7 +320,7 @@ async function unionSubtree(ctx0: SubtreeCtx, view: UnionView): Promise<Response
     const bodies = await Promise.all(reads.map(r => r.json() as Promise<Body>))
     const tree = unionRoot(view, ctx0.env.ROOT_LABEL ?? 'all buckets', bodies.map((b, i) => ({ store: ready[i].store, date: ready[i].date!, tree: b.tree })))
     return new Response(JSON.stringify({
-      date: resolved.date, path, w, h, minArea, atten: Number(url.searchParams.get('atten')) || ATTEN_DEFAULT,
+      date: resolved.date, path, w, h, minArea, atten,
       tier: bodies[0]?.tier ?? 'none', index: bodies[0]?.index ?? 'none',
       threshold: Math.round(threshold),
       nodes: bodies.reduce((n, x) => n + x.nodes, 0),
@@ -264,12 +328,7 @@ async function unionSubtree(ctx0: SubtreeCtx, view: UnionView): Promise<Response
       union: vectorOf(resolved),
       ...(bodies.some(x => x.budgetCut) ? { budgetCut: true } : {}),
       tree,
-    }), { headers: {
-      'content-type': 'application/json; charset=utf-8',
-      // As private as its members' answers; a member's uncacheable one (a budget-cut partial) makes it so.
-      'cache-control': reads.map(r => r.headers.get('cache-control')).find(c => c === 'no-store') ?? reads[0]?.headers.get('cache-control') ?? 'no-store',
-      'x-cache': reads.map(r => r.headers.get('x-cache') ?? '-').join(','),
-    } })
+    }), { headers: unionHeaders(reads) })
   } catch (e) {
     const msg = String((e as Error).message ?? e)
     if (e instanceof UnionOverlap) return new Response(msg, { status: 500 })

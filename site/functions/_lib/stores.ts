@@ -25,6 +25,14 @@
  * `secrets` maps a per-store var to the NAME of a Pages secret holding its
  * value, so no secret sits in the (public) `wrangler.toml`.
  *
+ * The static name index is per store too: a store with its own sets
+ * `STATIC_GEN` (its generation in the deployment's `INDEX_R2`) and, as its
+ * generation was built, `FILTER_STATIC_HEAVY` / `FILTER_STATIC_ANCHORS`. One
+ * without is `scan-not-indexed` under the deployment's static filter (the
+ * inherited `FILTER_STATIC`), never answered from the primary's generation:
+ *
+ *   STORES_JSON = {"meta": {"vars": {…, "STATIC_GEN": "2026-10-14-meta"}}}
+ *
  * An entry with `union` is a **union view** (specs/federated-scans.md, "First
  * live cases" 1), not a store: a read-time union of member stores' roots,
  * each member read at its own scan for the request's cutoff
@@ -41,7 +49,15 @@ import { withReq } from './shared.js'
  * migration lineage serves several deploys, each with its own `STORE`). */
 export const PRIMARY_STORE = 'primary'
 
-/** The vars a store config may set; all are cleared for a secondary store. */
+/** The deployment's filter policy a secondary store inherits unless its config sets its own: whether the map's
+ * filter is the static name index's (`FILTER_STATIC`) and whether it is indexed-only (`FILTER_INDEXED_ONLY`). */
+export const INHERITED_VARS = ['FILTER_STATIC', 'FILTER_INDEXED_ONLY'] as const
+
+/** The vars a store config may set; all but `INHERITED_VARS` are cleared for a secondary store. The static name
+ * index's are per store (`STATIC_GEN`, `FILTER_STATIC_HEAVY`, `FILTER_STATIC_ANCHORS`): a store reads a static
+ * index only when its own config names a generation (in the deployment's `INDEX_R2`, `static-names/<gen>/`); with
+ * the filter static and none named, it holds no scan (`staticFilter.ts` `UNINDEXED`: `scan-not-indexed`), never
+ * the primary's generation. */
 export const STORE_VARS = [
   'ROOT_LABEL',
   'ROOT_TITLE',
@@ -55,10 +71,18 @@ export const STORE_VARS = [
   'STORE_ACCESS_KEY_ID',
   'STORE_SECRET_ACCESS_KEY',
   'SERVED_R2',
+  'STATIC_GEN',
+  'FILTER_STATIC_HEAVY',
+  'FILTER_STATIC_ANCHORS',
+  ...INHERITED_VARS,
 ] as const
 export type StoreVar = typeof STORE_VARS[number]
-/** Cleared too (never set): the primary's GCS creds fallback (`storeCreds`). */
-const CLEARED = [...STORE_VARS, 'GCS_HMAC_KEY_ID', 'GCS_HMAC_SECRET'] as const
+/** Cleared (the inherited policy kept), plus, never set: the primary's GCS creds fallback (`storeCreds`) and its
+ * name summaries' index (`/api/name-summary` serves the primary only). */
+const CLEARED = [
+  ...STORE_VARS.filter(k => !(INHERITED_VARS as readonly string[]).includes(k)),
+  'GCS_HMAC_KEY_ID', 'GCS_HMAC_SECRET', 'NAME_SUMMARY_STATIC', 'STATIC_MAX_ROWS',
+] as const
 
 export interface StoreConfig {
   /** A scope viewers need on top of the deployment's viewer scope. */
