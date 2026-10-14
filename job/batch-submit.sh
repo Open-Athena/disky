@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# Submit the daily snapshot job to GCP Batch (n2-highmem-8, real disk for DuckDB spill).
-# Cloud Run jobs cap at 32Gi with tmpfs-only storage — DuckDB spill lands in RAM and the
-# 470M-row webdata step OOMs there; Batch VMs give 64G RAM + a 200G boot disk for spill.
+# Submit the daily snapshot job to GCP Batch, with local SSD for DuckDB spill.
+# Default: n2-highmem-32; SPLIT_COMPUTE=1 opts into a small manual controller
+# whose aggregation/access workers retain the known-good memory limits.
 #
 # Env overrides: SNAP_ID (a scan id, e.g. a sub-daily `YYYY-MM-DDTHHMM` for an extra scan) or
-# SNAPSHOT_DATE (default today UTC, resolved inside run.sh), IMAGE,
-# DUCKDB_MEM (default 48GB), DUCKDB_THREADS (default 8), SNAP_PATH,
+# SNAPSHOT_DATE (legacy explicit day override; default is a UTC timestamp inside run.sh), IMAGE,
+# DUCKDB_MEM (default 100GB, split controller 8GB), DUCKDB_THREADS (16, split 4), SNAP_PATH,
 # LISTING_MACHINE/PROCS/WORKERS (DIY fan-out sizing) — forwarded when set.
 set -euo pipefail
 
@@ -16,7 +16,10 @@ SA=gcs-usage-job@$PROJECT.iam.gserviceaccount.com
 # byte-identical regardless of the caller's shell (the IaC in infra/gcp
 # generates the Cloud Scheduler body from `PIN=1 DRY=1`). Must precede the
 # ${VAR:-default} knobs below; the python vars() honors PIN too.
-if [ -n "${PIN:-}" ]; then unset IMAGE MACHINE MEMORY_MIB LOCAL_SSD_GB MAX_RUN_SECONDS DATA_BUCKET; fi
+if [ -n "${PIN:-}" ]; then unset IMAGE MACHINE MEMORY_MIB LOCAL_SSD_GB MAX_RUN_SECONDS DATA_BUCKET ZONE; fi
+if [ -n "${ZONE:-}" ]; then
+  [[ "$ZONE" =~ ^us-central1-[a-z]$ ]] || { echo "ERROR: ZONE must be in $REGION" >&2; exit 1; }
+fi
 
 IMAGE=${IMAGE:-us-central1-docker.pkg.dev/$PROJECT/cloud-run-source-deploy/gcs-usage-snapshot:latest}
 # webdata's peak RSS is DuckDB at its cap plus ~40GB it doesn't account for
@@ -25,21 +28,43 @@ IMAGE=${IMAGE:-us-central1-docker.pkg.dev/$PROJECT/cloud-run-source-deploy/gcs-u
 # (256G) until specs/view-serving.md §4–5 land and the peak comes back down.
 # The Cloud Scheduler body is generated from `PIN=1 DRY=1` here (infra/gcp),
 # so this stays the single source of truth for the daily spec.
-MACHINE=${MACHINE:-n2-highmem-32}
-MEMORY_MIB=${MEMORY_MIB:-250000}
-LOCAL_SSD_GB=${LOCAL_SSD_GB:-1500}  # n2 32-vCPU machines require >=4 local SSDs (375G each)
+if [ -z "${PIN:-}" ] && [ "${SPLIT_COMPUTE:-0}" = "1" ]; then
+  [[ "$IMAGE" =~ ^[^[:space:]@]+@sha256:[0-9a-f]{64}$ ]] || { echo "ERROR: split scan requires a digest-pinned IMAGE" >&2; exit 1; }
+  MACHINE=${MACHINE:-n2-standard-4}
+  MEMORY_MIB=${MEMORY_MIB:-14000}
+  LOCAL_SSD_GB=${LOCAL_SSD_GB:-0}
+else
+  MACHINE=${MACHINE:-n2-highmem-32}
+  MEMORY_MIB=${MEMORY_MIB:-250000}
+  LOCAL_SSD_GB=${LOCAL_SSD_GB:-1500}  # n2 32-vCPU machines require >=4 local SSDs
+fi
+CPU_MILLI=8000
+case "$MACHINE" in
+  *-2) CPU_MILLI=2000 ;;
+  *-4) CPU_MILLI=4000 ;;
+esac
 JOB_ID=${JOB_ID:-gcs-usage-snapshot-$(date -u +%Y%m%d-%H%M%S)}
+if [ -z "${PIN:-}" ]; then
+  export SCAN_RUN_ID=${SCAN_RUN_ID:-$JOB_ID}
+  export SNAP_ID=${SNAP_ID:-${SNAPSHOT_DATE:-$(date -u +%FT%H%M)}}
+fi
 
 labels() {  # cost labels (specs/cost-labels.md): $DISKY_LABELS + component $1, as JSON; {} when unset
   python3 - "$1" <<'PY'
-import json, os, sys
+import json, os, re, sys
 d = dict(i.strip().split("=", 1) for i in os.environ.get("DISKY_LABELS", "").split(",") if i.strip())
+if d and not os.environ.get("PIN"):
+    for var, key in (("SCAN_RUN_ID", "scan_run"), ("SNAP_ID", "scan_id")):
+        value = os.environ[var].lower()
+        if not re.fullmatch(r"[a-z0-9_-]{1,63}", value):
+            raise ValueError(f"invalid {key} label: {value!r}")
+        d[key] = value
 print(json.dumps({**d, "component": sys.argv[1]} if d else {}))
 PY
 }
 
 vars() {  # container env: defaults + optional passthroughs
-  python3 - <<'EOF'
+  JOB_IMAGE="$IMAGE" python3 - <<'EOF'
 import json, os
 # PIN=1 emits the canonical/cron spec: ignore every ambient override so the body
 # is byte-stable regardless of the caller's shell (the IaC in infra/gcp
@@ -52,15 +77,15 @@ v = {
     # unaccounted process memory must fit the container — 100 and 90 inside
     # 124GB both got kernel-OOM-killed, exit 137, as the dir-group count grew).
     # Measured 2026-09-06 REPROC on highmem-32: peak RSS 141.7GB at 100GB.
-    "DUCKDB_MEM": g("DUCKDB_MEM", "100GB"),
+    "DUCKDB_MEM": g("DUCKDB_MEM", "8GB" if g("SPLIT_COMPUTE") == "1" else "100GB"),
     # access ingest runs before (not concurrent with) the webdata step, so
     # it can take a big slice of the 128G node; 24GB OOM'd on a row-heavy
     # 53GB chunk (2026-08-23)
     "DUCKDB_MEM_ACCESS": g("DUCKDB_MEM_ACCESS", "48GB"),
-    "DUCKDB_THREADS": g("DUCKDB_THREADS", "16"),
+    "DUCKDB_THREADS": g("DUCKDB_THREADS", "4" if g("SPLIT_COMPUTE") == "1" else "16"),
     "DATA_BUCKET": g("DATA_BUCKET", "oa-gcs-usage-dvx"),
     # stage inputs to the local-SSD mount (see disks below); STAGE_DIR="" disables
-    "STAGE_DIR": g("STAGE_DIR", "/stage"),
+    "STAGE_DIR": g("STAGE_DIR", "/tmp" if g("SPLIT_COMPUTE") == "1" else "/stage"),
     # Slack digest target: chat.postMessage (bot token) so per-message avatars apply
     "SLACK_CHANNEL": g("SLACK_CHANNEL", "C0BNWAASXFW"),  # #gcs-usage
     # failure/healthcheck alerts go to #gcs-usage-alerts, not the digest channel
@@ -70,10 +95,11 @@ v = {
     # the stack's cost labels (PIN keeps them: `submitter_spec` passes them through), so the
     # jobs this one submits (the listing fan-out, the static-names chain) carry them too
     "DISKY_LABELS": os.environ.get("DISKY_LABELS", ""),
+    "JOB_IMAGE": os.environ["JOB_IMAGE"],
 }
 v = {k: s for k, s in v.items() if s}
 if not pin:  # one-off overrides forwarded only for manual submits, never the cron spec
-    for k in ["SNAP_ID", "SNAPSHOT_DATE", "SNAP_PATH", "INDEX_PATH", "SCRATCH", "REPROC", "SWEEP", "SWEEP_PLAN", "SWEEP_DATE", "SWEEP_BUCKETS", "USER",
+    for k in ["SPLIT_COMPUTE", "SCAN_RUN_ID", "SNAP_ID", "SNAPSHOT_DATE", "SNAP_PATH", "INDEX_PATH", "SCRATCH", "REPROC", "SWEEP", "SWEEP_PLAN", "SWEEP_DATE", "SWEEP_BUCKETS", "USER",
               "SWEEP_BENCHMARK_PLAN", "SWEEP_BENCHMARK_BUCKET", "SWEEP_BENCHMARK_WORKERS", "SWEEP_BENCHMARK_ROOTS", "SWEEP_BENCHMARK_RESULTS_PER_ROOT", "SWEEP_BENCHMARK_OUT",
               "ACCESS_ONLY", "SKIP_ACCESS", "ACCESS_ARGS", "GATE", "GATE_K", "GATE_P", "GATE_THREADS", "GATE_HIST",
               "LISTING_MACHINE", "LISTING_PROCS", "LISTING_WORKERS",
@@ -104,7 +130,7 @@ container_volumes() {
   python3 - <<EOF
 import json
 print(json.dumps([f"/mnt/disks/gcs/{b}:/gcs/{b}:rw" for b in $BUCKETS_PY]
-                 + ["/mnt/disks/stage:/stage:rw"]))
+                 + (["/mnt/disks/stage:/stage:rw"] if $LOCAL_SSD_GB else [])))
 EOF
 }
 
@@ -119,10 +145,10 @@ cat > "$spec" <<EOF
     "taskCount": 1,
     "taskSpec": {
       "runnables": [{"container": {"imageUri": "$IMAGE", "volumes": $(container_volumes)}}],
-      "computeResource": {"cpuMilli": 8000, "memoryMib": $MEMORY_MIB},
+      "computeResource": {"cpuMilli": $CPU_MILLI, "memoryMib": $MEMORY_MIB},
       "maxRetryCount": 0,
       "maxRunDuration": "${MAX_RUN_SECONDS:-21600}s",
-      "volumes": $(volumes | python3 -c 'import json,sys; v=json.load(sys.stdin); v.append({"deviceName": "stage", "mountPath": "/mnt/disks/stage"}); print(json.dumps(v))'),
+      "volumes": $(volumes | python3 -c "import json,sys; v=json.load(sys.stdin); print(json.dumps(v + ([{'deviceName': 'stage', 'mountPath': '/mnt/disks/stage'}] if $LOCAL_SSD_GB else [])))"),
       "environment": {
         "variables": $(vars),
         "secretVariables": {
@@ -131,7 +157,7 @@ cat > "$spec" <<EOF
           "CLOUDFLARE_API_TOKEN": "projects/$PROJECT/secrets/cf-pages-token/versions/latest",
           "R2_ACCESS_KEY_ID": "projects/$PROJECT/secrets/gcs-static-index-r2-key-id/versions/latest",
           "R2_SECRET_ACCESS_KEY": "projects/$PROJECT/secrets/gcs-static-index-r2-secret/versions/latest",
-          "GCS_USAGE_TOKEN": "projects/$PROJECT/secrets/gcs-sheet-sync-token/versions/latest",
+          "GCS_USAGE_TOKEN": "projects/$PROJECT/secrets/gcs-snapshot-site-token/versions/latest",
           "DISCORD_GCS_USAGE_WEBHOOK": "projects/$PROJECT/secrets/gcs-usage-discord-webhook/versions/latest",
           "DISCORD_BOT_TOKEN": "projects/$PROJECT/secrets/marin-discord-bot-token/versions/latest"
         }
@@ -143,11 +169,11 @@ cat > "$spec" <<EOF
       "policy": {
         "machineType": "$MACHINE",
         "bootDisk": {"type": "pd-balanced", "sizeGb": "100"},
-        "disks": [{"newDisk": {"type": "local-ssd", "sizeGb": "$LOCAL_SSD_GB"}, "deviceName": "stage"}]
+        "disks": $(python3 -c "import json; print(json.dumps([{'newDisk': {'type': 'local-ssd', 'sizeGb': '$LOCAL_SSD_GB'}, 'deviceName': 'stage'}] if $LOCAL_SSD_GB else []))")
       }
     }],
     "serviceAccount": {"email": "$SA"},
-    "location": {"allowedLocations": ["regions/$REGION"]},
+    "location": {"allowedLocations": ["${ZONE:+zones/}${ZONE:-regions/$REGION}"]},
     "labels": $(labels scan)
   },
   "labels": $(labels scan),

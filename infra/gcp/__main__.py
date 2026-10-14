@@ -113,6 +113,15 @@ static_secrets = Secrets(
     adopt=adopt,
 )
 
+snapshot_secret = Secrets(
+    "gcs-snapshot-secret",
+    project=project,
+    secrets={"gcs-snapshot-site-token": {"app": "gcs-usage", "role": "snapshot-read"}},
+    accessor=job.member,
+    accessor_email=job.email_literal,
+    adopt=adopt,
+)
+
 daily = BatchCron(
     "gcs-usage-snapshot-daily",
     project=project,
@@ -122,7 +131,7 @@ daily = BatchCron(
     sa_email=job.email,
     adopt=adopt,
     existing=True,
-    depends_on=[secrets],
+    depends_on=[secrets, static_secrets, snapshot_secret],
 )
 
 # The hourly D1 → Google Sheet mirror (deploy/sheet-mirror/): `deploy.sh` ships

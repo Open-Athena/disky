@@ -36,11 +36,15 @@ unset n v
 set -x
 
 # The scan id keys everything this run writes (listing/, snapshots/, the index
-# generation, D1): `YYYY-MM-DD` for the daily cron, or a sub-daily
-# `YYYY-MM-DDTHHMM` (SNAP_ID=…, as cw's job) for an extra scan on a day that
-# already has one — a date is never a scan's key. DATE is its UTC day, for
+# generation, D1): `YYYY-MM-DDTHHMM` by default, so a later cron stays after an
+# earlier manual scan in the append stores' ID order. Explicit SNAP_ID and
+# legacy SNAPSHOT_DATE overrides remain supported. DATE is its UTC day, for
 # what is genuinely per-day (path-index `--asof`: the access-log cutoff).
-SNAP_ID=${SNAP_ID:-${SNAPSHOT_DATE:-$(date -u +%F)}}
+SNAP_ID=${SNAP_ID:-${SNAPSHOT_DATE:-$(date -u +%FT%H%M)}}
+export SCAN_ID=$SNAP_ID
+# Manual submits pin this before allocation; static cron bodies learn the
+# root identity here. Never replace it with a downstream job's own UID.
+export SCAN_RUN_ID=${SCAN_RUN_ID:-${BATCH_JOB_UID:-}}
 DATE=${SNAP_ID%%T*}
 DATA=${DATA_BUCKET:-oa-gcs-usage-dvx}
 # Deployment config (specs/oa-decoupling.md): `dt-cloud` carries no defaults for these.
@@ -80,6 +84,16 @@ SNAP_PATH=${SNAP_PATH:-snapshots/$SNAP_ID}
 GEN=${GEN:-$(date -u +%Y%m%dT%H%M%SZ)}
 INDEX_DIR=listing/$SNAP_ID/index/$GEN
 INDEX_PATH=${INDEX_PATH:-$INDEX_DIR/path-index.parquet}
+if [ "${SPLIT_COMPUTE:-0}" = "1" ]; then
+  [[ "$JOB_IMAGE" =~ @sha256:[0-9a-f]{64}$ ]] || { echo "ERROR: split scan requires a digest-pinned JOB_IMAGE" >&2; exit 1; }
+  [ -n "${BATCH_JOB_UID:-}" ] || { echo "ERROR: split scan needs a Batch controller UID" >&2; exit 1; }
+  for mode in GATE SWEEP SWEEP_BENCHMARK_PLAN ACCESS_ONLY SCAN_COMPUTE_ONLY NOP_IF_PUBLISHED; do
+    [ -z "${!mode:-}" ] || [ "${!mode}" = "0" ] || { echo "ERROR: split scan does not support $mode" >&2; exit 1; }
+  done
+  if [ "${SCRATCH:-0}" = "1" ]; then
+    [[ "$SNAP_PATH" == scratch/* && "$INDEX_PATH" == scratch/* ]] || { echo "ERROR: split SCRATCH requires SNAP_PATH and INDEX_PATH under scratch/" >&2; exit 1; }
+  fi
+fi
 
 # Scan-run record (specs/scan-runs-ui.md): this run's phases, outputs and exit
 # in D1 (`scan_runs`), shown at /scans. `dt-cloud scan-run record` never fails
@@ -89,17 +103,19 @@ INDEX_PATH=${INDEX_PATH:-$INDEX_DIR/path-index.parquet}
 # not a scan run: nothing is recorded.
 export SCAN_RUNS_PROFILE=${SCAN_RUNS_PROFILE:-job/scan-runs.json}
 SR_KIND=scan; [ "${REPROC:-0}" = "1" ] && SR_KIND=reproc
+[ "${SCAN_COMPUTE_ONLY:-0}" = "1" ] && SR_KIND=compute
 SR_ERR=""
 scan_run() {
   { set +x; } 2>/dev/null
   if [ "${SCRATCH:-0}" != "1" ] && [ "${GATE:-0}" != "1" ] && [ -n "${BATCH_JOB_UID:-}" ]; then
-    (cd /app && dt-cloud scan-run record -k "$SR_KIND" -g "$GEN" "$@" "$SNAP_ID")
+    (cd /app && dt-cloud scan-run record -k "$SR_KIND" -g "$GEN" ${SCAN_ROOT_UID:+-p "$SCAN_ROOT_UID"} "$@" "$SNAP_ID")
   fi
   set -x
 }
 # A phase just ended: the marker line (the backfill parses these from the
 # logs) and its record. `phase NAME [NOTE]`.
 phase() { echo "PHASE $1: ${SECONDS}s (wall${2:+, $2})" >&2; scan_run -P "$1" ${2:+-q "$2"}; }
+begin_phase() { echo "PHASE-START $1: ${SECONDS}s (wall)" >&2; scan_run -A -P "$1" -M; }
 scan_run_exit() { local rc=$?; scan_run -x "$rc" ${SR_ERR:+-e "$SR_ERR"}; exit "$rc"; }
 
 # Failure alerting: any command dying under `set -e` posts to Slack before the
@@ -115,6 +131,10 @@ scan_run_exit() { local rc=$?; scan_run -x "$rc" ${SR_ERR:+-e "$SR_ERR"}; exit "
 slack_post() {
   { set +x; } 2>/dev/null
   local msg=$1 chan="${SLACK_ALERT_CHANNEL:-${SLACK_CHANNEL:-}}"
+  if [ "${SCRATCH:-0}" = "1" ] || [ "${GATE:-0}" = "1" ]; then
+    printf 'Validation alert (Slack suppressed): %s\n' "$msg" >&2
+    return 0
+  fi
   SLACK_MSG="$msg" SLACK_CHAN="$chan" python3 - <<'PY' || true
 import json, os, urllib.request
 msg, chan = os.environ["SLACK_MSG"], os.environ["SLACK_CHAN"]
@@ -176,7 +196,9 @@ if [ -n "${SWEEP_BENCHMARK_PLAN:-}" ]; then
 fi
 # ACCESS_ONLY (backlog backfill): serial ingest, then exit — no snapshot.
 if [ "${ACCESS_ONLY:-0}" = "1" ]; then
+  if [ -n "${SCAN_ROOT_UID:-}" ]; then SR_KIND=access; trap scan_run_exit EXIT; scan_run -S -B; begin_phase access-ingest; fi
   dt-cloud access ingest ${ACCESS_ARGS:-} || exit 1
+  [ -z "${SCAN_ROOT_UID:-}" ] || phase access-ingest
   echo "ACCESS-JOB-DONE"
   exit 0
 fi
@@ -233,10 +255,16 @@ fi
 # path; now it hides under the listing's wall time. Non-fatal: a failure is
 # caught at the barrier and the watermark self-heals next run.
 ACCESS_PID=""
-if [ "${SKIP_ACCESS:-0}" != "1" ] && [ "${REPROC:-0}" != "1" ]; then
-  dt-cloud access ingest ${ACCESS_ARGS:-} & ACCESS_PID=$!
-fi
 SECONDS=0   # phase-timing baseline (see PHASE markers below)
+begin_phase listing-fanout
+if [ "${SKIP_ACCESS:-0}" != "1" ] && [ "${REPROC:-0}" != "1" ]; then
+  begin_phase access-ingest
+  if [ "${SPLIT_COMPUTE:-0}" = "1" ]; then
+    dt-cloud scan-run task -s access "$SNAP_ID" & ACCESS_PID=$!
+  else
+    dt-cloud access ingest ${ACCESS_ARGS:-} & ACCESS_PID=$!
+  fi
+fi
 
 # 1. List every bucket ourselves via a fan-out Batch job (one task per bucket).
 # We own the listing end-to-end — no dependency on SII inventory reports, which
@@ -271,6 +299,16 @@ if [ -n "$ACCESS_PID" ]; then
   wait "$ACCESS_PID" || echo "WARN: access ingest failed (snapshot continues; watermark self-heals next run)" >&2
 fi
 phase access-ingest "overlapped the listing"
+if [ "${SPLIT_COMPUTE:-0}" = "1" ]; then
+  begin_phase scan-compute
+  GEN="$GEN" SNAP_PATH="$SNAP_PATH" INDEX_PATH="$INDEX_PATH" dt-cloud scan-run task -s compute "$SNAP_ID"
+  phase scan-compute
+  if [ "${SCRATCH:-0}" = "1" ]; then
+    echo "SCRATCH — split computation complete; no serving pointers changed" >&2
+    exit 0
+  fi
+else
+begin_phase path-index
 G=()
 for b in "${FLEET[@]}"; do
   if [ -f "/gcs/$DATA/listing/$SNAP_ID/$b/_SUCCESS.json" ]; then G+=("/gcs/$DATA/listing/$SNAP_ID/$b/*.parquet")
@@ -352,6 +390,7 @@ dt-cloud path-index -d "$DATE" "${L[@]}" "${A[@]}" "${X[@]}" -o "/tmp/snap/$SNAP
   -P "$PI_DIR/path-index.parquet" ${PATH_INDEX_RG_ROWS:+-r "$PATH_INDEX_RG_ROWS"} -u "${PATH_INDEX_USER_SORT_TIERS:-bysize}" \
   ${PATH_INDEX_SEARCH:+-S}  # PATH_INDEX_SEARCH=1: the filter's search sidecars too (specs/path-store-search.md; off until measured)
 phase path-index
+begin_phase "path-index upload"
 ls -l "$PI_DIR" >&2
 PI_DIR="$PI_DIR" DATA="$DATA" DEST="$(dirname "$INDEX_PATH")" python3 - <<'PY'
 import os, time
@@ -371,8 +410,10 @@ for f in sorted(p for p in src.iterdir() if p.is_file() and not p.name.startswit
 print(f"path-index upload: {tot / 1e9:.1f} GB in {time.time() - t0:.0f}s → gs://{os.environ['DATA']}/{dest}/", flush=True)
 PY
 phase "path-index upload"
+begin_phase webdata+stage
 dt-cloud rules -o /tmp/rules.json || true  # findings shouldn't block the snapshot
 phase webdata+stage
+begin_phase publish
 
 # 3. publish to the canonical store — the live site reads these directly
 # (site/functions/data/[[path]].ts), so no site rebuild/deploy is needed.
@@ -392,30 +433,43 @@ fi
 # attribution rules: the single latest copy the /data/rules.json function serves
 cp /tmp/rules.json "/gcs/$DATA/snapshots/rules.json" 2>/dev/null || true
 phase publish
+begin_phase publish-r2
 
 # Serving off GCS (the site's `SERVED_R2`): the small files its pages read beside
 # the path store — this scan's snapshot JSONs and its generation's extras
 # (`attr.tsv` + index) — and the rules registry, copied to the R2 index bucket
 # before index-sync lists the scan. The key is the static index's
-# (`gcs-static-index-r2-*`, Batch secretVariables). Never fatal: until it's
-# re-run (`publish-r2 -S -a <scan>`, idempotent), the site reads those from
-# GCS only while `SERVED_R2` is off.
+# (`gcs-static-index-r2-*`, Batch secretVariables). This is a visibility
+# barrier: missing credentials, source files or verified copies fail the job
+# before any D1 pointer can move. The previous scan remains visible.
 { set +x; } 2>/dev/null
-if [ -n "${R2_ACCESS_KEY_ID:+set}" ] && [ -n "${CLOUDFLARE_ACCOUNT_ID:-}" ]; then
+if [ -n "${R2_ACCESS_KEY_ID:+set}" ] && [ -n "${R2_SECRET_ACCESS_KEY:+set}" ] && [ -n "${CLOUDFLARE_ACCOUNT_ID:-}" ]; then
   r2pub() {
     R2_ENDPOINT=${R2_ENDPOINT:-https://$CLOUDFLARE_ACCOUNT_ID.r2.cloudflarestorage.com} R2_BUCKET=oa-gcs-usage-index \
       LAYER2_PREFIX='listing/{scan}/index/' dt-cloud publish-r2 "$@"
   }
-  if r2pub -S -a "$SNAP_ID" && r2pub -a -p snapshots/rules.json "$SNAP_ID"; then
+  if r2pub -S -a \
+      -R "$SNAP_PATH/meta.json" -R "$SNAP_PATH/age.json" \
+      -R "$INDEX_DIR/attr.tsv" -R "$INDEX_DIR/attr.tsv.idx.json" "$SNAP_ID" \
+      && r2pub -a -p snapshots/rules.json -R snapshots/rules.json "$SNAP_ID"; then
     set -x; phase publish-r2
   else
     rc=$?; set -x
-    slack_post "⚠️ \`dt-cloud\` $SNAP_ID: the R2 copy of its snapshot files failed (exit $rc) — with \`SERVED_R2\` on, its meta/age/lifecycle/extras are missing. Resume: \`dt-cloud publish-r2 -S -a $SNAP_ID\` (R2 env + \`LAYER2_PREFIX='listing/{scan}/index/'\`)."
+    slack_post "⚠️ \`dt-cloud\` $SNAP_ID: R2 publication failed (exit $rc); D1 pointers were not advanced, so the previous scan remains visible. Repair the R2 copy before resuming index-sync."
     phase publish-r2 "failed (exit $rc)"
+    exit "$rc"
   fi
 else
-  set -x; echo "WARN: no R2 key in the env — skipping publish-r2 (the site's SERVED_R2 reads would miss $SNAP_ID)" >&2
+  set -x; echo "ERROR: missing R2 credentials — publication blocked; D1 pointers were not advanced" >&2
+  phase publish-r2 "failed (missing credentials)"
+  exit 1
 fi
+
+if [ "${SCAN_COMPUTE_ONLY:-0}" = "1" ]; then
+  echo "SCAN-COMPUTE-DONE $SNAP_ID" >&2
+  exit 0
+fi
+fi  # inline computation or dedicated compute worker
 
 # Static name index (specs/static-append.md): append this scan to the search
 # index on R2 — every per-scan stage, the heavy-literal drill included — before
@@ -479,6 +533,7 @@ index_sync_creds() { [ -n "${CLOUDFLARE_API_TOKEN:+set}" ] && [ -n "${CLOUDFLARE
 ROWS_PID=""
 { set +x; } 2>/dev/null
 if index_sync_creds; then
+  begin_phase "index-sync rows"
   (
     if dt-cloud index-sync -r -d "/gcs/$DATA/$INDEX_DIR" -g "$GEN" -k "$INDEX_DIR" "$SNAP_ID"; then
       phase "index-sync rows"
@@ -489,6 +544,8 @@ if index_sync_creds; then
   ) & ROWS_PID=$!
 fi
 set -x
+if [ "${SKIP_STATIC_NAMES:-0}" != "1" ] && [ -n "${CLOUDFLARE_ACCOUNT_ID:-}" ]; then begin_phase static-names; fi
+if [ "${INTERVAL_STORE_APPEND:-1}" = "1" ] && [ -n "${CLOUDFLARE_ACCOUNT_ID:-}" ]; then begin_phase interval-store; fi
 static_names_step & SN_PID=$!
 interval_store_step & IV_PID=$!
 wait "$SN_PID"
@@ -504,6 +561,7 @@ wait "$IV_PID"
 # The rows were staged above (`-r`); `-p` checks them against each footer and
 # flips the pointers, which lists the scan. If that refuses, a full sync redoes
 # rows + pointers.
+begin_phase index-sync
 { set +x; } 2>/dev/null
 if index_sync_creds; then
   dt-cloud index-sync -p -d "/gcs/$DATA/$INDEX_DIR" -g "$GEN" -k "$INDEX_DIR" "$SNAP_ID" \
@@ -514,6 +572,7 @@ else
 fi
 set -x
 phase index-sync
+begin_phase healthcheck
 
 # Serving invariant: the snapshot published + the footer synced — but is the
 # SITE actually serving this scan? `dt-cloud healthcheck` asserts the scan is
@@ -534,6 +593,7 @@ if [ -n "${GCS_USAGE_TOKEN:+set}" ] && [ "${REPROC:-0}" != "1" ]; then
 fi
 
 phase healthcheck
+begin_phase warm-cache
 
 # Warm the site's subtree + diff caches for this scan (colo cache + global
 # KV) so the first viewer of the day gets hits instead of a multi-second
@@ -545,6 +605,7 @@ if [ -n "${GCS_USAGE_TOKEN:+set}" ] && [ "${REPROC:-0}" != "1" ]; then
 fi
 
 phase warm-cache
+begin_phase probe
 
 # Replay the site's page loads uncached (`dt-cloud probe -c`): every response
 # a 2xx/4xx, and one cold-latency record per scan under probes/ (the time
@@ -558,6 +619,7 @@ if [ -n "${GCS_USAGE_TOKEN:+set}" ] && [ "${REPROC:-0}" != "1" ]; then
 fi
 
 phase probe
+begin_phase slack-digest
 
 # Converge the monthly Shape-C digest thread in Slack (specs/done/slack-digest-
 # shape-c.md): the OP + one reply per scan. Only when SLACK_BOT_TOKEN +
@@ -576,6 +638,7 @@ else
 fi
 
 phase slack-digest
+begin_phase discord-digest
 
 # The same month thread in Marin's Discord #gcs-usage (specs/done/discord-
 # digest-twin.md): OP + plot through the channel's app-owned webhook, the bot
@@ -591,6 +654,7 @@ else
 fi
 
 phase discord-digest
+begin_phase index-gc
 
 # Sweep row groups of generations the pointer no longer names (a REPROC's
 # previous generation; every reader handle has expired by now), and retire
