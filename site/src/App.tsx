@@ -32,6 +32,7 @@ import type { DateRange, Highlight, ShadeMode } from './Treemap'
 import { DEFAULT_SYNTAX, SYNTAXES, syntaxById } from './filterTree'
 import { fetchCover, matchedListOf, prefetchCover, rowCover, rowMatchesOf, useFilterCover } from './filterCover'
 import { HttpError } from './batches'
+import { budgetCutRefetch } from './budgetCut'
 import type { RowSource } from './MatchActions'
 import { type MatchFields, seriesMatches } from './filterMatches'
 import { QueryHelpTip } from './QueryHelp'
@@ -394,6 +395,8 @@ function AppContent() {
       queryKey: ['subtree', store.key, asof, p, canW, scopeKey],
       enabled: !!asof && scopeReady,
       staleTime: Infinity,
+      // A budget-cut answer (`budgetCut`) is upgraded at the edge in the background: ask again until whole.
+      refetchInterval: (q: { state: { data?: { budgetCut?: boolean }; dataUpdateCount: number } }) => budgetCutRefetch(q.state.data, q.state.dataUpdateCount),
       // Retry transient failures, but not the deterministic ones (409: no
       // user index for this scan; 413: view too wide) — those surface as-is.
       retry: (n: number, e: Error) => !/^4\d\d/.test(e.message) && n < 3,
@@ -407,7 +410,7 @@ function AppContent() {
           { credentials: 'include', signal },
         ))
         if (!r.ok) { pf.fail(); throw apiError(r.status, await r.text()) }
-        const j = await r.json() as MatchFields & { tree: TreeNode; tier?: string; matches?: string[]; threshold?: number; partialReason?: string; approximateReason?: string; hexRuns?: { min: number; tail: number } }
+        const j = await r.json() as MatchFields & { tree: TreeNode; tier?: string; matches?: string[]; threshold?: number; partialReason?: string; approximateReason?: string; hexRuns?: { min: number; tail: number }; budgetCut?: true }
         pf.decoded()
         return j
       },
@@ -787,6 +790,7 @@ function AppContent() {
     // section holds its height and shows something before the detail.
     placeholderData: (prev: DiffData | undefined) => diffL1 ?? prev,
     staleTime: Infinity,
+    refetchInterval: q => budgetCutRefetch(q.state.data, q.state.dataUpdateCount),
     retry: (n: number, e: Error) => !/^4\d\d/.test(e.message) && n < 3,
     retryDelay: (n: number) => 400 * 2 ** n,
     queryFn: async ({ signal }: { signal?: AbortSignal }) => {
