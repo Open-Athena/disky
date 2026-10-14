@@ -51,7 +51,7 @@ import { MultiSelect } from './MultiSelect'
 import { SiteNav, topbarH } from './SiteNav'
 import { canvasWidth } from './canvas'
 import type { MenuEntry } from './SiteNav'
-import { DAY, encodeScan, fromMiss, pendingNote, latestScan, nearestScan, noScansYet, scanInstant, useScan } from './scan'
+import { DAY, encodeScan, fmtTimestamp, fromMiss, pendingNote, latestScan, nearestScan, noScansYet, scanInstant, useScan } from './scan'
 import { scanCmp } from './scanSlug'
 import { hrefWithScan, NoScanMatch } from './NoScanMatch'
 import { selOf } from './scanSlug'
@@ -1044,14 +1044,16 @@ function AppContent() {
   }
 
   const segs = drillPath.split('/').filter(Boolean)
-  const recordedAt = meta?.disk_space?.captured_at ?? meta?.published
+  const pathScheme = store.bucketSchemes?.[segs[0]] ?? store.scheme
+  const capturedAt = meta?.captured_at ?? meta?.disk_space?.captured_at
+  const recordedAt = capturedAt ?? meta?.published
   const scanTip = meta && (
     <div className="scan-tip">
-      {meta.disk_space && (
-        <div>captured {new Date(meta.disk_space.captured_at).toISOString().replace('T', ' ').slice(0, 16)} UTC</div>
+      {capturedAt && (
+        <div>captured {fmtTimestamp(capturedAt)}</div>
       )}
       {meta.published && (
-        <div>published {new Date(meta.published).toISOString().replace('T', ' ').slice(0, 16)} UTC</div>
+        <div>published {fmtTimestamp(meta.published)}</div>
       )}
       <div><b>{fmtBytes(meta.total_bytes)}</b> · <b>{fmtN(meta.total_objects)}</b> objects across {store.rootLabel}</div>
       {estCost && (
@@ -1110,8 +1112,8 @@ function AppContent() {
   const here = mapPath?.[mapPath.length - 1]
   // The deepest crumb is a tap-to-open path card (the full `<scheme>…/` prefix +
   // copy) rather than another drill link — it's where the page already is.
-  const crumbFullPath = pathText(store.scheme, segs, true)
-  const crumbCopy = pathCopy(store.scheme, segs, true)
+  const crumbFullPath = pathText(pathScheme, segs, true)
+  const crumbCopy = pathCopy(pathScheme, segs, true)
   const crumbs = (
     <span className="tb-path" aria-label="Drilled path">
       <RootCrumb treeName={mapTree?.n} rootLabel={rootLabel} rootTitle={rootTitle} scopeWord={store.rootLabel} here={!segs.length} onClick={() => drillTo([])} />
@@ -1120,7 +1122,7 @@ function AppContent() {
           <span className="sep">/</span>
           {i === segs.length - 1
             ? <PathPopover label={sg} fullPath={crumbFullPath} copy={crumbCopy} />
-            : <Tooltip content={<code>{pathText(store.scheme, segs.slice(0, i + 1))}</code>}><button type="button" onClick={() => drillTo(segs.slice(0, i + 1))}>{sg}</button></Tooltip>}
+            : <Tooltip content={<code>{pathText(pathScheme, segs.slice(0, i + 1))}</code>}><button type="button" onClick={() => drillTo(segs.slice(0, i + 1))}>{sg}</button></Tooltip>}
         </span>
       ))}
     </span>

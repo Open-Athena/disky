@@ -2,3 +2,4 @@ packages:
   - "site"
   - "packages/*"
   - "infra/cf/cron-dispatch"
+  - "infra/cf/r2-access"
