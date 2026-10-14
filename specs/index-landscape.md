@@ -80,7 +80,7 @@ Pointers and footers are in D1 (`index_schema`, `index_row_groups`). File names 
 
 ### 1.2 Interval store (gcs only)
 
-Data lives in `gs://oa-gcs-usage-dvx/interval-store/<gen>/`, served from R2 `oa-gcs-usage-index` under the same keys. The profile is `cloud/src/dt_cloud/interval_profiles/gcs.json`. gcs prod reads it: `PATH_STORE="intervals"`, `INTERVAL_STORE_GEN="2026-10-09b"` (`gcs:site/wrangler.toml:53-54`, commit `1db67e1a`; whether this is deployed was not checked). `specs/interval-store.md:173-178` still calls this opt-in, and `specs/interval-store-append-gcs.md` still says the append is off by default. Both are stale: the job defaults `INTERVAL_STORE_APPEND:-1` (`gcs:job/run.sh:418-438`).
+Data lives in `gs://oa-gcs-usage-dvx/interval-store/<gen>/`, served from R2 `oa-gcs-usage-index` under the same keys. The profile is gcs `job/interval-store.json` (on `cloud` until 2026-10-14). gcs prod reads it: `PATH_STORE="intervals"`, `INTERVAL_STORE_GEN="2026-10-09b"` (`gcs:site/wrangler.toml:53-54`, commit `1db67e1a`; whether this is deployed was not checked). `specs/interval-store.md:173-178` still calls this opt-in, and `specs/interval-store-append-gcs.md` still says the append is off by default. Both are stale: the job defaults `INTERVAL_STORE_APPEND:-1` (`gcs:job/run.sh:418-438`).
 
 | Artifact | Answers | Builder / when | Size | Readers | Status |
 |---|---|---|---|---|---|

@@ -375,7 +375,7 @@ So a compaction is one branch commit: bump `gen` in `job/static-names.json`, set
 
 Not changed (deliberately, follow-ups):
 - `plan-sweep manifest`'s `-l` default `/gcs/<data>/cw-l2/<date>/<bucket>.parquet`: the whole `plan-sweep` executor (CLI + `site/functions/_lib/{planDispatch,cwBatch,executor}.ts`: `sweep/cw/runs/`, `cw-s3-job-grant`, `EXECUTOR` default `plan-sweep`) is cw-shaped; converge it with the executor unification (§6 "Later"), plumbing `LAYER2_PREFIX` into the Batch env then. **Bug found on the way:** `planDispatch.ts` runs `dt-cloud plan-sweep manifest --plan "$RUN/plan.json" …`, but the command takes the plan as a positional argument and has no `--plan` option (since `a02b24fd`, 9/28), so a cw plan-sweep dispatch fails: `dt-cloud plan-sweep manifest --plan x.json -d … -o …` exits 2 with "No such option '--plan'" (checked locally; not checked against a live run).
-- `interval_profiles/gcs.json` (live interval gen `2026-10-09b`) is still on `cloud`. Its loader already takes a path (`-P`/`$INTERVAL_STORE_PROFILE`); same move as static: copy it to `job/interval-store.json` on gcs, point the job at it, then drop it from `cloud`.
+- Done 2026-10-14: the interval profile moved to gcs `job/interval-store.json` (gcs `0d289768`) and `interval_profiles/` is gone from `cloud`; profiles are path-only (`-P PATH` / `$INTERVAL_STORE_PROFILE`).
 - `UA = "gcs-usage-…"` in `healthcheck.py`/`site.py`, `scan-started --listing-prefix listing` (the generic lister's layout, not a deployment's) and `GCS_USAGE_ATTR_MAX_DEPTH`: naming, not behavior.
 
 #### What each deployment must do before merging this
