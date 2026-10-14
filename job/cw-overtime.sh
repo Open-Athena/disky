@@ -28,8 +28,11 @@ if [ -z "${CLOUDFLARE_API_TOKEN:+set}" ] || [ -z "${CLOUDFLARE_ACCOUNT_ID:-}" ];
   echo "no CLOUDFLARE_API_TOKEN/ACCOUNT_ID — over-time groups need D1; skipping" >&2
   exit 0
 fi
-NEW=$(dt-cloud over-time-groups -g "$GEN" -o "$WORK" -p "/gcs/$DATA" -m "${DUCKDB_MEM:-16GB}" -t "${IMPORT_JOBS:-8}")
-for gid in $(printf '%s' "$NEW" | python3 -c 'import json, sys; print(" ".join(json.load(sys.stdin)["groups"]))'); do
+# The archive the groups are read from and published to: R2 when cw-run.sh set it up (`R2_ARCHIVE`, through
+# blobfs), where the site reads them; else the GCS mount, each new group then copied to R2 by `publish-r2`.
+ROOT=${R2_ARCHIVE:-/gcs/$DATA}
+NEW=$(dt-cloud over-time-groups -g "$GEN" -o "$WORK" -p "$ROOT" -m "${DUCKDB_MEM:-16GB}" -t "${IMPORT_JOBS:-8}")
+[ -n "${R2_ARCHIVE:-}" ] || for gid in $(printf '%s' "$NEW" | python3 -c 'import json, sys; print(" ".join(json.load(sys.stdin)["groups"]))'); do
   if [ -n "${R2_ENDPOINT:+set}" ] && [ -n "${R2_BUCKET:-}" ]; then  # `:+set`: xtrace must not print the creds
     # `-L`: the group's scan rollups (`cw-l2/<gid>/<bucket>.parquet`, ~1.3 GB) stay in
     # GCS only, as in cw-run.sh's 4c; nothing served reads them

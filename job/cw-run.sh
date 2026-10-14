@@ -34,7 +34,7 @@ set -euxo pipefail
 { set +x; } 2>/dev/null
 for n in AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY CLOUDFLARE_API_TOKEN DISCORD_BOT_TOKEN \
          DISCORD_GCS_USAGE_WEBHOOK SITE_TOKEN GCS_USAGE_TOKEN SLACK_BOT_TOKEN SLACK_WEBHOOK \
-         CF_ACCESS_CLIENT_ID CF_ACCESS_CLIENT_SECRET; do
+         CF_ACCESS_CLIENT_ID CF_ACCESS_CLIENT_SECRET R2_ENDPOINT R2_ACCESS_KEY_ID R2_SECRET_ACCESS_KEY; do
   if [ -n "${!n+set}" ]; then
     v=${!n}; v=${v#"${v%%[![:space:]]*}"}; v=${v%"${v##*[![:space:]]}"}
     export "$n=$v"
@@ -45,6 +45,16 @@ unset n v
 # passes until its next `pulumi up`; carry it under the new one.
 if [ -z "${SITE_TOKEN+set}" ] && [ -n "${GCS_USAGE_TOKEN+set}" ]; then export SITE_TOKEN=$GCS_USAGE_TOKEN; fi
 unset GCS_USAGE_TOKEN
+# The R2 archive through blobfs (`r2://$R2_BUCKET/…`): `AWS_*` are CoreWeave's keys (the lister's), so R2 gets its
+# own named profile, and `buckets.yml` (blobfs's per-bucket config) gives the bucket its endpoint and that profile.
+# Never `DISK_TREE_R2_ENDPOINT_URL`: it would override every bucket's endpoint, the CoreWeave ones included.
+if [ -n "${R2_ENDPOINT:-}" ] && [ -n "${R2_BUCKET:-}" ] && [ -n "${R2_ACCESS_KEY_ID:-}" ]; then
+  export AWS_SHARED_CREDENTIALS_FILE=${TMPDIR:-/tmp}/r2-credentials
+  ( umask 077; printf '[r2]\naws_access_key_id = %s\naws_secret_access_key = %s\n' "$R2_ACCESS_KEY_ID" "$R2_SECRET_ACCESS_KEY" > "$AWS_SHARED_CREDENTIALS_FILE" )
+  mkdir -p "$HOME/.config/disk-tree"
+  printf 'buckets:\n  - uri: r2://%s\n    endpoint_url: %s\n    profile: r2\n' "$R2_BUCKET" "$R2_ENDPOINT" > "$HOME/.config/disk-tree/buckets.yml"
+  export R2_ARCHIVE="r2://$R2_BUCKET"
+fi
 set -x
 
 # Deployment config for the shared CLI (cloud/src/dt_cloud/{index_footer,warm}.py).
@@ -299,7 +309,7 @@ phase index-gc
 begin warm-cache
 if { [ -n "${SITE_TOKEN:+set}" ] || { [ -n "${CF_ACCESS_CLIENT_ID:+set}" ] && [ -n "${CF_ACCESS_CLIENT_SECRET:+set}" ]; }; } \
    && [ "${REPROC:-0}" != "1" ]; then  # `:+set`: xtrace must not print the tokens
-  dt-cloud warm-cache -d "$SNAP_ID" -r "gs://$DATA/snapshots/cw" \
+  dt-cloud warm-cache -d "$SNAP_ID" -r "${R2_ARCHIVE:-gs://$DATA}/snapshots/cw" \
     || echo "WARN: cache warm-up failed for $SNAP_ID" >&2
 else
   echo "no warm-cache auth (SITE_TOKEN, or CF_ACCESS_CLIENT_ID+SECRET) — skipping cache warm-up" >&2
