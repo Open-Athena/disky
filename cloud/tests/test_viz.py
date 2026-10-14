@@ -1,5 +1,5 @@
 """End-to-end test of `write_path_index` on a tiny synthetic listing: the
-path store (specs/path-store.md §4.3) — every dir row per owner slice, every
+path store (specs/done/path-store.md §4.3) — every dir row per owner slice, every
 object row attributed to its dir, in the layer-2's names, cut into the `path`
 / `bysize` sorts (+ the by-user copies when attributing) — plus the age strata
 and meta JSONs.
@@ -13,13 +13,24 @@ from pathlib import Path
 import pandas as pd
 import pyarrow.parquet as pq
 import pytest
+from click.testing import CliRunner
 
 from dt_cloud.viz import write_path_index
+from dt_cloud.cli import main
 
 STORE_COLS = [
     "path", "usr", "size", "depth", "kind", "n_files", "n_children", "n_desc", "mtime", "mtime_mean", "created", "last_read",
     "sum_storage_class_id_2", "sum_storage_class_id_3", "sum_storage_class_id_4",
 ]
+
+
+def test_cli_lists_daily_and_subdaily_snapshots(tmp_path: Path, listing: str):
+    ids = ['2026-07-20', '2026-07-20T0600', '2026-07-20T1800']
+    for scan in ids:
+        result = CliRunner().invoke(main, ['path-index', '-d', scan, '-l', listing, '-o', str(tmp_path / scan)])
+        assert result.exit_code == 0, result.exception
+    assert json.loads((tmp_path / 'scans.json').read_text()) == ['2026-07-20T1800', '2026-07-20T0600', '2026-07-20']
+    assert [json.loads((tmp_path / scan / 'meta.json').read_text())['asof'] for scan in ids] == ids
 
 
 def _rows(df: pd.DataFrame, cols: list[str]) -> list[tuple]:
@@ -441,7 +452,7 @@ def test_dir_cache_from_before_the_store_is_rebuilt(tmp_path: Path, listing: str
 def test_store_without_user_sorts(tmp_path: Path, listing: str, attribution: str):
     """`user_sorts=False` writes the two sorts only, attributed rows and all —
     the reader prunes a lens by the footer's `u_min`/`u_max` (gcs's shape:
-    half the bytes and footer rows; specs/path-store.md §1.6)."""
+    half the bytes and footer rows; specs/done/path-store.md §1.6)."""
     identities_path = tmp_path / "identities.yaml"
     identities_path.write_text(IDENTITIES_YAML)
     out = tmp_path / "out"

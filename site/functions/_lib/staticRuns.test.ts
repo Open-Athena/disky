@@ -1,14 +1,14 @@
-import { beforeAll, describe, expect, it } from 'vitest'
+import { beforeAll, describe, expect, it, vi } from 'vitest'
 import { answerKey, staticSummary, type Store } from './nameSummaryStatic.js'
 import { catalogAnswer } from './staticCatalog.js'
-import { liveTotal, SuffixHits } from './staticFilter.js'
+import { liveTotal, MAX_ROWS, SuffixHits } from './staticFilter.js'
 import type { Blobs } from './staticNames.js'
 import { latestManifest, tiers } from './staticRuns.js'
 import { fixture } from './testStore.js'
 
 // The daily runs' reader (`staticRuns.ts`) over `fixtures/static-runs/` (`gen.py`): a base through 2026-09-01 and
 // a run per scan — 2026-10-01, 2026-10-02 (date ids), then two scans on one day, 2026-10-03T0600 and 2026-10-03T1800
-// (scan ids, specs/scan-ids-not-dates.md) — against a brute-force oracle over every version on every scan.
+// (scan ids, specs/done/scan-ids-not-dates.md) — against a brute-force oracle over every version on every scan.
 
 const RUNS = ['2026-10-01', '2026-10-02', '2026-10-03T0600', '2026-10-03T1800']
 const TIERS = ['base', ...RUNS.map(r => `deltas/${r}`)]
@@ -58,6 +58,43 @@ const store = (blobs: Blobs): Store => { const t = tiers(blobs); return { names:
 const until = (date: string) => Object.fromEntries(DATES.filter(d => d <= date).map(d => [d, null]))
 
 describe('static runs', () => {
+  it.each([
+    { rows: [], budget: MAX_ROWS },
+    { rows: [8192], budget: MAX_ROWS + 4 * 8192 },
+    { rows: [8192, 8192], budget: MAX_ROWS + 4 * 16384 },
+    { rows: [100000], budget: MAX_ROWS * 2 },
+  ])('counts distinct boundary groups and enforces the default hard ceiling ($rows)', async ({ rows, budget }) => {
+    const t = tiers(files())
+    const state = await t.tiers.state()
+    const spies = state.tiers.slice(1).map(tier => vi.spyOn(tier.names, 'extent').mockResolvedValue({
+      shard: { i: 0, lo: 'ckp', hi: null, rows: 0 },
+      idx: { size: 0, sMin: [], sMax: [], rows, chunks: [] },
+      a: 0, b: rows.length, rows: rows.reduce((s, n) => s + n, 0),
+    }))
+    try { expect(await t.names.defaultMaxRows('ckpt', MAX_ROWS)).toBe(budget) }
+    finally { spies.forEach(spy => spy.mockRestore()) }
+  })
+
+  it('allows bounded per-run boundary slack for default light reads, but keeps explicit row caps strict', async () => {
+    const t = tiers(files())
+    const full = await t.names.read('ckpt', Infinity)
+    const state = await t.tiers.state()
+    const spies = state.tiers.map((tier, i) => vi.spyOn(tier.names, 'extent').mockImplementation(async () => ({
+      shard: { i: 0, lo: 'ckp', hi: null, rows: 0 },
+      idx: { size: 0, sMin: [], sMax: [], rows: i === 0 ? [8192, 90000, 8192] : [8192, 8192], chunks: [] },
+      a: 0, b: i === 0 ? 3 : 2, rows: i === 0 ? 106384 : 16384,
+    })))
+    try {
+      expect(await t.names.defaultMaxRows('ckpt', MAX_ROWS)).toBe(MAX_ROWS + 4 * 16384)
+      const got = await new SuffixHits(t.names).all('ckpt')
+      expect(got?.hits).toEqual(full.fold!.hits)
+      expect(got?.scans).toEqual(DATES)
+      expect(await new SuffixHits(t.names, { maxRows: MAX_ROWS }).all('ckpt')).toBeNull()
+    } finally {
+      spies.forEach(spy => spy.mockRestore())
+    }
+  })
+
   it('takes the newest manifest; without one (or without `list`) the base alone', async () => {
     expect((await latestManifest(files()))?.runs.map(r => r.key)).toEqual(TIERS.slice(1))
     expect((await latestManifest(files([MANIFESTS[0]])))?.runs.map(r => r.key)).toEqual(['deltas/2026-10-01'])
@@ -191,7 +228,7 @@ describe('a broken tier: the stack is cut at it, the scans before it answer exac
   }
   const wantHits = (dates: string[], scans: string[]) => long().map(term => [term, scans, oracle(term, dates)])
 
-  it('a run recording another hex-run rule than the base (specs/static-hex-runs.md) is cut at, never mixed in', async () => {
+  it('a run recording another hex-run rule than the base (specs/done/static-hex-runs.md) is cut at, never mixed in', async () => {
     const logged: string[] = []
     const base = files(MANIFESTS)
     const json = async (key: string): Promise<unknown> => key === `${RUN3}/catalog/meta.json` ? { ...await base.json<object>(key), hex_runs: { min: 16, tail: 8 } } : base.json(key)

@@ -13,13 +13,15 @@ import { AttributionRules } from './AttributionRules'
 import { DiffTreemap, DiffHeader, useDiffModel } from './DiffTreemap'
 import { DiffTable } from './DiffTable'
 import { DiskSpace } from './DiskSpace'
+import { DiskSpaceDiff, diskDiffScan } from './DiskSpaceDiff'
 import type { DiffData } from './diffModel'
 import { ScanCombobox } from './ScanCombobox'
 import { ago, buildUserIndex, epochDaysToDate } from './colors'
 import { ChildrenTable } from './ChildrenTable'
+import { LargestFiles } from './LargestFiles'
 import { FitSelect } from './FitSelect'
 import { PathPopover } from './PathPopover'
-import { pathCopy, pathText } from './pathCrumbs'
+import { fromUrlPath, pathCopy, pathText, toUrlPath } from './pathCrumbs'
 import { listsObjects, openHref } from './objects'
 import { Busy, Skeleton } from './Busy'
 import { useRules } from './rules'
@@ -29,9 +31,11 @@ import { LifecycleFold } from './LifecycleFold'
 import { ClassMixTip, Tooltip } from './Tooltip'
 import { Treemap } from './Treemap'
 import type { DateRange, Highlight, ShadeMode } from './Treemap'
+import type { DayBand } from './dayBand'
 import { DEFAULT_SYNTAX, SYNTAXES, syntaxById } from './filterTree'
 import { fetchCover, matchedListOf, prefetchCover, rowCover, rowMatchesOf, useFilterCover } from './filterCover'
 import { HttpError } from './batches'
+import { budgetCutRefetch } from './budgetCut'
 import type { RowSource } from './MatchActions'
 import { type MatchFields, seriesMatches } from './filterMatches'
 import { QueryHelpTip } from './QueryHelp'
@@ -51,7 +55,7 @@ import { MultiSelect } from './MultiSelect'
 import { SiteNav, topbarH } from './SiteNav'
 import { canvasWidth } from './canvas'
 import type { MenuEntry } from './SiteNav'
-import { DAY, encodeScan, fromMiss, pendingNote, latestScan, nearestScan, noScansYet, scanInstant, useScan } from './scan'
+import { DAY, encodeScan, fmtTimestamp, fromMiss, pendingNote, latestScan, nearestScan, noScansYet, scanInstant, useScan } from './scan'
 import { scanCmp } from './scanSlug'
 import { hrefWithScan, NoScanMatch } from './NoScanMatch'
 import { selOf } from './scanSlug'
@@ -64,7 +68,7 @@ import { perf } from './perf'
 import { useDocTitle } from './title'
 import { TypedPrefixModal } from './TypedPrefix'
 import type { AgeRow, ColorMode, Meta, Pricing, Rules, TreeNode } from './types'
-import { CLASS_COLORS, CLASS_NAMES, CLASS_PRICE_US, MODE_LABELS, classMix, fmtN, fmtUsd, ratePerByte } from './types'
+import { CLASS_COLORS, CLASS_NAMES, CLASS_PRICE_US, MODE_KEYWORDS, MODE_LABELS, classMix, fmtN, fmtUsd, ratePerByte } from './types'
 import { SiteKbd } from './SiteKbd'
 import { useUnits } from './units'
 // The leaf viewer (file-tree's renderers, hyparquet…): its own chunk, fetched
@@ -186,10 +190,10 @@ function AppContent() {
   const rules: Rules | null = rulesQ.data ?? null
   // Ledger actions record which scan the actor was viewing.
   useEffect(() => setCurrentScan(asof ?? undefined), [asof])
-  const scanQuery = <T,>(name: string) => ({
-    queryKey: [name, store.key, asof],
-    queryFn: () => sfetch(`${store.base}/${asof}/${name}.json`).then(r => r.json() as Promise<T>),
-    enabled: !!asof,
+  const scanQuery = <T,>(name: string, scan = asof) => ({
+    queryKey: [name, store.key, scan],
+    queryFn: () => sfetch(`${store.base}/${scan}/${name}.json`).then(r => r.json() as Promise<T>),
+    enabled: !!scan,
     staleTime: Infinity,
   })
   // `?f=` (name filter) and `?o=` (owner axis): the page's scope, sent to the
@@ -222,6 +226,8 @@ function AppContent() {
   // Brushing: the view's child (by name) hovered in either the treemap or its
   // children table, lit in both (a ring on the cell, the row's hover tint).
   const [brush, setBrush] = useState<string | null>(null)
+  // The date brush shared by the map's gradient key and the age chart's bars.
+  const [band, setBand] = useState<DayBand | null>(null)
   useEffect(() => {
     if (fqDraft == null) return
     const t = setTimeout(() => { setFq(fqDraft || undefined); setFqDraft(null) }, 250)
@@ -334,6 +340,12 @@ function AppContent() {
   const fromScan = from && asof ? latestScan(from, earlier, times) : null
   const startMiss = useMemo(() => fromMiss(from, asof, scans, times), [from, asof, scans, times])
   const diffPrev = startMiss ? null : fromScan ?? spanScan ?? prevScan
+  // A store whose scans carry physical disk readings (`meta.disk_space`) compares them across the diff;
+  // any other store never fetches the earlier scan's meta (`diskDiffScan`).
+  const beforeMetaQ = useQuery({
+    ...scanQuery<Meta>('meta', diffPrev),
+    enabled: diskDiffScan(metaQ.data?.disk_space, diffPrev) != null,
+  })
   // Hour-rounded span back from `to` — the previous scan clears it, anything
   // else round-trips as its own span (nearest-scan resolution recovers it,
   // and the link keeps following `latest`).
@@ -341,7 +353,6 @@ function AppContent() {
     scans[scans.indexOf(to) + 1] === from
       ? undefined
       : Math.max(3600_000, Math.round((scanInstant(to, times) - scanInstant(from, times)) / 3600_000) * 3600_000)
-  const pickBefore = (scan: string) => { if (asof) setSpan(spanTo(asof, scan)) }
   // A brush on the size chart hands back the scan ids its ends sit on (else a
   // prefix, which resolves to the latest scan matching it — never a date-only
   // id read as its whole day), and the pair becomes the page's `?d=` (after + span).
@@ -350,7 +361,7 @@ function AppContent() {
     const toScan = brushScan(to)
     const fromScan = brushScan(from)
     if (!toScan || !fromScan || scanCmp(toScan, fromScan, times) <= 0) return
-    setRange(toScan, spanTo(toScan, fromScan))
+    setRange(toScan, spanTo(toScan, fromScan), fromScan)
   }
   const diffWindow: [string, string] | undefined = diffPrev && asof ? [diffPrev, asof] : undefined
   // Two orthogonal, low-key toggles for the diff window (see scan.ts grammar):
@@ -381,7 +392,7 @@ function AppContent() {
   // and every level of the drilled path gets its own subtree query, grafted
   // in depth order — interactive drills hit each level's cache as they go,
   // and a cold deep link fans the whole chain out in parallel.
-  const graftPath = pathname.slice((store.path === '/' ? '' : store.path).length).split('/').filter(Boolean).join('/')
+  const graftPath = fromUrlPath(pathname.slice((store.path === '/' ? '' : store.path).length)).join('/')
   const canW = canvasWidth(typeof window === 'undefined' ? 1280 : window.innerWidth)
   // Perf-mark keys (`perf.ts`): what tells one load of a widget from another
   // on this page — path, scan(s), canvas width, scope.
@@ -395,6 +406,8 @@ function AppContent() {
       queryKey: ['subtree', store.key, asof, p, canW, scopeKey],
       enabled: !!asof && scopeReady,
       staleTime: Infinity,
+      // A budget-cut answer (`budgetCut`) is upgraded at the edge in the background: ask again until whole.
+      refetchInterval: (q: { state: { data?: { budgetCut?: boolean }; dataUpdateCount: number } }) => budgetCutRefetch(q.state.data, q.state.dataUpdateCount),
       // Retry transient failures, but not the deterministic ones (409: no
       // user index for this scan; 413: view too wide) — those surface as-is.
       retry: (n: number, e: Error) => !/^4\d\d/.test(e.message) && n < 3,
@@ -408,7 +421,7 @@ function AppContent() {
           { credentials: 'include', signal },
         ))
         if (!r.ok) { pf.fail(); throw apiError(r.status, await r.text()) }
-        const j = await r.json() as MatchFields & { tree: TreeNode; tier?: string; matches?: string[]; threshold?: number; partialReason?: string; approximateReason?: string; hexRuns?: { min: number; tail: number } }
+        const j = await r.json() as MatchFields & { tree: TreeNode; tier?: string; matches?: string[]; threshold?: number; partialReason?: string; approximateReason?: string; hexRuns?: { min: number; tail: number }; budgetCut?: true }
         pf.decoded()
         return j
       },
@@ -639,7 +652,8 @@ function AppContent() {
   // `/my-bucket/some/dir`, not `/?p=my-bucket/some/dir`. View
   // options stay query params (`?c`, `?mt`, …); the section stays in the `#hash`.
   const storeBase = store.path === '/' ? '' : store.path
-  const drillPath = pathname.slice(storeBase.length).replace(/^\/+/, '')
+  // Decoded once: a dir name with spaces or URL delimiters travels encoded (`toUrlPath`).
+  const drillPath = fromUrlPath(pathname.slice(storeBase.length)).join('/')
   // Per-path created-time strata for `AgeChart`, keyed on the drilled prefix so
   // it follows the drill exactly instead of showing the whole fleet at every
   // depth (specs/done/age-index.md). Root (`drillPath === ''`, depth 0) is the fleet
@@ -697,7 +711,7 @@ function AppContent() {
   const drillTo = (segs: string[]) => {
     const q = new URLSearchParams(search)
     q.delete('open')
-    navigate({ pathname: segs.length ? `${storeBase}/${segs.join('/')}` : store.path, search: q.size ? `?${q}` : '' })
+    navigate({ pathname: segs.length ? `${storeBase}/${toUrlPath(segs)}` : store.path, search: q.size ? `?${q}` : '' })
   }
   // `?open=<name>`: an object under the drilled directory, shown in the leaf
   // viewer below the map (objects.ts `openHref`). Opening pushes history, so
@@ -750,7 +764,7 @@ function AppContent() {
   // Diff sides: the drilled subtree at each endpoint, scoped like the map.
   // The diff is read server-side (`/api/diff`): both scans' index tiers at
   // one shared byte floor, point lookups for names that crossed it, the
-  // page scope applied to both sides (specs/view-serving.md §2).
+  // page scope applied to both sides (specs/done/view-serving.md §2).
   // First paint: the bucket-level diff (`depth=1` — the two root reads plus
   // one level of lookups, ~2 s cold) stands in for the full walk while it
   // aligns, so the map shows the shape of the change before its detail.
@@ -788,6 +802,7 @@ function AppContent() {
     // section holds its height and shows something before the detail.
     placeholderData: (prev: DiffData | undefined) => diffL1 ?? prev,
     staleTime: Infinity,
+    refetchInterval: q => budgetCutRefetch(q.state.data, q.state.dataUpdateCount),
     retry: (n: number, e: Error) => !/^4\d\d/.test(e.message) && n < 3,
     retryDelay: (n: number) => 400 * 2 ** n,
     queryFn: async ({ signal }: { signal?: AbortSignal }) => {
@@ -916,15 +931,19 @@ function AppContent() {
 
   useActions({
     ...Object.fromEntries(
-      MODES.map((m, i) => [
+      // Only the axes this scan can color by (`bar.color`, the picker's own
+      // list): a "Color by read" on a store with no access logs did nothing.
+      // Bindings stay keyed to `MODES` order so a hotkey means one axis everywhere.
+      MODES.flatMap((m, i) => bar.color.length > 1 && bar.color.includes(m) ? [[
         `mode:${m}`,
         {
           label: `Color by ${MODE_LABELS[m]}`,
           group: 'Color mode',
+          keywords: MODE_KEYWORDS[m],
           defaultBindings: [String(i + 1)],
           handler: () => setMode(m),
         },
-      ]),
+      ]] : []),
     ),
     'highlight:clear': {
       label: 'Clear the owner axis (everyone)',
@@ -1046,14 +1065,15 @@ function AppContent() {
 
   const segs = drillPath.split('/').filter(Boolean)
   const pathScheme = store.bucketSchemes?.[segs[0]] ?? store.scheme
-  const recordedAt = meta?.disk_space?.captured_at ?? meta?.published
+  const capturedAt = meta?.captured_at ?? meta?.disk_space?.captured_at
+  const recordedAt = capturedAt ?? meta?.published
   const scanTip = meta && (
     <div className="scan-tip">
-      {meta.disk_space && (
-        <div>captured {new Date(meta.disk_space.captured_at).toISOString().replace('T', ' ').slice(0, 16)} UTC</div>
+      {capturedAt && (
+        <div>captured {fmtTimestamp(capturedAt)}</div>
       )}
       {meta.published && (
-        <div>published {new Date(meta.published).toISOString().replace('T', ' ').slice(0, 16)} UTC</div>
+        <div>published {fmtTimestamp(meta.published)}</div>
       )}
       <div><b>{fmtBytes(meta.total_bytes)}</b> · <b>{fmtN(meta.total_objects)}</b> objects across {store.rootLabel}</div>
       {estCost && (
@@ -1153,7 +1173,7 @@ function AppContent() {
           <label className="tb-ctl">
             <span className="lbl">color</span>
             <Explain text={
-              effMode === 'date' ? <>Object <b>{time.description}</b>, from the bucket listings (each cell = the byte-weighted mean of its objects). {store.objectsNote}</>
+              effMode === 'date' ? <>Object <b>{time.description}</b>, from the bucket listings (a folder’s cell = its newest object). {store.objectsNote}</>
               : effMode === 'read' ? <><b>Last observed read</b> — the most recent logged GET/HEAD/LIST anywhere under each cell (logging began {readRange ? epochDaysToDate(readRange.min) : '—'}). Brick-red = <b>no observed reads</b> since then. Logs may omit events; absence is not proof of no access.</>
               : effMode === 'user' ? <>Dominant <b>owner</b> of each cell; the legend lists the top users of the current view.</>
               : <>Top-level directory each cell belongs to.</>
@@ -1289,6 +1309,8 @@ function AppContent() {
             onOpen={p => openObject(p.slice(1).map(n => n.n))}
             brush={brush}
             onBrush={setBrush}
+            band={band}
+            onBand={setBand}
           />{mapStale ? <Busy label={mapRetrying ?? 'loading view…'} /> : mapBusy ? <Busy corner label="filling in…" /> : null}</div>
           {/* A drilled directory with nothing drawable under it: the scope came
               up empty, or (a v1 scan) it holds only objects or directories
@@ -1340,6 +1362,19 @@ function AppContent() {
               rowMatches={tblRowMatches}
               brush={brush}
               onBrush={setBrush}
+            /></div>
+          )}
+          {/* …and its flat twin: the largest files anywhere below it. The whole directory's, so not
+              shown under a scope (lens, owner pool, class, name filter) it couldn't honor. */}
+          {mapPath && objects && (
+            <div id="ltbl"><LargestFiles
+              segs={tblSegs}
+              scheme={store.scheme}
+              scan={asof}
+              total={mapPath[mapPath.length - 1].b}
+              enabled={!scopeQs}
+              onOpen={openPath}
+              onOpenObject={openObject}
             /></div>
           )}
         </>
@@ -1418,7 +1453,7 @@ function AppContent() {
             {/* Both endpoints: the window's start, and the page's scan again
                 (the bar's picker — one scan, stated where the diff reads). */}
             <Explain text={<>The diff window's start — the size chart's shaded band reads from here to the scan. Drag on the size chart to set both ends.</>}>
-              <ScanCombobox value={diffPrev} scans={earlier} onChange={startPinned ? setFrom : pickBefore} label="Diff from scan" fmt={fmtS} />
+              <ScanCombobox value={diffPrev} scans={earlier} onChange={setFrom} label="Diff from scan" fmt={fmtS} />
             </Explain>
             <Explain text={startPinned
               ? <>Start is <b>pinned</b> to this scan — the window's near end stays put as new scans arrive. Click to track a duration back from the end instead.</>
@@ -1471,6 +1506,7 @@ function AppContent() {
               <span className="loading"> · aligning {fmtS(diffPrev)} → {fmtS(asof)}…</span>
             )}
           </span>} />
+          <DiskSpaceDiff before={beforeMetaQ.data?.disk_space} after={meta?.disk_space} />
           {/* The slot keeps the treemap's height through a reload: the last
               diff dims under the marker, or (first load) a skeleton stands in.
               The height held is the one the last settled map actually drew
@@ -1529,7 +1565,7 @@ function AppContent() {
         </h2>
         {ageQ.isPending && !!asof && <Skeleton height={220} label="loading ages…" />}
         {age.length > 0 && (
-          <AgeChart rows={age} baseRows={diffPrev ? ageBase : undefined} diffLabels={diffPrev && asof ? { from: fmtS(diffPrev), to: fmtS(asof) } : undefined} catOrder={catOrder} mode={ageMode} onMode={m => setAgeModeP(m)} modes={ageModes} userIdx={userIdx} readRange={ageReadRange} scheme={store.scheme} />
+          <AgeChart rows={age} baseRows={diffPrev ? ageBase : undefined} diffLabels={diffPrev && asof ? { from: fmtS(diffPrev), to: fmtS(asof) } : undefined} catOrder={catOrder} mode={ageMode} onMode={m => setAgeModeP(m)} modes={ageModes} userIdx={userIdx} readRange={ageReadRange} scheme={store.scheme} band={band} onBand={setBand} />
         )}
       </section>
       )}
@@ -1567,7 +1603,7 @@ function AppContent() {
                   .map(([c, b]) => (
                     <tr key={c}>
                       <td>
-                        <Tooltip placement="right" content={<>${CLASS_PRICE_US[c] ?? 0.02}/GiB·mo · {((100 * b) / total).toFixed(1)}% of these bytes</>}>
+                        <Tooltip cell content={<>${CLASS_PRICE_US[c] ?? 0.02}/GiB·mo · {((100 * b) / total).toFixed(1)}% of these bytes</>}>
                           <span className="dotted">{CLASS_NAMES[c] ?? c}</span>
                         </Tooltip>
                       </td>

@@ -1,5 +1,5 @@
 """`dt-cloud scan-run`: the record's SQL path (against the real migration, FKs on), output measuring, and the
-backfill's reconstruction from fake Batch jobs, log lines and a fake store (specs/scan-runs-ui.md)."""
+backfill's reconstruction from fake Batch jobs, log lines and a fake store (specs/done/scan-runs-ui.md)."""
 from __future__ import annotations
 
 import datetime as dt
@@ -7,10 +7,13 @@ import json
 from pathlib import Path
 
 import pytest
+from click.testing import CliRunner
+
+from dt_cloud import scan_runs
 
 from dt_cloud.scan_runs import (
-    ALL, Output, Phase, PrintSink, Record, Run, SqliteSink, cost, fill, load_profile, measure, measure_after, parse_profile, record,
-    record_sql,
+    ALL, Output, Phase, PrintSink, Record, Run, SqliteSink, cli, cost, env_run_id, fill, load_profile, measure, measure_after,
+    parse_profile, record, record_sql, recovery_record, write_all,
 )
 from dt_cloud.scan_runs_backfill import classify, failure_of, log_filter, owner_of_gen, phases_of, reconstruct, task_lines
 
@@ -101,7 +104,10 @@ PROFILE = parse_profile({
     "overlapped": ["ingest"],
     "concurrent": ["names", "iv"],
     "nop_marker": "^NOP ",
-    "error_marker": "^\\+ fail_alert (?P<rc>\\d+) (?P<line>\\d+) (?P<cmd>.*)",
+    "error_marker": [  # the old trap's shape, then the wrapper's `scan_err` function
+        "^\\+\\+ fail_alert (?P<rc>\\d+) (?P<line>\\d+) (?P<cmd>.*)",
+        "^\\+\\+ scan_err (?P<rc>\\d+) (?P<line>\\d+) (?P<cmd>.*)",
+    ],
     "outputs": [
         {"key": "listing", "uri": "gs://data/listing/{scan}/", "exclude": ["index/"], "split": "dir",
          "rows": {"json": "_SUCCESS.json", "field": "objects"}, "after": "listing", "kinds": ["scan"]},
@@ -144,6 +150,88 @@ def rows(s: SqliteSink, sql: str) -> list[tuple]:
 
 
 # ── record: the job's incremental writes ────────────────────────────────────
+
+
+@pytest.mark.parametrize("note,expected", [
+    (None, "done"),
+    ("failed (exit 124)", "failed"),
+    ("wall, failed (exit 1", "failed"),
+    ("wall, failed", "failed"),
+    ("0 failed dirs", "done"),
+])
+def test_phase_failure_in_live_and_backfilled_records(note, expected):
+    s = sink()
+    record(s, PROFILE, "2026-10-08", "uid-phase", 100, start=True)
+    rec = record(s, PROFILE, "2026-10-08", "uid-phase", 200, phase="names", note=note)
+    assert [(p.status, p.note) for p in rec.phases] == [(expected, note)]
+    marker = "PHASE names: 100s" + (f" ({note})" if note else "")
+    assert [(p.status, p.note) for p in phases_of(PROFILE, [(200, marker)], 100)] == [(expected, note.rstrip(")") if note else None)]
+
+
+def recovery_fixture():
+    s = sink()
+    record(s, PROFILE, "2026-10-08", "original", 100, start=True)
+    record(s, PROFILE, "2026-10-08", "original", 200, phase="names", note="failed (exit 124)")
+    record(s, PROFILE, "2026-10-08", "original", 210, exit_code=0)
+    job = {
+        "uid": "recovery", "name": "projects/proj/locations/r1/jobs/retry-names",
+        "status": {"state": "SUCCEEDED", "statusEvents": [
+            {"description": "Job state is set to RUNNING", "eventTime": "1970-01-01T00:05:00Z"},
+            {"description": "Job state is set to SUCCEEDED", "eventTime": "1970-01-01T00:06:00Z"},
+        ]},
+    }
+    return s, job
+
+
+def test_recovery_links_verified_batch_facts_without_rewriting_original():
+    s, job = recovery_fixture()
+    original = s.query("SELECT * FROM scan_runs WHERE run_id = 'original'")
+    original_phase = s.query("SELECT * FROM scan_run_phases WHERE run_id = 'original'")
+    for now in (400, 500):
+        rec = recovery_record(s, PROFILE, "original", "names", job, now, "Resumed anchors; reused completed append and drill")
+        write_all(s, [rec], now)
+    assert rows(s, "SELECT run_id, parent, scan, kind, status, started_ts, finished_ts, job_name, region FROM scan_runs WHERE run_id = 'recovery'") == [
+        ("recovery", "original", "2026-10-08", "phase-recovery", "succeeded", 300, 360, "retry-names", "r1"),
+    ]
+    assert rows(s, "SELECT run_id, phase, started_ts, finished_ts, status, note FROM scan_run_phases WHERE run_id = 'recovery'") == [
+        ("recovery", "names", 300, 360, "done", "Resumed anchors; reused completed append and drill"),
+    ]
+    assert s.query("SELECT * FROM scan_runs WHERE run_id = 'original'") == original
+    assert s.query("SELECT * FROM scan_run_phases WHERE run_id = 'original'") == original_phase
+
+
+@pytest.mark.parametrize("state,expected", [("FAILED", "failed"), ("CANCELLED", "failed")])
+def test_unsuccessful_recovery_is_not_marked_successful(state, expected):
+    s, job = recovery_fixture()
+    job["status"]["state"] = state
+    job["status"]["statusEvents"][-1]["description"] = f"Job state is set to {state}"
+    rec = recovery_record(s, PROFILE, "original", "names", job, 400)
+    assert (rec.run.status, [p.status for p in rec.phases]) == (expected, ["failed"])
+
+
+@pytest.mark.parametrize("case,error", [
+    ("missing-parent", "scan-run recovery: no parent 'missing' in store 'primary'"),
+    ("missing-phase", "scan-run recovery: parent has no failed phase 'other'"),
+    ("running", "scan-run recovery: Batch attempt is not terminal ('RUNNING')"),
+    ("no-times", "scan-run recovery: missing or invalid Batch attempt times"),
+    ("conflict", "scan-run recovery: conflicting existing attempt 'original'"),
+])
+def test_recovery_refuses_invented_or_conflicting_attempts(case, error):
+    s, job = recovery_fixture()
+    parent, phase_name = "original", "names"
+    if case == "missing-parent":
+        parent = "missing"
+    elif case == "missing-phase":
+        phase_name = "other"
+    elif case == "running":
+        job["status"]["state"] = "RUNNING"
+    elif case == "no-times":
+        job["status"]["statusEvents"] = []
+    elif case == "conflict":
+        job["uid"] = "original"
+    with pytest.raises(ValueError) as e:
+        recovery_record(s, PROFILE, parent, phase_name, job, 400)
+    assert str(e.value) == error
 
 
 def test_record_start_phases_exit():
@@ -331,7 +419,7 @@ LOGS = [
     log("uid-a", "2026-10-08T08:00:00Z", "PHASE total: 3540s (wall)"),
     log("uid-a", "2026-10-08T08:00:01Z", "DONE 2026-10-08"),
     log("uid-r", "2026-10-08T12:20:00Z", "PHASE index: 1200s (wall)"),
-    log("uid-f", "2026-10-07T07:19:00Z", "+ fail_alert 1 222 'dt-cloud job submit-listing -d 2026-10-07'"),
+    log("uid-f", "2026-10-07T07:19:00Z", "++ fail_alert 1 222 'dt-cloud job submit-listing -d 2026-10-07'"),
     log("uid-n", "2026-10-06T07:01:30Z", "NOP 2026-10-06 (already published)"),
 ]
 
@@ -361,6 +449,52 @@ def test_record_concurrent_phases():
     ]
 
 
+def test_record_explicit_phase_starts_preserve_overlap_and_completion():
+    s = sink()
+    record(s, PROFILE, "2026-10-08", "live", 100, start=True)
+    record(s, PROFILE, "2026-10-08", "live", 200, phase="publish")
+    record(s, PROFILE, "2026-10-08", "live", 205, phase="names", phase_start=True)
+    record(s, PROFILE, "2026-10-08", "live", 210, phase="iv", phase_start=True)
+    assert rows(s, "SELECT phase, seq, started_ts, finished_ts, status FROM scan_run_phases ORDER BY seq") == [
+        ("publish", 0, 100, 200, "done"),
+        ("names", 1, 205, None, "running"),
+        ("iv", 2, 210, None, "running"),
+    ]
+    record(s, PROFILE, "2026-10-08", "live", 300, phase="iv")
+    record(s, PROFILE, "2026-10-08", "live", 400, phase="names")
+    record(s, PROFILE, "2026-10-08", "live", 410, phase="names", phase_start=True)
+    assert rows(s, "SELECT phase, seq, started_ts, finished_ts, status FROM scan_run_phases ORDER BY seq") == [
+        ("publish", 0, 100, 200, "done"),
+        ("names", 1, 205, 400, "done"),
+        ("iv", 2, 210, 300, "done"),
+    ]
+
+
+def test_record_failed_exit_closes_running_phases():
+    s = sink()
+    record(s, PROFILE, "2026-10-08", "live", 100, start=True)
+    record(s, PROFILE, "2026-10-08", "live", 200, phase="index", phase_start=True)
+    record(s, PROFILE, "2026-10-08", "live", 250, exit_code=1)
+    assert rows(s, "SELECT phase, started_ts, finished_ts, status, note FROM scan_run_phases") == [
+        ("index", 200, 250, "failed", "failed (exit 1)"),
+    ]
+
+
+def test_phase_start_measures_nothing_and_does_not_reopen_a_finished_run():
+    s = sink()
+    record(s, PROFILE, "2026-10-08", "live", 100, start=True)
+    begun = record(s, PROFILE, "2026-10-08", "live", 200, store=STORE, phase="publish", phase_start=True)
+    assert (begun.phases, begun.outputs) == ((Phase("publish", 0, 200, None, "running"),), ())
+    ended = record(s, PROFILE, "2026-10-08", "live", 300, store=STORE, phase="publish")
+    assert ended.outputs == (Output("snapshot", "gs://data/snapshots/2026-10-08/", 50, 2),)
+    record(s, PROFILE, "2026-10-08", "live", 310, exit_code=0)
+    repeated = record(s, PROFILE, "2026-10-08", "live", 320, phase="publish", phase_start=True)
+    assert (repeated.run.status, repeated.phases) == ("succeeded", ())
+    assert rows(s, "SELECT phase, started_ts, finished_ts, status FROM scan_run_phases") == [
+        ("publish", 200, 300, "done"),
+    ]
+
+
 def test_phases_from_markers():
     lines = task_lines(LOGS)["uid-a"]
     assert phases_of(PROFILE, lines, ts("2026-10-08T07:01:00")) == [
@@ -385,6 +519,23 @@ def test_phases_from_markers_concurrent():
         Phase("iv", 2, ts("2026-10-08T07:50:00"), ts("2026-10-08T08:05:00"), "done", "wall"),
         Phase("names", 3, ts("2026-10-08T07:50:00"), ts("2026-10-08T08:40:00"), "done", "wall"),
         Phase("sync", 4, ts("2026-10-08T08:40:00"), ts("2026-10-08T08:50:00"), "done", "wall"),
+    ]
+
+
+def test_phases_from_explicit_start_markers():
+    assert phases_of(PROFILE, [
+        (100, "PHASE-START listing: 0s (wall)"),
+        (105, "PHASE-START ingest: 5s (wall)"),
+        (200, "PHASE listing: 100s (wall)"),
+        (210, "PHASE ingest: 110s (wall)"),
+        (215, "PHASE-START names: 115s (wall)"),
+        (220, "PHASE-START iv: 120s (wall)"),
+        (250, "PHASE iv: 150s (wall)"),
+    ], 100) == [
+        Phase("listing", 0, 100, 200, "done", "wall"),
+        Phase("ingest", 1, 105, 210, "done", "wall"),
+        Phase("names", 2, 215, None, "running"),
+        Phase("iv", 3, 220, 250, "done", "wall"),
     ]
 
 
@@ -425,8 +576,17 @@ def test_log_filter():
     since = dt.datetime(2026, 9, 9, tzinfo=dt.timezone.utc)
     assert log_filter(PROFILE, since) == (
         'log_id("batch_task_logs") AND timestamp >= "2026-09-09T00:00:00Z" AND ('
-        'textPayload=~"^PHASE " OR textPayload=~"^NOP " OR textPayload=~"^\\\\+ fail_alert " OR textPayload=~"^DONE ")'
+        'textPayload=~"^PHASE " OR textPayload=~"^PHASE-START " OR textPayload=~"^NOP " OR textPayload=~"^\\\\+\\\\+ fail_alert " OR textPayload=~"^\\\\+\\\\+ scan_err " OR '
+        'textPayload=~"^DONE ")'
     )
+
+
+def test_failure_from_either_error_marker():
+    assert [failure_of(PROFILE, {}, [(0, "+ cp a b"), (1, ln)]) for ln in (
+        "++ fail_alert 1 222 'dt-cloud job submit-listing -d 2026-10-07'",
+        "++ scan_err 3 40 'cp a b'",
+        "++ SR_ERR='exit 1: cp a b (run.sh:40)'",
+    )] == ["exit 1: 'dt-cloud job submit-listing -d 2026-10-07' (line 222)", "exit 3: 'cp a b' (line 40)", None]
 
 
 def test_batch_failure_reasons():
@@ -446,3 +606,106 @@ def test_exit_trap_after_a_nop_keeps_it():
     record(s, PROFILE, "2026-10-08", "uid-6", 20, nop=True)
     record(s, PROFILE, "2026-10-08", "uid-6", 21, exit_code=0)
     assert rows(s, "SELECT status, started_ts, finished_ts FROM scan_runs") == [("nop", 10, 21)]
+
+
+# ── the generic seam: stated job facts, a step's own time, the store, unbilled phases ───────────────────
+
+
+QUEUED = parse_profile({
+    "name": "queued",
+    "store": "primary",
+    "run_id_env": ["JOB_ID", "BATCH_JOB_UID"],
+    "unbilled": ["capture", "queue"],
+    "prices": {"box-1": 0.36},
+    "spot_factor": 0.5,
+})
+
+
+def test_profile_run_id_env_and_unbilled():
+    assert (PROFILE.run_id_env, PROFILE.unbilled) == (("BATCH_JOB_UID",), ())
+    assert (QUEUED.run_id_env, QUEUED.unbilled) == (("JOB_ID", "BATCH_JOB_UID"), ("capture", "queue"))
+    assert [env_run_id(QUEUED, e) for e in ({"JOB_ID": "j1", "BATCH_JOB_UID": "u1"}, {"JOB_ID": " ", "BATCH_JOB_UID": "u1"}, {})] == [
+        "j1", "u1", None,
+    ]
+
+
+def test_record_stated_facts_and_cost_over_billed_time():
+    """A run that starts before its job (the capture it ingests, then the queue): facts stated at the start, each step
+    at its own time, the cost at the finish over the billed time only (here 1000 s of 1600 s)."""
+    s = sink()
+    facts = dict(job_name="ingest-1", region="us-east-1", machine="box-1", spot=True, tasks=None, image="img:abc")
+    record(s, QUEUED, "2026-10-14T0600", "job-1", 1000, start=True, kind="ingest", facts=facts)
+    record(s, QUEUED, "2026-10-14T0600", "job-1", 1400, kind="ingest", phase="capture")
+    record(s, QUEUED, "2026-10-14T0600", "job-1", 1600, kind="ingest", phase="queue")
+    record(s, QUEUED, "2026-10-14T0600", "job-1", 2100, kind="ingest", phase="fetch")
+    done = record(s, QUEUED, "2026-10-14T0600", "job-1", 2600, kind="ingest", phase="index-sync")
+    assert done.run.cost_usd is None
+    fin = record(s, QUEUED, "2026-10-14T0600", "job-1", 2600, kind="ingest", exit_code=0)
+    assert fin.run.cost_usd == 0.05  # 0.36 $/h × 0.5 (spot) × 1000 s
+    assert rows(s, "SELECT run_id, kind, status, store, started_ts, finished_ts, job_name, region, machine, spot, tasks, image, cost_usd FROM scan_runs") == [
+        ("job-1", "ingest", "succeeded", "primary", 1000, 2600, "ingest-1", "us-east-1", "box-1", 1, None, "img:abc", 0.05),
+    ]
+    assert rows(s, "SELECT phase, seq, started_ts, finished_ts, status FROM scan_run_phases ORDER BY seq") == [
+        ("capture", 0, 1000, 1400, "done"),
+        ("queue", 1, 1400, 1600, "done"),
+        ("fetch", 2, 1600, 2100, "done"),
+        ("index-sync", 3, 2100, 2600, "done"),
+    ]
+
+
+def test_record_failed_finish_costs_billed_time_too():
+    s = sink()
+    record(s, QUEUED, "2026-10-14T0600", "job-2", 0, start=True, facts={"machine": "box-1", "spot": False})
+    record(s, QUEUED, "2026-10-14T0600", "job-2", 3000, phase="queue")
+    fin = record(s, QUEUED, "2026-10-14T0600", "job-2", 6600, exit_code=1, failed_phase="fetch")
+    assert (fin.run.status, fin.run.failed_phase, fin.run.error, fin.run.cost_usd) == ("failed", "fetch", "exit 1", 0.36)
+
+
+def test_record_without_a_priced_machine_has_no_cost():
+    s = sink()
+    record(s, QUEUED, "2026-10-14T0600", "job-3", 0, start=True, facts={"machine": "unpriced"})
+    assert record(s, QUEUED, "2026-10-14T0600", "job-3", 3600, exit_code=0).run.cost_usd is None
+    record(s, QUEUED, "2026-10-14T0600", "job-4", 0, start=True)
+    assert record(s, QUEUED, "2026-10-14T0600", "job-4", 3600, exit_code=0).run.cost_usd is None
+
+
+def test_record_refuses_unknown_facts():
+    with pytest.raises(ValueError) as e:
+        record(sink(), QUEUED, "2026-10-14T0600", "job-5", 0, start=True, facts={"zone": "z"})
+    assert str(e.value) == "scan-run: unknown job facts ['zone']"
+
+
+def test_record_cli_store_at_facts_and_run_id_env(tmp_path, monkeypatch):
+    profile = tmp_path / "scan-runs.json"
+    profile.write_text(json.dumps({"store": "primary", "run_id_env": ["JOB_ID"], "unbilled": ["queue"], "prices": {"box-1": 0.36}}))
+    db = tmp_path / "runs.sqlite"
+    SqliteSink(db, ddl=DDL)
+    monkeypatch.setenv("JOB_ID", "job-9")
+    monkeypatch.delenv("BATCH_JOB_UID", raising=False)
+    base = ["record", "-c", str(profile), "-s", str(db), "-M", "-K", "nas", "-k", "ingest"]
+    calls = [
+        ["-S", "-t", "100", "-m", "box-1", "--no-spot", "-T", "1", "-j", "ingest-9", "-R", "us-east-1", "-i", "img:1"],
+        ["-P", "queue", "-t", "200"],
+        ["-P", "fetch", "-t", "3800"],
+        ["-x", "0", "-t", "3800"],
+    ]
+    for c in calls:
+        r = CliRunner().invoke(cli, [*base, *c, "2026-10-14T0600"])
+        assert (r.exit_code, r.exception, r.stdout) == (0, None, "")
+    s = SqliteSink(db)
+    assert rows(s, "SELECT run_id, kind, status, store, started_ts, finished_ts, job_name, region, machine, spot, tasks, image, cost_usd, source FROM scan_runs") == [
+        ("job-9", "ingest", "succeeded", "nas", 100, 3800, "ingest-9", "us-east-1", "box-1", 0, 1, "img:1", 0.36, "job"),
+    ]
+    assert rows(s, "SELECT phase, started_ts, finished_ts FROM scan_run_phases ORDER BY seq") == [("queue", 100, 200), ("fetch", 200, 3800)]
+
+
+def test_record_cli_without_a_run_id_reports_and_exits_zero(tmp_path, monkeypatch):
+    profile = tmp_path / "scan-runs.json"
+    profile.write_text(json.dumps({"run_id_env": ["JOB_ID"]}))
+    monkeypatch.delenv("JOB_ID", raising=False)
+    said: list[str] = []
+    monkeypatch.setattr(scan_runs, "err", said.append)  # `err` writes the stderr bound at import
+    r = CliRunner().invoke(cli, ["record", "-c", str(profile), "-n", "-S", "2026-10-14T0600"])
+    assert (r.exit_code, r.stdout, said) == (
+        0, "", ["scan-run record failed (the scan continues): SystemExit: scan-run: no run id: pass -r or set $JOB_ID"],
+    )

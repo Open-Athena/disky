@@ -79,6 +79,15 @@ dt-cloud interval-store append [-c] [-n] SCAN_ID  # Append one scan to the inter
                           # base generation (spec `interval-store.md` §2.7; profile `-P`/$INTERVAL_STORE_PROFILE):
                           # prepare → ranges (Batch) → publish (cut, binary-counter merges, manifest) → R2 → prune,
                           # strictly in scan-id order (exit 3: not published / not next; `-c` catches up)
+dt-cloud static-names build -g GEN -L LAYOUT -s SCANS -o STORE -x off|MIN,TAIL  # The static name index's base generation
+                          # on ONE machine (`static_local.py`): the staged (Batch) path's stages in-process — ranges,
+                          # coalesced versions, suffix shards, catalog, drill (`build_drill`) + `roots-measure/` — over a
+                          # work dir (`-w`), then copied to `<STORE>/static-names/GEN/` (a dir or `r2://`/`s3://` URL;
+                          # never over a generation). SCANS + `-L` templates (`{id}`, `{gen}`) find the `path` sorts
+dt-cloud static-names add -g GEN -L LAYOUT -s SCANS -o STORE  # Append every scan after GEN's newest as a run (append, shards,
+                          # catalog delta, drill run, `manifests/<id>.json`), then the binary counter's carries; a URL
+                          # store's generation is mirrored into `-w`, new files go up data → `meta.json`s → manifests.
+                          # Small deployments' path (the r2 demo's daily ingest); gcs/cw run the stages on Batch
 disk-tree tiers plan SIDECAR P THR  # The reader's span selection run offline over a tier's `.groups.json`
                           # (phase 0's instrument): for `path` it mirrors `readRects` exactly (depth rect
                           # `dP+1..`, path range `[P/, P0)`, `b_max ≥ thr·atten^(d−dP−1)` per group); for
@@ -113,6 +122,8 @@ One gate (`_lib/auth.ts`, `@open-athena/auth` over D1): `identify` → `Identity
 ## Development
 
 During ongoing implementation, treat a concrete bug report about the code we own as an implied request to fix it: reproduce, implement, verify, and coordinate the deployment handoff without requiring a second prompt. Honor explicitly read-only requests. Code-fix authority does not imply unrelated infrastructure applies, permission changes, or another session's live cutover. Report separately what is fixed locally and what is actually deployed.
+
+When another agent sends a useful, in-scope handoff, proactively review, implement or adopt, test, and coordinate it. A review queue tracks work; adding an item is not completion. Prefer coherent shared-code picks over merging deployment branches, preserve unrelated changes, and leave deployment-specific applies and live cutovers with their owners.
 
 ```bash
 # Python setup — one uv workspace: the engine (root) + the cloud overlay

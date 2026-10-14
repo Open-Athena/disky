@@ -1,4 +1,4 @@
-"""`dt-cloud static-names runs add SCAN_ID`: append one scan to the static name index as a run (specs/static-append.md),
+"""`dt-cloud static-names runs add SCAN_ID`: append one scan to the static name index as a run (specs/done/static-append.md),
 in Python, so a deployment's scan job calls it directly (no `gcloud`: GCS and Batch over their APIs):
 
     [backfill: each listed run's missing drill / anchors, oldest first] →
@@ -19,7 +19,7 @@ stage (`static_anchors run`, the profile's `anchors`) reads none of the drill's 
 run at once; each keeps its own skip-if-done and post-check, and a failure of either fails the run once both end.
 
 The unit is a scan: any deployment may scan once a day, every 6 h, or once more on demand, and each scan is its own
-run (specs/scan-ids-not-dates.md). Scans are added **strictly in scan-id order**: given SCAN_ID, every published scan
+run (specs/done/scan-ids-not-dates.md). Scans are added **strictly in scan-id order**: given SCAN_ID, every published scan
 after the generation's newest (base + live runs) and up to SCAN_ID is pending; the oldest pending must be SCAN_ID
 itself, else it refuses (exit 3), or with `-c` catches up every pending scan in order. Each stage is skipped when its
 output is in the data bucket, so a rerun resumes at the first missing one; the R2 copy skips objects already there,
@@ -88,6 +88,12 @@ def job_spec(cfg: Profile, name: str, tasks: int, commands: list[str], *, stage:
 def job_id(stage: str, scan_id: str, now: datetime | None = None) -> str:
     """`sn-<stage>-<scan>-<hhmmss>`: Batch ids are lowercase letters, digits and hyphens."""
     return ar.job_id("sn", stage, scan_id, now)
+
+
+def drill_duckdb_args(machine: str) -> list[str]:
+    """Reserve half the task's memory for Arrow, Python indexes/caches and allocations outside DuckDB's buffer manager."""
+    vcpus = int(machine.rsplit("-", 1)[-1])
+    return ["-M", f"{vcpus * 7700 // 2 // 1024}GB", "-p", str(vcpus)]
 
 
 # ── The chain ──────────────────────────────────────────────────────────────
@@ -258,7 +264,7 @@ class Runner(ar.Runner):
         if self.exists(f"{run}/drill/meta.json"):
             self.log(f"{d} drill: done")
             return None
-        args = ["build", "-g", self.cfg.gen, "-d", d, "-k", "task", *duckdb_args(self.cfg.machine)]
+        args = ["build", "-g", self.cfg.gen, "-d", d, "-k", "task", *drill_duckdb_args(self.cfg.machine)]
         name, spec = self.job("drill", d, 2, "static_drill", args)
 
         def build():
@@ -307,6 +313,7 @@ class Runner(ar.Runner):
         cmds.append(self.command("static_names", ["r2-copy", "-g", self.cfg.gen, "-o", f"manifests/{stem}.json"], mount=False))
         name = self.job_name("r2", d)
         spec = self.spec(name, 1, cmds, stage="r2", scratch=False, r2=True, machine="n2-highmem-4", ssd_gb=375)
+        spec = ar.label_batch_spec(spec, "static-names", scan_id=d)
         self.stage(f"{d} r2 ({len(runs)} runs + manifests/{stem}.json)", lambda: self.run_job(name, spec))
 
 

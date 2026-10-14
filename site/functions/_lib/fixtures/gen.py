@@ -5,7 +5,7 @@
   (`b, o, wts, wb, c2..c4, a`), zstd — for `zstd.test.ts` and the v1 side of
   `pathStore.test.ts`. The current writer no longer produces this shape, so it
   is never regenerated here; only its D1 rows are re-extracted.
-- `v2/`: a **version-2** store generation (specs/path-store.md phase 1) cut by
+- `v2/`: a **version-2** store generation (specs/done/path-store.md phase 1) cut by
   the current `dt_cloud.index.write_index` — every row, objects included, the
   layer-2 column names, no wire aliases, both sorts — over a listing shaped
   like `tests/test_tiers_plan.py`'s: a flat dir of `N_FLAT` objects whose sizes
@@ -28,6 +28,9 @@
   postings groups and `SEARCH_DIR_ROWS` rows per directory group — beside
   layout v1's `path-index.{names,search}.parquet`, kept as committed (the
   writer no longer emits them; their postings are v2's).
+- `v2-mount/`: `v2-search`'s writer over a few objects in one bucket (`mb`)
+  that no other fixture names — the second store of a union view's tests
+  (`unionSubtree.test.ts`), whose roots must not collide with `bk`.
 - `v2-slices/`: a store generation over owner slices (`usr` labels, one row per
   `(path, usr)` as gcs writes them) whose multi-owner dirs have slices under a
   view's threshold while their totals clear it (`m/big` drawn short of a slice,
@@ -35,7 +38,7 @@
   single-owner `s/`, 2500 unowned objects directly under `m/`, and `w/`'s
   1100 two-owner dirs (300 KiB slices, 600 KiB totals) filling whole `bysize`
   groups — `path` + `bysize` in 2048-row groups, `bysize` keyed on each path's
-  total (`tot`, specs/bysize-path-total.md), so a group's `b_max` must be
+  total (`tot`, specs/done/bysize-path-total.md), so a group's `b_max` must be
   `MAX(tot)` for a 512 KiB read to keep it (`sliceComplete.test.ts`); its
   `plans.json` is `disk-tree tiers plan -j` (with `matched`) over `SLICE_PLANS`.
 - `v2/plans.json`: `disk-tree tiers plan -j -C` over each v2 sidecar for a
@@ -323,6 +326,16 @@ def write_v2_search(here: str, name: str = 'v2-search', objects=search_rows) -> 
     write_text(join(out_dir, 'd1.json'), json.dumps(d1, separators=(',', ':')))
 
 
+def mount_rows() -> dict[str, list[tuple[str, int]]]:
+    """`v2-mount`'s objects: one bucket named apart from every other fixture's
+    (`mb`), so a union view can mount it beside another store's roots."""
+    return {'mb': [('scans/a.parquet', 3 * MiB), ('scans/b.parquet', MiB), ('index/g1/path-index.parquet', 2 * MiB), ('README.md', 100)]}
+
+
+def write_v2_mount(here: str) -> None:
+    write_v2_search(here, 'v2-mount', objects=mount_rows)
+
+
 def write_v1(here: str) -> None:
     parquet = join(here, 'path-index-zstd.parquet')
     write_text(join(here, 'path-index-zstd.d1.json'), json.dumps(d1_json({'path': parquet}), separators=(',', ':')))
@@ -334,6 +347,7 @@ WRITERS = {
     'v2-lens': write_v2_lens,
     'v2-slices': write_v2_slices,
     'v2-search': write_v2_search,
+    'v2-mount': write_v2_mount,
 }
 
 

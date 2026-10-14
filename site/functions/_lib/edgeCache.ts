@@ -28,6 +28,10 @@ const KV_TTL = 30 * 86400
 // pre-deploy diff while every other window was fresh (2026-09-17). The edge
 // tiers keep the long TTL behind the versioned key.
 const PRIVATE = 'private, max-age=300'
+/** A partial answer's browser copy: none. Its full one replaces it at the edge within seconds (`upgradePartial`),
+ *  and the next ask — the client's re-ask while `budgetCut`, or a reload — must reach the edge to get it: a
+ *  browser copy (it was `max-age=<ttl>`, 120 s) served the cut answer again, instantly, on every reload. */
+const PARTIAL_CLIENT = 'no-store'
 const JSON_HDR = { 'content-type': 'application/json; charset=utf-8' }
 
 export interface CacheEnv { CACHE_KV?: KVNamespace; CACHE_NS?: string; PROD_HOST?: string }
@@ -38,8 +42,9 @@ export interface CacheEnv { CACHE_KV?: KVNamespace; CACHE_NS?: string; PROD_HOST
 // one-sided diff nodes expand. 3 (2026-10-07): owner pools fold the live
 // ledger, objects included (a preview of the bytes-only fold wrote pool
 // answers with unconserved object counts into KV). 4: pool and user-lens
-// object counts exact from the manifest's per-user objects (`uo`).
-export const CACHE_V = '4'
+// object counts exact from the manifest's per-user objects (`uo`). 5 (2026-10-14): a
+// node's `d` is its newest write, not the byte-weighted mean.
+export const CACHE_V = '5'
 
 /** The deployment environment a response-cache key belongs to: `''` is prod's (keys exactly as before the
  * tag existed — no one-time flush), anything else a separate keyspace. A Pages preview (the dev stack)
@@ -56,7 +61,7 @@ export function cacheEnvTag(env: CacheEnv, request: Request): string {
 
 /** The cache key for `parts` of endpoint `kind`, in deployment environment `tag` (`cacheEnvTag`). A
  * non-prod tag adds a `~<tag>/` segment, which the KV key (a hash of the URL) inherits. A secondary store's
- * keys gain an `@<store>/` segment (specs/multi-store.md), so the same path in two stores can't collide;
+ * keys gain an `@<store>/` segment (specs/done/multi-store.md), so the same path in two stores can't collide;
  * the primary's (`store` omitted or `'primary'`) are exactly what they were before stores existed — no
  * one-time cache miss. */
 export function cacheKeyFor(kind: string, tag: string, parts: string, store?: string): Request {
@@ -79,9 +84,7 @@ export async function cacheMatch(env: CacheEnv, key: Request): Promise<Response 
   const hit = await colo().match(key)
   if (hit) {
     const res = new Response(hit.body, hit)
-    // A partial answer's browser copy lives no longer than its edge copy.
-    const partial = /ttl=(\d+)/.exec(hit.headers.get('x-cache-partial') ?? '')
-    res.headers.set('cache-control', partial ? `private, max-age=${partial[1]}` : PRIVATE)
+    res.headers.set('cache-control', isPartial(hit) ? PARTIAL_CLIENT : PRIVATE)
     res.headers.set('x-cache', 'hit')
     return res
   }
@@ -135,7 +138,7 @@ export async function cacheStore(env: CacheEnv, key: Request, body: string, head
   res.headers.set('x-cache-store', stored)
   if (partial != null) {
     res.headers.set('x-cache-partial', `ttl=${partial}`)
-    res.headers.set('cache-control', `private, max-age=${partial}`)
+    res.headers.set('cache-control', PARTIAL_CLIENT)
   }
   return res
 }

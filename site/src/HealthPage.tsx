@@ -1,4 +1,4 @@
-// /health (specs/health-page.md): the state of the deployment's append-only stores, from `/api/health` — each store's
+// /health (specs/done/health-page.md): the state of the deployment's append-only stores, from `/api/health` — each store's
 // stack drawn as binary-counter shards over the scan timeline (`pyrmts-react`'s `CoverTimeline`, the timeline the
 // pyrmts consumers' /health pages share), every scan's coverage and its gaps, and freshness; the last scan job comes
 // from /scans' own fetch (`useScanRuns`).
@@ -17,7 +17,7 @@ import {
 } from './healthModel'
 import { phaseOrder } from './scanRunsModel'
 import { scanTime } from './scanSlug'
-import { colorer, fmtDur, getJson, PhaseBar, Status, useScanRuns, utc } from './scanRunsUi'
+import { colorer, fmtDur, fmtRunTime, getJson, PhaseBar, runDay, Status, useScanRuns } from './scanRunsUi'
 import './scans.scss'
 import './health.scss'
 
@@ -51,7 +51,7 @@ function DayAxis({ genesis, now }: { genesis: number; now: number }) {
   const x = (t: number) => 42 + ((t - genesis) / span) * 1000
   return (
     <svg className="hl-days" viewBox="0 0 1042 12" aria-hidden>
-      {ticks.map(t => <text key={t} x={x(t)} y={9} textAnchor="middle">{new Date(t).toISOString().slice(5, 10)}</text>)}
+      {ticks.map(t => <text key={t} x={x(t)} y={9} textAnchor="middle">{runDay(t / 1000).slice(5)}</text>)}
     </svg>
   )
 }
@@ -97,7 +97,7 @@ function CoverageEvents({ doc, columns, genesis, now }: { doc: HealthDoc; column
     {rows.map(({ column, events }) => <div className="hl-event-row" key={column}>
       <span className="dim">{COLUMN_LABELS[column]}</span><div className="hl-event-axis">
         {events.filter(e => e.time >= genesis && e.time <= now).map(e => <span key={e.scan} className="hl-event-position" style={{ left: `${100 * (e.time - genesis) / span}%` }}>
-          <Tooltip content={<><b>{COLUMN_LABELS[column]} · {e.scan} · {e.status}</b><div>{new Date(e.time).toISOString().replace('T', ' ').slice(0, 16)} UTC</div></>}>
+          <Tooltip content={<><b>{COLUMN_LABELS[column]} · {e.scan} · {e.status}</b><div>{fmtRunTime(e.time / 1000)}</div></>}>
             <span className={`hl-event hl-${e.status}`} role="img" aria-label={`${COLUMN_LABELS[column]} · ${e.scan} · ${e.status}`}>{cellMark[e.status]}</span>
           </Tooltip>
         </span>)}
@@ -182,8 +182,8 @@ function LastRun() {
   return (
     <span className="hl-lastrun">
       <Link to={`/scans/${encodeURIComponent(last.run.run_id)}`}><code>{last.run.scan}</code></Link>
-      <Status run={last.run} failedAt={last.failed_at} />
-      <span className="dim">{last.run.started_ts == null ? 'start not recorded' : `${utc(last.run.started_ts)} UTC`}</span>
+      <Status run={last.run} failedAt={last.failed_at} issues={last.phase_issues} />
+      <span className="dim">{last.run.started_ts == null ? 'start not recorded' : fmtRunTime(last.run.started_ts)}</span>
       <span>{last.secs == null ? '—' : fmtDur(last.secs)}</span>
       <PhaseBar spans={last.spans} secs={last.secs} color={colorer(order)} width={140} />
     </span>

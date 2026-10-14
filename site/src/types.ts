@@ -1,18 +1,20 @@
 export interface TreeNode {
   n: string
   /** What the path is: an object (`file`) or a directory. A scan indexed
-   * before the path store (specs/path-store.md) holds directories only; a
+   * before the path store (specs/done/path-store.md) holds directories only; a
    * fold (`(other)`) is drawn as a branch. Absent from older cached responses. */
   k?: 'file' | 'dir'
   b: number
   o: number
-  d?: number                   // byte-weighted listing date, epoch days (GCS: created; S3/R2/local: modified)
+  d?: number                   // newest listing date at or under the node, epoch days (GCS: created; S3/R2/local: modified)
   a?: number                   // last-read epoch day (access logs; MAX over the whole subtree)
   us?: [string, number][]      // top users -> bytes
   cb?: Record<string, number>  // non-STANDARD class -> bytes ("2" NL, "3" CL, "4" AR); STANDARD = b - sum
   c?: TreeNode[]
   f?: number                   // an `(other)` fold: how many children it stands in for (drives the dust hatch density)
   pv?: Provenance              // provenance of the top owner's inferred attribution (absent when assigned, or no extras for the scan)
+  src?: string                 // a union view's root child: the store it belongs to (`functions/_lib/union.ts`)
+  at?: string                  // …and that store's scan id at the view's cutoff (its own, not the page's as-of)
 }
 
 /** Where an inferred owner came from: the pipeline signal that attributed
@@ -71,6 +73,14 @@ export const MODE_LABELS: Record<ColorMode, string> = {
   tree: 'tree',
 }
 
+/** Omnibar synonyms for each color axis ("atime" finds the read axis). */
+export const MODE_KEYWORDS: Record<ColorMode, string[]> = {
+  read: ['atime', 'accessed', 'last read'],
+  user: ['owner', 'person'],
+  date: ['mtime', 'modified', 'created', 'age'],
+  tree: ['path', 'directory', 'folder'],
+}
+
 /** Physical container measurements from the capture, not summed path sizes. */
 export interface DiskSpace {
   capacity: number
@@ -78,11 +88,14 @@ export interface DiskSpace {
   free: number
   device: string
   captured_at: string
+  /** APFS VM volume allocation, including swap and filesystem overhead. */
+  vm_used?: number
 }
 
 export interface Meta {
   asof: string
   generated: string
+  captured_at?: string  // capture instant, when supplied by the source
   published?: string  // object lastModified (ISO) — real publish time behind a date-only id
   total_bytes: number
   total_objects: number

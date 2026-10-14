@@ -17,13 +17,14 @@
  * handle's gen, and we fetch metadata only for the groups a query actually
  * reads, so the ~5 MB thrift footer is never parsed on a cold isolate. A run
  * never overwrites a file the pointer names: it lands a new generation and
- * flips the pointer last (specs/view-serving.md, "Index rewrite vs D1
- * footer"). A pointer whose row groups retention retired (`index-gc -r`)
+ * flips the pointer last (specs/done/view-serving.md, "Index rewrite vs D1
+ * footer"). A pointer whose row groups retention retired (`index-gc -r`), or the
+ * footer LRU evicted or hasn't filled (`footerCache.ts`, specs/done/footer-lru.md),
  * opens the tier's **cold footer** instead (`pq` mode): the same rows as a
  * small parquet beside the tier (`<tier>.groups.parquet`, 512 rows per
  * group, stats on the pruning columns), whose own footer is range-read and
  * cached; a query prunes its groups by those stats with the predicates it
- * would send D1 and decodes only the survivors (specs/path-store.md §1.6).
+ * would send D1 and decodes only the survivors (specs/done/path-store.md §1.6).
  * Only a generation without one opens the `.groups.json` blob (`blob` mode:
  * the whole document, fine for small deployments — 86 MB on gcs is not).
  * Parsing the tier parquet's own footer is never an option: a floor-free
@@ -34,6 +35,7 @@ import { R2Store } from '@rdub/file-tree/stores/r2'
 import { S3Store } from '@rdub/file-tree/stores/s3'
 import { type FileMetaData, parquetMetadata, parquetMetadataAsync, parquetRead, parquetReadObjects, type RowGroup } from 'hyparquet'
 import type { Env } from './auth.js'
+import { FILL_MAX_ROWS, type FooterRow, noteAccess, probe, queueFill, trusted, wantsFill } from './footerCache.js'
 import { newestManifest } from './manifests.js'
 import { inFlight, join, JOIN, type Join, reqOf, shared, STALLED, track } from './shared.js'
 import { d1Variant, isPrimary, PRIMARY_STORE, storeKey } from './stores.js'
@@ -43,7 +45,7 @@ import { compressors } from './zstd.js'
 export interface SchemaElement { type: string; name: string; repetition_type: string; converted_type?: string }
 
 
-/** One index row, named by the layer-2's columns (specs/path-store.md §1.1) —
+/** One index row, named by the layer-2's columns (specs/done/path-store.md §1.1) —
  * the shape both generations decode to (`toRow`). A version-2 store sort
  * carries these names on disk, objects and dirs alike; a version-1 index
  * (dir rows only, the wire names `b, o, wts, wb, c2..c4, a`) is mapped onto
@@ -130,6 +132,8 @@ interface D1Handle {
   /** An interval-store sort read as of a scan (`openInterval`): its epoch. Every group and row is
    *  tested `vf ≤ asOf < vt` (specs/interval-store.md §2.6). */
   asOf?: number
+  /** A bounded history read plans versions overlapping this inclusive scan range. */
+  historyRange?: [number, number]
   /** Where the handle's own files are read from, when not the deployment's store (the interval
    *  store on `INDEX_R2`). */
   src?: ByteStore
@@ -233,7 +237,7 @@ export const str = (v: unknown): string =>
   typeof v === 'string' ? v : v instanceof Uint8Array ? new TextDecoder().decode(v) : String(v ?? '')
 
 /** The index-store creds: an r2/s3 deploy sets `STORE_*`; unset falls back to
- *  the GCS HMAC pair so gcs/cw are unchanged (specs/union-of-roots.md). */
+ *  the GCS HMAC pair so gcs/cw are unchanged (specs/done/union-of-roots.md). */
 export const storeCreds = (env: Env) => ({
   accessKeyId: env.STORE_ACCESS_KEY_ID ?? env.GCS_HMAC_KEY_ID,
   secretAccessKey: env.STORE_SECRET_ACCESS_KEY ?? env.GCS_HMAC_SECRET,
@@ -297,8 +301,8 @@ export function servedStore(env: Env, prefixes: string[]): Store {
  * (`index_schema.dir`, e.g. `listing/<date>/index/<gen>`). Variants are
  * `<tier>[-<sort>]`: tier `''` (floor-free) or `coarse<E>`; sort `path`
  * (default) or `user`; a store generation adds the size-bucket sort
- * `bysize` (+ `bysize-user`), specs/path-store.md §1.2. Mirrors
- * `INDEX_VARIANTS` in the dt-cloud CLI (specs/view-serving.md §1). */
+ * `bysize` (+ `bysize-user`), specs/done/path-store.md §1.2. Mirrors
+ * `INDEX_VARIANTS` in the dt-cloud CLI (specs/done/view-serving.md §1). */
 export function indexKey(dir: string, variant: string): string {
   // The age index is a standalone index (per-path created-day strata), not a
   // path-index tier, so it keeps its own base name (specs/done/age-index.md).
@@ -307,7 +311,7 @@ export function indexKey(dir: string, variant: string): string {
   const pm = /^age-pyramid-(\d+(?:min|h|d|mo|y))$/.exec(variant)
   if (pm) return `${dir}/age-pyramid-${pm[1]}.parquet`
   // The cross-scan over-time index — a standalone singleton, own base name
-  // (specs/obs-axis-indexing.md Phase 1).
+  // (specs/done/obs-axis-indexing.md Phase 1).
   if (variant === 'over-time') return `${dir}/over-time.parquet`
   const m = /^(?:(coarse\d+|bysize)(?:-(user))?|(path|user))$/.exec(variant)
   if (!m) throw new Error(`bad index variant '${variant}'`)
@@ -379,6 +383,16 @@ export function pathScans(env: Env, order: boolean): Promise<{ results: { date: 
     : env.DB!.prepare(`SELECT DISTINCT date FROM index_schema WHERE store = ? AND variant = ?${by}`).bind(storeKey(env), d1Variant(env, 'path')).all<{ date: string }>()
 }
 
+/** The env's store's date-only scans whose start is known: each `path`
+ * pointer's `index_schema.started` (`dt-cloud index-sync -m`, or the
+ * `index-started` backfill) — the scan picker's times, in one query. */
+export function pathScanStarts(env: Env): Promise<{ results: { date: string; started: string }[] }> {
+  const known = "started IS NOT NULL AND date NOT LIKE '%T%'"
+  return isPrimary(env)
+    ? env.DB!.prepare(`SELECT date, started FROM index_schema WHERE variant = 'path' AND ${known}`).all<{ date: string; started: string }>()
+    : env.DB!.prepare(`SELECT date, started FROM index_schema WHERE store = ? AND variant = ? AND ${known}`).bind(storeKey(env), d1Variant(env, 'path')).all<{ date: string; started: string }>()
+}
+
 function fileFor(env: Env, dir: string, variant: string): FileSlice {
   const store = makeStore(env)
   const key = indexKey(dir, variant)
@@ -423,13 +437,21 @@ export async function openIndex(env: Env, date: string, variant = 'path'): Promi
     if (!env.DB) throw new Error('index reader not configured (DB)')
     const s = await schemaRow<{ version: number; schema_json: string; floor_bytes: number | null; gen: string | null; dir: string | null }>(env, 'version, schema_json, floor_bytes, gen, dir', date, variant)
     if (!s || !s.gen || !s.dir) throw new Error(`index variant '${variant}' not synced for ${date}`)
-    // A pointer whose row groups were retired (`index-gc -r`) still names
+    // A pointer whose row groups were retired (`index-gc -r`) or evicted still names
     // the generation dir: open the tier's cold footer there, else (a
     // generation from before it was written) the group-manifest blob.
-    const any = await env.DB.prepare('SELECT 1 AS x FROM index_row_groups WHERE date = ? AND variant = ? AND gen = ? LIMIT 1').bind(date, d1Variant(env, variant), s.gen).first<{ x: number }>()
+    // The footer LRU (`footerCache.ts`): D1's rows serve a hot entry or an untracked (synced) generation;
+    // anything else reads the cold footer, and a miss queues a fill. Without `footer_cache` (the migration
+    // not applied), the pre-LRU probe: any row at all.
+    const k = { date, variant: d1Variant(env, variant), gen: s.gen }
+    const p = await probe(env, k)
+    const d1 = p ? trusted(p) : !!(await env.DB.prepare('SELECT 1 AS x FROM index_row_groups WHERE date = ? AND variant = ? AND gen = ? LIMIT 1').bind(k.date, k.variant, k.gen).first<{ x: number }>())
     const schema = JSON.parse(s.schema_json) as SchemaElement[]
     const base = { file: fileFor(env, s.dir, variant), env, date, variant, gen: s.gen, dir: s.dir, schema, version: s.version, columns: rowColumns(s.version, schema), floor: s.floor_bytes == null ? null : num(s.floor_bytes) }
-    if (any) return { mode: 'd1', ...base }
+    if (d1) {
+      if (p?.state === 'hot') noteAccess(env, k, p.lastAccessDay)
+      return { mode: 'd1', ...base }
+    }
     let footer: FooterIndex
     try {
       footer = await openFooter(env, footerKey(s.dir, variant))
@@ -437,7 +459,10 @@ export async function openIndex(env: Env, date: string, variant = 'path'): Promi
       if ((e as Error).name !== 'NotFoundError') throw e
       return openBlob(env, date, variant, s.gen, s.dir)
     }
-    return { mode: 'pq', ...base, footer }
+    const h: PqHandle = { mode: 'pq', ...base, footer }
+    const total = footer.groups.at(-1)?.rgEnd ?? 0
+    if (p && wantsFill(p) && total <= FILL_MAX_ROWS) queueFill(env, k, () => footerRows(h))
+    return h
   }, 30_000) // a blob open is a ~15 MB fetch + parse
 }
 
@@ -743,6 +768,7 @@ export async function openInterval(env: Env, date: string, variant: string, retr
     // A run that won't open is cut out; the date is then the store's (an older run's or the base's) or per-scan.
     if (e instanceof IvTierBroken && !retried) return openInterval(env, date, variant, true)
     if (!sliced || (e as Error).name !== 'NotFoundError') throw e
+    if (!ivNoSlices.has(gen)) console.error(`interval store ${gen}: no slice sorts (${(e as Error).message}); sliced reads go per-scan for 60s`)
     ivNoSlices.set(gen, Date.now())
     return null
   }
@@ -1006,6 +1032,17 @@ async function openFooter(env: Env, key: string, src?: ByteStore): Promise<Foote
   return { key, metadata, groups }
 }
 
+/** Every row of a per-scan cold footer, a footer group at a time (a fill's source, `queueFill`). */
+async function* footerRows(h: PqHandle): AsyncIterable<FooterRow[]> {
+  for (const fg of h.footer.groups) {
+    const got = await readFooterCols(h, fg, FOOTER_COLS)
+    yield got.map(r => ({
+      rg: r.rg as number, d_min: r.d_min as number, d_max: r.d_max as number, p_min: str(r.p_min), p_max: str(r.p_max), b_max: r.b_max as number,
+      u_min: r.u_min == null ? null : str(r.u_min), u_max: r.u_max == null ? null : str(r.u_max), row_start: r.row_start as number, row_end: r.row_end as number, rg_json: str(r.rg_json),
+    }))
+  }
+}
+
 /** The byte span of some columns' chunks in a footer group (they're stored in schema order, so a
  *  run of columns is one range). */
 function chunksSpan(fg: FooterGroup, cols: Set<string>): [number, number] {
@@ -1172,8 +1209,9 @@ async function pqGroups(h: PqHandle, pass0: (g: NonNullable<FooterGroup['bounds'
   // A run's group can matter once a version in it opened by then, live or not (its close records end versions).
   const D = h.asOf
   const run = !!h.run
+  const range = h.historyRange
   const pass = D == null ? pass0 : (g: { vfMin?: number; vtMax?: number } & NonNullable<FooterGroup['bounds']>) =>
-    (g.vfMin == null || g.vfMin <= D) && (run || g.vtMax == null || D < g.vtMax) && pass0(g)
+    (g.vfMin == null || g.vfMin <= (range?.[1] ?? D)) && (run || g.vtMax == null || (range?.[0] ?? D) < g.vtMax) && pass0(g)
   const sel = h.footer.groups.filter(fg => !fg.bounds || pass(fg.bounds))
   h.trace?.('fgroups', sel.length)
   const all = (await mapLimit(sel, GROUP_READS, fg => readFooterGroup(h, fg))).flat()
@@ -1530,13 +1568,17 @@ const tiersOf = (h: IndexHandle): IndexHandle[] => [h, ...(h.runs ?? [])]
 /** Rows of every tier combined, one per version (`(depth, path, usr, vf)`; the smallest `vt`), then those live at
  *  the handle's scan: `interval_read.combine` + `live_rows`. */
 export function combineLive(h: IndexHandle, rows: Row[]): Row[] {
+  return liveAt(h, combineVersions(rows))
+}
+
+function combineVersions(rows: Row[]): Row[] {
   const best = new Map<string, Row>()
   for (const r of rows) {
     const k = `${r.depth}\0${r.path}\0${r.usr ?? ''}\0${r.vf}`
     const c = best.get(k)
     if (!c || r.vt! < c.vt!) best.set(k, r)
   }
-  return liveAt(h, [...best.values()])
+  return [...best.values()]
 }
 
 /** Decoded row groups, per isolate (LRU by an estimated byte size).
@@ -2070,7 +2112,7 @@ export async function readGroupsAt(h: IndexHandle, rgs: number[], keep: (path: s
   return { rows: out, read }
 }
 
-// --- the size-bucket sort (specs/path-store.md §1.3, §2.1) -------------------
+// --- the size-bucket sort (specs/done/path-store.md §1.3, §2.1) -------------------
 
 /** The `bysize` span predicate, for a blob handle's in-memory groups — the
  * same test `selectSizeSpans` sends D1, and `disk-tree tiers plan`'s
@@ -2253,6 +2295,90 @@ export async function readSizeRects(
   return rows.filter(r => tot.get(key(r))! >= thrAt(r.depth))
 }
 
+/** One page of the size sort's candidate groups for a path range, in sort
+ * (`rg`) order, after group `after` — `selectSizeSpans`'s predicate with no
+ * byte floor, paged instead of capped. */
+async function pageSizeSpans(h: IndexHandle, range: { pLo: string; pHi: string }, after: number, limit: number): Promise<Span[]> {
+  if (h.mode !== 'd1') {
+    const pass = (g: Parameters<typeof groupMatchesSize>[0]) => groupMatchesSize(g, [range])
+    const all = h.mode === 'blob' ? h.groups.filter(pass) : await pqGroups(h, pass)
+    return all.filter(g => g.rg > after).sort((a, b) => a.rg - b.rg).slice(0, limit)
+  }
+  const sql = 'SELECT rg, d_min, d_max, p_min, p_max, b_max, row_start, row_end FROM index_row_groups WHERE date = ? AND variant = ? AND gen = ? AND p_max >= ? AND p_min < ? AND rg > ? ORDER BY rg LIMIT ?'
+  const res = await h.env.DB!.prepare(sql).bind(h.date, d1Variant(h.env, h.variant), h.gen, range.pLo, range.pHi, after, limit).all<{ rg: number; d_min: number; d_max: number; p_min: string; p_max: string; b_max: number; row_start: number; row_end: number }>()
+  return res.results.map(r => ({ rg: r.rg, dMin: num(r.d_min), dMax: num(r.d_max), pMin: r.p_min, pMax: r.p_max, bMax: num(r.b_max), rowStart: num(r.row_start), rowEnd: num(r.row_end) }))
+}
+
+/** `⌊log2 b⌋`, the size sort's bucket (size 0: −1, below every bucket). */
+const bucketOf = (b: number): number => (b > 0 ? Math.floor(Math.log2(b)) : -1)
+
+/** Candidate groups fetched per span query, and decoded per round at most
+ * (rounds start at one group and double: most answers need one or two). */
+const LARGEST_PAGE = 32
+const LARGEST_BATCH = 8
+/** Groups a largest-files read decodes at most (a subtree whose top buckets hold mostly other paths' rows). */
+export const LARGEST_MAX_GROUPS = 64
+
+/** What `readLargest` answers: the files, size-descending (ties by path),
+ * the size-sort groups it decoded, and whether files beyond them exist or
+ * may (more matched than `n`, or candidate groups were left unread). */
+export interface Largest { rows: Row[]; groups: number[]; decoded: number; more: boolean; capped: boolean }
+
+/** The `n` largest objects (never dirs) under `path` (`''` = the store root),
+ * from a store generation's `bysize` sort: its groups in sort order — largest
+ * size bucket first — restricted by the span query to those whose path range
+ * meets `[P/, P0)`, decoding each round's groups and keeping object rows
+ * under P. A group whose `b_max` is below the current n-th size is skipped
+ * undecoded, and the read stops once a group's top bucket is below the n-th
+ * size's: buckets only fall along the sort, so no later group can hold a row
+ * that big (within a bucket rows are path-sorted, so a same-bucket group may
+ * still beat the n-th, and is read). At most `LARGEST_MAX_GROUPS` groups. */
+export async function readLargest(h: IndexHandle, path: string, n: number, maxGroups = LARGEST_MAX_GROUPS): Promise<Largest> {
+  const range = path === '' ? { pLo: '', pHi: '￿' } : { pLo: path + '/', pHi: path + '0' }
+  const under = (p: string) => p >= range.pLo && p < range.pHi
+  const order = (a: Row, b: Row) => b.size - a.size || (a.path < b.path ? -1 : a.path > b.path ? 1 : 0)
+  let top: Row[] = []
+  let matched = 0
+  const groups: number[] = []
+  let decoded = 0
+  let after = -1
+  let pending: Span[] = []
+  let exhausted = false
+  let width = 1
+  const nth = () => (top.length >= n ? top[n - 1].size : -1)
+  for (;;) {
+    if (!pending.length && !exhausted) {
+      const t0 = now()
+      pending = await pageSizeSpans(h, range, after, LARGEST_PAGE)
+      h.trace?.('spans', now() - t0)
+      if (pending.length < LARGEST_PAGE) exhausted = true
+      if (pending.length) after = pending[pending.length - 1].rg
+    }
+    if (!pending.length) return { rows: top, groups, decoded, more: matched > n, capped: false }
+    // This round: the next groups that could still place a row, up to the batch.
+    const batch: Span[] = []
+    const room = Math.min(width, maxGroups - groups.length)
+    while (pending.length && batch.length < Math.max(1, room)) {
+      const g = pending[0]
+      const t = nth()
+      // A group whose top bucket is below the n-th size's: it and every later group are out.
+      if (t >= 0 && bucketOf(g.bMax) < bucketOf(t)) return { rows: top, groups, decoded, more: true, capped: false }
+      pending.shift()
+      if (t >= 0 && g.bMax < t) continue
+      batch.push(g)
+    }
+    if (!batch.length) continue
+    // Out of budget with a group still able to place a row.
+    if (room <= 0) return { rows: top, groups, decoded, more: true, capped: true }
+    const rows = await decodeSpans(h, batch, r => r.kind === 'file' && under(r.path))
+    groups.push(...batch.map(g => g.rg))
+    decoded += batch.reduce((s, g) => s + (g.rowEnd - g.rowStart), 0)
+    matched += rows.length
+    width = Math.min(LARGEST_BATCH, 2 * width)
+    top = [...top, ...rows].sort(order).slice(0, n)
+  }
+}
+
 /** Lookups this isolate found too wide (`readAsks`' `rememberWide`), oldest dropped past `TOO_WIDE_HELD`. */
 const tooWide = new Map<string, string>()
 const TOO_WIDE_HELD = 256
@@ -2282,11 +2408,11 @@ export async function readAsks(
   h: IndexHandle,
   asks: Ask[],
   keep: (r: Row) => boolean,
-  { columns, maxGroups = 60, spanCap = 4000, stop, rememberWide }: { columns?: string[]; maxGroups?: number; spanCap?: number; stop?: () => boolean; rememberWide?: boolean } = {},
+  { columns, maxGroups = 60, spanCap = 4000, stop, rememberWide, versions = false, pre, lens }: { columns?: string[]; maxGroups?: number; spanCap?: number; stop?: () => boolean; rememberWide?: boolean; versions?: boolean; pre?: Pre; lens?: Lens } = {},
 ): Promise<{ rows: Row[]; groups: number }> {
   // `rememberWide`: a lookup this isolate already found too wide (same generation, asks and budget) throws
   // before any span query — the answer can't change while the generation stands.
-  const wideKey = rememberWide ? `${h.mode}\0${h.date}\0${h.variant}\0${'gen' in h ? h.gen : ''}\0${maxGroups}\0${asks.map(a => `${a.depth}:${'path' in a ? a.path : `${a.under}/`}`).join('\n')}` : null
+  const wideKey = rememberWide ? `${h.mode}\0${h.date}\0${h.variant}\0${'gen' in h ? h.gen : ''}\0${maxGroups}\0${lens?.key ?? ''}\0${asks.map(a => `${a.depth}:${'path' in a ? a.path : `${a.under}/`}`).join('\n')}` : null
   const known = wideKey != null ? tooWide.get(wideKey) : undefined
   if (known) throw new Error(`lookup too wide: ${known} (cap ${maxGroups}, remembered)`)
   // One rectangle per depth over its asks' [min, max] path, halved while it
@@ -2320,7 +2446,7 @@ export async function readAsks(
       let cand: Span[]
       h.trace?.('askspan', 1)
       try {
-        cand = await selectSpans(h, [rect], cap)
+        cand = await selectSpans(h, [rect], cap, 0, lens)
       } catch (e) {
         if (!(e instanceof TooWide) || part.length === 1) throw e
         const m = part.length >> 1
@@ -2354,11 +2480,11 @@ export async function readAsks(
           const j = jsons.get(s.rg)
           return j ? (await readGroupVersions(t, j, columns)).filter(keep) : []
         })
-        : await readGroupsCached(t, mine.flatMap(s => { const json = jsons.get(s.rg); return json ? [{ rg: s.rg, json }] : [] }), rows => rows.filter(keep), stop, true)
+        : await readGroupsCached(t, mine.flatMap(s => { const json = jsons.get(s.rg); return json ? [{ rg: s.rg, json }] : [] }), rows => rows.filter(keep), stop, true, pre)
       return per.flat()
     })))
     h.trace?.('groups', now() - t0)
-    return { rows: combineLive(h, got.flat()), groups: spans.length }
+    return { rows: versions ? combineVersions(got.flat()) : combineLive(h, got.flat()), groups: spans.length }
   }
   const jsons = await fetchGroupJson(h, spans.map(s => s.rg))
   h.trace?.('rgjson', now() - t0)
@@ -2368,11 +2494,58 @@ export async function readAsks(
   const perGroup = columns
     ? await mapLimit(spans, GROUP_READS, async s => {
       const j = jsons.get(s.rg)
-      return j ? (await readGroup(h, j, columns)).filter(keep) : []
+      return j ? (await (versions ? readGroupVersions : readGroup)(h, j, columns)).filter(keep) : []
     })
-    : await readGroupsCached(h, spans.flatMap(s => { const json = jsons.get(s.rg); return json ? [{ rg: s.rg, json }] : [] }), rows => rows.filter(keep), stop)
+    : await readGroupsCached(h, spans.flatMap(s => { const json = jsons.get(s.rg); return json ? [{ rg: s.rg, json }] : [] }), rows => rows.filter(keep), stop, versions, pre)
   h.trace?.('groups', now() - t0)
   return { rows: perGroup.flat(), groups: spans.length }
+}
+
+/** Fleet-root owner slices across held scans, with close records combined before
+ * testing each date. One bounded plan/decode, not a separate root read per scan.
+ * Missing slice sorts or uncovered dates are left to the canonical reader. */
+export async function readRootHistoryRows(env: Env, dates: string[], lens?: Lens): Promise<Map<string, Row[]> | null> {
+  const got = await readAsksHistory(slices(env), dates, lens ? 'bysize-user' : 'path', [{ depth: 1, under: '' }], r => r.depth === 1 && (!lens || r.usr === lens.key), { maxGroups: 60, pre: depth => depth === 1, lens })
+  if (!got) return null
+  if (got.versions > 100_000) throw new Error('root history too wide: more than 100000 versions')
+  return got.byDate
+}
+
+/** The scans the interval store holds (none when it is off). */
+export const ivHeldDates = async (env: Env): Promise<string[]> => (intervalsOn(env) ? [...(await ivScans(env)).keys()] : [])
+
+/** The interval store's newest scan ordinal (`vf`/`vt` units); null when it is off or empty. */
+export async function ivHorizon(env: Env): Promise<number | null> {
+  if (!intervalsOn(env)) return null
+  const ords = [...(await ivScans(env)).values()]
+  return ords.length ? Math.max(...ords) : null
+}
+
+/** `asks` on every one of `dates` the interval store holds, from one read of their versions (close records
+ *  combined: `rows`, live over `[vf, vt)` scan ordinals) — not one read per scan — then each date's live rows;
+ *  `hz` is the newest held date's ordinal. `index` is the handle's `<mode>:<gen>`
+ *  identity, the same as a per-date handle's. Null when the store is off or holds none of `dates`. */
+export async function readAsksHistory(
+  env: Env,
+  dates: string[],
+  variant: string,
+  asks: Ask[],
+  keep: (r: Row) => boolean,
+  { fields, maxGroups = 60, pre, lens }: { fields?: (keyof Row)[]; maxGroups?: number; pre?: Pre; lens?: Lens } = {},
+): Promise<{ byDate: Map<string, Row[]>; rows: Row[]; hz: number; versions: number; groups: number; index: string } | null> {
+  if (!intervalsOn(env) || !dates.length) return null
+  const scoped = asOfScans(env, dates)
+  const state = await ivState(scoped)
+  const held = dates.filter(d => state.scans.has(d))
+  if (!held.length) return null
+  const latest = held.reduce((a, b) => state.scans.get(a)! > state.scans.get(b)! ? a : b)
+  const handle = await openInterval(scoped, latest, variant)
+  if (!handle) return null
+  const range: [number, number] = [Math.min(...held.map(d => state.scans.get(d)!)), state.scans.get(latest)!]
+  const history = { ...handle, historyRange: range, runs: handle.runs?.map(r => ({ ...r, historyRange: range })) }
+  const { rows, groups } = await readAsks(history, asks, keep, { versions: true, maxGroups, pre, lens, ...(fields ? { columns: columnsFor(handle, fields) } : {}) })
+  const byDate = new Map(held.map(date => [date, liveAt({ ...handle, asOf: state.scans.get(date)! }, rows)]))
+  return { byDate, rows, hz: range[1], versions: rows.length, groups, index: `${handle.mode}:${'gen' in handle ? handle.gen : ''}` }
 }
 
 /** Raw rows (pre-`toRow` records) for a single `(depth, path)` point lookup —

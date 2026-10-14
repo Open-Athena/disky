@@ -112,6 +112,8 @@ Outputs: `gs://oa-gcs-usage-dvx/static-names/<gen>/{scans,ranges,shards}.json, i
 
 Run: `cd static-names/<gen> && PATH=$REPO/.venv/bin:$PATH dvx run verify-answers.json.dvc` (then `r2.dvc`).
 
+**One machine** (small deployments: the r2 demo, a laptop scan): `dt-cloud static-names build` / `add` (`cloud/src/dt_cloud/static_local.py`) chain the same stage functions in-process over a work dir and copy the result to a store dir or URL (`r2://…`): `build` = scans → ranges → coalesced versions → map/shards/sidecar → census/members/cells/short/assemble → drill (`static_drill.build_drill` over every member's roots, aliased by root-set digest) + `roots-measure/`; `add` = each pending scan as a run (`rebuild_open` from the base's `cintervals` and the runs' `cdelta`, so no state is kept between invocations), its drill run, `publish_run`, then `merge_pending`. No anchors. `cloud/tests/test_static_local.py`: the build's `cintervals/`, `chist/`, `sx/`, `sidecar/`, `sidecar.parquet` and `catalog/{cells,index}.parquet` are byte-identical to the staged stages' (`_gen`), its `drill/` to `build_drill` over the staged roots; base ⊕ the added runs (level-0 and the merged carry) has the rebuild's suffix rows, catalog bytes, first hits and brute-force answers. Measured on the r2 demo's 40 scans through 2026-10-12 (1.48M versions, 19.8M suffix rows, 54 long members holding 19.7M range rows, 26.8M short roots; laptop, 8 threads, 8 GB DuckDB limit): intervals 12 s, shards 28 s, catalog 28 s, max RSS 2.9 GB; the drill's rollups then spilled past the laptop's free disk, so the drill and `add` are measured on the ingest runner.
+
 ### Validation runs (2026-10-08)
 
 - **Local** (`cloud/tests/test_static_names.py`): intervals equal a sequential-ingest oracle (v1/v2 mix, duplicate v1 rows, absence gaps, rounding ties) at 1 and 4 ranges; ranges partition the key space; `append` is byte-identical to a rebuild (intervals and histogram files) with matching digests and delta; suffix rows equal brute force; the reader's per-bucket first-hit answers equal brute force for every date; the restated kernel equals pyrmts' `_intervals_sql`.
@@ -341,19 +343,19 @@ Cases (`job/static-names/drill-cases.jsonl`, from `drill-cases -n 1` over `drill
 
 ## Indexed-only filter (`FILTER_INDEXED_ONLY=1`)
 
-A deployment flag (gcs): the map's filter (`/api/subtree`, `/api/diff`, `/api/series`) accepts only what this index answers exactly — one literal substring of a file or folder name (no `/`, `*`, regex, exclusion, second term or `a|b`; quoted spaces are fine), unscoped (no owner pool, user lens or storage classes), on a scan the index covers — and never walks the path store for a filter. Everything else is a 400 `{ "error": <message>, "code": <code> }` before any read (`site/functions/_lib/indexedOnly.ts`):
+A deployment flag (gcs): the map's filter (`/api/subtree`, `/api/diff`, `/api/series`) accepts only what this index answers exactly — literal substrings of file or folder names, plain or anchored, alone or combined by AND (`a b`), OR (`a|b`) and NOT (`-b`) (no `/`, `*` or regex; quoted spaces are fine; the combination rules are `specs/search-extensions.md` §1, `site/functions/_lib/staticBool.ts`), unscoped (no owner pool, user lens or storage classes), on a scan the index covers — and never walks the path store for a filter. Everything else is a 400 `{ "error": <message>, "code": <code> }` before any read (`site/functions/_lib/indexedOnly.ts`):
 
 | Code | When |
 |---|---|
 | `unsupported-regex` | `qs=regex`, or a `/…/` query |
 | `unsupported-glob` | a `*` term |
-| `unsupported-exclusion` | any `-term`, exclusions alone included |
-| `unsupported-terms` | several terms, or alternatives (`a b`, `a|b`, two short terms) |
-| `unsupported-slash` | a term holding `/` (also `/api/name-summary`'s `name`) |
+| `unsupported-slash` | a term holding `/`, positive or negative (also `/api/name-summary`'s `name`) |
+| `unsupported-kind` | an unquoted `is:file` / `is:dir` (not built: `specs/search-extensions.md` §3); every deployment refuses it as a parse error |
 | `unsupported-scope` | a filter with `o=`, `lens=` or `cl=` |
-| `scan-not-indexed` | the literal's answer doesn't cover the scan: a scan outside the generation, or a heavy literal past the drill base (until the drill's per-scan append) (`/api/name-summary` keeps its own scan refusal) |
+| `scan-not-indexed` | the literal's answer doesn't cover the scan: a scan outside the generation, or a heavy literal past the drill base (until the drill's per-scan append) (`/api/name-summary` keeps its own scan refusal); for a compound query, any of its terms' answers |
+| `too-broad` | a compound query the index can't combine exactly within its budget (every term of an AND-group heavy at the view path, a heavy term under a candidate, a negative's rollup with a remainder, past 24 reads or 400K hits) |
 
-A view root whose path holds the literal is the plain view, on any scan. The series names uncovered scans (`unindexed: [dates]`, gaps) instead of reading the client's roots per scan. `GET /api/filter-caps` → `{ indexedOnly }` tells the filter box, which refuses the same forms inline (never sending them), shows the server's codes as its message, and lists only the supported form in its help. Unset (cw, the r2 demo, local), nothing changes.
+A view root whose path holds the literal (for a compound query: every term of an AND-group, with no negative term) is the plain view, on any scan. The series names uncovered scans (`unindexed: [dates]`, gaps) instead of reading the client's roots per scan. `GET /api/filter-caps` → `{ indexedOnly }` tells the filter box, which refuses the same forms inline (never sending them), shows the server's codes as its message, and lists only the supported form in its help. Unset (cw, the r2 demo, local), nothing changes.
 
 ## Acting on matches (`/api/filter-cover`)
 

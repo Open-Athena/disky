@@ -1,5 +1,5 @@
 /** Bytes under a path per scan — the size-over-time chart, scoped like the
- * map (specs/view-serving.md §1 "series.json" → this).
+ * map (specs/done/view-serving.md §1 "series.json" → this).
  *
  *   GET /api/series?path=<P>[&lens=user:<id>|user:me][&o=owned|unowned]
  *
@@ -13,22 +13,28 @@
  * filled in from the snapshot dir: the chart keeps any history that never
  * got (or lost) its tiers, rather than showing a gap.
  */
+import { hiddenNotFound, isHidden, restrictionFor } from '../_lib/restrict.js'
 import { type Ctx, json, requireScope, requireViewer } from '../_lib/auth.js'
 import { snapshotsPrefix, traceJoins } from '../_lib/shared.js'
 import { ivRetry, type Lens, pathGens, withPathStore, pathScans, servedStore, storeReady } from '../_lib/index.js'
 import { hasLedger, ledgerHead } from '../_lib/ledger.js'
 import { classKey, ownerKey, ownerOk, parseClasses, parseOwner, QueryError, queryParam } from '../_lib/scope.js'
-import { hexNote, hexQuery, liveTotal, rollupTotal, staticFilterStore, staticLiteral, staticTag } from '../_lib/staticFilter.js'
+import { hexNote, hexQuery, liveTotal, rollupTotal, staticCompound, staticFilterStore, staticLiteral, staticTag } from '../_lib/staticFilter.js'
+import { type BoolAnswer, boolPlan, compound } from '../_lib/staticBool.js'
 import { indexedOnly, reject, rejectBody, rejectQuery, rejectScope } from '../_lib/indexedOnly.js'
-import { readRootAgg, readRootRows } from '../_lib/view.js'
+import { readRootAgg, readRootHistory, readRootRows } from '../_lib/view.js'
 import { type OverTime, overTimePoint, readOverTime } from '../_lib/overTime.js'
 import { parsePaths } from '../_lib/filter.js'
 import { SERIES_MAX_PATHS } from '../_lib/seriesLimits.js'
-import { metaRoots, rootPoints, type RootRow } from '../_lib/series.js'
+import { metaRoots, rootPoints, type RootRow, type RootTrace } from '../_lib/series.js'
+import { latestCutoff, memberOf, memberRequest, membersAt, openUnion, unionFor } from '../_lib/union.js'
+import type { UnionView } from '../_lib/stores.js'
+import { scanTimes } from '../_lib/scanTimes.js'
+import { carryForward } from '../../src/federatedViews.js'
 import { cacheEnvTag, cacheKeyFor, cacheMatch, cacheStore, serverTiming } from '../_lib/edgeCache.js'
 import { LENS_PRIMARY_ONLY, storeKey, withStore } from '../_lib/stores.js'
 import { lensParam, ME_UNRESOLVED, resolveLens } from '../_lib/me.js'
-import { isScanId } from '../../src/scanSlug.js'
+import { isScanId, scanInstant } from '../../src/scanSlug.js'
 
 // The default store's snapshot dirs (`snapshots/<date>/`; other stores live in
 // a named subdir that `isScanId` keeps out), and the scan-id shape they're named by.
@@ -67,7 +73,79 @@ async function metaPoint(env: Ctx['env'], date: string): Promise<{ date: string;
   return m && typeof m.total_bytes === 'number' ? { date, b: m.total_bytes, o: m.total_objects ?? 0 } : null
 }
 
-export const onRequestGet = async (ctx0: Ctx & { waitUntil?: (p: Promise<unknown>) => void }): Promise<Response> => {
+type SeriesCtx = Ctx & { waitUntil?: (p: Promise<unknown>) => void }
+
+export const onRequestGet = async (ctx0: SeriesCtx): Promise<Response> => {
+  // A union view (`STORES_JSON` `union`, `_lib/union.ts`): its members' series as one step function; a deployment
+  // without one never leaves `seriesOf`.
+  const u = unionFor(ctx0.request, ctx0.env)
+  if (u instanceof Response) return u
+  return u ? unionSeries(ctx0, u) : seriesOf(ctx0)
+}
+
+/** The params a union root's series refuses: one store's axes (as `/api/subtree`'s root does). */
+const UNION_ROOT_UNSCOPED = ['lens', 'o', 'cl', 'q', 'paths'] as const
+
+/**
+ * `/api/series` on a union view. The root: each member's own series (its scans, its points), concurrently, as
+ * one step function over the union's events (`carryForward`): at each instant any member scanned, each member
+ * contributes its latest point at or before it, and nothing before its first — a point some member doesn't
+ * cover yet names it (`missing`), its total partial, never a zero. `split=roots`: every member's roots, each at
+ * its member's carried point. Below the root: the path's member answers (its roots at the latest cutoff).
+ */
+async function unionSeries(ctx0: SeriesCtx, view: UnionView): Promise<Response> {
+  const url = new URL(ctx0.request.url)
+  const path = (url.searchParams.get('path') ?? '').replace(/\/+$/, '')
+  if (path.includes('..') || path.startsWith('/')) return json({ error: 'bad path' }, 400)
+  const un = await openUnion(ctx0, view, true)
+  if (un instanceof Response) return un
+  if (path !== '') {
+    const c = latestCutoff(un)
+    const m = c && await memberOf(membersAt(un, c), path)
+    if (!m) return json({ error: 'path not found' }, 404)
+    return seriesOf({ ...ctx0, request: memberRequest(ctx0.request, m.store) })
+  }
+  const scoped = UNION_ROOT_UNSCOPED.filter(k => url.searchParams.get(k))
+  if (scoped.length) return json({ error: `a union view's root is unscoped (${scoped.join(', ')}: drill into one store)` }, 400)
+  const reads = await Promise.all(view.members.map(s => seriesOf({ ...ctx0, request: memberRequest(ctx0.request, s) })))
+  const bad = reads.find(r => !r.ok)
+  if (bad) return bad
+  const bodies = await Promise.all(reads.map(r => r.json() as Promise<{ points: { date: string; b: number; o: number }[]; roots?: RootTrace[]; failed?: string[] }>))
+  const traces = await Promise.all(bodies.map(async (body, i) => {
+    const env = un.ctxs[i].env
+    const times = await scanTimes(env, body.points.map(p => p.date))
+    const rows = new Map<string, RootRow[]>()
+    for (const t of body.roots ?? []) for (const p of t.points) {
+      const r = rows.get(p.date) ?? []
+      r.push({ path: t.path, b: p.b, o: p.o })
+      rows.set(p.date, r)
+    }
+    return { source: view.members[i], points: body.points.map(p => ({ at: new Date(scanInstant(p.date, times)).toISOString(), value: { ...p, rows: rows.get(p.date) ?? [] } })) }
+  }))
+  const steps = carryForward(traces)
+  const split = url.searchParams.get('split') === 'roots'
+  const byDate = new Map<string, RootRow[]>()
+  const points = steps.map(({ at, values }) => {
+    // The step's scan id: the one a member observed at this instant (the first, in member order).
+    const date = values.find((v, i) => v && traces[i].points.some(p => p.at === at && p.value === v))!.date
+    const missing = view.members.filter((_, i) => !values[i])
+    if (split) byDate.set(date, values.flatMap(v => v?.rows ?? []))
+    return { date, b: values.reduce((n, v) => n + (v?.b ?? 0), 0), o: values.reduce((n, v) => n + (v?.o ?? 0), 0), ...(missing.length ? { missing } : {}) }
+  })
+  const failed = bodies.flatMap(b => b.failed ?? []).sort()
+  const body = JSON.stringify({
+    path, points,
+    ...(split ? { roots: rootPoints(byDate) } : {}),
+    ...(failed.length ? { failed } : {}),
+    union: { view: view.key, sources: view.members.map((store, i) => ({ store, from: bodies[i].points[0]?.date ?? null })) },
+  })
+  return new Response(body, { headers: {
+    'content-type': 'application/json; charset=utf-8',
+    'cache-control': failed.length ? 'no-store' : reads.map(r => r.headers.get('cache-control')).find(c => c === 'no-store') ?? reads[0]?.headers.get('cache-control') ?? 'no-store',
+  } })
+}
+
+async function seriesOf(ctx0: SeriesCtx): Promise<Response> {
   // `store=<key>`: a secondary store's env overlay (none = the primary, as is).
   const ctx1 = withStore(ctx0)
   if (ctx1 instanceof Response) return ctx1
@@ -87,6 +165,9 @@ export const onRequestGet = async (ctx0: Ctx & { waitUntil?: (p: Promise<unknown
   const paths = parsePaths(url.searchParams.getAll('paths'))
   if (paths.some(p => p.includes('..') || p.startsWith('/'))) return json({ error: 'bad paths' }, 400)
   if (paths.length > SERIES_MAX_PATHS) return json({ error: `too many paths (max ${SERIES_MAX_PATHS})` }, 400)
+  // A path-restricted link (specs/path-scopes.md): hidden paths are absent.
+  const restriction = restrictionFor(gated, env)
+  if (restriction && [path, ...paths].some(p => isHidden(p, restriction))) return hiddenNotFound()
   const lensRaw = url.searchParams.get('lens')
   let lens: Lens | undefined
   if (lensRaw) {
@@ -124,8 +205,14 @@ export const onRequestGet = async (ctx0: Ctx & { waitUntil?: (p: Promise<unknown
   qp.query = hx.query
   const query = qp.query && !qp.query(path) ? qp.query : undefined
   if (qp.query && !query) paths.length = 0
-  const sfs = query && !lens && !classes ? staticFilterStore(env) : null
-  const skey = sfs ? staticLiteral(query!.ast) : null
+  // A compound query (`a b`, `a|b`, `a -b`, `-b`; `staticBool.ts`): Σ each scan's match roots less its excluded
+  // paths from the static answer — or, where the view root is the one match root (exclusions alone, an AND-group
+  // its path holds), the root's own point less what it excludes.
+  const bplan = qp.query && !lens && !classes ? boolPlan(qp.query.ast) : null
+  const sfs = (query || compound(bplan)) && !lens && !classes ? staticFilterStore(env) : null
+  const skey = sfs && query ? staticLiteral(query.ast) : null
+  /** The query the response is keyed and answered by: a compound one the view root matches still subtracts its exclusions. */
+  const keyed = query ?? (sfs && compound(bplan) && bplan.neg.length ? qp.query! : undefined)
   // `split=roots` (specs/done/root-geneses.md §1): the unscoped store root only —
   // one trace per depth-1 row (bucket) beside the total.
   const split = url.searchParams.get('split')
@@ -146,11 +233,11 @@ export const onRequestGet = async (ctx0: Ctx & { waitUntil?: (p: Promise<unknown
   // chart load re-read one point per scan (≈8 rounds of D1 + range reads for
   // a 94-scan history, 5–20 s) while the diff beside it was a cache hit.
   const g = await st.time('gens', pathGens(env, dates))
-  const cacheKey = cacheKeyFor('series', cacheEnvTag(env, request), `${encodeURIComponent(path)}?P=${encodeURIComponent(paths.join(','))}&l=${lensTag}&o=${owner ? ownerKey(owner) : ''}&cl=${classKey(classes)}&s=${split ?? ''}&qs=${query ? qp.syntax : ''}&q=${encodeURIComponent(query ? url.searchParams.get('q') ?? '' : '')}&st=${staticTag(env, query)}&d=${dates.join(',')}&x=${extra.join(',')}&head=${head}&g=${g}`, storeKey(env))
+  const cacheKey = cacheKeyFor('series', cacheEnvTag(env, request), `${encodeURIComponent(path)}?P=${encodeURIComponent(paths.join(','))}&l=${lensTag}&o=${owner ? ownerKey(owner) : ''}&cl=${classKey(classes)}&s=${split ?? ''}&qs=${keyed ? qp.syntax : ''}&q=${encodeURIComponent(keyed ? url.searchParams.get('q') ?? '' : '')}&st=${staticTag(env, keyed)}&d=${dates.join(',')}&x=${extra.join(',')}&head=${head}&g=${g}&oh=${env.OWNER_HISTORY_BATCH === '1' ? 4 : 0}`, storeKey(env))
   const hit = await st.time('cache', cacheMatch(env, cacheKey))
   if (hit) return hit
 
-  // Fast path (specs/obs-axis-indexing.md Phase 1): a path's series (or a
+  // Fast path (specs/done/obs-axis-indexing.md Phase 1): a path's series (or a
   // filter's, one line per match root) reads the cross-scan over-time index —
   // ⌈scans/K⌉ pruned reads per root — instead of one point read per scan.
   // Read only on a cache miss (it used to precede the check: ~1.2 s per hit).
@@ -163,22 +250,37 @@ export const onRequestGet = async (ctx0: Ctx & { waitUntil?: (p: Promise<unknown
   // or a rollup under an owner pool (rollups carry no owners).
   const found = skey ? await st.time('static', sfs!.source.hits(skey, path)) : null
   const shits = found?.rollup && owner ? null : found
+  const bgot = sfs && !skey && keyed && compound(bplan) ? await st.time('static', staticCompound(sfs, bplan, path, [])) : null
+  const sbool: BoolAnswer | null = bgot && 'answer' in bgot ? bgot.answer : null
   // The scans it is exact on: the drilldown's are its base generation's, less the dir-only ones (a v1 source
   // lists no files, so a name's total there reads ~0 — a gap, not a point).
-  const sscans = shits ? new Set(shits.scans ?? await sfs!.scans()) : null
+  const sscans = shits || sbool ? new Set((shits ?? sbool)!.scans ?? await sfs!.scans()) : null
   if (sscans) for (const d of await sfs!.dirOnly?.() ?? []) sscans.delete(d)
   // An anchored term with no anchors build is `anchor-not-indexed`, indexed-only or not; else, indexed-only, no
   // answer is `scan-not-indexed` (never the client's roots read per scan).
   const unanchored = query && skey && !found && sfs!.source.why?.(skey) === 'anchor-not-indexed'
-  if (unanchored || (query && strict && !shits)) return new Response(rejectBody(reject(unanchored ? 'anchor-not-indexed' : 'scan-not-indexed')), { status: 400, headers: { 'content-type': 'application/json' } })
-  if (query && !shits && !paths.length) return json({ error: 'a filtered series needs its match roots (paths=)' }, 400)
+  if (unanchored || (keyed && strict && !shits && !sbool)) return new Response(rejectBody(bgot && 'reject' in bgot ? bgot.reject : reject(unanchored ? 'anchor-not-indexed' : 'scan-not-indexed')), { status: 400, headers: { 'content-type': 'application/json' } })
+  if (query && !shits && !sbool && !paths.length) return json({ error: 'a filtered series needs its match roots (paths=)' }, 400)
   /** The scans a static answer doesn't cover: gaps in the series, named (indexed-only or not). */
   const unindexed: string[] = []
-  const indexable = !split && !lens && !owner && !classes && !shits
+  const indexable = !split && !lens && !owner && !classes && !shits && !(sbool && !sbool.whole)
   const lines = indexable ? await st.time('overtime', Promise.all((paths.length ? paths : [path]).map(p => readOverTime(env, p)))) : []
   const ot: OverTime[] | null = lines.length && lines.every(Boolean) ? lines as OverTime[] : null
+  let ownerHistory: Awaited<ReturnType<typeof readRootHistory>> = null
+  if (env.OWNER_HISTORY_BATCH === '1' && !path && !paths.length && !query && !split && !classes && lens && !owner) {
+    try {
+      ownerHistory = await st.time('owner-history', ivRetry(() => readRootHistory(env, dates, { lens, owner })))
+      st.trace('owner-history-points', ownerHistory?.size ?? 0, 'count')
+    } catch (e) {
+      const why = (e as Error).message
+      st.trace('owner-history-fallback', 0, why)
+      console.log(`owner history: canonical fallback: ${why}`)
+    }
+  }
 
   const points: { date: string; b: number; o: number }[] = []
+  /** Scans whose point errored (not ones the path is absent from): named in the body, which isn't cached. */
+  const failed: string[] = []
   // split=roots: each scan's depth-1 rows (the total is their sum), and for
   // tier-less scans whatever meta.json says about its roots.
   const rootsByDate = new Map<string, RootRow[]>()
@@ -191,9 +293,22 @@ export const onRequestGet = async (ctx0: Ctx & { waitUntil?: (p: Promise<unknown
         const t = shits.rollup ? rollupTotal(shits.rollup, date) : liveTotal(shits.hits, date, u => ownerOk(u, owner))
         return { date, b: t.b, o: t.o }
       }
+      if (sbool && sscans!.has(date)) {
+        if (sbool.none) return { date, b: 0, o: 0 }
+        const keep = (u: string | null) => ownerOk(u, owner)
+        const r = liveTotal(sbool.roots, date, keep), e = liveTotal(sbool.excl, date, keep)
+        if (!sbool.whole) return { date, b: r.b - e.b, o: r.o - e.o }
+        const covered = ot ? overTimePoint(ot, date) : undefined
+        const all = covered !== undefined ? covered : await ivRetry(() => readRootAgg(env, { date, path, lens, owner, classes }))
+        return all ? { date, b: all.b - e.b, o: all.o - e.o } : null
+      }
       // A scan the static answer doesn't cover: a gap, named — never the current scan's match roots read on
       // it (another scan's roots, or a rollup's few) nor a zero.
-      if (shits) { unindexed.push(date); return null }
+      if (shits || sbool) { unindexed.push(date); return null }
+      if (ownerHistory?.has(date)) {
+        const value = ownerHistory.get(date)
+        return value ? { date, ...value } : null
+      }
       const covered = ot ? overTimePoint(ot, date) : undefined
       if (covered !== undefined) return covered && { date, ...covered }
       if (split) {
@@ -215,6 +330,7 @@ export const onRequestGet = async (ctx0: Ctx & { waitUntil?: (p: Promise<unknown
       const msg = (e as Error).message
       if (tries > 1 && /internal error/i.test(msg)) return point(date, tries - 1)
       console.log(`series ${path || '/'} ${lensTag || owner || ''}: no point for ${date}: ${msg}`)
+      failed.push(date)
       return null
     }
   }
@@ -240,6 +356,8 @@ export const onRequestGet = async (ctx0: Ctx & { waitUntil?: (p: Promise<unknown
     for (const g of got) if (g) points.push(g)
   }
   points.sort((a, b) => a.date.localeCompare(b.date))
-  const body = JSON.stringify({ path, ...(qp.query ? hexNote(hx.hexRuns, qp.query.ast) : {}), ...(unindexed.length ? { unindexed: unindexed.sort() } : {}), ...(paths.length ? { paths } : {}), ...(lens ? { lens: lensTag } : {}), ...(owner ? { owner } : {}), points, ...(split ? { roots: rootPoints(rootsByDate) } : {}) })
+  const body = JSON.stringify({ path, ...(qp.query ? hexNote(hx.hexRuns, qp.query.ast) : {}), ...(unindexed.length ? { unindexed: unindexed.sort() } : {}), ...(paths.length ? { paths } : {}), ...(lens ? { lens: lensTag } : {}), ...(owner ? { owner } : {}), points, ...(split ? { roots: rootPoints(rootsByDate) } : {}), ...(failed.length ? { failed: failed.sort() } : {}) })
+  // A series missing points to errors is served (gaps beat no chart) but never cached: the next request retries them.
+  if (failed.length) return new Response(body, { headers: { 'content-type': 'application/json', 'cache-control': 'no-store', 'server-timing': st.header() } })
   return cacheStore(env, cacheKey, body, { 'server-timing': st.header() }, ctx.waitUntil?.bind(ctx))
 }

@@ -11,7 +11,7 @@
  *  root's bytes, objects and per-owner split on scan `D` are the sum of its slices live on `D`.
  *
  *  Which queries: `staticLiteral` — one positive substring matcher without `/`, no other term, glob, regex
- *  or exclusion. Which literals: those of ≥ 3 characters whose suffix range the shard group index bounds by
+ *  or exclusion; AND / OR / NOT of such literals combine their answers in `staticBool.ts` (`staticCompound`). Which literals: those of ≥ 3 characters whose suffix range the shard group index bounds by
  *  `maxRows` (V = 100K plus two row groups of slack, so every non-member and the lightest members) are read
  *  whole once per isolate (and once per colo through the Cache API); heavier ones, and every one- or
  *  two-character literal, ask the `heavy` source — the drilldown (`staticDrill.ts`, `FILTER_STATIC_HEAVY=1`):
@@ -28,11 +28,13 @@ import { StaticCatalog } from './staticCatalog.js'
 import { type CatalogLookup, Drill, DRILL_DIR, DrillSource, type Rollup, type RollupCell } from './staticDrill.js'
 import { type Blobs, cacheIndexes, type FirstHits, type Hit, type Io, r2Blobs, scanAt, staticGen, staticPrefix } from './staticNames.js'
 import { tiers } from './staticRuns.js'
-import { ANCHOR_MIN, type FilterReject, type FilterRejectCode, reject } from './indexedOnly.js'
+import { ANCHOR_MIN, type FilterReject, type FilterRejectCode, reject, rejectAst } from './indexedOnly.js'
+import { type BoolAnswer, boolPlan, type BoolPlan, compound, evalBool, isDecline } from './staticBool.js'
 import { AnchoredSource, parseKey, termInPath, termKey } from './staticAnchors.js'
 import { type HexRule, hexAffected } from './hexRuns.js'
 import type { Matcher } from './queryAst.js'
 import { compileQuery, type NamePred } from './pathQuery.js'
+import { PRIMARY_STORE } from './stores.js'
 
 export type { Hit } from './staticNames.js'
 export { type Rollup, rollupAt, rollupTotal } from './staticDrill.js'
@@ -91,6 +93,10 @@ export interface HitSource {
   /** Whether `hits` last declined `key` as a heavy literal its heavy source declined too (a member the drill's
    *  newest live tier doesn't know yet, its stack cut at a run with no drill): no light answer either. */
   heavyDeclined?(key: string): boolean
+  /** `key`'s match root at exactly `path` — its hits (every version of every owner slice), empty when `path` is no
+   *  root of `key` — any date: a heavy directory's kept child that is a root itself, whose own rows its rollup
+   *  doesn't list (`staticBool.ts`'s exclusions). Absent / null: can't say. */
+  at?(key: string, path: string): Promise<Found | null>
 }
 
 /** The generation's scans (ids). `dirOnly`: those of them indexed from a dir-only (v1) source — held, but blind
@@ -115,6 +121,7 @@ const under = (p: string, root: string): boolean => root === '' || p.startsWith(
 export interface HitReader {
   read(key: string, maxRows?: number): Promise<{ io: Io; fold: FirstHits | null; version?: string; scans?: string[] }>
   snapshot?(): Promise<{ version: string; scans: string[] }>
+  defaultMaxRows?(key: string, baseMaxRows: number): Promise<number>
 }
 
 /** The light source: the literal's suffix range from the shards, folded to its first hits once (per
@@ -139,7 +146,8 @@ export class SuffixHits implements HitSource {
     const p = shared(this.held, vkey, async () => {
       const cached = await this.opts.cache?.get(vkey)
       if (cached) return { hits: cached, io: { from: 'cache', version }, scans: snap?.scans }
-      const { io, fold, version: read = 'base', scans } = await this.names.read(key, this.opts.maxRows ?? MAX_ROWS)
+      const maxRows = this.opts.maxRows ?? await this.names.defaultMaxRows?.(key, MAX_ROWS) ?? MAX_ROWS
+      const { io, fold, version: read = 'base', scans } = await this.names.read(key, maxRows)
       if (!fold) return null
       // A stack cut mid-read (a broken tier) is another version's answer: never cached (or held) under this one.
       if (read === version) await this.opts.cache?.put(vkey, fold.hits)
@@ -176,6 +184,13 @@ export class SuffixHits implements HitSource {
       if (this.declinedHeavy.size > 1024) this.declinedHeavy.delete(this.declinedHeavy.values().next().value!)
     }
     return got
+  }
+
+  async at(key: string, path: string): Promise<Found | null> {
+    if (parseKey(key).mode) return null
+    const got = shortLiteral(key) ? null : await this.all(key)
+    if (!got) return this.opts.heavy?.at ? this.opts.heavy.at(key, path) : null
+    return { hits: got.hits.filter(h => h.path === path), io: got.io, ...(got.scans ? { scans: got.scans } : {}) }
   }
 
   async hits(key: string, root: string, opts?: HitOpts): Promise<Found | null> {
@@ -230,7 +245,7 @@ export function cacheHits(cache: Cache, prefix: string, version = 'hits-v1'): Hi
   }
 }
 
-export type StaticFilterEnv = { FILTER_STATIC?: string; FILTER_STATIC_HEAVY?: string; FILTER_STATIC_ANCHORS?: string; FILTER_INDEXED_ONLY?: string; INDEX_R2?: R2Bucket; STATIC_GEN?: string }
+export type StaticFilterEnv = { FILTER_STATIC?: string; FILTER_STATIC_HEAVY?: string; FILTER_STATIC_ANCHORS?: string; FILTER_INDEXED_ONLY?: string; INDEX_R2?: R2Bucket; STATIC_GEN?: string; STORE_KEY?: string }
 
 /** The drilldown over a bucket's generation: the base `drill/` and its `runs`' (`staticDrill.ts`), with the fleet
  *  root from `opts.catalog` (default: the base catalog); `cached`: its indexes in `cache` under `prefix` (the
@@ -246,23 +261,41 @@ export function drillSource(blobs: Blobs, cached?: { cache: Cache; prefix: strin
   return new DrillSource(drill, cache ? cacheHits(cache, pre(null), 'roots-v1') : undefined)
 }
 
-/** A test's store for an env object (in place of the R2 binding's): held on the env under a symbol, so the copies a
- *  request makes of it (`withStore`'s request, `withPathStore`, `slices`, …) carry it too. */
-const INJECTED = Symbol('injected static filter store')
+/** A test's stores for an env object (in place of the R2 binding's), one per store (default the primary): held on
+ *  the env under a symbol, so the copies a request makes of it (`withStore`'s overlay, `withPathStore`, `slices`, …)
+ *  carry them too, and each store's env finds its own. */
+const INJECTED = Symbol('injected static filter stores')
+type Injected = { [INJECTED]?: Map<string, StaticFilterStore> }
 export const injectedStores = {
-  set: (env: object, s: StaticFilterStore): void => { (env as { [INJECTED]?: StaticFilterStore })[INJECTED] = s },
-  get: (env: object): StaticFilterStore | undefined => (env as { [INJECTED]?: StaticFilterStore })[INJECTED],
+  set: (env: object, s: StaticFilterStore, store: string = PRIMARY_STORE): void => {
+    const e = env as Injected
+    e[INJECTED] = new Map(e[INJECTED] ?? []).set(store, s)
+  },
+  get: (env: object): StaticFilterStore | undefined => (env as Injected)[INJECTED]?.get((env as { STORE_KEY?: string }).STORE_KEY ?? PRIMARY_STORE),
 }
 
-let held: { r2: R2Bucket; gen: string; store: StaticFilterStore } | undefined
-/** The isolate's static filter store over the bound bucket; null when the static filter is off. A test
- *  injects its own (`injectedStores`). */
+/** A store under the static filter whose own config names no generation (`stores.ts`): it holds no scan, so every
+ *  literal and compound query is `scan-not-indexed` — never another store's index, never the walk. */
+export const UNINDEXED: StaticFilterStore = {
+  source: { hits: async () => null },
+  scans: async () => [],
+  gen: 'none',
+}
+
+/** The isolate's static filter stores, by generation and knobs (stores sharing a generation may differ in them). */
+const held = new Map<string, { r2: R2Bucket; store: StaticFilterStore }>()
+/** The isolate's static filter store over the bound bucket; null when the static filter is off. A secondary store
+ *  reads its own generation only (`STATIC_GEN` from its `STORES_JSON` vars), none = `UNINDEXED`. A test injects
+ *  its own (`injectedStores`). */
 export function staticFilterStore(env: StaticFilterEnv): StaticFilterStore | null {
+  const on = env.FILTER_STATIC === '1' && !!env.INDEX_R2
+  if (on && env.STORE_KEY !== undefined && !env.STATIC_GEN?.trim()) return UNINDEXED
   const injected = injectedStores.get(env)
   if (injected) return injected
-  if (env.FILTER_STATIC !== '1' || !env.INDEX_R2) return null
+  if (!on || !env.INDEX_R2) return null
   const gen = staticGen(env), pre = staticPrefix(gen)
-  if (held?.r2 !== env.INDEX_R2 || held.gen !== gen) {
+  const slot = `${gen}|${env.FILTER_STATIC_HEAVY === '1' ? 'h' : ''}|${env.FILTER_STATIC_ANCHORS === '0' ? '' : 'a'}`
+  if (held.get(slot)?.r2 !== env.INDEX_R2) {
     // The base generation plus its runs (`staticRuns.ts`): each tier's indexes cached under its own prefix.
     const tierPre = (dir: string | null) => dir ? `${pre}/${dir}` : pre
     const t = tiers(r2Blobs(env.INDEX_R2, pre), { indexCache: dir => cacheIndexes(caches.default, tierPre(dir)), catalogCache: dir => cacheIndexes(caches.default, tierPre(dir), 'catalog-v1') })
@@ -281,9 +314,9 @@ export function staticFilterStore(env: StaticFilterEnv): StaticFilterStore | nul
         top: dir => cacheIndexes(caches.default, sub(dir, 'anchors'), 'top-v1'),
       },
     })
-    held = { r2: env.INDEX_R2, gen, store: { source: new SuffixHits(t.names, { cache: cacheHits(caches.default, pre), heavy, catalog: heavy ? null : t.catalog, anchored }), scans: t.scans, dirOnly: t.dirOnly, gen: `${gen}${heavy ? '+drill' : ''}`, hexRuns: () => t.names.hexRuns() } }
+    held.set(slot, { r2: env.INDEX_R2, store: { source: new SuffixHits(t.names, { cache: cacheHits(caches.default, pre), heavy, catalog: heavy ? null : t.catalog, anchored }), scans: t.scans, dirOnly: t.dirOnly, gen: `${gen}${heavy ? '+drill' : ''}`, hexRuns: () => t.names.hexRuns() } })
   }
-  return held.store
+  return held.get(slot)!.store
 }
 
 /** Whether `date` can be answered statically for `ast`: the literal, else null. */
@@ -309,7 +342,8 @@ export async function dirsOnlyOf(s: StaticFilterStore | null, dates: string[]): 
  *  matches (the plain view, nothing searched). */
 export async function dirsOnlySplit(s: StaticFilterStore | null, ast: QueryAst | undefined, path: string, dates: string[]): Promise<FilterReject | null> {
   const key = staticLiteral(ast)
-  if (!s || !key || termInPath(key, path, s.hexRuns ? await s.hexRuns() : null)) return null
+  // A compound query (`staticBool.ts`) compares its matches as a literal does.
+  if (!s || !(key || compound(boolPlan(ast))) || (key && termInPath(key, path, s.hexRuns ? await s.hexRuns() : null))) return null
   const n = (await dirsOnlyOf(s, dates)).length
   return n && n < dates.length ? reject('scan-dirs-only') : null
 }
@@ -343,8 +377,13 @@ export function liveTotal(hits: Hit[], date: string, keep: (usr: string | null) 
  *  than its newest (published, not yet appended) or before its base — or that its answer doesn't cover is `scan-not-indexed`
  *  on every deployment, indexed-only or not: the walk answered it before, missing small matches; 18: a heavy literal's
  *  rollup view nests — its drawn children answered in turn, to `FILTER_SUBDIV_LEVELS` below the view, in the view and
- *  both sides of a diff). */
-const RESPONSE_V = 18
+ *  both sides of a diff; 19: a budget-cut nest flags `budgetCut` for the client to re-ask — cached 18s from a deploy
+ *  between the two could serve a cut tree unflagged; 20: a node's `d` is its newest write, not the byte-weighted mean;
+ *  21: compound queries — `a b`, `a|b`, `a -b`, `-b` of literals — answered exactly from the static index
+ *  (`staticBool.ts`), where they walked the path store, flagged approximate, before; 22: a secondary store reads only
+ *  its own static index (`STORES_JSON` `STATIC_GEN`), never the primary's — a cached 21 body could hold the primary's
+ *  matches under a secondary's root). */
+const RESPONSE_V = 22
 
 /** The query's substring matchers (positive and negative): the literals the hex-run rule applies to. */
 const subMatchers = (ast: QueryAst | undefined): Extract<Matcher, { kind: 'sub' }>[] =>
@@ -392,7 +431,21 @@ export function declined(s: StaticFilterStore | null, skey: string | null, raw: 
   return s && skey && !raw && s.source.heavy === false && !parseKey(skey).mode ? reject('term-too-common') : reject('scan-not-indexed')
 }
 
-/** An indexed-only deployment's coverage test (`indexedOnly.ts`): `ast` (one literal, `rejectAst` passed) is
+/** A compound query's static answer under `path` (`staticBool.ts`), exact on every one of `dates`; else the refusal
+ *  naming why: a scan outside the generation, or one an answer it read doesn't cover, `scan-not-indexed`; a term
+ *  no source answers, that term's own reason (`declined`); a combination that can't be exact within the budget,
+ *  `too-broad` (`why`: which rule). */
+export async function staticCompound(s: StaticFilterStore, plan: BoolPlan, path: string, dates: string[]): Promise<{ answer: BoolAnswer } | { reject: FilterReject; why?: string }> {
+  const have = await s.scans()
+  if (!dates.every(d => have.includes(d))) return { reject: reject('scan-not-indexed') }
+  const a = await evalBool(s.source, plan, path, s.hexRuns ? await s.hexRuns() : null)
+  if (isDecline(a)) return { reject: a.declined === 'term' ? declined(s, a.key, null) : reject('too-broad'), why: a.reason }
+  if (a.scans && !dates.every(d => a.scans!.includes(d))) return { reject: reject('scan-not-indexed') }
+  return { answer: a }
+}
+
+/** An indexed-only deployment's coverage test (`indexedOnly.ts`): `ast` (literals, `rejectAst` passed; a compound
+ *  one through `staticCompound`) is
  *  answered statically under `path` on every one of `dates`, else the refusal `declined` names (or, dates
  *  across a dir-only and a full scan, `scan-dirs-only`: `dirsOnlySplit`); a dir-only scan alone passes, its
  *  view flagged `dirsOnly`. A view root
@@ -400,8 +453,20 @@ export function declined(s: StaticFilterStore | null, skey: string | null, raw: 
  *  own read reuses it. */
 export async function indexedGate(env: StaticFilterEnv, ast: QueryAst | undefined, path: string, dates: string[], opts?: HitOpts): Promise<FilterReject | null> {
   const key = staticLiteral(ast)
-  if (!key) return reject('unsupported-terms')
   const s = staticFilterStore(env)
+  if (!key) {
+    // A compound query (`staticBool.ts`): its answer under `path`, every date covered, else why not. A view root
+    // the query matches with nothing to exclude is the plain view.
+    const plan = ast ? boolPlan(ast) : null
+    if (!plan) return (ast && rejectAst(ast)) ?? reject('unsupported-glob')
+    const rule = await staticHexRule(env)
+    if (!plan.neg.length && plan.alts.some(g => g.every(t => termInPath(t, path, rule)))) return null
+    if (!s) return declined(s, null, null)
+    const split = await dirsOnlySplit(s, ast, path, dates)
+    if (split) return split
+    const got = await staticCompound(s, plan, path, dates)
+    return 'answer' in got ? null : got.reject
+  }
   if (termInPath(key, path, await staticHexRule(env))) return null
   const skey = s ? await staticKey(s, ast, dates) : null
   if (!skey) return declined(s, null, null)

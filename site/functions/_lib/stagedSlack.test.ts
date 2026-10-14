@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
-import { closedParent, PLAN_SENDER, queueWasEmpty, fmtBytes, personSender, renderParent, runEvent, runUrl, shortPath, sizeOf, stageReply, stagedCardUrl, topFolders, type RunRow } from './stagedSlack.js'
-import { sqliteD1 } from './testD1.js'
+import { closedParent, PLAN_SENDER, queueWasEmpty, queuedOf, fmtBytes, personSender, renderParent, runEvent, runUrl, shortPath, sizeOf, stageReply, stagedCardUrl, topFolders, type RunRow } from './stagedSlack.js'
+import { LINEAGES, sqliteD1 } from './testD1.js'
 
 const run = (o: Partial<RunRow>): RunRow => ({
   run_id: 'cw-sweep-dry-1', mode: 'dry', scan: '2026-09-28T1201', actor: 'ann@openathena.ai', started_ts: 100,
@@ -75,12 +75,25 @@ describe('names and sizes (plain text, never a mention)', () => {
     expect((renderParent(v).blocks[0] as { text: { text: string } }).text.text.split('\n')).toEqual([
       `*Staged for deletion* · plan #${base.planId} · ${base.items} prefixes in ${base.batches} batches`,
       'staged by Ann Bee, c.d',
-      '*51.0 TiB* · 179,327,698 objects at scan 2026-10-02 · 5 empty · owners: Grace Hopper 16.0 TiB, hedy-lamarr 6.0 TiB',
+      '*51.0 TiB* · 179,327,698 objects at scan 2026-10-02 · owners: Grace Hopper 16.0 TiB, hedy-lamarr 6.0 TiB',
+      '+5 staged prefixes empty at scan, not counted',
     ])
   })
-  it('sizeOf: totals over every prefix, absent or zero = empty, owners by attributed bytes', () => {
-    const at = { scan: 'S', stats: { 'gs://b/a/': { b: 5, o: 2, us: [['u1', 3], ['u2', 2]] as [string, number][] }, 'gs://b/c/': { b: 4, o: 1, us: [['u2', 4]] as [string, number][] }, 'gs://b/z/': { b: 0, o: 0 } } }
-    expect(sizeOf(at, ['gs://b/a/', 'gs://b/c/', 'gs://b/z/', 'gs://b/gone/'], u => u.toUpperCase(), 1)).toEqual({ scan: 'S', b: 9, o: 3, empty: 2, owners: [{ label: 'U2', b: 6 }] })
+  it('sizeOf: totals over every prefix, absent or no bytes and no objects = empty (zero-byte objects are not), owners by attributed bytes', () => {
+    const at = { scan: 'S', stats: { 'gs://b/a/': { b: 5, o: 2, us: [['u1', 3], ['u2', 2]] as [string, number][] }, 'gs://b/c/': { b: 4, o: 1, us: [['u2', 4]] as [string, number][] }, 'gs://b/z/': { b: 0, o: 0 }, 'gs://b/zb/': { b: 0, o: 3 } } }
+    expect(sizeOf(at, ['gs://b/a/', 'gs://b/c/', 'gs://b/z/', 'gs://b/zb/', 'gs://b/gone/'], u => u.toUpperCase(), 1)).toEqual({ scan: 'S', b: 9, o: 6, empty: 2, owners: [{ label: 'U2', b: 6 }] })
+  })
+  it('queuedOf: the title counts prefixes, batches and stagers over what is not empty at the scan', () => {
+    const live = [
+      { prefix: 'gs://b/a/', added_by: 'ann', batch_id: 1 },
+      { prefix: 'gs://b/e1/', added_by: 'ann', batch_id: 1 },
+      { prefix: 'gs://b/e2/', added_by: 'bo', batch_id: 2 },
+      { prefix: 'gs://b/legacy/', added_by: 'cy', batch_id: null },
+    ]
+    expect([queuedOf(live), queuedOf(live, new Set(['gs://b/e1/', 'gs://b/e2/']))]).toEqual([
+      { items: 4, batches: 2, stagers: ['ann', 'bo', 'cy'] },
+      { items: 2, batches: 1, stagers: ['ann', 'cy'] },
+    ])
   })
 })
 
@@ -150,49 +163,51 @@ describe('senders', () => {
   })
 })
 
-describe('the plan card', () => {
-  const base = { planId: 7, siteUrl: 'https://site.example.org', items: 3, batches: 2, stagers: [] as string[], digest: 'D1', actions: true, closed: false, runs: [] as RunRow[] }
-  const types = (blocks: unknown[]) => blocks.map(b => (b as { type: string }).type)
-  it('an image block last, only with an image and items', () => {
-    const v = { ...base, image: 'https://site.example.org/og/staged.png?v=abc&sig=x' }
-    expect([types(renderParent(v).blocks), renderParent(v).blocks[3], types(renderParent({ ...v, items: 0 }).blocks), types(renderParent(base).blocks)]).toEqual([
-      ['section', 'section', 'actions', 'image'],
-      { type: 'image', image_url: 'https://site.example.org/og/staged.png?v=abc&sig=x', alt_text: 'Plan #7: the staged prefixes as a treemap, coloured by owner' },
-      ['section', 'section', 'actions'],
-      ['section', 'section', 'actions'],
-    ])
+describe.each(LINEAGES)('D1, %s lineage', lineage => {
+  describe('the plan card', () => {
+    const base = { planId: 7, siteUrl: 'https://site.example.org', items: 3, batches: 2, stagers: [] as string[], digest: 'D1', actions: true, closed: false, runs: [] as RunRow[] }
+    const types = (blocks: unknown[]) => blocks.map(b => (b as { type: string }).type)
+    it('an image block last, only with an image and items', () => {
+      const v = { ...base, image: 'https://site.example.org/og/staged.png?v=abc&sig=x' }
+      expect([types(renderParent(v).blocks), renderParent(v).blocks[3], types(renderParent({ ...v, items: 0 }).blocks), types(renderParent(base).blocks)]).toEqual([
+        ['section', 'section', 'actions', 'image'],
+        { type: 'image', image_url: 'https://site.example.org/og/staged.png?v=abc&sig=x', alt_text: 'Plan #7: the staged prefixes as a treemap, coloured by owner' },
+        ['section', 'section', 'actions'],
+        ['section', 'section', 'actions'],
+      ])
+    })
+    it('no card without cards on, nor for a non-https origin (Slack fetches it); with them, a full card backed by a fresh `og_tokens` row (cw `0010`)', async () => {
+      const { db, raw } = await sqliteD1(lineage)
+      const off = await stagedCardUrl({ SESSION_SECRET: 's3cret' }, db, 'https://site.example.org', 'abcdef0123456789', 1790000000)
+      const local = await stagedCardUrl({ OG_CARDS: '1', SESSION_SECRET: 's3cret' }, db, 'http://localhost:3254', 'abcdef0123456789', 1790000000)
+      const on = await stagedCardUrl({ OG_CARDS: '1', SESSION_SECRET: 's3cret' }, db, 'https://site.example.org', 'abcdef0123456789', 1790000000)
+      const rows = raw.prepare('SELECT token, kind, view, page, minted_by, minted_ts, exp_day FROM og_tokens').all() as { token: string }[]
+      expect([off, local, on?.replace(/t=\w{10}&/, 't=<token>&').replace(/sig=\w+$/, 'sig=<sig>'), rows.map(r => ({ ...r, token: r.token.length }))]).toEqual([
+        null,
+        null,
+        'https://site.example.org/og/staged.png?t=<token>&v=abcdef01&sig=<sig>',
+        [{ token: 10, kind: 'staged', view: '', page: '/staged', minted_by: 'slack:staged', minted_ts: 1790000000, exp_day: 293 }],
+      ])
+      expect(on).toContain(`t=${rows[0].token}&`)
+    })
   })
-  it('no card without cards on, nor for a non-https origin (Slack fetches it); with them, a full card backed by a fresh `og_tokens` row (cw `0010`)', async () => {
-    const { db, raw } = await sqliteD1('cw')
-    const off = await stagedCardUrl({ SESSION_SECRET: 's3cret' }, db, 'https://site.example.org', 'abcdef0123456789', 1790000000)
-    const local = await stagedCardUrl({ OG_CARDS: '1', SESSION_SECRET: 's3cret' }, db, 'http://localhost:3254', 'abcdef0123456789', 1790000000)
-    const on = await stagedCardUrl({ OG_CARDS: '1', SESSION_SECRET: 's3cret' }, db, 'https://site.example.org', 'abcdef0123456789', 1790000000)
-    const rows = raw.prepare('SELECT token, kind, view, page, minted_by, minted_ts, exp_day FROM og_tokens').all() as { token: string }[]
-    expect([off, local, on?.replace(/t=\w{10}&/, 't=<token>&').replace(/sig=\w+$/, 'sig=<sig>'), rows.map(r => ({ ...r, token: r.token.length }))]).toEqual([
-      null,
-      null,
-      'https://site.example.org/og/staged.png?t=<token>&v=abcdef01&sig=<sig>',
-      [{ token: 10, kind: 'staged', view: '', page: '/staged', minted_by: 'slack:staged', minted_ts: 1790000000, exp_day: 293 }],
-    ])
-    expect(on).toContain(`t=${rows[0].token}&`)
-  })
-})
 
-describe('queueWasEmpty: a stage into an emptied queue starts a new thread', () => {
-  const items = ['gs://b/a/', 'gs://b/c/', 'gs://b/new/']
-  const fresh = new Set(['gs://b/new/'])
-  it('every older item deleted by a real run, or empty (or absent) at the scan → empty', () => {
-    expect([
-      queueWasEmpty(items, fresh, new Set(['gs://b/a/', 'gs://b/c/']), null),
-      queueWasEmpty(items, fresh, new Set(['gs://b/a/']), { 'gs://b/c/': 0 }),
-      queueWasEmpty(['gs://b/new/'], fresh, new Set(), null),
-      queueWasEmpty(items, fresh, new Set(['gs://b/a/']), {}),
-    ]).toEqual([true, true, true, true])
-  })
-  it('any older item still holding bytes, or unsized and not deleted → not empty', () => {
-    expect([
-      queueWasEmpty(items, fresh, new Set(['gs://b/a/']), { 'gs://b/c/': 5 }),
-      queueWasEmpty(items, fresh, new Set(['gs://b/a/']), null),
-    ]).toEqual([false, false])
+  describe('queueWasEmpty: a stage into an emptied queue starts a new thread', () => {
+    const items = ['gs://b/a/', 'gs://b/c/', 'gs://b/new/']
+    const fresh = new Set(['gs://b/new/'])
+    it('every older item deleted by a real run, or empty (or absent) at the scan → empty', () => {
+      expect([
+        queueWasEmpty(items, fresh, new Set(['gs://b/a/', 'gs://b/c/']), null),
+        queueWasEmpty(items, fresh, new Set(['gs://b/a/']), { 'gs://b/c/': 0 }),
+        queueWasEmpty(['gs://b/new/'], fresh, new Set(), null),
+        queueWasEmpty(items, fresh, new Set(['gs://b/a/']), {}),
+      ]).toEqual([true, true, true, true])
+    })
+    it('any older item still holding bytes, or unsized and not deleted → not empty', () => {
+      expect([
+        queueWasEmpty(items, fresh, new Set(['gs://b/a/']), { 'gs://b/c/': 5 }),
+        queueWasEmpty(items, fresh, new Set(['gs://b/a/']), null),
+      ]).toEqual([false, false])
+    })
   })
 })

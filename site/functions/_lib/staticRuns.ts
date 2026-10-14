@@ -1,4 +1,4 @@
-/** The static name index's runs (specs/static-append.md): a base generation plus one small run per newer scan
+/** The static name index's runs (specs/done/static-append.md): a base generation plus one small run per newer scan
  *  (two scans of one day are two runs), each its own little generation under `deltas/<first>[_<last>]/`
  *  (`shards.json`, `sx/`, `catalog/`; scan ids), listed by the newest immutable `manifests/<scan id>.json` (scan
  *  ids sort in time order). Readers query every tier and merge:
@@ -236,6 +236,15 @@ export class TieredNames {
   async hexRuns(): Promise<HexRule | null> { return (await this.tiers.state()).hexRuns }
   /** The current stack: its version and the scans it covers. */
   async snapshot(): Promise<{ version: string; scans: string[] }> { const { version, scans } = await this.tiers.state(); return { version, scans } }
+
+  /** The base light-read allowance plus each run's actual boundary groups, capped at twice the base allowance.
+   *  A non-member's matching rows fit V, but each tier can add two groups of nonmatching boundary rows. */
+  async defaultMaxRows(key: string, baseMaxRows: number): Promise<number> {
+    const { got } = await this.tiers.each(t => t.names.extent(key, noIo()))
+    const extra = got.slice(1).reduce((sum, e) => sum + (e && e.b > e.a
+      ? e.idx.rows[e.a] + (e.b - e.a > 1 ? e.idx.rows[e.b - 1] : 0) : 0), 0)
+    return Math.min(baseMaxRows * 2, baseMaxRows + extra)
+  }
 
   /** Σ over tiers of the rows `key`'s range spans (row-group granular): an upper bound on rows read, and since
    *  a range's rows only grow and close records only add, ≤ V still proves `key` is no catalog member. */

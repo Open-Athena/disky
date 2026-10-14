@@ -2,10 +2,13 @@
  * the vendored wasm (the pieces the Function uses). Writes
  * `tmp/og-sample-{anon,full}.png` for a look. */
 import { beforeAll, describe, expect, it } from 'vitest'
-import { cardSvg, type CardData } from './card'
+import { cardSvg, svgColor, type CardData } from './card'
 import { ensureWasm, svgToPng } from './render'
 import { ownerColors, tilesOf } from './data'
 import type { TreeNode } from '../../../src/types'
+import { Resvg } from '@resvg/resvg-wasm'
+import { slotColor } from '../../../src/colors'
+import { diffCardData } from './diff'
 
 // Node's fs, loaded dynamically: the Functions typecheck has no Node types.
 interface Fs { mkdir(p: string, o: { recursive: boolean }): Promise<unknown>; readFile(p: string): Promise<Uint8Array>; writeFile(p: string, d: Uint8Array): Promise<void> }
@@ -42,6 +45,38 @@ describe('svgToPng', () => {
       await writeFile(`tmp/og-sample-${tier}.png`, png)
     }
     expect(dims).toEqual([[1200, 630], [1200, 630]])
+  })
+
+  it('renders a synthetic growth/shrink comparison through the real card renderer', async () => {
+    const { mkdir, writeFile } = await fsp()
+    const data = diffCardData({ name: 'CW diff demo (synthetic)', scheme: 's3://' }, 'checkpoints · changes', { path: 'checkpoints' }, 'full', '2026-09-17T0000', '2026-09-28T1200', {
+      total_a: 100 * T, total_b: 110 * T, objects_a: 10, objects_b: 11, expansions: 0,
+      truncated: false, threshold: 1, tier: 'path', lookups: 0, lookups_capped: false,
+      rows: [
+        { p: 'new-training', d: 1, k: 'dir', s: 'changed', a: 40 * T, b: 70 * T, oa: 4, ob: 7 },
+        { p: 'old-checkpoints', d: 1, k: 'dir', s: 'changed', a: 60 * T, b: 40 * T, oa: 6, ob: 4 },
+      ],
+    })
+    const png = svgToPng(cardSvg(data), fonts)
+    const dims = new DataView(png.buffer, png.byteOffset)
+    expect([dims.getUint32(16), dims.getUint32(20)]).toEqual([1200, 630])
+    await mkdir('tmp', { recursive: true })
+    await writeFile('tmp/og-diff-demo.png', png)
+  })
+
+  it('renders every fractional tree hue as its intended RGB, not black', () => {
+    const fills = Array.from({ length: 7 }, (_, i) => slotColor(0, i, 7))
+    const rects = fills.map((fill, i) => `<rect x="${i * 10}" width="10" height="10" fill="${svgColor(fill)}"/>`).join('')
+    const renderer = new Resvg(`<svg xmlns="http://www.w3.org/2000/svg" width="70" height="10">${rects}</svg>`)
+    try {
+      const pixels = renderer.render().pixels
+      expect(fills.map((_, i) => Array.from(pixels.slice((5 * 70 + i * 10 + 5) * 4, (5 * 70 + i * 10 + 5) * 4 + 4)))).toEqual([
+        [25, 142, 204, 255], [27, 137, 215, 255], [28, 132, 225, 255],
+        [37, 126, 228, 255], [48, 121, 229, 255], [58, 118, 231, 255], [69, 115, 232, 255],
+      ])
+    } finally {
+      renderer.free()
+    }
   })
 
   it('renders each selected map palette through the real SVG and WASM pipeline', async () => {

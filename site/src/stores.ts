@@ -38,6 +38,10 @@ export interface Store {
   desc: string     // meta description / unfurl description
   path: string     // app route
   scheme: string   // URI scheme for treemap paths/tooltips
+  /** The dir `~` abbreviates (path segments), for a store captured from a
+   *  home directory; unset on bucket stores, where the share console's Hide
+   *  field refuses `~` lines (`hideScopes`). */
+  home?: string[]
   /** Mixed-provider stores can label each bucket with its actual URI scheme. */
   bucketSchemes?: Record<string, string>
   base: string     // layer-3 data root
@@ -116,9 +120,9 @@ const REGISTRY: Store[] = MODULES
  * A deployment serves one **primary** store, selected by `VITE_STORE` at build
  * time (unset = the registry's first store) —
  * the "deployment as configuration" seam for the shared base
- * (specs/union-of-roots.md). `VITE_STORES_EXTRA` (comma-separated keys) adds
+ * (specs/done/union-of-roots.md). `VITE_STORES_EXTRA` (comma-separated keys) adds
  * **secondary** stores, each mounted under its own `path` (`/meta`) and read
- * through the same Functions with `store=<key>` (specs/multi-store.md phase 2).
+ * through the same Functions with `store=<key>` (specs/done/multi-store.md phase 2).
  * The primary keeps `/` and its requests carry no `store=` at all, so a build
  * without extras is exactly the single-store build. A misconfiguration is a
  * build-time error, not an empty page. */

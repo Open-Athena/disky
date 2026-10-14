@@ -3,7 +3,7 @@ import { actionItem, cellAction, filesRedirect, listsObjects, objectSource, open
 import { resolveStores } from './stores'
 import { TEST_REGISTRY } from './testStores'
 
-// Objects as first-class nodes (specs/path-store.md §3): the click / link /
+// Objects as first-class nodes (specs/done/path-store.md §3): the click / link /
 // open rules, where an object's bytes are read from per store, and where a
 // retired `/files/…` link lands.
 
@@ -80,6 +80,11 @@ describe('rowTarget', () => {
 })
 
 describe('openHref', () => {
+  it('encodes the directory and leaves consumed access/preview tokens out of navigation', () => {
+    expect(openHref('/', ['bk', '2025 tax returns', 'a #1?.pdf'], '?key=private&og=preview&d=261011')).toEqual({
+      pathname: '/bk/2025%20tax%20returns', search: '?d=261011&open=a+%231%3F.pdf',
+    })
+  })
   it('the object’s directory is the drill path, its basename `open`; the page’s other params stay', () => {
     expect(openHref('/', ['ctbk', 'gbfs', 'a b.parquet'], '?d=260930&c=w')).toEqual({ pathname: '/ctbk/gbfs', search: '?d=260930&c=w&open=a+b.parquet' })
     expect(openHref('/', ['jc-taxes', 'x.json'], '?open=y.json')).toEqual({ pathname: '/jc-taxes', search: '?open=x.json' })

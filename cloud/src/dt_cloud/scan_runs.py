@@ -1,4 +1,4 @@
-"""Scan runs (specs/scan-runs-ui.md): what each scan job did — when it ran, its phases, what it wrote — recorded
+"""Scan runs (specs/done/scan-runs-ui.md): what each scan job did — when it ran, its phases, what it wrote — recorded
 in the site's D1 (`scan_runs`, `scan_run_phases`, `scan_run_outputs`; migration `0016_scan_runs.sql` in the cw
 lineage) and shown at `/scans`.
 
@@ -67,6 +67,11 @@ class Phase:
     finished_ts: int | None
     status: str = "done"
     note: str | None = None
+
+
+def phase_status(note: str | None) -> str:
+    """Live notes and legacy `wall, failed …` markers carry nonfatal phase failures."""
+    return "failed" if re.search(r"(?:^|,\s*)failed\b", note or "", re.IGNORECASE) else "done"
 
 
 @dataclass(frozen=True)
@@ -273,6 +278,7 @@ class Profile:
     outputs: tuple[OutputSpec, ...] = ()
     #: A phase marker in the task log: groups `name` and (optional) `note` (`PHASE <name>: <s>s (<note>)`).
     phase_marker: str = r"^PHASE (?P<name>[^:]+): \d+s(?: \((?P<note>[^)]*)\))?"
+    phase_start_marker: str = r"^PHASE-START (?P<name>[^:]+): \d+s"
     #: Markers that are not phases (a final total).
     phase_ignore: tuple[str, ...] = ("total",)
     #: Phases that run beside the others (from the start, or from `record -b`; their marker is where they joined), by name.
@@ -282,13 +288,26 @@ class Profile:
     concurrent: tuple[str, ...] = ()
     #: A log line meaning the run did nothing (an already-published scan): group 1 the scan id.
     nop_marker: str | None = None
-    #: A log line naming a failure (the ERR trap's xtrace), groups `rc`, `line`, `cmd`.
-    error_marker: str | None = None
+    #: Log lines naming a failure (the ERR trap's xtrace), groups `rc`, `line`, `cmd`; the first that matches wins. The
+    #: profile may give one regex or a list (a job whose trap changed shape keeps the old one for its older logs).
+    error_marker: tuple[str, ...] = ()
     #: On-demand $/h by machine type; `spot_factor` scales it for SPOT VMs. A machine not here has no cost estimate.
     prices: Mapping[str, float] = field(default_factory=dict)
     spot_factor: float | None = None
     #: How far back the backfill reads (Cloud Logging keeps 30 d by default; Batch keeps its jobs).
     log_days: int = 30
+    #: The env vars `record` reads the run id from when `-r` isn't given; the first one set wins (the job's own id
+    #: under its scheduler).
+    run_id_env: tuple[str, ...] = ("BATCH_JOB_UID",)
+    #: Phases that bill no compute (a run that starts before its job does: the capture it ingests, its queue wait).
+    #: A run's cost at `record -x` leaves them out.
+    unbilled: tuple[str, ...] = ()
+    #: The job wrapper's alerts (specs/scan-job-wrapper.md): `label` names the deployment in each alert; `logs_url` is
+    #: a template over the run's job facts (`{job_uid}`, `{project}`, `{region}`, `{job}`, `{scan}`, `{kind}`) linked
+    #: from each alert, and an alert whose run lacks a fact it names carries no link.
+    alerts: Mapping[str, str] = field(default_factory=dict)
+    #: Env vars whose values never leave the job: each is replaced by `<NAME>` in any alert, note or error text.
+    secrets: tuple[str, ...] = ()
 
     def kind(self, name: str) -> JobKind | None:
         return next((k for k in self.jobs if k.kind == name), None)
@@ -312,6 +331,14 @@ def parse_profile(d: Mapping, base: Path | None = None) -> Profile:
     kw["phase_ignore"] = tuple(d.get("phase_ignore", Profile.phase_ignore))
     kw["overlapped"] = tuple(d.get("overlapped", ()))
     kw["concurrent"] = tuple(d.get("concurrent", ()))
+    kw["run_id_env"] = tuple(d.get("run_id_env", Profile.run_id_env))
+    kw["unbilled"] = tuple(d.get("unbilled", ()))
+    kw["secrets"] = tuple(d.get("secrets", ()))
+    em = d.get("error_marker", ())
+    kw["error_marker"] = (em,) if isinstance(em, str) else tuple(em)
+    kw["alerts"] = dict(d.get("alerts", {}))
+    if bad := sorted(set(kw["alerts"]) - {"label", "logs_url", "comment"}):
+        raise ValueError(f"scan-run profile: unknown alerts fields {bad}")
     kw["jobs"] = tuple(JobKind(kind=j["kind"], where=j.get("where", {}), scan=tuple(j.get("scan", ())),
                                downstream=bool(j.get("downstream", False))) for j in d.get("jobs", ()))
     kw["outputs"] = tuple(OutputSpec(key=o["key"], uri=anchor_static_gen(o["uri"], base), after=o.get("after"), kinds=tuple(o.get("kinds", ())),
@@ -567,6 +594,28 @@ def cost(profile: Profile, machine: str | None, spot: bool | None, tasks: int | 
 # ── `record`: the job's incremental writes ──────────────────────────────────
 
 
+def env_run_id(profile: Profile, env: Mapping[str, str] | None = None) -> str | None:
+    """The run id from the first of the profile's `run_id_env` vars that is set."""
+    env = os.environ if env is None else env
+    return next((v for k in profile.run_id_env if (v := env.get(k, "").strip())), None)
+
+
+#: The job facts `record` takes directly (a scheduler with no Batch-API lookup states its own).
+JOB_FACTS = ("job_name", "region", "machine", "spot", "tasks", "image")
+
+
+def billed_secs(profile: Profile, started: int | None, finished: int | None, phases: Iterable[Mapping | Phase]) -> int | None:
+    """The run's billed wall time: start to end, less its `unbilled` phases."""
+    if started is None or finished is None:
+        return None
+    unbilled = 0
+    for p in phases:
+        name, s, e = (p.phase, p.started_ts, p.finished_ts) if isinstance(p, Phase) else (p["phase"], p["started_ts"], p["finished_ts"])
+        if name in profile.unbilled and s is not None and e is not None:
+            unbilled += e - s
+    return max(0, finished - started - unbilled)
+
+
 def stored(sink: Sink, run_id: str) -> tuple[dict | None, list[dict]]:
     """The run row and its phases as the sink holds them (both empty under `-n`)."""
     rows = sink.query(f"SELECT * FROM scan_runs WHERE run_id = {lit(run_id)}")
@@ -584,6 +633,7 @@ def record(
     kind: str = "scan",
     start: bool = False,
     phase: str | None = None,
+    phase_start: bool = False,
     note: str | None = None,
     began: int | None = None,
     outputs: Sequence[tuple[str, str]] = (),
@@ -594,11 +644,17 @@ def record(
     error: str | None = None,
     parent: str | None = None,
     job: Mapping | None = None,
+    facts: Mapping[str, object] | None = None,
 ) -> Record:
-    """One incremental write of run `run_id` (scan `scan`): start it, close a phase (measuring the outputs tied to
+    """One incremental write of run `run_id` (scan `scan`): start it, start/close a phase (measuring completed outputs tied to
     it), measure named outputs, finish it (`exit_code`, or `nop`). The run row is upserted every time, so any call
-    may come first. Returns what was written."""
+    may come first. Returns what was written.
+
+    `facts`: job facts the caller states (`JOB_FACTS`; a None is "unknown", never a clear). With a machine known (here
+    or stored) and no Batch `job`, the finishing write estimates the run's cost over its billed time (`billed_secs`)."""
     check_scan_id(scan)
+    if phase_start and not phase:
+        raise ValueError("scan-run: a phase start needs a phase name")
     row, phases = stored(sink, run_id)
     started = row.get("started_ts") if row else None
     status = row["status"] if row and row["status"] in ("nop", "failed", "succeeded") else "running"
@@ -606,7 +662,7 @@ def record(
         status = "nop"
     elif exit_code is not None and not (exit_code == 0 and status == "nop"):  # the exit trap after a NOP keeps it
         status = "succeeded" if exit_code == 0 else "failed"
-    elif start or phase:
+    elif start or (phase and not phase_start):
         status = "running" if status != "nop" else status
     run = Run(run_id=run_id, scan=scan, kind=kind, status=status, store=profile.store, parent=parent,
               started_ts=now if start and not started else None, gen=gen, source="job")
@@ -614,21 +670,39 @@ def record(
         run = replace(run, finished_ts=now)
         if exit_code:
             run = replace(run, failed_phase=failed_phase, error=error or f"exit {exit_code}")
+    if facts:
+        if bad := sorted(set(facts) - set(JOB_FACTS)):
+            raise ValueError(f"scan-run: unknown job facts {bad}")
+        run = replace(run, **{k: (int(v) if k == "spot" else v) for k, v in facts.items() if v is not None})
     if job:
         # only what the job knows: one read just after start has no RUNNING event yet, and its None must not clear
         # the start `-S` stamped
         run = replace(run, **{k: v for k, v in job_fields(profile, job, now).items() if v is not None})
     new_phases: list[Phase] = []
     if phase:
+        existing = next((p for p in phases if p["phase"] == phase), None)
         skip = profile.overlapped + (profile.concurrent if phase in profile.concurrent else ())
         prev_end = max((p["finished_ts"] for p in phases if p.get("finished_ts") and p["phase"] not in skip), default=None)
         begin = run.started_ts or started
-        p_start = began if began is not None else begin if phase in profile.overlapped else (prev_end or begin)
+        p_start = began if began is not None else existing["started_ts"] if existing and existing["started_ts"] is not None else (
+            now if phase_start else begin if phase in profile.overlapped else (prev_end or begin))
         seq = next((p["seq"] for p in phases if p["phase"] == phase), len(phases))
-        new_phases.append(Phase(phase, seq, p_start, now, "done", note))
+        if not phase_start or not existing or existing["finished_ts"] is None:
+            new_phases.append(Phase(phase, seq, p_start, None if phase_start else now,
+                                    "running" if phase_start else phase_status(note), note))
+    if exit_code:
+        new_phases.extend(Phase(p["phase"], p["seq"], p["started_ts"], now, "failed", f"failed (exit {exit_code})")
+                          for p in phases if p["status"] == "running" and p["finished_ts"] is None)
+    machine = run.machine or (row.get("machine") if row else None)
+    if (exit_code is not None or nop) and not job and machine:
+        spot = run.spot if run.spot is not None else (row.get("spot") if row else None)
+        tasks = run.tasks if run.tasks is not None else (row.get("tasks") if row else None)
+        merged = {p["phase"]: p for p in phases} | {p.phase: p for p in new_phases}  # this write's phases over the stored
+        secs = billed_secs(profile, run.started_ts or started, now, merged.values())
+        run = replace(run, cost_usd=cost(profile, machine, bool(spot), tasks, secs))
     outs: list[Output] = []
     gen_now = gen or (row.get("gen") if row else None)
-    if store is not None and phase:
+    if store is not None and phase and not phase_start:
         outs += measure_after(profile, phase, kind, scan, gen_now, store)
     if store is not None and exit_code is not None and not exit_code:
         outs += measure_after(profile, None, kind, scan, gen_now, store)  # outputs with no `after`: the run's end
@@ -670,6 +744,43 @@ def job_fields(profile: Profile, job: Mapping, now: int | None = None) -> dict:
                 started_ts=started, finished_ts=finished, cost_usd=cost(profile, machine, spot, min(tasks, par), secs))
 
 
+def recovery_record(
+    sink: Sink,
+    profile: Profile,
+    parent: str,
+    phase: str,
+    job: Mapping,
+    now: int,
+    note: str | None = None,
+) -> Record:
+    """Attach one completed Batch attempt, preserving the parent's failed phase and clock."""
+    from .scan_runs_backfill import BATCH_STATES, failure_of
+
+    row, phases = stored(sink, parent)
+    if row is None or row["store"] != profile.store:
+        raise ValueError(f"scan-run recovery: no parent {parent!r} in store {profile.store!r}")
+    original = next((p for p in phases if p["phase"] == phase), None)
+    if original is None or (original["status"] != "failed" and phase_status(original.get("note")) != "failed"):
+        raise ValueError(f"scan-run recovery: parent has no failed phase {phase!r}")
+    state = job.get("status", {}).get("state")
+    if state not in ("SUCCEEDED", "FAILED", "CANCELLED"):
+        raise ValueError(f"scan-run recovery: Batch attempt is not terminal ({state!r})")
+    jf = job_fields(profile, job, now)
+    start, end = jf["started_ts"], jf["finished_ts"]
+    if start is None or end is None or end < start or (original["finished_ts"] is not None and end <= original["finished_ts"]):
+        raise ValueError("scan-run recovery: missing or invalid Batch attempt times")
+    uid = job["uid"]
+    existing, existing_phases = stored(sink, uid)
+    if existing and (existing["parent"], existing["scan"], existing["store"], existing["kind"], [p["phase"] for p in existing_phases]) != (
+        parent, row["scan"], profile.store, "phase-recovery", [phase],
+    ):
+        raise ValueError(f"scan-run recovery: conflicting existing attempt {uid!r}")
+    run = Run(run_id=uid, scan=row["scan"], kind="phase-recovery", parent=parent, status=BATCH_STATES[state],
+              store=profile.store, source="backfill", error=failure_of(profile, job, []), **jf)
+    attempt = Phase(phase, 0, start, end, "done" if state == "SUCCEEDED" else "failed", note)
+    return Record(run, (attempt,))
+
+
 def _epoch(ts: str) -> int:
     import datetime as dt
 
@@ -709,19 +820,24 @@ from click import IntRange, argument, group, option  # noqa: E402
 
 @group("scan-run")
 def cli() -> None:
-    """Scan runs: what each scan job did (specs/scan-runs-ui.md), recorded in the site's D1."""
+    """Scan runs: what each scan job did (specs/done/scan-runs-ui.md), recorded in the site's D1."""
 
 
 @cli.command("record")
+@option("-A", "--phase-start", is_flag=True, help="With -P: mark the phase running now; measure no phase outputs until completion")
 @option("-b", "--began", type=int, default=None, help="With -P: when the phase began (epoch seconds), for one run beside the main sequence (list it in the profile's `overlapped`)")
+@option("-B", "--from-batch", is_flag=True, help="Fill the Batch facts (machine, SPOT, tasks, cost) from the job whose uid is the run id, found in the profile's regions")
 @option("-c", "--profile", "profile_path", default=None, help=f"The deployment's profile JSON (default ${PROFILE_ENV})")
 @option("-d", "--d1", default=None, help="D1 database id (default $D1_DB_ID)")
 @option("-e", "--error", default=None, help="With a non-zero -x: the failure's one-line reason (default `exit <rc>`)")
 @option("-F", "--failed-phase", default=None, help="With a non-zero -x: the phase that was running")
 @option("-g", "--gen", default=None, help="The index generation this run writes (fills `{gen}` in output templates)")
-@option("-B", "--from-batch", is_flag=True, help="Fill the Batch facts (machine, SPOT, tasks, cost) from the job whose uid is the run id, found in the profile's regions")
-@option("-J", "--job", "job_name", default=None, help="Fill the Batch facts from this job name (with -R)")
+@option("-i", "--image", default=None, help="Job fact: the image the run ran")
+@option("-j", "--job-name", default=None, help="Job fact: the job's name (stated, not looked up; see -J)")
+@option("-J", "--job", "batch_job_name", default=None, help="Fill the Batch facts from this GCP Batch job name (with -R)")
 @option("-k", "--kind", default="scan", help="The run's kind (a profile job kind; default scan)")
+@option("-K", "--store", "store_key", default=None, help="The store the run belongs to (`scan_runs.store`; default the profile's `store`)")
+@option("-m", "--machine", default=None, help="Job fact: the machine; a key of the profile's `prices` gets the run a cost estimate when it finishes")
 @option("-M", "--no-measure", is_flag=True, help="Don't measure outputs (record timings only)")
 @option("-n", "--dry-run", is_flag=True, help="Print the SQL instead of writing it")
 @option("-N", "--nop", is_flag=True, help="Finish the run as a no-op (the scan was already published)")
@@ -729,44 +845,104 @@ def cli() -> None:
 @option("-p", "--parent", default=None, help="The orchestrating run (a downstream job's)")
 @option("-P", "--phase", default=None, help="A phase just ended: record it (it began where the last one ended) and measure the outputs the profile ties to it")
 @option("-q", "--note", default=None, help="With -P: a note on the phase")
-@option("-r", "--run-id", default=None, help="The run id (default $BATCH_JOB_UID)")
-@option("-R", "--region", default=None, help="The job's Batch region (with -J; default the profile's first)")
-@option("-S", "--start", is_flag=True, help="Mark the run started now (status running)")
+@option("-r", "--run-id", default=None, help="The run id (default the first set of the profile's `run_id_env` vars: $BATCH_JOB_UID unless it names others)")
+@option("-R", "--region", default=None, help="The job's region: a job fact, or with -J / -B where to look the job up (default the profile's first)")
+@option("-S", "--start", is_flag=True, help="Mark the run started (status running), at -t or now")
 @option("-s", "--sqlite", default=None, help="Write to this local SQLite file (created from the migration) instead of D1")
+@option("--spot/--no-spot", default=None, help="Job fact: the run ran on spot capacity (priced with the profile's `spot_factor`)")
+@option("-t", "--at", type=int, default=None, help="This step's time, epoch seconds (default now): the start with -S, the phase's end with -P, the run's end with -x")
+@option("-T", "--tasks", type=int, default=None, help="Job fact: the job's task count")
 @option("-x", "--exit", "exit_code", type=IntRange(0, 255), default=None, help="Finish the run with this exit code (0 = succeeded)")
 @argument("scan")
-def record_cmd(profile_path, began, d1, from_batch, error, failed_phase, gen, job_name, kind, no_measure, dry_run, nop, outputs, parent,
-               phase, note, run_id, region, start, sqlite, exit_code, scan) -> None:
+def record_cmd(phase_start, began, from_batch, profile_path, d1, error, failed_phase, gen, image, job_name, batch_job_name, kind, store_key, machine,
+               no_measure, dry_run, nop, outputs, parent, phase, note, run_id, region, start, sqlite, spot, at, tasks, exit_code, scan) -> None:
     """Record one step of SCAN's run, from the job: `-S` at its start, `-P NAME` as each phase ends, `-x RC` from
     its exit trap. Never fails the job it reports on: an error is printed and the exit status is 0."""
-    import time
-
     try:
         profile = load_profile(profile_path)
-        run_id = run_id or os.environ.get("BATCH_JOB_UID", "").strip()
+        if store_key:
+            profile = replace(profile, store=store_key)
+        run_id = run_id or env_run_id(profile)
         if not run_id:
-            raise SystemExit("scan-run: no run id: pass -r or run inside a Batch job ($BATCH_JOB_UID)")
+            raise SystemExit(f"scan-run: no run id: pass -r or set {' / '.join('$' + k for k in profile.run_id_env)}")
         sink = sink_for(dry_run, sqlite, d1)
         store = None if no_measure else AnyStore()
-        job = None
-        if job_name:
-            from .gcp import batch_job
-
-            job = batch_job(job_name, profile.project, region or (profile.regions[0] if profile.regions else "us-central1"))
-        elif from_batch:
-            from .scan_runs_backfill import fetch_jobs
-
-            job = next((j for j in fetch_jobs(profile.project or "", [region] if region else profile.regions) if j.get("uid") == run_id), None)
-            if job is None:
-                err(f"scan-run: no Batch job with uid {run_id} in {region or profile.regions}")
+        job = lookup_job(profile, run_id, batch_job_name, from_batch, region)
         pairs = [tuple(o.split("=", 1)) for o in outputs]
-        rec = record(sink, profile, scan, run_id, int(time.time()), store=store, kind=kind, start=start, phase=phase,
-                     note=note, began=began, outputs=pairs, gen=gen, exit_code=exit_code, nop=nop, failed_phase=failed_phase,
-                     error=error, parent=parent, job=job)
-        err(f"scan-run: {scan} {run_id} {rec.run.status}" + (f" · phase {phase}" if phase else "")
-            + (f" · {len(rec.outputs)} outputs" if rec.outputs else ""))
+        facts = dict(job_name=job_name, region=None if (batch_job_name or from_batch) else region, machine=machine, spot=spot,
+                     tasks=tasks, image=image)
+        rec = record(sink, profile, scan, run_id, _now() if at is None else at, store=store, kind=kind, start=start,
+                     phase=phase, phase_start=phase_start, note=note, began=began, outputs=pairs, gen=gen, exit_code=exit_code, nop=nop,
+                     failed_phase=failed_phase, error=error, parent=parent, job=job, facts=facts)
+        report_record(rec, phase)
     except (Exception, SystemExit) as e:  # noqa: BLE001 — reporting must never fail the scan
-        err(f"scan-run record failed (the scan continues): {type(e).__name__}: {e}")
+        report_failure(e)
+
+
+def _now() -> int:
+    """The clock every job-side write stamps (the seam tests pin)."""
+    import time
+
+    return int(time.time())
+
+
+def lookup_job(profile: Profile, run_id: str, batch_job_name: str | None, from_batch: bool, region: str | None) -> Mapping | None:
+    """The run's Batch job: `-J` by name, `-B` by the run id (its uid) in the profile's regions; else None."""
+    if batch_job_name:
+        from .gcp import batch_job
+
+        return batch_job(batch_job_name, profile.project, region or (profile.regions[0] if profile.regions else "us-central1"))
+    if from_batch:
+        from .scan_runs_backfill import fetch_jobs
+
+        job = next((j for j in fetch_jobs(profile.project or "", [region] if region else profile.regions) if j.get("uid") == run_id), None)
+        if job is None:
+            err(f"scan-run: no Batch job with uid {run_id} in {region or profile.regions}")
+        return job
+    return None
+
+
+def report_record(rec: Record, phase: str | None) -> None:
+    err(f"scan-run: {rec.run.scan} {rec.run.run_id} {rec.run.status}" + (f" · phase {phase}" if phase else "")
+        + (f" · {len(rec.outputs)} outputs" if rec.outputs else ""))
+
+
+def report_failure(e: BaseException) -> None:
+    err(f"scan-run record failed (the scan continues): {type(e).__name__}: {e}")
+
+
+@cli.command("recovery")
+@option("-c", "--profile", "profile_path", default=None, help=f"Deployment profile (default ${PROFILE_ENV})")
+@option("-d", "--d1", default=None, help="D1 database id (default $D1_DB_ID)")
+@option("-J", "--job", "job_name", required=True, help="Completed Batch job: its UID, times, status and links are read from Batch")
+@option("-n", "--dry-run", is_flag=True, help="Validate against D1 and print SQL instead of writing it")
+@option("-p", "--parent", required=True, help="Original scan run id (never overwritten)")
+@option("-P", "--phase", required=True, help="The failed phase this attempt reran")
+@option("-q", "--note", default=None, help="Describe the scope of this attempt, including reused work")
+@option("-R", "--region", required=True, help="Batch job region")
+@option("-s", "--sqlite", default=None, help="Use a local scan-run SQLite database instead of D1")
+def recovery_cmd(
+    profile_path: str | None,
+    d1: str | None,
+    job_name: str,
+    dry_run: bool,
+    parent: str,
+    phase: str,
+    note: str | None,
+    region: str,
+    sqlite: str | None,
+) -> None:
+    """Link a completed phase re-run to its original scan. No job is launched; safe to repeat."""
+    import time
+
+    from .gcp import batch_job
+
+    profile = load_profile(profile_path)
+    sink = sink_for(False, sqlite, d1)
+    now = int(time.time())
+    rec = recovery_record(sink, profile, parent, phase, batch_job(job_name, profile.project, region), now, note)
+    write_all(PrintSink() if dry_run else sink, [rec], now)
+    err(f"scan-run recovery: {rec.run.run_id} {rec.run.status} · {parent} / {phase}")
 
 
 @cli.command("backfill")
@@ -807,3 +983,413 @@ def backfill_cmd(profile_path, d1, jobs_json, logs_json, no_measure, dry_run, su
             err(f"{r.run.scan:16} {r.run.kind:8} {r.run.status:9} {r.run.job_name or r.run.run_id:44} phases={ph} outputs={len(r.outputs)}")
     err(f"scan-run backfill: {len(recs)} runs over {len({r.run.scan for r in recs})} scans "
         f"({len(jobs)} jobs, {len(logs)} log lines)")
+
+
+# ── The job wrapper: `start`, `phase-begin`/`phase-end`, `phase -- CMD`, `finish` (specs/scan-job-wrapper.md) ─────
+#
+# A job script's recording, PHASE markers, redaction and failure alerts, so each deployment's script keeps only its
+# step list, two one-line traps and its per-step messages. Every command reads the run id like `record` (`-r`, else
+# the profile's `run_id_env`); with none (not a scheduled job) or `$DT_RECORD=off`, nothing is recorded, while the
+# markers still print and alerts still post. `start` keeps the run's scan, kind, parent, gen and job facts in a state
+# file beside the "already alerted" marker, under `${TMPDIR:-/tmp}/dt-scan-run/`, which the phases (background
+# subshells included) and `finish` read.
+
+JOB_START_ENV = "DT_JOB_START"
+#: `stderr`: alerts print as `alert (suppressed): …` and nothing posts.
+ALERTS_ENV = "DT_ALERTS"
+#: `off` (or `0`): record nothing (a scratch / gate run); markers and alerts are unaffected.
+RECORD_ENV = "DT_RECORD"
+
+
+def phase_line(name: str, secs: int, note: str | None = None, start: bool = False) -> str:
+    """A PHASE marker, byte-identical to the job scripts' (`PHASE <name>: <N>s (wall[, note])`; the backfill parses
+    them from the logs: `Profile.phase_marker` / `phase_start_marker`)."""
+    if start:
+        return f"PHASE-START {name}: {secs}s (wall)"
+    return f"PHASE {name}: {secs}s (wall{f', {note}' if note else ''})"
+
+
+def redact(text: str, names: Iterable[str], env: Mapping[str, str]) -> str:
+    """`text` with each named env var's value (trailing whitespace stripped: an injected secret's newline is not part
+    of it, and must not swallow the text's own) replaced by `<NAME>`; longer values first, so one secret containing
+    another is replaced whole."""
+    vals = sorted({(v, n) for n in names if (v := (env.get(n) or "").rstrip())}, key=lambda p: -len(p[0]))
+    for v, n in vals:
+        text = text.replace(v, f"<{n}>")
+    return text
+
+
+def duration(s: str) -> float:
+    """`90`, `90s`, `120m`, `2h`, `1d` → seconds (coreutils `timeout`'s forms)."""
+    m = re.fullmatch(r"(\d+(?:\.\d+)?)([smhd]?)", s.strip())
+    if not m:
+        raise ValueError(f"not a duration: {s!r} (want N[s|m|h|d])")
+    return float(m[1]) * {"": 1, "s": 1, "m": 60, "h": 3600, "d": 86400}[m[2]]
+
+
+def _off(v: str | None) -> bool:
+    return (v or "").strip().lower() in ("0", "off", "false", "no")
+
+
+class JobRun:
+    """One job's view of its run: profile, run id, sink, state file and alerted marker."""
+
+    def __init__(
+        self,
+        profile_path: str | None,
+        d1: str | None,
+        dry_run: bool,
+        run_id: str | None,
+        sqlite: str | None,
+        env: Mapping[str, str] | None = None,
+    ):
+        self.env = dict(os.environ) if env is None else dict(env)
+        try:
+            self.profile = load_profile(profile_path)
+        except (Exception, SystemExit) as e:  # noqa: BLE001 — the wrapper never fails the job for its own reasons
+            report_failure(e)
+            self.profile = Profile()
+        self.run_id = run_id or env_run_id(self.profile, self.env)
+        self.recording = bool(self.run_id) and not _off(self.env.get(RECORD_ENV))
+        self.d1, self.dry_run, self.sqlite = d1, dry_run, sqlite
+        key = self.run_id or f"local-{self.env.get(JOB_START_ENV, '').strip() or 'run'}"
+        self.key = re.sub(r"[^\w.-]", "_", key)
+        self.dir = Path(self.env.get("TMPDIR") or "/tmp") / "dt-scan-run"
+
+    # state shared across the job's processes
+
+    @property
+    def state_path(self) -> Path:
+        return self.dir / f"{self.key}.json"
+
+    @property
+    def alerted_path(self) -> Path:
+        return self.dir / f"{self.key}.alerted"
+
+    def state(self) -> dict:
+        try:
+            return json.loads(self.state_path.read_text())
+        except (OSError, ValueError):
+            return {}
+
+    def save(self, fresh: bool = False, **kw: object) -> None:
+        """Merge `kw` (None values skipped) into the state file, atomically (phases in background subshells share it)."""
+        import tempfile
+
+        st = {} if fresh else self.state()
+        st.update({k: v for k, v in kw.items() if v is not None})
+        self.dir.mkdir(parents=True, exist_ok=True)
+        fd, tmp = tempfile.mkstemp(dir=self.dir, prefix=f".{self.key}.")
+        with os.fdopen(fd, "w") as f:
+            json.dump(st, f)
+        os.replace(tmp, self.state_path)
+
+    def alerted(self) -> bool:
+        return self.alerted_path.exists()
+
+    def mark_alerted(self) -> None:
+        self.dir.mkdir(parents=True, exist_ok=True)
+        self.alerted_path.touch()
+
+    def clear(self) -> None:
+        for p in (self.state_path, self.alerted_path):
+            p.unlink(missing_ok=True)
+
+    @property
+    def scan(self) -> str | None:
+        return self.state().get("scan") or self.env.get("SCAN_ID") or None
+
+    def redact(self, text: str) -> str:
+        return redact(text, self.profile.secrets, self.env)
+
+    # the record
+
+    def write(self, **kw) -> Record | None:
+        """One `record` write of this run (never raises: a failure is printed, the job continues)."""
+        if not self.recording or not self.run_id:
+            return None
+        try:
+            st = self.state()
+            profile = replace(self.profile, store=st["store"]) if st.get("store") else self.profile
+            if kw.get("gen") is None:
+                kw["gen"] = st.get("gen")
+            rec = record(sink_for(self.dry_run, self.sqlite, self.d1), profile, self.scan or "", self.run_id, _now(),
+                         kind=st.get("kind", "scan"), parent=st.get("parent"), **kw)
+            report_record(rec, kw.get("phase"))
+            return rec
+        except (Exception, SystemExit) as e:  # noqa: BLE001 — reporting must never fail the scan
+            report_failure(e)
+            return None
+
+    # alerts
+
+    def facts(self) -> dict[str, str]:
+        st = self.state()
+        f = {"job_uid": self.run_id, "project": self.profile.project, "region": st.get("region"), "job": st.get("job_name"),
+             "scan": self.scan, "kind": st.get("kind", "scan")}
+        return {k: str(v) for k, v in f.items() if v}
+
+    def logs_url(self) -> str | None:
+        t = self.profile.alerts.get("logs_url")
+        if not t:
+            return None
+        try:
+            return t.format_map(self.facts())
+        except (KeyError, IndexError, ValueError):
+            return None
+
+    def alert(self, level: str, message: str) -> None:
+        """Post a `fail` / `warn` alert through `disk-tree notify`'s channels (or print it, under `DT_ALERTS=stderr`).
+        Never raises: alerting must never mask the failure it reports."""
+        try:
+            from disk_tree.notify import push
+
+            label = self.profile.alerts.get("label") or "scan"
+            title = self.redact(f"{'❌' if level == 'fail' else '⚠️'} {label} {self.scan or ''}".rstrip())
+            message = self.redact(message)
+            if (self.env.get(ALERTS_ENV) or "").strip() == "stderr":
+                err(f"alert (suppressed): {title}: {message}")
+                return
+            chans = push.configured(self.env)
+            if not chans:
+                err(f"alert (no channel configured): {title}: {message}")
+                return
+            url = self.logs_url()
+            notice = push.Notice(title, message, url, "task logs" if url else None, 1 if level == "fail" else 0)
+            for c, e in push.send(notice, chans, env=self.env, post=push.http_post):
+                err(self.redact(f"alert: {c}: {e or 'sent'}"))
+        except Exception as e:  # noqa: BLE001
+            err(self.redact(f"alert failed (the job continues): {type(e).__name__}: {e}"))
+
+    # the steps
+
+    def clock(self) -> int:
+        """Seconds since `$DT_JOB_START`; exits 2 when it isn't set (a PHASE line never prints another clock)."""
+        v = (self.env.get(JOB_START_ENV) or "").strip()
+        if not v.isdigit():
+            err(f"scan-run: ${JOB_START_ENV} is not set: export {JOB_START_ENV}=$(date +%s) at the job's top")
+            sys.exit(2)
+        return _now() - int(v)
+
+    def begin(self, name: str, began: int | None = None, gen: str | None = None) -> None:
+        err(phase_line(name, self.clock(), start=True))
+        if gen:
+            self.save(gen=gen)
+        self.write(phase=name, phase_start=True, began=began, gen=gen)
+
+    def end(
+        self,
+        name: str,
+        rc: int = 0,
+        warn: bool = False,
+        msg: str | None = None,
+        resume: str | None = None,
+        note: str | None = None,
+        outputs: Sequence[str] = (),
+        measure: bool = True,
+        timed_out: str | None = None,
+    ) -> int:
+        """Close phase `name` with exit code `rc`: the PHASE line, its record, and on a failure its alert. Returns the
+        exit status: `rc` for a fatal failure, else 0."""
+        secs = self.clock()
+        if rc:
+            note = f"failed (exit {rc})" + (f", {note}" if note else "")
+        note = self.redact(note) if note else None
+        err(phase_line(name, secs, note))
+        pairs = [tuple(o.split("=", 1)) for o in outputs]
+        # a failed phase's outputs are not measured: what it left is partial
+        self.write(phase=name, note=note, store=AnyStore() if measure and not rc else None, outputs=() if rc else pairs)
+        if not rc:
+            return 0
+        text = f"{name} failed (exit {rc}{f', timed out after {timed_out}' if timed_out else ''})"
+        if msg:
+            text += f": {msg}"
+        if resume:
+            text += f"\nResume: `{resume}`"
+        if warn:
+            self.alert("warn", text)
+            return 0
+        self.save(failed_phase=name)
+        self.mark_alerted()  # first: a `finish` racing this post must not send a second
+        self.alert("fail", text)
+        return rc
+
+
+def run_grouped(cmd: Sequence[str], timeout: float | None, grace: float) -> tuple[int, bool]:
+    """Run `cmd`; with `timeout`, in its own session, and past it TERM its whole process group, wait `grace` for the
+    group to empty, then KILL what's left (coreutils `timeout -k`, but group-wide: multiprocessing spawn workers and
+    Batch submitters must not outlive it). Returns `(rc, timed_out)`; a timeout is rc 124, a missing CMD 127."""
+    import signal
+    import subprocess
+    import time
+
+    try:
+        p = subprocess.Popen(list(cmd), start_new_session=timeout is not None)
+    except OSError as e:
+        err(f"scan-run phase: {cmd[0]}: {e.strerror or e}")
+        return 127, False
+    if timeout is None:
+        return p.wait(), False
+    try:
+        return p.wait(timeout=timeout), False
+    except subprocess.TimeoutExpired:
+        pass
+
+    def alive() -> bool:
+        p.poll()  # reap the leader, or its zombie keeps the group "alive"
+        try:
+            os.killpg(p.pid, 0)
+            return True
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            return True
+
+    def signal_group(sig: int) -> None:
+        try:
+            os.killpg(p.pid, sig)
+        except ProcessLookupError:
+            pass
+
+    signal_group(signal.SIGTERM)
+    deadline = time.monotonic() + grace
+    while alive() and time.monotonic() < deadline:
+        time.sleep(0.05)
+    if alive():
+        signal_group(signal.SIGKILL)
+    p.wait()
+    return 124, True
+
+
+def _wrapper_opts(f):
+    """The options every wrapper command takes: where the profile and the record live, and the run id."""
+    for o in reversed([
+        option("-c", "--profile", "profile_path", default=None, help=f"The deployment's profile JSON (default ${PROFILE_ENV})"),
+        option("-d", "--d1", default=None, help="D1 database id (default $D1_DB_ID)"),
+        option("-n", "--dry-run", is_flag=True, help="Print the SQL instead of writing it"),
+        option("-r", "--run-id", default=None, help="The run id (default the first set of the profile's `run_id_env` vars)"),
+        option("-s", "--sqlite", default=None, help="Write to this local SQLite file instead of D1"),
+    ]):
+        f = o(f)
+    return f
+
+
+def _phase_end_opts(f):
+    """`phase-end`'s options, shared by the `phase -- CMD` sugar."""
+    for o in reversed([
+        option("-m", "--msg", default=None, help="What a failure means for users; posted in the alert (fatal or -W)"),
+        option("-M", "--no-measure", is_flag=True, help="Don't measure the phase's outputs"),
+        option("-o", "--output", "outputs", multiple=True, help="Measure KEY=URI as an output too (repeatable)"),
+        option("-q", "--note", default=None, help="A note on the phase (after `failed (exit N)` on a failure)"),
+        option("-R", "--resume", default=None, help="A hand-written resume command, quoted in the alert (opt-in; never the argv)"),
+        option("-W", "--warn", is_flag=True, help="A failure is non-fatal: record it, post a `warn` alert, exit 0"),
+    ]):
+        f = o(f)
+    return f
+
+
+@cli.command("start")
+@option("-B", "--from-batch", is_flag=True, help="Fill the Batch facts from the job whose uid is the run id")
+@option("-g", "--gen", default=None, help="The index generation this run writes")
+@option("-i", "--image", default=None, help="Job fact: the image the run ran")
+@option("-j", "--job-name", default=None, help="Job fact: the job's name")
+@option("-J", "--job", "batch_job_name", default=None, help="Fill the Batch facts from this GCP Batch job name (with -R)")
+@option("-k", "--kind", default="scan", help="The run's kind: scan | reproc | compute | access | … (default scan)")
+@option("-K", "--store", "store_key", default=None, help="The store the run belongs to (default the profile's `store`)")
+@option("-m", "--machine", default=None, help="Job fact: the machine (a key of the profile's `prices` gets a cost)")
+@option("-p", "--parent", default=None, help="The orchestrating run's id")
+@option("-R", "--region", default=None, help="Job fact: the region (or with -J / -B where to look the job up)")
+@option("--spot/--no-spot", default=None, help="Job fact: the run ran on spot capacity")
+@option("-T", "--tasks", type=int, default=None, help="Job fact: the job's task count")
+@_wrapper_opts
+@argument("scan", required=False)
+def start_cmd(from_batch, gen, image, job_name, batch_job_name, kind, store_key, machine, parent, region, spot, tasks,
+              profile_path, d1, dry_run, run_id, sqlite, scan) -> None:
+    """Start the job's run of SCAN (default $SCAN_ID): record it running (`record -S`) and keep its scan, kind,
+    parent and job facts for the phases and `finish`. Never fails the job."""
+    j = JobRun(profile_path, d1, dry_run, run_id, sqlite)
+    scan = scan or j.env.get("SCAN_ID")
+    j.clear()
+    j.save(fresh=True, scan=scan, kind=kind, parent=parent, gen=gen, store=store_key, region=region, job_name=job_name)
+    job = None
+    if j.recording and j.run_id:
+        try:
+            job = lookup_job(j.profile, j.run_id, batch_job_name, from_batch, region)
+        except (Exception, SystemExit) as e:  # noqa: BLE001
+            report_failure(e)
+    facts = dict(job_name=job_name, region=None if (batch_job_name or from_batch) else region, machine=machine, spot=spot,
+                 tasks=tasks, image=image)
+    rec = j.write(start=True, job=job, facts=facts)
+    if rec is not None:
+        j.save(region=rec.run.region, job_name=rec.run.job_name)
+
+
+@cli.command("phase-begin")
+@option("-b", "--began", type=int, default=None, help="When the phase began (epoch seconds; one beside the sequence)")
+@option("-g", "--gen", default=None, help="The index generation the run writes, from here on")
+@_wrapper_opts
+@argument("name")
+def phase_begin_cmd(began, gen, profile_path, d1, dry_run, run_id, sqlite, name) -> None:
+    """Phase NAME begins: `PHASE-START <name>: <N>s (wall)` on stderr (N since $DT_JOB_START; exit 2 if unset), and
+    the phase recorded running."""
+    JobRun(profile_path, d1, dry_run, run_id, sqlite).begin(name, began, gen)
+
+
+@cli.command("phase-end")
+@_phase_end_opts
+@option("-x", "--exit", "rc", type=IntRange(0, 255), default=0, help="The phase's exit code (non-zero: it failed)")
+@_wrapper_opts
+@argument("name")
+def phase_end_cmd(msg, no_measure, outputs, note, resume, warn, rc, profile_path, d1, dry_run, run_id, sqlite, name) -> None:
+    """Phase NAME ended with exit code -x: `PHASE <name>: <N>s (wall[, note])` on stderr, the phase recorded (its
+    outputs measured). A failure records the phase failed and alerts: fatal (default) posts `fail`, marks the run
+    alerted and exits RC; `-W` posts `warn` and exits 0."""
+    j = JobRun(profile_path, d1, dry_run, run_id, sqlite)
+    sys.exit(j.end(name, rc, warn, msg, resume, note, outputs, not no_measure))
+
+
+@cli.command("phase")
+@_phase_end_opts
+@option("-g", "--gen", default=None, help="The index generation the run writes, from here on")
+@option("-G", "--grace", default="30s", help="With -T: how long the group has after TERM before KILL (default 30s)")
+@option("-T", "--timeout", default=None, help="Run CMD in its own session; past this (N[s|m|h|d]) TERM then KILL its process group, exit 124")
+@_wrapper_opts
+@argument("name")
+@argument("cmd", nargs=-1, required=True)
+def phase_cmd(msg, no_measure, outputs, note, resume, warn, gen, grace, timeout, profile_path, d1, dry_run, run_id, sqlite, name, cmd) -> None:
+    """`phase-begin NAME`, run CMD (after `--`), `phase-end NAME -x <its exit code>` with the same options; exits as
+    `phase-end` does."""
+    j = JobRun(profile_path, d1, dry_run, run_id, sqlite)
+    try:
+        limit = duration(timeout) if timeout is not None else None
+        grace_s = duration(grace)
+    except ValueError as e:
+        err(f"scan-run phase: {e}")
+        sys.exit(2)
+    j.begin(name, gen=gen)
+    rc, timed_out = run_grouped(cmd, limit, grace_s)
+    sys.exit(j.end(name, rc, warn, msg, resume, note, outputs, not no_measure, timeout if timed_out else None))
+
+
+@cli.command("nop")
+@_wrapper_opts
+def nop_cmd(profile_path, d1, dry_run, run_id, sqlite) -> None:
+    """Mark the run a no-op (its scan was already published; `record -N`). The EXIT trap's `finish -x 0` keeps it a
+    NOP; a non-zero `finish` still fails it. Never fails the job."""
+    JobRun(profile_path, d1, dry_run, run_id, sqlite).write(nop=True)
+
+
+@cli.command("finish")
+@option("-e", "--error", default=None, help="With a non-zero -x: the failure's one-line reason (the ERR trap's)")
+@option("-x", "--exit", "rc", type=IntRange(0, 255), required=True, help="The job's exit code (0 = succeeded)")
+@_wrapper_opts
+def finish_cmd(error, rc, profile_path, d1, dry_run, run_id, sqlite) -> None:
+    """The job's EXIT trap: record the run finished (`record -x`; ERR as `scan_runs.error`), and on a non-zero RC
+    post the `fail` alert unless a phase already did. Never fails the job."""
+    j = JobRun(profile_path, d1, dry_run, run_id, sqlite)
+    error = j.redact(error) if error else None
+    failed_phase = j.state().get("failed_phase")
+    j.write(exit_code=rc, error=error, failed_phase=failed_phase)
+    if rc and not j.alerted():
+        j.alert("fail", f"run failed (exit {rc}){f' in {failed_phase}' if failed_phase else ''}{f': {error}' if error else ''}")
+    j.clear()

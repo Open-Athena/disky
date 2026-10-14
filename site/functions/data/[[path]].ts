@@ -11,7 +11,9 @@
 import { withStore } from '../_lib/stores.js'
 import { snapshotsPrefix } from '../_lib/shared.js'
 import { type Env, requireViewer } from '../_lib/auth.js'
+import { dataAllowed, restrictedForbidden, restrictionFor } from '../_lib/restrict.js'
 import { pathScans, servedStore, storeReady } from '../_lib/index.js'
+import { scanStarts } from '../_lib/scanTimes.js'
 import { isScanId } from '../../src/scanSlug.js'
 
 // Scan ids are `YYYY-MM-DD`, optionally sub-daily as `YYYY-MM-DDTHHMM` (no
@@ -55,11 +57,26 @@ export const onRequest = async (ctx0: { request: Request; env: Env }): Promise<R
         headers: { 'content-type': 'application/json; charset=utf-8', 'cache-control': CACHE },
       })
     }
+    // `<store>/scan-times.json` → `{ <date-only scan id>: <started> }`: each date-only scan's start
+    // instant, as its `path` pointer records it (`index_schema.started`; `scanStarts`) — one D1 query
+    // for the picker's times, however many scans share a day. A scan with no recorded start is left
+    // out. Names no path, so a restricted link reads it as it reads `scans.json`.
+    const timesM = /^(?:([a-z0-9-]+)\/)?scan-times\.json$/.exec(rel)
+    if (timesM) {
+      const prefix = timesM[1] ? `snapshots/${timesM[1]}/` : 'snapshots/'
+      if (prefix !== snapshotsPrefix(ctx.env)) return notFound()
+      return new Response(JSON.stringify(await scanStarts(ctx.env)), {
+        headers: { 'content-type': 'application/json; charset=utf-8', 'cache-control': CACHE },
+      })
+    }
     // rules.json → snapshots/rules.json ; else /data/<date>/<file> → snapshots/<date>/<file>
     const key = rulesKey ?? `snapshots/${rel}`
     // A root-level primary must not proxy another store's named subdirectory
     // without its scope gate. Every snapshot starts with a canonical scan ID.
     if (!rulesKey && (!key.startsWith(own) || !isScanId(key.slice(own.length).split('/')[0]))) return notFound()
+    // A path-restricted link (specs/path-scopes.md): only the snapshot files that can't name a hidden path.
+    const restriction = restrictionFor(gated, ctx.env)
+    if (restriction && !rulesKey && !dataAllowed(key, own, restriction)) return restrictedForbidden()
     const { bytes, contentType } = await store.get(key)
     // A date-only scan id can't say *when* in that day the scan ran, and the
     // daily GCS job publishes ids without a time — but the object itself knows.

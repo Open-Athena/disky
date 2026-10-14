@@ -1,11 +1,11 @@
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import type { Env } from './auth'
-import { IV_JOIN, openIndex, slices } from './index'
+import { IV_JOIN, openIndex, readRootHistoryRows, slices } from './index'
 import { type Req, reqOf, withReq } from './shared'
 import type { OwnerScope } from './scope'
 import { LEDGER_KIND, sqliteD1 } from './testD1'
 import { type D1Variant, fixture, GETS, readJson, seedGeneration } from './testStore'
-import { buildDiff, buildView, readRootAgg } from './view'
+import { buildDiff, buildView, readRootAgg, readRootHistory } from './view'
 
 vi.mock('@rdub/file-tree/stores/s3', async () => ({ S3Store: (await import('./testStore')).S3Store }))
 
@@ -78,6 +78,212 @@ beforeAll(async () => {
   ;(globalThis as unknown as { caches: unknown }).caches = { default: { match: async () => undefined, put: async () => {} } }
   // The ledger's tables, empty: owners are the scans' own attribution.
   ;({ perScan, iv } = await seed())
+})
+
+describe('batched root owner history', () => {
+  const dates = [S1, S2, S3]
+  it('combines base/run close records before selecting dates and leaves uncovered dates out', async () => {
+    const runEnv = { ...iv, INTERVAL_STORE_GEN: 'g5' } as Env
+    const held = await readRootHistoryRows(runEnv, ['2026-01-01', ...dates])
+    expect([...held!.keys()]).toEqual(dates)
+    for (const scope of [{ lens: { key: 'alice' } }, { owner: 'unowned' as const }]) {
+      const want = []
+      for (const date of dates) want.push([date, await readRootAgg(runEnv, { date, path: '', ...scope })])
+      expect([...(await readRootHistory(runEnv, dates, scope))!]).toEqual(want)
+    }
+    expect(await readRootHistoryRows(iv, ['2026-01-01'])).toBeNull()
+  })
+  it('matches canonical bytes and objects for every user and owner pool', async () => {
+    for (const scope of [
+      { lens: { key: 'alice' } }, { lens: { key: 'bob' } }, { lens: { key: 'nobody' } },
+      { owner: 'owned' as const }, { owner: 'unowned' as const }, { owner: { not: ['alice'] } },
+    ]) {
+      const want = []
+      for (const date of dates) want.push([date, await readRootAgg(iv, { date, path: '', ...scope })])
+      expect([...(await readRootHistory(iv, dates, scope))!]).toEqual(want)
+    }
+    expect(await readRootHistory(perScan, dates, { owner: 'unowned' })).toBeNull()
+  })
+  it('applies newer ancestor repainting, release and exact-object assignments on every date', async () => {
+    const ledger = `
+      INSERT INTO actions (id, actor, ts, scan, pattern, set_owner, owner) VALUES
+        (1, 'ops', 1, '${S2}', 'gs://bk/m/', 1, 'alice'),
+        (2, 'ops', 2, '${S2}', 'gs://bk/', 1, 'bob'),
+        (3, 'ops', 3, '${S2}', 'gs://bk/nest/', 1, NULL);
+      INSERT INTO owner_prefixes (action_id, prefix, owner, ts) VALUES
+        (1, 'gs://bk/m/', 'alice', 1), (2, 'gs://bk/', 'bob', 2), (3, 'gs://bk/nest/', NULL, 3);
+      INSERT INTO actions (id, actor, ts, scan, pattern, set_owner, owner, kind) VALUES
+        (4, 'ops', 4, '${S2}', 'gs://bk/flat/f00016', 1, 'carol', 'object');
+      INSERT INTO owner_prefixes (action_id, prefix, owner, ts, kind) VALUES
+        (4, 'gs://bk/flat/f00016', 'carol', 4, 'object');
+    `
+    const current = await seed(ledger)
+    for (const scope of [{ lens: { key: 'alice' } }, { lens: { key: 'bob' } }, { lens: { key: 'carol' } }, { owner: 'unowned' as const }, { owner: 'owned' as const }]) {
+      // Warm manifests sequentially: the SQLite D1 fixture uses one connection
+      // and cannot overlap transactions; production D1 serializes its batches.
+      const want = []
+      for (const date of dates) want.push([date, await readRootAgg(current.iv, { date, path: '', ...scope })])
+      expect([...(await readRootHistory(current.iv, dates, scope))!]).toEqual(want)
+    }
+  })
+})
+
+describe('an owner-scoped root read of a held scan with no sort to read', () => {
+  it('throws, never a null point (a gap a series would cache)', async () => {
+    // The store's slice sorts unreadable (a generation found "without slices": every sliced read goes per-scan
+    // for a minute) and the scan's per-scan index retired, as a v1 scan's lens tiers are.
+    vi.resetModules()
+    const { readRootAgg: fresh } = await import('./view')
+    const { iv: env } = await seed()
+    await env.DB!.prepare('DELETE FROM index_schema WHERE date = ?').bind(S1).run()
+    const r = env.INDEX_R2! as unknown as { get: (k: string, o?: unknown) => Promise<unknown> }
+    const hidden = { ...env, INDEX_R2: { ...r, get: (k: string, o?: unknown) => (k.includes('/served/slices') ? Promise.resolve(null) : r.get(k, o)) } } as unknown as Env
+    const got = await Promise.allSettled([{ lens: { key: 'alice' } }, { owner: 'owned' as const }].map(scope => fresh(hidden, { date: S1, path: '', ...scope })))
+    // A lens fails earlier, folding its ledger on the scan's `path` sort.
+    expect(got.map(g => g.status === 'fulfilled' ? g.value : String(g.reason))).toEqual([
+      `Error: index variant 'path' not synced for ${S1}`,
+      `Error: no owner-scoped sort of ${S1} to read`,
+    ])
+  })
+})
+
+describe('owner totals after a new assignment', () => {
+  const LEDGER = `
+    INSERT INTO actions (id, actor, ts, scan, pattern, set_owner, owner) VALUES
+      (1, 'ops', 1, '${S2}', 'gs://bk/m/', 1, 'alice'), (2, 'ops', 2, '${S2}', 'gs://bk/', 1, 'bob');
+    INSERT INTO owner_prefixes (action_id, prefix, owner, ts) VALUES (1, 'gs://bk/m/', 'alice', 1), (2, 'gs://bk/', 'bob', 2);
+  `
+  const NEXT = `
+    INSERT INTO actions (id, actor, ts, scan, pattern, set_owner, owner) VALUES (3, 'ops', 3, '${S2}', 'gs://bk/nest/', 1, 'carol');
+    INSERT INTO owner_prefixes (action_id, prefix, owner, ts) VALUES (3, 'gs://bk/nest/', 'carol', 3);
+  `
+  const fold = ({ computed: _, ...body }: Awaited<ReturnType<typeof import('./ownerTotals').ownerTotals>>) => body
+
+  it('prices only the new prefix, and folds what a cold recompute folds', async () => {
+    for (const env of ['perScan', 'iv'] as const) {
+      vi.resetModules()
+      const { ownerTotals } = await import('./ownerTotals')
+      const before = (await seed(LEDGER))[env]
+      const cold = await ownerTotals(before, S2)
+      expect([cold.head, cold.computed.prefixes]).toEqual([2, 2])
+      for (const sql of NEXT.split(';').map(q => q.trim()).filter(Boolean)) await before.DB!.prepare(sql).run()
+      const next = await ownerTotals(before, S2)
+      // A fresh module: `ownerTotals` memoizes per (scan, head) in the isolate.
+      vi.resetModules()
+      const { ownerTotals: coldTotals } = await import('./ownerTotals')
+      const full = await coldTotals((await seed(LEDGER + NEXT))[env], S2)
+      expect({ env, head: next.head, prefixes: next.computed.prefixes, fold: fold(next) }).toEqual({ env, head: 3, prefixes: 1, fold: fold(full) })
+      expect(full.computed.prefixes).toBe(3)
+    }
+  })
+
+  it('prices a new prefix on every held scan in one interval-store read', async () => {
+    vi.resetModules()
+    const { ownerTotals } = await import('./ownerTotals')
+    const env = (await seed(LEDGER)).iv
+    for (const date of [S1, S2, S3]) await ownerTotals(env, date)
+    for (const sql of NEXT.split(';').map(q => q.trim()).filter(Boolean)) await env.DB!.prepare(sql).run()
+    const next = await ownerTotals(env, S2)
+    const n = r2Reads.length
+    const rest = [await ownerTotals(env, S1), await ownerTotals(env, S3)]
+    // The other scans' refolds read nothing: S2's refold priced the prefix on them too.
+    expect(r2Reads.slice(n)).toEqual([])
+    expect([next, ...rest].map(b => [b.scan, b.head, b.computed.prefixes])).toEqual([[S2, 3, 1], [S1, 3, 0], [S3, 3, 0]])
+    vi.resetModules()
+    const { ownerTotals: coldTotals } = await import('./ownerTotals')
+    const cold = (await seed(LEDGER + NEXT)).iv
+    for (const b of [next, ...rest]) expect(fold(b)).toEqual(fold(await coldTotals(cold, b.scan)))
+  })
+
+  it('writes nothing per scan when an owner changes on prefixes already priced', async () => {
+    vi.resetModules()
+    const { ownerTotals } = await import('./ownerTotals')
+    const env = (await seed(LEDGER)).iv
+    for (const date of [S1, S2, S3]) await ownerTotals(env, date)
+    const cached = () => env.DB!.prepare('SELECT scan, updated_ts, length(body) AS n FROM owner_prefix_aggs ORDER BY scan').all()
+    const before = (await cached()).results
+    // `gs://bk/m/` changes hands: already priced on every scan.
+    await env.DB!.prepare(`INSERT INTO actions (id, actor, ts, scan, pattern, set_owner, owner) VALUES (3, 'ops', 3, '${S2}', 'gs://bk/m/', 1, 'carol')`).run()
+    await env.DB!.prepare(`INSERT INTO owner_prefixes (action_id, prefix, owner, ts) VALUES (3, 'gs://bk/m/', 'carol', 3)`).run()
+    const n = r2Reads.length
+    const after = [await ownerTotals(env, S1), await ownerTotals(env, S2), await ownerTotals(env, S3)]
+    expect(after.map(b => [b.scan, b.head, b.computed.prefixes])).toEqual([[S1, 3, 0], [S2, 3, 0], [S3, 3, 0]])
+    expect(r2Reads.slice(n)).toEqual([])
+    expect((await cached()).results).toEqual(before)
+    expect((await env.DB!.prepare('SELECT count(*) AS n FROM owner_totals').first<{ n: number }>())!.n).toBe(0)
+  })
+})
+
+describe('owner prefix history', () => {
+  const LEDGER = `
+    INSERT INTO actions (id, actor, ts, scan, pattern, set_owner, owner) VALUES
+      (1, 'ops', 1, '${S2}', 'gs://bk/m/', 1, 'alice'), (2, 'ops', 2, '${S2}', 'gs://bk/', 1, 'bob'), (3, 'ops', 3, '${S2}', 'gs://bk/nest/', 1, 'carol');
+    INSERT INTO owner_prefixes (action_id, prefix, owner, ts) VALUES (1, 'gs://bk/m/', 'alice', 1), (2, 'gs://bk/', 'bob', 2), (3, 'gs://bk/nest/', 'carol', 3);
+  `
+  const fold = ({ computed: _, ...body }: Awaited<ReturnType<typeof import('./ownerTotals').ownerTotals>>) => body
+
+  it('versions a path by its live slices, merging equal neighbours and leaving gaps', async () => {
+    const { versionsOf } = await import('./ownerHist')
+    const row = (usr: string | null, size: number, vf: number, vt: number) =>
+      ({ depth: 2, path: 'bk/a', usr, size, n_files: 1, cls2: 0, cls3: 0, cls4: 0, vf, vt }) as unknown as import('./index').Row
+    const vs = versionsOf([row('al', 5, 0, 2), row('bo', 3, 0, 4), row('al', 5, 2, 4), row('bo', 7, 6, 9)])
+    expect([...vs]).toEqual([['2:bk/a', [
+      [0, 4, { b: 8, o: 2, us: { al: 5, bo: 3 }, uo: { al: 1, bo: 1 }, cb: {} }],
+      [6, 9, { b: 7, o: 1, us: { bo: 7 }, uo: { bo: 1 }, cb: {} }],
+    ]]])
+  })
+
+  it('folds every held scan as the per-scan reader does (runs and close records too)', async () => {
+    for (const gen of ['g2', 'g5']) {
+      vi.resetModules()
+      const { ownerTotals } = await import('./ownerTotals')
+      const { perScan, iv } = await seed(LEDGER)
+      const env = { ...iv, INTERVAL_STORE_GEN: gen } as Env
+      for (const date of [S1, S2, S3]) {
+        const h = await ownerTotals(env, date)
+        expect({ gen, date, hist: h.computed.hist, fold: fold(h) }).toEqual({ gen, date, hist: true, fold: fold(await ownerTotals(perScan, date)) })
+      }
+    }
+  })
+
+  it('concurrent folds after a new assignment share one pricing and all fold from history', async () => {
+    vi.resetModules()
+    const { ownerTotals } = await import('./ownerTotals')
+    const env = (await seed(LEDGER)).iv
+    for (const date of [S1, S2, S3]) await ownerTotals(env, date)
+    await env.DB!.prepare(`INSERT INTO actions (id, actor, ts, scan, pattern, set_owner, owner) VALUES (4, 'ops', 4, '${S2}', 'gs://bk/small/', 1, 'dan')`).run()
+    await env.DB!.prepare(`INSERT INTO owner_prefixes (action_id, prefix, owner, ts) VALUES (4, 'gs://bk/small/', 'dan', 4)`).run()
+    // D1's latency: each statement's result arrives a few ms later, so concurrent folds interleave as on the edge.
+    const late = <T extends object>(o: T): T => new Proxy(o, { get(t, k) {
+      const v = Reflect.get(t, k)
+      if (typeof v !== 'function') return v
+      if (k === 'prepare' || k === 'bind') return (...a: unknown[]) => late(v.apply(t, a))
+      return async (...a: unknown[]) => { await new Promise(r => setTimeout(r, 5)); return v.apply(t, a) }
+    } })
+    const slow = { ...env, DB: late(env.DB!) } as Env
+    const got = await Promise.allSettled([S1, S2, S3].map(d => ownerTotals(slow, d)))
+    expect(got.map(g => g.status === 'fulfilled' ? [g.value.scan, g.value.computed.hist] : [g.status, String(g.reason)])).toEqual([[S1, true], [S2, true], [S3, true]])
+    vi.resetModules()
+    const { ownerTotals: coldTotals } = await import('./ownerTotals')
+    const cold = (await seed(LEDGER + `
+      INSERT INTO actions (id, actor, ts, scan, pattern, set_owner, owner) VALUES (4, 'ops', 4, '${S2}', 'gs://bk/small/', 1, 'dan');
+      INSERT INTO owner_prefixes (action_id, prefix, owner, ts) VALUES (4, 'gs://bk/small/', 'dan', 4);`)).perScan
+    for (const g of got) if (g.status === 'fulfilled') expect(fold(g.value)).toEqual(fold(await coldTotals(cold, g.value.scan)))
+  })
+
+  it('a new assignment writes one history row, and no per-scan row', async () => {
+    vi.resetModules()
+    const { ownerTotals } = await import('./ownerTotals')
+    const env = (await seed(LEDGER)).iv
+    for (const date of [S1, S2, S3]) await ownerTotals(env, date)
+    const count = async (t: string) => (await env.DB!.prepare(`SELECT count(*) AS n FROM ${t}`).first<{ n: number }>())!.n
+    const before = [await count('owner_prefix_hist'), await count('owner_prefix_aggs')]
+    await env.DB!.prepare(`INSERT INTO actions (id, actor, ts, scan, pattern, set_owner, owner) VALUES (4, 'ops', 4, '${S2}', 'gs://bk/small/', 1, 'dan')`).run()
+    await env.DB!.prepare(`INSERT INTO owner_prefixes (action_id, prefix, owner, ts) VALUES (4, 'gs://bk/small/', 'dan', 4)`).run()
+    const after = [await ownerTotals(env, S1), await ownerTotals(env, S2), await ownerTotals(env, S3)]
+    expect(after.map(b => [b.scan, b.computed.hist, b.computed.prefixes])).toEqual([[S1, true, 1], [S2, true, 0], [S3, true, 0]])
+    expect([await count('owner_prefix_hist'), await count('owner_prefix_aggs')]).toEqual([before[0] + 1, before[1]])
+  })
 })
 
 /** What a read did per-scan: the store's `listing/` keys it fetched. */
