@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { fmtDuration, fmtOffset, ticks, timeline, uaLabel } from './sessionsModel'
+import { fmtClock, fmtDuration, fmtOffset, ticks, timeline, uaLabel } from './sessionsModel'
 import type { StoredEvent } from '../functions/_lib/sessionLogShape'
 
 const T = 1_791_817_200_000
@@ -54,6 +54,25 @@ describe('session view model', () => {
     expect([ticks(lines, 400), ticks(timeline([e(0, 'start', { u: '/' })]), 400)]).toEqual([
       [{ i: 0, x: 0, lane: 'nav', error: false }, { i: 1, x: 100, lane: 'input', error: false }, { i: 2, x: 400, lane: 'error', error: true }],
       [{ i: 0, x: 0, lane: 'nav', error: false }],
+    ])
+  })
+
+  it('formats wall-clock times to the ms, with the date only off the start day', () => {
+    // T = 2026-10-12T15:00Z: 11:00 in New York, 00:00 the next day in Tokyo.
+    expect([
+      fmtClock(T, T, 'UTC'),
+      fmtClock(T + 66_433, T, 'UTC'),
+      fmtClock(T + 10 * 3_600_000 + 5, T, 'UTC'),
+      fmtClock(T + 10 * 3_600_000 + 5, T, 'America/New_York'),
+      fmtClock(T + 10 * 3_600_000 + 5, T, 'Asia/Tokyo'),
+      fmtClock(T + 30 * 3_600_000, T, 'America/New_York'),
+    ]).toEqual([
+      '15:00:00.000',
+      '15:01:06.433',
+      'Oct 13 01:00:00.005',
+      '21:00:00.005',
+      '10:00:00.005',
+      'Oct 13 17:00:00.000',
     ])
   })
 
