@@ -185,13 +185,27 @@ Then, once after the scans (not per scan of a catch-up), the **merge stage** (de
 
 Measured size of a scan's delta (§6): ~2–3M opens plus ~1–2M close records. That's ~4M rows, ~0.12 GB in both sorts, against 21.7 GB for a per-scan path store. A real run: §6.3.
 
+### 2.8 Any store, and one machine (`blobstore`, `interval_local`)
+
+**The store seam.** Every interval-store read, write and list goes through `blobstore.Store`: a URL root (`gs://`, `r2://`, `s3://`; `r2://`'s endpoint from `DISK_TREE_R2_ENDPOINT_URL` or `buckets.yml`) or a local dir, keys relative to it as the readers' `INDEX_R2` keys are. A profile's `bucket` (and `append.scratch`) may be a URL; a bare bucket name still means `gs://<name>` (`store_url`), so gcs's `job/interval-store.json` is unchanged. `blobstore.run_store` is `append_runner`'s `RunStore` over it (`GcsRunStore` on a whole GCS bucket). The staged commands take the store as `-b` (`build-ranges`, `fold`, `cut`, `verify`, `runs ranges|publish|carry`); DuckDB reads their range files from `-m` (a mount) or the store's URL. When the store *is* the serving R2 bucket (`r2://$R2_BUCKET`), `r2` and `r2-copy` are no-ops (`blobstore.serves`).
+
+What stays GCS-shaped: the staged chain (`interval-store append` / `merge`) submits Batch jobs whose tasks mount the store as a GCS volume, so its profile's `bucket` and `scratch` must be whole GCS buckets (`load_config` refuses others and points at `add`); the GCS → R2 copy (`r2`, `r2-copy`) copies from GCS only.
+
+**One machine** (`dt-cloud interval-store build` / `add`, `interval_local.py`, the model being `static_local.py`'s `static-names build` / `add`): the staged path's stages in-process, in order, over a work dir (`-w`), for a deployment whose scans one machine handles in minutes (r2.rbw.sh's daily GitHub Actions ingest; cw-s3, whose store is R2 with no GCS copy, once one machine is sized for its scans: each stage reports its peaks).
+- `build -g GEN -L LAYOUT -s SCANS -o STORE [-k RANGES] [-r RG_ROWS] [-t THROUGH]`: ranges (`plan_ranges`), `build_range` + `fold_range`, `build_slices_range` + `slice_totals_range` (every scan's reconstruction checked, or it fails), the served sorts (every `SORTS` entry, dyadic segments, `stats.json`), then the generation copied into `STORE/interval-store/GEN/`, `scans.json` last. Never over an existing generation.
+- `add -g GEN -L LAYOUT -s SCANS -o STORE [-C LEVEL] [-N]`: every scan after the generation's newest, oldest first, as a run (`append_range` per key range, `cut_run`, `meta.json`, `publish_run`), then the due carries (`merge_pending` with `interval_append.carry`). The open versions are refolded from the base's range files and the newest manifest's runs' deltas (`open_state_sql`: one row per version, the smallest `vt`, those open), so no `state/` is kept between runs; a run is byte for byte the staged chain's.
+- A URL store's generation is mirrored into the work dir (but the base's `served/`, `rd/` and digests, which no append reads); new files go up data first, `meta.json`s next, the base's `scans.json` (on a build), manifests last. A pending scan's run already on the store (an interrupted `add`, no manifest) is redone, its keys overwritten and the rest deleted.
+- Each build stage and each appended scan reports its seconds, peak work-disk GiB and peak RSS GiB (`static_local.DiskPeak`, `rss_peak_gb`).
+- The site reads the result as it reads gcs's: `PATH_STORE` (`opt-in`, then `intervals`), `INTERVAL_STORE_GEN=<gen>` and the `INDEX_R2` binding on the store's bucket (`scans.json`, `served/`, `manifests/`, each listed run's `served/`).
+- `test_interval_local.py`: the build's range files and served sorts are the staged stages' over the same ranges, byte for byte; each run is the staged chain's append (deltas and served sorts, byte for byte), the refolded state is its `state/`; base + runs (merged or not) is a full rebuild version for version, and every directory's view at every scan is the per-scan reference's; an add with nothing pending changes nothing; an interrupted run is redone with its stale keys gone; a `memory://` store gets the local store's files.
+
 ## 3. Not built
 
 - The change-only diff (§2.6: needs the per-scan runs, and a decision on `(other)`), and the one-read series.
 - **A floor on the dyadic level.** A historical root still reads one group per small block (L0–L3: ~4 groups of 8K rows for a few rows over the threshold). Putting levels below 4 into L4 would cut that to one, ~30% of a historical diff's groups (§6.2). Deferred to the next compaction (§2.7), which rewrites the closed segments anyway; a standalone re-cut is ~$5 of GCS → R2 egress for the folded sorts.
 - **A lens's unread ancestors' own slices.** An ancestor of U's assigned regions whose own slice is under the threshold is valued from its bands alone, the lens's lower bound (`OwnerLens.value`). On v1 scans per-scan reads a coarse user tier (16 MiB floor) that holds that slice: ahmed-ahmed's `marin-us-east5/tokenized` is 120 MB short on the store (§6.2). A point read of U's slice at those few paths would close it.
 - Shrinking close records. Today a close record is the full row. Identity + `vt` + `size` would do; a sweep scan closes 58–126M versions.
-- The append in the gcs job (a patch for `job/run.sh`: `specs/done/interval-store-append-gcs.md`), cw's profile, compaction (§2.7), and rebuilding a lost open-version state from the base and the runs' deltas.
+- The append in the gcs job (a patch for `job/run.sh`: `specs/done/interval-store-append-gcs.md`), cw's and r2.rbw.sh's ingest steps (`interval-store add`, §2.8), compaction (§2.7), and rebuilding a lost open-version state from the base and the runs' deltas in the staged chain (`interval_local.open_state_sql` does it on one machine).
 
 ## 4. Retention of per-scan artifacts (proposal — Ryan decides)
 
@@ -230,7 +244,7 @@ Measured size of a scan's delta (§6): ~2–3M opens plus ~1–2M close records.
 
 **Generation `interval-store/2026-10-09`:** 71 scans, 2026-07-30 → 10-09; v1 indexes through 09-29, v2 store generations after.
 
-**Build** (`dt-cloud interval-store build`, 32 spot n2-highmem-16 tasks × 256 key ranges, ~41 task-hours; then `fold`, `cut`):
+**Build** (`dt-cloud interval-store build-ranges`, then named `build`; 32 spot n2-highmem-16 tasks × 256 key ranges, ~41 task-hours; then `fold`, `cut`):
 
 | | Rows | Bytes |
 |---|---:|---:|
