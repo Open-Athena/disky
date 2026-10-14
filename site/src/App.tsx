@@ -68,7 +68,7 @@ import { perf } from './perf'
 import { useDocTitle } from './title'
 import { TypedPrefixModal } from './TypedPrefix'
 import type { AgeRow, ColorMode, Meta, Pricing, Rules, TreeNode } from './types'
-import { CLASS_COLORS, CLASS_NAMES, CLASS_PRICE_US, MODE_LABELS, classMix, fmtN, fmtUsd, ratePerByte } from './types'
+import { CLASS_COLORS, CLASS_NAMES, CLASS_PRICE_US, MODE_KEYWORDS, MODE_LABELS, classMix, fmtN, fmtUsd, ratePerByte } from './types'
 import { SiteKbd } from './SiteKbd'
 import { useUnits } from './units'
 // The leaf viewer (file-tree's renderers, hyparquet…): its own chunk, fetched
@@ -931,15 +931,19 @@ function AppContent() {
 
   useActions({
     ...Object.fromEntries(
-      MODES.map((m, i) => [
+      // Only the axes this scan can color by (`bar.color`, the picker's own
+      // list): a "Color by read" on a store with no access logs did nothing.
+      // Bindings stay keyed to `MODES` order so a hotkey means one axis everywhere.
+      MODES.flatMap((m, i) => bar.color.length > 1 && bar.color.includes(m) ? [[
         `mode:${m}`,
         {
           label: `Color by ${MODE_LABELS[m]}`,
           group: 'Color mode',
+          keywords: MODE_KEYWORDS[m],
           defaultBindings: [String(i + 1)],
           handler: () => setMode(m),
         },
-      ]),
+      ]] : []),
     ),
     'highlight:clear': {
       label: 'Clear the owner axis (everyone)',
