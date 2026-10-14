@@ -140,6 +140,11 @@ export interface Env {
   /** Set only on a secondary store's overlay: a scope its viewers need on top
    *  of the deployment's viewer scope (`requireViewer`). */
   STORE_SCOPE?: string
+  /** The footer LRU's budget (`_lib/footerCache.ts`, specs/done/footer-lru.md): the most
+   *  `index_row_groups` rows its hot entries hold (default 1,000,000)… */
+  FOOTER_CACHE_MAX_ROWS?: string
+  /** …and, when set, the most bytes (their text columns + 64 per row; unset = no byte cap). */
+  FOOTER_CACHE_MAX_BYTES?: string
 }
 
 export interface Ctx {

@@ -18,7 +18,8 @@
  * reads, so the ~5 MB thrift footer is never parsed on a cold isolate. A run
  * never overwrites a file the pointer names: it lands a new generation and
  * flips the pointer last (specs/done/view-serving.md, "Index rewrite vs D1
- * footer"). A pointer whose row groups retention retired (`index-gc -r`)
+ * footer"). A pointer whose row groups retention retired (`index-gc -r`), or the
+ * footer LRU evicted or hasn't filled (`footerCache.ts`, specs/done/footer-lru.md),
  * opens the tier's **cold footer** instead (`pq` mode): the same rows as a
  * small parquet beside the tier (`<tier>.groups.parquet`, 512 rows per
  * group, stats on the pruning columns), whose own footer is range-read and
@@ -34,6 +35,7 @@ import { R2Store } from '@rdub/file-tree/stores/r2'
 import { S3Store } from '@rdub/file-tree/stores/s3'
 import { type FileMetaData, parquetMetadata, parquetMetadataAsync, parquetRead, parquetReadObjects, type RowGroup } from 'hyparquet'
 import type { Env } from './auth.js'
+import { FILL_MAX_ROWS, type FooterRow, noteAccess, probe, queueFill, trusted, wantsFill } from './footerCache.js'
 import { newestManifest } from './manifests.js'
 import { inFlight, join, JOIN, type Join, reqOf, shared, STALLED, track } from './shared.js'
 import { d1Variant, isPrimary, PRIMARY_STORE, storeKey } from './stores.js'
@@ -435,13 +437,21 @@ export async function openIndex(env: Env, date: string, variant = 'path'): Promi
     if (!env.DB) throw new Error('index reader not configured (DB)')
     const s = await schemaRow<{ version: number; schema_json: string; floor_bytes: number | null; gen: string | null; dir: string | null }>(env, 'version, schema_json, floor_bytes, gen, dir', date, variant)
     if (!s || !s.gen || !s.dir) throw new Error(`index variant '${variant}' not synced for ${date}`)
-    // A pointer whose row groups were retired (`index-gc -r`) still names
+    // A pointer whose row groups were retired (`index-gc -r`) or evicted still names
     // the generation dir: open the tier's cold footer there, else (a
     // generation from before it was written) the group-manifest blob.
-    const any = await env.DB.prepare('SELECT 1 AS x FROM index_row_groups WHERE date = ? AND variant = ? AND gen = ? LIMIT 1').bind(date, d1Variant(env, variant), s.gen).first<{ x: number }>()
+    // The footer LRU (`footerCache.ts`): D1's rows serve a hot entry or an untracked (synced) generation;
+    // anything else reads the cold footer, and a miss queues a fill. Without `footer_cache` (the migration
+    // not applied), the pre-LRU probe: any row at all.
+    const k = { date, variant: d1Variant(env, variant), gen: s.gen }
+    const p = await probe(env, k)
+    const d1 = p ? trusted(p) : !!(await env.DB.prepare('SELECT 1 AS x FROM index_row_groups WHERE date = ? AND variant = ? AND gen = ? LIMIT 1').bind(k.date, k.variant, k.gen).first<{ x: number }>())
     const schema = JSON.parse(s.schema_json) as SchemaElement[]
     const base = { file: fileFor(env, s.dir, variant), env, date, variant, gen: s.gen, dir: s.dir, schema, version: s.version, columns: rowColumns(s.version, schema), floor: s.floor_bytes == null ? null : num(s.floor_bytes) }
-    if (any) return { mode: 'd1', ...base }
+    if (d1) {
+      if (p?.state === 'hot') noteAccess(env, k, p.lastAccessDay)
+      return { mode: 'd1', ...base }
+    }
     let footer: FooterIndex
     try {
       footer = await openFooter(env, footerKey(s.dir, variant))
@@ -449,7 +459,10 @@ export async function openIndex(env: Env, date: string, variant = 'path'): Promi
       if ((e as Error).name !== 'NotFoundError') throw e
       return openBlob(env, date, variant, s.gen, s.dir)
     }
-    return { mode: 'pq', ...base, footer }
+    const h: PqHandle = { mode: 'pq', ...base, footer }
+    const total = footer.groups.at(-1)?.rgEnd ?? 0
+    if (p && wantsFill(p) && total <= FILL_MAX_ROWS) queueFill(env, k, () => footerRows(h))
+    return h
   }, 30_000) // a blob open is a ~15 MB fetch + parse
 }
 
@@ -1016,6 +1029,17 @@ async function openFooter(env: Env, key: string, src?: ByteStore): Promise<Foote
     return g
   })
   return { key, metadata, groups }
+}
+
+/** Every row of a per-scan cold footer, a footer group at a time (a fill's source, `queueFill`). */
+async function* footerRows(h: PqHandle): AsyncIterable<FooterRow[]> {
+  for (const fg of h.footer.groups) {
+    const got = await readFooterCols(h, fg, FOOTER_COLS)
+    yield got.map(r => ({
+      rg: r.rg as number, d_min: r.d_min as number, d_max: r.d_max as number, p_min: str(r.p_min), p_max: str(r.p_max), b_max: r.b_max as number,
+      u_min: r.u_min == null ? null : str(r.u_min), u_max: r.u_max == null ? null : str(r.u_max), row_start: r.row_start as number, row_end: r.row_end as number, rg_json: str(r.rg_json),
+    }))
+  }
 }
 
 /** The byte span of some columns' chunks in a footer group (they're stored in schema order, so a
