@@ -88,10 +88,10 @@ begin() { sr phase-begin "$1"; }
 phase() { sr phase-end "$1" ${2:+-q "$2"}; }
 # ERR: name the failed command for the record and the alert (`finish` posts it). The backfill matches this
 # function's xtrace line (`error_marker`), so its name and argument order are a contract.
-on_err() { { set +x; } 2>/dev/null; SR_ERR="exit $1: $3 (cw-run.sh:$2)"; }
+scan_err() { { set +x; } 2>/dev/null; SR_ERR="exit $1: $3 (cw-run.sh:$2)"; }
 on_exit() { local rc=$?; sr finish -x "$rc" ${SR_ERR:+-e "$SR_ERR"}; exit "$rc"; }
 SR_ERR=""
-trap 'on_err $? $LINENO "$BASH_COMMAND"' ERR
+trap 'scan_err $? $LINENO "$BASH_COMMAND"' ERR
 trap on_exit EXIT
 sr start -B -g "$GEN" "$SNAP_ID"
 begin bucket-check
