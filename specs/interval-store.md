@@ -61,7 +61,7 @@ The **per-scan append** is already solved (`specs/static-daily-append.md`, `stat
   - `slices-bytotal` `(⌊log2 tot⌋ desc, path, usr, vf)`: keyed on the path's total, as the per-scan `bysize` is since `bysize-path-total.md`. `fold -S` splits each slice version where its path's total changes (`svt/`, the pieces checked to tile the slices);
   - `slices-bysize-user` `(usr, ⌊log2 size⌋ desc, path, vf)`.
 - **Only with an owner axis.** A generation is *sliced* iff some scan in it names an owner (`usr` neither NULL nor '' on some row; a missing `usr` column names none). `build_range` counts the versions naming one (its digest's `owners`); the base build records the answer in `scans.json` as `"slices": true | false` (the local build after its versions stage, the staged `cut` from every range's digest, `gen_sliced`), and `stats.json` carries it too. An unsliced generation (cw-s3, r2.rbw.sh: no owner axis) builds no `sv/`, `svt/`, `sv-digest/` or slice sort, in the base or its runs (`build -S`, `fold -S` and the slice sorts' `cut` are no-ops there; its runs carry `pvl` and `path`/`bysize` alone): each slice sort would be about the size of `path` again. Appending a scan that names an owner to an unsliced generation is refused (`add` before appending anything, the staged `ranges` task too): its owners need a new base generation. A generation from before the flag reads as sliced. No override.
-  
+
   Their group indexes carry `u_min`/`u_max`. A slice sort *is* the per-scan sort as intervals, so the per-scan reader's owner logic (lens rects, `ownerOk`, owner totals) runs on it unchanged.
 - **Slices barely add versions.** Most paths are one slice: 1,156,339,350 slice versions against 1,156,324,516 folded path versions (609.2M open in both).
 
