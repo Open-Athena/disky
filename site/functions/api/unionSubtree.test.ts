@@ -1,7 +1,7 @@
 import { beforeAll, describe, expect, it, vi } from 'vitest'
 import type { Env } from '../_lib/auth'
-import { LINEAGES, sqliteD1 } from '../_lib/testD1'
-import { type D1Variant, readJson, seedGeneration } from '../_lib/testStore'
+import { LINEAGES } from '../_lib/testD1'
+import { A, B, C, unionDeployment, Z } from '../_lib/testUnion'
 import { onRequestGet as subtree } from './subtree'
 
 vi.mock('@rdub/file-tree/stores/s3', async () => ({ S3Store: (await import('../_lib/testStore')).S3Store }))
@@ -9,44 +9,22 @@ vi.mock('@rdub/file-tree/stores/s3', async () => ({ S3Store: (await import('../_
 // A union view (specs/federated-scans.md, "First live cases" 1): two stores of one deployment — the primary
 // (`v2-search`: roots `bk`, `zz`) and a secondary `meta` (`v2-mount`: root `mb`) — whose roots the main map
 // shows side by side, each read at its own scan for the request's cutoff; a drill below the root is the
-// owning store's own answer.
-
-const Z = '2026-09-30T0001'
-const A = '2026-10-01T0001'
-const B = '2026-10-02T0001'
-const C = '2026-10-03T0001'
-const CREDS = { STORE_ACCESS_KEY_ID: 'STORE_META_ID', STORE_SECRET_ACCESS_KEY: 'STORE_META_ID' }
-const META = { vars: { ROOT_LABEL: 'our storage', SNAPSHOTS_SUBDIR: 'meta', STORE_PREFIXES: 'meta-l2/,snapshots/meta/', STORE_BUCKET: 'meta-data' }, secrets: CREDS }
-const DUP = { vars: { ROOT_LABEL: 'dup', STORE_BUCKET: 'dup-data' }, secrets: CREDS }
-const stores = (views: Record<string, unknown>) => JSON.stringify({ meta: META, dup: DUP, ...views })
+// owning store's own answer. The deployment: `_lib/testUnion.ts`.
 
 type Node = { n: string; k: string; b: number; o: number; f?: number; c?: Node[]; src?: string; at?: string }
 type Body = { date: string; path: string; threshold: number; tree: Node; union?: unknown; nodes: number }
 
 describe.each(LINEAGES)('D1, %s lineage', lineage => {
-  let base: Env
+  let deployment: (views?: Record<string, unknown>) => Env
   const puts: string[] = []
 
   beforeAll(async () => {
     ;(globalThis as unknown as { caches: unknown }).caches = { default: { match: async () => undefined, put: async (k: Request) => { puts.push(k.url) } } }
-    const { db, raw } = await sqliteD1(lineage)
-    const seed = async (fx: string, date: string, store?: string) => {
-      const v = await readJson<Record<string, D1Variant>>(`${fx}/d1.json`)
-      const files = { path: { parquet: `${fx}/path-index.parquet`, groups: `${fx}/path-index.groups.json` }, bysize: { parquet: `${fx}/path-index-bysize.parquet`, groups: `${fx}/path-index-bysize.groups.json` } }
-      seedGeneration(raw, { date, gen: 'g', dir: `${store ?? 'primary'}/${date}/index/g`, variants: v, files, store })
-    }
-    // The primary scans at Z, A and C; meta at A and B (its own schedule); `dup` (a `bk` root, like the primary's) at A.
-    await seed('v2-search', Z)
-    await seed('v2-search', A)
-    await seed('v2-search', C)
-    await seed('v2-mount', A, 'meta')
-    await seed('v2-mount', B, 'meta')
-    await seed('v2', A, 'dup')
-    base = { DB: db, GCS_HMAC_KEY_ID: 'k', GCS_HMAC_SECRET: 's', STORE_BUCKET: 'my-data', ROOT_LABEL: 'Fleet', STORE_META_ID: 'x' } as Env
+    deployment = await unionDeployment(lineage)
   })
 
-  const get = async (qs: string, views: Record<string, unknown> = { all: { union: ['primary', 'meta'], main: true } }) => {
-    const r = await subtree({ request: new Request(`http://localhost/api/subtree?w=1280&h=768&${qs}`), env: { ...base, STORES_JSON: stores(views) } })
+  const get = async (qs: string, views?: Record<string, unknown>) => {
+    const r = await subtree({ request: new Request(`http://localhost/api/subtree?w=1280&h=768&${qs}`), env: deployment(views) })
     return { status: r.status, text: await r.text() }
   }
   const body = async (qs: string, views?: Record<string, unknown>) => {

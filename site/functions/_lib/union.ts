@@ -105,21 +105,29 @@ async function observations(env: Env): Promise<Observation[]> {
   return dates.map(id => { const t = iso(scanInstant(id, times)); return { id, revision: '', observed_through: t, published_at: t } })
 }
 
+/** A union opened for a request: its members' contexts (gated) and indexed scans, and the caller's identity. */
+export interface Union {
+  view: UnionView
+  ctxs: Ctx[]
+  obs: Observation[][]
+  id: Identity | null
+}
+
+/** A cutoff: the scan id that names it (the client's as-of) and its instant. */
+export interface Cutoff { date: string; at: string }
+
 /**
- * Resolve the request's cutoff and every member's scan at it. `date=<id>`:
- * an exact scan id, which some member must index (else the same 404 a
- * single store answers); `d=<slug>`: the latest scan any member indexes
- * under the slug. Then each member's latest scan observed through that
- * instant. Every member is gated first (`requireViewer` on its own env: a
- * union demands each member's scope), so nothing is read for a viewer who
- * may not see all of it.
+ * Open a union for a request: every member's context, gated first
+ * (`requireViewer` on its own env: a union demands each member's scope, so
+ * nothing is read for a viewer who may not see all of it), then its indexed
+ * scans as observations.
  */
-export async function resolveUnion(ctx: Ctx, view: UnionView, gate: boolean): Promise<{ resolved: Resolved; id: Identity | null } | Response> {
+export async function openUnion(ctx: Ctx, view: UnionView, gate: boolean): Promise<Union | Response> {
   const ctxs = memberCtxs(ctx, view)
   if (ctxs instanceof Response) return ctxs
   for (const c of ctxs) {
     if (!c.env.DB) return json({ error: 'index backend not configured (DB)' }, 503)
-    if (!storeReady(c.env)) return new Response('subtree API not configured (missing index store creds)', { status: 503 })
+    if (!storeReady(c.env)) return json({ error: 'index reader not configured (missing index store creds)' }, 503)
   }
   let id: Identity | null = null
   if (gate) {
@@ -129,29 +137,44 @@ export async function resolveUnion(ctx: Ctx, view: UnionView, gate: boolean): Pr
       id ??= g
     }
   }
-  const sp = new URL(ctx.request.url).searchParams
-  const obs = await Promise.all(ctxs.map(c => observations(c.env)))
-  let date: string
-  let at: string
-  const raw = sp.get('date')
-  if (raw !== null || !sp.has('d')) {
-    if (!raw || !isScanId(raw)) return json({ error: 'date=YYYY-MM-DD[THHMM] required' }, 400)
-    const hit = obs.map(o => o.find(s => s.id === raw)).find(Boolean)
-    if (!hit) return noScan('date', raw)
-    date = raw
-    at = hit.observed_through
-  } else {
-    const slug = sp.get('d') ?? ''
-    const prefix = decodeScan(slug)
-    const found = prefix ? await Promise.all(ctxs.map(c => indexedScan(c.env, prefix, false))) : []
-    const cands = found.map((f, i) => (f ? obs[i].find(s => s.id === f) ?? null : null)).filter((s): s is Observation => !!s)
-    const best = cands.sort(compareScans).at(-1)
-    if (!best) return noScan('d', slug)
-    date = best.id
-    at = best.observed_through
+  return { view, ctxs, obs: await Promise.all(ctxs.map(c => observations(c.env))), id }
+}
+
+/** The cutoff a request names under `key`: an exact scan id some member indexes (else the single-store 404);
+ *  for `date` absent, `d=<slug>` — the latest scan any member indexes under the slug. */
+export async function cutoffOf(u: Union, sp: URLSearchParams, key = 'date'): Promise<Cutoff | Response> {
+  const raw = sp.get(key)
+  if (raw !== null || key !== 'date' || !sp.has('d')) {
+    if (!raw || !isScanId(raw)) return json({ error: `${key}=YYYY-MM-DD[THHMM] required` }, 400)
+    const hit = u.obs.map(o => o.find(s => s.id === raw)).find(Boolean)
+    return hit ? { date: raw, at: hit.observed_through } : noScan(key, raw)
   }
-  const members = view.members.map((store, i) => ({ store, ctx: ctxs[i], date: latestObserved(obs[i], at)?.id ?? null }))
-  return { resolved: { view, date, at, members }, id }
+  const slug = sp.get('d') ?? ''
+  const prefix = decodeScan(slug)
+  const found = prefix ? await Promise.all(u.ctxs.map(c => indexedScan(c.env, prefix, false))) : []
+  const cands = found.map((f, i) => (f ? u.obs[i].find(s => s.id === f) ?? null : null)).filter((s): s is Observation => !!s)
+  const best = cands.sort(compareScans).at(-1)
+  return best ? { date: best.id, at: best.observed_through } : noScan('d', slug)
+}
+
+/** The newest scan any member indexes: the "latest" cutoff (null = no member has one). */
+export function latestCutoff(u: Union): Cutoff | null {
+  const best = u.obs.flat().sort(compareScans).at(-1)
+  return best ? { date: best.id, at: best.observed_through } : null
+}
+
+/** Every member's scan at a cutoff: its latest observed through it (null = unknown, never a later one). */
+export function membersAt(u: Union, c: Cutoff): Resolved {
+  return { view: u.view, ...c, members: u.view.members.map((store, i) => ({ store, ctx: u.ctxs[i], date: latestObserved(u.obs[i], c.at)?.id ?? null })) }
+}
+
+/** Open, cut off at the request's `date=`/`d=`, resolve: what a single-scan endpoint (`/api/subtree`) reads. */
+export async function resolveUnion(ctx: Ctx, view: UnionView, gate: boolean): Promise<{ resolved: Resolved; id: Identity | null } | Response> {
+  const u = await openUnion(ctx, view, gate)
+  if (u instanceof Response) return u
+  const c = await cutoffOf(u, new URL(ctx.request.url).searchParams)
+  if (c instanceof Response) return c
+  return { resolved: membersAt(u, c), id: u.id }
 }
 
 /** A path's member: the one whose roots (at its resolved scan) hold the
