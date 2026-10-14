@@ -17,12 +17,14 @@ Every write is authenticated as **you** by a personal bearer token.
 
 The token carries the `gcs` and `gcs:assign` scopes (least privilege: it can read, stage and assign, not administer). Revoking it is instant. Share links (guest access) can't assign.
 
+Automated readers can instead use an independently revocable `gcs:read` grant: reads only, no staging, assigning or administration. The daily snapshot job uses a dedicated Secret Manager credential, separate from the sheet mirror; operators provision it with `dt-cloud job-token` as described in [GCS operations][operations]. Do not reuse a personal write-capable token for a read-only job.
+
 ```bash
 export GCS_USAGE_TOKEN=…                  # the token you copied
 export GCS_USAGE_URL=https://gcs.oa.dev   # the site
 ```
 
-Prefixes are always `gs://marin-<bucket>/<dir>/…/`: **directory prefixes only** (trailing slash), in one of the six `marin-*` buckets. The read APIs' `path=` is the same prefix without the scheme or trailing slash (`marin-us-east5/checkpoints`; empty = all buckets).
+Directory prefixes are `gs://marin-<bucket>/<dir>/…/` (trailing slash), in one of the six `marin-*` buckets. An exact object path has no appended slash and carries `kind: 'object'` in supported write operations. The read APIs' `path=` is the same path without scheme or trailing slash (`marin-us-east5/checkpoints`; empty = all buckets).
 
 **You are `me`.** Your owner id is what `GET /api/me` reports as `user`; `user=me` (`/api/estate`), `lens=user:me` (`/api/subtree`, `/api/diff`, `/api/series`) and `owner: '@me'` (`POST /api/actions`) all resolve to it.
 
@@ -60,7 +62,7 @@ Every run, dry or real, is readable by any signed-in viewer; only admins dispatc
 | `GET /api/plans/prefix-history?id=<plan_id>` | Each staged prefix of a plan → the real run(s) that deleted it. |
 | `GET /v1/files/list?prefix=sweep/runs/<run_id>/` | A run's directory (plan, per-bucket manifests of the exact objects + generations deleted); fetch a file with `/v1/files/get?path=…`. |
 
-Deleted objects stay recoverable for 7 days from their deletion (each run's `undo_deadline`, epoch seconds). **There is deliberately no undo API.** To get something back, send an admin the run id and the prefixes (a reply on the run's Slack/Discord thread, or a DM); an agent can assemble that list with the recipe below. `/runs/<run_id>` is the same run as a page.
+Deleted objects stay recoverable for 7 days from each object's deletion, not from job completion; the recorded run deadline is not a new retention window. Ordinary agent tokens cannot restore. Admins can dispatch whole-run recovery through `POST /api/sweep/undo` (`{ run_id, bulk? }`) after the real job finishes and drains, within its recovery window. For prefix-filtered recovery, ask an admin to use the CLI with committed decision logs. Send the run id and prefixes (a reply on the run's thread, or a DM); an agent can assemble them with the recipe below. `/runs/<run_id>` shows progress, deletion records and recovery information; opening it does not start recovery.
 
 ### Ownership
 
@@ -92,6 +94,10 @@ CREATE SECRET (TYPE http, EXTRA_HTTP_HEADERS MAP {'Authorization': 'Bearer <toke
 SELECT path, sum(b) AS bytes FROM read_parquet('https://gcs.oa.dev/api/path-index?date=2026-08-26')
 WHERE depth = 2 GROUP BY path ORDER BY bytes DESC LIMIT 20;
 ```
+
+### Temporary session-monitor API (operator only)
+
+`POST /api/session-monitor` runs the time-boxed GCS aggregate checker; `?dry=1` reads counts without state writes or notifications. It requires the dedicated `gcs:session-monitor:read` grant, not a normal viewer or admin token. That grant has no access to raw session logs, ordinary viewer data or app mutations. Production notifications are capped at three attempts per UTC day, at least an hour apart; preview refuses notification sends. The checker and its grant expire at 2026-10-21T00:00:00Z. It also does nothing when logging is off. This is a recorded-client-event checker, not a full visitor count or uptime guarantee.
 
 ## 3. Recipes
 
@@ -180,7 +186,7 @@ for r in $(gu "$GCS_USAGE_URL/api/plans/staged" | jq -r '.runs[] | select(.mode 
 done
 ```
 
-**Asking for an undo.** There is no API for it, on purpose: an undo is an admin's call. Message an admin (a reply on the run's Slack/Discord thread, or a DM) with the run id, the prefixes you want back (the recipe above lists them), and why, before the run's `undo_deadline`.
+**Asking for an undo.** Recovery is an admin's call; ordinary agent tokens cannot dispatch it. Message an admin (a reply on the run's Slack/Discord thread, or a DM) with the run id, prefixes you want back (the recipe above lists them), and why, before their recovery cutoff. An admin uses the whole-run recovery API or the prefix-filtered CLI after stop/drain.
 
 ## Notes for agents
 
@@ -190,3 +196,4 @@ done
 - There is no client CLI for staging; the surviving `dt-cloud` verbs are the pipeline's and the executor's (`healthcheck`, `sweep manifest --plan`, …).
 
 [API.md]: https://github.com/Open-Athena/marin-gcs-usage/blob/gcs/API.md
+[operations]: specs/gcs-operations.md

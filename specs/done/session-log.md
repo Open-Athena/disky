@@ -4,6 +4,8 @@ When someone reports a bug, an admin opens their session's event log and sees wh
 
 This is an event log, not a screen recorder: no DOM snapshots, no form contents other than the path filter.
 
+The temporary GCS failure-only checker is documented separately in [session-monitor.md][monitor-spec]. Logging starts on page load; enabling it does not retroactively capture usage or turn it on in tabs that booted while it was off.
+
 ## Switch: `/admin`, stored in D1
 
 A runtime switch, not a deploy var: the "Session log" section at the bottom of `/admin` has an on/off switch (`role="switch"` checkbox) and a "through" date (UTC).
@@ -103,3 +105,5 @@ Measured on the build (`pnpm -C site build`, vs. the spec commit):
 1. On the gcs branch: copy `site/migrations/cw/0018_session_log.sql` to `site/migrations/gcs/0042_session_log.sql` (it now carries `session_log_switch` too); apply: `wrangler d1 migrations apply oa-gcs-usage-auth --remote` (Ryan's go). Deploy the merged code. No `[vars]` needed (`SESSION_LOG_RETAIN_DAYS` only to change the 30-day default).
 2. Signed in as an admin: `/admin` → "Session log" at the bottom → check "Logging" (the date defaults to 7 days out; move it first if wanted, ≤ 31 days). Uncheck to stop early; it also stops by itself after the date.
 3. Check: `/api/session-log` → `{"enabled": true, …}` signed in (within 60 s on other isolates); browse; `/admin/sessions` lists the session. `SELECT * FROM admin_edits WHERE tbl = 'session_log_switch'` shows who toggled it.
+
+[monitor-spec]: session-monitor.md

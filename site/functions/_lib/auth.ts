@@ -21,6 +21,8 @@ import { d1AuditSink, d1GrantStore, d1ProfileStore, d1RequestStore } from '@open
 import type { D1Database, KVNamespace, R2Bucket } from '@cloudflare/workers-types'
 
 export interface Env {
+  /** Temporary aggregate session monitor; preview is dry-run only. */
+  SESSION_MONITOR?: string
   DB?: D1Database
   SESSION_SECRET?: string
   /** OIDC (our own Google client) — the ZT-free sign-in path. Set as Pages
@@ -96,6 +98,7 @@ export interface Env {
    *  store on `INDEX_R2` (`index.ts` `openInterval`, specs/interval-store.md); `opt-in`: only requests
    *  with `ps=iv` (`withPathStore`); unset = per-scan stores. */
   PATH_STORE?: string
+  OWNER_HISTORY_BATCH?: string
   /** The interval store generation (`interval-store/<gen>/` on `INDEX_R2`). */
   INTERVAL_STORE_GEN?: string
   /** A revision of the generation's files (rewritten in place): keys every cache over them apart. */
