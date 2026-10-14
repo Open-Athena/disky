@@ -67,6 +67,7 @@ async function seed(ledger = ''): Promise<{ perScan: Env; iv: Env }> {
     CREATE TABLE owner_prefixes (action_id INTEGER NOT NULL REFERENCES actions (id), prefix TEXT NOT NULL, owner TEXT, ts INTEGER NOT NULL, tombstoned TEXT, PRIMARY KEY (prefix, action_id));
     ${LEDGER_KIND}
     CREATE TABLE owner_totals (scan TEXT NOT NULL, head INTEGER NOT NULL, body TEXT NOT NULL, claims TEXT NOT NULL, computed_ts INTEGER, ms INTEGER, PRIMARY KEY (scan, head));
+    CREATE TABLE owner_prefix_aggs (scan TEXT NOT NULL, idx TEXT NOT NULL, body TEXT NOT NULL, updated_ts INTEGER NOT NULL, PRIMARY KEY (scan, idx));
     ${ledger}
   `)
   seedGeneration(raw, { date: S2, gen: 'g', dir: `listing/${S2}/index/g`, variants: lensD1, files: files('v2-lens', { path: 'path-index', bysize: 'path-index-bysize', 'bysize-user': 'path-index-bysize-by-user' }) })
@@ -78,6 +79,37 @@ beforeAll(async () => {
   ;(globalThis as unknown as { caches: unknown }).caches = { default: { match: async () => undefined, put: async () => {} } }
   // The ledger's tables, empty: owners are the scans' own attribution.
   ;({ perScan, iv } = await seed())
+})
+
+describe('owner totals after a new assignment', () => {
+  const LEDGER = `
+    INSERT INTO actions (id, actor, ts, scan, pattern, set_owner, owner) VALUES
+      (1, 'ops', 1, '${S2}', 'gs://bk/m/', 1, 'alice'), (2, 'ops', 2, '${S2}', 'gs://bk/', 1, 'bob');
+    INSERT INTO owner_prefixes (action_id, prefix, owner, ts) VALUES (1, 'gs://bk/m/', 'alice', 1), (2, 'gs://bk/', 'bob', 2);
+  `
+  const NEXT = `
+    INSERT INTO actions (id, actor, ts, scan, pattern, set_owner, owner) VALUES (3, 'ops', 3, '${S2}', 'gs://bk/nest/', 1, 'carol');
+    INSERT INTO owner_prefixes (action_id, prefix, owner, ts) VALUES (3, 'gs://bk/nest/', 'carol', 3);
+  `
+  const fold = ({ computed: _, ...body }: Awaited<ReturnType<typeof import('./ownerTotals').ownerTotals>>) => body
+
+  it('prices only the new prefix, and folds what a cold recompute folds', async () => {
+    for (const env of ['perScan', 'iv'] as const) {
+      vi.resetModules()
+      const { ownerTotals } = await import('./ownerTotals')
+      const before = (await seed(LEDGER))[env]
+      const cold = await ownerTotals(before, S2)
+      expect([cold.head, cold.computed.prefixes]).toEqual([2, 2])
+      for (const sql of NEXT.split(';').map(q => q.trim()).filter(Boolean)) await before.DB!.prepare(sql).run()
+      const next = await ownerTotals(before, S2)
+      // A fresh module: `ownerTotals` memoizes per (scan, head) in the isolate.
+      vi.resetModules()
+      const { ownerTotals: coldTotals } = await import('./ownerTotals')
+      const full = await coldTotals((await seed(LEDGER + NEXT))[env], S2)
+      expect({ env, head: next.head, prefixes: next.computed.prefixes, fold: fold(next) }).toEqual({ env, head: 3, prefixes: 1, fold: fold(full) })
+      expect(full.computed.prefixes).toBe(3)
+    }
+  })
 })
 
 /** What a read did per-scan: the store's `listing/` keys it fetched. */
