@@ -3,6 +3,7 @@ controller. Deployment-specific (project ids, machine shapes), so kept out of th
 from json import loads
 import json
 import os
+import re
 from os import environ
 from pathlib import Path
 from subprocess import run
@@ -96,6 +97,15 @@ def test_downstream_backfill_retains_explicit_parent():
     assert [(r.run.run_id, r.run.parent, r.run.kind) for r in reconstruct(profile, jobs, [], None, now=1791900000)] == [
         ("access", "root-uid", "access"), ("compute", "root-uid", "compute"),
     ]
+
+
+def test_error_marker_matches_the_traced_err_trap():
+    """`run.sh`'s ERR trap, as xtrace logs it: bash traces a trap's command one level down (`++`), so the backfill's
+    `error_marker` must match that line (`^\\+ fail_alert` never did)."""
+    profile = load_profile(ROOT_DIR / "job/scan-runs.json")
+    traced = run(["bash", "-c", "set -x; fail_alert() { :; }; trap 'fail_alert $? $LINENO \"$BASH_COMMAND\"' ERR; false"], capture_output=True, text=True).stderr.splitlines()
+    assert traced == ["+ trap 'fail_alert $? $LINENO \"$BASH_COMMAND\"' ERR", "+ false", "++ fail_alert 1 1 false", "++ :"]
+    assert re.match(profile.error_marker, traced[2]).groupdict() == {"rc": "1", "line": "1", "cmd": "false"}
 
 
 @pytest.mark.parametrize("code, scratch, expected", [

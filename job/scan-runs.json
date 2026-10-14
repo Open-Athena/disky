@@ -19,7 +19,7 @@
   "overlapped": ["access-ingest"],
   "concurrent": ["static-names", "interval-store", "index-sync rows"],
   "nop_marker": "^SNAPSHOT-JOB-NOP ",
-  "error_marker": "^\\+ fail_alert (?P<rc>\\d+) (?P<line>\\d+) (?P<cmd>.*)",
+  "error_marker": "^\\+\\+ fail_alert (?P<rc>\\d+) (?P<line>\\d+) (?P<cmd>.*)",
   "outputs": [
     {"key": "listing", "uri": "gs://oa-gcs-usage-dvx/listing/{scan}/", "exclude": ["dir-cache/", "index/"], "split": "dir",
      "rows": {"json": "_SUCCESS.json", "field": "objects"}, "after": "listing-fanout", "kinds": ["scan"]},
