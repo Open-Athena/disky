@@ -41,7 +41,10 @@ def test_selective_grants_keep_all_secret_containers(grant_only: set[str] | None
             for name in ("current", "retired")
         }
 
-    return pulumi.Output.all(*[secret.id for secret in secrets.secrets.values()]).apply(check)
+    assert sorted(secrets.grants) == expected
+    # Wait on the grants too: each registers after its secret (`depends_on`), so
+    # waiting on the secrets alone races the grants' registration.
+    return pulumi.Output.all(*[r.id for r in [*secrets.secrets.values(), *secrets.grants.values()]]).apply(check)
 
 
 def test_unknown_grant_id_is_rejected() -> None:

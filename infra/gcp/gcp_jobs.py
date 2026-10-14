@@ -187,6 +187,7 @@ class Secrets(ComponentResource):
         if grants_existing is None:
             grants_existing = existing
         self.secrets: dict[str, gcp.secretmanager.Secret] = {}
+        self.grants: dict[str, gcp.secretmanager.SecretIamMember] = {}
         for sid, labels in secrets.items():
             path = f"projects/{project}/secrets/{sid}"
             secret = gcp.secretmanager.Secret(
@@ -199,7 +200,7 @@ class Secrets(ComponentResource):
             )
             self.secrets[sid] = secret
             if grant_only is None or sid in grant_only:
-                grant_secret(
+                self.grants[sid] = grant_secret(
                     f"{sid}-accessor",
                     project=project,
                     secret_id=sid,

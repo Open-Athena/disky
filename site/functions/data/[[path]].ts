@@ -11,6 +11,7 @@
 import { withStore } from '../_lib/stores.js'
 import { snapshotsPrefix } from '../_lib/shared.js'
 import { type Env, requireViewer } from '../_lib/auth.js'
+import { dataAllowed, restrictedForbidden, restrictionFor } from '../_lib/restrict.js'
 import { pathScans, servedStore, storeReady } from '../_lib/index.js'
 import { isScanId } from '../../src/scanSlug.js'
 
@@ -60,6 +61,9 @@ export const onRequest = async (ctx0: { request: Request; env: Env }): Promise<R
     // A root-level primary must not proxy another store's named subdirectory
     // without its scope gate. Every snapshot starts with a canonical scan ID.
     if (!rulesKey && (!key.startsWith(own) || !isScanId(key.slice(own.length).split('/')[0]))) return notFound()
+    // A path-restricted link (specs/path-scopes.md): only the snapshot files that can't name a hidden path.
+    const restriction = restrictionFor(gated, ctx.env)
+    if (restriction && !rulesKey && !dataAllowed(key, own, restriction)) return restrictedForbidden()
     const { bytes, contentType } = await store.get(key)
     // A date-only scan id can't say *when* in that day the scan ran, and the
     // daily GCS job publishes ids without a time — but the object itself knows.
