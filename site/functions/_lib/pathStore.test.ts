@@ -449,7 +449,7 @@ describe('buildView on a store generation', () => {
       CREATE TABLE actions (id INTEGER PRIMARY KEY, actor TEXT NOT NULL, ts INTEGER NOT NULL, scan TEXT NOT NULL, pattern TEXT NOT NULL, set_owner INTEGER NOT NULL DEFAULT 0, owner TEXT);
       CREATE TABLE owner_prefixes (action_id INTEGER NOT NULL REFERENCES actions (id), prefix TEXT NOT NULL, owner TEXT, ts INTEGER NOT NULL, tombstoned TEXT, PRIMARY KEY (prefix, action_id));
       ${LEDGER_KIND}
-      CREATE TABLE owner_totals (scan TEXT NOT NULL, head INTEGER NOT NULL, body TEXT NOT NULL, claims TEXT NOT NULL, computed_ts INTEGER, ms INTEGER, PRIMARY KEY (scan, head)); CREATE TABLE owner_prefix_aggs (scan TEXT NOT NULL, idx TEXT NOT NULL, body TEXT NOT NULL, updated_ts INTEGER NOT NULL, PRIMARY KEY (scan, idx));
+      CREATE TABLE owner_totals (scan TEXT NOT NULL, head INTEGER NOT NULL, body TEXT NOT NULL, claims TEXT NOT NULL, computed_ts INTEGER, ms INTEGER, PRIMARY KEY (scan, head));
       INSERT INTO actions (id, actor, ts, scan, pattern, set_owner, owner) VALUES (1, 'ann', 1, '${V2_LENS}', 'gs://bk/small/s2', 1, 'carol');
       INSERT INTO owner_prefixes (action_id, prefix, owner, ts) VALUES (1, 'gs://bk/small/s2', 'carol', 1);
       INSERT INTO owner_totals (scan, head, body, claims) VALUES ('${V2_LENS}', 1, '{}', '${JSON.stringify(assigned)}');

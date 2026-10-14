@@ -67,7 +67,6 @@ async function seed(ledger = ''): Promise<{ perScan: Env; iv: Env }> {
     CREATE TABLE owner_prefixes (action_id INTEGER NOT NULL REFERENCES actions (id), prefix TEXT NOT NULL, owner TEXT, ts INTEGER NOT NULL, tombstoned TEXT, PRIMARY KEY (prefix, action_id));
     ${LEDGER_KIND}
     CREATE TABLE owner_totals (scan TEXT NOT NULL, head INTEGER NOT NULL, body TEXT NOT NULL, claims TEXT NOT NULL, computed_ts INTEGER, ms INTEGER, PRIMARY KEY (scan, head));
-    CREATE TABLE owner_prefix_aggs (scan TEXT NOT NULL, idx TEXT NOT NULL, body TEXT NOT NULL, updated_ts INTEGER NOT NULL, PRIMARY KEY (scan, idx));
     ${ledger}
   `)
   seedGeneration(raw, { date: S2, gen: 'g', dir: `listing/${S2}/index/g`, variants: lensD1, files: files('v2-lens', { path: 'path-index', bysize: 'path-index-bysize', 'bysize-user': 'path-index-bysize-by-user' }) })

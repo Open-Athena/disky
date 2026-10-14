@@ -13,13 +13,15 @@ import { AttributionRules } from './AttributionRules'
 import { DiffTreemap, DiffHeader, useDiffModel } from './DiffTreemap'
 import { DiffTable } from './DiffTable'
 import { DiskSpace } from './DiskSpace'
+import { DiskSpaceDiff, diskDiffScan } from './DiskSpaceDiff'
 import type { DiffData } from './diffModel'
 import { ScanCombobox } from './ScanCombobox'
 import { ago, buildUserIndex, epochDaysToDate } from './colors'
 import { ChildrenTable } from './ChildrenTable'
+import { LargestFiles } from './LargestFiles'
 import { FitSelect } from './FitSelect'
 import { PathPopover } from './PathPopover'
-import { pathCopy, pathText } from './pathCrumbs'
+import { fromUrlPath, pathCopy, pathText, toUrlPath } from './pathCrumbs'
 import { listsObjects, openHref } from './objects'
 import { Busy, Skeleton } from './Busy'
 import { useRules } from './rules'
@@ -187,10 +189,10 @@ function AppContent() {
   const rules: Rules | null = rulesQ.data ?? null
   // Ledger actions record which scan the actor was viewing.
   useEffect(() => setCurrentScan(asof ?? undefined), [asof])
-  const scanQuery = <T,>(name: string) => ({
-    queryKey: [name, store.key, asof],
-    queryFn: () => sfetch(`${store.base}/${asof}/${name}.json`).then(r => r.json() as Promise<T>),
-    enabled: !!asof,
+  const scanQuery = <T,>(name: string, scan = asof) => ({
+    queryKey: [name, store.key, scan],
+    queryFn: () => sfetch(`${store.base}/${scan}/${name}.json`).then(r => r.json() as Promise<T>),
+    enabled: !!scan,
     staleTime: Infinity,
   })
   // `?f=` (name filter) and `?o=` (owner axis): the page's scope, sent to the
@@ -335,6 +337,12 @@ function AppContent() {
   const fromScan = from && asof ? latestScan(from, earlier, times) : null
   const startMiss = useMemo(() => fromMiss(from, asof, scans, times), [from, asof, scans, times])
   const diffPrev = startMiss ? null : fromScan ?? spanScan ?? prevScan
+  // A store whose scans carry physical disk readings (`meta.disk_space`) compares them across the diff;
+  // any other store never fetches the earlier scan's meta (`diskDiffScan`).
+  const beforeMetaQ = useQuery({
+    ...scanQuery<Meta>('meta', diffPrev),
+    enabled: diskDiffScan(metaQ.data?.disk_space, diffPrev) != null,
+  })
   // Hour-rounded span back from `to` — the previous scan clears it, anything
   // else round-trips as its own span (nearest-scan resolution recovers it,
   // and the link keeps following `latest`).
@@ -381,7 +389,7 @@ function AppContent() {
   // and every level of the drilled path gets its own subtree query, grafted
   // in depth order — interactive drills hit each level's cache as they go,
   // and a cold deep link fans the whole chain out in parallel.
-  const graftPath = pathname.slice((store.path === '/' ? '' : store.path).length).split('/').filter(Boolean).join('/')
+  const graftPath = fromUrlPath(pathname.slice((store.path === '/' ? '' : store.path).length)).join('/')
   const canW = canvasWidth(typeof window === 'undefined' ? 1280 : window.innerWidth)
   // Perf-mark keys (`perf.ts`): what tells one load of a widget from another
   // on this page — path, scan(s), canvas width, scope.
@@ -641,7 +649,8 @@ function AppContent() {
   // `/my-bucket/some/dir`, not `/?p=my-bucket/some/dir`. View
   // options stay query params (`?c`, `?mt`, …); the section stays in the `#hash`.
   const storeBase = store.path === '/' ? '' : store.path
-  const drillPath = pathname.slice(storeBase.length).replace(/^\/+/, '')
+  // Decoded once: a dir name with spaces or URL delimiters travels encoded (`toUrlPath`).
+  const drillPath = fromUrlPath(pathname.slice(storeBase.length)).join('/')
   // Per-path created-time strata for `AgeChart`, keyed on the drilled prefix so
   // it follows the drill exactly instead of showing the whole fleet at every
   // depth (specs/done/age-index.md). Root (`drillPath === ''`, depth 0) is the fleet
@@ -699,7 +708,7 @@ function AppContent() {
   const drillTo = (segs: string[]) => {
     const q = new URLSearchParams(search)
     q.delete('open')
-    navigate({ pathname: segs.length ? `${storeBase}/${segs.join('/')}` : store.path, search: q.size ? `?${q}` : '' })
+    navigate({ pathname: segs.length ? `${storeBase}/${toUrlPath(segs)}` : store.path, search: q.size ? `?${q}` : '' })
   }
   // `?open=<name>`: an object under the drilled directory, shown in the leaf
   // viewer below the map (objects.ts `openHref`). Opening pushes history, so
@@ -1346,6 +1355,19 @@ function AppContent() {
               onBrush={setBrush}
             /></div>
           )}
+          {/* …and its flat twin: the largest files anywhere below it. The whole directory's, so not
+              shown under a scope (lens, owner pool, class, name filter) it couldn't honor. */}
+          {mapPath && objects && (
+            <div id="ltbl"><LargestFiles
+              segs={tblSegs}
+              scheme={store.scheme}
+              scan={asof}
+              total={mapPath[mapPath.length - 1].b}
+              enabled={!scopeQs}
+              onOpen={openPath}
+              onOpenObject={openObject}
+            /></div>
+          )}
         </>
       ) : miss ? (
         <NoScanMatch miss={miss} fmt={fmtS} hrefFor={scan => hrefWithScan(pathname, search, selOf(new URLSearchParams(search)), scan, true, times, scans)} />
@@ -1475,6 +1497,7 @@ function AppContent() {
               <span className="loading"> · aligning {fmtS(diffPrev)} → {fmtS(asof)}…</span>
             )}
           </span>} />
+          <DiskSpaceDiff before={beforeMetaQ.data?.disk_space} after={meta?.disk_space} />
           {/* The slot keeps the treemap's height through a reload: the last
               diff dims under the marker, or (first load) a skeleton stands in.
               The height held is the one the last settled map actually drew
