@@ -1,11 +1,11 @@
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import type { Env } from './auth'
-import { IV_JOIN, openIndex, slices } from './index'
+import { IV_JOIN, openIndex, readRootHistoryRows, slices } from './index'
 import { type Req, reqOf, withReq } from './shared'
 import type { OwnerScope } from './scope'
 import { LEDGER_KIND, sqliteD1 } from './testD1'
 import { type D1Variant, fixture, GETS, readJson, seedGeneration } from './testStore'
-import { buildDiff, buildView, readRootAgg } from './view'
+import { buildDiff, buildView, readRootAgg, readRootHistory } from './view'
 
 vi.mock('@rdub/file-tree/stores/s3', async () => ({ S3Store: (await import('./testStore')).S3Store }))
 
@@ -78,6 +78,54 @@ beforeAll(async () => {
   ;(globalThis as unknown as { caches: unknown }).caches = { default: { match: async () => undefined, put: async () => {} } }
   // The ledger's tables, empty: owners are the scans' own attribution.
   ;({ perScan, iv } = await seed())
+})
+
+describe('batched root owner history', () => {
+  const dates = [S1, S2, S3]
+  it('combines base/run close records before selecting dates and leaves uncovered dates out', async () => {
+    const runEnv = { ...iv, INTERVAL_STORE_GEN: 'g5' } as Env
+    const held = await readRootHistoryRows(runEnv, ['2026-01-01', ...dates])
+    expect([...held!.keys()]).toEqual(dates)
+    for (const scope of [{ lens: { key: 'alice' } }, { owner: 'unowned' as const }]) {
+      const want = []
+      for (const date of dates) want.push([date, await readRootAgg(runEnv, { date, path: '', ...scope })])
+      expect([...(await readRootHistory(runEnv, dates, scope))!]).toEqual(want)
+    }
+    expect(await readRootHistoryRows(iv, ['2026-01-01'])).toBeNull()
+  })
+  it('matches canonical bytes and objects for every user and owner pool', async () => {
+    for (const scope of [
+      { lens: { key: 'alice' } }, { lens: { key: 'bob' } }, { lens: { key: 'nobody' } },
+      { owner: 'owned' as const }, { owner: 'unowned' as const }, { owner: { not: ['alice'] } },
+    ]) {
+      const want = []
+      for (const date of dates) want.push([date, await readRootAgg(iv, { date, path: '', ...scope })])
+      expect([...(await readRootHistory(iv, dates, scope))!]).toEqual(want)
+    }
+    expect(await readRootHistory(perScan, dates, { owner: 'unowned' })).toBeNull()
+  })
+  it('applies newer ancestor repainting, release and exact-object assignments on every date', async () => {
+    const ledger = `
+      INSERT INTO actions (id, actor, ts, scan, pattern, set_owner, owner) VALUES
+        (1, 'ops', 1, '${S2}', 'gs://bk/m/', 1, 'alice'),
+        (2, 'ops', 2, '${S2}', 'gs://bk/', 1, 'bob'),
+        (3, 'ops', 3, '${S2}', 'gs://bk/nest/', 1, NULL);
+      INSERT INTO owner_prefixes (action_id, prefix, owner, ts) VALUES
+        (1, 'gs://bk/m/', 'alice', 1), (2, 'gs://bk/', 'bob', 2), (3, 'gs://bk/nest/', NULL, 3);
+      INSERT INTO actions (id, actor, ts, scan, pattern, set_owner, owner, kind) VALUES
+        (4, 'ops', 4, '${S2}', 'gs://bk/flat/f00016', 1, 'carol', 'object');
+      INSERT INTO owner_prefixes (action_id, prefix, owner, ts, kind) VALUES
+        (4, 'gs://bk/flat/f00016', 'carol', 4, 'object');
+    `
+    const current = await seed(ledger)
+    for (const scope of [{ lens: { key: 'alice' } }, { lens: { key: 'bob' } }, { lens: { key: 'carol' } }, { owner: 'unowned' as const }, { owner: 'owned' as const }]) {
+      // Warm manifests sequentially: the SQLite D1 fixture uses one connection
+      // and cannot overlap transactions; production D1 serializes its batches.
+      const want = []
+      for (const date of dates) want.push([date, await readRootAgg(current.iv, { date, path: '', ...scope })])
+      expect([...(await readRootHistory(current.iv, dates, scope))!]).toEqual(want)
+    }
+  })
 })
 
 /** What a read did per-scan: the store's `listing/` keys it fetched. */
