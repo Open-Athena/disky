@@ -1,6 +1,6 @@
 # Static name index: hash interiors are not indexed
 
-Status: approved by Ryan 2026-10-09 (the rule); **implemented** on branch `hex-runs` (2026-10-09, "Implementation as built" below). A generic `[cloud]` pipeline option, on for both deployments. The measurements are from cw's `2026-10-09cw` (specs/cw-static-names.md).
+**Status:** done. The rule was approved by Ryan 2026-10-09, built on branch `hex-runs` ("Implementation as built" below), merged to `cloud` in `424b4ada` (builder `91a882ce`, Worker `f9afbacf`), and is live on cw generation `2026-10-10cw` (`25bd5bee`). gcs adopts it at its next compaction. Open follow-up: the perf levers for `grams_sql` and `first_sql` before the next rebuild. A generic `[cloud]` pipeline option, on for both deployments. The measurements are from cw's `2026-10-09cw` (specs/cw-static-names.md).
 
 ## Why
 

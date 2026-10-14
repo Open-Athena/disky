@@ -1,5 +1,7 @@
 # Scans are not dates: sub-daily scan ids everywhere, a short `?d=` on every page
 
+**Status:** done. Scan ids on `cloud` (`83846b63`, `fb3ecfae`), `/names` on the shared `?d=` (`43deafdf`), date-only exact slugs (`85883570`), real start keys (`4b4788e8`), the shortest permanent slug (`a88f4838`), filtered views on covered scans (`be53b663`); the gcs job keys a scan by `SNAP_ID` (gcs `c80a6456`). Small leftovers (“Remaining” below): `/names` labels a date-only scan by its midnight form, and gcs's `stamp-started` backfill apply is unconfirmed.
+
 From the gcs session (2026-10-09), on Ryan's direction: "we should not be treating dates as PKs! we should have option to trigger (or switch cron to) multiple scans per day. cw already does this so if you added code … to bake in 'date == scan', that's wrong and should be removed. I'm fine to leave the params BC (e.g. date maps to latest scan for that date) and we can generalize that to where we always pick that latest scan matching a provided strptime-ish slug. param `date` should be shortened (have use-prms canonicalize it to a new shorter key+val str), and canonical repr should drop leading '20' from years."
 
 He also said "some of the above should go US too": this spec covers the `cloud` (upstream) part. gcs's own job (`job/run.sh` keyed by `DATE`, `listing/$DATE/`) is the gcs session's, done there in parallel (§4).

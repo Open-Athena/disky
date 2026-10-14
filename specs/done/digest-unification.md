@@ -1,5 +1,7 @@
 # Digest unification: one engine, two templates
 
+**Status:** done. One engine with `gcs` / `cw` templates (`ae8d2183`), presets that carry only template shape (`7723e512`), validated `-C` configs (`012a4ea1`), no deployment defaults (`26b59975`). Both deployments run `dt-cloud digest -C job/digest.yml`. Optional cleanup: drop the `cw-digest` alias.
+
 Step 1 of the gcs/cw unification sequence in [`branch-layout.md`] ("Open": digests → sweep executors → `path-index`/`index-write` → identities into D1 → sheet mirror). Per [branches carry exactly their code]: the posting capability lives on `cloud` as a toolkit; each deployment's policy/config lives on its branch.
 
 ## Before

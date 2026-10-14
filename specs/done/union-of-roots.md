@@ -1,6 +1,8 @@
 # disk-tree as the shared base for the cloud-usage viewers
 
-Status: **in progress** (2026-09-20). Union view + single-cloud collapse landed (`786b5bb`). Phase-1 hoist of raw `m/gcs` (`76a07ad`) was the **wrong source** — superseded below.
+**Status:** done. `cloud` is the base that gcs and cw-s3 merge (since 2026-09-28), and r2.rbw.sh is live on it (since 2026-09-21). Phase 7 went to [`pyrmts-adoption.md`](pyrmts-adoption.md), itself superseded by the interval store; phase 8 (the `ui/` superset) belongs to the `local` / app lane.
+
+As of 2026-09-20 (in progress): Union view + single-cloud collapse landed (`786b5bb`). Phase-1 hoist of raw `m/gcs` (`76a07ad`) was the **wrong source** — superseded below.
 
 **Direction (decided 2026-09-20):** disk-tree `cloud` is the canonical base for every cloud-storage-usage viewer. mgu already has a mature convergence in flight (`m/cw-s3:specs/convergence.md` — "one codebase, deployments as configuration"), whose own endgame is to upstream the union to disk-tree. So: **mgu finishes its convergence; disk-tree adopts the union tip (`m/cw-s3`) as the base and builds the r2/public layer convergence.md doesn't cover; then adopts mgu's converged `main`.** One convergence, not two.
 

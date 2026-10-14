@@ -1,6 +1,8 @@
 # Serving options for filters, diffs and history: a platform survey
 
-Status: research (2026-10-03), plus benchmarks A′ and B measured the same day (§5, §6). It answers "could Lambda / Cloud Run / Modal / a real database replace the [serving box][filter-query-service] or the Worker?". Every price and limit below links to its source. Where a number isn't documented, the text says so instead of guessing. Estimates (marked *est.*) are mine and are what the proposed benchmark would check.
+**Status:** done (reference). Outcome: the ClickHouse serving box this survey led to was built, then retired on 2026-10-10 (`20f57b46`, [`ch-postmortem.md`](ch-postmortem.md)); `?f=` is served by the static R2 name index (`e2073737`).
+
+Research (2026-10-03), plus benchmarks A′ and B measured the same day (§5, §6). It answers "could Lambda / Cloud Run / Modal / a real database replace the [serving box][filter-query-service] or the Worker?". Every price and limit below links to its source. Where a number isn't documented, the text says so instead of guessing. Estimates (marked *est.*) are mine and are what the proposed benchmark would check.
 
 ## Baseline (from our own measurements)
 
