@@ -165,6 +165,67 @@ def exists(path: str) -> bool:
     return False
 
 
+def glob(pattern: str) -> list[str]:
+    """The paths a glob matches, sorted, in the pattern's own form: local
+    paths for a local pattern, full URLs (scheme kept, e.g. `r2://bucket/…`)
+    for a URL one — so a match passes straight back into this module."""
+    if not is_url(pattern):
+        from glob import glob as _glob
+        return sorted(_glob(pattern))
+    import re
+    # Map each match back through the pattern's literal head (up to the dir
+    # holding the first wildcard): drivers spell paths their own way (`memory`
+    # adds a leading `/`), the caller's URL form is kept.
+    wild = re.search(r'[*?\[]', pattern)
+    head = pattern[:wild.start()].rsplit('/', 1)[0] if wild else pattern
+    fs, p = fs_for(pattern)
+    _, hp = fs_for(head)
+    hp = hp.rstrip('/')
+    return sorted(f"{head.rstrip('/')}{m[len(hp):]}" for m in fs.glob(p) if m.startswith(hp))
+
+
+def find(d: str) -> list[tuple[str, int, float]]:
+    """Every file under the dir ``d`` (local or URL), recursively, as
+    ``(path relative to d, size, mtime)`` sorted by path; `[]` when ``d`` is absent."""
+    fs, p = fs_for(d) if is_url(d) else (_fsspec().filesystem('file'), os.path.abspath(d))
+    p = p.rstrip('/')
+    if not fs.exists(p):
+        return []
+    return sorted(
+        (k[len(p) + 1:], int(info.get('size') or 0), _info_mtime(info))
+        for k, info in fs.find(p, detail=True).items()
+        if info.get('type') != 'directory'
+    )
+
+
+def remove_many(d: str, rel: list[str]) -> None:
+    """Delete the files ``rel`` (paths relative to the dir ``d``, local or URL)
+    in one batched call where the driver batches (S3's `DeleteObjects`)."""
+    if not rel:
+        return
+    if not is_url(d):
+        for r in rel:
+            os.remove(_local_join(d, r))
+        return
+    fs, p = fs_for(d)
+    fs.rm([f"{p.rstrip('/')}/{r}" for r in rel])
+    for r in rel:
+        _known.discard(join(d, r))
+
+
+def dataset(path: str):
+    """A `pyarrow.dataset` over one parquet file, local or URL: a lazy scan
+    that streams row groups and pushes projections/filters down. DuckDB
+    queries one registered as a table (`con.register`), which reaches every
+    URL this module resolves (`r2://` with its endpoint and profile) without
+    a DuckDB secret of its own."""
+    import pyarrow.dataset as ds
+    if not is_url(path):
+        return ds.dataset(path, format='parquet')
+    fs, p = fs_for(path)
+    return ds.dataset(p, filesystem=fs, format='parquet')
+
+
 def _info(path: str) -> dict:
     fs, p = fs_for(path)
     return fs.info(p)
@@ -360,7 +421,13 @@ def remove(path: str) -> None:
 
 
 def put(local_path: str, path: str) -> None:
-    """Upload a local file to a URL path (an `adopt_parquet` into a remote dir)."""
+    """Upload a local file to a URL path (an `adopt_parquet` into a remote dir),
+    or copy it to a local one (parent dirs made)."""
+    if not is_url(path):
+        import shutil
+        os.makedirs(os.path.dirname(path) or '.', exist_ok=True)
+        shutil.copy2(local_path, path)
+        return
     fs, p = fs_for(path)
     _ensure_parent(fs, p)
     fs.put(local_path, p)
