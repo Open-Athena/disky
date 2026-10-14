@@ -44,6 +44,8 @@ from . import static_drill as sd
 from . import static_names as sn
 from . import static_roots as sr
 from .append_runner import COMPACT_LEVEL, LocalRunStore, latest_key, run_key, scans_of
+from .blobstore import Store, mirror
+from .blobstore import upload_new as _upload_new
 from .hex_runs import parse_rule, rule_json
 from .static_names import PREFIX, err, q
 
@@ -102,45 +104,7 @@ class DiskPeak:
         return round(self.total / GB, 2)
 
 
-# ── The store: a local dir or an fsspec URL ────────────────────────────────
-
-
-class Store:
-    """The readers' key space: `root` a local dir or a URL. `listing(prefix)` is `{key: size}`."""
-
-    def __init__(self, root: str):
-        from disk_tree.blobfs import fs_for, is_url
-
-        self.root = root.rstrip("/")
-        self.url = is_url(root)
-        if self.url:
-            self.fs, self.base = fs_for(self.root)
-            self.base = self.base.rstrip("/")
-
-    def listing(self, prefix: str) -> dict[str, int]:
-        if not self.url:
-            d = Path(self.root) / prefix
-            return {p.relative_to(self.root).as_posix(): p.stat().st_size for p in sorted(d.rglob("*")) if p.is_file()} if d.is_dir() else {}
-        found = self.fs.find(f"{self.base}/{prefix}", detail=True)
-        return {k[len(self.base) + 1:]: int(v["size"]) for k, v in sorted(found.items()) if v.get("type", "file") == "file"}
-
-    def exists(self, key: str) -> bool:
-        return (Path(self.root) / key).is_file() if not self.url else self.fs.exists(f"{self.base}/{key}")
-
-    def get(self, key: str, dst: Path) -> None:
-        dst.parent.mkdir(parents=True, exist_ok=True)
-        if self.url:
-            self.fs.get(f"{self.base}/{key}", str(dst))
-        else:
-            shutil.copyfile(Path(self.root) / key, dst)
-
-    def put(self, src: Path, key: str) -> None:
-        if self.url:
-            self.fs.put(str(src), f"{self.base}/{key}")
-        else:
-            dst = Path(self.root) / key
-            dst.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copyfile(src, dst)
+# ── The store: a local dir or an fsspec URL (`blobstore`) ──────────────────
 
 
 def publish_order(keys: list[str]) -> list[str]:
@@ -157,23 +121,8 @@ def publish_order(keys: list[str]) -> list[str]:
 
 
 def upload_new(store: Store, local: Path, prefix: str, before: dict[str, int]) -> list[str]:
-    """Every file under `local` (the mirror of `prefix`) not in `before` → `store`, in `publish_order`. Files in `before`
-    are never rewritten (a generation's files are written once)."""
-    keys = [p.relative_to(local).as_posix() for p in local.rglob("*") if p.is_file()]
-    new = publish_order([k for k in keys if f"{prefix}/{k}" not in before])
-    for k in new:
-        store.put(local / k, f"{prefix}/{k}")
-    return new
-
-
-def mirror(store: Store, prefix: str, local: Path) -> dict[str, int]:
-    """`prefix` (a generation) copied into `local` (files already there with the same size are kept); returns the listing."""
-    listing = store.listing(prefix)
-    for key, size in listing.items():
-        dst = local / key[len(prefix) + 1:]
-        if not (dst.is_file() and dst.stat().st_size == size):
-            store.get(key, dst)
-    return listing
+    """`blobstore.upload_new` in this store's `publish_order`."""
+    return _upload_new(store, local, prefix, before, publish_order)
 
 
 # ── Scans ──────────────────────────────────────────────────────────────────
