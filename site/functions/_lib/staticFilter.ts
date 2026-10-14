@@ -380,8 +380,10 @@ export function liveTotal(hits: Hit[], date: string, keep: (usr: string | null) 
  *  both sides of a diff; 19: a budget-cut nest flags `budgetCut` for the client to re-ask — cached 18s from a deploy
  *  between the two could serve a cut tree unflagged; 20: a node's `d` is its newest write, not the byte-weighted mean;
  *  21: compound queries — `a b`, `a|b`, `a -b`, `-b` of literals — answered exactly from the static index
- *  (`staticBool.ts`), where they walked the path store, flagged approximate, before). */
-const RESPONSE_V = 21
+ *  (`staticBool.ts`), where they walked the path store, flagged approximate, before; 22: a secondary store reads only
+ *  its own static index (`STORES_JSON` `STATIC_GEN`), never the primary's — a cached 21 body could hold the primary's
+ *  matches under a secondary's root). */
+const RESPONSE_V = 22
 
 /** The query's substring matchers (positive and negative): the literals the hex-run rule applies to. */
 const subMatchers = (ast: QueryAst | undefined): Extract<Matcher, { kind: 'sub' }>[] =>
