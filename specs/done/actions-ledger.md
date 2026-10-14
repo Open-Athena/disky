@@ -1,6 +1,6 @@
 # Actions ledger: attribution + keep/sweep as one auditable WAL
 
-**Status correction (2026-10-11): ownership actions and their audit fold are implemented.** The keep/sweep workflow below is historical; GCS now stages explicit paths for admin dispatch rather than treating keep marks as deletion authority. See [staged delete](staged-delete.md), [sweep executor](sweep-executor.md) and [API.md](../API.md). Do not revive the keep axis from this original design.
+**Status:** done for the owner axis, superseded for the keep axis. The ledger (`actions`, `owner_prefixes`; `site/functions/api/actions.ts`, `_lib/ledger.ts`, `_lib/actionLog.ts`, `site/src/ActionLog.tsx`) is live on every deployment, with object-kind owner actions since `16dff52d`. The keep axis and `marks` were retired by the marks demolition (`227c534c`, [`marks-demolition.md`](marks-demolition.md)) in favor of staged deletion. Not built, and not planned: regex patterns, `/api/resolve`, a nightly `sweep_stats` rollup and the fate lens.
 
 Unify the two kinds of judgment users make about storage — *whose is it* (owner axis) and *should it survive the sweep* (keep axis) — into a single append-only ledger of *actions*. Today's `marks`/`claims`/`mark_log` tables are a special case of this (keep axis only, prefix patterns only, deepest-wins); this spec generalizes and supersedes them.
 

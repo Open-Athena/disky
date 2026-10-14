@@ -1,4 +1,4 @@
-// /scans and /scans/<run id> (specs/scan-runs-ui.md): what each scan job did —
+// /scans and /scans/<run id> (specs/done/scan-runs-ui.md): what each scan job did —
 // when it ran, its phases, what it wrote and how that compares to the
 // previous scan — from the D1 rows `dt-cloud scan-run record | backfill`
 // writes. DIY SVG: a duration strip over all runs, a phase bar per row, and a

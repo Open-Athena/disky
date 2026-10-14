@@ -163,22 +163,22 @@ The [reservation journal][reservations] uses a process writer lock and SQLite EX
 
 The synthetic 100K identity screen publishes bootstrap bindings in 0.369 seconds, appends 100 in 0.153 seconds and retries without writes in 0.104 seconds. These exclude scalar/rich ingestion and billion-path lookups. End-to-end scalar/summary publication, new-scan refresh, concurrency tails, a durable service endpoint and reconstructed pre-09-30 object history remain production gates. No trillion-state query trie or universal subsecond guarantee is implied by these component results.
 
-[ch-spec]: ../done/ch-store.md
+[ch-spec]: ../ch-store.md
 [short-query]: short-query-index.md
-[agents]: ../../AGENTS.md
-[schema]: https://github.com/Open-Athena/marin-gcs-usage/blob/fc9aeec73f880f2beed44508ea6f5aa3517a207f/cloud/src/dt_cloud/chstore/schema.py
-[ingest]: https://github.com/Open-Athena/marin-gcs-usage/blob/fc9aeec73f880f2beed44508ea6f5aa3517a207f/cloud/src/dt_cloud/chstore/ingest.py
-[narrow]: https://github.com/Open-Athena/marin-gcs-usage/blob/fc9aeec73f880f2beed44508ea6f5aa3517a207f/cloud/src/dt_cloud/chstore/narrow.py
-[narrow-serve]: https://github.com/Open-Athena/marin-gcs-usage/blob/fc9aeec73f880f2beed44508ea6f5aa3517a207f/cloud/src/dt_cloud/chstore/narrow_serve.py
-[ranges]: https://github.com/Open-Athena/marin-gcs-usage/blob/fc9aeec73f880f2beed44508ea6f5aa3517a207f/cloud/src/dt_cloud/chstore/range_bench.py
-[coarse]: https://github.com/Open-Athena/marin-gcs-usage/blob/fc9aeec73f880f2beed44508ea6f5aa3517a207f/cloud/src/dt_cloud/chstore/coarse.py
-[coarse-walk]: https://github.com/Open-Athena/marin-gcs-usage/blob/fc9aeec73f880f2beed44508ea6f5aa3517a207f/cloud/src/dt_cloud/chstore/coarse_walk.py
-[coverage]: https://github.com/Open-Athena/marin-gcs-usage/blob/fc9aeec73f880f2beed44508ea6f5aa3517a207f/cloud/src/dt_cloud/chstore/coverage.py
-[scoped]: https://github.com/Open-Athena/marin-gcs-usage/blob/fc9aeec73f880f2beed44508ea6f5aa3517a207f/cloud/src/dt_cloud/chstore/scoped_pattern.py
-[coarse-pair]: https://github.com/Open-Athena/marin-gcs-usage/blob/fc9aeec73f880f2beed44508ea6f5aa3517a207f/cloud/src/dt_cloud/chstore/coarse_pair.py
-[pair-tests]: https://github.com/Open-Athena/marin-gcs-usage/blob/fc9aeec73f880f2beed44508ea6f5aa3517a207f/cloud/tests/test_chcoarse_pair.py
-[order-keys]: https://github.com/Open-Athena/marin-gcs-usage/blob/fc9aeec73f880f2beed44508ea6f5aa3517a207f/cloud/src/dt_cloud/chstore/order_keys.py
-[key-history]: https://github.com/Open-Athena/marin-gcs-usage/blob/fc9aeec73f880f2beed44508ea6f5aa3517a207f/cloud/src/dt_cloud/chstore/key_history.py
-[reservations]: https://github.com/Open-Athena/marin-gcs-usage/blob/fc9aeec73f880f2beed44508ea6f5aa3517a207f/cloud/src/dt_cloud/chstore/reservations.py
-[identity-publish]: https://github.com/Open-Athena/marin-gcs-usage/blob/fc9aeec73f880f2beed44508ea6f5aa3517a207f/cloud/src/dt_cloud/chstore/identity_publish.py
+[agents]: ../../../AGENTS.md
+[schema]: ../../cloud/src/dt_cloud/chstore/schema.py
+[ingest]: ../../cloud/src/dt_cloud/chstore/ingest.py
+[narrow]: ../../cloud/src/dt_cloud/chstore/narrow.py
+[narrow-serve]: ../../cloud/src/dt_cloud/chstore/narrow_serve.py
+[ranges]: ../../cloud/src/dt_cloud/chstore/range_bench.py
+[coarse]: ../../cloud/src/dt_cloud/chstore/coarse.py
+[coarse-walk]: ../../cloud/src/dt_cloud/chstore/coarse_walk.py
+[coverage]: ../../cloud/src/dt_cloud/chstore/coverage.py
+[scoped]: ../../cloud/src/dt_cloud/chstore/scoped_pattern.py
+[coarse-pair]: ../../cloud/src/dt_cloud/chstore/coarse_pair.py
+[pair-tests]: ../../cloud/tests/test_chcoarse_pair.py
+[order-keys]: ../../cloud/src/dt_cloud/chstore/order_keys.py
+[key-history]: ../../cloud/src/dt_cloud/chstore/key_history.py
+[reservations]: ../../cloud/src/dt_cloud/chstore/reservations.py
+[identity-publish]: ../../cloud/src/dt_cloud/chstore/identity_publish.py
 [mega-index]: mega-index.md

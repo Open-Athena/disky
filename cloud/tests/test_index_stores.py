@@ -1,4 +1,4 @@
-"""Multi-store index rows (specs/multi-store.md phase 1): the primary's SQL is
+"""Multi-store index rows (specs/done/multi-store.md phase 1): the primary's SQL is
 unchanged and runs with or without the store migration; a secondary store's
 rows are namespaced (`<store>:<variant>` + the `store` column) and need it."""
 

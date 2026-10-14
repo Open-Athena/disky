@@ -1,8 +1,8 @@
 # Handoff: drilldown runs, their place in `runs add`, and compaction
 
-**Superseded handoff (reconciled 2026-10-11).** Drill-run integration, tier-preserving merges, T1236 backfill and concurrent drill/anchors have landed. Do not replay items 1–4 under “Left” or merge the old branches to implement them again. The Oct 11 scan measured drill at 33.5 minutes despite prefetch; CPU fixes from `917f4369` are now built, with full-scan measurement pending. Compaction remains separately gated; this file's old trial is not a production command. Current runbook: [GCS operations](gcs-operations.md) and [static append](static-append.md). The original handoff below is retained as dated provenance.
+**Superseded handoff (reconciled 2026-10-11).** Drill-run integration, tier-preserving merges, T1236 backfill and concurrent drill/anchors have landed. Do not replay items 1–4 under “Left” or merge the old branches to implement them again. The Oct 11 scan measured drill at 33.5 minutes despite prefetch; CPU fixes from `917f4369` are now built, with full-scan measurement pending. Compaction remains separately gated; this file's old trial is not a production command. Current runbook: [GCS operations](gcs:specs/gcs-operations.md) and [static append](static-append.md). The original handoff below is retained as dated provenance.
 
-Written 2026-10-09 by the session that built the drill runs and started compaction, for the agent that continues. Specs to read first: `specs/static-append.md` ("Drilldown runs (heavy terms)": design, the measured 10-09 run, R2 layout, runbook) and `specs/static-compaction.md` (design).
+Written 2026-10-09 by the session that built the drill runs and started compaction, for the agent that continues. Specs to read first: `specs/done/static-append.md` ("Drilldown runs (heavy terms)": design, the measured 10-09 run, R2 layout, runbook) and `specs/static-compaction.md` (design).
 
 ## Branches
 

@@ -1,6 +1,6 @@
 # `/health`: the state of the append-only stores
 
-**GCS rollout (2026-10-11): deployed and browser-verified in production**, not local-only. Both R2 stores show coverage through Oct 11 with no reported gaps; the latest scan job is successful, 2h03. The local fixture descriptions below remain historical verification provenance. See [GCS operations](gcs-operations.md) for the current release.
+**Status:** done. `/health` and `/api/health` (`a834d8ac`, `2b3311e3`), merges in progress (`543b747e`) and copy polish (`1ea6e9f1`) are on `cloud` and merged into gcs, cw-s3 and r2. Optional upstream items remain in pyrmts (an external-labels mode and a day axis in `CoverTimeline`).
 
 Every deployment gets a stock `/health` page: each append-only store's stack drawn as binary-counter shards over the scan timeline, every scan's coverage (and its gaps), and freshness. `/scans` stays the per-run job table; `/health` is the state of the stores. They link to each other, and both are in the ☰ menu and the omnibar's Pages.
 
@@ -68,6 +68,6 @@ The merge lease lives in the job's GCS scratch bucket (`<scratch>/<prefix>/<gen>
 
 ## Verification
 
-Local stack with synthetic data (`site/./dev --local-db` over an untracked local `wrangler.toml`: local D1 seeded with `index_schema` / `scan_runs` rows, local R2 with both stores' `scans.json`, manifests and run files; generator in `tmp/health-local/gen.py`), checked in Chrome in dark and light, desktop and phone width. Not deployed.
+Local stack with synthetic data (`site/./dev --local-db` over an untracked local `wrangler.toml`: local D1 seeded with `index_schema` / `scan_runs` rows, local R2 with both stores' `scans.json`, manifests and run files; generator in `tmp/health-local/gen.py`), checked in Chrome in dark and light, desktop and phone width. Not deployed at the time; it shipped as `cloud` merged into the deployments.
 
 Merges in progress (2026-10-10): the same stack plus a `merging.json` per store put to local R2 (the interval store's fresh: blue `merging` chip, its L1 carry drawn as a `merging` pending shard and dropped from the due line; the static index's 3 h without a heartbeat: amber `stuck` chip with "no heartbeat for 3h04m"), checked in Chrome in dark and light at desktop width.

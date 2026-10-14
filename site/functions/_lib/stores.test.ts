@@ -10,7 +10,7 @@ import { sqliteD1 } from './testD1'
 import { onRequestGet as owners } from '../api/owners'
 import { onRequestGet as subtree } from '../api/subtree'
 
-// The multi-store seam (specs/multi-store.md phase 1): no `store=` is the
+// The multi-store seam (specs/done/multi-store.md phase 1): no `store=` is the
 // primary exactly as before; `store=<key>` reads only that store's config,
 // D1 rows and cache keys.
 
@@ -134,9 +134,9 @@ describe('withStore', () => {
 
 describe('cache keys', () => {
   it('the primary’s are unchanged; a secondary store’s get an `@<store>/` segment', () => {
-    expect(cacheKeyFor('series', '', 'a%2Fb?P=').url).toBe('https://series.cache/v4/a%2Fb?P=')
-    expect(cacheKeyFor('series', '', 'a%2Fb?P=', 'primary').url).toBe('https://series.cache/v4/a%2Fb?P=')
-    expect(cacheKeyFor('series', '', 'a%2Fb?P=', 'meta').url).toBe('https://series.cache/v4/@meta/a%2Fb?P=')
+    expect(cacheKeyFor('series', '', 'a%2Fb?P=').url).toBe('https://series.cache/v5/a%2Fb?P=')
+    expect(cacheKeyFor('series', '', 'a%2Fb?P=', 'primary').url).toBe('https://series.cache/v5/a%2Fb?P=')
+    expect(cacheKeyFor('series', '', 'a%2Fb?P=', 'meta').url).toBe('https://series.cache/v5/@meta/a%2Fb?P=')
   })
   it('over-time manifest datasets: `over-time` for the primary, `<store>:over-time` else', () => {
     expect([overTimeDataset(PRIMARY), overTimeDataset(storeEnv(PRIMARY, 'meta', META))]).toEqual(['over-time', 'meta:over-time'])

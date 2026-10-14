@@ -764,7 +764,7 @@ function AppContent() {
   // Diff sides: the drilled subtree at each endpoint, scoped like the map.
   // The diff is read server-side (`/api/diff`): both scans' index tiers at
   // one shared byte floor, point lookups for names that crossed it, the
-  // page scope applied to both sides (specs/view-serving.md §2).
+  // page scope applied to both sides (specs/done/view-serving.md §2).
   // First paint: the bucket-level diff (`depth=1` — the two root reads plus
   // one level of lookups, ~2 s cold) stands in for the full walk while it
   // aligns, so the map shows the shape of the change before its detail.
@@ -1173,7 +1173,7 @@ function AppContent() {
           <label className="tb-ctl">
             <span className="lbl">color</span>
             <Explain text={
-              effMode === 'date' ? <>Object <b>{time.description}</b>, from the bucket listings (each cell = the byte-weighted mean of its objects). {store.objectsNote}</>
+              effMode === 'date' ? <>Object <b>{time.description}</b>, from the bucket listings (a folder’s cell = its newest object). {store.objectsNote}</>
               : effMode === 'read' ? <><b>Last observed read</b> — the most recent logged GET/HEAD/LIST anywhere under each cell (logging began {readRange ? epochDaysToDate(readRange.min) : '—'}). Brick-red = <b>no observed reads</b> since then. Logs may omit events; absence is not proof of no access.</>
               : effMode === 'user' ? <>Dominant <b>owner</b> of each cell; the legend lists the top users of the current view.</>
               : <>Top-level directory each cell belongs to.</>

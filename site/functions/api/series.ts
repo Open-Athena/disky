@@ -1,5 +1,5 @@
 /** Bytes under a path per scan — the size-over-time chart, scoped like the
- * map (specs/view-serving.md §1 "series.json" → this).
+ * map (specs/done/view-serving.md §1 "series.json" → this).
  *
  *   GET /api/series?path=<P>[&lens=user:<id>|user:me][&o=owned|unowned]
  *
@@ -154,7 +154,7 @@ export const onRequestGet = async (ctx0: Ctx & { waitUntil?: (p: Promise<unknown
   const hit = await st.time('cache', cacheMatch(env, cacheKey))
   if (hit) return hit
 
-  // Fast path (specs/obs-axis-indexing.md Phase 1): a path's series (or a
+  // Fast path (specs/done/obs-axis-indexing.md Phase 1): a path's series (or a
   // filter's, one line per match root) reads the cross-scan over-time index —
   // ⌈scans/K⌉ pruned reads per root — instead of one point read per scan.
   // Read only on a cache miss (it used to precede the check: ~1.2 s per hit).

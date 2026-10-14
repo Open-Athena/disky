@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { migrations, sqliteD1 } from './testD1'
 
-// The store-scoped index migration (specs/multi-store.md phase 1), in the `cw`
+// The store-scoped index migration (specs/done/multi-store.md phase 1), in the `cw`
 // D1 lineage (the only one `cloud` carries; gcs's lives on the `gcs` branch),
 // applied over a seeded DB with foreign keys ON (as D1 enforces them): existing
 // rows become the primary store's, nothing else moves, and the rebuilt pointer

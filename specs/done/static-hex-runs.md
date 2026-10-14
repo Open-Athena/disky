@@ -1,6 +1,6 @@
 # Static name index: hash interiors are not indexed
 
-Status: approved by Ryan 2026-10-09 (the rule); **implemented** on branch `hex-runs` (2026-10-09, "Implementation as built" below). A generic `[cloud]` pipeline option, on for both deployments. The measurements are from cw's `2026-10-09cw` (specs/cw-static-names.md).
+**Status:** done. The rule was approved by Ryan 2026-10-09, built on branch `hex-runs` ("Implementation as built" below), merged to `cloud` in `424b4ada` (builder `91a882ce`, Worker `f9afbacf`), and is live on cw generation `2026-10-10cw` (`25bd5bee`). gcs adopts it at its next compaction. Open follow-up: the perf levers for `grams_sql` and `first_sql` before the next rebuild. A generic `[cloud]` pipeline option, on for both deployments. The measurements are from cw's `2026-10-09cw` (specs/cw-static-names.md).
 
 ## Why
 
@@ -52,7 +52,7 @@ A new generation is needed either way: the rule changes `sx/`, the catalog and t
 | Keep `2026-10-09cw`, copy its drill as is | 0 | drill 142.3 GB ≈ **$17** | $17 |
 | Wait for the next compaction | folded into compaction | the compaction re-uploads the base anyway | ~$0 extra, but meanwhile every per-scan run and merge is ~2.5–3× bigger |
 
-Recommendation: **rebuild cw now** (after the implementation lands and its tests pass), as a new generation beside `2026-10-09cw`. It is cheaper than copying the current drill (estimates; measure the kept fraction with the tail on a few ranges first). It gives cw heavy-term drills on R2. Every per-scan run, merge and compaction after it is ~2.5–3× smaller from the first one (specs/static-append.md, "Egress: merges re-upload"). `2026-10-09cw`'s light index stays on R2 and serves the dev stack until the new gen is verified and `STATIC_GEN` moves; deleting it is Ryan's call. gcs adopts the rule at its next compaction (1% of its rows are affected, so a rebuild just for this isn't worth it).
+Recommendation: **rebuild cw now** (after the implementation lands and its tests pass), as a new generation beside `2026-10-09cw`. It is cheaper than copying the current drill (estimates; measure the kept fraction with the tail on a few ranges first). It gives cw heavy-term drills on R2. Every per-scan run, merge and compaction after it is ~2.5–3× smaller from the first one (specs/done/static-append.md, "Egress: merges re-upload"). `2026-10-09cw`'s light index stays on R2 and serves the dev stack until the new gen is verified and `STATIC_GEN` moves; deleting it is Ryan's call. gcs adopts the rule at its next compaction (1% of its rows are affected, so a rebuild just for this isn't worth it).
 
 ## Implementation as built (2026-10-09)
 

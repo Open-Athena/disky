@@ -1,8 +1,8 @@
 # Unified path store: objects and dirs in one served table
 
-**Current status correction (2026-10-11): implemented.** The canonical store includes object and directory rows, with `path` and path-total `bysize` sorts; the directory-only state below is the original problem, not current behavior. GCS's covered views now use the R2 interval store, while per-scan tiers remain the fallback/raw-download lane. Their storage and raw listings have not been retired. See [GCS operations](gcs-operations.md) and [interval store](interval-store.md).
+**Status:** done. Phases 0–5 are built: writer, readers and browser; the r2 demo; gcs live 2026-10-01; cw's `index-write` cuts the same sorts; §2.3's top-N shipped as `/api/largest` (`ba2d31a3`). Phase 6 (consolidate and retire) is superseded by [`interval-store.md`](../interval-store.md). Phase 7 (an architecture page and `docs/architecture.md`) was not started.
 
-**Status:** draft v2, 2026-09-30. Base work (`cloud`). Origin: Ryan's pushback in the cw-s3 session (12:11, 13:26 UTC) on a proposed "objects tier": *"the simplest mental model, to me, is a unified path store that holds objs and dirs, bc that's what a TM needs: paths by size … what I especially don't want is thresholded queries that will merge independent result sets from objs and dirs"*. v2 (after his review of v1): the store keeps the layer-2's column names; the byte-floor tiers and the per-parent size sort are replaced by one size-bucketed sort (§1.3), which also answers his "denormalized size-desc index per subtree" idea (§1.4); phase 0 runs on Batch.
+Draft v2, 2026-09-30. Base work (`cloud`). Origin: Ryan's pushback in the cw-s3 session (12:11, 13:26 UTC) on a proposed "objects tier": *"the simplest mental model, to me, is a unified path store that holds objs and dirs, bc that's what a TM needs: paths by size … what I especially don't want is thresholded queries that will merge independent result sets from objs and dirs"*. v2 (after his review of v1): the store keeps the layer-2's column names; the byte-floor tiers and the per-parent size sort are replaced by one size-bucketed sort (§1.3), which also answers his "denormalized size-desc index per subtree" idea (§1.4); phase 0 runs on Batch.
 
 ## 0. Where we are, and why it got here
 
@@ -284,7 +284,7 @@ bucket 2^20  | …      ← thr(P) falls here: stop
 - Open (from cw-s3): which store `/meta` hangs off. Orthogonal; `/meta` is just another store with the same table.
 
 [view-serving]: view-serving.md
-[mgu-scale-unification]: done/mgu-scale-unification.md
-[listing-slim]: listing-slim.md
+[mgu-scale-unification]: mgu-scale-unification.md
+[listing-slim]: ../listing-slim.md
 [multi-store]: multi-store.md
 [obs-axis-indexing]: obs-axis-indexing.md
