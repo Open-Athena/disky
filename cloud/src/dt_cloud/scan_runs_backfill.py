@@ -288,8 +288,8 @@ def log_filter(profile: Profile, since: dt.datetime) -> str:
 
 
 def _head(rx: str) -> str:
-    """A regex's literal head as an RE2 filter literal: `^PHASE (?P<name>…` → `^PHASE `, `^\\+ fail_alert (…` →
-    `^\\\\+ fail_alert ` (RE2-escaped, then escaped for the filter's string literal)."""
+    """A regex's literal head as an RE2 filter literal: `^PHASE (?P<name>…` → `^PHASE `, `^\\+\\+ fail_alert (…` (a trap's xtrace line is `++ `) →
+    `^\\\\+\\\\+ fail_alert ` (RE2-escaped, then escaped for the filter's string literal)."""
     anchored = rx.startswith("^")
     i, lit = (1 if anchored else 0), []
     while i < len(rx):
