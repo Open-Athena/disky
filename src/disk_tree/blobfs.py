@@ -9,9 +9,10 @@ backends and the diff/index readers never branch on it themselves.
 `fsspec` (and the per-scheme driver) is an optional extra — every import here
 is lazy, so a local-only install never pays for it, and a remote entry on the
 search path fails with a pointed message instead of an ImportError deep in
-pandas. `r2://` is not a registered fsspec protocol: it rides `s3fs` with the
-bucket's Cloudflare endpoint, resolved by `r2_endpoint` (env, then the same
-per-bucket `endpoint_url` that `buckets.yml` already carries for `sync`).
+pandas. `r2://` rides `s3fs` with the bucket's Cloudflare endpoint, resolved by
+`r2_endpoint` (env, then the same per-bucket `endpoint_url` that `buckets.yml`
+already carries for `sync`), and its `profile`; `r2fs` registers the same as an
+fsspec protocol, so plain fsspec call sites resolve `r2://` too.
 
 Remote `exists` hits are remembered (`_known`): blobs are immutable UUID-named
 files, so a positive answer stays true until this module removes the blob.
@@ -64,6 +65,19 @@ def _fsspec():
             "remote scans dirs need the `fsspec` extra — install `disk-tree[r2]` (or `[s3]` / `[gcs]`)"
         ) from None
     return fsspec
+
+
+def register_r2() -> None:
+    """Register `r2://` with fsspec (`r2fs.R2FileSystem`), for an install whose entry points weren't refreshed; a
+    no-op without fsspec, or when it's registered already."""
+    try:
+        import fsspec
+    except ImportError:
+        return
+    try:
+        fsspec.register_implementation("r2", "disk_tree.r2fs.R2FileSystem", clobber=False)
+    except ValueError:  # the entry point registered it
+        pass
 
 
 def _buckets_yml() -> dict:
@@ -448,3 +462,6 @@ def list_parquets(d: str) -> list[str]:
         fs, p = fs_for(d)
         names = (x.rsplit('/', 1)[-1] for x in fs.glob(f"{p.rstrip('/')}/*.parquet"))
     return sorted(n for n in names if not n.endswith(SIDECAR_SUFFIXES))
+
+
+register_r2()
