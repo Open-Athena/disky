@@ -288,8 +288,9 @@ class Profile:
     concurrent: tuple[str, ...] = ()
     #: A log line meaning the run did nothing (an already-published scan): group 1 the scan id.
     nop_marker: str | None = None
-    #: A log line naming a failure (the ERR trap's xtrace), groups `rc`, `line`, `cmd`.
-    error_marker: str | None = None
+    #: Log lines naming a failure (the ERR trap's xtrace), groups `rc`, `line`, `cmd`; the first that matches wins. The
+    #: profile may give one regex or a list (a job whose trap changed shape keeps the old one for its older logs).
+    error_marker: tuple[str, ...] = ()
     #: On-demand $/h by machine type; `spot_factor` scales it for SPOT VMs. A machine not here has no cost estimate.
     prices: Mapping[str, float] = field(default_factory=dict)
     spot_factor: float | None = None
@@ -333,6 +334,8 @@ def parse_profile(d: Mapping, base: Path | None = None) -> Profile:
     kw["run_id_env"] = tuple(d.get("run_id_env", Profile.run_id_env))
     kw["unbilled"] = tuple(d.get("unbilled", ()))
     kw["secrets"] = tuple(d.get("secrets", ()))
+    em = d.get("error_marker", ())
+    kw["error_marker"] = (em,) if isinstance(em, str) else tuple(em)
     kw["alerts"] = dict(d.get("alerts", {}))
     if bad := sorted(set(kw["alerts"]) - {"label", "logs_url", "comment"}):
         raise ValueError(f"scan-run profile: unknown alerts fields {bad}")
@@ -1366,6 +1369,14 @@ def phase_cmd(msg, no_measure, outputs, note, resume, warn, gen, grace, timeout,
     j.begin(name, gen=gen)
     rc, timed_out = run_grouped(cmd, limit, grace_s)
     sys.exit(j.end(name, rc, warn, msg, resume, note, outputs, not no_measure, timeout if timed_out else None))
+
+
+@cli.command("nop")
+@_wrapper_opts
+def nop_cmd(profile_path, d1, dry_run, run_id, sqlite) -> None:
+    """Mark the run a no-op (its scan was already published; `record -N`). The EXIT trap's `finish -x 0` keeps it a
+    NOP; a non-zero `finish` still fails it. Never fails the job."""
+    JobRun(profile_path, d1, dry_run, run_id, sqlite).write(nop=True)
 
 
 @cli.command("finish")
