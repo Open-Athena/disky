@@ -123,7 +123,7 @@ A ships as reviewed-but-unrun batch/serving code. Order:
 
 ## Phase B — pyrmts multi-scale pyramid (follow-up)
 
-Replace A's fixed day buckets with [`pyrmts`](~/c/pyrmts) tiered time pyramids:
+Replace A's fixed day buckets with [`pyrmts`](https://github.com/runsascoded/pyrmts) tiered time pyramids:
 `(shard × bin)` tiers, a planner picking the finest tier under a bin-budget (or
 an exact `targetBin` via ragged decomposition), `stitch` monoid re-aggregation,
 and the FE hook driving the budget off the viewport width. A's `/api/age` +

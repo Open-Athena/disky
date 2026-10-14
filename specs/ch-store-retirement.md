@@ -2,6 +2,8 @@
 
 Status: **mostly executed** (2026-10-10). What ran, by runbook step:
 
+**Oct 11 reconciliation:** step 6's optional `query_host` block was subsequently removed (`bd7ce34b`), not retained for reactivation. Step 10 is already done. Only the surviving staging-copy retention and old account-wide R2 token decision remain open; neither is authorized by the new production R2-serving approval. Do not recreate the VM/tunnel or delete its surviving evidence. See [GCS operations](gcs-operations.md).
+
 | Step | State |
 |---|---|
 | 1 Site stops referencing the box | done: gcs prod + dev drop every `QUERY_BOX_*` var (gcs `b667b554`); `/names` answers from the static index |
@@ -14,7 +16,7 @@ Status: **mostly executed** (2026-10-10). What ran, by runbook step:
 | 9 Code | done: `cloud` `c41a5778` (tag `ch-store-final` = `fc9aeec7`), gcs `b667b554` / `c1b91518` |
 | 10 Local and memory | done (2026-10-10): worktrees `wt/ch-daily`, `wt/ch-retire`, `wt/ch-retire-gcs`, `wt/ch-tunnel`, `wt/ch-remove` and `wt/ch-store` removed, their ignored notes and logs moved to `tmp/archive-<name>/` first (`wt/ch-store`'s 2.1 GB — `tmp/` incl. the local ClickHouse binary and servers' data, `.dvc/cache`, `dvx.db`, the ignored DVX outputs under `static-names/2026-10-08{,c}/` — to `tmp/archive-ch-store/`, after stopping its two orphaned local ClickHouse servers, started 10-07); branches archived as annotated tags `archive/ch-daily` (`5a7039b6`), `archive/ch-remove` (`db5e97c8`), `archive/ch-retire` (`70a2b477`), `archive/ch-retire-gcs` (`8f47b8d3`, superseded on `gcs` by `f00b6210`), `archive/ch-tunnel` (`2edea467`), `archive/ch-store` (`33557ba6`) and deleted; `tmp/ch-store-ip` deleted. Kept: branch `catalog-append` (2 static-catalog commits not on `gcs`; its worktree removed, its `tmp/` in `tmp/archive-catalog-append/`), remote `o/ch-store` (`73f8a266`), and the agent worktree `.claude/worktrees/agent-ac91f1f5…` (`exp/ch-suspend`) |
 
-Move this spec to `done/` once 7, 8 and 10 are settled. Prepared 2026-10-09: Ryan agreed to retire the VM once the static name search has run on gcs prod for a few days. This spec is the inventory, the preconditions, and the ordered runbook.
+Move this spec to `done/` once 7 and 8 are settled; 10 is done. Prepared 2026-10-09: Ryan agreed to retire the VM once the static name search has run on gcs prod for a few days. This spec retains the historical inventory and ordered runbook, not instructions to replay completed deletion steps.
 
 The VM was the experiment platform for an append-only historical query service ([`ch-store.md`], [`filter-query-service.md`], [`serving-options.md`]). It ended up serving one production-adjacent thing, the name search, which now comes from the static name index on R2 (`specs/static-append.md` on `gcs`, `specs/architecture/static-name-search.md`). Nothing in gcs prod reads from the VM any more; its last jobs are the hourly `ch-daily` catch-up and, until the code change below, the R2 copy in `job/static-daily.sh`.
 

@@ -1,5 +1,7 @@
 # Production serverless architecture
 
+**Current overlay (2026-10-11):** supported GCS views use R2 interval generation `2026-10-09b`; literal/anchored search uses R2 static generation `2026-10-08c`, with daily run drills/anchors. Metadata/extras now use `SERVED_R2=1`. Per-scan fallback/raw downloads still use GCS. Required R2 copies verify before D1 visibility moves; rows stage concurrently with both appends, then pointers flip last. Indexed-only production search refuses unsupported/unavailable coverage, not an approximate fallback. ClickHouse is retired. [GCS operations][operations] is the current handoff; Oct 6 mechanics and pinned source links below are historical baseline.
+
 As of 2026-10-06. This describes the GCS production deployment, not the `ch-store` research worktree. Cloudflare deployment `873dfa7b` was verified by the coordinating agent to name source commit `3d0a4fa9637b978af6cad542767294352b527d84`, matching local `gcs-prod`. Source links below are pinned to that commit. ClickHouse and `/coarse` remain development experiments; neither is the production query engine described here.
 
 ## 1. Shape of the system
@@ -112,3 +114,4 @@ Caching makes repeated immutable queries cheap but cannot fix arbitrary cold-que
 [search-spec]: https://github.com/Open-Athena/marin-gcs-usage/blob/3d0a4fa9637b978af6cad542767294352b527d84/specs/path-store-search.md
 [path-store]: ../path-store.md
 [ch-spec]: ../done/ch-store.md
+[operations]: ../gcs-operations.md

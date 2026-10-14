@@ -1,6 +1,6 @@
 # Treemap scaling: from DOM cells toward a canvas-backed map
 
-Status: planning. Captures the roadmap for scaling `<Treemap>` past the DOM-per-cell ceiling, and records what already shipped so the canvas work is a plan, not a rewrite-in-the-dark.
+Status (reconciled 2026-10-11): **canvas renderer and bounded accessibility overlay shipped**, alongside the DOM renderer; see the as-built sections below and `packages/treemap/src/Treemap.tsx`. Default remains DOM; color-buffer hit testing and further optimizations remain proposals, not prerequisites for implementing canvas again.
 
 ## The problem
 

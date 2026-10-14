@@ -101,8 +101,8 @@ Status 2026-09-14: `gcs-usage weekly` is implemented (`weekly.py`, 12 exact-equa
 - Per-user nudges in the post. `/users` and the sheet sync cover that; the weekly post stays a storage report.
 - A Slack twin. `#gcs-usage` already carries the monthly digest (`digest.py`, `SlackClient`); the weekly's `compose` is a pure function over the same inputs, so a Slack rendering (`mrkdwn`, image block on the icons host) is a second formatter away if anyone asks. Not built until then.
 
-[digest]: ../gcs-usage/src/gcs_usage/digest.py
-[run.sh]: ../job/run.sh
-[batch-submit]: ../job/batch-submit.sh
+[digest]: ../../cloud/src/dt_cloud/digest.py
+[run.sh]: ../../job/run.sh
+[batch-submit]: ../../job/batch-submit.sh
 
 Status 2026-09-14 (evening): the report moves to Marin's new private `#gcs-usage` channel (Ryan + Marin Bot for now; Marin Dev once the format settles) and posts through the same app-owned webhook as the Discord digest twin (`specs/done/discord-digest-twin.md`), mounted as `DISCORD_GCS_USAGE_WEBHOOK` from this project's `gcs-usage-discord-webhook` secret. The `#internal-discuss` cross-project secret, its grant, and `WEEKLY_SECRET=1` are retired. First live post: Monday 2026-09-21 07:00Z.

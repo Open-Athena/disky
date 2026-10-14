@@ -1,5 +1,7 @@
 # Static name search: rare terms without a server
 
+**Current rollout (2026-10-11): production, no query VM.** Generation `2026-10-08c` is maintained by scheduled static runs, with drill and anchored tiers, and serves covered scans through Oct 11. Consolidated-base measurements below retain their original acceptance scope. The current reader refuses unsupported coverage explicitly. See [GCS operations](../gcs-operations.md), [static append](../static-append.md) and [anchored search](../anchored-search.md).
+
 Can the below-catalog ("rare term") name search run from static files on R2/GCS, read by a Worker, with interactive latency and a bounded worst case? Measured 2026-10-08 on the consolidated store (70 scans, 2026-07-30 → 2026-10-08). **Yes, with a suffix-ordered, denormalized postings layout**: every rare query is one contiguous byte range of at most a few MB, exact on every date, and the only server work left is the daily build. With the **static catalog** (gen `2026-10-08c`, below) every `/names` literal on every scan of the generation is answered without the query box: one- and two-character literals and literals whose suffix range exceeds V = 100K rows from a 25 MB catalog, everything else from the suffix shards (≤ V rows read). The members' **map-filter drilldown** (the filtered view at any path, any date) reads their match roots or, for the few heavy directories, per-child rollups: ≤ ~116K rows per drill, verified 2,270/2,270 against brute force ("Drilldown for heavy terms").
 
 ## The query

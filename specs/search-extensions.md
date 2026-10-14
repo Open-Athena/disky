@@ -1,5 +1,7 @@
 # Search extensions: costed options for the static name index
 
+**Status correction (2026-10-11): not all speculative.** Option 2's starts/ends-with indexes and daily maintenance are built, merged and production-enabled; see [anchored search](anchored-search.md). Heavy starts-with still uses bounded degradation rather than a general heavy directory drill. Remaining Boolean/compound proposals are not blanket production capabilities. The original costed proposal below does not override the [current reader contract](gcs-operations.md).
+
 Status: spec only (2026-10-09), nothing built. It prices five extensions of the exact, indexed name search beyond one plain substring, each grounded in the index formats of `specs/architecture/static-name-search.md` and `specs/static-append.md`. The measurements are cheap reads of gen `2026-10-08c` metadata (`sidecar.parquet` 29 MB, `catalog/members.parquet`, `roots-measure/`, `drill/aliases.parquet`) and a 60-row-group sample of the 2026-10-08 scan's `path` sort. No Batch was spent. Where an answer needs a census, the census is priced as a gated first step.
 
 ## Baseline: what the index answers today

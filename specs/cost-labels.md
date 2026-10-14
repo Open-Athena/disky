@@ -1,5 +1,7 @@
 # Cost labels: attributing disky's GCP spend
 
+**GCS rollout correction (2026-10-11):** labels were applied to the GCP stack and shipped in jobs/site; [the GCS handoff](cost-labels-gcs.md) records that completed work. Billing-export enablement is still a separate administrator gate, and labels alone are not a measured spend report. Other deployments' application remains separately verifiable.
+
 disky's GCP resources (Batch jobs, Cloud Run, Scheduler, Secret Manager, buckets) share a project with other OA work. To report disky's spend, everything disky creates carries cost-attribution labels, and the project's billing account exports detailed usage cost to BigQuery, where a query groups the labeled rows by deployment and component.
 
 ## The setting
@@ -25,7 +27,24 @@ Each job adds its own `component`. Label rules are GCP's: keys `[a-z][a-z0-9_-]{
 | `sheet-sync` | the D1 → Google Sheet Cloud Run job | `RunJobCron(labels=…)`, `deploy/sheet-mirror/deploy.sh` |
 | `data`, `scratch` | `oa-gcs-usage-dvx`, `oa-gcs-usage-scratch` (with `deployment=shared`) | gcs's Pulumi program |
 
-`interval-store` and `digest` have no Batch jobs of their own yet: their compute runs inside the `scan` VM. A future standalone job takes its component from `label_batch_spec(spec, "<component>")`.
+`interval-store` now has its own ranges/publish/merge/R2 Batch jobs, labeled `component=interval-store` and `stage=<stage>`. Digests still run inside the `scan` VM.
+
+## Per-scan attribution and estimates (2026-10-13)
+
+The GCS parent exports `SCAN_RUN_ID` and `SCAN_ID`. `cost_labels` adds `scan_run` and lowercase `scan_id`; the listing and append runners set `scan_id` to the scan actually being processed, including catch-up scans. The root identity stays fixed across children, retries and detached compactions. `label_batch_spec` applies these keys and the stage to `allocationPolicy.labels` as well as job labels, and forwards the context plus `DISKY_LABELS` into each child environment for grandchildren. Manual recovery work must explicitly set `SCAN_RUN_ID=<original root identity>` and `SCAN_ID=<scan>` when it should be charged to the original run; standalone unlinked work is not silently attributed.
+
+Manual `job/batch-submit.sh` submissions label the parent at creation using its job ID as `scan_run` and pin the scan ID in its environment. A Scheduler request is static: its canonical `PIN=1` spec deliberately contains no per-run identity or scan date. At runtime the scheduled parent uses its automatic `BATCH_JOB_UID` as the root; its children carry that UID as `scan_run`. The parent remains attributable through Batch's automatic `batch-job-uid` label. A billing query therefore unions `(batch-job-uid = ROOT_UID)` with `(scan_run = ROOT_ID)`, or simply filters `scan_run` for manual submissions. No Compute resource relabeling, new IAM grants, Scheduler intermediary or migration is required. Existing jobs are not retroactively labeled.
+
+```bash
+dt-cloud scan-run cost -c job/scan-runs.json -s 2026-10-13T1300 gcs-usage-snapshot-f4572bb6-0c6b-47f10
+dt-cloud scan-run cost -c job/scan-runs.json -s 2026-10-13T1300 -l -j -o tmp/scan-cost.json gcs-usage-snapshot-f4572bb6-0c6b-47f10
+```
+
+This read-only report lists the parent and label-linked children across the profile's regions, including jobs created after the parent finishes. It paginates jobs/tasks, includes failed and retried assignments, and unions overlapping task intervals per VM to avoid charging packed tasks twice. Unknown machine prices, missing Spot factors, incomplete task coverage and missing VM identities are explicitly unpriced, never treated as zero. Active work is identified and extends to the report clock. The JSON retains component/stage, machine, provisioning model, task/attempt/VM counts, observed VM-hours, disk configurations and the billing filter; save it before Batch history expires. Labels do not automatically enable billing export.
+
+The amount is **observed compute at configured profile rates**, not billed cost or a complete scan total. It excludes VM startup/shutdown outside task assignment, disks/local SSDs, transfers, storage operations/storage, billing credits and negotiated/actual Spot pricing. The profile currently uses us-central1 reference on-demand prices and a configured 0.3 Spot multiplier; other regions and current Spot prices can differ. `-l/--legacy` is opt-in for pre-label jobs: exact scan identity, same deployment and creation inside the parent's dispatch window are required; the report warns that overlapping retries are not reliably attributable. It does not label or mutate existing resources, infer children merely from a shared app label, or write a misleading aggregate into the existing per-job `scan_runs.cost_usd` field.
+
+The first implementation is a local operator CLI, not a cost widget on `/scans`. The parent/child orchestration split and machine resizing remain follow-up work, not part of this rollout.
 
 ## Where it is read
 

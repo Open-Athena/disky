@@ -1,5 +1,7 @@
 # Interval store: change intervals in place of per-scan path stores
 
+**Current deployment status (2026-10-11): enabled in GCS production**, `PATH_STORE=intervals`, generation `2026-10-09b`, through scan `2026-10-11`. The daily job appends it; manual T2022 exercised the four-scan L2 carry and R2 revision publication. `ps=iv` remains a development option, not GCS's current rollout state. Per-scan GCS tiers remain fallback for uncovered scans/sorts, and their construction/storage is not retired. See [GCS operations](gcs-operations.md). The design-version history and dated measurements below do not override this deployment status.
+
 **Status:** draft v7, 2026-10-10. Base work: on `cloud` (opt-in, `PATH_STORE=opt-in` + `ps=iv`).
 - v1 (2026-10-07, unreviewed) recommended object-only intervals plus keyframes.
 - v2 decided for objects and directories as one interval table, with no keyframes.

@@ -1,6 +1,6 @@
 # Single files: assignable and stageable
 
-Status: implemented on branch `file-assign` (off `cloud`); the migrations below await Ryan's go (none applied), and the gcs lineage's twin is the gcs session's to add.
+**Status correction (2026-10-11): merged implementation, not a pending feature branch.** Current ledger/plan readers carry explicit `prefix` versus `object` kinds, and the GCS lineage includes `0041_items_kind.sql`. The original migration proposal below is provenance, not approval to apply it again. Check each deployment's migration history before changing schema; this audit does not establish other deployments' rollout. [API.md](../API.md) documents object operations.
 
 Today owner assignments and plan items (and so the sweep) only take folder prefixes. A lone matching file — e.g. `ACS_(Part_1)_…_chunk003.mp3` in a folder that also holds non-matching files — can't be acted on: the filtered bulk bar lists it but never sends it, and the unfiltered table's trash button on a file row stages `key/`, which deletes nothing.
 

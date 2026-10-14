@@ -1,6 +1,8 @@
 # `/hot` and `/names` development release
 
-## Current checkpoint: 2026-10-07
+**Retired preview (2026-10-11 reconciliation).** ClickHouse-backed `/hot`, dated-name registry and query-box routes below are no longer deployed; VM/tunnel/code were retired Oct 10. Do not restart or republish this release. `/names` now uses the static R2 index; current production state is [GCS operations](gcs-operations.md). Tests and latency results below describe historical contracts only.
+
+## Historical checkpoint: 2026-10-07
 
 Pages release **`8404e950`** enables accepted **Oct 6 root summaries** alongside the existing Oct 4/5 catalog/fallback lane. The private `/api/name-summary-registry` drives scan/baseline selectors; separately validated dated single/diff envelopes retain each side's numeric geometry and align bucket paths. Cached and fetched results must match pinned source identities and registry qualification. `QUERY_BOX_DATED_NAMES=1` is enabled **only in preview** after full source acceptance, four independent full-source aggregate controls and immutable private publication. Oct 6 reuses the original **71,182 T100k/L16 Oct 4/5-qualified literals**; no fresh Oct 6 frequency qualification, cold fallback or bucket detail is inferred.
 

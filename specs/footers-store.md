@@ -517,17 +517,17 @@ Ryan's question was whether every store should move onto one blessed FS. **Mostl
 [`interval-store.md`]: interval-store.md
 [`index-landscape.md`]: index-landscape.md
 [`static-name-search.md`]: architecture/static-name-search.md
-[`awair 0003`]: ../../awair/cfw/cascade/migrations/0003_shard_stats.sql
-[`awair 0004`]: ../../awair/cfw/cascade/migrations/0004_footer_cache.sql
-[`write.ts`]: ../../awair/cfw/cascade/src/write.ts
-[`cascade.ts`]: ../../awair/cfw/cascade/src/cascade.ts
-[`backfill.ts`]: ../../awair/cfw/cascade/src/backfill.ts
-[`pyramid.py`]: ../../awair/src/awair/cli/pyramid.py
-[`awair serve`]: ../../awair/cfw/serve/src/index.ts
-[`rg-manifest.md`]: ../../hccs/ctbk/specs/rg-manifest.md
-[`rg_manifest.ts`]: ../../hccs/ctbk/gbfs/api/src/rg_manifest.ts
-[`gbfs_cli.py`]: ../../hccs/ctbk/ctbk/gbfs_cli.py
-[`fetch.ts`]: ../../pyrmts/js/packages/pyrmts/src/fetch.ts
-[`walkdiff.ts`]: ../../pyrmts/js/packages/pyrmts/src/walkdiff.ts
-[`shard-index.ts`]: ../../pyrmts/js/packages/pyrmts-cfw/src/shard-index.ts
-[`lazy-footer-parse.md`]: ../../hyparquet/specs/lazy-footer-parse.md
+[`awair 0003`]: https://github.com/runsascoded/awair/blob/befe6296d05d1e9379c4d988ae676687c3ebeaed/cfw/cascade/migrations/0003_shard_stats.sql
+[`awair 0004`]: https://github.com/runsascoded/awair/blob/befe6296d05d1e9379c4d988ae676687c3ebeaed/cfw/cascade/migrations/0004_footer_cache.sql
+[`write.ts`]: https://github.com/runsascoded/awair/blob/befe6296d05d1e9379c4d988ae676687c3ebeaed/cfw/cascade/src/write.ts
+[`cascade.ts`]: https://github.com/runsascoded/awair/blob/befe6296d05d1e9379c4d988ae676687c3ebeaed/cfw/cascade/src/cascade.ts
+[`backfill.ts`]: https://github.com/runsascoded/awair/blob/befe6296d05d1e9379c4d988ae676687c3ebeaed/cfw/cascade/src/backfill.ts
+[`pyramid.py`]: https://github.com/runsascoded/awair/blob/befe6296d05d1e9379c4d988ae676687c3ebeaed/src/awair/cli/pyramid.py
+[`awair serve`]: https://github.com/runsascoded/awair/blob/befe6296d05d1e9379c4d988ae676687c3ebeaed/cfw/serve/src/index.ts
+[`rg-manifest.md`]: https://github.com/hudcostreets/ctbk.dev/blob/3a753abd675665159799f1d95d1ea5dc419243e1/specs/rg-manifest.md
+[`rg_manifest.ts`]: https://github.com/hudcostreets/ctbk.dev/blob/3a753abd675665159799f1d95d1ea5dc419243e1/gbfs/api/src/rg_manifest.ts
+[`gbfs_cli.py`]: https://github.com/hudcostreets/ctbk.dev/blob/3a753abd675665159799f1d95d1ea5dc419243e1/ctbk/gbfs_cli.py
+[`fetch.ts`]: https://github.com/runsascoded/pyrmts/blob/9a9e6704e8ee626ef3e615696a96c92898186f97/js/packages/pyrmts/src/fetch.ts
+[`walkdiff.ts`]: https://github.com/runsascoded/pyrmts/blob/9a9e6704e8ee626ef3e615696a96c92898186f97/js/packages/pyrmts/src/walkdiff.ts
+[`shard-index.ts`]: https://github.com/runsascoded/pyrmts/blob/9a9e6704e8ee626ef3e615696a96c92898186f97/js/packages/pyrmts-cfw/src/shard-index.ts
+[`lazy-footer-parse.md`]: https://github.com/runsascoded/hyparquet/blob/9ce569d49263c147a221bf040a3f6312c8006b93/specs/lazy-footer-parse.md

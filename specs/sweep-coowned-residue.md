@@ -1,5 +1,7 @@
 # Sweep gate: stop deleting co-located non-sweeper data on a majority heuristic
 
+**Historical safety analysis (2026-10-11 reconciliation).** The mark/sweeper-majority workflow below was replaced by explicit staged-path admin dispatch. Attribution remains evidence, not permission to delete someone else's data. Preserve this analysis as a regression warning; do not reinstate its directory-majority gate as the current approval model. Current pinned-manifest/exact-generation behavior is recorded in [sweep executor](sweep-executor.md) and [API.md](../API.md).
+
 A sweep approval in *slice* mode is supposed to delete "the sweeper's own slice
 of the band." The gate approximates that per **directory**: a directory is
 `eligible` when its nearest-indexed-ancestor's top-attributed user is a sweeper

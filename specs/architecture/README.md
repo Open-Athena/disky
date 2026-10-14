@@ -1,5 +1,15 @@
 # Storage query architecture
 
+## Current decision and deployment (2026-10-11)
+
+Production uses **serverless R2-backed interval and static-name stores**, not an active ClickHouse service. GCS serves interval generation `2026-10-09b` and static generation `2026-10-08c`, with daily appends and immutable merge revisions. The R2 small-artifact switch is deployed; raw per-scan fallback/downloads can still use GCS. Read [GCS operations][operations] for actual release state, publication barriers, credentials and remaining verification.
+
+The Oct 11 scan validated overlapping static/interval/D1 stages (2h03 total; 19-second visibility flip). Prefetch did not improve drill; the later CPU fix is built but its 10–12-minute estimate needs a full-run measurement. Compaction and removing old per-scan copies are distinct gates. Owner/text compounds need exact bounded semantics or explicit refusal; the old blanket “make them exclusive” recommendation below is not current policy.
+
+ClickHouse `/hot`/`coarse`, its VM and tunnel were retired Oct 10. Numbers below are historical evidence, not live endpoints or instructions to resume that rollout. `ch-store-final` preserves code; [the retirement runbook][retirement] records lost VM-only artifacts and remaining credential cleanup.
+
+## Historical architecture decision record (2026-10-07)
+
 Evidence checkpoint: 2026-10-07. These documents distinguish production, development deployments, measured workloads and untested proposals. Start here rather than reading the experiment journal chronologically.
 
 | Document | What it explains |
@@ -10,7 +20,7 @@ Evidence checkpoint: 2026-10-07. These documents distinguish production, develop
 | [Short-query index sizing and next experiments][short-query] | Frequency-pruned hot-name prototype, exact root/drill benchmarks, compact leaf-block payloads, fleet frequency screens, dense-versus-sparse envelope and FM/document-range alternatives. |
 | [Static name search][static-name] | Rare-term search without a server: suffix-ordered postings on R2 (one range read per query, exact on 4 dates, ~430 GB), bounded by the cost-weighted catalog; alternatives (trigram/FTS5, FM-index, name-id indirection) and a plan to production. |
 
-## The present decision
+## The decision at the historical checkpoint
 
 Production still runs the serverless architecture. Its Pages source metadata reports `3d0a4fa`, matching `gcs-prod`, but the deployed GCS site also includes uncommitted changes: that SHA is not the complete built-source identity. Auth-gated Pages release **`8404e950`** adds accepted **Oct 6 root summaries** to [stitched name search][dev-names]. Oct 4/5 retain catalog lookup or bounded name-posting fallback; Oct 6 now qualifies literals from its own T100k/L16 census (48,748). Until a cold fallback exists, it serves a 71,273-literal superset (`438e6615…`, per-date qualification in the registry), so no previously answered literal regresses. Generations `98955269…` (own-only) and `f07bc80b…` (inherited union) are retained. Dated comparisons align bucket paths and retain independent source positions. Chrome verifies paired maps/tables, baseline removal and no-baseline reload; unavailable new-date queries display no fabricated zero table. The separate [catalog-only viewer][dev-hot] retains prepared bucket-child detail for frozen Oct 4/5. This is not a faster implementation of every rich-search field, and is not released to production. Prepared children cannot be drilled further.
 
@@ -20,7 +30,7 @@ An all-history RAM node is plausible enough to evaluate, not proven to fit or wi
 
 The **hosted dev backend serves T100k/L16 L1 and full paired L2** on frozen Oct 4/5; production remains unchanged. The full v2/TCP L2 build exits 0 without OOM in **3,368.125 seconds stream / 3,402.164 seconds build**, retaining **701,754 cells** in a **211,480,689-byte artifact**, not fleet usage or a serving-memory bound. Complete accepted-subset parity and all covered-control frames plus four scoped independent checks pass; **119 remote fixtures pass in 4.61 seconds**. Activation at **07:42:11 UTC** preserves flags and resolves transient startup 503. **All 427,092 complete L2 diff responses** (71,182 × six buckets) equal the pinned reader, exit 0/no OOM at **07:52:15 UTC**. Benchmark elapsed time is **431.303 seconds excluding catalog load**; same-node median/p90/max are **0.726/0.807/11.306 ms**, maximum body **12,606 bytes**, uncontrolled caches—not independent source truth, edge latency or an SLA. Backend RSS is sampled at approximately **1,807,636 KiB**, not a peak. Copy-only Pages `14c4c3bc` and post-copy Chrome checks pass. Construction/proof history is in [the short-query plan][short-query].
 
-## Near-term execution and decision gates
+## Historical execution and decision gates (superseded as a rollout plan)
 
 | Track | Current gate | Decision after it |
 | --- | --- | --- |
@@ -48,3 +58,5 @@ For exhaustive measurements, failed attempts and artifacts, see [the ClickHouse 
 [journal]: ../done/ch-store.md
 [dev-hot]: https://dev.gcs.oa.dev/hot?name=.json&date=2026-10-05&from=2026-10-04
 [dev-names]: https://dev.gcs.oa.dev/names?name=zarr.json&date=2026-10-06&from=2026-10-05
+[operations]: ../gcs-operations.md
+[retirement]: ../ch-store-retirement.md

@@ -1,5 +1,7 @@
 # Architectural alternatives: what has actually been tested
 
+**Disposition update (2026-10-11):** ClickHouse was retired Oct 10. Static-name and change-interval stores on R2 are the GCS production direction; see [GCS operations](../gcs-operations.md). Measurements below compare their stated contracts, not current rollout priorities. RAM/RDBMS/managed alternatives remain proposals unless independently validated; retirement is not proof that every database strategy is infeasible.
+
 Evidence checkpoint: 2026-10-06. This compares the alternatives in [serving-options], [filter-query-service], [phase-0], [path-store], [path-store-search] and [ch-store]. “Measured” means the stated workload was run; “proposed” is not a performance result. Deployment status and release decisions belong in the architecture index, rather than being inferred from these experiments.
 
 ## The problem is aggregation, not just retrieval
@@ -15,7 +17,7 @@ This does not require sending 100M files to the browser. It requires an access p
 | Worker + D1 footer + object-store parquet | Unified path/bysize sorts, cold footer tier, range merging and search sidecars implemented; original GCS bench had 71/105 flagged answers, median 6.9 s | Cheap, independently persisted snapshots; bounded decode and repeated network/string work constrain broad exact queries | Retain as front door and existing reader, not sole fleet-wide broad-search engine |
 | Always-on custom RAM index | One 778M-node scan: 105/105 exact roots/totals; p50/p90/max 0.44/2.1/5.2 s | Fast ID-array traversal; independently loading two scans multiplies RAM, and all-history representation was not built | Promising baseline; historical delta version is proposed |
 | Serverful DuckDB over locally cached parquet | Same 105 roots/totals exact; 2.0/12.1/91 s; 11.8 GB resident, 39.7 GB peak | Reuses files and SQL; broad names map into costly row-group decoding, sometimes full path scans | Useful ingestion/oracle tool; not winning serving plan |
-| Disk-backed ClickHouse + RAM caches | Latest-scan roots/totals 0.20/1.46/4.33 s warm; append-only historical and numeric prototypes implemented separately | Multiple physical orders and historical compression; rich broad TM still has large aggregation tails | Main implementation direction, not yet general fast-FTS acceptance |
+| Disk-backed ClickHouse + RAM caches | Latest-scan roots/totals 0.20/1.46/4.33 s warm; append-only historical and numeric prototypes implemented separately | Multiple physical orders and historical compression; rich broad TM still has large aggregation tails | Retired experiment; historical contract-specific results, not the rollout direction |
 | Sparse predicate summaries on either RAM or disk | Frozen leaf `zarr.json` and `.npy` TM/dTM partitions validated; explicit directory-coverage mode also validated | Exact additive totals with bounded geometry; arbitrary Boolean/owner/age/rich fields and incremental maintenance missing | Strongest measured broad-query direction, narrower contract |
 | Managed/serverless alternatives | Platform survey: Lambda/Cloud Run fan-out, Modal, Aurora/pg_trgm, BigQuery, ClickHouse Cloud, MotherDuck | Different cold-start, billing and ops choices; none removes aggregation or access-path requirements | Surveyed, not locally benchmarked alternatives |
 
@@ -49,7 +51,7 @@ For scale, canonical bookkeeping through 10-04 records **1,142,160,667 opened ve
 
 A RAM engine should therefore be evaluated with a concrete packed schema and the same complete TM/dTM oracle, measuring build peak and concurrent-query peak as well as loaded rows. Restart/replay, generation overlap during updates and a second serving replica need separate headroom. A “128 GiB node could fit” hypothesis would not establish that 128 GiB safely builds, updates and serves it. Storing durable history on SSD while pinning just dictionaries and hot summaries is a coherent intermediate design; all-history residency is optional, not an architectural prerequisite.
 
-## Disk-backed indexed node: the current main direction
+## Disk-backed indexed node: historical ClickHouse direction
 
 ClickHouse separates name discovery, name-to-node postings, subtree/path order and historical values. Initial seven-scan scalar history compressed to 569M object versions plus 218M directory versions, only 1.009/1.004 scan-equivalents. Its 0.1–0.5 s warm history probes were view-level/scalar aggregations; some filtered diffs still scanned hundreds of millions of rows rather than only changes. [Measured experiment][serving-options].
 

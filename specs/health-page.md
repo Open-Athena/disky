@@ -1,5 +1,7 @@
 # `/health`: the state of the append-only stores
 
+**GCS rollout (2026-10-11): deployed and browser-verified in production**, not local-only. Both R2 stores show coverage through Oct 11 with no reported gaps; the latest scan job is successful, 2h03. The local fixture descriptions below remain historical verification provenance. See [GCS operations](gcs-operations.md) for the current release.
+
 Every deployment gets a stock `/health` page: each append-only store's stack drawn as binary-counter shards over the scan timeline, every scan's coverage (and its gaps), and freshness. `/scans` stays the per-run job table; `/health` is the state of the stores. They link to each other, and both are in the ☰ menu and the omnibar's Pages.
 
 ## Model: pyrmts' health timeline

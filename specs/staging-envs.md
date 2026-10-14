@@ -1,5 +1,7 @@
 # Staging environments — real-login server + selectable DB backend
 
+**Current boundary (2026-10-11): proposal, not an isolated data sandbox.** `dev.gcs.oa.dev` exists, but its GCS configuration shares production D1/index data and lacks executor credentials. Normal sign-in now uses the app-owned auth gate, not the historical CF Access flow below. Read-only browser verification is safe; development-host writes can still change real ledger data. A selectable independent backend remains a separate implementation task.
+
 ## Goal
 
 A deployed **staging server** you can actually sign into (CF Access, real identity) and exercise end-to-end — marks, claims, the actions ledger, the agent-token flow — without touching prod data. And, as a variant, the ability to point that same running app at the **real prod DB** to test live user actions. The database backing a session should be **selectable from the UI** (an *environment switcher* in the account menu), not baked into a separate deployment per backend.

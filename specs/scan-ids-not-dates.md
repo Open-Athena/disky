@@ -1,5 +1,7 @@
 # Scans are not dates: sub-daily scan ids everywhere, a short `?d=` on every page
 
+**GCS ordering fix (2026-10-12):** manual launch review found that the date-only cron default sorts before a timestamped manual scan earlier on its day, while both append pipelines compare raw IDs. The approved `job/run.sh` timestamp default is now built and published, retaining explicit `SNAP_ID` / `SNAPSHOT_DATE` overrides; a regression reproduces the old failure and checks a later same-day daily append. Manual scan `2026-10-12T1042` was submitted on the new image. See [GCS operations](gcs-operations.md). Do not backdate a manual ID or overwrite the daily's ID.
+
 From the gcs session (2026-10-09), on Ryan's direction: "we should not be treating dates as PKs! we should have option to trigger (or switch cron to) multiple scans per day. cw already does this so if you added code … to bake in 'date == scan', that's wrong and should be removed. I'm fine to leave the params BC (e.g. date maps to latest scan for that date) and we can generalize that to where we always pick that latest scan matching a provided strptime-ish slug. param `date` should be shortened (have use-prms canonicalize it to a new shorter key+val str), and canonical repr should drop leading '20' from years."
 
 He also said "some of the above should go US too": this spec covers the `cloud` (upstream) part. gcs's own job (`job/run.sh` keyed by `DATE`, `listing/$DATE/`) is the gcs session's, done there in parallel (§4).

@@ -1,5 +1,7 @@
 # Staged delete: the `chat-approve` cloud path, upstreamed generic
 
+**GCS status correction (2026-10-11): implemented and used.** `/staged` is a global current-load view plus batch/run history, not multiple independently open deletion plans. Recorded deletion history is not currently staged work; an empty later scan is not proof of deletion. The generic `backend.delete(uri)` sketch below is not the GCS executor's safety contract: dispatch pins a reviewed manifest, and execution/recovery retain exact object generations and committed decision logs. See [sweep executor](sweep-executor.md) and [API.md](../API.md). Other deployments' rollout is not established by this audit.
+
 **From:** the mgu gcs "delete not mark" pivot (`specs/gcs-toward-union.md` §5 seam 1 + `specs/sweep-plan-union.md`, mgu-side), routed here as roadmap item 3 (`specs/done/mgu-cp-2026-09-16.md`). Cross-repo peer, so **generalize-and-upstream** (`/cp` `handoff: spec`): disk-tree holds the reusable engine, each deployment keeps its policy; gcs eventually imports it.
 
 **Goal:** a public demo against Ryan's **S3 + R2**, in the repo — you log in and do admin dispatches. It doubles as the forcing function to make the ported pieces appropriately generic (S3/R2/GCS, not gcs-only).

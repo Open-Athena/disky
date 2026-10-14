@@ -1,5 +1,7 @@
 # Short-query aggregation: trie, suffix index and sizing gates
 
+**Status correction (2026-10-11): historical ClickHouse experiments, retired Oct 10.** VM/tunnel and `ch-*` code are no longer deployed; source is at `ch-store-final`. Do not resume preview/cron instructions below. Production search uses the R2 static-name index with run drills/anchors; [GCS operations](../gcs-operations.md) states release gates. Historical census and frozen-response measurements are not current serving contracts. The old blanket owner/text-exclusive recommendation is superseded by exact bounded compounds or explicit refusal, not a limitation to reinstate.
+
 Evidence checkpoint: 2026-10-07. The target is an exact additive answer `F(query, subtree, scan)` over matching objects' own bytes/counts, followed by bounded heavy-child refinement. Queries are case-insensitive substrings within individual names: no slash characters or cross-segment matching. A matching directory name still covers its descendants. It is not a list of substring occurrences or a separate full fleet index for every query. Pages **`8404e950`** serves accepted Oct 6 registered root summaries alongside the full 71,182-predicate T100k/L16 Oct 4/5 L1/L2 catalogs and bounded old-date fallback. Oct 6 reuses registry membership, not its old frequency counts, and has no cold fallback or L2. All earlier 427,092 L2 bodies remain accepted; 42 new whole HTTP responses cover dated single/mixed views, registry metadata and unchanged old catalog/fallback results. Chrome verifies real paired maps/tables, optional-baseline URL/reload behavior and unavailable new-date refusal. The site passes **1,022 tests with one skip**, both type checks and preview build. These are catalog/HTTP and bounded browser checks, not independent full-catalog source truth or an edge SLA. Production, scheduled refresh, owner/Boolean and deeper child-drill contracts remain unchanged.
 
 ## Production contract and priorities
@@ -419,16 +421,16 @@ Active Oct 6 tables total **19,566,121,249 bytes**, of which final nodes use **3
 [hot-dev]: https://dev.gcs.oa.dev/hot?name=.json&date=2026-10-05&from=2026-10-04
 [owner-writer]: ../../cloud/src/dt_cloud/viz.py
 [owner-prefixes]: ../../cloud/src/dt_cloud/prefixes.py
-[owner-claims]: ../../site/functions/_lib/claims.ts
+[owner-claims]: https://github.com/Open-Athena/marin-gcs-usage/blob/3d0a4fa9637b978af6cad542767294352b527d84/site/functions/_lib/claims.ts
 [owner-totals]: ../../site/functions/_lib/ownerTotals.ts
 [owner-ledger]: ../../site/functions/_lib/ledger.ts
-[owner-ch]: ../../cloud/src/dt_cloud/chstore/serve.py
+[owner-ch]: https://github.com/Open-Athena/marin-gcs-usage/blob/fc9aeec73f880f2beed44508ea6f5aa3517a207f/cloud/src/dt_cloud/chstore/serve.py
 [doc-count]: https://users.dcc.uchile.cl/~gnavarro/ps/dcc15.1.pdf
 [colored-range]: https://users.dcc.uchile.cl/~gnavarro/ps/tcs12.3.pdf
 [ch-joins]: https://clickhouse.com/docs/concepts/features/operations/select/joining-tables
 [ch-ngrams]: https://clickhouse.com/docs/reference/functions/regular-functions/splitting-merging-functions#ngrams
-[hot-frequency-source]: ../../cloud/src/dt_cloud/chstore/hot_frequency.py
-[batch-catalog]: ../../cloud/src/dt_cloud/chstore/hot_l1_batch_catalog.py
+[hot-frequency-source]: https://github.com/Open-Athena/marin-gcs-usage/blob/fc9aeec73f880f2beed44508ea6f5aa3517a207f/cloud/src/dt_cloud/chstore/hot_frequency.py
+[batch-catalog]: https://github.com/Open-Athena/marin-gcs-usage/blob/fc9aeec73f880f2beed44508ea6f5aa3517a207f/cloud/src/dt_cloud/chstore/hot_l1_batch_catalog.py
 
 ## Oct 6 at the complete length domain, keyed by match set
 

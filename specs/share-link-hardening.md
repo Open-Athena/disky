@@ -1,5 +1,7 @@
 # Share-link hardening: read-only scope, rotate, token self-ID
 
+**Current status (2026-10-11): the read-only tier and auth-package adoption are implemented** (as-built sections below). Current read gates accept `gcs:read`; stage/assign/admin gates do not. The snapshot job now has its own read-only grant and Secret Manager token, independently revocable from the sheet mirror; live `/api/me` confirms exactly `gcs:read`, not admin. Original vulnerability/keep-mark descriptions below are historical. See [GCS operations](gcs-operations.md) for provisioning, and check package/UI behavior separately before assuming every proposed rotation/self-ID affordance is deployed.
+
 Three related gaps surfaced while wiring the `/admin` share-link console for a
 guest link (Rob). This spec covers all three; **(1) is the priority** and is
 entirely app-side (this repo), **(2)/(3)** touch the `@open-athena/auth` package
