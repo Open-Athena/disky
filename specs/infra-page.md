@@ -16,22 +16,21 @@ A deployment spans two clouds, and nothing on the site shows what it is built on
   - R2 buckets: bytes and object count. Free and paid limits aren't per bucket, so show growth: today and 7 and 30 days ago.
   - KV namespaces: key count, if cheap.
 - **GCP**
-  - Buckets the deployment writes (e.g. `oa-gcs-usage-dvx`): bytes and object count, from the deployment's own latest scan where it lists that bucket, otherwise the snapshot below.
+  - Buckets the deployment writes (e.g. `oa-gcs-usage-dvx`): bytes and object count, from the deployment's own latest scan where it lists that bucket, otherwise the latest sample below.
   - Batch: the running and last 10 jobs per component label (`scan`, `interval-store`, `static-names`, …), with state, duration and a link to `/scans`.
   - Cloud Scheduler: each job's schedule, state and last attempt status.
   - Artifact Registry: the image the scheduler runs (`:latest`), its digest, build time and source SHA, plus other tags in use (e.g. `:cw`).
-- **IaC**: the Pulumi stacks (`infra/gcp`, the CF stack), their last `up` time and resource counts, and any drift a `pulumi preview` reported in the snapshot.
+- **IaC**: the Pulumi stacks (`infra/gcp`, the CF stack), their last `up` time and resource counts, and any drift a `pulumi preview` reported at sampling.
 
 ## Data path
 
 Most of this needs credentials a Pages Function doesn't have (GCP; Cloudflare account APIs) and shouldn't hold. So it splits:
 
-1. **Snapshot**, `infra.json`: written by the daily job's final phase (it already has GCP credentials) plus a read-only Cloudflare token (`Account Analytics:Read`, `D1:Read`, `Pages:Read`, `R2:Read`) kept in Secret Manager. It goes to the deployment's R2 (`INDEX_R2`, e.g. `infra/<date>.json` + `infra/latest.json`) and is kept 30 days, which gives the growth columns.
+1. **Samples, per scan run** (not per day): rows in D1 `infra_samples (run_id, resource, kind, used, lim, unit, status, at, detail)` (`detail` a small JSON for nesting; `run_id` the `scan_runs` row it was taken by), written by the scan job's final phase (it already has GCP credentials) plus a read-only Cloudflare token (`Account Analytics:Read`, `D1:Read`, `Pages:Read`, `R2:Read`) kept in Secret Manager. It goes to the deployment's R2 (`INDEX_R2`, e.g. `infra/<date>.json` + `infra/latest.json`) and is kept 30 days, which gives the growth columns.
    - CF figures: GraphQL analytics `r2StorageAdaptiveGroups` for R2, D1 `GET /accounts/:id/d1/database/:id` (`file_size`) for D1, Pages deployments list.
    - GCP figures: `gcloud batch/scheduler/artifacts` JSON, and bucket sizes from Cloud Monitoring `storage/total_bytes`.
-   - Shape: one entry per resource, `{ provider, kind, id, label, status, used?, limit?, unit, at, href? }`, so the page renders it generically.
-   - A `dt-cloud infra-snapshot -o <url>` CLI builds it, so it can also run ad hoc.
-2. **Live** (read by the function on request, cheap): D1's own size (the `size_after` field D1 returns on a trivial read), migration state (`d1_migrations`), the configured tables' row counts and bytes, and the site's build stamp. Live values replace the snapshot's for the same resource.
+   - A `dt-cloud infra-sample` CLI takes the samples (`-n` prints them as JSON without writing), so it can also run ad hoc.
+2. **Live** (read by the function on request, cheap): D1's own size (the `size_after` field D1 returns on a trivial read), migration state (`d1_migrations`), the configured tables' row counts and bytes, and the site's build stamp. Live values replace the latest sample for the same resource.
 3. `GET /api/infra` merges the two (admin-gated, colo-cached about 60 s like `/api/health`).
 
 Config: the deployment's wrangler vars (or a small `infra.yml` in the deployment branch) list the resources to show and their limits. Shared code knows only resource kinds, never gcs names.
@@ -43,7 +42,7 @@ The session-monitor pattern applies: a quiet checker posts to the deployment's a
 ## Phases
 
 1. Live D1 section + `/api/infra` + page skeleton. No new credentials. This alone surfaces the D1 cap.
-2. `infra-snapshot` CLI + daily-job phase + read-only CF token (needs the user's go: new secret, IAM) → GCP, R2, Pages and IaC sections.
+2. `infra-sample` CLI + scan-job phase + `infra_samples` migration + read-only CF token (needs the user's go: new secret, IAM) → GCP, R2, Pages and IaC sections.
 3. Threshold alerts.
 
 ## Open questions
