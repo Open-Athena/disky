@@ -15,7 +15,7 @@ row-group pruning SQL. ~250 B per group: D1 holds every scan's every tier (2M+
 groups) under its 10 GB cap, where the verbose thrift-shaped JSON (~3 KB) hit
 8.4 GB at 38 scans (2026-09-06).
 
-Generations (specs/view-serving.md, "Index rewrite vs D1 footer"): a run never
+Generations (specs/done/view-serving.md, "Index rewrite vs D1 footer"): a run never
 overwrites a parquet D1 points at. Each run writes its tiers under a fresh
 ``listing/<date>/index/<gen>/`` and syncs them tagged with that ``gen``
 (``index_row_groups`` PK is (date, variant, gen, rg), so two generations
@@ -54,7 +54,7 @@ def _site_dir() -> Path:
 
 
 # `index_schema.version`, per synced file. A reader keys its row shape off it
-# (specs/path-store.md §5 phase 1): 1 = the dir-only index (`b, o, wts, wb, …`
+# (specs/done/path-store.md §5 phase 1): 1 = the dir-only index (`b, o, wts, wb, …`
 # wire names, no `kind`); 2 = a path-store sort cut by the engine's
 # `write_tiers` — every row, objects included, `kind` on each, the layer-2's
 # column names (§1.1), and a `bysize` sibling. Told apart by the `tier`
@@ -237,7 +237,7 @@ def write_groups_blob(parquet_path: str, schema: dict, rows: list[dict]) -> tupl
     return out, len(text)
 
 
-# The cold footer tier (specs/path-store.md §1.6): the same rows as one small
+# The cold footer tier (specs/done/path-store.md §1.6): the same rows as one small
 # parquet beside the tier, `FOOTER_ROW_GROUP_ROWS` rows per group with stats on
 # the pruning columns — what the site range-reads (`_lib/index.ts` `pq` mode)
 # once retention retires a scan's rows from D1. The engine owns the format.
@@ -371,7 +371,7 @@ def _q(v) -> str:  # nullable string literal for SQL
     return "NULL" if v is None else f"'{_sql_escape(v)}'"
 
 
-# Multi-store deploys (specs/multi-store.md). The primary store's SQL is
+# Multi-store deploys (specs/done/multi-store.md). The primary store's SQL is
 # exactly what it was before stores existed, so it runs on a D1 with or
 # without the store migration (site/migrations/{cw/0006,gcs/0030}). A
 # secondary store's rows are namespaced twice: their `variant` is
@@ -630,7 +630,7 @@ def pointers(db_id: str = D1_DB_ID) -> list[tuple[str, str, str]]:
     return [(r["date"], r["variant"], r["dir"]) for r in rows if r.get("dir")]
 
 
-# The path store's sorts (specs/path-store.md §1.2), variant → file under the
+# The path store's sorts (specs/done/path-store.md §1.2), variant → file under the
 # generation dir: `path` = every row sorted `(depth, path)`, `bysize` = the same
 # rows sorted `(⌊log2 size⌋ desc, path)`. Both are cut by the engine's
 # `write_tiers` (`index-write` / `path-index`); the by-user copies are the same
@@ -656,7 +656,7 @@ INDEX_VARIANTS: dict[str, str] = {**STORE_SORTS, **USER_SORTS}
 # `AGE_PYRAMID_VARIANTS` in dt_cloud.index.
 for _b in ("1h", "3h", "6h", "12h", "1d", "2d", "4d", "8d"):
     INDEX_VARIANTS[f"age-pyramid-{_b}"] = f"age-pyramid-{_b}.parquet"
-# The cross-scan over-time index (specs/obs-axis-indexing.md Phase 1): a single
+# The cross-scan over-time index (specs/done/obs-axis-indexing.md Phase 1): a single
 # SCD-2 interval table over the *observation* axis, not per-scan. Its (depth,
 # path, b) stats prune like any tier; `usr` absent, the extra `__scan_lo/hi`
 # columns carry no stats the reader needs. `dt_cloud.overtime.OVER_TIME_*`.
@@ -677,7 +677,7 @@ def retire_d1(
     base: str | None = None,
     has_cold=exists,
 ) -> tuple[list[tuple[str, str, int]], list[tuple[str, str, str]]]:
-    """Retention (specs/path-store.md §1.6): drop the store sorts' row groups
+    """Retention (specs/done/path-store.md §1.6): drop the store sorts' row groups
     (`SORT_VARIANTS`) for every synced scan older than the newest ``retain``
     — they are 95 % of D1's index bytes (thousands of groups per sort per
     scan) and a deep drill into an old scan is rare. The pointer stays, and

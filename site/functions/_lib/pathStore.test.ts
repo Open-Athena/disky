@@ -10,7 +10,7 @@ import { buildDiff, buildView, type DiffRow, lensSort, readRootAgg, SMALL_SUBTRE
 
 vi.mock('@rdub/file-tree/stores/s3', async () => ({ S3Store: (await import('./testStore')).S3Store }))
 
-// The path store's reader (specs/path-store.md phase 2), over two real
+// The path store's reader (specs/done/path-store.md phase 2), over two real
 // generations served from one D1 through the local-file store twin:
 //
 // - v1: `fixtures/path-index-zstd.parquet`, the dir-only index with the wire

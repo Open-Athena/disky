@@ -110,5 +110,5 @@ Caching makes repeated immutable queries cheap but cannot fix arbitrary cold-que
 [search-source]: https://github.com/Open-Athena/marin-gcs-usage/blob/3d0a4fa9637b978af6cad542767294352b527d84/site/functions/_lib/search.ts
 [filter-source]: https://github.com/Open-Athena/marin-gcs-usage/blob/3d0a4fa9637b978af6cad542767294352b527d84/site/functions/_lib/filter.ts
 [search-spec]: https://github.com/Open-Athena/marin-gcs-usage/blob/3d0a4fa9637b978af6cad542767294352b527d84/specs/path-store-search.md
-[path-store]: ../path-store.md
+[path-store]: ../done/path-store.md
 [ch-spec]: ../done/ch-store.md

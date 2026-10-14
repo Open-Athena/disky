@@ -1,5 +1,5 @@
 /** One view = "path + scan + scope + pixel budget", answered from the index
- * tiers (specs/view-serving.md §1–2). Shared by `/api/subtree` (the map),
+ * tiers (specs/done/view-serving.md §1–2). Shared by `/api/subtree` (the map),
  * `/api/todo` (the review backlog) and anything else that wants a folded tree.
  *
  * Treemap area is proportional to bytes, so "everything this canvas can draw
@@ -18,7 +18,7 @@
  * the coarsest such tier; a path below every floor (or a scan without
  * coarse tiers) reads the floor-free tier.
  *
- * Sort choice, version-2 generations (the path store, specs/path-store.md:
+ * Sort choice, version-2 generations (the path store, specs/done/path-store.md:
  * every row, objects included, `kind` on each, no coarse tiers): a
  * thresholded subtree read goes to the `bysize` sort — the groups above the
  * threshold under P, whatever the tree's shape — unless P's subtree is small
@@ -94,7 +94,7 @@ export interface ViewOpts {
   /** Absolute byte threshold instead of the pixel-budget one (e.g. the to-do
    * backlog's min bytes). Still attenuated per level by `atten`. */
   threshold?: number
-  // --- the page's scope axes (specs/view-serving.md §2) -------------------
+  // --- the page's scope axes (specs/done/view-serving.md §2) -------------------
   /** `o=owned|unowned`: the owner axis's pools (a user is `lens`). */
   owner?: OwnerScope
   /** `cl=` ⊆ snca: keep only these storage classes' bytes (rows are scaled,
@@ -2077,7 +2077,7 @@ function sumInteriors(a?: View['interiors'], b?: View['interiors']): NonNullable
   return { read: xs.reduce((n, x) => n + x.read, 0), skipped: xs.reduce((n, x) => n + x.skipped, 0), reason: [...new Set(xs.map(x => x.reason))].join(' · '), ...(late ? { late } : {}) }
 }
 
-/** What changed under P between two scans (specs/view-serving.md §2):
+/** What changed under P between two scans (specs/done/view-serving.md §2):
  * both sides are read from their index tiers at ONE absolute byte floor —
  * the larger side's pixel-budget threshold — so a directory is named on both
  * sides or folded on both, never named here and hidden in `(other)` there

@@ -47,7 +47,7 @@ export interface Env {
    *  (`_lib/index.ts:storeCreds`). */
   GCS_HMAC_KEY_ID?: string
   GCS_HMAC_SECRET?: string
-  /** Generalized index-store seam (specs/union-of-roots.md — the r2/public
+  /** Generalized index-store seam (specs/done/union-of-roots.md — the r2/public
    *  layer). Point the index reader at any S3-compatible store; unset falls
    *  back to the GCS defaults + `GCS_HMAC_*` so gcs/cw are unchanged. */
   STORE_ENDPOINT?: string
@@ -132,7 +132,7 @@ export interface Env {
   /** The service account dispatched Batch jobs run as (a `[vars]` entry). */
   JOB_SA?: string
   /** Secondary stores served beside the primary (`_lib/stores.ts`,
-   *  specs/multi-store.md): `{<key>: {scope?, vars?, secrets?}}` as JSON. */
+   *  specs/done/multi-store.md): `{<key>: {scope?, vars?, secrets?}}` as JSON. */
   STORES_JSON?: string
   /** Set only on a secondary store's env overlay (`withStore`): its key
    *  (`index_schema.store`, cache keys); unset = the primary. */

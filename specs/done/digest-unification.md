@@ -91,6 +91,6 @@ Other non-posted differences: the dry-run plot's temp filename (`<slug>-YYYYMM.p
 - **Owners/users section**: neither digest has one today (gcs's owner attribution lives in the site and the retired weekly report). If wanted, it is an optional template section fed from config (on/off) + gcs's owner data — a gcs-branch input, not engine code.
 - [`comms-notify.md`] describes an earlier `disk_tree.notify` engine (plotly, `DigestProfile`), deleted from `cloud` as dead code (`be4e0d1`); this spec supersedes it for the deployed digests.
 
-[`branch-layout.md`]: branch-layout.md
-[branches carry exactly their code]: branch-layout.md#2-proposed-tree
-[`comms-notify.md`]: done/comms-notify.md
+[`branch-layout.md`]: ../branch-layout.md
+[branches carry exactly their code]: ../branch-layout.md#2-proposed-tree
+[`comms-notify.md`]: comms-notify.md

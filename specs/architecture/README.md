@@ -41,9 +41,9 @@ The completed sweep used the existing node serially: four threads, 8 GiB query m
 For exhaustive measurements, failed attempts and artifacts, see [the ClickHouse experiment journal][journal]. Mermaid diagrams are source-controlled alongside the explanation so designs can evolve with the code.
 
 [serverless]: serverless.md
-[clickhouse]: clickhouse.md
+[clickhouse]: ../done/architecture/clickhouse.md
 [alternatives]: alternatives.md
-[short-query]: short-query-index.md
+[short-query]: ../done/architecture/short-query-index.md
 [static-name]: static-name-search.md
 [journal]: ../done/ch-store.md
 [dev-hot]: https://dev.gcs.oa.dev/hot?name=.json&date=2026-10-05&from=2026-10-04

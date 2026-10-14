@@ -17,13 +17,13 @@
  * handle's gen, and we fetch metadata only for the groups a query actually
  * reads, so the ~5 MB thrift footer is never parsed on a cold isolate. A run
  * never overwrites a file the pointer names: it lands a new generation and
- * flips the pointer last (specs/view-serving.md, "Index rewrite vs D1
+ * flips the pointer last (specs/done/view-serving.md, "Index rewrite vs D1
  * footer"). A pointer whose row groups retention retired (`index-gc -r`)
  * opens the tier's **cold footer** instead (`pq` mode): the same rows as a
  * small parquet beside the tier (`<tier>.groups.parquet`, 512 rows per
  * group, stats on the pruning columns), whose own footer is range-read and
  * cached; a query prunes its groups by those stats with the predicates it
- * would send D1 and decodes only the survivors (specs/path-store.md §1.6).
+ * would send D1 and decodes only the survivors (specs/done/path-store.md §1.6).
  * Only a generation without one opens the `.groups.json` blob (`blob` mode:
  * the whole document, fine for small deployments — 86 MB on gcs is not).
  * Parsing the tier parquet's own footer is never an option: a floor-free
@@ -43,7 +43,7 @@ import { compressors } from './zstd.js'
 export interface SchemaElement { type: string; name: string; repetition_type: string; converted_type?: string }
 
 
-/** One index row, named by the layer-2's columns (specs/path-store.md §1.1) —
+/** One index row, named by the layer-2's columns (specs/done/path-store.md §1.1) —
  * the shape both generations decode to (`toRow`). A version-2 store sort
  * carries these names on disk, objects and dirs alike; a version-1 index
  * (dir rows only, the wire names `b, o, wts, wb, c2..c4, a`) is mapped onto
@@ -235,7 +235,7 @@ export const str = (v: unknown): string =>
   typeof v === 'string' ? v : v instanceof Uint8Array ? new TextDecoder().decode(v) : String(v ?? '')
 
 /** The index-store creds: an r2/s3 deploy sets `STORE_*`; unset falls back to
- *  the GCS HMAC pair so gcs/cw are unchanged (specs/union-of-roots.md). */
+ *  the GCS HMAC pair so gcs/cw are unchanged (specs/done/union-of-roots.md). */
 export const storeCreds = (env: Env) => ({
   accessKeyId: env.STORE_ACCESS_KEY_ID ?? env.GCS_HMAC_KEY_ID,
   secretAccessKey: env.STORE_SECRET_ACCESS_KEY ?? env.GCS_HMAC_SECRET,
@@ -299,8 +299,8 @@ export function servedStore(env: Env, prefixes: string[]): Store {
  * (`index_schema.dir`, e.g. `listing/<date>/index/<gen>`). Variants are
  * `<tier>[-<sort>]`: tier `''` (floor-free) or `coarse<E>`; sort `path`
  * (default) or `user`; a store generation adds the size-bucket sort
- * `bysize` (+ `bysize-user`), specs/path-store.md §1.2. Mirrors
- * `INDEX_VARIANTS` in the dt-cloud CLI (specs/view-serving.md §1). */
+ * `bysize` (+ `bysize-user`), specs/done/path-store.md §1.2. Mirrors
+ * `INDEX_VARIANTS` in the dt-cloud CLI (specs/done/view-serving.md §1). */
 export function indexKey(dir: string, variant: string): string {
   // The age index is a standalone index (per-path created-day strata), not a
   // path-index tier, so it keeps its own base name (specs/done/age-index.md).
@@ -309,7 +309,7 @@ export function indexKey(dir: string, variant: string): string {
   const pm = /^age-pyramid-(\d+(?:min|h|d|mo|y))$/.exec(variant)
   if (pm) return `${dir}/age-pyramid-${pm[1]}.parquet`
   // The cross-scan over-time index — a standalone singleton, own base name
-  // (specs/obs-axis-indexing.md Phase 1).
+  // (specs/done/obs-axis-indexing.md Phase 1).
   if (variant === 'over-time') return `${dir}/over-time.parquet`
   const m = /^(?:(coarse\d+|bysize)(?:-(user))?|(path|user))$/.exec(variant)
   if (!m) throw new Error(`bad index variant '${variant}'`)
@@ -2077,7 +2077,7 @@ export async function readGroupsAt(h: IndexHandle, rgs: number[], keep: (path: s
   return { rows: out, read }
 }
 
-// --- the size-bucket sort (specs/path-store.md §1.3, §2.1) -------------------
+// --- the size-bucket sort (specs/done/path-store.md §1.3, §2.1) -------------------
 
 /** The `bysize` span predicate, for a blob handle's in-memory groups — the
  * same test `selectSizeSpans` sends D1, and `disk-tree tiers plan`'s

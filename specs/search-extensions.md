@@ -1,6 +1,6 @@
 # Search extensions: costed options for the static name index
 
-Status: spec only (2026-10-09), nothing built. It prices five extensions of the exact, indexed name search beyond one plain substring, each grounded in the index formats of `specs/architecture/static-name-search.md` and `specs/static-append.md`. The measurements are cheap reads of gen `2026-10-08c` metadata (`sidecar.parquet` 29 MB, `catalog/members.parquet`, `roots-measure/`, `drill/aliases.parquet`) and a 60-row-group sample of the 2026-10-08 scan's `path` sort. No Batch was spent. Where an answer needs a census, the census is priced as a gated first step.
+Status: spec only (2026-10-09), nothing built. It prices five extensions of the exact, indexed name search beyond one plain substring, each grounded in the index formats of `specs/architecture/static-name-search.md` and `specs/done/static-append.md`. The measurements are cheap reads of gen `2026-10-08c` metadata (`sidecar.parquet` 29 MB, `catalog/members.parquet`, `roots-measure/`, `drill/aliases.parquet`) and a 60-row-group sample of the 2026-10-08 scan's `path` sort. No Batch was spent. Where an answer needs a census, the census is priced as a gated first step.
 
 ## Baseline: what the index answers today
 

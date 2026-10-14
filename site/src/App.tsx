@@ -764,7 +764,7 @@ function AppContent() {
   // Diff sides: the drilled subtree at each endpoint, scoped like the map.
   // The diff is read server-side (`/api/diff`): both scans' index tiers at
   // one shared byte floor, point lookups for names that crossed it, the
-  // page scope applied to both sides (specs/view-serving.md §2).
+  // page scope applied to both sides (specs/done/view-serving.md §2).
   // First paint: the bucket-level diff (`depth=1` — the two root reads plus
   // one level of lookups, ~2 s cold) stands in for the full walk while it
   // aligns, so the map shows the shape of the change before its detail.

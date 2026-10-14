@@ -59,7 +59,7 @@ Our served artifact is a **snapshot** path-index keyed `(path)` with no event-ti
 **Dataset scoping — one union dataset vs. one per location. Open question #2, and the federated-scans lever.** Today the ingestion builds **one** union path-index (three buckets grouped as the Map's top cells). pyrmts's guidance is "per-location dataset = its own dyadic ladder." Two shapes:
 
 - **(a) one dataset for the union** — matches today's single index; simplest; one MS ladder + one diff-index. But couples the three buckets' scan cadences and makes "add a bucket / a new cloud location" a re-consolidation.
-- **(b) one dataset per bucket/location** (`ctbk`, `crashes`, `jc-taxes`) — each with its own MS ladder + diff-index; the union Map reads across datasets via the manifest. This is exactly the [federated-scans](federated-scans.md) north-star (each location consolidates independently; the union reader routes via the manifest) and lets a new location join without touching the others. Cost: the union view composes N dataset reads.
+- **(b) one dataset per bucket/location** (`ctbk`, `crashes`, `jc-taxes`) — each with its own MS ladder + diff-index; the union Map reads across datasets via the manifest. This is exactly the [federated-scans](../federated-scans.md) north-star (each location consolidates independently; the union reader routes via the manifest) and lets a new location join without touching the others. Cost: the union view composes N dataset reads.
 
 **Resolved: (b) per-location** (pyrmts agrees). Three refinements from the review:
 
@@ -145,4 +145,4 @@ Verdict: no engine change for the demo now; keep `buildDiff`. Revisit when (a) t
 
 - **pyrmts** reviews this spec (Pyramid mapping, per-location dataset scoping, diff-index wiring). Ping the pyrmts session when it's up (done on commit).
 - **cw-s3** owns the DuckDB producer + CFW reader being upstreamed into pyrmts, and is wiring MS for its 12 h GCS fleet; our serve wiring in the base is what cw/gcs inherit on rebase — coordinate via the mgu handoff (`/Users/ryan/c/oa/marin-gcs-usage/specs/disk-tree-as-base.md`).
-- Related specs: [`union-of-roots.md`](union-of-roots.md) (the base plan), [`federated-scans.md`](federated-scans.md) (per-location scans + union reader — §3.2 (b) is its realization), `pyrmts:specs/multi-scan-consolidation.md` (§"grouping policy" / Phase 2d for exponential), `pyrmts:specs/pyrmts-column-cube.md` (the *other* redundancy — across tiers within a scan; separate axis, not this spec).
+- Related specs: [`union-of-roots.md`](union-of-roots.md) (the base plan), [`federated-scans.md`](../federated-scans.md) (per-location scans + union reader — §3.2 (b) is its realization), `pyrmts:specs/multi-scan-consolidation.md` (§"grouping policy" / Phase 2d for exponential), `pyrmts:specs/pyrmts-column-cube.md` (the *other* redundancy — across tiers within a scan; separate axis, not this spec).

@@ -1,4 +1,4 @@
-// specs/scan-runs-ui.md: /api/scan-runs over the cw lineage's migration (FKs on).
+// specs/done/scan-runs-ui.md: /api/scan-runs over the cw lineage's migration (FKs on).
 import { describe, expect, it, vi } from 'vitest'
 import { onRequestGet as route } from '../api/scan-runs/[[path]]'
 import { sqliteD1 } from './testD1'
