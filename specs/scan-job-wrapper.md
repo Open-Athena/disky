@@ -1,6 +1,15 @@
 # Shared scan-job wrapper: `dt-cloud scan-run phase-*` + `disk-tree notify`
 
-Status: **revised after review** (2026-10-14). Reviewed by gcs (9 gaps) and cw-s3 (5 gaps); both are folded in below. m3's `disk-tree notify` is now on cloud (`65f0a64e`) and is the one notifier. Not built yet.
+Status: **migration step 1 built on cloud** (2026-10-14). Reviewed by gcs (9 gaps) and cw-s3 (5 gaps); both are folded in below. m3's `disk-tree notify` is on cloud (`65f0a64e`) and is the one notifier; it now has the `slack` channel. `dt-cloud scan-run start / phase-begin / phase-end / phase -- CMD / finish` are in `cloud/src/dt_cloud/scan_runs.py` (over `record`'s internals; `record` is unchanged), tested in `cloud/tests/test_scan_run_wrapper.py`. Step 2 (each deployment swapping its shim) has not started.
+
+As built, beyond the design below:
+- **Run state file.** `start [SCAN]` (default `$SCAN_ID`) keeps the run's scan, kind, parent, gen, store and job facts in `${TMPDIR:-/tmp}/dt-scan-run/<run id>.json`, beside the `.alerted` marker. The phases (background subshells included) and `finish` read it, so `phase-begin NAME` needs no scan or kind flags. A fatal `phase-end` writes its phase there, and `finish` records it as `failed_phase`. `start` clears a stale state file and marker; `finish` removes both.
+- **Recording switch.** `record` has no scratch flag (gcs's SCRATCH/GATE check lives in its shell `scan_run`). So the wrapper records nothing when there's no run id, or when `DT_RECORD=off`. The PHASE lines and alerts are unaffected. gcs SCRATCH/GATE would set `DT_RECORD=off DT_ALERTS=stderr`.
+- **What marks the run alerted.** Only a fatal `phase-end` (a `fail` alert) creates the marker. A `-W` warning doesn't, so a later fatal failure in the same run still alerts. The engine's `disk-tree notify` CLI has no notion of a run and doesn't touch the marker.
+- **Alert text.** The title is `❌|⚠️ <alerts.label> <scan>`. A phase's message is `<name> failed (exit N[, timed out after T])[: MSG][\nResume: `R`]`. `finish`'s is `run failed (exit N)[ in <phase>][: ERR]`. The `logs_url` link is labelled "task logs", and is omitted when the run lacks a fact the template names. The facts are `job_uid`, `project`, `region`, `job`, `scan` and `kind`. With no channel configured, the alert prints as `alert (no channel configured): …`.
+- **Failed phases.** A failed phase's outputs aren't measured (what it left is partial). The PHASE line and the note are `failed (exit N)[, NOTE]`, as gcs writes them today.
+- **`phase` timeouts.** `-T` takes `N[s|m|h|d]`, and `-G` sets the TERM→KILL grace (default 30s). A missing CMD exits 127. If `$DT_JOB_START` is unset, CMD doesn't run (exit 2).
+- **Redaction** uses each secret's value with trailing whitespace stripped, so an injected newline doesn't swallow the text's own.
 
 Inputs:
 - the drift audit (`tmp/drift-audit-2026-10-14.md` #3–#4);
