@@ -130,4 +130,17 @@ Two concrete pairs ride slice 3's reader. Both are "N stores → one virtual roo
 
 Order: (1) first — it proves the reader without auth or transport; (2) reuses it with a remote adapter.
 
+### Case 1 status
+
+Config: a `STORES_JSON` entry with `union` is a **union view**, not a store (`site/functions/_lib/stores.ts`): `{"union": [<store>…], "main"?: true}`, members `primary` or secondary store keys (≥ 2, distinct, never another view), at most one `main`. `main: true` makes it what a request with no `store=` reads (the main map, no client change); `store=primary` is then the primary alone, `store=<view key>` the view either way. A deployment without a view is untouched (its requests never reach `_lib/union.ts`). r2:
+
+```
+STORES_JSON = '{"meta": {"vars": {…as today…}, "secrets": {…}}, "all": {"union": ["primary", "meta"], "main": true}}'
+```
+
+Resolution (`_lib/union.ts` `resolveUnion`): one cutoff — `date=<id>` (some member must index it, else the single-store 404) or `d=<slug>` (the latest any member indexes under it) — at that scan's instant (`scanInstant`); each member's scan is `latestObserved` (the catalog resolver's rule, factored out of `resolveFederation`) over its own indexed scans, so aligned ids pick the same id, a member on its own schedule carries its last scan forward, and a member with none by the cutoff is unknown (`date: null`), never its first later scan. Every member is gated (`requireViewer` on its own env) before anything is read: a union demands each member's scope.
+
+- **Slice 1 — tree/table: done.** `/api/subtree` (the table reads the same endpoint, `depth=1`). Root: each ready member's root read concurrently through its own read path at its resolved scan, under one byte threshold from the union's total (`Σ root bytes · minArea / (w·h)`: one fleet budget, not one per member); merged by `unionRoot` — each member's top-level nodes tagged `src` (store) and `at` (its scan id), the members' `(other)`s summed into one, totals summed under the deployment's `ROOT_LABEL`, the resolved vector beside it (`union: {view, at, sources: [{store, date}]}`). A top-level name two members draw is a 500 (`UnionOverlap`), never a sum. Below the root: the member whose roots (`readRootRows` at its resolved scan) hold the first segment answers through `store=<member>` at its scan — byte-identical to asking that store directly; no member holding it is a 404. Cache keys: each member read keeps its own key, carrying its resolved scan; a union root's member reads add `&T=<threshold>` (the shared threshold, itself a function of the vector). The union root refuses the per-store axes (`lens`, `o`, `by`, `cl`, `q`: 400, "drill into one store"); a drill takes them. Tests: `functions/_lib/union.test.ts`, `functions/api/unionSubtree.test.ts` (fixture `v2-mount`: one `mb` root, beside `v2-search`'s `bk`/`zz`).
+- Not yet: series, diff, age, `?f=` (slices 2–5); the page doesn't yet show a root's `src`/`at` (data only); OG (`warmSubtree`) reads the primary.
+
 [source catalog contract]: federated-source-catalog.md
