@@ -15,6 +15,12 @@ DEFAULT_ROOT_DIR = join(CONFIG_DIR, 'disk-tree')
 #: backend singleton must be rebuilt against it).
 _write_target_hooks: list[Callable[[], None]] = []
 
+#: Root-derived globals, bound by `_apply_root` at import (and on re-root).
+ROOT_DIR: str
+DEFAULT_SCANS_DIR: str
+SQLITE_PATH: str
+SCANS_DIR: str
+
 
 def _ensure_dir(path: str) -> None:
     """`makedirs(path)` for a local dir; a no-op for a URL (object stores have
