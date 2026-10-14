@@ -61,7 +61,7 @@ export function cacheEnvTag(env: CacheEnv, request: Request): string {
 
 /** The cache key for `parts` of endpoint `kind`, in deployment environment `tag` (`cacheEnvTag`). A
  * non-prod tag adds a `~<tag>/` segment, which the KV key (a hash of the URL) inherits. A secondary store's
- * keys gain an `@<store>/` segment (specs/multi-store.md), so the same path in two stores can't collide;
+ * keys gain an `@<store>/` segment (specs/done/multi-store.md), so the same path in two stores can't collide;
  * the primary's (`store` omitted or `'primary'`) are exactly what they were before stores existed — no
  * one-time cache miss. */
 export function cacheKeyFor(kind: string, tag: string, parts: string, store?: string): Request {

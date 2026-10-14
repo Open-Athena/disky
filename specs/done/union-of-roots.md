@@ -1,6 +1,8 @@
 # disk-tree as the shared base for the cloud-usage viewers
 
-Status: **in progress** (2026-09-20). Union view + single-cloud collapse landed (`786b5bb`). Phase-1 hoist of raw `m/gcs` (`76a07ad`) was the **wrong source** — superseded below.
+**Status:** done. `cloud` is the base that gcs and cw-s3 merge (since 2026-09-28), and r2.rbw.sh is live on it (since 2026-09-21). Phase 7 went to [`pyrmts-adoption.md`](pyrmts-adoption.md), itself superseded by the interval store; phase 8 (the `ui/` superset) belongs to the `local` / app lane.
+
+As of 2026-09-20 (in progress): Union view + single-cloud collapse landed (`786b5bb`). Phase-1 hoist of raw `m/gcs` (`76a07ad`) was the **wrong source** — superseded below.
 
 **Direction (decided 2026-09-20):** disk-tree `cloud` is the canonical base for every cloud-storage-usage viewer. mgu already has a mature convergence in flight (`m/cw-s3:specs/convergence.md` — "one codebase, deployments as configuration"), whose own endgame is to upstream the union to disk-tree. So: **mgu finishes its convergence; disk-tree adopts the union tip (`m/cw-s3`) as the base and builds the r2/public layer convergence.md doesn't cover; then adopts mgu's converged `main`.** One convergence, not two.
 
@@ -136,7 +138,7 @@ CI: `.github/workflows/deploy-r2.yml` gates an auto-deploy to r2.rbw.sh on push 
 
 **Read-path gotcha (exponential-only, pyrmts heads-up 2026-09-22) — bake into `pyrmts-adoption.md`:** an archive's **key changes as it compacts** — a scan starts in a size-1 archive, merges into size-2, size-4, …, and the key encodes `(first-scan-label + block-size)`, so the archive holding a given day moves over time. The manifest + `resolveScan`/`seriesAcrossGroups` always route to the *current* archive (self-correcting), **but the embeddable viz must resolve through the manifest per read — never cache or hard-code an archive URL; cache the `(dataset, scan/path)` query, not the resolved key.** `seriesAcrossGroups` re-lists each read (`list_multiscans → filter tile → per-group seriesFor`), so it's automatically current. Reassuring corollary: dropping individuals after `seal` loses nothing — `extract_scan` reconstructs any single day's tree from its current archive, so "tree as of day X" survives compaction. (Fixed-K keys are stable — this is exponential-only.) pyrmts confirmed the plan shape (per-location dataset = its own dyadic ladder, constant-`binCol` snapshot pyramid, `seal` as idempotent daily-ingest stage, mirror-not-append D1) and will sanity-check the union-path-index→`Pyramid` mapping + per-location dataset scoping once `pyrmts-adoption.md` is up.
 
-**Division:** cw-s3 owns the DuckDB producer + CFW reader (being upstreamed into pyrmts); cw is wiring multiscan for its 12h GCS fleet. disk-tree adopts pyrmts's `path-index` consolidation. **Next step: a `specs/pyrmts-adoption.md`** scoping the disk-tree side (pyramid config for the union path-index, the constant-binCol snapshot contract, the `scheme: exponential` `multiscan seal` post-stage in `daily-ingest.yml`, and the `pyrmts-cfw` D1-manifest read path in `site/functions`). No code yet — needs its own spec + light cw coordination.
+**Division:** cw-s3 owns the DuckDB producer + CFW reader (being upstreamed into pyrmts); cw is wiring multiscan for its 12h GCS fleet. disk-tree adopts pyrmts's `path-index` consolidation. **Next step: a `specs/done/pyrmts-adoption.md`** scoping the disk-tree side (pyramid config for the union path-index, the constant-binCol snapshot contract, the `scheme: exponential` `multiscan seal` post-stage in `daily-ingest.yml`, and the `pyrmts-cfw` D1-manifest read path in `site/functions`). No code yet — needs its own spec + light cw coordination.
 
 ## Coordination
 

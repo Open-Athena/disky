@@ -1,6 +1,8 @@
 # R2 Data Catalog / R2 SQL (now "Basin"): can it replace or simplify our index tiers?
 
-Status: timeboxed evaluation (~2 h), 2026-10-10, `[cloud]`. Desk research only: Cloudflare docs, changelog and blog, read 2026-10-10, against `specs/index-landscape.md` §6.3, `interval-store.md`, `static-append.md`, `anchored-search.md` and `latency-observability.md`. Nothing was enabled, written or queried on any bucket, D1 or KV. Latency claims about R2 SQL below are **inferred from its architecture**, not measured; the experiment in §6 would measure them.
+**Status:** done (`fc9aeec7`). Verdict: keep the bespoke tiers (below). The §6 latency experiment and the Iceberg-metadata idea are optional and unscheduled.
+
+Scope: a timeboxed evaluation (~2 h), 2026-10-10, `[cloud]`. Desk research only: Cloudflare docs, changelog and blog, read 2026-10-10, against `specs/index-landscape.md` §6.3, `interval-store.md`, `static-append.md`, `anchored-search.md` and `latency-observability.md`. Nothing was enabled, written or queried on any bucket, D1 or KV. Latency claims about R2 SQL below are **inferred from its architecture**, not measured; the experiment in §6 would measure them.
 
 ## Verdict
 

@@ -1,4 +1,4 @@
-// The scan-run pieces /scans and /health share (specs/scan-runs-ui.md, specs/health-page.md): the run list's fetch
+// The scan-run pieces /scans and /health share (specs/done/scan-runs-ui.md, specs/done/health-page.md): the run list's fetch
 // (one React Query cache entry for both pages), the status chip, the phase bar and its colors.
 import { useQuery } from '@tanstack/react-query'
 import { Tooltip } from './Tooltip'

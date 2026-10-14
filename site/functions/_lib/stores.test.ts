@@ -10,7 +10,7 @@ import { sqliteD1 } from './testD1'
 import { onRequestGet as owners } from '../api/owners'
 import { onRequestGet as subtree } from '../api/subtree'
 
-// The multi-store seam (specs/multi-store.md phase 1): no `store=` is the
+// The multi-store seam (specs/done/multi-store.md phase 1): no `store=` is the
 // primary exactly as before; `store=<key>` reads only that store's config,
 // D1 rows and cache keys.
 

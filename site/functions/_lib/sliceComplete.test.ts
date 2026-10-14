@@ -59,7 +59,7 @@ const perPath = (rows: Row[]) => {
   return Object.fromEntries([...m].sort(([a], [b]) => (a < b ? -1 : 1)))
 }
 
-// The fixture's `bysize` is keyed on each path's total (`tot`, specs/bysize-path-total.md):
+// The fixture's `bysize` is keyed on each path's total (`tot`, specs/done/bysize-path-total.md):
 // a read keeps every slice of every path whose total clears the threshold.
 describe('bysize over owner slices', () => {
   const read = async (q: Rect, thrAt: (d: number) => number) =>

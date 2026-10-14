@@ -1,5 +1,11 @@
 # Observation-axis indexing: diff-index + over-time index
 
+**Status:** superseded. Phase 1 (the over-time index and its groups,
+`d249b554`, `27c55aa2`) has been live on cw since 2026-09-28. Phases 2–3
+(diff-index, dyadic consolidation) were delivered instead by the interval
+store (`specs/interval-store.md`: SCD-2 change intervals, diffs at per-scan
+speed, `53149ddd`, `10932421`).
+
 Good indices for **every plot on the mgu pages**, by filling the two gaps that
 today are served the expensive way. Both gaps are the same axis — the
 **observation axis** (scan timestamp), distinct from the **event-time axis**
