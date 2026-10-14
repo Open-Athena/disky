@@ -1,6 +1,18 @@
 # Root upstream review queue
 
-Peer handoffs received 2026-10-13; these are review candidates, not verified root implementations or authorization for infrastructure changes. Current root priority is the project-owned/public federated-scan design in `federated-scans.md`. No whole deployment/laptop merge should replace a reviewed shared-code pick.
+Peer handoffs received 2026-10-13. Useful in-scope work is reviewed and adopted proactively; this queue is not a substitute for implementation. No whole deployment/laptop merge should replace a reviewed shared-code pick, and no handoff authorizes unrelated infrastructure changes.
+
+## Root adoption checkpoints
+
+- `af65a317`: snapshot-proxy store scope (`022359cd` + `d6c25a38`), with seven regressions reproduced before the fix and 23 scope/store tests passing afterward. Direct file-proxy prefix configuration remains a deployment-owner check.
+- `c48c477d`: parent-aware `scripts/branch-audit` from `4615459c`; local→cloud, m3/app→local. Syntax and real m3/local audit checked.
+- `2d7478c7`: package-local Vitest/jest-dom setup repair, required for meaningful widget validation without dependency upgrades.
+- `6e22366e`: atomic corrected title-space geometry (`ca4aea08` + `3f917f18`), retaining the complete final spec from `9b42a0e2`; `c5d8dddf`: shared controls and parent frames (`5621357b`). The option remains disabled by default.
+- `a002671c`: consumer settings, mixed bucket URI labels, qualified titles, job/run links, and actual scan-availability events (`3e0978a6`).
+- `83a41c38`: sticky diff endpoint pinning (`e2cea646`); `a9616ab5`: page-search discoverability (`51ff1c25`).
+- `468302ba`: shared capture timestamp formatter adapted from `2b8a325b` without its laptop deployment log; `21a5eed8`: viewer-local run timestamps (`642a7eec`).
+
+Combined validation: 2,012 site tests passed (one skipped), 181 core widget tests passed, core typecheck and site build passed. The development federation fixture exercises title-space controls in DOM and canvas; it remains explicitly fictional, not a production inventory. Root sent this handoff to CW, GCS, OA R2 and m3. All checkpoints above are local root changes, not claims of live deployment. The remaining sections retain peer provenance and outstanding candidates.
 
 ## CW
 
