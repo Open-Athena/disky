@@ -80,6 +80,26 @@ class Store:
             return {}
         return {k[len(self.base) + 1:]: int(v["size"]) for k, v in sorted(found.items()) if v.get("type", "file") == "file"}
 
+    def mtimes(self, prefix: str) -> dict[str, float]:
+        """`{key: write time}` (epoch s) of the files under `prefix/`; a URL store's from its listing (`blobfs`'s reading
+        of the driver's `mtime` / `LastModified` / `created`). Raises when the driver reports none: a prune must not read
+        a manifest as superseded long ago."""
+        prefix = prefix.rstrip("/")
+        if not self.url:
+            d = Path(self.root) / prefix
+            return {p.relative_to(self.root).as_posix(): p.stat().st_mtime for p in sorted(d.rglob("*")) if p.is_file()} if d.is_dir() else {}
+        from disk_tree.blobfs import _info_mtime
+
+        self.fs.invalidate_cache(self._p(prefix))
+        try:
+            found = self.fs.find(self._p(prefix), detail=True)
+        except FileNotFoundError:
+            return {}
+        out = {k[len(self.base) + 1:]: _info_mtime(v) for k, v in sorted(found.items()) if v.get("type", "file") == "file"}
+        if bad := [k for k, t in out.items() if not t]:
+            raise RuntimeError(f"{self.root}: no write time for {bad[0]} (and {len(bad) - 1} more)")
+        return out
+
     def keys(self, prefix: str) -> list[str]:
         """The keys starting with `prefix` (a dir `a/b/`, or a dir plus a name's start `a/b/c`)."""
         d, _, _ = prefix.rpartition("/")
