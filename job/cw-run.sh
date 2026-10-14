@@ -45,16 +45,8 @@ unset n v
 # passes until its next `pulumi up`; carry it under the new one.
 if [ -z "${SITE_TOKEN+set}" ] && [ -n "${GCS_USAGE_TOKEN+set}" ]; then export SITE_TOKEN=$GCS_USAGE_TOKEN; fi
 unset GCS_USAGE_TOKEN
-# The R2 archive through blobfs (`r2://$R2_BUCKET/…`): `AWS_*` are CoreWeave's keys (the lister's), so R2 gets its
-# own named profile, and `buckets.yml` (blobfs's per-bucket config) gives the bucket its endpoint and that profile.
-# Never `DISK_TREE_R2_ENDPOINT_URL`: it would override every bucket's endpoint, the CoreWeave ones included.
-if [ -n "${R2_ENDPOINT:-}" ] && [ -n "${R2_BUCKET:-}" ] && [ -n "${R2_ACCESS_KEY_ID:-}" ]; then
-  export AWS_SHARED_CREDENTIALS_FILE=${TMPDIR:-/tmp}/r2-credentials
-  ( umask 077; printf '[r2]\naws_access_key_id = %s\naws_secret_access_key = %s\n' "$R2_ACCESS_KEY_ID" "$R2_SECRET_ACCESS_KEY" > "$AWS_SHARED_CREDENTIALS_FILE" )
-  mkdir -p "$HOME/.config/disk-tree"
-  printf 'buckets:\n  - uri: r2://%s\n    endpoint_url: %s\n    profile: r2\n' "$R2_BUCKET" "$R2_ENDPOINT" > "$HOME/.config/disk-tree/buckets.yml"
-  export R2_ARCHIVE="r2://$R2_BUCKET"
-fi
+# The R2 archive through blobfs (`R2_ARCHIVE`): R2's own credentials profile + `buckets.yml` entry.
+. "$(dirname "$0")/r2-profile.sh"
 set -x
 
 # Deployment config for the shared CLI (cloud/src/dt_cloud/{index_footer,warm}.py).
@@ -268,6 +260,24 @@ else
   echo "no R2_ENDPOINT/R2_BUCKET — skipping publish-r2" >&2
 fi
 phase publish-r2
+
+# 4c'. Interval store (specs/interval-store.md): append this scan, and any earlier one still pending, to cw's
+# change-interval path store on R2 (`interval-store/$INTERVAL_STORE_GEN/`) as a run beside its base generation,
+# then the binary counter's due carries, pruning the runs they fold. One machine, reading the scans' `path` sorts
+# from R2 (4c just published this one's). The site reads it under `PATH_STORE = "intervals"`; a scan the store
+# doesn't hold reads per-scan. Never fatal (`-W`): a failure or the timeout warns, and the next run's `add`
+# catches up. Skipped until the base generation exists (`job/cw-interval-submit.sh build`).
+IV_GEN=${INTERVAL_STORE_GEN:-2026-10-14cw}
+if [ "${INTERVAL_STORE_APPEND:-1}" = "1" ] && [ -n "${R2_ARCHIVE:-}" ] && [ "${REPROC:-0}" != "1" ]; then
+  if python -c 'import sys; from dt_cloud.static_local import Store; sys.exit(0 if Store(sys.argv[1]).exists(sys.argv[2]) else 1)' \
+       "$R2_ARCHIVE" "interval-store/$IV_GEN/scans.json"; then
+    sr phase interval-store -W -T "${INTERVAL_STORE_TIMEOUT:-60m}" -m "the scan reads per-scan until a later run appends it" \
+      -- dt-cloud interval-store add -g "$IV_GEN" -L 'cw-l2/{id}/index/{gen}/path-index.parquet' -s "$R2_ARCHIVE" -o "$R2_ARCHIVE" \
+         -w "$WORK/interval-store" -M "${INTERVAL_STORE_MEM:-12GB}" -p "$(nproc)"
+  else
+    echo "no interval-store/$IV_GEN on R2 yet (job/cw-interval-submit.sh build): not appending $SNAP_ID" >&2
+  fi
+fi
 
 # 4d. Over-time index groups (specs/obs-axis-indexing.md Phase 1): every full
 # K-scan run of indexed scans not yet in the manifest becomes one sealed
