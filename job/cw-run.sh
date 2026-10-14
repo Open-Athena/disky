@@ -73,52 +73,28 @@ SNAP_ID=${SNAP_ID:-$(date -u +%Y-%m-%dT%H%M)}
 DATE=${SNAP_ID%%T*}
 GEN=${GEN:-$(date -u +%Y%m%dT%H%M%SZ)}  # this run's index generation (step 4b), stamped once at start
 
-# Scan-run record (specs/scan-runs-ui.md): this run's phases, outputs and exit
-# in D1 (`scan_runs`), shown at /scans. `dt-cloud scan-run record` never fails
-# the job and writes over the D1 HTTP API (the index-sync credentials), so
-# xtrace is off around it. `job/scan-runs.json` says what each phase wrote.
-export SCAN_RUNS_PROFILE=${SCAN_RUNS_PROFILE:-job/scan-runs.json}
+# Scan-run record + failure alerts (specs/scan-job-wrapper.md): `dt-cloud scan-run` prints each PHASE line (timed
+# from DT_JOB_START), records the run in D1 (`scan_runs`, shown at /scans; the index-sync credentials) and, when the
+# job fails, posts one alert to SLACK_ALERT_CHANNEL through `disk-tree notify`'s slack channel, its text redacted of
+# the profile's `secrets` (job/scan-runs.json, which also says what each phase wrote). It records only under Batch
+# (BATCH_JOB_UID is the run id), not for a REPROC run, and never fails the job; xtrace is off around it so the
+# tokens in its env never reach the log. Alerting was added after the 8/26–8/28 crash-loop on a missing script
+# went unnoticed for two days.
+export SCAN_RUNS_PROFILE=${SCAN_RUNS_PROFILE:-/app/job/scan-runs.json}
+export DT_JOB_START=${DT_JOB_START:-$(date +%s)}
+if [ "${REPROC:-0}" = "1" ]; then export DT_RECORD=off; fi
+sr() { { set +x; } 2>/dev/null; local rc=0; dt-cloud scan-run "$@" || rc=$?; set -x; return "$rc"; }
+begin() { sr phase-begin "$1"; }
+phase() { sr phase-end "$1" ${2:+-q "$2"}; }
+# ERR: name the failed command for the record and the alert (`finish` posts it). The backfill matches this
+# function's xtrace line (`error_marker`), so its name and argument order are a contract.
+on_err() { { set +x; } 2>/dev/null; SR_ERR="exit $1: $3 (cw-run.sh:$2)"; }
+on_exit() { local rc=$?; sr finish -x "$rc" ${SR_ERR:+-e "$SR_ERR"}; exit "$rc"; }
 SR_ERR=""
-SECONDS=0
-scan_run() {
-  { set +x; } 2>/dev/null
-  if [ "${REPROC:-0}" != "1" ] && [ -n "${BATCH_JOB_UID:-}" ]; then
-    (cd /app && dt-cloud scan-run record -g "$GEN" "$@" "$SNAP_ID")
-  fi
-  set -x
-}
-phase() { echo "PHASE $1: ${SECONDS}s (wall${2:+, $2})" >&2; scan_run -P "$1" ${2:+-q "$2"}; }
-scan_run_exit() { local rc=$?; scan_run -x "$rc" ${SR_ERR:+-e "$SR_ERR"}; exit "$rc"; }
-
-# Failure alerting: any command dying under `set -e` posts to Slack before the
-# job exits (silence was the only failure signal — the 8/26–8/28 crash-loop on
-# a missing script went unnoticed for two days). Activates once a transport is
-# configured on the scheduler body (SLACK_BOT_TOKEN+SLACK_CHANNEL secret/env,
-# or SLACK_WEBHOOK); `set +x` first so the token never hits the xtrace log.
-# Alerts go to SLACK_ALERT_CHANNEL (#gcs-usage-alerts, as the GCS job) when
-# set, so they don't land in the #cw-s3-usage digest thread's channel.
-slack_alert() {
-  local msg=$1 chan="${SLACK_ALERT_CHANNEL:-${SLACK_CHANNEL:-}}"
-  if [ -n "${SLACK_BOT_TOKEN:-}" ] && [ -n "$chan" ]; then
-    curl -sS -X POST https://slack.com/api/chat.postMessage \
-      -H "Authorization: Bearer $SLACK_BOT_TOKEN" -H 'Content-type: application/json; charset=utf-8' \
-      -d "$(python3 -c 'import json,sys; print(json.dumps({"channel": sys.argv[1], "text": sys.argv[2]}))' "$chan" "$msg")" >/dev/null || true
-  elif [ -n "${SLACK_WEBHOOK:-}" ]; then
-    curl -sS -X POST "$SLACK_WEBHOOK" -H 'Content-type: application/json' \
-      -d "$(python3 -c 'import json,sys; print(json.dumps({"text": sys.argv[1]}))' "$msg")" >/dev/null || true
-  fi
-}
-fail_alert() {
-  local rc=$1 line=$2 cmd=$3
-  { set +x; } 2>/dev/null
-  SR_ERR="exit $rc: $cmd (cw-run.sh:$line)"  # the EXIT trap records it (scan_run_exit)
-  local msg="❌ CoreWeave scan job failed ($SNAP_ID): \`${cmd}\` exited $rc at cw-run.sh:$line"
-  [ -n "${BATCH_JOB_UID:-}" ] && msg+=$'\n'"<https://console.cloud.google.com/logs/query;query=labels.job_uid%3D%22$BATCH_JOB_UID%22?project=oa-internal-450019|task logs>"
-  slack_alert "$msg"
-}
-trap 'fail_alert $? $LINENO "$BASH_COMMAND"' ERR
-trap scan_run_exit EXIT
-scan_run -S -B
+trap 'on_err $? $LINENO "$BASH_COMMAND"' ERR
+trap on_exit EXIT
+sr start -B -g "$GEN" "$SNAP_ID"
+begin bucket-check
 
 # Every bucket the CAIOS key can list is either scanned or empty. A non-empty
 # one outside SCAN_BUCKETS (a new zone's bucket) is billed storage the site
@@ -152,7 +128,8 @@ phase bucket-check
 if [ -n "$UNSCANNED" ]; then
   echo "WARN: unscanned-bucket check: $UNSCANNED" >&2
   { set +x; } 2>/dev/null
-  slack_alert "⚠️ CoreWeave scan ($SNAP_ID): non-empty CAIOS bucket(s) not in SCAN_BUCKETS: \`$UNSCANNED\`"
+  disk-tree notify -t "⚠️ cw-s3 $SNAP_ID" "non-empty CAIOS bucket(s) not in SCAN_BUCKETS: \`$UNSCANNED\`" \
+    || echo "WARN: unscanned-bucket alert not sent (exit $?)" >&2
   set -x
 fi
 
@@ -175,9 +152,11 @@ ulimit -n "$(ulimit -Hn)" 2>/dev/null || ulimit -n 65536
 # keeps this in ~2 GB.
 SRC=()  # <bucket>=<layer-2>, in SCAN_BUCKETS order
 for b in $BUCKETS; do
+  begin "list $b"
   disk-tree bulk-list -a "s3://$b" -E "$ENDPOINT" \
     -o "$WORK/listing/$b" -P "$PROCS" -w "$WORKERS" -x clear
   phase "list $b"
+  begin "import $b"
   env DISK_TREE_ROOT="$WORK/l2/$b" \
     disk-tree import -e stream -j "${IMPORT_JOBS:-$(nproc)}" -m -p storage_class_id \
       -s s3 -t "${DATE}T00:00:00+00:00" -l "$WORK/listing/$b/shard-*.parquet" -b "$b"
@@ -186,12 +165,14 @@ for b in $BUCKETS; do
 done
 
 # 3. Site JSONs: the store root wraps one node per bucket.
+begin webdata
 python job/cw-webdata.py "$WORK/web" "${SRC[@]}" -l "Marin CoreWeave" -a "$DATE"
 phase webdata
 
 # 4. Publish. Written last and all at once: the site's scan list is derived by
 # listing this prefix, so a partially-uploaded snapshot would show up in the
 # dropdown as a broken entry.
+begin publish
 DEST="/gcs/$DATA/snapshots/cw/$SNAP_ID"
 mkdir -p "$DEST"
 cp "$WORK"/web/*.json "$DEST/"
@@ -206,6 +187,7 @@ phase publish
 
 # Keep the canonical layer-2 parquets too -- they're the input to every ad-hoc
 # question ("what grew?", "what's idle?") that the JSONs can't answer.
+begin layer-2
 mkdir -p "/gcs/$DATA/cw-l2/$SNAP_ID"
 for s in "${SRC[@]}"; do cp "${s#*=}" "/gcs/$DATA/cw-l2/$SNAP_ID/${s%%=*}.parquet"; done
 phase layer-2
@@ -218,6 +200,7 @@ phase layer-2
 # a file D1 points at; `index-sync` lands the footers in D1 and flips the
 # pointer last, so a reader sees the old complete set or the new one.
 INDEX_KEY="cw-l2/$SNAP_ID/index/$GEN"
+begin index-write
 dt-cloud index-write -m "${DUCKDB_MEM:-16GB}" -t "${IMPORT_JOBS:-$(nproc)}" -o "$WORK/index" "${SRC[@]}"
 mkdir -p "/gcs/$DATA/$INDEX_KEY"
 cp "$WORK"/index/*.parquet "/gcs/$DATA/$INDEX_KEY/"  # path-index + coarse tiers + age-index
@@ -235,18 +218,19 @@ phase index-write
 # scan yet.
 STATIC_PID=""
 if [ "${STATIC_NAMES:-0}" = "1" ] && [ "${REPROC:-0}" != "1" ]; then
-  SN_BEGAN=$(date +%s)
   (
+    begin static-names
     STATIC_NAMES_PROFILE=/app/job/static-names.json dt-cloud static-names runs add -c "$SNAP_ID" \
       || echo "WARN: static-names runs add failed for $SNAP_ID (exit $?)" >&2
-    echo "PHASE static-names: ${SECONDS}s (wall, overlapped)" >&2
-    scan_run -P static-names -b "$SN_BEGAN" -q overlapped
+    phase static-names overlapped
   ) &
   STATIC_PID=$!
+  begin static-wait
   for ((i = 0; i < ${STATIC_NAMES_WAIT_S:-2400} / 10; i++)); do kill -0 "$STATIC_PID" 2>/dev/null || break; sleep 10; done
   kill -0 "$STATIC_PID" 2>/dev/null && echo "WARN: static-names still running after ${STATIC_NAMES_WAIT_S:-2400}s; listing $SNAP_ID before it is searchable" >&2
   phase static-wait
 fi
+begin index-sync
 if [ -n "${CLOUDFLARE_API_TOKEN:+set}" ] && [ -n "${CLOUDFLARE_ACCOUNT_ID:-}" ]; then  # `:+set`: xtrace must not print the token
   dt-cloud index-sync -d "/gcs/$DATA/$INDEX_KEY" -g "$GEN" -k "$INDEX_KEY" -M "/gcs/$DATA/snapshots/cw" "$SNAP_ID" \
     || echo "WARN: index-sync failed (the site keeps serving the previous generation)" >&2
@@ -264,6 +248,7 @@ phase index-sync
 # below: once the site serves from R2, the warm has to find the scan there.
 # Skipped without the R2 env (the `cw-s3-r2-*` Secret Manager secrets +
 # `R2_BUCKET`, from `cw-batch-submit.sh`); the site keeps serving GCS then.
+begin publish-r2
 if [ -n "${R2_ENDPOINT:+set}" ] && [ -n "${R2_BUCKET:-}" ]; then  # `:+set`: xtrace must not print the creds
   # `-L`: the canonical per-bucket listings stay in GCS only (specs/listing-slim.md
   # phase 2; nothing served reads them — the site reads the tiers).
@@ -280,6 +265,7 @@ phase publish-r2
 # one point per scan. The stage lives in job/cw-overtime.sh (also the one-off
 # backfill via cw-overtime-submit.sh); it takes this run's env. Never fatal:
 # the series keeps its per-scan reads if a group fails.
+begin over-time
 GEN="$GEN" WORK="$WORK/over-time" bash job/cw-overtime.sh || echo "WARN: over-time groups failed (the series keeps its per-scan reads)" >&2
 phase over-time
 
@@ -291,6 +277,7 @@ phase over-time
 # and its newest object is older than the 2-day grace (an in-flight reindex is
 # never raced). The site reads generations only through their pointers, so this
 # is invisible to it. Needs D1; R2 only with its env. Never fatal.
+begin index-gc
 if [ -n "${CLOUDFLARE_API_TOKEN:+set}" ] && [ -n "${CLOUDFLARE_ACCOUNT_ID:-}" ]; then  # `:+set`: xtrace must not print the token
   GC_TARGETS=(-F "gs://$DATA")
   if [ -n "${R2_ENDPOINT:+set}" ] && [ -n "${R2_BUCKET:-}" ]; then GC_TARGETS+=(-F r2); fi
@@ -309,6 +296,7 @@ phase index-gc
 # (`SITE_TOKEN` ← Secret Manager `cw-s3-job-grant`, scope `cw`, minted
 # from /admin — specs/done/oidc-cutover-cw.md P5); the CF Access pair is the
 # pre-cutover form, kept for a rollback. Skipped when neither is set. Never fatal.
+begin warm-cache
 if { [ -n "${SITE_TOKEN:+set}" ] || { [ -n "${CF_ACCESS_CLIENT_ID:+set}" ] && [ -n "${CF_ACCESS_CLIENT_SECRET:+set}" ]; }; } \
    && [ "${REPROC:-0}" != "1" ]; then  # `:+set`: xtrace must not print the tokens
   dt-cloud warm-cache -d "$SNAP_ID" -r "gs://$DATA/snapshots/cw" \
@@ -322,6 +310,7 @@ phase warm-cache
 # job does): every response a 2xx/4xx, and one cold-latency record per scan
 # under probes/cw/ (the time series of what a viewer waits past the warmed
 # cache). Same token and gating as the warm-up; never fatal.
+begin probe
 if [ -n "${SITE_TOKEN:+set}" ] && [ "${REPROC:-0}" != "1" ]; then
   dt-cloud probe -c -u "$SITE_URL" -o "gs://$DATA/probes/cw/" \
     || echo "WARN: serving probe failed for $SNAP_ID (a 5xx or a dropped request; data is fine)" >&2
@@ -337,6 +326,7 @@ phase probe
 # and `wrangler pages deploy`s it to the icons Pages project's `cw` branch, so
 # it needs CLOUDFLARE_* + wrangler (both in this image). A failed digest never
 # fails the scan.
+begin digest
 if [ -n "${SLACK_BOT_TOKEN:+set}" ] && [ -n "${SLACK_CHANNEL:-}" ]; then  # `:+set`: xtrace must not print the token
   dt-cloud digest -T cw -C job/digest.yml -r "gs://$DATA/snapshots/cw" \
     || echo "WARN: usage-digest step failed" >&2

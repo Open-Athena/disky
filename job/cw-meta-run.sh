@@ -66,19 +66,17 @@ WORKERS=${LISTING_WORKERS:-4}
 SNAP_ID=${SNAP_ID:-$(date -u +%Y-%m-%dT%H%M)}
 DATE=${SNAP_ID%%T*}
 
-# Failure alerting, as cw-run.sh: any command dying under `set -e` posts to
-# Slack (SLACK_ALERT_CHANNEL, #gcs-usage-alerts) before the job exits.
+# Failure alerting: any command dying under `set -e` posts to Slack
+# (SLACK_ALERT_CHANNEL, #gcs-usage-alerts) through `disk-tree notify` before the
+# job exits. This one-shot isn't a recorded scan run, so it skips cw-run.sh's
+# `dt-cloud scan-run` wrapper.
 fail_alert() {
   local rc=$1 line=$2 cmd=$3
   { set +x; } 2>/dev/null
-  local msg="❌ meta self-scan job failed ($SNAP_ID): \`${cmd}\` exited $rc at cw-meta-run.sh:$line"
-  [ -n "${BATCH_JOB_UID:-}" ] && msg+=$'\n'"<https://console.cloud.google.com/logs/query;query=labels.job_uid%3D%22$BATCH_JOB_UID%22?project=oa-internal-450019|task logs>"
-  local chan="${SLACK_ALERT_CHANNEL:-}"
-  if [ -n "${SLACK_BOT_TOKEN:-}" ] && [ -n "$chan" ]; then
-    curl -sS -X POST https://slack.com/api/chat.postMessage \
-      -H "Authorization: Bearer $SLACK_BOT_TOKEN" -H 'Content-type: application/json; charset=utf-8' \
-      -d "$(python3 -c 'import json,sys; print(json.dumps({"channel": sys.argv[1], "text": sys.argv[2]}))' "$chan" "$msg")" >/dev/null || true
-  fi
+  local logs=()
+  [ -n "${BATCH_JOB_UID:-}" ] && logs=(-u "https://console.cloud.google.com/logs/query;query=labels.job_uid%3D%22$BATCH_JOB_UID%22?project=oa-internal-450019" -l "task logs")
+  disk-tree notify -t "❌ meta self-scan $SNAP_ID" "${logs[@]}" "\`${cmd}\` exited $rc at cw-meta-run.sh:$line" \
+    || echo "WARN: failure alert not sent (exit $?)" >&2
 }
 trap 'fail_alert $? $LINENO "$BASH_COMMAND"' ERR
 
