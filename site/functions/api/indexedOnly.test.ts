@@ -4,6 +4,9 @@ import { sqliteD1 } from '../_lib/testD1'
 import { type D1Variant, fixture, FILES, readJson, seedGeneration } from '../_lib/testStore'
 import { searchKey } from '../_lib/search'
 import { type FilterRejectCode, REJECT_MESSAGES, rejectQuery } from '../_lib/indexedOnly'
+import { KIND_ERROR } from '../_lib/querySyntax'
+import { parseQuery } from '../_lib/scope'
+import { brute, fixtureObjects, SCANS } from '../_lib/testBrute'
 import { drillSource, type HitSource, injectedStores, SuffixHits, type StaticFilterStore } from '../_lib/staticFilter'
 import { type Blobs, scanAt, StaticNames } from '../_lib/staticNames'
 import { StaticCatalog } from '../_lib/staticCatalog'
@@ -18,9 +21,10 @@ import { onRequestGet as filterCover } from './filter-cover'
 
 vi.mock('@rdub/file-tree/stores/s3', async () => ({ S3Store: (await import('../_lib/testStore')).S3Store }))
 
-// `FILTER_INDEXED_ONLY=1` (`_lib/indexedOnly.ts`): the map's filter (subtree, diff, series) takes one literal
-// substring of a name, unscoped, on a scan the static index covers — every other form, scope or scan is a 400
-// `{ error, code }` before any read; unset, the same requests answer as before. Over the static-filter
+// `FILTER_INDEXED_ONLY=1` (`_lib/indexedOnly.ts`): the map's filter (subtree, diff, series) takes literal
+// substrings of names — one, or AND / OR / NOT of them (`staticBool.ts`) — unscoped, on a scan the static index
+// covers; every other form, scope or scan is a 400 `{ error, code }` before any read (a combination the index
+// can't answer exactly, `too-broad`); unset, the same requests answer as before. Over the static-filter
 // fixture's two scans (`fixtures/static-filter/`) and its drill (`fixtures/static-drill/`).
 
 const A = '2026-10-04'
@@ -92,36 +96,38 @@ const FORMS: [string, string, FilterRejectCode][] = [
   ['regex syntax', 'q=ckpt.*pt&qs=regex', 'unsupported-regex'],
   ['a /…/ regex', `q=${encodeURIComponent('/ckpt.*pt/')}`, 'unsupported-regex'],
   ['a glob', `q=${encodeURIComponent('tom*t')}`, 'unsupported-glob'],
-  ['an exclusion', `q=${encodeURIComponent('tomat -bin')}`, 'unsupported-exclusion'],
-  ['exclusions alone', `q=${encodeURIComponent('-ttl')}`, 'unsupported-exclusion'],
-  ['two terms', `q=${encodeURIComponent('tomat bin')}`, 'unsupported-terms'],
-  ['two short terms', `q=${encodeURIComponent('to at')}`, 'unsupported-terms'],
-  ['alternatives', `q=${encodeURIComponent('tomat|ckpt')}`, 'unsupported-terms'],
+  ['a glob in an exclusion', `q=${encodeURIComponent('tomat -tom*t')}`, 'unsupported-glob'],
   ['a `/`', `q=${encodeURIComponent('data/tomat')}`, 'unsupported-slash'],
+  ['a `/` in an alternative', `q=${encodeURIComponent('tomat|data/x')}`, 'unsupported-slash'],
+  ['`is:file`', `q=${encodeURIComponent('tomat is:file')}`, 'unsupported-kind'],
   ['an owner pool', 'q=tomat&o=owned', 'unsupported-scope'],
   ['a user lens', 'q=tomat&lens=user:alice', 'unsupported-scope'],
   ['a class scope', 'q=tomat&cl=s', 'unsupported-scope'],
 ]
 
 describe('rejectQuery: what an indexed-only deployment refuses', () => {
-  it('one literal (any length, quoted spaces too) passes; every other form has its code', () => {
+  it('literals (any length, quoted spaces too) and AND / OR / NOT of them pass; every other form has its code', () => {
     const code = (q: string, qs?: string) => rejectQuery(q, qs)?.code ?? null
     expect([
       code('tomat'), code('TOMAT'), code('.'), code('ab'), code('"final ckpt"'), code(''), code('  '),
-      code('ckpt.*pt', 'regex'), code('/ckpt/'), code('tom*t'), code('tomat -bin'), code('-ttl'), code('a b'), code('a|b'), code('data/tomat'),
+      code('tomat -bin'), code('-ttl'), code('a b'), code('a|b'), code('a b|c -d'), code('"is:file" x'),
+      code('ckpt.*pt', 'regex'), code('/ckpt/'), code('tom*t'), code('a -b*c'), code('data/tomat'), code('a|b/c'), code('is:file'), code('-is:dir x'), code('*'),
     ]).toEqual([
       null, null, null, null, null, null, null,
-      'unsupported-regex', 'unsupported-regex', 'unsupported-glob', 'unsupported-exclusion', 'unsupported-exclusion', 'unsupported-terms', 'unsupported-terms', 'unsupported-slash',
+      null, null, null, null, null, null,
+      'unsupported-regex', 'unsupported-regex', 'unsupported-glob', 'unsupported-glob', 'unsupported-slash', 'unsupported-slash', 'unsupported-kind', 'unsupported-kind', 'unsupported-glob',
     ])
   })
   it('one anchored literal passes (`^q` from 2 characters, `q$` from 3, `^q$` from 1); shorter ones, globs and slashes don\'t', () => {
     const code = (q: string) => rejectQuery(q)?.code ?? null
     expect([
       code('^train'), code('.json$'), code('^config.json$'), code('^ab'), code('.gz$'), code('^x$'), code('"^a"'), code('^TRAIN'),
-      code('^a'), code('gz$'), code('^ab*cd'), code('^a/b'), code('^ckpt -tmp'), code('^a .json$'),
+      code('^ckpt -tmp'), code('^ab .json$'), code('x -.gz$|^ab'),
+      code('^a'), code('gz$'), code('^ab*cd'), code('^a/b'), code('^a .json$'), code('x -gz$'),
     ]).toEqual([
       null, null, null, null, null, null, null, null,
-      'anchor-too-short', 'anchor-too-short', 'unsupported-glob', 'unsupported-slash', 'unsupported-exclusion', 'unsupported-terms',
+      null, null, null,
+      'anchor-too-short', 'anchor-too-short', 'unsupported-glob', 'unsupported-slash', 'anchor-too-short', 'anchor-too-short',
     ])
   })
 })
@@ -134,7 +140,7 @@ describe('escaped `^`/`$`: a plain literal on an indexed-only deployment', () =>
       code('^a\\$'), code('^a'), code('a$'), code('\\^a*b'), code('\\^a -b'),
     ]).toEqual([
       null, null, null, null, null, null, null, null,
-      null, 'anchor-too-short', 'anchor-too-short', 'unsupported-glob', 'unsupported-exclusion',
+      null, 'anchor-too-short', 'anchor-too-short', 'unsupported-glob', null,
     ])
   })
   it('the map routes, flag set: subtree, diff and series answer them', async () => {
@@ -171,8 +177,8 @@ describe('the map routes, flag set: each rejected form is a 400 with its code; u
       // Unset: served (a series of a non-static query wants its roots, `paths=`, as before; the fixture has no
       // ledger for a lens read).
       if (code === 'unsupported-scope' && qs.includes('lens=')) return
-      if (what === 'two short terms') {
-        expect(await call(subtree, `date=${A}&path=bk&${qs}`, envOf(false))).toEqual([400, 'bad query: type at least 3 characters (“to”)'])
+      if (code === 'unsupported-kind') {
+        expect(await call(subtree, `date=${A}&path=bk&${qs}`, envOf(false))).toEqual([400, `bad query: ${KIND_ERROR}`])
         return
       }
       const unset = await Promise.all([
@@ -182,6 +188,68 @@ describe('the map routes, flag set: each rejected form is a 400 with its code; u
       expect(unset).toEqual([[200, 'ok'], [200, 'ok']])
     })
   }
+})
+
+describe('compound queries (AND / OR / NOT, `staticBool.ts`) on the map routes', () => {
+  const enc = (t: string) => `q=${encodeURIComponent(t)}`
+  const points = async (qs: string, env: Env) => {
+    const r = await series({ request: new Request(`http://localhost/api/series?${qs}`), env })
+    const j = await r.json() as { points?: { date: string; b: number; o: number }[]; unindexed?: string[]; error?: string; code?: string }
+    return [r.status, j.points ? j.points.map(p => [p.date, p.b, p.o]) : j]
+  }
+  /** Brute force's matched total per scan (`testBrute.ts`). */
+  const bruteSeries = (t: string, root: string) => SCANS.map(d => [d, ...brute(fixtureObjects(d), parseQuery(t)!, root).total])
+
+  it('flag set: subtree, diff and series answer them', async () => {
+    const got = []
+    for (const t of ['tomat -bin', '-ttl', 'tomat bin', 'tomat|ckpt', 'data tomat|ckpt -inner']) {
+      got.push(await Promise.all([
+        call(subtree, `date=${A}&path=bk&${enc(t)}`, envOf(true)),
+        call(diff, `from=${A}&to=${B}&path=bk&${enc(t)}`, envOf(true)),
+        call(series, `path=bk&${enc(t)}`, envOf(true)),
+      ]))
+    }
+    expect(got).toEqual(Array(5).fill([[200, 'ok'], [200, 'ok'], [200, 'ok']]))
+  })
+  it.each([[true], [false]])('the series (flag %s): each scan\'s matched total = brute force — roots less exclusions, or the view root less them', async flag => {
+    const cases: [string, string][] = [['tomat -bin', 'bk'], ['tomat|ckpt', ''], ['data tomat|ckpt -inner', 'bk'], ['-ttl', 'bk/tmp'], ['-=7d', 'bk/tmp'], ['tmp -=7d', 'bk/tmp']]
+    const got = await Promise.all(cases.map(([t, root]) => points(`path=${root}&${enc(t)}`, envOf(flag))))
+    expect(got).toEqual(cases.map(([t, root]) => [200, bruteSeries(t, root)]))
+  })
+  it('too broad to combine exactly here (`f00` heavy under `bk/fill`, its roots past the rollup): flag set, `too-broad` on every route', async () => {
+    expect(refusal('too-broad')).toEqual([400, { error: 'These terms match too much here to combine exactly; open a folder, or make a term more specific.', code: 'too-broad' }])
+    expect(await Promise.all([
+      call(subtree, `date=${A}&path=bk/fill&${enc('fil f00')}`, envOf(true)),
+      call(diff, `from=${A}&to=${B}&path=bk/fill&${enc('fil f00')}`, envOf(true)),
+      call(series, `path=bk/fill&${enc('fil f00')}`, envOf(true)),
+      call(subtree, `date=${A}&path=bk&${enc('-f00')}`, envOf(true)),
+    ])).toEqual([refusal('too-broad'), refusal('too-broad'), refusal('too-broad'), refusal('too-broad')])
+  })
+  it('…flag unset: the view reads as before (the search sidecars), flagged where that read may miss matches', async () => {
+    const view = async (qs: string) => {
+      const j = await (await subtree({ request: new Request(`http://localhost/api/x?${qs}`), env: envOf(false) })).json() as Record<string, unknown>
+      return [(j.tier as string).split('+')[0], j.partial ?? null, j.approximate ?? null]
+    }
+    expect(await Promise.all([view(`date=${A}&path=bk/fill&${enc('fil f00')}`), view(`date=${A}&path=bk&${enc('tomat -bin')}`)]))
+      .toEqual([['search', null, null], ['static', null, null]])
+  })
+  it('a term no source answers is that term\'s refusal: `0` with no heavy source is `term-too-common`', async () => {
+    const light: StaticFilterStore = { source: new SuffixHits(new StaticNames(blobsOf(filterFiles)), { maxRows: 40 }), scans: async () => [A, B], gen: 'fixture' }
+    expect(await call(subtree, `date=${A}&path=bk&${enc('tomat -0')}`, envOf(true, light))).toEqual(refusal('term-too-common'))
+  })
+  it('a scan outside the generation: `scan-not-indexed`, flag set or not (never the search / walk), on subtree and diff', async () => {
+    expect(await Promise.all([
+      call(subtree, `date=${B}&path=bk&${enc('tomat -bin')}`, envOf(true, store([A]))),
+      call(subtree, `date=${B}&path=bk&${enc('tomat -bin')}`, envOf(false, store([A]))),
+      call(subtree, `date=${B}&path=bk&${enc('tomat|ckpt')}`, envOf(false, store([A]))),
+      call(diff, `from=${A}&to=${B}&path=bk&${enc('-ttl')}`, envOf(false, store([A]))),
+      call(subtree, `date=${A}&path=bk&${enc('tomat -bin')}`, envOf(false, store([A]))),
+    ])).toEqual([refusal('scan-not-indexed'), refusal('scan-not-indexed'), refusal('scan-not-indexed'), refusal('scan-not-indexed'), [200, 'ok']])
+  })
+  it('a view root holding a negative term matches nothing: an empty view, no refusal', async () => {
+    const j = await (await subtree({ request: new Request(`http://localhost/api/x?date=${A}&path=bk/tmp&${enc('bin -tmp')}`), env: envOf(true) })).json() as Record<string, unknown>
+    expect([j.tier, (j.tree as { b: number }).b, j.matches]).toEqual(['none', 0, []])
+  })
 })
 
 describe('the map routes, flag set: a heavy literal with no heavy source (`FILTER_STATIC_HEAVY` off)', () => {
@@ -371,13 +439,13 @@ describe('flag unset: a static literal on a scan the generation doesn\'t hold is
     expect([JSON.parse(only).tier.split('+')[0], only]).toEqual(['static', both])
   })
 
-  it('a query the static index can\'t answer (regex, glob, two terms) still walks the uncovered scan; a view root the literal holds is the plain view', async () => {
+  it('a query the static index can\'t answer (regex, glob) still walks the uncovered scan; a compound of literals is refused; a view root the literal holds is the plain view', async () => {
     expect(await Promise.all([
       tierOf(`date=${B}&path=bk&q=tom.*t&qs=regex`, newer()),
       tierOf(`date=${B}&path=bk&q=${encodeURIComponent('tom*t')}`, newer()),
-      tierOf(`date=${B}&path=bk&q=${encodeURIComponent('tomat bin')}`, newer()),
+      call(subtree, `date=${B}&path=bk&q=${encodeURIComponent('tomat bin')}`, newer()),
       call(subtree, `date=${B}&path=bk/data/tomato&q=tomat`, newer()),
-    ])).toEqual([[200, 'bysize'], [200, 'search'], [200, 'search'], [200, 'ok']])
+    ])).toEqual([[200, 'bysize'], [200, 'search'], refusal('scan-not-indexed'), [200, 'ok']])
   })
 })
 
