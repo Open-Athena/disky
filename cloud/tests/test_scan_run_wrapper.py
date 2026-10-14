@@ -162,6 +162,15 @@ def test_start_phases_finish_record_exact_rows(job):
     assert sorted(p.name for p in (job.tmp / "dt-scan-run").iterdir()) == []  # `finish` clears the state + marker
 
 
+@pytest.mark.parametrize("rc, status", [(0, "nop"), (1, "failed")])
+def test_nop_kept_by_a_clean_finish(job, rc, status):
+    job.mp.setenv("DT_ALERTS", "stderr")
+    assert job("start", SCAN, at=T0) == 0
+    assert job("nop", at=T0 + 5) == 0
+    assert job("finish", "-x", str(rc), at=T0 + 6) == 0
+    assert job.rows("SELECT status, started_ts, finished_ts FROM scan_runs") == [(status, T0, T0 + 6)]
+
+
 def test_no_run_id_or_record_off_records_nothing_but_marks_and_alerts(job):
     job.mp.delenv("JOB_ID")
     job.mp.setenv("SCAN_ID", SCAN)

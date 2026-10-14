@@ -1,6 +1,6 @@
 # Shared scan-job wrapper: `dt-cloud scan-run phase-*` + `disk-tree notify`
 
-Status: **migration step 1 built on cloud** (2026-10-14). Reviewed by gcs (9 gaps) and cw-s3 (5 gaps); both are folded in below. m3's `disk-tree notify` is on cloud (`65f0a64e`) and is the one notifier; it now has the `slack` channel. `dt-cloud scan-run start / phase-begin / phase-end / phase -- CMD / finish` are in `cloud/src/dt_cloud/scan_runs.py` (over `record`'s internals; `record` is unchanged), tested in `cloud/tests/test_scan_run_wrapper.py`. Step 2 (each deployment swapping its shim) has not started.
+Status: **migration step 1 built on cloud** (2026-10-14). Reviewed by gcs (9 gaps) and cw-s3 (5 gaps); both are folded in below. m3's `disk-tree notify` is on cloud (`65f0a64e`) and is the one notifier; it now has the `slack` channel. `dt-cloud scan-run start / phase-begin / phase-end / phase -- CMD / finish` are in `cloud/src/dt_cloud/scan_runs.py` (over `record`'s internals; `record` is unchanged), tested in `cloud/tests/test_scan_run_wrapper.py`. Step 2 (each deployment swapping its shim): cw switched (8d343511), pending its first verified job run; gcs built (b55f942a), pending its image and first verified run, with its old shell functions deleted. Since: `scan-run nop`, and a list-valued `error_marker`.
 
 As built, beyond the design below:
 - **Run state file.** `start [SCAN]` (default `$SCAN_ID`) keeps the run's scan, kind, parent, gen, store and job facts in `${TMPDIR:-/tmp}/dt-scan-run/<run id>.json`, beside the `.alerted` marker. The phases (background subshells included) and `finish` read it, so `phase-begin NAME` needs no scan or kind flags. A fatal `phase-end` writes its phase there, and `finish` records it as `failed_phase`. `start` clears a stale state file and marker; `finish` removes both.
@@ -45,14 +45,18 @@ For the steps that are one executable: `phase-begin`, then run CMD, then `phase-
 ### Run start and finish
 
 - **`dt-cloud scan-run start [-k scan|reproc|compute|access] [-p PARENT_UID] [job facts]`:** today's `record -S`, plus kind and parent. gcs's ACCESS_ONLY path starts with `-k access`. The facts come from `-B`/`-J` on GCP and from flags on AWS.
+- **`dt-cloud scan-run nop`:** marks the run a no-op (its scan was already published; `record -N`). The EXIT trap's `finish -x 0` keeps it a NOP; a non-zero `finish` still fails it.
 - **`dt-cloud scan-run finish -x RC [-e ERR]`:** today's `record -x`. On a non-zero RC it posts the `fail` alert, unless the run is already marked as alerted. `ERR` is recorded as `scan_runs.err` (shown on /scans) and included in the alert.
 
 The traps become:
 
 ```bash
-trap 'SR_ERR="exit $?: $BASH_COMMAND (${BASH_SOURCE##*/}:$LINENO)"' ERR   # record only; no alert
+scan_err() { SR_ERR="exit $1: $3 (${BASH_SOURCE[1]##*/}:$2)"; }       # record only; no alert
+trap 'scan_err $? $LINENO "$BASH_COMMAND"' ERR
 trap 'dt-cloud scan-run finish -x $? ${SR_ERR:+-e "$SR_ERR"}' EXIT
 ```
+
+Use the function, not an inline `SR_ERR=…` assignment. Under `set -x` the call traces as `++ scan_err RC LINE CMD`, which the scan-runs backfill can parse (`error_marker` `^\+\+ scan_err (?P<rc>\d+) (?P<line>\d+) (?P<cmd>.*)`). An inline assignment traces as `++ SR_ERR='exit …'`, which it can't. `error_marker` may be a list, so a deployment whose trap changed shape keeps its old marker (gcs: `fail_alert`) for older logs. macOS `/bin/bash` 3.2 reports `$LINENO` one lower than bash 5 under `bash -c`, so tests run the PATH's `bash`.
 
 The ERR trap stays because gcs runs many unphased commands (cp, mkdir, heredoc python, the lifecycle pull), and "which one failed" has to survive. Its text passes through redaction (below) before it's recorded or posted.
 
