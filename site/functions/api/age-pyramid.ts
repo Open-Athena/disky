@@ -122,10 +122,13 @@ async function ageOf(ctx0: AgeCtx): Promise<Response> {
   const dts = baseRows.map(r => num(r.binstart))
   const from = new Date(Number.isNaN(fromMs) ? Math.min(...dts) : fromMs)
   const to = new Date(Number.isNaN(toMs) ? Math.max(...dts) : toMs)
+  if (from > to) return new Response('bad range: `from` is after `to`', { status: 400 })
 
-  const plan = planAge(from, to, binBudget)
-  const bin = plan.outputTier?.bin ?? plan.outputBin
-  const meta = { outputBin: bin, tier: plan.outputTier?.name ?? null, binBudget }
+  // An extent of one instant (every row in one bin, or `from` = `to`) is that bin at the finest tier: the planner
+  // takes only a non-empty range.
+  const plan = from < to ? planAge(from, to, binBudget) : null
+  const bin = plan ? plan.outputTier?.bin ?? plan.outputBin : fine
+  const meta = { outputBin: bin, tier: plan ? plan.outputTier?.name ?? null : fine, binBudget }
   // Reuse the finest rows when the planner chose that tier; else read the coarser one.
   const rows = bin === fine ? baseRows : await readPoint(await openIndex(ctx.env, date, `age-pyramid-${bin}`), depth, path, COLS)
   // Planner extents select a tier; only caller-supplied bounds trim its bins.
