@@ -27,8 +27,10 @@ REGION=us-central1
 SA=cw-s3-job@$PROJECT.iam.gserviceaccount.com
 export IMAGE=${IMAGE:-us-central1-docker.pkg.dev/$PROJECT/cw-s3-usage/scan:cw}  # exported: stage 4f runs on it
 # Measured on a 92M-object scan: 1.1 GB RSS listing, 1.8 GB import. The listing
-# is CPU-bound (92% of 8 vCPUs on 02a, 10/13), so vCPUs buy more than RAM.
-MACHINE=${MACHINE:-n2-standard-16}
+# is CPU-bound (92% of 8 vCPUs on 02a, 10/13), but 16 vCPUs (10/14) only moved
+# the run's critical path onto the static-names stage it waits on, at twice the
+# price, so it stays on 8.
+MACHINE=${MACHINE:-n2-standard-8}
 CPU_MILLI=$(( ${MACHINE##*-} * 1000 ))
 MEMORY_MIB=${MEMORY_MIB:-30000}
 DATA_BUCKET=${DATA_BUCKET:-oa-cw-s3-usage-data}
