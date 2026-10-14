@@ -2876,8 +2876,11 @@ kbd { font: inherit; font-size: 11px; padding: 0 4px; border: 1px solid var(--li
   .dim { color: var(--ink-3); }
   .sessions-filters {
     display: flex; flex-wrap: wrap; gap: 8px 16px; align-items: center; margin: 12px 0; font-size: 13px;
-    input:not([type]) , input[type="date"] { font: inherit; padding: 3px 6px; color: inherit; background: transparent; border: 1px solid var(--line); border-radius: 4px; }
+    input:not([type]), input[type="search"], input[type="date"] { font: inherit; padding: 3px 6px; color: inherit; background: transparent; border: 1px solid var(--line); border-radius: 4px; }
   }
+  .session-who { display: inline-flex; align-items: center; flex-wrap: wrap; gap: 0 2px; }
+  .guest-tag { font-size: 12px; padding: 0 6px; border: 1px solid var(--line); border-radius: 9px; color: var(--ink-2); white-space: nowrap; }
+  h1 .guest-tag { font-size: 14px; vertical-align: middle; }
   .session-meta { font-size: 13px; color: var(--ink-2); overflow-wrap: anywhere; }
   table.sessions {
     width: 100%; border-collapse: collapse; font-size: 13px;

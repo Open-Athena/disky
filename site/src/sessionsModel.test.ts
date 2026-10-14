@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
-import { fmtClock, fmtDuration, fmtOffset, ticks, timeline, uaLabel } from './sessionsModel'
+import { fmtClock, fmtDuration, fmtOffset, ticks, timeline, uaLabel, viewerOf } from './sessionsModel'
+import { buildRegistry } from './identityRegistry'
 import type { StoredEvent } from '../functions/_lib/sessionLogShape'
 
 const T = 1_791_817_200_000
@@ -90,5 +91,33 @@ describe('session view model', () => {
       ['+0:00.000', '+1:02.345'],
       ['Safari · iOS', 'Chrome · macOS', '—'],
     ])
+  })
+
+  it('maps a session to its viewer: `user_emails` row, else a registry handle, else the address; guests tagged', () => {
+    const reg = buildRegistry([
+      { u: 'grace-hopper', aliases: ['grace@navy.example', 'amazing-grace'], name: 'Grace' },
+      { u: 'alan-turing', aliases: [] },
+    ])
+    const emails = { 'ada@lab.example': 'ada-lovelace' }
+    const rows: { email: string | null; via: string | null }[] = [
+      { email: 'Ada@Lab.example', via: 'session' },
+      { email: 'grace@other.example', via: 'session' },
+      { email: 'alan.turing@x.example', via: 'grant' },
+      { email: 'stranger@x.example', via: 'session' },
+      { email: 'visitor@x.example', via: 'grant' },
+      { email: null, via: 'grant' },
+      { email: null, via: 'public' },
+    ]
+    expect(rows.map(r => viewerOf(r, emails, reg))).toEqual([
+      { kind: 'user', id: 'ada-lovelace', email: 'Ada@Lab.example', guest: false },
+      { kind: 'user', id: 'grace-hopper', email: 'grace@other.example', guest: false },
+      { kind: 'user', id: 'alan-turing', email: 'alan.turing@x.example', guest: true },
+      { kind: 'email', email: 'stranger@x.example', guest: false },
+      { kind: 'email', email: 'visitor@x.example', guest: true },
+      { kind: 'guest' },
+      { kind: 'anonymous' },
+    ])
+    // No `user_emails` map (not loaded, or a lineage without the table): the registry alone.
+    expect(viewerOf(rows[0], undefined, reg)).toEqual({ kind: 'email', email: 'Ada@Lab.example', guest: false })
   })
 })
