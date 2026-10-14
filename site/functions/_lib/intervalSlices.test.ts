@@ -157,6 +157,24 @@ describe('owner totals after a new assignment', () => {
       expect(full.computed.prefixes).toBe(3)
     }
   })
+
+  it('prices a new prefix on every held scan in one interval-store read', async () => {
+    vi.resetModules()
+    const { ownerTotals } = await import('./ownerTotals')
+    const env = (await seed(LEDGER)).iv
+    for (const date of [S1, S2, S3]) await ownerTotals(env, date)
+    for (const sql of NEXT.split(';').map(q => q.trim()).filter(Boolean)) await env.DB!.prepare(sql).run()
+    const next = await ownerTotals(env, S2)
+    const n = r2Reads.length
+    const rest = [await ownerTotals(env, S1), await ownerTotals(env, S3)]
+    // The other scans' refolds read nothing: S2's refold priced the prefix on them too.
+    expect(r2Reads.slice(n)).toEqual([])
+    expect([next, ...rest].map(b => [b.scan, b.head, b.computed.prefixes])).toEqual([[S2, 3, 1], [S1, 3, 0], [S3, 3, 0]])
+    vi.resetModules()
+    const { ownerTotals: coldTotals } = await import('./ownerTotals')
+    const cold = (await seed(LEDGER + NEXT)).iv
+    for (const b of [next, ...rest]) expect(fold(b)).toEqual(fold(await coldTotals(cold, b.scan)))
+  })
 })
 
 /** What a read did per-scan: the store's `listing/` keys it fetched. */

@@ -12,7 +12,7 @@
  * live one (~1,260 on gcs, ~22 s a scan), which made an owner-lens series
  * (one fold per scan) time out after any assignment. */
 import type { Env } from './auth.js'
-import { columnsFor, openIndex, slices, readAsks, type Ask, type Row } from './index.js'
+import { columnsFor, ivHeldDates, mapLimit, openIndex, slices, readAsks, readAsksHistory, type Ask, type Row } from './index.js'
 import { loadLedger } from './ledger.js'
 import { shared } from './shared.js'
 import { addAgg, computeOwners, foldLatest, idxKey, newAgg, type AssignmentRow, type OwnerRow, type OwnerTotals, type PathAgg } from './ownerBands.js'
@@ -50,6 +50,56 @@ const PREFIX_CACHE_MAX = 1_800_000
 /** The index a scan's prefixes are priced on: a reindex (new generation) prices them again. */
 const indexTag = (idx: { mode: string }): string => `${idx.mode}:${'gen' in idx ? (idx as { gen: string }).gen : ''}`
 
+/** New prefixes a refold prices on every held scan in one interval-store read; more (a scan's first fold, say)
+ *  read per scan. */
+const HISTORY_PRICE_MAX = 64
+const priceMemo = new Map<string, Promise<{ priced: Map<string, Map<string, PathAgg>>; groups: number } | null>>()
+
+/** Add `added` (the paths of `missing` a read found; one absent isn't in the scan) to `cache`. */
+function mergePriced(cache: PrefixCache, added: Map<string, PathAgg>, missing: Map<string, number>): void {
+  for (const [path, a] of added) if (!cache.aggs[path]) cache.aggs[path] = a
+  const asked = new Set(cache.asked)
+  for (const [path, depth] of missing) asked.add(`${depth}:${path}`)
+  cache.asked = [...asked].sort()
+}
+
+async function storePriced(env: Env, date: string, tag: string, cache: PrefixCache): Promise<void> {
+  const body = JSON.stringify(cache)
+  if (body.length > PREFIX_CACHE_MAX) return
+  await env.DB!.prepare('INSERT OR REPLACE INTO owner_prefix_aggs (scan, idx, body, updated_ts) VALUES (?, ?, ?, ?)')
+    .bind(date, tag, body, Math.floor(Date.now() / 1000)).run()
+}
+
+/** `missing` priced on every scan the interval store holds, from one read, and added to each one's cached
+ *  prefixes at `tag` (a scan with none yet prices everything on its first fold: its roots aren't cached).
+ *  Null when the store's handle isn't `tag`'s. Concurrent refolds over the same new prefixes share it. */
+async function priceHeld(env: Env, tag: string, missing: Map<string, number>): Promise<{ priced: Map<string, Map<string, PathAgg>>; groups: number } | null> {
+  const key = `${tag}|${[...missing].map(([path, depth]) => `${depth}:${path}`).sort().join('\n')}`
+  return shared(priceMemo, key, async () => {
+    const asks: Ask[] = [...missing].map(([path, depth]) => ({ depth, path }))
+    const got = await readAsksHistory(env, await ivHeldDates(env), 'path', asks, r => missing.get(r.path) === r.depth, { fields: FIELDS, maxGroups: maxGroups(asks.length) })
+    if (!got || got.index !== tag) return null
+    const priced = new Map<string, Map<string, PathAgg>>()
+    for (const [date, rows] of got.byDate) {
+      const added = new Map<string, PathAgg>()
+      for (const r of rows) {
+        let a = added.get(r.path)
+        if (!a) added.set(r.path, (a = newAgg()))
+        addAgg(a, r)
+      }
+      priced.set(date, added)
+    }
+    await mapLimit([...priced], 8, async ([date, added]) => {
+      const row = await env.DB!.prepare('SELECT body FROM owner_prefix_aggs WHERE scan = ? AND idx = ?').bind(date, tag).first<{ body: string }>()
+      const cache = row ? JSON.parse(row.body) as PrefixCache : null
+      if (cache?.v !== PREFIX_CACHE_VERSION) return
+      mergePriced(cache, added, missing)
+      await storePriced(env, date, tag, cache)
+    })
+    return { priced, groups: got.groups }
+  }, MEMO_WAIT)
+}
+
 async function compute(env: Env, date: string, owners: Map<string, OwnerRow>, head: number): Promise<OwnerTotalsBody> {
   const t0 = Date.now()
   const idx = await openIndex(slices(env), date)
@@ -68,7 +118,14 @@ async function compute(env: Env, date: string, owners: Map<string, OwnerRow>, he
   const missing = new Map<string, number>()
   for (const [path, depth] of want) if (!asked.has(`${depth}:${path}`)) { missing.set(path, depth); asks.push({ depth, path }) }
   let groups = 0
-  if (asks.length) {
+  // A scan already cached at this index with a few new prefixes (the usual new assignment): price them on every
+  // held scan at once, so the refolds of the other scans that follow read nothing.
+  const held = !fresh && missing.size && missing.size <= HISTORY_PRICE_MAX && idx.asOf != null ? await priceHeld(slices(env), tag, missing) : null
+  const mine = held?.priced.get(date)
+  if (mine) {
+    mergePriced(cache, mine, missing)
+    groups = held!.groups
+  } else if (asks.length) {
     const isRoot = (r: Row) => fresh && r.depth === 1
     const read = await readAsks(
       idx,
@@ -87,15 +144,9 @@ async function compute(env: Env, date: string, owners: Map<string, OwnerRow>, he
       if (!a) added.set(r.path, (a = newAgg()))
       addAgg(a, r)
     }
-    for (const [path, a] of added) cache.aggs[path] = a
     cache.buckets = [...buckets].sort()
-    for (const [path, depth] of missing) asked.add(`${depth}:${path}`)
-    cache.asked = [...asked].sort()
-    const body = JSON.stringify(cache)
-    if (body.length <= PREFIX_CACHE_MAX) {
-      await env.DB!.prepare('INSERT OR REPLACE INTO owner_prefix_aggs (scan, idx, body, updated_ts) VALUES (?, ?, ?, ?)')
-        .bind(date, tag, body, Math.floor(Date.now() / 1000)).run()
-    }
+    mergePriced(cache, added, missing)
+    await storePriced(env, date, tag, cache)
   }
   const aggs = new Map(Object.entries(cache.aggs))
   const totals = computeOwners({ owners, aggs, buckets: cache.buckets })

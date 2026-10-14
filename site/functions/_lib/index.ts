@@ -2470,19 +2470,39 @@ export async function readAsks(
  * testing each date. One bounded plan/decode, not a separate root read per scan.
  * Missing slice sorts or uncovered dates are left to the canonical reader. */
 export async function readRootHistoryRows(env: Env, dates: string[], lens?: Lens): Promise<Map<string, Row[]> | null> {
+  const got = await readAsksHistory(slices(env), dates, lens ? 'bysize-user' : 'path', [{ depth: 1, under: '' }], r => r.depth === 1 && (!lens || r.usr === lens.key), { maxGroups: 60, pre: depth => depth === 1, lens })
+  if (!got) return null
+  if (got.versions > 100_000) throw new Error('root history too wide: more than 100000 versions')
+  return got.byDate
+}
+
+/** The scans the interval store holds (none when it is off). */
+export const ivHeldDates = async (env: Env): Promise<string[]> => (intervalsOn(env) ? [...(await ivScans(env)).keys()] : [])
+
+/** `asks` on every one of `dates` the interval store holds, from one read of their versions (close records
+ *  combined) — not one read per scan — then each date's live rows. `index` is the handle's `<mode>:<gen>`
+ *  identity, the same as a per-date handle's. Null when the store is off or holds none of `dates`. */
+export async function readAsksHistory(
+  env: Env,
+  dates: string[],
+  variant: string,
+  asks: Ask[],
+  keep: (r: Row) => boolean,
+  { fields, maxGroups = 60, pre, lens }: { fields?: (keyof Row)[]; maxGroups?: number; pre?: Pre; lens?: Lens } = {},
+): Promise<{ byDate: Map<string, Row[]>; versions: number; groups: number; index: string } | null> {
   if (!intervalsOn(env) || !dates.length) return null
-  const scoped = slices(asOfScans(env, dates))
+  const scoped = asOfScans(env, dates)
   const state = await ivState(scoped)
   const held = dates.filter(d => state.scans.has(d))
   if (!held.length) return null
   const latest = held.reduce((a, b) => state.scans.get(a)! > state.scans.get(b)! ? a : b)
-  const handle = await openInterval(scoped, latest, lens ? 'bysize-user' : 'path')
+  const handle = await openInterval(scoped, latest, variant)
   if (!handle) return null
   const range: [number, number] = [Math.min(...held.map(d => state.scans.get(d)!)), state.scans.get(latest)!]
   const history = { ...handle, historyRange: range, runs: handle.runs?.map(r => ({ ...r, historyRange: range })) }
-  const { rows } = await readAsks(history, [{ depth: 1, under: '' }], r => r.depth === 1 && (!lens || r.usr === lens.key), { versions: true, maxGroups: 60, pre: depth => depth === 1, lens })
-  if (rows.length > 100_000) throw new Error('root history too wide: more than 100000 versions')
-  return new Map(held.map(date => [date, liveAt({ ...handle, asOf: state.scans.get(date)! }, rows)]))
+  const { rows, groups } = await readAsks(history, asks, keep, { versions: true, maxGroups, pre, lens, ...(fields ? { columns: columnsFor(handle, fields) } : {}) })
+  const byDate = new Map(held.map(date => [date, liveAt({ ...handle, asOf: state.scans.get(date)! }, rows)]))
+  return { byDate, versions: rows.length, groups, index: `${handle.mode}:${'gen' in handle ? handle.gen : ''}` }
 }
 
 /** Raw rows (pre-`toRow` records) for a single `(depth, path)` point lookup —
