@@ -95,6 +95,8 @@ on_exit() { local rc=$?; sr finish -x "$rc" ${SR_ERR:+-e "$SR_ERR"}; exit "$rc";
 SR_ERR=""
 trap 'scan_err $? $LINENO "$BASH_COMMAND"' ERR
 trap on_exit EXIT
+trap 'exit 143' TERM
+trap 'exit 130' INT
 sr start -B -g "$GEN" "$SNAP_ID"
 begin bucket-check
 

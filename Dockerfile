@@ -47,7 +47,9 @@ RUN uv sync --no-dev --no-editable --package dt-cloud --extra plot --extra overt
 COPY --from=site /repo/site/dist ./dist
 COPY job ./job
 # The entrypoint runs `job/$JOB` (`job/build.sh` passes `--build-arg JOB=…`):
-# the CoreWeave scan job, `cw-run.sh`, by default.
+# the CoreWeave scan job, `cw-run.sh`, by default, under `dt-cloud scan-run
+# supervise` (specs/scan-job-wrapper.md, "The entrypoint"): a preemption, cancel
+# or OOM kill is recorded as a failed run, never left `running` or `succeeded`.
 ARG JOB=cw-run.sh
 ENV JOB_SCRIPT=$JOB
-ENTRYPOINT ["bash", "-c", "exec bash job/$JOB_SCRIPT \"$@\"", "--"]
+ENTRYPOINT ["bash", "-c", "exec dt-cloud scan-run supervise -- bash job/$JOB_SCRIPT \"$@\"", "--"]

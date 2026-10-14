@@ -98,8 +98,8 @@ cat > "$spec" <<EOF
       "runnables": [{
         "container": {
           "imageUri": "$IMAGE",
-          "entrypoint": "bash",
-          "commands": ["job/cw-run.sh"],
+          "entrypoint": "dt-cloud",
+          "commands": ["scan-run", "supervise", "--", "bash", "job/cw-run.sh"],
           "volumes": ["/mnt/disks/gcs/$DATA_BUCKET:/gcs/$DATA_BUCKET:rw", "/mnt/disks/stage:/stage:rw"]
         }
       }],
