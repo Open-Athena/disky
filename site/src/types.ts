@@ -71,6 +71,14 @@ export const MODE_LABELS: Record<ColorMode, string> = {
   tree: 'tree',
 }
 
+/** Omnibar synonyms for each color axis ("atime" finds the read axis). */
+export const MODE_KEYWORDS: Record<ColorMode, string[]> = {
+  read: ['atime', 'accessed', 'last read'],
+  user: ['owner', 'person'],
+  date: ['mtime', 'modified', 'created', 'age'],
+  tree: ['path', 'directory', 'folder'],
+}
+
 /** Physical container measurements from the capture, not summed path sizes. */
 export interface DiskSpace {
   capacity: number
