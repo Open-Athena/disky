@@ -9,7 +9,7 @@ from dataclasses import fields
 from pathlib import Path
 
 import yaml
-from test_digest_golden import HERO, P, _dry_run, cw_root, golden, site_image  # noqa: F401 (fixture)
+from test_digest_golden import HERO, P, _dry_run, cw_root, golden
 
 from dt_cloud import digest as DG
 
@@ -56,7 +56,7 @@ def test_config_is_complete():
     assert DG.config_from_dict(yaml.safe_load(CONFIG.read_text()), junk) == CW
 
 
-def test_dry_run_with_config(monkeypatch, tmp_path: Path, site_image: list):
+def test_dry_run_with_config(monkeypatch, tmp_path: Path):
     # the fixture scans' buckets are neutral names: re-key the file's buckets to them
     cfg = yaml.safe_load(CONFIG.read_text())
     names = {"marin-us-east-02a": P, "hero-checkpoints": HERO}
