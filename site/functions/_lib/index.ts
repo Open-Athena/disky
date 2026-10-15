@@ -2377,6 +2377,9 @@ const LARGEST_PAGE = 32
 const LARGEST_BATCH = 8
 /** Groups a largest-files read decodes at most (a subtree whose top buckets hold mostly other paths' rows). */
 export const LARGEST_MAX_GROUPS = 64
+/** …on an interval store, the same budget in rows (its groups are of every size: a run's few rows per size bucket
+ *  make groups spanning buckets, which its path bounds can't rule out): `LARGEST_MAX_GROUPS` per-scan groups of 8K. */
+export const LARGEST_MAX_ROWS = LARGEST_MAX_GROUPS * 8192
 
 /** What `readLargest` answers: the files, size-descending (ties by path),
  * the size-sort groups it decoded, and whether files beyond them exist or
@@ -2393,6 +2396,7 @@ export interface Largest { rows: Row[]; groups: number[]; decoded: number; more:
  * that big (within a bucket rows are path-sorted, so a same-bucket group may
  * still beat the n-th, and is read). At most `LARGEST_MAX_GROUPS` groups. */
 export async function readLargest(h: IndexHandle, path: string, n: number, maxGroups = LARGEST_MAX_GROUPS): Promise<Largest> {
+  if (h.asOf != null) return readLargestIv(h, path, n, maxGroups * 8192)
   const range = path === '' ? { pLo: '', pHi: '￿' } : { pLo: path + '/', pHi: path + '0' }
   const under = (p: string) => p >= range.pLo && p < range.pHi
   const order = (a: Row, b: Row) => b.size - a.size || (a.path < b.path ? -1 : a.path > b.path ? 1 : 0)
@@ -2436,6 +2440,53 @@ export async function readLargest(h: IndexHandle, path: string, n: number, maxGr
     width = Math.min(LARGEST_BATCH, 2 * width)
     top = [...top, ...rows].sort(order).slice(0, n)
   }
+}
+
+/** `readLargest` over an interval store's `bysize` sort, as of the handle's scan: the same answer as the scan's own
+ *  size sort. Its groups (every tier's: a run's sort is its own) are read a size bucket at a time — those whose largest
+ *  row is in the bucket, largest bucket first — and every version decoded is kept, so a run's close record (a row of
+ *  the same size, so in a group of that bucket or above) ends its version whichever tier it is read from: the live
+ *  rows after each bucket are exact for every bucket read. The read stops once the next bucket is below the n-th
+ *  size's (no later group holds a row that big), or past `maxRows` rows decoded (`capped`; `LARGEST_MAX_ROWS`). */
+async function readLargestIv(h: IndexHandle, path: string, n: number, maxRows: number): Promise<Largest> {
+  const range = path === '' ? { pLo: '', pHi: '\uffff' } : { pLo: path + '/', pHi: path + '0' }
+  const keep = (r: Row) => r.kind === 'file' && r.path >= range.pLo && r.path < range.pHi
+  const order = (a: Row, b: Row) => b.size - a.size || (a.path < b.path ? -1 : a.path > b.path ? 1 : 0)
+  const t0 = now()
+  const spans = await overTiers(h, t => pageSizeSpans(t, range, -1, Infinity))
+  h.trace?.('spans', now() - t0)
+  const units = new Map<number, Span[]>()
+  for (const g of spans) { const b = bucketOf(g.bMax); units.set(b, [...units.get(b) ?? [], g]) }
+  const tiered = !!h.runs?.length
+  const versions: Row[] = []
+  let live: Row[] = []
+  let top: Row[] = []
+  const groups: number[] = []
+  let decoded = 0
+  for (const b of [...units.keys()].sort((x, y) => y - x)) {
+    const t = top.length >= n ? top[n - 1].size : -1
+    if (t >= 0 && b < bucketOf(t)) return { rows: top, groups, decoded, more: true, capped: false }
+    const unit = units.get(b)!
+    const rows = unit.reduce((k, g) => k + (g.rowEnd - g.rowStart), 0)
+    if (decoded + rows > maxRows) return { rows: top, groups, decoded, more: true, capped: true }
+    if (tiered) {
+      // Every version of the unit's groups, tier by tier; liveness once they are combined with every earlier unit's.
+      const got = await Promise.all(tiersOf(h).map((_, i) => onTier(h, i, async tier => {
+        const mine = unit.filter(g => (g.tier ?? 0) === i)
+        if (!mine.length) return []
+        const jsons = await fetchGroupJson(tier, mine.map(g => g.rg))
+        return (await readGroupsCached(tier, mine.flatMap(g => { const json = jsons.get(g.rg); return json ? [{ rg: g.rg, json }] : [] }), rows => rows.filter(keep), undefined, true)).flat()
+      })))
+      versions.push(...got.flat())
+      live = combineLive(h, versions)
+    } else {
+      live.push(...await decodeSpans(h, unit, keep))
+    }
+    groups.push(...unit.map(g => g.rg))
+    decoded += rows
+    top = [...live].sort(order).slice(0, n)
+  }
+  return { rows: top, groups, decoded, more: live.length > n, capped: false }
 }
 
 /** Lookups this isolate found too wide (`readAsks`' `rememberWide`), oldest dropped past `TOO_WIDE_HELD`. */

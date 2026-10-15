@@ -318,8 +318,13 @@ def compact(store: Store, gen: str, gen_dir: Path, work: Path, *, level: int | N
         err(f"compact {gen}: {len(stale)} objects of an unpublished {new}: replaced")
         store.delete(sorted(stale))
     out = work / "store" / new_prefix
+    t0, disk = monotonic(), DiskPeak(work)
     summary = ic.compact_gen(gen_dir, out, work, gen=gen, new_gen=new, level=level, rg_rows=rg_rows, threads=threads, mem=mem)
     summary["files"] = len(upload_new(store, out, new_prefix, {}, publish_order))
+    summary["s"] = round(monotonic() - t0, 1)
+    summary["peak"] = {"disk_gb": disk.close(), "rss_gb": rss_peak_gb()}
+    err(f"compact {gen} → {new}: {summary['files']} files in {summary['s']}s (work disk peak {summary['peak']['disk_gb']} GiB, "
+        f"RSS peak {summary['peak']['rss_gb']} GiB)")
     store.write_text(f"{PREFIX}/{gen}/{ic.SUCCESSOR}", json.dumps({"gen": new}) + "\n")
     summary["current"] = ic.current(store) in (None, gen)
     if summary["current"]:
