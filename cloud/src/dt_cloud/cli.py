@@ -2894,8 +2894,6 @@ def cw_digest(**kw) -> None:
     _digest(**kw)
 
 
-if __name__ == "__main__":
-    main()
 
 
 @main.command("discord-emoji")
@@ -3096,3 +3094,7 @@ main.add_command(_job_token)
 from .d1_schema import cli as _d1_schema  # noqa: E402
 
 main.add_command(_d1_schema)
+
+
+if __name__ == "__main__":
+    main()
