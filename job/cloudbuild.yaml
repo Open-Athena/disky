@@ -1,0 +1,7 @@
+# Build the hf scan image. The context is the minimal repo-root-shaped tree `job/build.sh` stages, with the
+# Dockerfile under job/ — hence a config instead of `builds submit --tag` (which only finds a root Dockerfile).
+steps:
+  - name: gcr.io/cloud-builders/docker
+    args: ['build', '-f', 'job/Dockerfile', '-t', '${_IMAGE}', '.']
+images:
+  - '${_IMAGE}'
