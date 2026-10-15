@@ -51,7 +51,7 @@ SERVED_R2 = "1"                  # snapshot JSONs + extras through INDEX_R2 (the
 FILTER_STATIC = "1"
 NAME_SUMMARY_STATIC = "1"
 FILTER_STATIC_HEAVY = "1"
-STATIC_GEN = "2026-10-14hf"
+STATIC_GEN = "2026-10-15hf"
 # The interval store, in INDEX_R2 under `interval-store/<gen>/`: built by the job's first run, then one `add` per scan,
 # which compacts it into a new generation every 2^5 scans and moves `interval-store/CURRENT.json` to it. No
 # INTERVAL_STORE_GEN: the site serves the generation CURRENT.json names (`ivGen`); setting one pins it (and the job then
@@ -111,7 +111,7 @@ SERVED_R2 = "1"
 FILTER_STATIC = "1"
 NAME_SUMMARY_STATIC = "1"
 FILTER_STATIC_HEAVY = "1"
-STATIC_GEN = "2026-10-14hf"
+STATIC_GEN = "2026-10-15hf"
 PATH_STORE = "intervals"
 
 [[env.preview.r2_buckets]]
