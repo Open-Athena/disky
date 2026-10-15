@@ -87,7 +87,7 @@ const TIERS_AT_PLAN_ROWS_0: Record<string, number> = { 'full bysize': 42, 'band 
 
 beforeAll(async () => {
   ;(globalThis as unknown as { caches: unknown }).caches = { default: { match: async () => undefined, put: async () => {} } }
-  const { db } = await sqliteD1('cw')
+  const { db } = await sqliteD1()
   reads = []
   env = { DB: db, ROOT_LABEL: 'all buckets', PATH_STORE: 'intervals', INTERVAL_STORE_GEN: 'g1', INDEX_R2: r2(reads) } as Env
   cases = await readJson<Case[]>('iv/expected.json')
@@ -314,7 +314,7 @@ describe('interval store', () => {
   it('leaves a per-scan read of a date it holds as it was: one isolate serves both under `PATH_STORE=opt-in`', async () => {
     // A per-scan v1 generation of the store's first scan, with a coarse tier (the fine tier's rows, floor 1).
     const D = '2026-07-30'
-    const { db, raw } = await sqliteD1('cw')
+    const { db, raw } = await sqliteD1()
     const v1 = await readJson<Record<string, D1Variant>>('path-index-zstd.d1.json')
     const tier = { parquet: 'path-index-zstd.parquet', groups: 'path-index-zstd.groups.json' }
     seedGeneration(raw, { date: D, gen: 'p1', dir: `listing/${D}/index/p1`, variants: { ...v1, coarse20: { ...v1.path, schema: { ...v1.path.schema, floor_bytes: 1 } } }, files: { path: tier, coarse20: tier } })

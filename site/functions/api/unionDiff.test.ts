@@ -1,6 +1,6 @@
 import { beforeAll, describe, expect, it, vi } from 'vitest'
 import type { Env } from '../_lib/auth'
-import { LINEAGES } from '../_lib/testD1'
+
 import { A, B, C, unionDeployment, Z } from '../_lib/testUnion'
 import { onRequestGet as diff, unionDiffRows } from './diff'
 import { onRequestGet as subtree } from './subtree'
@@ -15,12 +15,12 @@ vi.mock('@rdub/file-tree/stores/s3', async () => ({ S3Store: (await import('../_
 type Row = { p: string; d: number; k: string; s: string; a: number; b: number; oa: number; ob: number; src?: string }
 type Body = { prev: string; curr: string; rows: Row[]; total_a: number; total_b: number; objects_a: number; objects_b: number; threshold: number; union?: { view: string; sources: unknown[] } }
 
-describe.each(LINEAGES)('D1, %s lineage', lineage => {
+describe('D1', () => {
   let deployment: (views?: Record<string, unknown>) => Env
 
   beforeAll(async () => {
     ;(globalThis as unknown as { caches: unknown }).caches = { default: { match: async () => undefined, put: async () => {} } }
-    deployment = await unionDeployment(lineage)
+    deployment = await unionDeployment()
   })
 
   const get = async (qs: string, views?: Record<string, unknown>) => {

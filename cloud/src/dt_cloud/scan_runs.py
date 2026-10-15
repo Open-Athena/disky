@@ -24,12 +24,13 @@ from functools import partial
 from pathlib import Path
 from typing import Protocol
 
+from .d1_schema import table_ddl
 from .scan_id import check_scan_id
 
 err = partial(print, file=sys.stderr)
 
 PROFILE_ENV = "SCAN_RUNS_PROFILE"
-MIGRATION = "0016_scan_runs.sql"
+TABLES = ("scan_runs", "scan_run_phases", "scan_run_outputs")
 STATUSES = ("running", "succeeded", "failed", "nop")
 
 
@@ -180,27 +181,16 @@ class D1Sink:
         return self._q(sql, self._acct, self._tok, self.db_id)
 
 
-def migration_sql(site: Path | None = None) -> str:
-    """The tables' DDL, from the migration file (the one source of the schema)."""
-    if site is None:
-        site = Path(__file__).resolve().parents[3] / "site"  # the repo checkout this module runs from
-        if not site.is_dir():
-            from .index_footer import _site_dir
-
-            site = _site_dir()
-    return (site / "migrations" / "cw" / MIGRATION).read_text()
-
-
 class SqliteSink:
-    """A local SQLite file with foreign keys ON (as D1 enforces them); the tables are created from the migration
-    when absent."""
+    """A local SQLite file with foreign keys ON (as D1 enforces them); the tables are created from the D1 schema
+    (`site/schema.sql`, the one source of it) when absent."""
 
     def __init__(self, path: str | Path, ddl: str | None = None):
         self.con = sqlite3.connect(str(path))
         self.con.row_factory = sqlite3.Row
         self.con.execute("PRAGMA foreign_keys = ON")
         if not self.con.execute("SELECT 1 FROM sqlite_master WHERE name = 'scan_runs'").fetchone():
-            self.con.executescript(ddl if ddl is not None else migration_sql())
+            self.con.executescript(ddl if ddl is not None else table_ddl(TABLES))
 
     def execute(self, statements: Sequence[str]) -> None:
         with self.con:
