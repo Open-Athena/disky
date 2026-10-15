@@ -75,6 +75,7 @@ HF_SECRETS = [
     "hf-usage-r2-access-key-id",      # R2_ACCESS_KEY_ID: the `r2_s3_access_key_id` CF output (read/write, the bucket only)
     "hf-usage-r2-secret-access-key",  # R2_SECRET_ACCESS_KEY: the `r2_s3_secret_access_key` CF output
     "hf-usage-slack-bot-token",       # SLACK_BOT_TOKEN: failure alerts to #gcs-usage-alerts
+    "hf-usage-job-grant",             # SITE_TOKEN: a read-only grant on hf.oa.dev (minted from /admin), for warm-up + probe
 ]
 secrets = Secrets(
     "hf-secrets",

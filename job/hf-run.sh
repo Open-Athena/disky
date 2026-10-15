@@ -27,7 +27,8 @@
 #   HF_URI (default hf://open-athena; the namespace is the store's one bucket), HF_THREADS (requests in flight),
 #   SNAP_ID (default the UTC start minute, `YYYY-MM-DDTHHMM`, as gcs/cw), STORE_ROOT (default r2://$R2_BUCKET; a local dir
 #   for a dry run), WORK_DIR, MEM (DuckDB memory limit). Secrets: HF_TOKEN, CLOUDFLARE_API_TOKEN (D1 edit),
-#   CLOUDFLARE_ACCOUNT_ID, R2_ENDPOINT, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY, SLACK_BOT_TOKEN (+ SLACK_ALERT_CHANNEL).
+#   CLOUDFLARE_ACCOUNT_ID, R2_ENDPOINT, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY, SLACK_BOT_TOKEN (+ SLACK_ALERT_CHANNEL),
+#   SITE_TOKEN (the site read grant: cache warm-up + the serving probe).
 # Deployment config comes from `site/wrangler.toml` (baked into the image): the D1 (`database_id` /
 # `database_name`), and the static-names / interval-store generations (`STATIC_GEN` / `INTERVAL_STORE_GEN`), so the
 # job writes exactly the generations the site reads.
@@ -178,6 +179,19 @@ fi
 if [ -n "${CLOUDFLARE_API_TOKEN:+set}" ] && [ -n "${CLOUDFLARE_ACCOUNT_ID:+set}" ]; then
   sr phase index-gc -W -m "superseded generations stay until the next run" \
     -- dt-cloud index-gc -m 2d -F "$STORE_ROOT"
+fi
+
+# 10. Warm the site's subtree + diff caches for this scan (the home page's default requests at the common widths; the
+# colo cache + CACHE_KV), so the first viewer gets hits. 11. Replay the page loads uncached (`probe -c`): every
+# response a 2xx/4xx, one cold-latency record per scan under `probes/hf/`. Both authenticate with the job's read
+# grant (`SITE_TOKEN`, minted from /admin; specs/hf-deployment.md) and are skipped without it. Never fatal.
+if [ -n "${SITE_TOKEN:+set}" ]; then  # `:+set`: xtrace must not print the token
+  sr phase warm-cache -W -M -m "the first viewers of this scan compute their views cold" \
+    -- dt-cloud warm-cache -d "$SNAP_ID" -r "$STORE_ROOT/snapshots/$SUB"
+  sr phase probe -W -M -m "a page load 5xx'd or dropped (the data is fine); see the probe record" \
+    -- dt-cloud probe -c -u "$SITE_URL" -o "$STORE_ROOT/probes/$SUB/"
+else
+  echo "no SITE_TOKEN: cache warm-up and the serving probe skipped" >&2
 fi
 
 echo "HF-SCAN-JOB-DONE $SNAP_ID -> $STORE_ROOT/$INDEX_KEY"

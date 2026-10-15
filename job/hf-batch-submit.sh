@@ -83,7 +83,8 @@ cat > "$spec" <<EOF
           "R2_ENDPOINT": "$(secret hf-usage-r2-endpoint)",
           "R2_ACCESS_KEY_ID": "$(secret hf-usage-r2-access-key-id)",
           "R2_SECRET_ACCESS_KEY": "$(secret hf-usage-r2-secret-access-key)",
-          "SLACK_BOT_TOKEN": "$(secret hf-usage-slack-bot-token)"
+          "SLACK_BOT_TOKEN": "$(secret hf-usage-slack-bot-token)",
+          "SITE_TOKEN": "$(secret hf-usage-job-grant)"
         }
       }
     }

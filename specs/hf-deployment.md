@@ -100,6 +100,7 @@ export UV_PROJECT_ENVIRONMENT=$PWD/infra/.venv   # for pulumi; never the repo's 
    Then the Google OAuth client `hf.oa.dev (disky)` in project `oa-auth-509611` (as cw-s3's), origins `https://hf.oa.dev`, `http://localhost:3263`, `https://dev.hf.oa.dev`, `https://dev.oa-hf-usage.pages.dev`, each with its `/auth/google/callback`; after Create + Download JSON, the auth repo's `scripts/provision-oauth-client.mjs --project oa-auth-509611 --app-origin … --redirect-uri … --pages-project oa-hf-usage --from-json … --run` (production), and the same through a `--wrangler` wrapper appending `--env preview` for the dev stack (cw-s3's recipe, `specs/done/oidc-cutover-cw.md`).
 7. **Image.** `job/build.sh` (Cloud Build into `hf-usage`; the build account needs Artifact Registry write on it, as cw-s3's builds into `cw-s3-usage`).
 8. **Site.** `cd site && ./deploy -P` (first deploy, no push), and `./deploy --dev` (dev.hf.oa.dev). Both should show the sign-in wall; after sign-in, an empty store until the first scan.
+8b. **The job's site grant** (`SITE_TOKEN`, for warm-up + probe): on hf.oa.dev `/admin`, a share link named `hf job (warm-cache)`, read-only, no email, no expiry; store its token without printing it: `printf %s '<token>' | gcloud secrets versions add hf-usage-job-grant --project oa-internal-450019 --data-file=-`. **Before any submit or the cron**: the job spec maps this secret, and Batch refuses to start a job whose secret has no version.
 9. **First manual run.**
    ```bash
    job/hf-batch-submit.sh                         # prints the job id (DISKY_LABELS from the .envrc)
@@ -120,7 +121,7 @@ export UV_PROJECT_ENVIRONMENT=$PWD/infra/.venv   # for pulumi; never the repo's 
 
 `AGENTS.md` "Deployments: parity by default" is the baseline; these are hf's missing items, open work in this order:
 - `PATH_STORE = "intervals"`: after the first scans verify (step 10).
-- Cache warm-up and the serving probe after each scan (cw-s3's `warm-cache` / `probe -c` stages): need the site live and a read-only grant for the job (cw-s3's `cw-s3-job-grant` recipe).
+- Cache warm-up and the serving probe: built (job steps 10–11, `probe -c` records under `probes/hf/`); they run once the job's grant exists (checklist step 8b).
 - The Slack digest thread (cw-s3's `dt-cloud digest -T …`): needs a channel choice.
 - The meta store ("data behind this site"): waits on the shared self-scan + index step the root session is building on `cloud`.
 - Not applicable: staging / executor / sweeps (the site deletes nothing on the Hub), lifecycle pull (no lifecycle rules on the Hub).
