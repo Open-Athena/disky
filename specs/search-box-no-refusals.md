@@ -1,6 +1,6 @@
 # The search box answers, fast and exact, or not at all
 
-**Status:** site side implemented on `cloud` 2026-10-15 (commits below); the index and pipeline changes in §3 are planned, not built.
+**Status:** site side implemented on `cloud` 2026-10-15 (commits below); §3.1 built (`26dca187`, live per deployment after its generation rebuild); the rest of §3 planned, not built.
 
 Every deployment runs one search: the prebuilt static name index (`FILTER_INDEXED_ONLY=1`, no per-scan search sidecars). The box means **literal text matched against names along a path**, answered exactly from that index; what it can't answer is not a half-built search style. The goal is that no form a user types reaches a "not supported" refusal. This spec records what each former refusal does now, and the index changes that close the rest.
 
@@ -23,7 +23,7 @@ Syntax `plain` (`site/functions/_lib/querySyntax.ts`; `queryParam(…, indexed)`
 | `unsupported-scope` | Owner pools answered (§2.2). Left: a person lens or a class scope (§3.4, §3.5); a heavy literal's rollup under a pool (`owner-too-common`, §3.4) | `b4e0cebd` |
 | `scan-not-indexed` (the publish window) | The r2 ingest lists a scan only after its appends land, as gcs does (§2.3). Left: a failed append; cw's waits (§3.6) | `c9243667` |
 | `anchor-too-short` | Unchanged: `^a`, `ab$` need §3.2 | — |
-| `anchor-not-indexed` | Unchanged where a generation has no `anchors/` (the one-machine builds: r2, m3): §3.1. Now also names path terms | — |
+| `anchor-not-indexed` | Only on a generation built without `anchors/`: the one-machine builds now build them (§3.1); r2 and m3 until their generations are rebuilt. Now also names path terms | `26dca187` |
 | `unsupported-kind` (`is:file`) | Unchanged: needs the kind bit (`specs/search-extensions.md` §3, rides the next compaction) | — |
 
 `term-too-common` and `too-broad` stay: they are budgets ("too common to answer exactly here; open a folder"), not missing forms.
@@ -42,17 +42,18 @@ The static index's hits are owner slices (`usr`), so a pool picks them exactly, 
 
 gcs's job runs the static append (and the interval append) before `index-sync`'s pointer step, which is what lists a scan; on a failure it publishes anyway (browse and diff work; search refuses that scan) and alerts. The r2 ingest (`.github/workflows/daily-ingest.yml`) now does the same: both appends, then the D1 publish (`!cancelled()`), then a step failing the run if an append failed. The site needs no change for this: a filtered view with no `d=` already opens on the newest indexed scan (`/api/filter-scans`, `floatingScan`).
 
-## 3. Index and pipeline changes (planned)
+## 3. Index and pipeline changes (§3.1 done; the rest planned)
 
-### 3.1 Anchors on the one-machine builds (r2, m3)
+### 3.1 Anchors on the one-machine builds (r2, m3) — done (`26dca187`)
 
-`static_local.build` / `add` build no `names/` or `anchors/` ("Anchored search is not built"), so on r2.rbw.sh and m3 `^q`, a heavy `q$`, `^q$` and every path term are `anchor-not-indexed`. The functions exist in `static_anchors.py`:
+`static_local.build` / `add` built no `names/` or `anchors/`, so on r2.rbw.sh and m3 `^q`, a heavy `q$`, `^q$` and every path term were `anchor-not-indexed`. They now chain `static_anchors`' own builders:
 
-1. `build_gen`: after the shards, `an.write_names(con, <cintervals versions SQL>, gen_dir / NAMES)`; after the catalog, `an.build_tier_local(con, sx_files, names_files, gen_dir / ANCHORS, R, K, scans, rule)` (it writes `anchors/start/` too). `static_local.publish_order` already puts every `meta.json` after the data files (`anchors/meta.json` after `names/` and the rollups, as the reader's liveness marker needs); a run's `anchors/meta.json` should rank with the drill's (last), since the anchored stack is cut at the first run without one.
-2. `add` (per pending scan, after its drill run): `an.build_run_local(con, prior_tiers, run_tier, D, R, K, scans, versions_sql=<the run's cdelta>, rule=rule)`, then `an.build_run_start(...)`.
-3. `merge_pending` (the binary counter's carries): `an.merge_run_local(con, runs, out, R, K, scans, rule=rule)` beside the drill's merge.
-4. Backfill: one `static-names build` of a new generation per deployment (r2: seconds; m3: minutes), `STATIC_GEN` bumped in `wrangler.r2.toml` / m3's config.
-5. Test: `cloud/tests/test_static_local.py`: the build's `names/` and `anchors/` byte-identical to `test_static_anchors.build_world`'s for the same versions; base ⊕ added runs = rebuild (the anchored reader's answers, as `staticAnchors.test.ts` checks).
+1. `build`: after the drill, `build_base_anchors`: `an.write_names` over `cintervals/` (as `static-names anchors names`), then `an.build_tier_local` over `sx/` and `names/` at the drill's R and K (it writes `anchors/start/` too; `meta.json`s last, recording the hex-run rule and the scans). On by default; `-A` / `--no-anchors` skips it. Default on because every deployment should get the full search, and the cost is small at the one-machine builds' scale (the stage logs its seconds and disk / RSS peaks as `build GEN: anchors`).
+2. `add` (per pending scan, after its drill run): `run_anchors` → `an.build_run_local` (names from the run's `cdelta/`, both rollup kinds, then `anchors/start/` when every earlier tier carries one) over the base and the manifest's runs, at the base's R and K — when the base has `anchors/meta.json`. A listed run without one under an anchored base is refused (a run built over a gap would never be read).
+3. Carries: nothing to wire. `static_merge.run_tiers` already merges `names/` + `anchors/` (`merge_run_local`) when every input carries them.
+4. `publish_order` ranks `anchors/meta.json` with `drill/meta.json` (last of the markers, after `anchors/start/meta.json`, as the staged path uploads them).
+5. Existing generations: no backfill. An anchorless generation (built before this, or with `-A`) keeps appending without anchors (`add` logs it). It gets them by a rebuild into a new generation: r2 bumps `STATIC_GEN` in `site/wrangler.r2.toml` and the daily ingest builds it (`static-names build` when `scans.json` is missing, seconds), then the site deploys with it; m3 the same with its own `static-names build` and generation pointer (minutes).
+6. Tests (`cloud/tests/test_static_local.py`): the base's `names/` and `anchors/` byte-identical to `write_names` + `build_tier_local` over the staged generation's versions and shards (`test_static_catalog._gen`); `^q`, `q$`, `^q$` through `AnchoredReader` (light, rollups, scoped roots, the starts-with catalog, whose members are exactly the prefixes past R) and path terms (the tail's name-index range folded by the path test) equal brute force over the base, base ⊕ level-0 runs and base ⊕ the carry's merged run, every flavor; `-A` builds and appends without them. The staged (Batch) base cuts its rollups per shard (`rollups/<kind>-s####.parquet` + `keys/`), so the two layouts differ by file split; the reader reads either through the rollup index.
 
 ### 3.2 Short anchors: `^a`, `a$`, `ab$`
 
@@ -93,7 +94,7 @@ Static hits carry no class split. Add `c2, c3, c4` (bytes in Nearline / Coldline
 |---|---|---|
 | `slash-tail-short` | a path term whose tail is under 2 characters, or empty | §3.3 |
 | `anchor-too-short` | `^a`, `a$`, `ab$` | §3.2 |
-| `anchor-not-indexed` | `^q`, heavy `q$`, `^q$`, `a/b` on r2 / m3 | §3.1 |
+| `anchor-not-indexed` | `^q`, heavy `q$`, `^q$`, `a/b` on a generation built without anchors (r2 / m3 until rebuilt) | §3.1 (done; rebuild) |
 | `owner-too-common` | a heavy literal under a heavy folder, with an owner pool | §3.4 |
 | `unsupported-scope` | a person lens or a class scope with a search | §3.4, §3.5 |
 | `unsupported-kind` | `is:file`, `is:dir` | `specs/search-extensions.md` §3 |
