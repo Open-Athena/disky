@@ -99,6 +99,8 @@ def test_add_compacts_every_two_to_the_level_scans(run):
         ("g", 6, [ar.run_key(DATES[2], DATES[3]), ar.run_key(DATES[4], DATES[5])], True),
         ("g.c001", 10, [ar.run_key(DATES[6], DATES[7]), ar.run_key(DATES[8], DATES[9])], True),
     ]
+    # Its cost, for sizing the machine: seconds, peak work-disk and RSS (GiB), as `add` reports its own
+    assert [(type(c["s"]), sorted(c["peak"]), all(v >= 0 for v in c["peak"].values())) for c in (c1, c2)] == [(float, ["disk_gb", "rss_gb"], True)] * 2
     root = run["store"] / ist.PREFIX
     assert json.loads((root / "CURRENT.json").read_text()) == {"gen": "g.c002"}
     assert [json.loads((root / g / "successor.json").read_text()) for g in ("g", "g.c001")] == [{"gen": "g.c001"}, {"gen": "g.c002"}]
