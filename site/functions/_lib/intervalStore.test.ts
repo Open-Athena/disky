@@ -473,6 +473,32 @@ describe('interval store: a heavy literal\'s match roots draw their insides', ()
     expect(got).toEqual(want)
     expect(inside).toBe(5)
   })
+
+  it('the diff: rows inside a root are each path\'s true totals on both scans, its lookups cut or not', async () => {
+    // As per scan (`staticDrill.test.ts`): a name the lookup budget leaves unanswered folds into `(other)` on both
+    // sides, never one-sided at zero. The fixture's rows are per path, not sums (a bucket absent on a scan whose
+    // folders aren't; a 0-byte root over a 10-byte child): only paths P and roots each scan holds bytes at.
+    const bad: unknown[] = []
+    let rows = 0, folded = 0
+    for (const lit of LITS) for (const from of LIVE) for (const to of LIVE) if (from < to) for (const T2 of [T, 1, 8, 64]) for (const P of ['', 'b1', 'b2']) {
+      if (P && !(scans.get(from)!.get(P)?.[0] && scans.get(to)!.get(P)?.[0])) continue
+      const o = { from, to, path: P, w: W, h: H, minArea: MIN_AREA, atten: ATTEN, top: 10_000, threshold: T2, query: parseQuery(lit)! }
+      const full = await buildDiff(envS, o)
+      for (const cut of [{}, { lookupCap: 0 }, { walkMs: 0 }]) {
+        const d = Object.keys(cut).length ? await buildDiff(envS, { ...o, ...cut }) : full
+        const roots = (d.matched ?? []).map(m => m.path).filter(R => scans.get(from)!.get(R)?.[0] && scans.get(to)!.get(R)?.[0])
+        const drawn = d.rows.filter(r => !r.p.endsWith('(other)')).map(r => [P === '' ? r.p : `${P}/${r.p}`, r] as const).filter(([p]) => roots.some(R => p.startsWith(`${R}/`)))
+        rows += drawn.length
+        if (d !== full) folded += full.rows.filter(r => !r.p.endsWith('(other)')).length - d.rows.filter(r => !r.p.endsWith('(other)')).length
+        for (const [p, r] of drawn) {
+          const [a, oa] = scans.get(from)!.get(p) ?? [0, 0], [b, ob] = scans.get(to)!.get(p) ?? [0, 0]
+          if (r.a !== a || r.b !== b || r.oa !== oa || r.ob !== ob) bad.push([lit, from, to, T2, P, cut, r.p, [r.a, r.b, r.oa, r.ob], [a, b, oa, ob]])
+        }
+      }
+    }
+    expect(bad).toEqual([])
+    expect([rows, folded]).toEqual([43, 26])
+  })
 })
 
 // Base + per-scan runs (specs/interval-store.md §2.7, `interval_append`): `g3`, `g4` and `g6` hold `g1`'s six scans as a

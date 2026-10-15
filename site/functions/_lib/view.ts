@@ -1961,8 +1961,10 @@ async function readRootAllRows(env: Env, date: string, path: string, dP: number)
  *  3 — a view the query matches draws its subtree again; 4 — `depth=N` caps phase 2 at dP + N;
  *  5 — level-capped interiors from the `path` sort; 6 — `\^`, `\$`, `\\` escapes in a `simple` term (`q=` is keyed raw); 7 — a search cut by its time
  *  budget is kept briefly and upgraded (`Coverage.searchLate`), where 6 kept it whole; 8 — a root's interior under an
- *  unfiltered view's read bound (64 groups / 512K rows), the interval store planned as the plain view plans it. */
-export const FILTER_VIEW_V = 8
+ *  unfiltered view's read bound (64 groups / 512K rows), the interval store planned as the plain view plans it; 9 — a
+ *  diff's name whose lookup the walk's budget left unanswered folds into `(other)` on both sides, where it read as
+ *  added / removed at zero (a root's interior child over its threshold on one scan only). */
+export const FILTER_VIEW_V = 9
 
 /** A filter view's phase 2 (the insides of its match roots) subdivides a root only when its tile is at
  *  least this many px² — room for a title and a few legible cells; a smaller root is one exact tile. */
@@ -2196,6 +2198,9 @@ export interface DiffOpts extends Omit<ViewOpts, 'date'> {
    * unexpanded, as leaves) — `depth=1` is the bucket-level diff the page
    * draws first, before the full walk lands. */
   depth?: number
+  /** The walk's lookup budgets, `LOOKUP_CAP` and (filtered) `FILTER_WALK_MS` by default (tests). */
+  lookupCap?: number
+  walkMs?: number
 }
 
 export interface DiffRow {
@@ -2226,7 +2231,8 @@ export interface Diff {
   threshold: number
   tier: string
   lookups: number
-  /** The lookup budget ran out: some one-sided names may really be folded. */
+  /** The lookup budget ran out: names one side drew that the other side's lookup didn't answer are folded into
+   *  their parent's `(other)` on both sides (never drawn one-sided at 0). */
   lookups_capped: boolean
   /** …by time (`FILTER_WALK_MS`). */
   lookups_late?: true
@@ -2275,8 +2281,11 @@ const listsObjects = (v: Read): boolean => isStore(v.idx) && (v.idx.asOf == null
  * reading as −81 / +141 Ti of churn). A name that clears the floor on one
  * side only is read point-blank from the other side's floor-free tier: if
  * it exists there it shows with its real size (it crossed the floor), else
- * it was added / removed. `(other)` is parent − Σ named on each side, so its
- * Δ is the sub-floor churn, truthfully. */
+ * it was added / removed. A name whose lookup the budget leaves unanswered
+ * (`LOOKUP_CAP`, a filtered diff's `FILTER_WALK_MS`) has an unknown other
+ * side, not a zero: it isn't drawn, and stays in `(other)` on both sides.
+ * `(other)` is parent − Σ named on each side, so its Δ is the sub-floor
+ * churn, truthfully. */
 export async function buildDiff(env0: Env, o: DiffOpts): Promise<Diff> {
   const env = sliced(asOfScans(env0, [o.from, o.to]), o)
   const { from, to, path, lens, owner, query } = o
@@ -2362,7 +2371,9 @@ export async function buildDiff(env0: Env, o: DiffOpts): Promise<Diff> {
   // A filtered diff's lookups stop after `FILTER_WALK_MS` as they do past `LOOKUP_CAP` (`lookups_capped`).
   let late = false
   let lookupsOff = false
-  const walkOver = () => (late ||= !!query && performance.now() - walkStart > FILTER_WALK_MS)
+  const lookupCap = o.lookupCap ?? LOOKUP_CAP
+  const walkMs = o.walkMs ?? FILTER_WALK_MS
+  const walkOver = () => (late ||= !!query && performance.now() - walkStart > walkMs)
   const matchedUnion = query ? [...new Map([...(va?.matched ?? []), ...(vb?.matched ?? [])].map(m => [m.path, m])).values()].sort((x, y) => x.path < y.path ? -1 : 1) : undefined
   const totals = {
     total_a: Math.round(va?.rootAgg.b ?? 0),
@@ -2420,9 +2431,10 @@ export async function buildDiff(env0: Env, o: DiffOpts): Promise<Diff> {
     out.kind = a.kind
     return out
   }
-  const lookup = async (date: string, v: Read, p: string, depth: number): Promise<Agg | null> => {
+  // A lookup's answer: the path's total on that side, null for none there, undefined for unanswered (a budget).
+  const lookup = async (date: string, v: Read, p: string, depth: number): Promise<Agg | null | undefined> => {
     if (!inQuery(p, v)) return null
-    if (lookups >= LOOKUP_CAP || walkOver()) { capped = true; return null }
+    if (lookups >= lookupCap || walkOver()) { capped = true; return undefined }
     lookups++
     const rows = await readRows(await fine(date), depth, depth, p, p, undefined, lens)
     const needTot = !!v.ownerLens?.needsTotal(p)
@@ -2466,13 +2478,14 @@ export async function buildDiff(env0: Env, o: DiffOpts): Promise<Diff> {
       for (let i = 0; i < qs.length; i += PAR) {
         const chunk = qs.slice(i, i + PAR)
         const got = await Promise.all(chunk.map(q => lookup(date, v, q.cp, q.d)))
-        chunk.forEach((q, j) => out.set(q.cp, got[j]))
+        chunk.forEach((q, j) => { if (got[j] !== undefined) out.set(q.cp, got[j]) })
       }
     }
     if (lens || !todo.length) { await perAsk(todo); return out }
-    const room = walkOver() ? 0 : Math.max(0, LOOKUP_CAP - lookups)
+    const room = walkOver() ? 0 : Math.max(0, lookupCap - lookups)
     const take = todo.slice(0, room)
-    if (todo.length > room) { capped = true; for (const q of todo.slice(room)) out.set(q.cp, null) }
+    // Past the budget a name is left unanswered (absent from `out`): the walk folds it, it doesn't read as zero.
+    if (todo.length > room) capped = true
     if (!take.length) return out
     const want = new Map(take.map(q => [`${q.d}\0${q.cp}`, q]))
     let got: Row[]
@@ -2548,14 +2561,15 @@ export async function buildDiff(env0: Env, o: DiffOpts): Promise<Diff> {
       }
     }
     const found = new Map<string, Agg | null>() // `${side}:${cp}`
+    const asked = new Set(asks.map(q => `${q.side}:${q.cp}`))
     const sideAsks = (side: 1 | 2) => asks.filter(q => q.side === side)
     const level2 = Promise.all([
       va && sideAsks(1).length ? lookupMany(from, va, sideAsks(1)) : new Map<string, Agg | null>(),
       vb && sideAsks(2).length ? lookupMany(to, vb, sideAsks(2)) : new Map<string, Agg | null>(),
     ])
     // A filtered diff's level waits for its lookups until `FILTER_WALK_MS` is spent, no longer: the names
-    // still unanswered read as one-sided, as past `LOOKUP_CAP` (`lookups_capped`, `lookups_late`).
-    const left = query ? FILTER_WALK_MS - (performance.now() - walkStart) : Infinity
+    // still unanswered are folded, as past `LOOKUP_CAP` (`lookups_capped`, `lookups_late`).
+    const left = query ? walkMs - (performance.now() - walkStart) : Infinity
     let timer: ReturnType<typeof setTimeout> | null = null
     const none = [new Map<string, Agg | null>(), new Map<string, Agg | null>()] as const
     const [gotA, gotB] = left === Infinity ? await level2 : await Promise.race([
@@ -2573,6 +2587,9 @@ export async function buildDiff(env0: Env, o: DiffOpts): Promise<Diff> {
       expansions++
       const sum = { a: newAgg(), b: newAgg() }
       for (const cp of names) {
+        // A name one side drew whose lookup on the other went unanswered (`lookupCap`, the walk's time): its other
+        // side is unknown, not zero — it stays in the parent's `(other)` on both sides, which is exact by subtraction.
+        if (asked.has(`1:${cp}`) && !found.has(`1:${cp}`) || asked.has(`2:${cp}`) && !found.has(`2:${cp}`)) continue
         const ca = va?.kept.get(cp) ?? va?.exact?.get(cp) ?? found.get(`1:${cp}`) ?? null
         const cb = vb?.kept.get(cp) ?? vb?.exact?.get(cp) ?? found.get(`2:${cp}`) ?? null
         const lk: 1 | 2 | undefined = ca && !va!.kept.has(cp) && !va!.complete?.(p) ? 1 : cb && !vb!.kept.has(cp) && !vb!.complete?.(p) ? 2 : undefined

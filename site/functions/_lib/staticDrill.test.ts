@@ -8,7 +8,7 @@ import { FilterRejected, REJECT_MESSAGES } from './indexedOnly'
 import { type Blobs, type Hit, scanAt, StaticNames } from './staticNames'
 import { LINEAGES, sqliteD1 } from './testD1'
 import { type D1Variant, fixture, FILES, readJson, seedGeneration } from './testStore'
-import { buildDiff, buildView, type DiffRow, NotFound, type View, type ViewNode } from './view'
+import { buildDiff, buildView, type Diff, type DiffRow, NotFound, type View, type ViewNode } from './view'
 import { searchKey } from './search'
 import { resetUpgrades } from './edgeCache'
 import { warmSubtree } from '../api/subtree'
@@ -888,6 +888,36 @@ describe.each(LINEAGES)('D1, %s lineage', lineage => {
       }
       expect(got).toEqual(want)
       expect(got.length).toBe(10)
+    })
+
+    it('a filtered diff\'s rows inside a match root are each path\'s true totals on both scans, its lookups cut or not', async () => {
+      // A name one side drew inside a root (over its interior threshold there, under it or unread on the other side)
+      // takes the other side's total from a lookup; one the lookup budget leaves unanswered (`lookupCap`, the walk's
+      // time) is folded into its parent's `(other)` on both sides, never drawn as added / removed at zero (cw 10-15:
+      // `q=feuer`, the walk past `FILTER_WALK_MS`, a 2.5 GB dir read as "added").
+      const bad: unknown[] = []
+      let rows = 0, folded = 0, lateCases = 0, looked = 0
+      for (const [env, src] of [[envStatic(), 'static'], [base, 'search']] as const) for (const t of [...TERMS, 'bk']) for (const P of ['', 'bk', 'bk/data']) for (const T of [0.5, 40, 300, 2000, 2300]) {
+        const o = { from: A, to: B, path: P, w: W, h: H, minArea: MIN_AREA, atten: ATTEN, top: 10_000, query: q(t), threshold: T }
+        // A query the static source refuses here (`FilterRejected`), or a path a scan lacks: no diff to check.
+        const full = await buildDiff(env, o).catch(e => { if (e instanceof FilterRejected || e instanceof NotFound) return null; throw e })
+        if (!full) continue
+        for (const cut of [{}, { lookupCap: 0 }, { walkMs: 0 }]) {
+          const d: Diff = Object.keys(cut).length ? await buildDiff(env, { ...o, ...cut }) : full
+          if (d.lookups_late) lateCases++
+          const roots = (d.matched ?? []).map(m => m.path)
+          const drawn = d.rows.filter(r => !r.p.endsWith('(other)')).map(r => [P === '' ? r.p : `${P}/${r.p}`, r] as const).filter(([p]) => roots.some(R => p.startsWith(`${R}/`)))
+          rows += drawn.length; looked += drawn.filter(([, r]) => r.l).length
+          if (d !== full) folded += full.rows.filter(r => !r.p.endsWith('(other)')).length - d.rows.filter(r => !r.p.endsWith('(other)')).length
+          for (const [p, r] of drawn) {
+            const [a, oa] = scanRows.get(A)!.get(p) ?? [0, 0], [b, ob] = scanRows.get(B)!.get(p) ?? [0, 0]
+            const s = !a && !oa ? 'added' : !b && !ob ? 'removed' : a !== b || oa !== ob ? 'changed' : 'unchanged'
+            if (r.a !== a || r.b !== b || r.oa !== oa || r.ob !== ob || r.s !== s) bad.push([src, t, P, T, cut, r.p, [r.s, r.a, r.b, r.oa, r.ob], [s, a, b, oa, ob]])
+          }
+        }
+      }
+      expect(bad).toEqual([])
+      expect([rows, looked, folded, lateCases]).toEqual([229, 1, 416, 100])
     })
   })
 
