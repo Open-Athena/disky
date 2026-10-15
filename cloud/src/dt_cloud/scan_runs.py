@@ -1077,16 +1077,21 @@ class JobRun:
             return {}
 
     def save(self, fresh: bool = False, **kw: object) -> None:
-        """Merge `kw` (None values skipped) into the state file, atomically (phases in background subshells share it)."""
+        """Merge `kw` (None values skipped) into the state file, atomically and under an exclusive lock: phases in
+        background subshells share it, and an unlocked read-merge-write lets a concurrent one drop another's field (a
+        background phase's `failed_phase` lost to a foreground `phase-end`)."""
+        import fcntl
         import tempfile
 
-        st = {} if fresh else self.state()
-        st.update({k: v for k, v in kw.items() if v is not None})
         self.dir.mkdir(parents=True, exist_ok=True)
-        fd, tmp = tempfile.mkstemp(dir=self.dir, prefix=f".{self.key}.")
-        with os.fdopen(fd, "w") as f:
-            json.dump(st, f)
-        os.replace(tmp, self.state_path)
+        with open(self.dir / f"{self.key}.lock", "a") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            st = {} if fresh else self.state()
+            st.update({k: v for k, v in kw.items() if v is not None})
+            fd, tmp = tempfile.mkstemp(dir=self.dir, prefix=f".{self.key}.")
+            with os.fdopen(fd, "w") as f:
+                json.dump(st, f)
+            os.replace(tmp, self.state_path)
 
     def alerted(self) -> bool:
         return self.alerted_path.exists()
@@ -1096,7 +1101,7 @@ class JobRun:
         self.alerted_path.touch()
 
     def clear(self) -> None:
-        for p in (self.state_path, self.alerted_path):
+        for p in (self.state_path, self.alerted_path, self.dir / f"{self.key}.lock"):
             p.unlink(missing_ok=True)
 
     @property
