@@ -385,10 +385,11 @@ def _footers(src, key: str, version: int) -> dict[str, Footer]:
     return out
 
 
-def verify_task(sampled: list[str], task: int, tasks: int, served: str, scans: dict, out_path: Path, tmp: Path, mount: str | None) -> list[dict]:
+def verify_task(sampled: list[str], task: int, tasks: int, served: str, scans: dict, out_path: Path, tmp: Path, mount: str | None,
+                runs: list[str] = ()) -> list[dict]:
     """This task's share of the `sampled` scan ids (contiguous, so each diff's previous scan is local),
     each scan's per-scan `path` sort copied to local disk first: from `mount`, else through the scans' root (`scans["bucket"]`:
-    a URL, a dir, or a bare GCS bucket name)."""
+    a URL, a dir, or a bare GCS bucket name). `runs`: the newest manifest's runs' served dirs, read beside the base."""
     import duckdb
 
     from .blobstore import Store, store_url
@@ -397,7 +398,7 @@ def verify_task(sampled: list[str], task: int, tasks: int, served: str, scans: d
     per = math.ceil(len(sampled) / tasks)
     mine = sampled[max(0, task * per - 1):(task + 1) * per]  # the one before this task's share: its diffs' `from`
     first_own = sampled[task * per] if task * per < len(sampled) else None
-    store = ir.Store(served)
+    store = ir.Store(served, runs)
     con = duckdb.connect()
     con.execute(f"SET threads=16; SET memory_limit='80GB'; SET temp_directory={q(str(tmp / 'spill'))}")
     src = Store(store_url(scans["bucket"]))
