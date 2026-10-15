@@ -2,7 +2,7 @@
 # The "meta" self-scan (GCP Batch, daily): the storage the deployments write,
 # as the cw-s3 deployment's secondary store `meta` (specs/multi-store.md
 # phase 3 — served at cw-s3.oa.dev/meta once `STORES_JSON` / `STORES_EXTRA`
-# name it and `migrations/cw/0006` is applied). The chain is cw-run.sh's, over
+# name it; its D1 rows need the meta columns in `site/schema.sql`). The chain is cw-run.sh's, over
 # different roots and into the store's own prefixes:
 #   1. bulk-list  each root: the GCS data bucket (`gcs://`, ADC as the job SA)
 #                 and cw's R2 serving bucket (`r2://` via the R2 S3 endpoint)
@@ -155,7 +155,7 @@ fi
 
 # 4e. Footers to D1 under this store, last: the scan is listed once 4d made it searchable, as on gcs
 # (specs/search-box-no-refusals.md §3.6). `--store meta`: rows are `store = 'meta'`, variant `meta:path`, never
-# visible to the primary's queries (`migrations/cw/0006`).
+# visible to the primary's queries (the meta columns in `site/schema.sql`).
 if [ -n "${CLOUDFLARE_API_TOKEN:+set}" ] && [ -n "${CLOUDFLARE_ACCOUNT_ID:-}" ]; then  # `:+set`: xtrace must not print the token
   dt-cloud index-sync -s "$STORE" -d "/gcs/$DATA/$INDEX_KEY" -g "$GEN" -k "$INDEX_KEY" "$SNAP_ID" \
     || echo "WARN: index-sync failed (the site keeps serving the previous generation)" >&2

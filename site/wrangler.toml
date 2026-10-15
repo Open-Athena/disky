@@ -1,27 +1,23 @@
 # CF Pages project config (oa-cw-s3-usage → cw-s3.oa.dev). `wrangler pages
 # deploy` reads this, so bindings + vars declared here apply to the deployment
 # it creates. The deployment's own sign-in (Google OIDC + emailed codes, the
-# `@open-athena/auth` session model) gates the whole host; the D1 lineage is
-# `migrations/cw/` (auth tables + the staged-deletion tables, from the
-# `0001_init.sql` baseline).
+# `@open-athena/auth` session model) gates the whole host; D1's schema is
+# `site/schema.sql` (auth tables + the staged-deletion tables).
 name = "oa-cw-s3-usage"
 pages_build_output_dir = "dist"
 compatibility_date = "2026-06-01"
 compatibility_flags = ["enable_request_signal"]  # interval-store reads evict a cancelled request's in-flight fetches
 
 # Staged-deletion store (specs/staged-delete.md): D1 holds the plans, the
-# executed-deletion records, and the admin allowlist (site/migrations/cw, from `0001_init.sql`).
+# executed-deletion records, and the admin allowlist (`site/schema.sql`).
 # Create with `wrangler d1 create oa-cw-s3-usage-db` and paste the returned
-# database_id below, then `wrangler d1 migrations apply oa-cw-s3-usage-db
-# --remote` (needs CLOUDFLARE_ACCOUNT_ID=74981a43… + the D1-scoped token).
+# database_id below, then `wrangler d1 execute oa-cw-s3-usage-db --remote
+# --file site/schema.sql` (needs CLOUDFLARE_ACCOUNT_ID=74981a43… + the D1-scoped token).
 [[d1_databases]]
 binding = "DB"
 database_name = "oa-cw-s3-usage-db"
 database_id = "7f1e1326-b879-4ecd-8621-846621c24f36"
-# Two D1 lineages live in site/migrations/ (one per deployment; they collide on
-# the folded index-footer migration). This deployment applies ITS lineage
-# only: gcs's is `migrations/gcs`.
-migrations_dir = "migrations/cw"
+# Its schema is `site/schema.sql` (one current-state file; `dt-cloud d1-schema check -d oa-cw-s3-usage-db`).
 # Local dev runs against the REAL prod D1 (read-write) — dev-only: deploys
 # ignore `remote`. Needs CLOUDFLARE_API_TOKEN (direnv) + CLOUDFLARE_ACCOUNT_ID.
 remote = true
@@ -56,7 +52,7 @@ SNAPSHOTS_SUBDIR = "cw"          # this store's snapshots: snapshots/cw/ (`_lib/
 STORE_PREFIXES = "listing/,snapshots/,sweep/,cw-sweep/,cw-l2/"
 # Domain whose sign-in identities are staff (admin/sweep scope). CoreWeave
 # viewers (coreweave.com) can see the dashboard but are not staff; the
-# sweep-dispatch admin gate is the `admin_emails` (site/migrations/cw/0001_init.sql)
+# sweep-dispatch admin gate is the `admin_emails` (`site/schema.sql`)
 # allowlist on top of this (`ADMIN_EMAILS` says the table exists here).
 STAFF_DOMAIN = "openathena.ai"
 ADMIN_EMAILS = "1"
@@ -74,7 +70,7 @@ REPO_URL = "https://github.com/Open-Athena/marin-gcs-usage"  # the site's "Sourc
 # `cw` scope with no `allowed_emails` row.
 VIEWER_DOMAINS = "coreweave.com"
 # The opt-in trash model (specs/staged-delete.md): any full viewer stages
-# deletions into the shared open plan (`stage_batches`, migrations/cw/0002).
+# deletions into the shared open plan (`stage_batches`, `site/schema.sql`).
 STAGING = "1"
 # Staged-plan review in Slack (specs/done/staged-slack.md): one thread per staged plan
 # in #cw-s3-admin; `EXECUTOR` = the Store's executor, which says the Slack
@@ -105,8 +101,8 @@ STORE_REGION = "auto"
 # Secondary store `meta` (specs/multi-store.md phase 3): the deploy's own
 # storage — the GCS data bucket + this R2 bucket — scanned daily by
 # job/cw-meta-run.sh and served at /meta to staff. ENABLED 2026-09-30 in this
-# order (Ryan's go for each): (1) `wrangler d1 migrations apply` puts
-# `migrations/cw/0006_store_scoped_index` on prod D1; (2) a first
+# order (Ryan's go for each): (1) prod D1 gets the store-scoped index tables (now in
+# `site/schema.sql`); (2) a first
 # `job/cw-meta-submit.sh` run lands `snapshots/meta/<scan>/` + `meta-l2/` and
 # the `store = 'meta'` D1 rows; (3) uncomment BOTH lines below (in both envs)
 # and deploy — `STORES_EXTRA` mounts the page, `STORES_JSON` gives the
@@ -173,7 +169,6 @@ id = "1dbc4c60884c4f3ba61aa1aa79f494bc"
 binding = "DB"
 database_name = "oa-cw-s3-usage-db"   # the SAME ledger as prod (marks made on dev are real)
 database_id = "7f1e1326-b879-4ecd-8621-846621c24f36"
-migrations_dir = "migrations/cw"
 
 [env.preview.vars]
 ROOT_LABEL = "Marin CoreWeave (dev)"
@@ -203,7 +198,7 @@ DISKY_LABELS = "app=disky,deployment=cw-s3"  # cost labels on executor jobs (spe
 SWEEP_S3_ENDPOINT = "https://cwobject.com"
 VIEWER_DOMAINS = "coreweave.com"
 # The opt-in trash model (specs/staged-delete.md): any full viewer stages
-# deletions into the shared open plan (`stage_batches`, migrations/cw/0002).
+# deletions into the shared open plan (`stage_batches`, `site/schema.sql`).
 STAGING = "1"
 # Staged-plan review in Slack (specs/done/staged-slack.md): one thread per staged plan
 # in #cw-s3-admin; `EXECUTOR` = the Store's executor, which says the Slack
@@ -220,8 +215,8 @@ STORE_REGION = "auto"
 # Secondary store `meta` (specs/multi-store.md phase 3): the deploy's own
 # storage — the GCS data bucket + this R2 bucket — scanned daily by
 # job/cw-meta-run.sh and served at /meta to staff. OFF until enabled (flip here first, on the dev stack), in this
-# order (Ryan's go for each): (1) `wrangler d1 migrations apply` puts
-# `migrations/cw/0006_store_scoped_index` on prod D1; (2) a first
+# order (Ryan's go for each): (1) prod D1 gets the store-scoped index tables (now in
+# `site/schema.sql`); (2) a first
 # `job/cw-meta-submit.sh` run lands `snapshots/meta/<scan>/` + `meta-l2/` and
 # the `store = 'meta'` D1 rows; (3) uncomment BOTH lines below (in both envs)
 # and deploy — `STORES_EXTRA` mounts the page, `STORES_JSON` gives the

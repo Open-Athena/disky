@@ -241,7 +241,7 @@ The repo is **public**: no emails or other PII in tracked files or commit messag
 
 - `cw-s3` merges the local `cloud` branch (`git merge refs/heads/cloud`; bare `cloud` is ambiguous with the `cloud/` dir). Never rebase onto it.
 - Changes that belong in the shared base are tagged `[cloud]` (or `[local]`, for the `local` branch the m3/app deployments merge) and cherry-picked up by the root session; this branch keeps only what the cw-s3 deployment runs.
-- Migrations: one lineage, `site/migrations/cw/`. Never rename an applied migration; a migration `cloud` drops (or another branch adds) only needs its file to match what cw prod D1 has applied (`d1_migrations` records file names).
+- D1 schema: `site/schema.sql`, one current-state file (specs/done/d1-migrations.md). A change is a pending recipe `site/migrations/<slug>.sql`, folded in with `dt-cloud d1-schema dump site/schema.sql site/migrations/<slug>.sql -o site/schema.sql`, applied to cw's D1, then `git rm`'d; a recipe `cloud` deletes that cw's D1 hasn't applied is restored in the merge. `dt-cloud d1-schema check -d oa-cw-s3-usage-db` compares (read-only).
 
 ### Layout (cw-s3's own)
 
@@ -255,6 +255,6 @@ The repo is **public**: no emails or other PII in tracked files or commit messag
 
 - `site/dev`: Vite on **:3263** + `wrangler pages dev` on **:3264** (`devPort` in `site/package.json`; `./dev --refresh` seeds a local D1 from a prod export).
 - `site/deploy` (run from `site/`): manual deploy to cw-s3.oa.dev, then pushes the branch + `cw-s3-prod` to `o` (`-P` skips the push). `--dev` deploys the preview branch (dev.cw-s3.oa.dev; prod D1). `--status` compares deployed vs HEAD.
-- D1: `wrangler d1 migrations apply oa-cw-s3-usage-db --remote` (separate from deploy; needs `CLOUDFLARE_ACCOUNT_ID`).
+- D1: a pending recipe applies with `wrangler d1 execute oa-cw-s3-usage-db --remote --file site/migrations/<slug>.sql` (separate from deploy; needs `CLOUDFLARE_ACCOUNT_ID`); a new database starts from `--file site/schema.sql`.
 - Tests: `PYTHONPATH=$PWD/src:$PWD/cloud/src pytest tests cloud/tests`; `cd site && pnpm build && pnpm vitest run`.
 - Serving health: `dt-cloud healthcheck -u https://cw-s3.oa.dev -s cw/` with a `cw`-scoped token (Secret Manager `cw-s3-job-grant`).
