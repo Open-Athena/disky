@@ -583,8 +583,12 @@ def index_store(
     if not meta:
         stages.append(("interval-store", config["interval_gen"], []))
     for kind, gen, build_args in stages:
-        verb = "add" if Store(store).exists(f"{kind}/{gen}/scans.json") else "build"
-        command = ["dt-cloud", kind, verb, "-g", gen, *common, "-w", str(work / kind), *(build_args if verb == "build" else [])]
+        # The interval store compacts into successor generations (`G.c001`, …) and prunes the old one, so `gen` only
+        # names its first build: `add` without `-g` follows `CURRENT.json` (or adopts the sole generation and writes it).
+        current = kind == "interval-store" and Store(store).exists("interval-store/CURRENT.json")
+        verb = "add" if current or Store(store).exists(f"{kind}/{gen}/scans.json") else "build"
+        pin = verb == "build" or kind != "interval-store"
+        command = ["dt-cloud", kind, verb, *(["-g", gen] if pin else []), *common, "-w", str(work / kind), *(build_args if verb == "build" else [])]
         with reporter.phase(kind):
             print(join(command), file=stderr, flush=True)
             done = run(command, env=env)
