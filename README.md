@@ -1,5 +1,10 @@
 # disk-tree
 
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="site/public/icons/banner-dark.svg">
+  <img alt="disky: where your disk and bucket space went, mapped" src="site/public/icons/banner-light.svg">
+</picture>
+
 Cloud storage analyzer: a scanning/indexing CLI for S3 / R2 / GCS buckets, and a Cloudflare-hosted treemap site (`site/`) over its indexes.
 
 [![disk-tree treemap of an R2 bucket](screenshots/treemap.png)](https://r2.rbw.sh/r2/ctbk)
