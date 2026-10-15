@@ -29,14 +29,14 @@ RETRY_BASE_S = 2.0
 
 
 def _retrying(op: Callable[[], None]) -> None:
-    """`op()`, retried on a transient error (a timeout, a dropped connection, an I/O error); a missing key is not
-    transient and raises at once, as does the last attempt's error."""
+    """`op()`, retried on a transient error (a timeout, a dropped connection, an I/O error); a missing key or a
+    refused credential is not transient and raises at once, as does the last attempt's error."""
     from fsspec.exceptions import FSTimeoutError
 
     for n in range(RETRIES):
         try:
             return op()
-        except FileNotFoundError:
+        except (FileNotFoundError, PermissionError):
             raise
         except (FSTimeoutError, TimeoutError, OSError):
             if n == RETRIES - 1:

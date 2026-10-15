@@ -1,5 +1,5 @@
 """`blobstore.Store`'s transfers retry a transient failure (an R2 read stalled past fsspec's socket timeout aborted
-cw's 153-scan interval-store build after ~100 GB of downloads), and never retry a missing key."""
+cw's 153-scan interval-store build after ~100 GB of downloads), and never retry a missing key or a refused credential."""
 from __future__ import annotations
 
 from pathlib import Path
@@ -59,8 +59,9 @@ def test_get_gives_up_after_the_last_attempt(store: Store, tmp_path: Path):
     assert len(store.fs.calls) == blobstore.RETRIES
 
 
-def test_a_missing_key_is_not_retried(store: Store, tmp_path: Path):
-    store.fs = FlakyFs([FileNotFoundError("k")])
-    with pytest.raises(FileNotFoundError):
+@pytest.mark.parametrize("e", [FileNotFoundError("k"), PermissionError("denied")])
+def test_a_missing_key_or_refused_credential_is_not_retried(store: Store, tmp_path: Path, e: OSError):
+    store.fs = FlakyFs([e])
+    with pytest.raises(type(e)):
         store.get("k", tmp_path / "k")
     assert len(store.fs.calls) == 1
