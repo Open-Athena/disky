@@ -6,6 +6,7 @@ becoming heavy, a literal becoming a member, probes either way, closes, resurrec
 from __future__ import annotations
 
 import random
+import re
 import shutil
 from itertools import groupby
 from pathlib import Path
@@ -729,6 +730,39 @@ def test_a_checkpoint_restores_tables_exactly(tmp_path):
     assert ck.store.listing("x/y") == {}
 
 
+def test_a_checkpoint_other_code_saved_is_not_resumed(tmp_path):
+    """A checkpoint is keyed by the code that saved it (`code.json`): reopened by the same code it resumes; by other code
+    (a rebuilt image after a bug fix) or with no version recorded, it is cleared, so no step a buggy build saved reaches
+    the fixed build's output. `close` logs the checkpoint's total cost."""
+    import duckdb
+
+    con = duckdb.connect()
+    con.execute("CREATE TABLE t (x INTEGER)")
+    root, logs = str(tmp_path / "store"), []
+
+    def open_(code):
+        return sd.Checkpoint(root, "d/g/s/long", every_s=0, log=logs.append, code=code)
+
+    a = open_("aaaa")
+    a.save(con, "inputs", ("t",))
+    assert sorted(a.store.listing("d/g/s/long")) == ["d/g/s/long/code.json", "d/g/s/long/inputs/done.json", "d/g/s/long/inputs/t.parquet"]
+    assert open_("aaaa").done("inputs")
+    b = open_("bbbb")
+    assert not b.done("inputs")
+    assert sorted(b.store.listing("d/g/s/long")) == ["d/g/s/long/code.json"]
+    assert b.store.read_json("d/g/s/long/code.json") == {"code": "bbbb"}
+    sd.Checkpoint(root, "d/g/s/long", log=logs.append).save(con, "inputs", ("t",))
+    sd.Checkpoint(root, "d/g/s/long", log=logs.append).store.delete({"d/g/s/long/code.json": 0})
+    c = open_("cccc")
+    assert not c.done("inputs")
+    c.save(con, "inputs", ("t",))
+    c.load(con, "inputs")
+    logs.clear()
+    c.close()
+    assert [re.sub(r"\d+s\b", "<n>s", m).replace(root, "<root>") for m in logs] == ["checkpoint <root>/d/g/s/long: total 1 saves in <n>s, 1 resumes in <n>s"]
+    assert len(sd.code_version()) == 16
+
+
 def test_the_build_inputs_checkpoint_round_trips(world, tmp_path):
     """`build -S`'s first step (`save_inputs`): table `pnew`, the new members and their history come back as saved, under
     `drill/<gen>/<scan>/<kinds>/inputs/`."""
@@ -741,7 +775,7 @@ def test_the_build_inputs_checkpoint_round_trips(world, tmp_path):
     assert history.num_rows > 0
     ck = sd.drill_checkpoint(str(tmp_path / "store"), "g1", "2026-08-04", ("long",), log=lambda *_: None)
     sd.save_inputs(con, ck, ["zebra"], history)
-    assert sorted(ck.store.listing(ck.prefix)) == [f"drill/g1/2026-08-04/long/inputs/{f}" for f in ("done.json", "nmh.parquet", "pnew.parquet")]
+    assert sorted(ck.store.listing(ck.prefix)) == ["drill/g1/2026-08-04/long/code.json"] + [f"drill/g1/2026-08-04/long/inputs/{f}" for f in ("done.json", "nmh.parquet", "pnew.parquet")]
     other = duckdb.connect()
     assert ck.load(other, "inputs") == {"new_members": ["zebra"]}
     assert other.execute("SELECT * FROM pnew ORDER BY ALL").fetchall() == [(2, "b1/x"), (3, "b2/zoo/zebra9.txt")]

@@ -26,7 +26,7 @@ from click import Choice, group, option
 
 from . import static_names as sn
 from . import static_roots as sr
-from .checkpoint import Checkpoint, Parts
+from .checkpoint import Checkpoint, code_version, Parts
 from .static_names import CODEC, OPEN, PREFIX, _batches, err, q
 from .static_profile import data_bucket
 from .resource_monitor import monitor_resources, resource_stage
@@ -1866,7 +1866,7 @@ def drill_checkpoint(root: str, gen: str, scan: str, kinds: tuple[str, ...], **k
     and short kinds' tasks each clear only their own)."""
     from .blobstore import store_url
 
-    return Checkpoint(store_url(root), f"drill/{gen}/{scan}/{'-'.join(kinds)}", **kw)
+    return Checkpoint(store_url(root), f"drill/{gen}/{scan}/{'-'.join(kinds)}", code=code_version(), **kw)
 
 
 def save_inputs(con, ck: Checkpoint, new_members: list[str], history: pa.Table | None) -> None:
