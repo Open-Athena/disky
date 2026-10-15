@@ -498,7 +498,7 @@ def execute_scan(
             run(command, env=source, check=True)
     with reporter.phase("path-index"):
         run([
-            "dt-cloud", "path-index", "-S", "-U", "-d", scan,
+            "dt-cloud", "path-index", "-U", "-d", scan,
             "-l", str(work / "listing/*/shard-*.parquet"),
             "-P", str(work / "index/path-index.parquet"), "-o", str(work / "snap"),
         ], check=True)
