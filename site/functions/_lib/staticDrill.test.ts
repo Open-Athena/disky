@@ -6,7 +6,7 @@ import { covers, drillSource, type Found, type HitSource, injectedStores, liveTo
 import { catalogAnswer, StaticCatalog } from './staticCatalog'
 import { FilterRejected, REJECT_MESSAGES } from './indexedOnly'
 import { type Blobs, type Hit, scanAt, StaticNames } from './staticNames'
-import { LINEAGES, sqliteD1 } from './testD1'
+import { sqliteD1 } from './testD1'
 import { type D1Variant, fixture, FILES, readJson, seedGeneration } from './testStore'
 import { buildDiff, buildView, type Diff, type DiffRow, NotFound, type View, type ViewNode } from './view'
 import { searchKey } from './search'
@@ -21,7 +21,7 @@ vi.mock('@rdub/file-tree/stores/s3', async () => ({ S3Store: (await import('./te
 // files, aliases; short members), checked against brute force from the objects (`expected.json`) — the
 // reader alone, then the map's views served from it (the static-filter fixture's store generations).
 
-describe.each(LINEAGES)('D1, %s lineage', lineage => {
+describe('D1', () => {
   const A = '2026-10-04'
   const B = '2026-10-05'
   const DATES = [A, B]
@@ -81,7 +81,7 @@ describe.each(LINEAGES)('D1, %s lineage', lineage => {
       filterFiles.set(k, b.buffer.slice(b.byteOffset, b.byteOffset + b.byteLength) as ArrayBuffer)
     }
     expected = await readJson<Expected>('static-drill/expected.json')
-    const { db, raw } = await sqliteD1(lineage)
+    const { db, raw } = await sqliteD1()
     for (const date of DATES) {
       const v = await readJson<Record<string, D1Variant>>(`static-filter/${date}/d1.json`)
       const files = {
