@@ -85,6 +85,29 @@ export function utcInstant(value: string): string {
   return canonical
 }
 
+const CUTOFF_ISO = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2})(?:\.(\d{3}))?)?Z$/
+const CUTOFF_COMPACT = /^(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})?Z$/
+
+/** An `at=` cutoff (a union view's instant, specs/federated-scans.md "Case 1 status"): an ISO UTC instant
+ *  (`2026-10-13T19:35Z`, `…:35:00Z`, `…:35:00.000Z`) or its compact form (`20261013T1935Z`, `20261013T193500Z`),
+ *  as its canonical ISO instant (`2026-10-13T19:35:00.000Z`). Null: neither form, or no such calendar time. */
+export function parseCutoff(value: string | null | undefined): string | null {
+  const m = value ? CUTOFF_ISO.exec(value) ?? CUTOFF_COMPACT.exec(value) : null
+  if (!m) return null
+  const [, y, mo, d, hh, mm, ss = '00', ms = '000'] = m
+  const iso = `${y}-${mo}-${d}T${hh}:${mm}:${ss}.${ms}Z`
+  const n = Date.parse(iso)
+  return Number.isFinite(n) && new Date(n).toISOString() === iso ? iso : null
+}
+
+/** A cutoff as the URL writes it: the compact form, to the minute (`20261013T1935Z`), seconds only when it has
+ *  them; an instant with milliseconds stays ISO (exact either way: `parseCutoff` reads both). */
+export function encodeCutoff(iso: string): string {
+  const m = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})\.(\d{3})Z$/.exec(iso)
+  if (!m || m[7] !== '000') return iso
+  return `${m[1]}${m[2]}${m[3]}T${m[4]}${m[5]}${m[6] === '00' ? '' : m[6]}Z`
+}
+
 function record(value: unknown): Record<string, unknown> {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('expected an object')
   return value as Record<string, unknown>
