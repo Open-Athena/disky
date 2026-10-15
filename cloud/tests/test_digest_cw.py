@@ -102,6 +102,21 @@ def test_qlabel_and_bucket_clause():
     )
 
 
+def test_bucket_path_site_root():
+    # a single-bucket store whose site serves the bucket at its root (hf.oa.dev: `open-athena` is `/`): `path: ""`
+    # links the bucket's clause to the root, not `/<bucket>`; `path` unset keeps `/<bucket>`
+    cfg = E.config_from_dict({"template": "cw", "site_url": SITE, "icons_base": "x", "primary": "org", "buckets": {
+        "org": {"label": "org", "path": "", "quota": {"bytes": "253 TB", "name": "253 TB", "short": "253T"}},
+    }})
+    assert cfg.buckets["org"] == E.Bucket("org", E.Quota(253 * 10**12, "253 TB", "253T"), path="")
+    assert D._bucket_clause("org", 14.3, "2026-10-16T0800", None, cfg) == (
+        f"[org]({SITE}/?d=2610160800#over-time): 6.2% of 253T (215.8 Ti free)"
+    )
+    with pytest.raises(ValueError) as e:
+        E.config_from_dict({"template": "cw", "buckets": {"b": {"path": 1}}})
+    assert str(e.value) == "digest config buckets.b.path: expected a string, got 1"
+
+
 def test_tail_zone_shared_quota():
     # `hot-data` and `side-data` share zone `z8`'s 100 TiB: one clause, the zone's free;
     # `more-data` (no config) and the primary keep their own clauses, in meta order

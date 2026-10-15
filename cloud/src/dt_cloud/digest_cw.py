@@ -84,9 +84,10 @@ def _diff_url(scan: str, since: dt.datetime | None, site_url: str, bucket: str =
 
 
 def _bucket_link(bucket: str, scan: str, since: dt.datetime | None, cfg: DigestConfig, slug: str | None = None) -> str:
-    """`[<label>](<over-time url>)` for one bucket."""
+    """`[<label>](<over-time url>)` for one bucket (at its site ``path``, default ``/<bucket>``)."""
     b = cfg.buckets.get(bucket)
-    return f"[{(b.label if b else None) or bucket}]({_diff_url(scan, since, cfg.site_url, bucket, slug)})"
+    path = bucket if b is None or b.path is None else b.path
+    return f"[{(b.label if b else None) or bucket}]({_diff_url(scan, since, cfg.site_url, path, slug)})"
 
 
 def _quota_clause(tb: float, q: Quota) -> str:
