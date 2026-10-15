@@ -19,7 +19,7 @@ from time import monotonic
 import pyarrow.parquet as pq
 
 from . import interval_read as ir
-from .static_names import q, read_json
+from .static_names import V2_OPTIONAL, q, read_json
 
 err = partial(print, file=sys.stderr, flush=True)
 
@@ -51,9 +51,14 @@ class Scan:
     def __init__(self, con, file: str, version: int, key: str = ""):
         self.con, self.file, self.v, self.key = con, file, version, key
         self.src = f"read_parquet({q(file)})"
-        if "usr" not in {r[0] for r in con.execute(f"DESCRIBE SELECT * FROM {self.src}").fetchall()}:
-            # A scan without the owner column (no owner axis) names no owner.
-            self.src = f"(SELECT *, NULL::VARCHAR AS usr FROM {self.src})"
+        have = {r[0] for r in con.execute(f"DESCRIBE SELECT * FROM {self.src}").fetchall()}
+        # Columns the scan lacks read as NULL, as the builder reads them (`static_names.V2_OPTIONAL`): no owner
+        # axis names no owner, and an absent storage-class pivot holds no bytes (cw's sorts carry only class 1).
+        missing = ["NULL::VARCHAR AS usr"] if "usr" not in have else []
+        if version == 2:
+            missing += [f"NULL::BIGINT AS {c}" for c in V2_OPTIONAL.values() if c not in have and c != "usr"]
+        if missing:
+            self.src = f"(SELECT *, {', '.join(missing)} FROM {self.src})"
 
     def _aggs(self, where: str, having: str = "") -> list[dict]:
         cur = self.con.execute(f"SELECT depth, path, {agg_sql(self.v)} FROM {self.src} WHERE {where} GROUP BY depth, path {having}")
