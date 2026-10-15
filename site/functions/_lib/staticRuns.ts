@@ -21,6 +21,7 @@ import { type CatalogIo, type CatalogMeta, type Member, StaticCatalog } from './
 import { type Blobs, cmp, FirstHits, type Io, type IndexCache, type GroupIndex, StaticNames } from './staticNames.js'
 import { type HexRule, ruleOf, sameRule } from './hexRuns.js'
 import { newestManifest } from './manifests.js'
+import { inFlight, type Req } from './shared.js'
 
 export interface RunInfo { key: string; first: string; last: string; level: number; scans: string[] }
 export interface Manifest { gen: string; date: string; base_scans?: number; scans: string[]; runs: RunInfo[] }
@@ -62,15 +63,18 @@ const message = (e: unknown): string => e instanceof Error ? e.message : String(
  *  The state is cut at the first tier that isn't: its scans and every later one's drop out (a caller's
  *  `scan-not-indexed`), the ones before it answer as before. A cut state is re-built after `brokenTtlMs` (not
  *  `ttlMs`), re-checking the broken tier, so a publish caught mid-write heals within that. */
-/** `Tiers.refreshMs`'s default: a refresh is a listing and a few small JSON reads. */
-export const REFRESH_MS = 15_000
-
 export class Tiers {
   private held = new Map<string, Tier>()
   private broken = new Map<string, Broken>()
+  /** The last good state (`ok`, built at `at`; `cut` at a broken tier), and the refresh in flight: shared across
+   *  requests as an owned, tracked entry (`shared.ts` `inFlight`), so a request that is gone (cancelled, or ended
+   *  with its read frozen) never holds the next one. `epoch`: bumped by `broke`, so a refresh started before it
+   *  neither is joined nor lands. */
+  private ok?: TierState
   private at = -Infinity
   private cut = false
-  private cur?: Promise<TierState>
+  private epoch = 0
+  private refreshing = new Map<string, Promise<TierState>>()
   constructor(
     readonly blobs: Blobs,
     readonly make: MakeTier,
@@ -78,9 +82,6 @@ export class Tiers {
     readonly now: () => number = () => Date.now(),
     readonly brokenTtlMs = 30_000,
     readonly log: (msg: string) => void = msg => console.error(msg),
-    /** How long a refresh may take before the last good state answers instead (a cold isolate's: an error), so a
-     *  read that never settles (an R2 request hung) can't hold every caller of this isolate for `ttlMs`. */
-    readonly refreshMs = REFRESH_MS,
   ) {}
 
   private tier(dir: string | null): Tier {
@@ -106,18 +107,20 @@ export class Tiers {
   /** A read of tier `dir`'s files failed: the next `state()` is cut at it. */
   broke(dir: string | null, error: unknown): void {
     this.mark(dir, error)
-    this.cur = undefined
+    this.ok = undefined
     this.at = -Infinity
+    this.epoch++
+    this.refreshing.clear()
   }
 
   /** Whether `x` is usable at `t`: not broken within `brokenTtlMs`, and its `catalog/meta.json` loads (held once
    *  loaded, so a healthy tier costs nothing past its first state). */
-  private async usable(x: Tier, t: number): Promise<boolean> {
+  private async usable(x: Tier, t: number, req?: Req): Promise<boolean> {
     const k = x.dir ?? ''
     const b = this.broken.get(k)
     if (b && t - b.at < this.brokenTtlMs) return false
     try {
-      await x.catalog.info()
+      await x.catalog.info(req)
       this.broken.delete(k)
       return true
     } catch (e) {
@@ -126,25 +129,37 @@ export class Tiers {
     }
   }
 
-  state(): Promise<TierState> {
+  /** The current state, refreshed once it is `ttlMs` old (`brokenTtlMs` when cut). A refresh another request has in
+   *  flight is joined; a failed one is the caller's error, and the next call refreshes again. `req`: the request
+   *  asking (`reqOf(env)`). */
+  async state(req?: Req): Promise<TierState> {
     const t = this.now()
-    if (this.cur && t - this.at < (this.cut ? Math.min(this.ttlMs, this.brokenTtlMs) : this.ttlMs)) return this.cur
-    const prev = this.cur
-    this.at = t
-    const p = (async (): Promise<TierState> => {
+    if (this.ok && t - this.at < (this.cut ? Math.min(this.ttlMs, this.brokenTtlMs) : this.ttlMs)) return this.ok
+    const epoch = this.epoch
+    return inFlight(this.refreshing, 'state', async () => {
+      const { st, cut } = await this.load(t, req)
+      if (this.epoch === epoch) { this.ok = st; this.at = t; this.cut = cut }
+      return st
+    }, { name: 'static-tiers', req })
+  }
+
+  /** The state as of `t`: the newest manifest's tiers, cut at the first unusable one (`cut`). */
+  private async load(t: number, req?: Req): Promise<{ st: TierState; cut: boolean }> {
+    let cut = false
+    const st = await (async (): Promise<TierState> => {
       const manifest = await latestManifest(this.blobs)
       const all = [this.tier(null), ...(manifest?.runs ?? []).map(r => this.tier(r.key))]
-      const ok = await Promise.all(all.map(x => this.usable(x, t)))
+      const ok = await Promise.all(all.map(x => this.usable(x, t, req)))
       // Every tier answers under the base's hex-run rule (its `catalog/meta.json` `hex_runs`): a run recording
       // another is broken (cut there), never mixed in.
-      const hexRuns = ok[0] ? ruleOf((await all[0].catalog.info()).hex_runs) : null
+      const hexRuns = ok[0] ? ruleOf((await all[0].catalog.info(req)).hex_runs) : null
       for (let i = 1; i < all.length; i++) {
         if (!ok[i]) continue
-        const r = ruleOf((await all[i].catalog.info()).hex_runs)
+        const r = ruleOf((await all[i].catalog.info(req)).hex_runs)
         if (!sameRule(r, hexRuns)) { this.mark(all[i].dir, new Error(`static tiers: ${all[i].dir}/catalog/meta.json hex_runs ${JSON.stringify(r)} disagrees with the base's ${JSON.stringify(hexRuns)}`)); ok[i] = false }
       }
       const n = ok.indexOf(false)
-      this.cut = n >= 0
+      cut = n >= 0
       if (n === 0) return { version: 'none', scans: [], tiers: [], manifest, broken: this.broken.get(''), hexRuns: null }
       if (!manifest) {
         try {
@@ -152,7 +167,7 @@ export class Tiers {
           return { version: 'base', scans: doc.scans.map(s => s.id).sort(), tiers: all, manifest: null, dirOnly: dirOnlyScans(doc), hexRuns }
         } catch (e) {
           this.mark(null, e)
-          this.cut = true
+          cut = true
           return { version: 'none', scans: [], tiers: [], manifest: null, broken: this.broken.get(''), hexRuns: null }
         }
       }
@@ -172,29 +187,15 @@ export class Tiers {
         dirOnly,
       }
     })()
-    // Bounded: past `refreshMs` the last good state answers (warm; the next refresh is a TTL on, as after any
-    // refresh) or the call fails (cold; the next call retries); a refresh that does settle later replaces it.
-    let timer: ReturnType<typeof setTimeout> | undefined
-    const bound = new Promise<TierState>((resolve, reject) => {
-      timer = setTimeout(() => {
-        if (prev) { this.log(`static tiers: a refresh took over ${this.refreshMs} ms; serving the last good state`); resolve(prev) }
-        else reject(new Error(`static tiers: a refresh took over ${this.refreshMs} ms, with no state yet`))
-      }, this.refreshMs)
-    })
-    const q = Promise.race([p, bound])
-    this.cur = q
-    p.then(() => { clearTimeout(timer!); if (this.cur === q) this.cur = p }, () => clearTimeout(timer!))
-    // A failed (or, cold, timed-out) refresh keeps serving the last good state, and the next call retries.
-    q.catch(() => { if (this.cur === q) { this.cur = prev; this.at = -Infinity } })
-    return q
+    return { st, cut }
   }
 
   /** `f` over every usable tier of the current state. A tier whose read fails is `broke`n and `f` re-run over the
    *  re-cut stack (the lowest failing tier first), so the result is always a whole stack's: `state` is the one
    *  it was read over (its `scans` the ones the result is exact on). */
-  async each<T>(f: (t: Tier, state: TierState) => Promise<T>): Promise<{ state: TierState; got: T[] }> {
+  async each<T>(f: (t: Tier, state: TierState) => Promise<T>, req?: Req): Promise<{ state: TierState; got: T[] }> {
     for (let tries = 0; ; tries++) {
-      const state = await this.state()
+      const state = await this.state(req)
       const got = await Promise.allSettled(state.tiers.map(t => f(t, state)))
       const bad = got.findIndex(g => g.status === 'rejected')
       if (bad < 0) return { state, got: got.map(g => (g as PromiseFulfilledResult<T>).value) }
@@ -248,16 +249,17 @@ const noIo = (): Io => ({ shard: null, groups: 0, bytes: 0, rows_read: 0, rows_m
 export class TieredNames {
   constructor(readonly tiers: Tiers) {}
 
-  async version(): Promise<string> { return (await this.tiers.state()).version }
+  /** Every method's `req`: the request asking (`reqOf(env)`; `shared.ts`). */
+  async version(req?: Req): Promise<string> { return (await this.tiers.state(req)).version }
   /** The generation's hex-run rule (the base's; every usable tier agrees), null = the full index. */
-  async hexRuns(): Promise<HexRule | null> { return (await this.tiers.state()).hexRuns }
+  async hexRuns(req?: Req): Promise<HexRule | null> { return (await this.tiers.state(req)).hexRuns }
   /** The current stack: its version and the scans it covers. */
-  async snapshot(): Promise<{ version: string; scans: string[] }> { const { version, scans } = await this.tiers.state(); return { version, scans } }
+  async snapshot(req?: Req): Promise<{ version: string; scans: string[] }> { const { version, scans } = await this.tiers.state(req); return { version, scans } }
 
   /** The base light-read allowance plus each run's actual boundary groups, capped at twice the base allowance.
    *  A non-member's matching rows fit V, but each tier can add two groups of nonmatching boundary rows. */
-  async defaultMaxRows(key: string, baseMaxRows: number): Promise<number> {
-    const { got } = await this.tiers.each(t => t.names.extent(key, noIo()))
+  async defaultMaxRows(key: string, baseMaxRows: number, req?: Req): Promise<number> {
+    const { got } = await this.tiers.each(t => t.names.extent(key, noIo(), req), req)
     const extra = got.slice(1).reduce((sum, e) => sum + (e && e.b > e.a
       ? e.idx.rows[e.a] + (e.b - e.a > 1 ? e.idx.rows[e.b - 1] : 0) : 0), 0)
     return Math.min(baseMaxRows * 2, baseMaxRows + extra)
@@ -265,8 +267,8 @@ export class TieredNames {
 
   /** Σ over tiers of the rows `key`'s range spans (row-group granular): an upper bound on rows read, and since
    *  a range's rows only grow and close records only add, ≤ V still proves `key` is no catalog member. */
-  async extent(key: string, io: Io): Promise<{ rows: number; scans: string[] } | null> {
-    const { state, got } = await this.tiers.each(async t => { const x = noIo(); return { x, e: await t.names.extent(key, x) } })
+  async extent(key: string, io: Io, req?: Req): Promise<{ rows: number; scans: string[] } | null> {
+    const { state, got } = await this.tiers.each(async t => { const x = noIo(); return { x, e: await t.names.extent(key, x, req) } }, req)
     const exts = got.map(g => g.e)
     Object.assign(io, { shard: got[0]?.x.shard ?? null, index: got[0]?.x.index ?? 'none', tiers: state.tiers.length })
     if (exts.every(e => e == null)) return null
@@ -275,19 +277,19 @@ export class TieredNames {
   }
 
   /** `key`'s first hits over every tier; `maxRows` refuses (null) when the tiers' summed extent is above it. */
-  async read(key: string, maxRows = Infinity): Promise<{ io: Io; fold: FirstHits | null; version: string; scans: string[] }> {
+  async read(key: string, maxRows = Infinity, { req }: { req?: Req } = {}): Promise<{ io: Io; fold: FirstHits | null; version: string; scans: string[] }> {
     if (maxRows !== Infinity) {
       const probe = noIo()
-      const ext = await this.extent(key, probe)
-      if (ext && ext.rows > maxRows) { const { version, scans } = await this.tiers.state(); return { io: { ...probe, rows_read: ext.rows }, fold: null, version, scans } }
+      const ext = await this.extent(key, probe, req)
+      if (ext && ext.rows > maxRows) { const { version, scans } = await this.tiers.state(req); return { io: { ...probe, rows_read: ext.rows }, fold: null, version, scans } }
     }
-    const { state, got } = await this.tiers.each((t, st) => t.names.read(key, Infinity, { rule: st.hexRuns }))
+    const { state, got } = await this.tiers.each((t, st) => t.names.read(key, Infinity, { rule: st.hexRuns, req }), req)
     const io = got.length ? sumIo(got.map(g => g.io)) : { ...noIo(), tiers: 0 }
     return { io, fold: combineFolds(key, got.map(g => g.fold!), state.hexRuns), version: state.version, scans: state.scans }
   }
 
-  async answer(key: string, dates: string[], maxRows = Infinity) {
-    const { io, fold, scans } = await this.read(key, maxRows)
+  async answer(key: string, dates: string[], maxRows = Infinity, req?: Req) {
+    const { io, fold, scans } = await this.read(key, maxRows, { req })
     return { io, answer: fold ? fold.answer(dates) : null, scans }
   }
 }
@@ -297,11 +299,11 @@ export class TieredNames {
 export class TieredCatalog {
   constructor(readonly tiers: Tiers) {}
 
-  /** The base's `meta.json` (V is the generation's). */
-  info(): Promise<CatalogMeta> { return this.tiers.base().catalog.info() }
+  /** The base's `meta.json` (V is the generation's). `req`: the request asking (`reqOf(env)`; `shared.ts`). */
+  info(req?: Req): Promise<CatalogMeta> { return this.tiers.base().catalog.info(req) }
 
-  async lookup(q: string): Promise<{ io: CatalogIo; member: Member | null; scans: string[] }> {
-    const { state, got } = await this.tiers.each(t => t.catalog.lookup(q, { partial: true }))
+  async lookup(q: string, { req }: { req?: Req } = {}): Promise<{ io: CatalogIo; member: Member | null; scans: string[] }> {
+    const { state, got } = await this.tiers.each(t => t.catalog.lookup(q, { partial: true, req }), req)
     const { tiers, scans } = state
     if (!got.length) return { io: { groups: 0, bytes: 0, rows_read: 0, index: 'isolate' }, member: null, scans }
     const io: CatalogIo = { ...got[0].io }
@@ -326,12 +328,10 @@ export function tiers(blobs: Blobs, opts: {
   /** A cut state's lifetime (`Tiers`). */
   brokenTtlMs?: number
   log?: (msg: string) => void
-  /** How long a refresh may take (`Tiers.refreshMs`). */
-  refreshMs?: number
-} = {}): { tiers: Tiers; names: TieredNames; catalog: TieredCatalog; scans: () => Promise<string[]>; dirOnly: () => Promise<string[]> } {
+} = {}): { tiers: Tiers; names: TieredNames; catalog: TieredCatalog; scans: (req?: Req) => Promise<string[]>; dirOnly: (req?: Req) => Promise<string[]> } {
   const t = new Tiers(blobs, (b, dir) => ({
     names: new StaticNames(b, opts.indexCache?.(dir), opts.clock),
     catalog: new StaticCatalog(b, opts.catalogCache?.(dir)),
-  }), opts.ttlMs, opts.now, opts.brokenTtlMs, opts.log, opts.refreshMs)
-  return { tiers: t, names: new TieredNames(t), catalog: new TieredCatalog(t), scans: async () => (await t.state()).scans, dirOnly: async () => (await t.state()).dirOnly ?? [] }
+  }), opts.ttlMs, opts.now, opts.brokenTtlMs, opts.log)
+  return { tiers: t, names: new TieredNames(t), catalog: new TieredCatalog(t), scans: async req => (await t.state(req)).scans, dirOnly: async req => (await t.state(req)).dirOnly ?? [] }
 }

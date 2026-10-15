@@ -5,6 +5,7 @@ import { covers, drillSource, fromDrill } from './staticFilter'
 import { type Blobs, type Hit } from './staticNames'
 import { tiers } from './staticRuns'
 import { fixture, readJson } from './testStore'
+import { abandoned, BOUND, hangFirst } from './testHang'
 
 // The drilldown's runs (`staticDrill.ts` over base ⊕ runs) on `fixtures/static-drill-runs/` (`gen.py`): a base
 // generation's `drill/` over three scans and two runs' `deltas/<scan>/drill/` on one day (`2026-08-04T0600`,
@@ -265,6 +266,18 @@ describe('a broken drill tier: cut there, the scans before it answer exactly, ne
     const rows = THROUGH_RUN1().map(d => { const r = rollupTotal(found!.rollup!, d); return [d, [r.b, r.o]] })
     expect([found!.io.source, found!.scans, rows]).toEqual(['catalog', THROUGH_RUN1(), THROUGH_RUN1().map(d => [d, total(brute(t, '', d))])])
     expect(logged.map(m => m.split(' is broken')[0])).toEqual([`static tiers: ${RUN2}`])
+  })
+})
+
+describe('a refresh abandoned by its request (its I/O frozen) is never awaited by the next one (`shared.ts`)', () => {
+  it.each(['cancel', 'end'] as const)('request A\'s drill state hangs on `meta.json` and A %ss: request B builds its own', async how => {
+    const fresh = await wired().state()
+    const blobs = hangFirst(blobsOf(), (method, key) => method === 'json' && key === 'drill/meta.json')
+    const t = tiers(blobs)
+    const drill = new Drill(blobs, t.catalog, { runs: async req => (await t.tiers.state(req)).tiers.flatMap(x => x.dir ? [x.dir] : []) })
+    const got = await abandoned(req => drill.state(req).then(s => [s.version, s.scans]), blobs.hung, how, how === 'cancel' ? BOUND / 2 : 5 * BOUND)
+    expect(got).toEqual([fresh.version, fresh.scans])
+    expect(fresh.version).toBe(RUN2)
   })
 })
 
