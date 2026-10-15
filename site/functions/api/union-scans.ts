@@ -14,10 +14,20 @@
  * (`openUnion`).
  */
 import { type Ctx, json, requireViewer } from '../_lib/auth.js'
-import { withStore } from '../_lib/stores.js'
+import { excludedFromFunctions } from '../_lib/routes.js'
+import { type UnionView, withStore } from '../_lib/stores.js'
 import { openUnion, unionFor } from '../_lib/union.js'
 
 const HEADERS = { 'cache-control': 'private, max-age=60' }
+
+/** A view's config problems short of an error: an icon site path the Functions would answer (not excluded by
+ *  `public/_routes.json`: the catch-all serves the SPA's `index.html` there, and the mark silently falls back to
+ *  its label). An `http(s)://` icon is the deployment's own business. */
+export function iconWarnings(view: UnionView): string[] {
+  return Object.entries(view.sources).flatMap(([m, s]) => (s.icon?.startsWith('/') && !excludedFromFunctions(s.icon)
+    ? [`STORES_JSON.${view.key}.sources.${m}.icon '${s.icon}': not excluded from the Functions (public/_routes.json), so it is served the SPA's index.html; put it under /icons/`]
+    : []))
+}
 
 export const onRequestGet = async (ctx0: Ctx): Promise<Response> => {
   const view = unionFor(ctx0.request, ctx0.env)
@@ -41,5 +51,7 @@ export const onRequestGet = async (ctx0: Ctx): Promise<Response> => {
         .map(o => ({ id: o.id, at: o.observed_through, ...(!o.id.includes('T') && o.observed_through === `${o.id}T00:00:00.000Z` ? { day: true } : {}) })),
     }
   })
-  return json({ union: { view: view.key, sources } }, 200, HEADERS)
+  const warnings = iconWarnings(view)
+  for (const w of warnings) console.warn(`union-scans: ${w}`)
+  return json({ union: { view: view.key, sources, ...(warnings.length ? { warnings } : {}) } }, 200, HEADERS)
 }

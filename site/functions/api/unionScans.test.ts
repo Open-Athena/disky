@@ -34,6 +34,15 @@ describe.each(LINEAGES)('D1, %s lineage', lineage => {
     })
   })
 
+  it('an icon site path the Functions would answer (not under `/icons/`, `_routes.json`) is warned of; a URL is not', async () => {
+    const views = { all: { union: ['primary', 'meta'], main: true, sources: { primary: { icon: 'https://example.com/p.png' }, meta: { icon: '/meta.svg' } } } }
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const r = await get('', views)
+    const w = "STORES_JSON.all.sources.meta.icon '/meta.svg': not excluded from the Functions (public/_routes.json), so it is served the SPA's index.html; put it under /icons/"
+    expect([r.status, (r.body as { union: { warnings?: string[] } }).union.warnings, warn.mock.calls]).toEqual([200, [w], [[`union-scans: ${w}`]]])
+    warn.mockRestore()
+  })
+
   it('a store (or a deployment without a view) reads one store: no union', async () => {
     expect([await get('store=primary'), await get('store=meta'), await get('', {})]).toEqual([
       { status: 200, body: { union: null } },
