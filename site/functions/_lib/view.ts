@@ -207,6 +207,8 @@ export interface View {
   /** With `query`: the scan lists folders only (a v1 index, `DIRS_ONLY`): the matches are its folder-name
    *  matches, exact as such; a file name is never matched there. */
   dirsOnly?: true
+  /** With `q=`: the search stopped at its time budget (`Coverage.searchLate`): kept briefly, recomputed. */
+  searchLate?: true
 }
 
 /** Whether a filtered read may be missing matches, and why (the response's
@@ -218,6 +220,9 @@ export interface Coverage {
   /** The scan is a dir-only (v1) one (`staticRuns.ts` `dirOnlyScans`): its matches are its folders' names
    *  only — exact as such, but never the literal's whole answer. */
   dirsOnly?: string[]
+  /** A search stopped at its time budget (`SearchFound.timedOut`): unlike a read budget's cut, a run with more
+   *  time may answer more — so the answer is kept briefly and recomputed (`keepFor`). */
+  searchLate?: true
 }
 export const APPROX_NO_INDEX = 'this scan has no search index; small matches may be missing'
 export const APPROX_V1_TOO_BIG = 'this scan has no search index and this view is too big to scan; small matches may be missing'
@@ -227,16 +232,17 @@ export const APPROX_EXCL_NO_INDEX = 'this scan has no search index; small exclus
 export const DIRS_ONLY = 'this scan lists folders only — files aren’t searchable on it'
 export const APPROX_EXCL_UNINDEXED = 'this query’s exclusions can’t use the search index; small ones may be missed'
 /** Add a reason (once) to a coverage flag. */
-export function noteCoverage(cov: Coverage, flag: keyof Coverage, why: string | undefined): void {
+export function noteCoverage(cov: Coverage, flag: 'partial' | 'approximate' | 'dirsOnly', why: string | undefined): void {
   if (!why) return
   const have = (cov[flag] ??= [])
   if (!have.includes(why)) have.push(why)
 }
 /** A coverage as response fields. */
-export const coverageFields = (c: Coverage): Pick<View, 'partial' | 'partialReason' | 'approximate' | 'approximateReason' | 'dirsOnly'> => ({
+export const coverageFields = (c: Coverage): Pick<View, 'partial' | 'partialReason' | 'approximate' | 'approximateReason' | 'dirsOnly' | 'searchLate'> => ({
   ...(c.partial ? { partial: true as const, partialReason: c.partial.join(' · ') } : {}),
   ...(c.approximate ? { approximate: true as const, approximateReason: c.approximate.join(' · ') } : {}),
   ...(c.dirsOnly ? { dirsOnly: true as const } : {}),
+  ...(c.searchLate ? { searchLate: true as const } : {}),
 })
 
 export class NotFound extends Error {}
@@ -963,6 +969,7 @@ async function readView(env: Env, o: ViewOpts, cov: Coverage = {}): Promise<Read
       const plan = !shits && !sb && store && pq ? planPositive(pq) : null
       const searched = plan ? await searchRoots(perScan(env), searchIdx!, query, plan, path, o.searchLimits, `pos:${JSON.stringify(pq)}`) : null
       if (searched) traceSearch('pos', searched)
+      if (searched?.timedOut) cov.searchLate = true
       // A search cut before it found anything (its heaviest name alone is
       // over budget) says nothing: the thresholded read below answers instead.
       const found = searched && (searched.roots.length || !searched.truncated) ? searched : null
@@ -1045,6 +1052,7 @@ async function readView(env: Env, o: ViewOpts, cov: Coverage = {}): Promise<Read
       if (ns) {
         traceSearch('neg', ns)
         if (ns.truncated) searchCut = true
+        if (ns.timedOut) cov.searchLate = true
         noteCoverage(cov, 'partial', ns.reason && `exclusions: ${ns.reason}`)
         const an = aggregate(ns.rows)
         for (const e of ns.roots) if (rootFor(e) !== null) exclude(e, scoped(e, an.all.get(e)!, an.mine.get(e)!))
@@ -1814,8 +1822,9 @@ async function readRootAllRows(env: Env, date: string, path: string, dP: number)
 /** Bumped when a filtered view's answer changes for the same inputs (the subtree and diff cache keys carry
  *  it with `q=`): 2 — phase 2 bounded (subdivision area, levels, read and time budgets), the tile budget;
  *  3 — a view the query matches draws its subtree again; 4 — `depth=N` caps phase 2 at dP + N;
- *  5 — level-capped interiors from the `path` sort; 6 — `\^`, `\$`, `\\` escapes in a `simple` term (`q=` is keyed raw). */
-export const FILTER_VIEW_V = 6
+ *  5 — level-capped interiors from the `path` sort; 6 — `\^`, `\$`, `\\` escapes in a `simple` term (`q=` is keyed raw); 7 — a search cut by its time
+ *  budget is kept briefly and upgraded (`Coverage.searchLate`), where 6 kept it whole. */
+export const FILTER_VIEW_V = 7
 
 /** A filter view's phase 2 (the insides of its match roots) subdivides a root only when its tile is at
  *  least this many px² — room for a title and a few legible cells; a smaller root is one exact tile. */
@@ -2093,6 +2102,8 @@ export interface Diff {
   approximateReason?: string
   /** With `q=`: either side is a dir-only scan (`View.dirsOnly`; both are, or the diff is refused). */
   dirsOnly?: true
+  /** With `q=`: the search stopped at its time budget (`Coverage.searchLate`): kept briefly, recomputed. */
+  searchLate?: true
 }
 
 const LOOKUP_CAP = 240
@@ -2107,6 +2118,12 @@ function sumInteriors(a?: View['interiors'], b?: View['interiors']): NonNullable
   const late = xs.reduce((n, x) => n + (x.late ?? 0), 0)
   return { read: xs.reduce((n, x) => n + x.read, 0), skipped: xs.reduce((n, x) => n + x.skipped, 0), reason: [...new Set(xs.map(x => x.reason))].join(' · '), ...(late ? { late } : {}) }
 }
+
+/** Whether a side's scan lists objects (a store generation) or only directories (a v1 index). Per-scan, its handle
+ *  says; on the interval store every scan reads one store sort, so its rows say: a version from a v1 scan has no
+ *  structural counts (`n_children` / `n_desc` -1 in the store, null as a `Row`), a store generation's always do — the
+ *  same test a view's `(other)` count makes (`f`). */
+const listsObjects = (v: Read): boolean => isStore(v.idx) && (v.idx.asOf == null || v.rootAll.nd != null)
 
 /** What changed under P between two scans (specs/done/view-serving.md §2):
  * both sides are read from their index tiers at ONE absolute byte floor —
@@ -2196,7 +2213,7 @@ export async function buildDiff(env0: Env, o: DiffOpts): Promise<Diff> {
   // One side a v1 generation (dirs only), the other a store (objects too):
   // the objects have no counterpart to be compared with, so they fold into
   // `(other)` on the store side rather than reading as added / removed.
-  if (va && vb && isStore(va.idx) !== isStore(vb.idx)) {
+  if (va && vb && listsObjects(va) !== listsObjects(vb)) {
     for (const v of [va, vb]) for (const [p, a] of v.kept) if (a.kind === 'file') v.kept.delete(p)
   }
   const walkStart = performance.now()
