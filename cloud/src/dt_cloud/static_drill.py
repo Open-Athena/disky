@@ -1510,10 +1510,12 @@ def _count(con, table: str) -> int:
 
 
 def build_drill(con, out: Path, *, long_roots: str, short_roots: str, aliases: pa.Table, R: int, K: int, meta: dict | None = None,
-                step=None) -> dict:
+                rollups: dict[str, str] | None = None, step=None) -> dict:
     """A tier holding every root: tables `long_roots` (canonical members only) and `short_roots` (`ROOT_COLS`) → `out`
     (`static_roots.build_roots` per kind, its rows written as `write_kind` writes them), with `aliases` and `meta.json`.
-    `step(name, t, **counts)` (optional) reports each kind's rollup and write (`drill/rollup/<kind>`, `drill/write/<kind>`)."""
+    `rollups` `{kind: table}` (`ROLLUP_COLS`): a kind's rollup cells already cut (by `q` range, as `static_local`'s
+    chunked build does), written as they are. `step(name, t, **counts)` (optional) reports each kind's rollup and write
+    (`drill/rollup/<kind>`, `drill/write/<kind>`)."""
     out.mkdir(parents=True, exist_ok=True)
     doc = {**base_meta(R, K), **(meta or {})}
     con.register("al_in", aliases)
@@ -1522,6 +1524,11 @@ def build_drill(con, out: Path, *, long_roots: str, short_roots: str, aliases: p
     write_aliases(con, out)
     t = monotonic()
     for kind, table in (("long", long_roots), ("short", short_roots)):
+        if rollups and kind in rollups:
+            doc.update(write_kind(con, out, kind, roots=table, rollups=rollups[kind]))
+            if step:
+                t = step(f"drill/write/{kind}", t)
+            continue
         con.execute(f"CREATE OR REPLACE TABLE dr AS SELECT * FROM {table}")
         con.execute(f"CREATE OR REPLACE TABLE rup AS {sr.rollup_sql(con, 'dr', R, K)}")
         if step:
