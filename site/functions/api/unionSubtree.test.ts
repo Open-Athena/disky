@@ -54,13 +54,15 @@ describe.each(LINEAGES)('D1, %s lineage', lineage => {
       tree: {
         n: 'Fleet', k: 'dir', b: total, o: p.tree.o + m.tree.o,
         c: [
-          ...top(p.tree).map(c => ({ ...c, src: 'primary', at: A })),
-          ...top(m.tree).map(c => ({ ...c, src: 'meta', at: A })),
+          ...top(p.tree).filter(c => c.n !== '(other)').map(c => ({ ...c, src: 'primary', at: A })),
+          ...top(m.tree).filter(c => c.n !== '(other)').map(c => ({ ...c, src: 'meta', at: A })),
+          { n: 'zz', b: 30, o: 2, src: 'primary', at: A },
         ].sort((x, y) => y.b - x.b),
       },
     })
-    // `zz` (30 bytes) is under the union's threshold: not drawn, as a single store leaves it (the totals count it).
-    expect(top(u.tree).map(c => [c.n, c.src])).toEqual([['bk', 'primary'], ['mb', 'meta']])
+    // `zz` (30 bytes) is under the union's threshold: the treemap's read folds it, but the root lists every
+    // store's every root (its bucket table), so it is out of the fold, with no `(other)` left.
+    expect(top(u.tree).map(c => [c.n, c.src, c.b])).toEqual([['bk', 'primary', 29339201], ['mb', 'meta', 6291556], ['zz', 'primary', 30]])
   })
 
   it('`store=<view>` names the view whether or not it is main; `store=primary` is the primary alone', async () => {
@@ -99,7 +101,7 @@ describe.each(LINEAGES)('D1, %s lineage', lineage => {
     expect([u.union, u.tree.b, top(u.tree).map(n => [n.n, n.src, n.at])]).toEqual([
       { view: 'all', at: '2026-09-30T00:01:00.000Z', sources: [{ store: 'primary', date: Z }, { store: 'meta', date: null }] },
       p.tree.b,
-      [['bk', 'primary', Z]],
+      [['bk', 'primary', Z], ['zz', 'primary', Z]],
     ])
     expect(await get(`date=${Z}&path=mb`)).toEqual({ status: 404, text: 'path not found' })
   })

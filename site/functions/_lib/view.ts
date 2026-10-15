@@ -492,15 +492,16 @@ const floorOf = (h: IndexHandle): number | null => h.floor
 /** The store root's depth-1 rows (one per bucket) in a scan — `/api/series
  * ?split=roots` (specs/done/root-geneses.md §1); null = the scan has no tier. The
  * same one range read `readRootAgg` sums for the unscoped root. */
-export async function readRootRows(env: Env, date: string): Promise<{ path: string; b: number; o: number }[] | null> {
+export async function readRootRows(env: Env, date: string): Promise<{ path: string; b: number; o: number; m: number | null; k: 'file' | 'dir' }[] | null> {
   const top = await tryOpen(env, date, `coarse${COARSE_EXPS[0]}`)
   const rows = top ? await readRows(top, 1, 1, '', '￿') : []
   const src = rows.length ? rows : await (async () => { const fine = await tryOpen(env, date, 'path'); return fine ? readRows(fine, 1, 1, '', '￿') : null })()
   if (src == null) return null
-  const by = new Map<string, { path: string; b: number; o: number }>()
+  const by = new Map<string, { path: string; b: number; o: number; m: number | null; k: 'file' | 'dir' }>()
   for (const r of src) {
-    const a = by.get(r.path) ?? { path: r.path, b: 0, o: 0 }
+    const a = by.get(r.path) ?? { path: r.path, b: 0, o: 0, m: null, k: r.kind }
     a.b += r.size; a.o += r.n_files
+    if (r.mtime != null && (a.m == null || r.mtime > a.m)) a.m = r.mtime
     by.set(r.path, a)
   }
   return [...by.values()]

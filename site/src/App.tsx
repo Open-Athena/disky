@@ -46,6 +46,9 @@ import { type BlindPanel, blindNote, blindShown } from './filterBlind'
 import { LoadFailure, mapSlot } from './LoadFailure'
 import { REJECT_MESSAGES, rejectQuery } from '../functions/_lib/indexedOnly'
 import { FilterFlags, FilterNote, matchedNote } from './FilterNote'
+import { UnionScanPicker } from './UnionScanPicker'
+import { UnionRefusals } from './UnionNotes'
+import { marksOf, UnionMarks, useUnionSources, type UnionVector } from './unionSources'
 import { BulkBar } from './BulkBar'
 import { setCurrentScan, useMyUserState, useOwnerIndex, useOwners } from './owners'
 import { ledgerRevOf, ownerScope, ownerScopeReady, pageLedgerKey, scopeKeyOf } from './viewScope'
@@ -145,6 +148,9 @@ function AppContent() {
   const store = useStore()
   const time = listingTime(store.scheme)
   const sfetch = useStoreFetch()
+  // A union view (`STORES_JSON` `union`): its members' scans drive the picker, their marks the map's provenance.
+  const union = useUnionSources(store)
+  const unionMarks = useMemo(() => marksOf(union), [union])
   // Legacy `?path=<prefix>` links (cw-s3 drilled by query param until the
   // union): forward to the URL-path form, keeping the other params.
   useEffect(() => {
@@ -421,7 +427,7 @@ function AppContent() {
           { credentials: 'include', signal },
         ))
         if (!r.ok) { pf.fail(); throw apiError(r.status, await r.text()) }
-        const j = await r.json() as MatchFields & { tree: TreeNode; tier?: string; matches?: string[]; threshold?: number; partialReason?: string; approximateReason?: string; hexRuns?: { min: number; tail: number }; budgetCut?: true }
+        const j = await r.json() as MatchFields & { tree: TreeNode; tier?: string; matches?: string[]; threshold?: number; partialReason?: string; approximateReason?: string; hexRuns?: { min: number; tail: number }; budgetCut?: true; union?: UnionVector }
         pf.decoded()
         return j
       },
@@ -452,7 +458,7 @@ function AppContent() {
           { credentials: 'include', signal },
         ))
         if (!r.ok) { pf.fail(); throw new Error(`${r.status}`) }
-        const j = await r.json() as MatchFields & { tree: TreeNode; tier?: string; partialReason?: string; approximateReason?: string; hexRuns?: { min: number; tail: number } }
+        const j = await r.json() as MatchFields & { tree: TreeNode; tier?: string; partialReason?: string; approximateReason?: string; hexRuns?: { min: number; tail: number }; union?: UnionVector }
         pf.decoded()
         return j
       },
@@ -1149,6 +1155,7 @@ function AppContent() {
   )
 
   return (
+    <UnionMarks.Provider value={unionMarks}>
     <main>
       {typedOpen && <TypedPrefixModal idx={ownerIdx} onClose={() => setTypedOpen(false)} />}
       {/* The page scope, all of it, in the sticky bar — the same bar at the
@@ -1159,7 +1166,10 @@ function AppContent() {
       <SiteNav menu={menu} crumbs={crumbs}>
         {asof && scans.length > 1 && (
           <span className="tb-scan">
-            <ScanCombobox value={asof} scans={scans} onChange={setDP} label="Scan date" fmt={fmtS} />
+            {union
+              ? <UnionScanPicker sources={union.sources} value={asof} scans={scans} onChange={setDP} label="Scan date" compact
+                  fallback={<ScanCombobox value={asof} scans={scans} onChange={setDP} label="Scan date" fmt={fmtS} />} />
+              : <ScanCombobox value={asof} scans={scans} onChange={setDP} label="Scan date" fmt={fmtS} />}
           </span>
         )}
         {/* How fresh the page's scan is, at a glance (the picker shows only
@@ -1231,6 +1241,7 @@ function AppContent() {
               ? <QueryHelpTip syntaxes={[INDEXED_SYNTAX]} active={INDEXED_SYNTAX} />
               : <QueryHelpTip syntaxes={SYNTAXES} active={syntax} onPick={id => setQsP(id === storeSyntax.id ? undefined : id)} />}
             <FilterNote error={fErr} matched={fq && fHere ? matchedNote(fHere.b, !!graftPath, fmtBytes) : null} coverage={fCoverage}>
+              {fq && !fErr && <UnionRefusals union={(subtreeQs[0]?.data ?? coarseQs[0]?.data)?.union} />}
               <Explain text="Clear the path filter"><button type="button" onClick={() => { setFqDraft(null); setFq(undefined) }}>✕</button></Explain>
             </FilterNote>
           </span>
@@ -1453,7 +1464,10 @@ function AppContent() {
             {/* Both endpoints: the window's start, and the page's scan again
                 (the bar's picker — one scan, stated where the diff reads). */}
             <Explain text={<>The diff window's start — the size chart's shaded band reads from here to the scan. Drag on the size chart to set both ends.</>}>
-              <ScanCombobox value={diffPrev} scans={earlier} onChange={setFrom} label="Diff from scan" fmt={fmtS} />
+              {union && diffPrev
+                ? <UnionScanPicker sources={union.sources} value={diffPrev} scans={earlier} onChange={setFrom} label="Diff from scan" before={asof} compact
+                    fallback={<ScanCombobox value={diffPrev} scans={earlier} onChange={setFrom} label="Diff from scan" fmt={fmtS} />} />
+                : <ScanCombobox value={diffPrev} scans={earlier} onChange={setFrom} label="Diff from scan" fmt={fmtS} />}
             </Explain>
             <Explain text={startPinned
               ? <>Start is <b>pinned</b> to this scan — the window's near end stays put as new scans arrive. Click to track a duration back from the end instead.</>
@@ -1466,7 +1480,10 @@ function AppContent() {
               </button>
             </Explain>
             <span className="arrow"> → </span>
-            <ScanCombobox value={asof} scans={scans} onChange={setDP} label="Diff to scan (the page's scan)" fmt={fmtS} />
+            {union && asof
+              ? <UnionScanPicker sources={union.sources} value={asof} scans={scans} onChange={setDP} label="Diff to scan (the page's scan)" compact
+                  fallback={<ScanCombobox value={asof} scans={scans} onChange={setDP} label="Diff to scan (the page's scan)" fmt={fmtS} />} />
+              : <ScanCombobox value={asof} scans={scans} onChange={setDP} label="Diff to scan (the page's scan)" fmt={fmtS} />}
             {endIsLatest && (
               <Explain text={endPinned
                 ? <>End is <b>pinned</b> to this scan. Click to follow the latest scan as new ones arrive.</>
@@ -1626,6 +1643,7 @@ function AppContent() {
         extra={[{ key: 'lens', label: `Class lens: ${lens ? 'on' : 'off'} (s)`, icon: <MdLayers />, onClick: () => setLens(v => !v) }]}
       />
     </main>
+    </UnionMarks.Provider>
   )
 }
 
