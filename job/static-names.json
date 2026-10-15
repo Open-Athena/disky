@@ -25,5 +25,8 @@
  "anchors": true,
  "src": [],
  "hex_runs": "16,8",
- "compact_level": 5
+ "compact_level": 5,
+ "standard_stages": [
+  "anchors"
+ ]
 }
