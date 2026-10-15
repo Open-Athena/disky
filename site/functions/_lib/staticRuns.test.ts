@@ -195,6 +195,29 @@ describe('static runs', () => {
   })
 })
 
+describe('a refresh that never settles (an R2 read hung) is bounded, never held for the TTL', () => {
+  /** `files` whose `list` hangs forever from the `hang`th call on (a read that never settles). */
+  const hanging = (hang: number) => {
+    let calls = 0
+    const base = files([MANIFESTS[0]])
+    const blobs: Blobs = { ...base, list: async p => { if (++calls >= hang) return new Promise<string[]>(() => {}); return [MANIFESTS[0]].filter(k => k.startsWith(p)) } }
+    return blobs
+  }
+  it('a warm isolate answers from the last good state at once, logged', async () => {
+    let now = 0
+    const logs: string[] = []
+    const t = tiers(hanging(2), { ttlMs: 1000, refreshMs: 20, now: () => now, log: m => logs.push(m) })
+    expect(await t.scans()).toEqual(DATES.slice(0, 3))
+    now = 1000
+    expect(await t.scans()).toEqual(DATES.slice(0, 3))
+    expect(logs).toEqual(['static tiers: a refresh took over 20 ms; serving the last good state'])
+  })
+  it('a cold isolate refuses (an error, not a hang) and retries on the next call', async () => {
+    const t = tiers(hanging(1), { refreshMs: 20, log: () => {} })
+    await expect(t.scans()).rejects.toThrow('static tiers: a refresh took over 20 ms, with no state yet')
+  })
+})
+
 describe('a broken tier: the stack is cut at it, the scans before it answer exactly, never a failure', () => {
   const RUN3 = 'deltas/2026-10-03T0600'
   /** The base and runs 1–2: the scans a cut at run 3 still answers. */
