@@ -36,7 +36,7 @@ export const onRequestGet = async (ctx0: Ctx): Promise<Response> => {
   // `store=<key>`: a secondary store's env overlay (none = the primary, as is); then its path store.
   const ctx1 = withStore(ctx0)
   if (ctx1 instanceof Response) return ctx1
-  const ctx = withPathStore(ctx1)
+  const ctx = await withPathStore(ctx1)
   const st = serverTiming()
   if (!storeReady(ctx.env)) {
     return new Response('largest API not configured (missing index store creds)', { status: 503 })
