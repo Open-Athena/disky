@@ -4,6 +4,8 @@
 config:
   gcs-usage-cf:pagesProject: oa-hf-usage
   gcs-usage-cf:domain: hf.oa.dev
+  gcs-usage-cf:branchAliases:
+    - {domain: dev.hf.oa.dev, branch: dev}
   gcs-usage-cf:d1Name: oa-hf-usage-db
   gcs-usage-cf:kvName: oa-hf-usage-cache
   gcs-usage-cf:r2Bucket: oa-hf-usage-index

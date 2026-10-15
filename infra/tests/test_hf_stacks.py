@@ -62,6 +62,8 @@ def test_cf_stack(monkeypatch: pytest.MonkeyPatch):
             ("cloudflare:index/pagesProject:PagesProject", "hf-pages"),
             ("cloudflare:index/dnsRecord:DnsRecord", "hf-cname"),
             ("cloudflare:index/pagesDomain:PagesDomain", "hf-domain"),
+            ("cloudflare:index/dnsRecord:DnsRecord", "hf-dev-cname"),
+            ("cloudflare:index/pagesDomain:PagesDomain", "hf-dev-domain"),
             ("cloudflare:index/d1Database:D1Database", "hf-d1"),
             ("cloudflare:index/workersKvNamespace:WorkersKvNamespace", "hf-cache-kv"),
             ("cloudflare:index/r2Bucket:R2Bucket", "hf-r2"),
@@ -74,6 +76,11 @@ def test_cf_stack(monkeypatch: pytest.MonkeyPatch):
         assert {k: res["hf-domain"][k] for k in ("accountId", "name")} == {"accountId": "acct", "name": "hf.oa.dev"}
         assert {k: res["hf-cname"][k] for k in ("zoneId", "name", "type", "content")} == {
             "zoneId": "zone", "name": "hf.oa.dev", "type": "CNAME", "content": "oa-hf-usage.pages.dev",
+        }
+        # The dev stack: `site/deploy --dev`'s branch alias, under its own name.
+        assert {k: res["hf-dev-domain"][k] for k in ("accountId", "name")} == {"accountId": "acct", "name": "dev.hf.oa.dev"}
+        assert {k: res["hf-dev-cname"][k] for k in ("zoneId", "name", "type", "content")} == {
+            "zoneId": "zone", "name": "dev.hf.oa.dev", "type": "CNAME", "content": "dev.oa-hf-usage.pages.dev",
         }
         assert res["hf-d1"]["name"] == "oa-hf-usage-db"
         assert res["hf-cache-kv"]["title"] == "oa-hf-usage-cache"
