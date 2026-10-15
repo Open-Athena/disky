@@ -474,20 +474,59 @@ export async function openIndex(env: Env, date: string, variant = 'path'): Promi
 
 // --- the interval store (specs/interval-store.md): every scan of a generation in one set of sorts ---
 
-/** `PATH_STORE=intervals` with `INTERVAL_STORE_GEN` and the `INDEX_R2` binding: a date the generation
- *  holds reads its `path` / `bysize` sorts from the interval store, as of that scan; any other date or
- *  variant (a lens's user-first sort, the age index, a date past the generation) reads as before. */
+/** `PATH_STORE=intervals` with `INTERVAL_STORE_GEN` (a pin, or the current generation `withPathStore` resolved for
+ *  the request: `ivGen`) and the `INDEX_R2` binding: a date the generation holds reads its `path` / `bysize` sorts
+ *  from the interval store, as of that scan; any other date or variant (a lens's user-first sort, the age index, a
+ *  date past the generation) reads as before. */
 export const intervalsOn = (env: Env): boolean => env.PATH_STORE === 'intervals' && !!env.INTERVAL_STORE_GEN && !!env.INDEX_R2
 
 /** A request's path store: `PATH_STORE=opt-in` reads the interval store only for requests asking
- *  `ps=iv` (so one deployment serves both, side by side); a secondary store (`store=`) never does. */
-export function withPathStore<C extends { request: Request; env: Env }>(ctx: C): C {
+ *  `ps=iv` (so one deployment serves both, side by side); a secondary store (`store=`) never does. The
+ *  generation is `INTERVAL_STORE_GEN` (a pin), else the store's current one (`ivCurrentGen`), fixed for the
+ *  request: none (no pointer yet) reads per-scan stores. */
+export async function withPathStore<C extends { request: Request; env: Env }>(ctx: C): Promise<C> {
   const { env } = ctx
   if (env.PATH_STORE !== 'opt-in' && env.PATH_STORE !== 'intervals') return ctx
   const u = new URL(ctx.request.url).searchParams
   const on = !u.get('store') && (env.PATH_STORE === 'intervals' || u.get('ps') === 'iv')
+  const gen = on ? await ivGen(env) : env.INTERVAL_STORE_GEN
   const w = (ctx as { waitUntil?: unknown }).waitUntil
-  return { ...ctx, env: { ...env, PATH_STORE: on ? 'intervals' : undefined }, ...(typeof w === 'function' ? { waitUntil: w.bind(ctx) } : {}) }
+  return { ...ctx, env: { ...env, PATH_STORE: on ? 'intervals' : undefined, INTERVAL_STORE_GEN: gen ?? undefined }, ...(typeof w === 'function' ? { waitUntil: w.bind(ctx) } : {}) }
+}
+
+/** The store's current-generation pointer (`interval_compact.CURRENT`: `{"gen": …}`), moved by a compaction
+ *  (`interval-store add`) once the new generation is whole. */
+export const IV_CURRENT = 'interval-store/CURRENT.json'
+const ivCurrents = new Map<string, { at: number; p: Promise<string | null> }>()
+
+/** `env`'s interval-store generation: `INTERVAL_STORE_GEN` when set (a pin), else `IV_CURRENT`'s (null without one or
+ *  without `INDEX_R2`), held `IV_STATE_TTL` per isolate and in the colo cache: a compaction is served within the
+ *  colo's TTL plus the isolate's. A failed read keeps the last pointer, or (none yet) reads per-scan stores. */
+export async function ivGen(env: Env): Promise<string | null> {
+  const pin = env.INTERVAL_STORE_GEN?.trim()
+  if (pin) return pin
+  if (!env.INDEX_R2) return null
+  const k = storeKey(env)
+  const cur = ivCurrents.get(k)
+  if (cur && Date.now() - cur.at < IV_STATE_TTL) return cur.p
+  const last = cur?.p
+  const p = (async () => {
+    const ck = coloKey(env, IV_CURRENT, 'current=1')
+    const hit = await colo().match(ck)
+    if (hit) return (await hit.json<{ gen: string | null }>()).gen
+    const o = await env.INDEX_R2!.get(IV_CURRENT)
+    const gen = o ? (await o.json<{ gen?: unknown }>()).gen : null
+    if (gen !== null && (typeof gen !== 'string' || !gen)) throw new Error(`${IV_CURRENT}: bad pointer`)
+    await colo().put(ck, new Response(JSON.stringify({ gen }), { headers: { 'content-type': 'application/json', 'cache-control': `max-age=${IV_STATE_TTL / 1000}` } }))
+    return gen
+  })().catch(e => {
+    console.error(`${IV_CURRENT}: ${(e as Error).message}; ${last ? 'serving the last pointer' : 'reading per-scan stores'}`)
+    if (last) return last
+    ivCurrents.delete(k)
+    return null
+  })
+  ivCurrents.set(k, { at: Date.now(), p })
+  return p
 }
 /** Which path store answers `env`'s reads of a date the interval store holds: '' (per-scan), else the
  *  generation (folded or sliced). A per-isolate memo of what a date has keys by it, as by `storeKey`:

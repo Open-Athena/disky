@@ -105,12 +105,15 @@ dt-cloud interval-store build -g GEN -L LAYOUT -s SCANS -o STORE  # The interval
                           # owner slices, every served sort — the staged stages in-process over `-w` — then copied to
                           # `<STORE>/interval-store/GEN/` (a dir or `gs://`/`r2://`/`s3://` URL; `scans.json` last;
                           # never over a generation). The staged per-range Batch stage is `interval-store build-ranges`
-dt-cloud interval-store add -g GEN -L LAYOUT -s SCANS -o STORE  # Append every scan after GEN's newest as a run (per-range
+dt-cloud interval-store add [-g GEN] -L LAYOUT -s SCANS -o STORE  # Append every scan after GEN's newest as a run (per-range
                           # append over the open versions refolded from base + runs, run cut, `manifests/<id>.json`),
                           # then the due carries; a URL store mirrors into `-w`, uploads data → `meta.json`s → manifests.
                           # Reports peak work-disk/RSS per stage and scan. Every interval-store key goes through
                           # `blobstore.Store` (a profile's bare bucket name = `gs://`); `r2`/`r2-copy` are no-ops when the
-                          # store is the serving R2 bucket
+                          # store is the serving R2 bucket. Every 2^L scans (`-C L`, default 5; `none`: never) it compacts
+                          # base + runs into a new generation (`interval_compact`: a fresh build's bytes), then moves
+                          # `interval-store/CURRENT.json` to it (the site follows it when `INTERVAL_STORE_GEN` is unset);
+                          # `-g` defaults to that pointer. `interval-store current -o STORE [-s GEN]` prints / sets it
 disk-tree tiers plan SIDECAR P THR  # The reader's span selection run offline over a tier's `.groups.json`
                           # (phase 0's instrument): for `path` it mirrors `readRects` exactly (depth rect
                           # `dP+1..`, path range `[P/, P0)`, `b_max ≥ thr·atten^(d−dP−1)` per group); for
@@ -204,6 +207,17 @@ Tests build their listing fixtures inline (`tmp_path` parquets). CI and the job 
 
 - Depth column enables parquet predicate pushdown (only load needed rows)
 - The site reads the path store by row-group range reads, planned from footers in D1 (`index-sync`)
+
+## Deployments: parity by default
+
+Every deployment (gcs, cw-s3, r2, hf, the r2 demo, …) ships the current full feature set. A new deployment, or a feature landing on `cloud`, reaches each of them without being asked; only a store that can't support a feature skips it, and its deployment spec says which and why. The baseline today:
+- **Hosts:** prod and a dev stack: `dev.<host>` (a `branchAliases` CNAME onto the Pages branch `dev`), wrangler's `[env.preview]` with prod's bindings, preview-env secrets, every origin + callback (prod, dev, the `pages.dev` alias, localhost) on the Google OAuth client.
+- **Auth:** app sign-in (Google OIDC + emailed codes), staff domain, admin console, personal agent tokens.
+- **Serving:** the path store (`path` + `bysize`, footers in D1), search sidecars, the static name index (`FILTER_STATIC`, `NAME_SUMMARY_STATIC`, `FILTER_STATIC_HEAVY`), the interval store as the Map's path store (`PATH_STORE = "intervals"` once `interval-store verify` / a `ps=iv` parity check passes on the first scans).
+- **Job:** `scan-run supervise` (phases, alerts, `/scans` records, cost labels), `index-gc`, cache warm-up (`warm-cache`) and the serving probe (`probe -c`) after each scan, the Slack digest thread.
+- **Meta:** the "data behind this site" store (`STORES_JSON` `meta`) with its own static index.
+
+A deployment's spec lists the baseline items it doesn't have yet as gaps, and those gaps are open work, not follow-ups to propose.
 
 ## cw-s3
 
