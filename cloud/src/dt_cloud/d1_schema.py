@@ -15,6 +15,7 @@ from __future__ import annotations
 import difflib
 import heapq
 import json
+import re
 import sqlite3
 import subprocess
 import sys
@@ -97,8 +98,15 @@ def dump(con: sqlite3.Connection) -> str:
     sql = {(t, n): s for t, n, _, s in objs}
     tables = _tables_in_fk_order(con, sorted(n for t, n, _, _ in objs if t == "table"))
     rest = sorted(((t, n, tbl) for t, n, tbl, _ in objs if t != "table"), key=lambda o: (_TYPE_ORDER[o[0]], o[2], o[1]))
-    stmts = [sql["table", t] for t in tables] + [sql[t, n] for t, n, _ in rest]
+    stmts = [_bare(sql["table", t]) for t in tables] + [_bare(sql[t, n]) for t, n, _ in rest]
     return HEADER + "".join(f"\n{s};\n" for s in stmts)
+
+
+def _bare(stmt: str) -> str:
+    """`stmt` without `--` comments or trailing whitespace: D1 stores a statement's text with its comments stripped (and
+    the spaces before them kept), SQLite verbatim, so only this form compares equal across the two. (Our DDL has no `--`
+    inside a string literal.)"""
+    return "\n".join(re.sub(r"--[^\n]*", "", ln).rstrip() for ln in stmt.split("\n"))
 
 
 def is_sqlite_file(path: Path) -> bool:

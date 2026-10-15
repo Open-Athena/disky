@@ -308,7 +308,12 @@ describe('requests sharing the isolate\'s memos while every read outlasts the jo
     const lone = wired()
     const terms = [...E.long.slice(0, 12), ...E.short.slice(0, 4), ...NONMEMBERS]
     const want: unknown[] = []
-    for (const t of terms) for (const P of E.paths) { const a = await lone.view(t, P); want.push([t, P, a], [t, P, a], [t, P, a]) }
+    // `io.top` says where a group index came from (this isolate's memo or its file): under concurrency that is the race's
+    // outcome, not the answer, so it is left out of the comparison.
+    const answer = (x: unknown): unknown => Array.isArray(x) ? x.map(answer)
+      : x && Object.getPrototypeOf(x) === Object.prototype ? Object.fromEntries(Object.entries(x).map(([k, v]) => [k, k === 'io' && v && typeof v === 'object' ? { ...v, top: undefined } : answer(v)]))
+      : x
+    for (const t of terms) for (const P of E.paths) { const a = answer(await lone.view(t, P)); want.push([t, P, a], [t, P, a], [t, P, a]) }
     // Each read settles after 1–4 ms (in a fixed order), past the 1 ms join bound: joiners convict owners at every turn.
     const b = blobsOf()
     let i = 0
@@ -333,7 +338,7 @@ describe('requests sharing the isolate\'s memos while every read outlasts the jo
         const views = reqs.map(async r => src.answer(term, P, await drill.state(r), undefined, r))
         setTimeout(() => ctl.abort(), 2)
         const [a, b2, , d] = (await Promise.allSettled(views)).map(x => x.status === 'fulfilled' ? x.value : x.reason)
-        got.push([term, P, a], [term, P, b2], [term, P, d])
+        got.push([term, P, answer(a)], [term, P, answer(b2)], [term, P, answer(d)])
       }
       expect(got).toEqual(want)
       // The setup did what it says: requests joined others' reads, and convicted their owners.

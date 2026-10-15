@@ -6,27 +6,27 @@
 CREATE TABLE access_log (
   id          INTEGER PRIMARY KEY AUTOINCREMENT,
   ts          INTEGER NOT NULL,
-  event       TEXT NOT NULL,   -- redeem | deny | revoke | request | view | signin | signout
+  event       TEXT NOT NULL,
   grant_id    TEXT,
-  session_sub TEXT,            -- `e:<email>` | `g:<id>`
+  session_sub TEXT,
   path        TEXT,
   status      INTEGER,
   ip_hash     TEXT,
   ua          TEXT,
   country     TEXT,
   referer     TEXT,
-  reason      TEXT,            -- deny detail: bad-token | revoked | expired | exhausted | not-allowed
-  bucket      INTEGER          -- floor(ts/3600) for `view` rows; NULL otherwise
+  reason      TEXT,
+  bucket      INTEGER
 , city TEXT, region TEXT, as_org TEXT);
 
 CREATE TABLE access_log_daily (
-  day      INTEGER NOT NULL,   -- floor(ts / 86400)
+  day      INTEGER NOT NULL,
   event    TEXT NOT NULL,
   grant_id TEXT,
   path     TEXT,
   country  TEXT,
-  events   INTEGER NOT NULL,   -- rows collapsed into this bucket
-  clients  INTEGER NOT NULL,   -- distinct ip_hash values within it
+  events   INTEGER NOT NULL,
+  clients  INTEGER NOT NULL,
   PRIMARY KEY (day, event, grant_id, path, country)
 );
 
@@ -36,11 +36,11 @@ CREATE TABLE access_requests (
   name       TEXT,
   note       TEXT,
   created_at INTEGER NOT NULL,
-  status     TEXT NOT NULL,   -- pending | approved | denied | auto
+  status     TEXT NOT NULL,
   decided_at INTEGER,
   decided_by TEXT,
   grant_id   TEXT,
-  ip_hash    TEXT             -- HMAC, for rate-limiting; never a raw address
+  ip_hash    TEXT
 , subject_json TEXT);
 
 CREATE TABLE admin_edits (
@@ -55,23 +55,23 @@ CREATE TABLE admin_edits (
 );
 
 CREATE TABLE admin_emails (
-  email TEXT PRIMARY KEY,               -- lowercased; may mark sweep + dispatch runs
-  note  TEXT,                           -- who this is
-  who   TEXT NOT NULL,                  -- admin who added the row
-  ts    INTEGER NOT NULL                -- epoch seconds
+  email TEXT PRIMARY KEY,
+  note  TEXT,
+  who   TEXT NOT NULL,
+  ts    INTEGER NOT NULL
 );
 
 CREATE TABLE agent_tokens (
-  email    TEXT PRIMARY KEY,          -- lower-cased owner email
-  grant_id TEXT NOT NULL,             -- grants.id of the live token grant
-  created  INTEGER NOT NULL           -- unix seconds, server-assigned
+  email    TEXT PRIMARY KEY,
+  grant_id TEXT NOT NULL,
+  created  INTEGER NOT NULL
 );
 
 CREATE TABLE allowed_emails (
-  email TEXT PRIMARY KEY,               -- lowercased
-  note  TEXT,                           -- who this is / where they're from
-  who   TEXT NOT NULL,                  -- admin who added the row
-  ts    INTEGER NOT NULL                -- epoch seconds
+  email TEXT PRIMARY KEY,
+  note  TEXT,
+  who   TEXT NOT NULL,
+  ts    INTEGER NOT NULL
 , read_only INTEGER NOT NULL DEFAULT 0);
 
 CREATE TABLE footer_cache (
@@ -79,26 +79,26 @@ CREATE TABLE footer_cache (
   variant         TEXT NOT NULL,
   gen             TEXT NOT NULL,
   state           TEXT NOT NULL CHECK (state IN ('filling', 'hot', 'evicting')),
-  rows            INTEGER NOT NULL DEFAULT 0,  -- index_row_groups rows the entry holds
-  bytes           INTEGER NOT NULL DEFAULT 0,  -- their text columns' lengths + 64 per row
-  started_ts      INTEGER NOT NULL,            -- epoch s: the fill's claim, or the demotion
-  filled_ts       INTEGER,                     -- epoch s the last batch landed
-  last_access_day INTEGER NOT NULL DEFAULT 0,  -- epoch day of the newest read (written ≤ once a day)
+  rows            INTEGER NOT NULL DEFAULT 0,
+  bytes           INTEGER NOT NULL DEFAULT 0,
+  started_ts      INTEGER NOT NULL,
+  filled_ts       INTEGER,
+  last_access_day INTEGER NOT NULL DEFAULT 0,
   PRIMARY KEY (date, variant, gen)
 );
 
 CREATE TABLE grants (
-  id            TEXT PRIMARY KEY,       -- random, not autoincrement: doesn't leak counts
-  token_hash    TEXT NOT NULL UNIQUE,   -- SHA-256, base64url
-  name          TEXT,                   -- admin-side label: "Bob Smith (donor)"
-  note          TEXT,                   -- freeform: why this exists
-  subject_json  TEXT,                   -- optional pre-loaded identity: {first,last,email,avatar}
-  email         TEXT,                   -- if set: magic-link semantics (bind on redeem)
-  scopes        TEXT NOT NULL,          -- space-separated
-  max_redeems   INTEGER,                -- NULL = unlimited; counts sessions minted, not requests
+  id            TEXT PRIMARY KEY,
+  token_hash    TEXT NOT NULL UNIQUE,
+  name          TEXT,
+  note          TEXT,
+  subject_json  TEXT,
+  email         TEXT,
+  scopes        TEXT NOT NULL,
+  max_redeems   INTEGER,
   redeems       INTEGER NOT NULL DEFAULT 0,
-  expires_at    INTEGER,                -- NULL = never
-  session_ttl   INTEGER,                -- seconds; NULL = inherit app default
+  expires_at    INTEGER,
+  session_ttl   INTEGER,
   created_at    INTEGER NOT NULL,
   created_by    TEXT NOT NULL,
   revoked_at    INTEGER,
@@ -110,59 +110,59 @@ CREATE TABLE index_row_groups (
   date      TEXT NOT NULL,
   variant   TEXT NOT NULL,
   gen       TEXT NOT NULL,
-  rg        INTEGER NOT NULL,   -- row-group ordinal
-  d_min     INTEGER NOT NULL,   -- depth stats (row-group pruning)
+  rg        INTEGER NOT NULL,
+  d_min     INTEGER NOT NULL,
   d_max     INTEGER NOT NULL,
-  p_min     TEXT NOT NULL,      -- path stats
+  p_min     TEXT NOT NULL,
   p_max     TEXT NOT NULL,
-  b_max     INTEGER NOT NULL,   -- max descendant-inclusive bytes (threshold prune)
-  u_min     TEXT,               -- usr range (a user-sorted variant's primary key; NULL here)
+  b_max     INTEGER NOT NULL,
+  u_min     TEXT,
   u_max     TEXT,
-  row_start INTEGER NOT NULL,   -- absolute row range of this group
+  row_start INTEGER NOT NULL,
   row_end   INTEGER NOT NULL,
-  rg_json   TEXT NOT NULL, store TEXT NOT NULL DEFAULT 'primary',      -- compact [num_rows, codec, [[off, size, dict_off], …]]
+  rg_json   TEXT NOT NULL, store TEXT NOT NULL DEFAULT 'primary',
   PRIMARY KEY (date, variant, gen, rg)
 );
 
 CREATE TABLE "index_schema" (
-  store       TEXT NOT NULL DEFAULT 'primary',  -- 'primary' or a `STORES_JSON` key
-  date        TEXT NOT NULL,            -- scan id (SNAP_ID, e.g. 2026-09-16T0001)
-  variant     TEXT NOT NULL DEFAULT 'path',  -- 'path' (floor-free) or 'coarse<E>'
-  version     INTEGER NOT NULL,         -- parquet FileMetaData.version
-  schema_json TEXT NOT NULL,            -- hyparquet SchemaElement[] (root + leaves)
-  floor_bytes INTEGER,                  -- a coarse tier's absolute byte floor F; NULL = floor-free
-  gen         TEXT,                     -- generation stamp of the synced file set
-  dir         TEXT, started TEXT,                     -- bucket-relative dir holding this variant's parquet
+  store       TEXT NOT NULL DEFAULT 'primary',
+  date        TEXT NOT NULL,
+  variant     TEXT NOT NULL DEFAULT 'path',
+  version     INTEGER NOT NULL,
+  schema_json TEXT NOT NULL,
+  floor_bytes INTEGER,
+  gen         TEXT,
+  dir         TEXT, started TEXT,
   PRIMARY KEY (store, date, variant)
 );
 
 CREATE TABLE og_tokens (
   id         INTEGER PRIMARY KEY,
   token      TEXT NOT NULL,
-  kind       TEXT NOT NULL,     -- the card kind (`map`, `staged`, …)
-  view       TEXT NOT NULL,     -- the canonical view params it covers
-  page       TEXT NOT NULL,     -- the page URL path + view, without `og=`
-  minted_by  TEXT NOT NULL,     -- the minter's email (or `slack:` for server posts)
+  kind       TEXT NOT NULL,
+  view       TEXT NOT NULL,
+  page       TEXT NOT NULL,
+  minted_by  TEXT NOT NULL,
   minted_ts  INTEGER NOT NULL,
-  exp_day    INTEGER NOT NULL,  -- days since 2026-01-01; valid through that day (UTC)
+  exp_day    INTEGER NOT NULL,
   revoked_by TEXT,
   revoked_ts INTEGER
 );
 
 CREATE TABLE owner_prefix_aggs (
-  scan       TEXT NOT NULL,     -- scan id the prefixes are priced on
-  idx        TEXT NOT NULL,     -- the index read (`<mode>:<gen>`): a reindex prices again
-  body       TEXT NOT NULL,     -- JSON: { v, buckets, asked, aggs }
+  scan       TEXT NOT NULL,
+  idx        TEXT NOT NULL,
+  body       TEXT NOT NULL,
   updated_ts INTEGER NOT NULL,
   PRIMARY KEY (scan, idx)
 );
 
 CREATE TABLE owner_prefix_hist (
-  idx        TEXT NOT NULL,     -- the interval store's index tag (`<mode>:<gen>`): a new generation prices again
-  depth      INTEGER NOT NULL,  -- the prefix's depth; 0 = the roots marker (every depth-1 path priced through `hz`)
+  idx        TEXT NOT NULL,
+  depth      INTEGER NOT NULL,
   path       TEXT NOT NULL,
-  hz         INTEGER NOT NULL,  -- the newest scan ordinal (`vf`/`vt` units) the versions are complete through
-  versions   TEXT NOT NULL,     -- JSON: [[vf, vt, agg], …], agg = { b, o, us, uo, cb }; absent between = not in the scan
+  hz         INTEGER NOT NULL,
+  versions   TEXT NOT NULL,
   updated_ts INTEGER NOT NULL,
   PRIMARY KEY (idx, depth, path)
 );
@@ -183,38 +183,38 @@ CREATE TABLE plans (
   name       TEXT NOT NULL,
   note       TEXT,
   state      TEXT NOT NULL DEFAULT 'open' CHECK (state IN ('open', 'closed')),
-  created_by TEXT NOT NULL,            -- CF Access identity that drafted it
-  created_ts INTEGER NOT NULL,         -- epoch seconds
-  closed_ts  INTEGER                   -- set when state → closed
+  created_by TEXT NOT NULL,
+  created_ts INTEGER NOT NULL,
+  closed_ts  INTEGER
 , slack_channel TEXT, slack_ts TEXT);
 
 CREATE TABLE deletion_runs (
-  run_id TEXT PRIMARY KEY,           -- <plan>-<scan>/<utc compact ts>
-  plan_id INTEGER NOT NULL REFERENCES plans(id),  -- the first-class plan executed
-  manifest TEXT NOT NULL,            -- gs:// dir the object-level manifest was written to
+  run_id TEXT PRIMARY KEY,
+  plan_id INTEGER NOT NULL REFERENCES plans(id),
+  manifest TEXT NOT NULL,
   scan TEXT NOT NULL,
-  head INTEGER NOT NULL,             -- mark_log head at pin (drift detection)
-  exec_head INTEGER NOT NULL,        -- mark_log head at execution (re-verified)
-  actor TEXT NOT NULL,               -- CF Access identity that dispatched
+  head INTEGER NOT NULL,
+  exec_head INTEGER NOT NULL,
+  actor TEXT NOT NULL,
   mode TEXT NOT NULL CHECK (mode IN ('dry', 'real')),
   started_ts INTEGER NOT NULL,
   finished_ts INTEGER,
-  deleted_bytes INTEGER NOT NULL DEFAULT 0,   -- would-delete bytes for dry runs
+  deleted_bytes INTEGER NOT NULL DEFAULT 0,
   deleted_objects INTEGER NOT NULL DEFAULT 0,
-  skipped_gone INTEGER NOT NULL DEFAULT 0,     -- key already absent
-  skipped_overwritten INTEGER NOT NULL DEFAULT 0, -- versionId/ETag drifted since scan
-  drift_dirs INTEGER NOT NULL DEFAULT 0,      -- dirs skipped: new keys since the scan
-  ledger_drift_dirs INTEGER NOT NULL DEFAULT 0, -- dirs dropped: newer marks
-  buckets TEXT,                      -- bucket cut dispatched with (CSV); NULL = whole plan
-  undo_deadline INTEGER,             -- finished_ts + hold window (real runs); undo before this
+  skipped_gone INTEGER NOT NULL DEFAULT 0,
+  skipped_overwritten INTEGER NOT NULL DEFAULT 0,
+  drift_dirs INTEGER NOT NULL DEFAULT 0,
+  ledger_drift_dirs INTEGER NOT NULL DEFAULT 0,
+  buckets TEXT,
+  undo_deadline INTEGER,
   undo_state TEXT NOT NULL DEFAULT 'none' CHECK (undo_state IN ('none', 'partial', 'full', 'expired')),
   purge_state TEXT NOT NULL DEFAULT 'none' CHECK (purge_state IN ('none', 'pending', 'done')),
-  log_dir TEXT NOT NULL              -- gs:// dir holding {would-delete,deleted}/ parquets + summary
+  log_dir TEXT NOT NULL
 , plan_digest TEXT);
 
 CREATE TABLE deletion_bands (
   run_id TEXT NOT NULL REFERENCES deletion_runs(run_id),
-  prefix TEXT NOT NULL,              -- s3://<bucket>/<dir>/ band the deletions fell under
+  prefix TEXT NOT NULL,
   bytes INTEGER NOT NULL,
   objects INTEGER NOT NULL,
   gone INTEGER NOT NULL DEFAULT 0,
@@ -241,7 +241,7 @@ CREATE TABLE deletion_progress (
 CREATE TABLE profiles (
   email       TEXT PRIMARY KEY,
   avatar      TEXT,
-  -- Provenance for re-resolve/debug: 'upload' | 'url' | 'github' | 'gravatar'.
+
   avatar_src  TEXT,
   updated_at  INTEGER NOT NULL
 , name TEXT);
@@ -261,24 +261,24 @@ CREATE TABLE "pyramid_multiscans" (
 );
 
 CREATE TABLE scan_runs (
-  run_id       TEXT PRIMARY KEY,                -- the Batch job uid ($BATCH_JOB_UID); else `<scan>@<started_ts>`
-  store        TEXT NOT NULL DEFAULT 'primary', -- 'primary' or a `STORES_JSON` key (a secondary store's own job)
-  scan         TEXT NOT NULL,                   -- scan id (YYYY-MM-DD or YYYY-MM-DDTHHMM)
-  kind         TEXT NOT NULL,                   -- the profile's job kind: scan | reproc | listing | static-names | …
-  parent       TEXT,                            -- the orchestrating run of a downstream job (no FK: either may land first)
+  run_id       TEXT PRIMARY KEY,
+  store        TEXT NOT NULL DEFAULT 'primary',
+  scan         TEXT NOT NULL,
+  kind         TEXT NOT NULL,
+  parent       TEXT,
   status       TEXT NOT NULL CHECK (status IN ('running', 'succeeded', 'failed', 'nop')),
-  failed_phase TEXT,                            -- the phase running when it failed
-  error        TEXT,                            -- the failure's one-line reason (exit code + command, or Batch's event)
-  started_ts   INTEGER,                         -- epoch s: the job's task started (RUNNING)
+  failed_phase TEXT,
+  error        TEXT,
+  started_ts   INTEGER,
   finished_ts  INTEGER,
-  job_name     TEXT,                            -- the Batch job id (its name's last segment)
+  job_name     TEXT,
   region       TEXT,
   machine      TEXT,
-  spot         INTEGER,                         -- 1 = SPOT provisioning
+  spot         INTEGER,
   tasks        INTEGER,
   image        TEXT,
-  cost_usd     REAL,                            -- estimate: the profile's $/h for the machine × run hours × tasks
-  gen          TEXT,                            -- the index generation the run wrote, if any
+  cost_usd     REAL,
+  gen          TEXT,
   source       TEXT NOT NULL CHECK (source IN ('job', 'backfill')),
   updated_ts   INTEGER NOT NULL
 );
@@ -286,7 +286,7 @@ CREATE TABLE scan_runs (
 CREATE TABLE scan_run_outputs (
   run_id  TEXT NOT NULL REFERENCES scan_runs(run_id),
   key     TEXT NOT NULL,
-  uri     TEXT NOT NULL,                        -- gs:// | r2:// | s3:// prefix or object
+  uri     TEXT NOT NULL,
   bytes   INTEGER,
   objects INTEGER,
   rows    INTEGER,
@@ -306,64 +306,64 @@ CREATE TABLE scan_run_phases (
 );
 
 CREATE TABLE session_log (
-  sid         TEXT PRIMARY KEY,   -- per-tab session id (client `sessionStorage`)
-  email       TEXT,               -- the request's identity (server-derived); NULL = anonymous public viewer
-  via         TEXT,               -- session | grant | public
-  build       TEXT,               -- the client's build SHA
-  ua          TEXT,               -- User-Agent
-  started_ms  INTEGER NOT NULL,   -- earliest event (client clock, epoch ms)
-  last_ms     INTEGER NOT NULL,   -- latest event
+  sid         TEXT PRIMARY KEY,
+  email       TEXT,
+  via         TEXT,
+  build       TEXT,
+  ua          TEXT,
+  started_ms  INTEGER NOT NULL,
+  last_ms     INTEGER NOT NULL,
   n_events    INTEGER NOT NULL,
-  n_errors    INTEGER NOT NULL,   -- error | reject | console events, and api events with status 0 or >= 500
+  n_errors    INTEGER NOT NULL,
   n_batches   INTEGER NOT NULL,
-  first_url   TEXT,               -- the first batch's first `start` / `nav` URL
-  received_ts INTEGER NOT NULL    -- epoch s (server clock) of the latest batch: what retention keys on
+  first_url   TEXT,
+  received_ts INTEGER NOT NULL
 );
 
 CREATE TABLE session_log_batches (
   sid         TEXT NOT NULL,
-  pid         TEXT NOT NULL,      -- page-load id (a reload keeps `sid`, gets a new `pid`)
-  seq         INTEGER NOT NULL,   -- the batch's number within its page load
+  pid         TEXT NOT NULL,
+  seq         INTEGER NOT NULL,
   received_ts INTEGER NOT NULL,
   first_ms    INTEGER NOT NULL,
   last_ms     INTEGER NOT NULL,
   n           INTEGER NOT NULL,
-  events      TEXT NOT NULL,      -- JSON array of `{t, k, ...}`, as validated
+  events      TEXT NOT NULL,
   PRIMARY KEY (sid, pid, seq)
 );
 
 CREATE TABLE session_log_switch (
   id          INTEGER PRIMARY KEY CHECK (id = 1),
-  until_ms    INTEGER,            -- NULL = off
-  who         TEXT NOT NULL,      -- admin who last set it
-  ts          INTEGER NOT NULL    -- epoch s of that change
+  until_ms    INTEGER,
+  who         TEXT NOT NULL,
+  ts          INTEGER NOT NULL
 );
 
 CREATE TABLE stage_replies (
   id         INTEGER PRIMARY KEY AUTOINCREMENT,
   plan_id    INTEGER NOT NULL REFERENCES plans(id),
-  stager     TEXT NOT NULL,             -- lowercased identity of the batches' stager
+  stager     TEXT NOT NULL,
   channel    TEXT NOT NULL,
-  thread_ts  TEXT NOT NULL,             -- the parent it replies under
-  slack_ts   TEXT,                      -- the reply; NULL while being posted
-  open       INTEGER,                   -- 1 = taking this stager's stages; NULL = closed
-  created_ts INTEGER NOT NULL,          -- epoch seconds
-  updated_ts INTEGER NOT NULL           -- the last stage it took
+  thread_ts  TEXT NOT NULL,
+  slack_ts   TEXT,
+  open       INTEGER,
+  created_ts INTEGER NOT NULL,
+  updated_ts INTEGER NOT NULL
 );
 
 CREATE TABLE stage_batches (
   id         INTEGER PRIMARY KEY AUTOINCREMENT,
   plan_id    INTEGER NOT NULL REFERENCES plans(id),
-  note       TEXT,                    -- the one memo for this gesture
-  created_by TEXT NOT NULL,           -- the identity that trashed
-  created_ts INTEGER NOT NULL         -- epoch seconds
+  note       TEXT,
+  created_by TEXT NOT NULL,
+  created_ts INTEGER NOT NULL
 , reply_id INTEGER REFERENCES stage_replies(id));
 
 CREATE TABLE plan_items (
   plan_id  INTEGER NOT NULL REFERENCES plans(id),
-  prefix   TEXT NOT NULL,             -- s3://<bucket>/<path>/ (trailing slash)
+  prefix   TEXT NOT NULL,
   note     TEXT,
-  added_by TEXT NOT NULL,             -- CF Access identity that added it
+  added_by TEXT NOT NULL,
   added_ts INTEGER NOT NULL, batch_id INTEGER REFERENCES stage_batches(id), as_of TEXT, kind TEXT CHECK (kind IS NULL OR kind = 'object'),
   PRIMARY KEY (plan_id, prefix)
 );
