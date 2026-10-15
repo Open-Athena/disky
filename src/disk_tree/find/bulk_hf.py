@@ -201,7 +201,7 @@ class HfClient:
             with self._lock:
                 self.requests += 1
             m = _RATELIMIT.search(r.headers.get("ratelimit", ""))
-            if m and int(m.group(1)) <= self.reserve:
+            if m and int(m.group(1)) <= (self.concurrency if self.reserve is None else self.reserve):
                 self._pause(int(m.group(2)) + 1)
             if r.status == 429 or r.status >= 500:
                 if attempt == self.max_retries:
