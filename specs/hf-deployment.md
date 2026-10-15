@@ -1,6 +1,6 @@
 # hf.oa.dev: the Hugging Face deployment
 
-Status: **applying** (2026-10-15, the `wt/hf` session). Done: steps 1–5, 6 except the Pages secrets and the OAuth client, 7, and the dev stack's CF side; the first scan (step 9) is running. Waiting: the Pages secrets (`hf-secrets -P -d`, needs `RESEND_API_KEY` from `$oa/.envrc`) and the OAuth client's Create, both Ryan's (Claude Code's safety check refuses them), then 8 and 10.
+Status: **live** (2026-10-15). First scan `2026-10-15`: 47 min, $0.11, 234,832 objects; billed bytes 15,753,134,621,714 B = the layer-2 root's non-git bytes exactly (billing page: 15.72 TB). Waiting on Ryan: the dev stack's Pages secrets (`hf-secrets -d`), the job's site grant (8b), then resuming the cron.
 
 ## What it is
 
@@ -120,7 +120,7 @@ export UV_PROJECT_ENVIRONMENT=$PWD/infra/.venv   # for pulumi; never the repo's 
 ## Gaps against the deployment baseline
 
 `AGENTS.md` "Deployments: parity by default" is the baseline; these are hf's missing items, open work in this order:
-- `PATH_STORE = "intervals"`: after the first scans verify (step 10).
+- ~~`PATH_STORE = "intervals"`~~: done 2026-10-15 (first scan: `interval-store verify` 11/11 views equal). Diff parity is checked once there are two scans.
 - Cache warm-up and the serving probe: built (job steps 10–11, `probe -c` records under `probes/hf/`); they run once the job's grant exists (checklist step 8b).
 - The Slack digest thread (cw-s3's `dt-cloud digest -T …`): needs a channel choice.
 - The meta store ("data behind this site"): waits on the shared self-scan + index step the root session is building on `cloud`.
