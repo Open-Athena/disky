@@ -71,11 +71,14 @@ class Bucket:
     the bucket name) and its ``quota`` (None: the tail shows raw TiB). Buckets
     naming the same ``zone`` share one quota (a CoreWeave zone quota covers
     every bucket in the zone): they must carry equal quotas, and the tail
-    renders them as one clause against it."""
+    renders them as one clause against it. ``path`` is the bucket's path on
+    the site, its links' target (None: ``/<bucket>``, a union-of-buckets
+    site's; ``""``: the site root, a single-bucket store served there)."""
 
     label: str | None = None
     quota: Quota | None = None
     zone: str | None = None
+    path: str | None = None
 
 
 @dataclass(frozen=True)
@@ -207,15 +210,15 @@ def _keys(where: str, d: Any, allowed: set[str], required: set[str] = frozenset(
 
 
 def _bucket(name: str, b: dict | None) -> Bucket:
-    b = _keys(f"buckets.{name}", b or {}, {"label", "quota", "zone"})
-    for k in ("label", "zone"):
+    b = _keys(f"buckets.{name}", b or {}, {"label", "quota", "zone", "path"})
+    for k in ("label", "zone", "path"):
         if b.get(k) is not None and not isinstance(b[k], str):
             raise ValueError(f"digest config buckets.{name}.{k}: expected a string, got {b[k]!r}")
     q = b.get("quota")
     if q is None:
-        return Bucket(b.get("label"), zone=b.get("zone"))
+        return Bucket(b.get("label"), zone=b.get("zone"), path=b.get("path"))
     q = _keys(f"buckets.{name}.quota", q, {"bytes", "name", "short"}, {"bytes", "name"})
-    return Bucket(b.get("label"), Quota(parse_bytes(q["bytes"]), str(q["name"]), None if q.get("short") is None else str(q["short"])), b.get("zone"))
+    return Bucket(b.get("label"), Quota(parse_bytes(q["bytes"]), str(q["name"]), None if q.get("short") is None else str(q["short"])), b.get("zone"), b.get("path"))
 
 
 def _check_zones(buckets: dict[str, Bucket]) -> None:
