@@ -8,6 +8,9 @@
   public-facing deployment holds no write key.
 - **The job's D1 token** (`job_d1_token`): D1 read + write on the account, for `index-sync` and the scan-run records.
   D1 tokens can't be scoped to one database.
+- **The digest's icons** (`oa-hf-usage-icons`): a Pages project serving the Slack digest's reply avatars (its
+  production deployment of `job/icons-hf/`) and the OP's plot (the `plot` branch, deployed by `dt-cloud digest`), and
+  the job's Pages token (`job_pages_token`, Pages edit on the account: Pages tokens can't be scoped to one project).
 
 `pulumi preview` is read-only; `up` is a human's call.
 """
@@ -30,6 +33,8 @@ STACK = "hf"
 ID_ENV = {"accountId": "CLOUDFLARE_ACCOUNT_ID", "zoneId": "CF_ZONE_ID"}
 READ = "Workers R2 Storage Bucket Item Read"
 D1 = ("D1 Read", "D1 Write")
+PAGES = ("Pages Write",)
+ICONS = "oa-hf-usage-icons"
 
 
 def ids_from_env(config: pulumi.Config, environ: dict[str, str]) -> None:
@@ -95,3 +100,21 @@ pulumi.export("site_r2_access_key_id", pulumi.Output.secret(reader.id))
 # R2's S3 secret is the SHA-256 of the token value.
 pulumi.export("site_r2_secret_access_key", pulumi.Output.secret(reader.value.apply(lambda v: hashlib.sha256(v.encode()).hexdigest())))
 pulumi.export("job_d1_token", pulumi.Output.secret(d1.value))
+icons = cloudflare.PagesProject(
+    "hf-icons",
+    account_id=account_id,
+    name=ICONS,
+    production_branch="main",
+    build_config=cloudflare.PagesProjectBuildConfigArgs(destination_dir="."),
+    # direct uploads (`wrangler pages deploy`) record their deployments' configs on the project
+    opts=pulumi.ResourceOptions(ignore_changes=["deployment_configs"]),
+)
+pages = token(
+    "hf-job-pages",
+    account_id=account_id,
+    title=f"{project} pages (job: digest plot)",
+    groups=group_ids(account_id, PAGES),
+    resources={f"com.cloudflare.api.account.{account_id}": "*"},
+)
+pulumi.export("icons_project", icons.name)
+pulumi.export("job_pages_token", pulumi.Output.secret(pages.value))

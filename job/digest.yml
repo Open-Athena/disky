@@ -1,0 +1,34 @@
+# hf's Slack usage digest (`dt-cloud digest -T cw -C job/digest.yml`): the `cw` template (a monthly thread, one reply
+# per UTC day), spelled out field by field as cw-s3's `job/digest.yml`. Validated on load: unknown keys raise.
+# Secrets stay env-only (`SLACK_BOT_TOKEN`, `SLACK_CHANNEL`; the channel is #hf-usage, set by `job/hf-batch-submit.sh`).
+template: cw
+title: Hugging Face usage
+site_url: https://hf.oa.dev
+# R2, no GCS: the job passes `-r "$STORE_ROOT/snapshots/hf"` anyway
+root: r2://oa-hf-usage-index/snapshots/hf
+# beside `snapshots/`: r2://oa-hf-usage-index/digest/hf/<channel>/<variant>/<YYYY-MM>.json, keyed by channel (a
+# staging converge never masquerades as prod) and variant
+state: digest/hf/{channel}/{variant}
+discord_state: digest/discord/{webhook}
+discord_webhook_env: null
+# the reply avatars (`arrows/av_deg<N>.png`) are the icons project's production deployment of `job/icons-hf/`
+icons_base: https://oa-hf-usage-icons.pages.dev
+icons_dir: job/icons-hf
+# the OP's plot (drawn by the site, `POST /api/digest-image` with SITE_TOKEN) goes to the icons project's `plot`
+# preview branch, never the production alias that serves the avatars
+plot_project: oa-hf-usage-icons
+plot_branch: plot
+plot_base: https://plot.oa-hf-usage-icons.pages.dev
+# sender: the headline as the reply's sender name + a trend-arrow avatar. hf scans once a day (08:00 UTC): the reply
+# is the day's first scan from 00Z on (its only one, or the first of a re-run day; the first scan, `2026-10-15`, has
+# a date id, which reads as 00:00Z), so there are no earlier scans and no provisional reply
+variant: sender
+reply_hour: 0
+provisional: false
+primary: open-athena
+# `path: ""`: the site serves the org at its root, not `/open-athena`. The quota is the org's public-storage allowance
+# (billing page, 2026-10-14; `HF_ALLOWANCES` in site/src/stores/hf.tsx). The total also counts private storage (5.1 TB
+# allowance) and unbilled git files, both a fraction of a percent of it
+buckets:
+  open-athena: {label: open-athena, path: "", quota: {bytes: 253 TB, name: 253 TB public, short: 253T}}
+prices: {}

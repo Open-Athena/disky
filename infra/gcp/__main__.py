@@ -70,11 +70,12 @@ images_reader = gcp.artifactregistry.RepositoryIamMember(
 HF_SECRETS = [
     "hf-usage-hf-token",              # HF_TOKEN: a Hub read token that sees the org's private repos and buckets
     "hf-usage-cf-token",              # CLOUDFLARE_API_TOKEN: D1 edit (index-sync, scan runs); the `job_d1_token` CF output
+    "hf-usage-cf-pages-token",        # CF_PAGES_TOKEN: Pages edit, the digest's plot upload; the `job_pages_token` CF output
     "hf-usage-cf-account-id",         # CLOUDFLARE_ACCOUNT_ID
     "hf-usage-r2-endpoint",           # R2_ENDPOINT: https://<account id>.r2.cloudflarestorage.com
     "hf-usage-r2-access-key-id",      # R2_ACCESS_KEY_ID: the `r2_s3_access_key_id` CF output (read/write, the bucket only)
     "hf-usage-r2-secret-access-key",  # R2_SECRET_ACCESS_KEY: the `r2_s3_secret_access_key` CF output
-    "hf-usage-slack-bot-token",       # SLACK_BOT_TOKEN: failure alerts to #gcs-usage-alerts
+    "hf-usage-slack-bot-token",       # SLACK_BOT_TOKEN: the HF Usage Bot (job/slack/): the digest + failure alerts
     "hf-usage-job-grant",             # SITE_TOKEN: a read-only grant on hf.oa.dev (minted from /admin), for warm-up + probe
 ]
 secrets = Secrets(

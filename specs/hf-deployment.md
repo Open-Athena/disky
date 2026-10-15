@@ -12,10 +12,11 @@ A new OA deployment, modeled on cw-s3 (GCP Batch job → R2 + D1 → Cloudflare 
 | job service account | `hf-usage-job` |
 | image | `us-central1-docker.pkg.dev/oa-internal-450019/hf-usage/scan:hf` (repo `hf-usage`) |
 | cron | `hf-usage-snapshot`, daily 08:00 UTC, Batch on one `e2-standard-4`, on demand |
-| secrets | `hf-usage-hf-token`, `hf-usage-cf-token`, `hf-usage-cf-account-id`, `hf-usage-r2-endpoint`, `hf-usage-r2-access-key-id`, `hf-usage-r2-secret-access-key`, `hf-usage-slack-bot-token` |
+| secrets | `hf-usage-hf-token`, `hf-usage-cf-token`, `hf-usage-cf-pages-token`, `hf-usage-cf-account-id`, `hf-usage-r2-endpoint`, `hf-usage-r2-access-key-id`, `hf-usage-r2-secret-access-key`, `hf-usage-slack-bot-token`, `hf-usage-job-grant` |
 | Pulumi stacks | `hf` in `infra/gcp` (project `gcs-usage-gcp`) and `infra/cf` (project `gcs-usage-cf`), backend `gs://oa-pulumi` |
 | Pages project / domains | `oa-hf-usage` / `hf.oa.dev`, dev stack `dev.hf.oa.dev` (branch alias `dev`; OA Cloudflare account, zone `oa.dev`) |
 | D1 / KV / R2 | `oa-hf-usage-db` (cw lineage) / `oa-hf-usage-cache` / `oa-hf-usage-index` |
+| Slack | the HF Usage Bot app (`job/slack/`): the digest thread in #hf-usage (`C0C9G547AP7`), failure alerts in #gcs-usage-alerts (shared); icons Pages project `oa-hf-usage-icons` |
 | cost labels | `app=disky,deployment=hf` (`$DISKY_LABELS`) |
 
 ## The daily job
@@ -122,7 +123,13 @@ export UV_PROJECT_ENVIRONMENT=$PWD/infra/.venv   # for pulumi; never the repo's 
 `AGENTS.md` "Deployments: parity by default" is the baseline; these are hf's missing items, open work in this order:
 - ~~`PATH_STORE = "intervals"`~~: done 2026-10-15 (first scan: `interval-store verify` 11/11 views equal). Diff parity is checked once there are two scans.
 - Cache warm-up and the serving probe: built (job steps 10–11, `probe -c` records under `probes/hf/`); they run once the job's grant exists (checklist step 8b).
-- The Slack digest thread (cw-s3's `dt-cloud digest -T …`): needs a channel choice.
+- The Slack digest thread: built 2026-10-15 (job step 12, `job/digest.yml`: the `cw` template, one reply per UTC day, % of the 253 TB public allowance; #hf-usage). It runs once these are applied, in order:
+  1. The HF Usage Bot app from `job/slack/hf-usage-bot.manifest.json` (api.slack.com/apps → From a manifest), installed; its `xoxb-` token → `hf-usage-slack-bot-token` (replacing the copy of cw-s3's), the icon `job/slack/hf-app.png`.
+  2. `infra/cf/run up -s hf`: the icons Pages project `oa-hf-usage-icons` + the job's Pages token (`job_pages_token`).
+  3. `infra/cf/hf-secrets -g`: now also `hf-usage-cf-pages-token`, after the GCP stack has its container: `pulumi up -s hf` in `infra/gcp` (+1 secret, +1 accessor; the cron body gains `SLACK_CHANNEL` + `CF_PAGES_TOKEN`). The secret needs its version before the next scheduled run: Batch refuses to start a job whose secret has none.
+  4. The avatars on the icons project's production branch, once: `wrangler pages deploy job/icons-hf --project-name oa-hf-usage-icons --branch main`.
+  5. The image (`job/build.sh`: now with wrangler, `job/digest.yml`, `job/icons-hf/`), then the cron (resumed after 8b).
+  The site grant (8b) is needed too: the OP's plot is drawn by the site (`POST /api/digest-image`). Check a month's thread without posting: `dt-cloud digest -T cw -C job/digest.yml -n -r r2://oa-hf-usage-index/snapshots/hf` (with the R2 keys).
 - The meta store ("data behind this site"): waits on the shared self-scan + index step the root session is building on `cloud`.
 - Not applicable: staging / executor / sweeps (the site deletes nothing on the Hub), lifecycle pull (no lifecycle rules on the Hub).
 

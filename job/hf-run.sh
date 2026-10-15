@@ -27,8 +27,9 @@
 #   HF_URI (default hf://open-athena; the namespace is the store's one bucket), HF_THREADS (requests in flight),
 #   SNAP_ID (default the UTC start minute, `YYYY-MM-DDTHHMM`, as gcs/cw), STORE_ROOT (default r2://$R2_BUCKET; a local dir
 #   for a dry run), WORK_DIR, MEM (DuckDB memory limit). Secrets: HF_TOKEN, CLOUDFLARE_API_TOKEN (D1 edit),
-#   CLOUDFLARE_ACCOUNT_ID, R2_ENDPOINT, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY, SLACK_BOT_TOKEN (+ SLACK_ALERT_CHANNEL),
-#   SITE_TOKEN (the site read grant: cache warm-up + the serving probe).
+#   CLOUDFLARE_ACCOUNT_ID, R2_ENDPOINT, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY, SLACK_BOT_TOKEN (the HF Usage Bot: the
+#   digest to SLACK_CHANNEL, failure alerts to SLACK_ALERT_CHANNEL), SITE_TOKEN (the site read grant: cache warm-up, the
+#   serving probe, the digest's plot), CF_PAGES_TOKEN (Pages edit: the digest's plot upload).
 # Deployment config comes from `site/wrangler.toml` (baked into the image): the D1 (`database_id` /
 # `database_name`), and the static-names / interval-store generations (`STATIC_GEN` / `INTERVAL_STORE_GEN`), so the
 # job writes exactly the generations the site reads.
@@ -37,7 +38,8 @@ set -euxo pipefail
 # Secrets arrive from Secret Manager verbatim, and a version made with `echo … | --data-file=-` carries a trailing
 # newline. Strip surrounding whitespace off each before anything reads it; xtrace off (`${!n}` would print them).
 { set +x; } 2>/dev/null
-for n in HF_TOKEN CLOUDFLARE_API_TOKEN CLOUDFLARE_ACCOUNT_ID R2_ENDPOINT R2_ACCESS_KEY_ID R2_SECRET_ACCESS_KEY SLACK_BOT_TOKEN; do
+for n in HF_TOKEN CLOUDFLARE_API_TOKEN CF_PAGES_TOKEN CLOUDFLARE_ACCOUNT_ID R2_ENDPOINT R2_ACCESS_KEY_ID R2_SECRET_ACCESS_KEY \
+         SLACK_BOT_TOKEN SITE_TOKEN; do
   if [ -n "${!n+set}" ]; then
     v=${!n}; v=${v#"${v%%[![:space:]]*}"}; v=${v%"${v##*[![:space:]]}"}
     export "$n=$v"
@@ -196,6 +198,20 @@ if [ -n "${SITE_TOKEN:+set}" ]; then  # `:+set`: xtrace must not print the token
     -- dt-cloud probe -c -u "$SITE_URL" -o "$STORE_ROOT/probes/$SUB/"
 else
   echo "no SITE_TOKEN: cache warm-up and the serving probe skipped" >&2
+fi
+
+# 12. Converge the month's Slack digest thread in #hf-usage (`job/digest.yml`: the `cw` template, one reply per UTC
+# day, the headline as the sender name, % of the public-storage allowance): the OP (month-to-date, per-week bullets,
+# the site-drawn plot, `POST /api/digest-image` with SITE_TOKEN, uploaded to the icons project's `plot` branch with
+# the Pages token) edited in place, plus the day's reply. State beside the snapshots (`digest/hf/…`), so a re-run is a
+# no-op. Never fatal; skipped without the bot, the channel, the site grant or the Pages token.
+if [ -n "${SLACK_BOT_TOKEN:+set}" ] && [ -n "${SLACK_CHANNEL:-}" ] && [ -n "${SITE_TOKEN:+set}" ] && [ -n "${CF_PAGES_TOKEN:+set}" ]; then
+  # wrangler authenticates with CLOUDFLARE_API_TOKEN: the Pages token for this one command (single-quoted, so xtrace
+  # prints the variable's name, never its value); the D1 token stays the scan-run records'.
+  sr phase digest -W -M -m "today's #hf-usage digest reply didn't post (the scan is fine)" \
+    -- bash -c 'CLOUDFLARE_API_TOKEN=$CF_PAGES_TOKEN exec dt-cloud digest -T cw -C job/digest.yml -r "$1"' _ "$STORE_ROOT/snapshots/$SUB"
+else
+  echo "no SLACK_BOT_TOKEN + SLACK_CHANNEL + SITE_TOKEN + CF_PAGES_TOKEN: the Slack digest skipped" >&2
 fi
 
 echo "HF-SCAN-JOB-DONE $SNAP_ID -> $STORE_ROOT/$INDEX_KEY"

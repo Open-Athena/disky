@@ -45,6 +45,8 @@ v = {
     "HF_URI": g("HF_URI", "hf://open-athena"),
     "R2_BUCKET": g("R2_BUCKET", "oa-hf-usage-index"),
     "WORK_DIR": g("WORK_DIR", "/work"),
+    # the usage digest thread: #hf-usage
+    "SLACK_CHANNEL": g("SLACK_CHANNEL", "C0C9G547AP7"),
     # failure alerts: #gcs-usage-alerts (shared with the gcs and cw-s3 jobs)
     "SLACK_ALERT_CHANNEL": g("SLACK_ALERT_CHANNEL", "C0BTUNT3B5Z"),
 }
@@ -79,6 +81,7 @@ cat > "$spec" <<EOF
         "secretVariables": {
           "HF_TOKEN": "$(secret hf-usage-hf-token)",
           "CLOUDFLARE_API_TOKEN": "$(secret hf-usage-cf-token)",
+          "CF_PAGES_TOKEN": "$(secret hf-usage-cf-pages-token)",
           "CLOUDFLARE_ACCOUNT_ID": "$(secret hf-usage-cf-account-id)",
           "R2_ENDPOINT": "$(secret hf-usage-r2-endpoint)",
           "R2_ACCESS_KEY_ID": "$(secret hf-usage-r2-access-key-id)",

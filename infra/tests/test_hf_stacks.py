@@ -70,6 +70,8 @@ def test_cf_stack(monkeypatch: pytest.MonkeyPatch):
             ("cloudflare:index/accountToken:AccountToken", "hf-r2-token"),
             ("cloudflare:index/accountToken:AccountToken", "hf-site-r2-reader"),
             ("cloudflare:index/accountToken:AccountToken", "hf-job-d1"),
+            ("cloudflare:index/pagesProject:PagesProject", "hf-icons"),
+            ("cloudflare:index/accountToken:AccountToken", "hf-job-pages"),
         ])
         res = {n: m.inputs(n) for _, n in m.created() if not n == "hf"}
         assert {k: res["hf-pages"][k] for k in ("accountId", "name")} == {"accountId": "acct", "name": "oa-hf-usage"}
@@ -89,15 +91,25 @@ def test_cf_stack(monkeypatch: pytest.MonkeyPatch):
         for name, title, groups, scope in (
             ("hf-site-r2-reader", "oa-hf-usage r2 read (site)", ["Workers R2 Storage Bucket Item Read"], bucket),
             ("hf-job-d1", "oa-hf-usage d1 (job)", ["D1 Read", "D1 Write"], {"com.cloudflare.api.account.acct": "*"}),
+            ("hf-job-pages", "oa-hf-usage pages (job: digest plot)", ["Pages Write"], {"com.cloudflare.api.account.acct": "*"}),
         ):
             assert res[name] == {
                 "accountId": "acct", "name": title,
                 "policies": [{"effect": "allow", "permissionGroups": [{"id": f"pg:{n}"} for n in groups], "resources": json.dumps(scope, sort_keys=True)}],
             }
+        # The digest's icons project: avatars on production, the plot on its `plot` branch (job/digest.yml).
+        assert {k: res["hf-icons"][k] for k in ("accountId", "name", "productionBranch")} == {"accountId": "acct", "name": "oa-hf-usage-icons", "productionBranch": "main"}
         r2_policy = res["hf-r2-token"]["policies"][0]
         assert json.loads(r2_policy["resources"]) == bucket
 
-    return pulumi.Output.all(g["reader"].id, g["d1"].id, g["program"]["dash"].r2_token.id).apply(check)
+    # Every resource's id: the mocks register them asynchronously, so a check gated on a few ran before the rest had
+    # registered (a flaky `created()` short of the dev aliases or the KV).
+    dash = g["program"]["dash"]
+    every = [
+        dash.pages, dash.domain, dash.cname, dash.d1, dash.kv, dash.r2, dash.r2_token,
+        *dash.branch_cnames.values(), *dash.branch_domains.values(), g["reader"], g["d1"], g["icons"], g["pages"],
+    ]
+    return pulumi.Output.all(*[r.id for r in every]).apply(check)
 
 
 def test_cf_stack_needs_the_ids(monkeypatch: pytest.MonkeyPatch):
@@ -149,7 +161,7 @@ def test_gcp_stack(monkeypatch: pytest.MonkeyPatch):
         }
         assert task["environment"]["variables"] == {
             "DISKY_LABELS": "app=disky,deployment=hf", "HF_URI": "hf://open-athena", "R2_BUCKET": "oa-hf-usage-index",
-            "WORK_DIR": "/work", "SLACK_ALERT_CHANNEL": "C0BTUNT3B5Z",
+            "WORK_DIR": "/work", "SLACK_CHANNEL": "C0C9G547AP7", "SLACK_ALERT_CHANNEL": "C0BTUNT3B5Z",
         }
         refs = task["environment"]["secretVariables"]
         # Every secret the job reads is a container this stack creates (and grants), and the profile redacts it.

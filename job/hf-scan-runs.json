@@ -9,7 +9,7 @@
   ],
   "error_marker": ["^\\+\\+ scan_err (?P<rc>\\d+) (?P<line>\\d+) (?P<cmd>.*)"],
   "alerts": {"label": "Hugging Face scan", "logs_url": "https://console.cloud.google.com/logs/query;query=labels.job_uid%3D%22{job_uid}%22?project={project}"},
-  "secrets": ["HF_TOKEN", "CLOUDFLARE_API_TOKEN", "CLOUDFLARE_ACCOUNT_ID", "R2_ENDPOINT", "R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY", "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "SLACK_BOT_TOKEN", "SITE_TOKEN"],
+  "secrets": ["HF_TOKEN", "CLOUDFLARE_API_TOKEN", "CF_PAGES_TOKEN", "CLOUDFLARE_ACCOUNT_ID", "R2_ENDPOINT", "R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY", "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "SLACK_BOT_TOKEN", "SITE_TOKEN"],
   "outputs": [
     {"key": "layer-2", "uri": "r2://oa-hf-usage-index/listing/{scan}/", "exclude": ["index/"], "split": "stem", "after": "upload"},
     {"key": "path-index", "uri": "r2://oa-hf-usage-index/listing/{scan}/index/{gen}/", "split": "stem", "rows": "groups", "after": "upload"},
