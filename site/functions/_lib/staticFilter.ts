@@ -383,8 +383,10 @@ export function liveTotal(hits: Hit[], date: string, keep: (usr: string | null) 
  *  matches under a secondary's root; 23: path terms (`a/b`) from the name index, where they walked (flagged approximate) or
  *  were refused before, and an owner pool's series over static hits folds the ledger per root; 24: a heavy literal's
  *  rollup view draws its match roots' insides (the unfiltered subtree, as the light path's phase 2), where each was one
- *  tile — in the view and both sides of a diff). */
-const RESPONSE_V = 24
+ *  tile — in the view and both sides of a diff); 25: a match root's interior is read under an unfiltered view's bound
+ *  (`FILTER_PHASE2_GROUPS`/`ROWS` 64 / 512K, the interval store planned as the plain view plans it), where 16 / 160K left a
+ *  big root on an interval-store deployment one tile ("over the read budget")). */
+const RESPONSE_V = 25
 
 /** The query's substring matchers (positive and negative): the literals the hex-run rule applies to. */
 const subMatchers = (ast: QueryAst | undefined): Extract<Matcher, { kind: 'sub' }>[] =>
