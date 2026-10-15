@@ -38,6 +38,9 @@ export interface Store {
   desc: string     // meta description / unfurl description
   path: string     // app route
   scheme: string   // URI scheme for treemap paths/tooltips
+  /** Its tab icon while its routes are open: a `public/icons/` key (`scripts/marks/build.mjs`; `marks.ts`). Unset:
+   *  the deployment's `MARK`, built into `index.html`. */
+  mark?: string
   /** The dir `~` abbreviates (path segments), for a store captured from a
    *  home directory; unset on bucket stores, where the share console's Hide
    *  field refuses `~` lines (`hideScopes`). */
