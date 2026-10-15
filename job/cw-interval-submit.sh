@@ -34,9 +34,8 @@ body=$(python3 - "$@" <<'EOF'
 import json, os, shlex, sys
 extra = " ".join(shlex.quote(a) for a in sys.argv[1:])
 CMD, GEN = os.environ["CMD"], os.environ["GEN"]
-if CMD == "verify":  # every case's lines + summary land in /stage/verify; the summary is printed for the logs
-    run = (f'dt-cloud interval-store verify -b "$R2_ARCHIVE" -g {GEN} -i 0 -n 1 -T /stage/tmp -o /stage/verify {extra}\n'
-           "cat /stage/verify/*.json\n")
+if CMD == "verify":  # every case's lines + summary land in /stage/verify (and the generation's verify/ on R2); the summary is printed
+    run = f'dt-cloud interval-store verify -b "$R2_ARCHIVE" -g {GEN} -i 0 -n 1 -T /stage/tmp -o /stage {extra}\n'
 else:
     run = (f"dt-cloud interval-store {CMD} -g {GEN} -L 'cw-l2/{{id}}/index/{{gen}}/path-index.parquet'"
            f' -s "$R2_ARCHIVE" -o "$R2_ARCHIVE" -w /stage/iv -M {os.environ["MEM"]} -p "$(nproc)" {extra}\n')
