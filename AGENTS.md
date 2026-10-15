@@ -89,7 +89,8 @@ dt-cloud interval-store append [-c] [-n] SCAN_ID  # Append one scan to the inter
                           # strictly in scan-id order (exit 3: not published / not next; `-c` catches up)
 dt-cloud static-names build -g GEN -L LAYOUT -s SCANS -o STORE -x off|MIN,TAIL  # The static name index's base generation
                           # on ONE machine (`static_local.py`): the staged (Batch) path's stages in-process — ranges,
-                          # coalesced versions, suffix shards, catalog, drill (`build_drill`) + `roots-measure/` — over a
+                          # coalesced versions, suffix shards, catalog, drill (`build_drill`) + `roots-measure/`, and
+                          # anchored search (`names/` + `anchors/`: `^q`, `^q$`, heavy `q$`, path terms; `-A` skips it) — over a
                           # work dir (`-w`), then copied to `<STORE>/static-names/GEN/` (a dir or `r2://`/`s3://` URL;
                           # never over a generation). SCANS + `-L` templates (`{id}`, `{gen}`) find the `path` sorts.
                           # The drill is chunked as the staged path (`-c` rows, default 4M: suffix rows per member-loop
@@ -97,7 +98,8 @@ dt-cloud static-names build -g GEN -L LAYOUT -s SCANS -o STORE -x off|MIN,TAIL  
                           # so its working set is `-c`-bound, not the corpus's; byte-identical at any `-c`. Logs a
                           # `build GEN: drill/<step>` line per sub-step (seconds, disk / RSS peaks, row counts)
 dt-cloud static-names add -g GEN -L LAYOUT -s SCANS -o STORE  # Append every scan after GEN's newest as a run (append, shards,
-                          # catalog delta, drill run, `manifests/<id>.json`), then the binary counter's carries; a URL
+                          # catalog delta, drill run, + `names/`/`anchors/` when GEN's base has them — an anchorless GEN
+                          # gets them only by a rebuild into a new GEN — `manifests/<id>.json`), then the binary counter's carries; a URL
                           # store's generation is mirrored into `-w`, new files go up data → `meta.json`s → manifests.
                           # Small deployments' path (the r2 demo's daily ingest); gcs/cw run the stages on Batch
 dt-cloud interval-store build -g GEN -L LAYOUT -s SCANS -o STORE  # The interval store's base generation on ONE machine
