@@ -7,15 +7,16 @@
 #   job/cw-interval-submit.sh build             # the base generation $INTERVAL_STORE_GEN over every scan
 #   job/cw-interval-submit.sh build -t <scan>   # … through one scan (extra args go to the command)
 #   job/cw-interval-submit.sh add               # append every scan after the generation's newest
+#   job/cw-interval-submit.sh verify -s A,B,…   # parity against the per-scan path store at those scans (the base's)
 #   DRY=1 job/cw-interval-submit.sh build       # print the body only
 #
 # Same image, SA and R2 secrets as the scan job (cw-batch-submit.sh); R2 through `job/r2-profile.sh`. Never
 # over a generation: `build` refuses an existing one. Standard (not spot) VM: a build has no resume.
 set -euo pipefail
 
-if [ $# -eq 0 ]; then echo "usage: $0 build|add [args…]" >&2; exit 2; fi
+if [ $# -eq 0 ]; then echo "usage: $0 build|add|verify [args…]" >&2; exit 2; fi
 CMD=$1; shift
-case $CMD in build|add) ;; *) echo "$0: build or add, not $CMD" >&2; exit 2 ;; esac
+case $CMD in build|add|verify) ;; *) echo "$0: build, add or verify, not $CMD" >&2; exit 2 ;; esac
 
 PROJECT=oa-internal-450019
 REGION=us-central1
@@ -32,14 +33,20 @@ export PROJECT SA IMAGE R2_BUCKET GEN MACHINE MEM DISK_GB CMD
 body=$(python3 - "$@" <<'EOF'
 import json, os, shlex, sys
 extra = " ".join(shlex.quote(a) for a in sys.argv[1:])
+CMD, GEN = os.environ["CMD"], os.environ["GEN"]
+if CMD == "verify":  # every case's lines + summary land in /stage/verify; the summary is printed for the logs
+    run = (f'dt-cloud interval-store verify -b "$R2_ARCHIVE" -g {GEN} -i 0 -n 1 -T /stage/tmp -o /stage/verify {extra}\n'
+           "cat /stage/verify/*.json\n")
+else:
+    run = (f"dt-cloud interval-store {CMD} -g {GEN} -L 'cw-l2/{{id}}/index/{{gen}}/path-index.parquet'"
+           f' -s "$R2_ARCHIVE" -o "$R2_ARCHIVE" -w /stage/iv -M {os.environ["MEM"]} -p "$(nproc)" {extra}\n')
 cmd = (
     "set -euo pipefail\n"
     ". job/r2-profile.sh\n"
     'test -n "${R2_ARCHIVE:-}" || { echo "no R2 env" >&2; exit 2; }\n'
     "set -x\n"
-    f"dt-cloud interval-store {os.environ['CMD']} -g {os.environ['GEN']} -L 'cw-l2/{{id}}/index/{{gen}}/path-index.parquet'"
-    f' -s "$R2_ARCHIVE" -o "$R2_ARCHIVE" -w /stage/iv -M {os.environ["MEM"]} -p "$(nproc)" {extra}\n'
-    "echo INTERVAL-STORE-DONE"
+    + run
+    + "echo INTERVAL-STORE-DONE"
 )
 P = os.environ["PROJECT"]
 print(json.dumps({
