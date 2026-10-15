@@ -381,8 +381,10 @@ export function liveTotal(hits: Hit[], date: string, keep: (usr: string | null) 
  *  (`staticBool.ts`), where they walked the path store, flagged approximate, before; 22: a secondary store reads only
  *  its own static index (`STORES_JSON` `STATIC_GEN`), never the primary's — a cached 21 body could hold the primary's
  *  matches under a secondary's root; 23: path terms (`a/b`) from the name index, where they walked (flagged approximate) or
- *  were refused before, and an owner pool's series over static hits folds the ledger per root). */
-const RESPONSE_V = 23
+ *  were refused before, and an owner pool's series over static hits folds the ledger per root; 24: a heavy literal's
+ *  rollup view draws its match roots' insides (the unfiltered subtree, as the light path's phase 2), where each was one
+ *  tile — in the view and both sides of a diff). */
+const RESPONSE_V = 24
 
 /** The query's substring matchers (positive and negative): the literals the hex-run rule applies to. */
 const subMatchers = (ast: QueryAst | undefined): Extract<Matcher, { kind: 'sub' }>[] =>
