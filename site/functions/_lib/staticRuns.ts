@@ -62,6 +62,9 @@ const message = (e: unknown): string => e instanceof Error ? e.message : String(
  *  The state is cut at the first tier that isn't: its scans and every later one's drop out (a caller's
  *  `scan-not-indexed`), the ones before it answer as before. A cut state is re-built after `brokenTtlMs` (not
  *  `ttlMs`), re-checking the broken tier, so a publish caught mid-write heals within that. */
+/** `Tiers.refreshMs`'s default: a refresh is a listing and a few small JSON reads. */
+export const REFRESH_MS = 15_000
+
 export class Tiers {
   private held = new Map<string, Tier>()
   private broken = new Map<string, Broken>()
@@ -75,6 +78,9 @@ export class Tiers {
     readonly now: () => number = () => Date.now(),
     readonly brokenTtlMs = 30_000,
     readonly log: (msg: string) => void = msg => console.error(msg),
+    /** How long a refresh may take before the last good state answers instead (a cold isolate's: an error), so a
+     *  read that never settles (an R2 request hung) can't hold every caller of this isolate for `ttlMs`. */
+    readonly refreshMs = REFRESH_MS,
   ) {}
 
   private tier(dir: string | null): Tier {
@@ -166,10 +172,21 @@ export class Tiers {
         dirOnly,
       }
     })()
-    this.cur = p
-    // A failed refresh keeps serving the last good state (and retries on the next call).
-    p.catch(() => { if (this.cur === p) { this.cur = prev; this.at = -Infinity } })
-    return p
+    // Bounded: past `refreshMs` the last good state answers (warm; the next refresh is a TTL on, as after any
+    // refresh) or the call fails (cold; the next call retries); a refresh that does settle later replaces it.
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const bound = new Promise<TierState>((resolve, reject) => {
+      timer = setTimeout(() => {
+        if (prev) { this.log(`static tiers: a refresh took over ${this.refreshMs} ms; serving the last good state`); resolve(prev) }
+        else reject(new Error(`static tiers: a refresh took over ${this.refreshMs} ms, with no state yet`))
+      }, this.refreshMs)
+    })
+    const q = Promise.race([p, bound])
+    this.cur = q
+    p.then(() => { clearTimeout(timer!); if (this.cur === q) this.cur = p }, () => clearTimeout(timer!))
+    // A failed (or, cold, timed-out) refresh keeps serving the last good state, and the next call retries.
+    q.catch(() => { if (this.cur === q) { this.cur = prev; this.at = -Infinity } })
+    return q
   }
 
   /** `f` over every usable tier of the current state. A tier whose read fails is `broke`n and `f` re-run over the
@@ -309,10 +326,12 @@ export function tiers(blobs: Blobs, opts: {
   /** A cut state's lifetime (`Tiers`). */
   brokenTtlMs?: number
   log?: (msg: string) => void
+  /** How long a refresh may take (`Tiers.refreshMs`). */
+  refreshMs?: number
 } = {}): { tiers: Tiers; names: TieredNames; catalog: TieredCatalog; scans: () => Promise<string[]>; dirOnly: () => Promise<string[]> } {
   const t = new Tiers(blobs, (b, dir) => ({
     names: new StaticNames(b, opts.indexCache?.(dir), opts.clock),
     catalog: new StaticCatalog(b, opts.catalogCache?.(dir)),
-  }), opts.ttlMs, opts.now, opts.brokenTtlMs, opts.log)
+  }), opts.ttlMs, opts.now, opts.brokenTtlMs, opts.log, opts.refreshMs)
   return { tiers: t, names: new TieredNames(t), catalog: new TieredCatalog(t), scans: async () => (await t.state()).scans, dirOnly: async () => (await t.state()).dirOnly ?? [] }
 }
