@@ -5,6 +5,7 @@ import { liveTotal, MAX_ROWS, SuffixHits } from './staticFilter.js'
 import type { Blobs } from './staticNames.js'
 import { latestManifest, tiers } from './staticRuns.js'
 import { fixture } from './testStore.js'
+import { abandoned, BOUND, hangFirst } from './testHang.js'
 
 // The daily runs' reader (`staticRuns.ts`) over `fixtures/static-runs/` (`gen.py`): a base through 2026-09-01 and
 // a run per scan — 2026-10-01, 2026-10-02 (date ids), then two scans on one day, 2026-10-03T0600 and 2026-10-03T1800
@@ -195,26 +196,22 @@ describe('static runs', () => {
   })
 })
 
-describe('a refresh that never settles (an R2 read hung) is bounded, never held for the TTL', () => {
-  /** `files` whose `list` hangs forever from the `hang`th call on (a read that never settles). */
-  const hanging = (hang: number) => {
-    let calls = 0
-    const base = files([MANIFESTS[0]])
-    const blobs: Blobs = { ...base, list: async p => { if (++calls >= hang) return new Promise<string[]>(() => {}); return [MANIFESTS[0]].filter(k => k.startsWith(p)) } }
-    return blobs
-  }
-  it('a warm isolate answers from the last good state at once, logged', async () => {
-    let now = 0
-    const logs: string[] = []
-    const t = tiers(hanging(2), { ttlMs: 1000, refreshMs: 20, now: () => now, log: m => logs.push(m) })
-    expect(await t.scans()).toEqual(DATES.slice(0, 3))
-    now = 1000
-    expect(await t.scans()).toEqual(DATES.slice(0, 3))
-    expect(logs).toEqual(['static tiers: a refresh took over 20 ms; serving the last good state'])
+describe('a refresh abandoned by its request (its read frozen) is never awaited by the next one (`shared.ts`)', () => {
+  it.each(['cancel', 'end'] as const)('request A\'s refresh hangs and A %ss: request B refreshes in its own context and answers', async how => {
+    const blobs = hangFirst(files(), method => method === 'list')
+    const t = tiers(blobs)
+    const got = await abandoned(req => t.scans(req), blobs.hung, how, how === 'cancel' ? BOUND / 2 : 5 * BOUND)
+    expect(got).toEqual(DATES)
   })
-  it('a cold isolate refuses (an error, not a hang) and retries on the next call', async () => {
-    const t = tiers(hanging(1), { refreshMs: 20, log: () => {} })
-    await expect(t.scans()).rejects.toThrow('static tiers: a refresh took over 20 ms, with no state yet')
+  it('a warm isolate\'s TTL refresh, likewise: B does not wait on A\'s', async () => {
+    let now = 0
+    let hang = false
+    const blobs = hangFirst(files(), method => hang && method === 'list')
+    const t = tiers(blobs, { ttlMs: 1000, now: () => now })
+    expect(await t.scans()).toEqual(DATES)
+    now = 1000
+    hang = true
+    expect(await abandoned(req => t.scans(req), blobs.hung, 'cancel', BOUND / 2)).toEqual(DATES)
   })
 })
 
