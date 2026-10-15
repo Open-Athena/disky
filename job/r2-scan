@@ -579,6 +579,9 @@ def index_store(
     common = ["-L", f"{'meta-l2' if meta else 'listing'}/{{id}}/index/{{gen}}/path-index.parquet", "-s", store, "-o", store,
               "-M", environ.get("DUCKDB_MEM", "12GB"), "-p", environ.get("DUCKDB_THREADS", "8")]
     env = {**environ, "AWS_ACCESS_KEY_ID": environ["R2_ACCESS_KEY_ID"].strip(), "AWS_SECRET_ACCESS_KEY": environ["R2_SECRET_ACCESS_KEY"].strip()}
+    # The existence checks below read the index bucket from this process: without its key they read nothing, and every
+    # stage would `build` (refused over an existing generation).
+    environ.update(AWS_ACCESS_KEY_ID=env["AWS_ACCESS_KEY_ID"], AWS_SECRET_ACCESS_KEY=env["AWS_SECRET_ACCESS_KEY"])
     stages = [("static-names", config["meta_static_gen" if meta else "static_gen"], ["-x", "16,8"])]
     if not meta:
         stages.append(("interval-store", config["interval_gen"], []))

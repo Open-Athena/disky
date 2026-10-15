@@ -20,7 +20,7 @@ enabled = true
 [vars]
 STORE = "oa-r2"
 STORES_EXTRA = "meta"
-STORES_JSON = '{"meta":{"vars":{"ROOT_LABEL":"OA R2 metadata","SNAPSHOTS_SUBDIR":"meta","STORE_SCHEME":"r2://","STORE_BUCKETS":"oa-r2-usage-data,oa-r2-usage-index","STORE_PREFIXES":"meta-l2/,snapshots/meta/","STORE_BUCKET":"oa-r2-usage-index","STORE_REGION":"auto","ROOT_TITLE":"This deployment’s scan archive and serving indexes","STATIC_GEN":"2026-10-15meta","FILTER_STATIC_HEAVY":"1"},"secrets":{"STORE_ENDPOINT":"STORE_ENDPOINT","STORE_ACCESS_KEY_ID":"STORE_ACCESS_KEY_ID","STORE_SECRET_ACCESS_KEY":"STORE_SECRET_ACCESS_KEY"}},"all":{"union":["primary","meta"],"main":true,"sources":{"primary":{"label":"R2 buckets","icon":"/favicon.svg"},"meta":{"label":"Scan metadata","icon":"/icons/meta.svg"}}}}'
+STORES_JSON = '{"meta":{"vars":{"ROOT_LABEL":"OA R2 metadata","SNAPSHOTS_SUBDIR":"meta","STORE_SCHEME":"r2://","STORE_BUCKETS":"oa-r2-usage-data,oa-r2-usage-index","STORE_PREFIXES":"meta-l2/,snapshots/meta/","STORE_BUCKET":"oa-r2-usage-index","STORE_REGION":"auto","ROOT_TITLE":"This deployment’s scan archive and serving indexes","STATIC_GEN":"2026-10-15metab","FILTER_STATIC_HEAVY":"1"},"secrets":{"STORE_ENDPOINT":"STORE_ENDPOINT","STORE_ACCESS_KEY_ID":"STORE_ACCESS_KEY_ID","STORE_SECRET_ACCESS_KEY":"STORE_SECRET_ACCESS_KEY"}},"all":{"union":["primary","meta"],"main":true,"sources":{"primary":{"label":"R2 buckets","icon":"/favicon.svg"},"meta":{"label":"Scan metadata","icon":"/icons/meta.svg"}}}}'
 META_TREE_URL = "https://r2.oa.dev/meta"
 AUTH_MODE = "app"
 ROOT_LABEL = "Open Athena R2"
@@ -47,7 +47,7 @@ REPO_URL = "https://github.com/Open-Athena/marin-gcs-usage"
 # (`interval-store/CURRENT.json`; unpinned, so the job's compactions are followed without a deploy).
 # `job/r2-scan` builds both on its first run (`submit -i` without a scan) and appends each later scan.
 FILTER_STATIC = "1"
-STATIC_GEN = "2026-10-15r2"
+STATIC_GEN = "2026-10-15r2b"
 FILTER_STATIC_HEAVY = "1"
 PATH_STORE = "intervals"
 
