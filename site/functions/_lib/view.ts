@@ -670,7 +670,8 @@ interface Read {
    * is known whole. */
   exact?: Map<string, Agg>
   complete?: (p: string) => boolean
-  /** A rollup read: the paths answered (P and the nested ones; `ViewOpts.nestForce`). */
+  /** A rollup read: the paths answered (P, the nested ones, the match roots whose insides were read, and the other
+   *  side's answered paths this scan doesn't hold; `ViewOpts.nestForce`). */
   nested?: Set<string>
   /** With a NOT query: the outermost excluded paths under the match roots. */
   excluded?: string[]
@@ -880,6 +881,13 @@ async function readView(env: Env, o: ViewOpts, cov: Coverage = {}): Promise<Read
     // The search reads the `path` sort (its names' row groups are that
     // sort's); a lens without assignments keeps the old read.
     const pathIdx = !tiers.length && !lens ? (sort === 'path' && fine ? fine : withTrace(await openFine(env, date, 'path'), tr)) : null
+    // Phase 2's index at forest threshold `T`: the coarsest tier the threshold can't see below (a first paint:
+    // the coarsest), else the floor-free `path` sort.
+    const regionFor = async (T: number, first: boolean): Promise<{ chosen: { name: string; idx: IndexHandle } | 'fine'; idx: IndexHandle }> => {
+      const withFloors = tiers.filter(t => floorOf(t.idx) != null).map(t => ({ name: t.name, floor: floorOf(t.idx)!, idx: t.idx }))
+      const chosen = first ? (withFloors[0] ?? 'fine') : pickTier(withFloors, T)
+      return { chosen, idx: chosen === 'fine' ? (fine ?? withTrace(await openFine(env, date, 'path'), tr)) : chosen.idx }
+    }
     const store = !!pathIdx && isStore(pathIdx)
     // The search sidecars sit beside the scan's own path sort: an interval-store handle searches there
     // (a deployment that builds none never opens that per-scan sort for them).
@@ -940,7 +948,7 @@ async function readView(env: Env, o: ViewOpts, cov: Coverage = {}): Promise<Read
       tr?.('static', performance.now() - t0, shits ? `${skey} ${shits.rollup ? `rollup ${shits.rollup.cells.length}` : shits.hits.length}` : skey ? `declined${off ? ` (${off})` : ''}` : undefined)
       if (shits?.rollup) {
         const h = pathIdx ?? fine ?? withTrace(await openFine(env, date, 'path'), tr)
-        return rollupRead(env, o, shits.rollup, { dP, rootAll, idx, details: h, trace: tr, fetch: (p, ho) => sfs!.source.hits(skey!, p, ho) })
+        return rollupRead(env, o, shits.rollup, { dP, rootAll, idx, details: h, trace: tr, fetch: (p, ho) => sfs!.source.hits(skey!, p, ho), region: async T => (await regionFor(T, false)).idx, smallRows, ivPlanRows })
       }
       if (sb) {
         p1 = aggregateHits(sb.roots)
@@ -1077,9 +1085,7 @@ async function readView(env: Env, o: ViewOpts, cov: Coverage = {}): Promise<Read
     const T = o.threshold ?? filterThreshold(matchedPre.b, w, h, minArea)
     // A diff's floor pass wants this side's floor alone: no forest.
     if (o.floorOnly) return { rootAll, rootAgg: matchedPre, kept: new Map(), aggDepth: new Map(), foldedOf: new Map(), threshold: T, thrAt: rebasedThreshold(T, atten, dP), tier: p1Tier, idx, truncated: false, ownerLens: ol, scoped }
-    const withFloors = tiers.filter(t => floorOf(t.idx) != null).map(t => ({ name: t.name, floor: floorOf(t.idx)!, idx: t.idx }))
-    const chosen = o.firstPaint ? (withFloors[0] ?? 'fine') : pickTier(withFloors, T)
-    const regionIdx = chosen === 'fine' ? (fine ?? withTrace(await openFine(env, date, 'path'), tr)) : chosen.idx
+    const { chosen, idx: regionIdx } = await regionFor(T, !!o.firstPaint)
     let tierName = chosen === 'fine' ? 'fine' : chosen.name
     // A root under its level's threshold folds into its parent's `(other)` (below): nothing inside it
     // is drawn, so it is neither read nor looked up.
@@ -1599,6 +1605,8 @@ export interface Nest {
   /** P and every path answered. */
   fetched: Set<string>
   skipped: { budget: number; late: number }
+  /** Phase 2's decoded-rows budget the nest left (its match roots' insides read within it, `rollupRead`). */
+  rowsLeft: number
   total: Agg
   T: number
   thrAt: (d: number) => number
@@ -1750,7 +1758,7 @@ export async function nestRollup(o: NestOpts): Promise<Nest | null> {
     if (timer != null) clearTimeout(timer)
     tr?.('nest', performance.now() - t0, `${fetched.size - 1} read, ${skipped.budget + skipped.late} left`)
   }
-  return { exact, depthOf, kidsOf, rollupKids, rootsDirs, fetched, skipped, total, T, thrAt }
+  return { exact, depthOf, kidsOf, rollupKids, rootsDirs, fetched, skipped, rowsLeft, total, T, thrAt }
 }
 
 /** A heavy literal's view at P from P's rollup (`staticDrill.ts`) on `o.date`: each child of P holding match
@@ -1767,19 +1775,41 @@ export async function nestRollup(o: NestOpts): Promise<Nest | null> {
  * exact). Level by level, heaviest first, `NEST_PAR` at a time, at most `FILTER_NEST_READS` answers and phase 2's
  * rows (`FILTER_PHASE2_ROWS` match roots over the roots answers; one bounded past what is left is not read)
  * — past them a child stays one exact tile — within phase 2's time budget (`late`: kept briefly, upgraded); any
- * cut is `interiors`. Each answer spans every scan, so a diff's two sides read the same ones (`nestForce`). */
-async function rollupRead(env: Env, o: ViewOpts, rollup: Rollup, x: { dP: number; rootAll: Agg; idx: IndexHandle; details: IndexHandle; trace?: Trace; fetch?: (p: string, opts: HitOpts) => Promise<Found | null> }): Promise<Read | null> {
+ * cut is `interiors`. Each answer spans every scan, so a diff's two sides read the same ones (`nestForce`).
+ *
+ * The drawn match roots' insides are the light path's phase 2 (`readInteriors`): every descendant of a match root
+ * matches, so a root the plain filter view would subdivide (drawn, more than one object, at least
+ * `FILTER_SUBDIV_AREA` px², above `maxDepth`; the heaviest `REGION_READS`) draws the unfiltered subtree at its path,
+ * `FILTER_SUBDIV_LEVELS` deep at its own rebased threshold, within what the nest left of phase 2's rows and time.
+ * A root in `nestForce` (the diff's other side read its inside) is read whatever its bytes; one this scan doesn't
+ * hold is answered empty. Roots read are `nested` too, so a diff draws a root's inside on both sides or neither. */
+async function rollupRead(env: Env, o: ViewOpts, rollup: Rollup, x: {
+  dP: number
+  rootAll: Agg
+  idx: IndexHandle
+  details: IndexHandle
+  trace?: Trace
+  fetch?: (p: string, opts: HitOpts) => Promise<Found | null>
+  /** Phase 2's index at a forest threshold (the light path's tier pick). */
+  region: (T: number) => Promise<IndexHandle>
+  smallRows: number
+  ivPlanRows: number
+}): Promise<Read | null> {
   const { date, path, w, h, minArea, atten, query, maxDepth } = o
   const { dP, trace: tr } = x
   const t0 = performance.now()
   const isRoot = (p: string) => !!query?.(p)
+  const ms = o.phase2Ms ?? (Number(env.FILTER_PHASE2_MS) || FILTER_PHASE2_MS)
   const nest = await nestRollup({
     date, path, dP, rollup, isRoot, threshold: o.threshold, w, h, minArea, atten, maxDepth,
     fetch: o.firstPaint || o.floorOnly ? undefined : x.fetch, force: o.nestForce, reads: o.nestReads, rows: o.phase2Rows,
-    ms: o.phase2Ms ?? (Number(env.FILTER_PHASE2_MS) || FILTER_PHASE2_MS), trace: tr,
+    ms, trace: tr,
   })
   if (!nest) return null
   const { exact, depthOf, kidsOf, rollupKids, rootsDirs, fetched, skipped, total, T, thrAt } = nest
+  // The match roots known on this scan (before any inside is read: a path inside a root whose name holds the
+  // literal too is no root).
+  const rootSet = new Set([...exact.keys()].filter(isRoot))
 
   // The drawn tree: every known node over its level's threshold whose parent is drawn (or is P), within `maxDepth`.
   const kept = new Map<string, Agg>()
@@ -1792,6 +1822,70 @@ async function rollupRead(env: Env, o: ViewOpts, rollup: Rollup, x: { dP: number
     }
   }
   draw(path)
+  // A path is known whole on this side (a diff takes its children from `exact`, absent = zero): it was answered,
+  // or it sits inside a roots answer above every match root, or it has no matches here under a known parent.
+  const complete = (p: string): boolean => {
+    if (fetched.has(p)) return true
+    for (let q = p; q.length > path.length; q = parentOf(q)) {
+      if (isRoot(q)) return false
+      const par = parentOf(q)
+      if (rootsDirs.has(par)) return true
+      if (fetched.has(par)) break
+    }
+    return p !== path && !exact.has(p) && complete(parentOf(p))
+  }
+  // A path the diff's other side answered (`nestForce`) that this scan doesn't hold, under a parent it knows whole:
+  // answered too — nothing is there — so the other side's answer stands (an added folder draws what arrived).
+  const absent = new Set([...o.nestForce ?? []].filter(p => p !== path && !exact.has(p) && complete(parentOf(p))))
+
+  // The match roots' insides (`readInteriors`, as the light path's phase 2).
+  const inside = { budget: 0, wide: 0, late: 0 }
+  let insideRead = 0
+  const insideDone = new Set<string>()
+  if (!o.firstPaint && !o.floorOnly && !(maxDepth != null && maxDepth <= 0)) {
+    const subdivMin = T * (FILTER_SUBDIV_AREA / minArea)
+    const force = o.nestForce
+    const want = [...rootSet].filter(r => kept.has(r) && exact.get(r)!.o > 1 && exact.get(r)!.b >= subdivMin && (maxDepth == null || depthOf.get(r)! < dP + maxDepth))
+      .map(r => [exact.get(r)!.b, r] as const).sort((p, q) => q[0] - p[0] || (p[1] < q[1] ? -1 : p[1] > q[1] ? 1 : 0)).slice(0, REGION_READS).map(e => e[1])
+    // The diff's other side read these: so does this one (one this scan doesn't hold is `absent`).
+    const forced = [...force ?? []].filter(p => isRoot(p) && !want.includes(p))
+    const roots = [...forced.filter(p => rootSet.has(p) && (maxDepth == null || depthOf.get(p)! < dP + maxDepth)), ...want].map(p => ({ path: p, depth: depthOf.get(p)! }))
+    if (roots.length) {
+      const got = await readInteriors(env, {
+        date, path, dP, idx: await x.region(T), roots, weight: p => exact.get(p)!.b, nd: () => null,
+        T, atten, maxDepth, ms: Math.max(0, ms - (performance.now() - t0)), groups: o.phase2Groups ?? FILTER_PHASE2_GROUPS,
+        rows: Math.max(0, nest.rowsLeft), gate: o.phase2Gate, smallRows: x.smallRows, ivPlanRows: x.ivPlanRows, trace: tr,
+      })
+      Object.assign(inside, got.skipped)
+      insideRead = roots.length - (got.skipped.budget + got.skipped.wide + got.skipped.late)
+      for (const p of got.done) insideDone.add(p)
+      // Each path's rows summed (owner slices); the root a row is under, and its depth.
+      const rowAgg = new Map<string, Agg>()
+      for (const r of got.rows) {
+        let a = rowAgg.get(r.path)
+        if (!a) { rowAgg.set(r.path, (a = newAgg())); depthOf.set(r.path, r.depth) }
+        merge(a, r)
+      }
+      const rootOf = (p: string): string | null => {
+        for (let q = parentOf(p); q.length > path.length; q = parentOf(q)) { if (got.done.has(q)) return q; if (q === '') break }
+        return null
+      }
+      for (const p of [...rowAgg.keys()].sort((a, b) => depthOf.get(a)! - depthOf.get(b)! || (a < b ? -1 : a > b ? 1 : 0))) {
+        const r = rootOf(p)
+        if (r === null) continue
+        // At the root's own rebased threshold (the light path's): the read's groups hold lighter rows too.
+        const a = rowAgg.get(p)!
+        if (a.b < rebasedThreshold(T, atten, depthOf.get(r)!)(depthOf.get(p)!)) continue
+        exact.set(p, a)
+        const par = parentOf(p)
+        const ks = kidsOf.get(par)
+        if (ks) ks.push(p); else kidsOf.set(par, [p])
+        // Drawn under a drawn parent.
+        if (kept.has(par)) { kept.set(p, a); aggDepth.set(p, depthOf.get(p)!) }
+      }
+    }
+  }
+
   const foldedOf = new Map<string, number>()
   const capped = capTiles(kept, aggDepth, path, o.maxTiles ?? tileBudget(w, h))
   for (const dir of [path, ...kept.keys()]) {
@@ -1802,7 +1896,7 @@ async function rollupRead(env: Env, o: ViewOpts, rollup: Rollup, x: { dP: number
     if (f > 0) foldedOf.set(dir, f)
   }
   if (!foldedOf.has(path)) foldedOf.set(path, 0)
-  const matched = [...exact].filter(([p]) => isRoot(p)).map(([p, a]) => ({ path: p, b: a.b, o: a.o })).sort((x, y) => y.b - x.b || (x.path < y.path ? -1 : x.path > y.path ? 1 : 0))
+  const matched = [...rootSet].map(p => [p, exact.get(p)!] as const).map(([p, a]) => ({ path: p, b: a.b, o: a.o })).sort((x, y) => y.b - x.b || (x.path < y.path ? -1 : x.path > y.path ? 1 : 0))
   // The drawn match roots: their own rows (kind, ages, classes, owners — the whole root is matched) by point
   // lookups, heaviest first, within `FILTER_DETAILS_MS`; never on the first paint.
   const want = matched.filter(m => kept.has(m.path)).slice(0, ROOT_DETAILS)
@@ -1834,27 +1928,15 @@ async function rollupRead(env: Env, o: ViewOpts, rollup: Rollup, x: { dP: number
     tr?.('details', performance.now() - t0, String(own.size))
   }
   tr?.('rollup', performance.now() - t0, `${kidsOf.get(path)!.length} kids, ${kept.size} kept${capped.length ? `, ${capped.length} over the tile budget` : ''}`)
-  const left = skipped.budget + skipped.late
-  // A path is known whole on this side (a diff takes its children from `exact`, absent = zero): it was answered,
-  // or it sits inside a roots answer above every match root, or it has no matches here under a known parent.
-  const complete = (p: string): boolean => {
-    if (fetched.has(p)) return true
-    for (let q = p; q.length > path.length; q = parentOf(q)) {
-      if (isRoot(q)) return false
-      const par = parentOf(q)
-      if (rootsDirs.has(par)) return true
-      if (fetched.has(par)) break
-    }
-    return p !== path && !exact.has(p) && complete(parentOf(p))
-  }
+  const left = skipped.budget + skipped.late + inside.budget + inside.wide + inside.late
   return {
     rootAll: x.rootAll, rootAgg: total, kept, aggDepth, foldedOf,
     threshold: T, thrAt, tier: 'rollup', idx: x.idx, truncated: false,
     matches: matched.map(m => m.path).sort(), matched: matched.map(m => ({ path: m.path, b: Math.round(m.b), o: Math.round(m.o) })),
     matchCount: { n: rollup.rows ?? matched.length, b: Math.round(total.b), o: Math.round(total.o) },
     rollup: { children: rollup.children, kept: rollup.kept, rows: rollup.rows, ...(rollup.bucketsOnly ? { bucketsOnly: true as const } : {}), ...(rollup.scopedBelow ? { scopedBelow: true as const } : {}) },
-    exact, complete, nested: fetched,
-    ...(left ? { interiors: { read: fetched.size - 1, skipped: left, reason: [skipped.budget && `${skipped.budget} over the read budget`, skipped.late && `${skipped.late} past the time budget`].filter(Boolean).join(', '), ...(skipped.late ? { late: skipped.late } : {}) } } : {}),
+    exact, complete, nested: insideDone.size || absent.size ? new Set([...fetched, ...insideDone, ...absent]) : fetched,
+    ...(left ? { interiors: interiorsNote(fetched.size - 1 + insideRead, { budget: skipped.budget + inside.budget, wide: inside.wide, late: skipped.late + inside.late }) } : {}),
     ...(o.firstPaint ? { firstPaint: true } : {}), ownerLens: null, scoped: (_p, _all, mine) => mine!,
   }
 }
@@ -2453,8 +2535,8 @@ export async function buildDiff(env0: Env, o: DiffOpts): Promise<Diff> {
     const asks: { cp: string; d: number; side: 1 | 2; v: Read; date: string; other?: Agg }[] = []
     for (const { it, names } of plans) {
       for (const cp of names) {
-        if (va && !va.kept.has(cp) && !va.complete?.(it.p)) asks.push({ cp, d: it.d + 1, side: 1, v: va, date: from, other: vb?.kept.get(cp) })
-        if (vb && !vb.kept.has(cp) && !vb.complete?.(it.p)) asks.push({ cp, d: it.d + 1, side: 2, v: vb, date: to, other: va?.kept.get(cp) })
+        if (va && !va.kept.has(cp) && !va.exact?.has(cp) && !va.complete?.(it.p)) asks.push({ cp, d: it.d + 1, side: 1, v: va, date: from, other: vb?.kept.get(cp) })
+        if (vb && !vb.kept.has(cp) && !vb.exact?.has(cp) && !vb.complete?.(it.p)) asks.push({ cp, d: it.d + 1, side: 2, v: vb, date: to, other: va?.kept.get(cp) })
       }
     }
     const found = new Map<string, Agg | null>() // `${side}:${cp}`
