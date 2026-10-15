@@ -126,6 +126,7 @@ FILTER_STATIC = "1"
 NAME_SUMMARY_STATIC = "1"
 STATIC_GEN = "2026-10-10cw"
 FILTER_STATIC_HEAVY = "1"
+FILTER_INDEXED_ONLY = "1"   # as gcs: the filter is the static name index only (no per-scan search sidecars)
 SERVED_R2 = "1"   # snapshot JSONs + extras read through INDEX_R2 (the same bucket as `STORE_BUCKET`), not the S3 seam
 PATH_STORE = "intervals"   # every request reads the interval store (INDEX_R2) for the scans its generation holds; others read per-scan (`_lib/index.ts`)
 INTERVAL_STORE_GEN = "2026-10-14cw"   # the interval store generation (specs/interval-store.md): base by `job/cw-interval-submit.sh build`, each later scan appended by `cw-run.sh` 4c'
@@ -241,6 +242,7 @@ NAME_SUMMARY_STATIC = "1"
 # The hex-run generation (specs/static-hex-runs.md), light index and drill both on R2; heavy terms read the drill.
 STATIC_GEN = "2026-10-10cw"
 FILTER_STATIC_HEAVY = "1"
+FILTER_INDEXED_ONLY = "1"   # as gcs: the filter is the static name index only (no per-scan search sidecars)
 SERVED_R2 = "1"   # snapshot JSONs + extras read through INDEX_R2 (the same bucket as `STORE_BUCKET`), not the S3 seam
 PATH_STORE = "intervals"   # every request reads the interval store (INDEX_R2) for the scans its generation holds; others read per-scan (`_lib/index.ts`)
 INTERVAL_STORE_GEN = "2026-10-14cw"   # the interval store generation (specs/interval-store.md): base by `job/cw-interval-submit.sh build`, each later scan appended by `cw-run.sh` 4c'
