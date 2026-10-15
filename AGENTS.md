@@ -240,7 +240,7 @@ The repo is **public**: no emails, account ids, tokens or other secrets in track
 ### Branches
 
 - `hf` merges the local `cloud` branch (`git merge refs/heads/cloud`); never rebase onto it. Shared fixes are `[cloud]` commits, cherry-picked up by the root session; deployment commits are `[hf]`.
-- Migrations: the cw lineage, `site/migrations/cw/`, applied from scratch to `oa-hf-usage-db`.
+- D1: `oa-hf-usage-db` is on the shared `site/schema.sql` (`dt-cloud d1-schema check -d oa-hf-usage-db`); a change is a `site/migrations/<slug>.sql` recipe applied with `--file`.
 
 ### Layout (hf's own)
 

@@ -14,7 +14,7 @@ pulumi preview -s <stack>   # read-only; `up` is a human's call
 The `hf` stack (hf.oa.dev) runs the shared program through `hf_stack.py` (`main:` in `Pulumi.yaml`), with this deployment's values in `Pulumi.hf.yaml`. The account and zone ids are not in that file: `hf_stack.py` takes them from `$CLOUDFLARE_ACCOUNT_ID` / `$CF_ZONE_ID`. It declares:
 
 - the `oa-hf-usage` Pages project shell and the `hf.oa.dev` custom domain + CNAME (no preview-branch alias yet);
-- the `oa-hf-usage-db` D1 database (migrations stay with the app, `site/migrations/cw/`);
+- the `oa-hf-usage-db` D1 database (its schema stays with the app, `site/schema.sql`);
 - the `CACHE_KV` namespace `oa-hf-usage-cache`;
 - the R2 index bucket `oa-hf-usage-index` and its read/write token (`r2_s3_*` outputs: the job's keys);
 - from `hf_stack.py`: a read-only token on that bucket (`site_r2_*`: the site's `STORE_*`) and the job's D1 token (`job_d1_token`).

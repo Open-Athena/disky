@@ -15,7 +15,6 @@ compatibility_flags = ["enable_request_signal"]  # interval-store reads evict a 
 binding = "DB"
 database_name = "oa-hf-usage-db"
 database_id = "2f83fdf9-509f-491c-9664-04bef9944988"
-migrations_dir = "migrations/cw"
 remote = true   # dev-only: local dev reads the real D1; deploys ignore it
 
 [observability]
@@ -85,7 +84,6 @@ id = "db204aed0ef5440f8d450184cc7c177a"
 binding = "DB"
 database_name = "oa-hf-usage-db"
 database_id = "2f83fdf9-509f-491c-9664-04bef9944988"
-migrations_dir = "migrations/cw"
 
 [env.preview.vars]
 ROOT_LABEL = "Open Athena on Hugging Face (dev)"

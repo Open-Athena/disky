@@ -69,11 +69,12 @@ export UV_PROJECT_ENVIRONMENT=$PWD/infra/.venv   # for pulumi; never the repo's 
    ```
    The DNS / domain step is part of this `up`: a proxied CNAME `hf.oa.dev → oa-hf-usage.pages.dev` in the oa.dev zone, and the Pages custom domain (validated by Cloudflare, usually within minutes).
 3. **Fill the binding ids** in `site/wrangler.toml`: `database_id` ← `./run stack output d1_database_id -s hf`, the `CACHE_KV` `id` ← `./run stack output cache_kv_id -s hf`. Commit (`[hf] site/wrangler.toml: the D1 + KV ids`). The image bakes this file, so do it before step 7.
-4. **D1 migrations** (the cw lineage, from scratch):
+4. **D1 schema** (one current-state file, `site/schema.sql`; spec `done/d1-migrations.md`). A new database is created from it:
    ```bash
-   cd site && pnpm exec wrangler d1 migrations apply oa-hf-usage-db --remote
-   pnpm exec wrangler d1 execute oa-hf-usage-db --remote --command "SELECT name FROM d1_migrations ORDER BY id"   # 20 rows, 0001_init … 0022_footer_cache
+   cd site && pnpm exec wrangler d1 execute oa-hf-usage-db --remote --file schema.sql
+   cd ../cloud && dt-cloud d1-schema check -d oa-hf-usage-db   # read-only: the live schema equals schema.sql
    ```
+   `oa-hf-usage-db` itself was built (2026-10-15) by the 20 then-current `migrations/cw` files, `0001_init` … `0022_footer_cache`; `check` matches it to `schema.sql`. A later change is a recipe `site/migrations/<slug>.sql` (AGENTS.md "D1 schema"), applied here with `--file`, then removed.
 5. **GCP stack.**
    ```bash
    cd infra/gcp
