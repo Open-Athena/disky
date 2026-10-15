@@ -264,20 +264,22 @@ fi
 phase publish-r2
 
 # 4c'. Interval store (specs/interval-store.md): append this scan, and any earlier one still pending, to cw's
-# change-interval path store on R2 (`interval-store/$INTERVAL_STORE_GEN/`) as a run beside its base generation,
-# then the binary counter's due carries, pruning the runs they fold. One machine, reading the scans' `path` sorts
-# from R2 (4c just published this one's). The site reads it under `PATH_STORE = "intervals"`; a scan the store
-# doesn't hold reads per-scan. Never fatal (`-W`): a failure or the timeout warns, and the next run's `add`
-# catches up. Skipped until the base generation exists (`job/cw-interval-submit.sh build`).
-IV_GEN=${INTERVAL_STORE_GEN:-2026-10-14cw}
+# change-interval path store on R2 as a run beside the store's current generation (`interval-store/CURRENT.json`),
+# then the binary counter's due carries, pruning the runs they fold, and every 2^5 scans a compaction into a new
+# generation, the pointer moved with it (§2.7 "Compaction"; the site follows the pointer, cw pins none). One
+# machine, reading the scans' `path` sorts from R2 (4c just published this one's). The site reads it under
+# `PATH_STORE = "intervals"`; a scan the store doesn't hold reads per-scan. Never fatal (`-W`): a failure or the
+# timeout warns, and the next run's `add` catches up. Skipped while the store has no generation
+# (`job/cw-interval-submit.sh build`).
 if [ "${INTERVAL_STORE_APPEND:-1}" = "1" ] && [ -n "${R2_ARCHIVE:-}" ] && [ "${REPROC:-0}" != "1" ]; then
-  if python -c 'import sys; from dt_cloud.static_local import Store; sys.exit(0 if Store(sys.argv[1]).exists(sys.argv[2]) else 1)' \
-       "$R2_ARCHIVE" "interval-store/$IV_GEN/scans.json"; then
-    sr phase interval-store -W -T "${INTERVAL_STORE_TIMEOUT:-60m}" -m "the scan reads per-scan until a later run appends it" \
-      -- dt-cloud interval-store add -g "$IV_GEN" -L 'cw-l2/{id}/index/{gen}/path-index.parquet' -s "$R2_ARCHIVE" -o "$R2_ARCHIVE" \
+  IV_GEN=$(dt-cloud interval-store current -o "$R2_ARCHIVE") || { echo "WARN: interval-store current failed: not appending $SNAP_ID" >&2; IV_GEN=-; }
+  if [ "$IV_GEN" = - ]; then :
+  elif [ -n "$IV_GEN" ]; then
+    sr phase interval-store -W -T "${INTERVAL_STORE_TIMEOUT:-90m}" -m "the scan reads per-scan until a later run appends it" \
+      -- dt-cloud interval-store add -L 'cw-l2/{id}/index/{gen}/path-index.parquet' -s "$R2_ARCHIVE" -o "$R2_ARCHIVE" \
          -w "$WORK/interval-store" -M "${INTERVAL_STORE_MEM:-12GB}" -p "$(nproc)"
   else
-    echo "no interval-store/$IV_GEN on R2 yet (job/cw-interval-submit.sh build): not appending $SNAP_ID" >&2
+    echo "no interval store on R2 yet (job/cw-interval-submit.sh build): not appending $SNAP_ID" >&2
   fi
 fi
 
