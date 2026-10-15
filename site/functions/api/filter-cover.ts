@@ -17,7 +17,7 @@ import { allMatchRoots, FILTER_VIEW_V, NotFound, pathTotals } from '../_lib/view
 import { COVER_V, coverFloor, coverSet, overCapReason } from '../_lib/cover.js'
 import { hexQuery, indexedGate, staticTag } from '../_lib/staticFilter.js'
 import { FilterRejected, indexedOnly, rejectBody, rejectQuery } from '../_lib/indexedOnly.js'
-import { cacheEnvTag, cacheKeyFor, cacheMatch, cacheStore, serverTiming } from '../_lib/edgeCache.js'
+import { cacheEnvTag, cacheKeyFor, cacheMatch, cacheStore, keepFor, serverTiming } from '../_lib/edgeCache.js'
 import { storeKey, type UnionView, withStore } from '../_lib/stores.js'
 import { filteredVector, type Member, memberOf, memberRequest, type Refusal, refusalOf, refusalResponse, resolveUnion, UnionOverlap, unionFor } from '../_lib/union.js'
 import { isScanId } from '../../src/scanSlug.js'
@@ -179,7 +179,8 @@ async function cover(ctx0: Ctx): Promise<Response> {
         looked: cover.looked, unchecked: cover.unchecked,
       }
     }
-    return await cacheStore(ctx.env, cacheKey, JSON.stringify(body), { 'server-timing': st.header() }, ctx.waitUntil?.bind(ctx))
+    // A search its time budget cut is kept briefly (`keepFor`): the next ask recomputes it.
+    return await cacheStore(ctx.env, cacheKey, JSON.stringify(body), { 'server-timing': st.header() }, ctx.waitUntil?.bind(ctx), keepFor({ searchLate: found?.coverage.searchLate }))
   } catch (e) {
     if (e instanceof NotFound) return new Response('path not found', { status: 404 })
     if (e instanceof FilterRejected) return new Response(rejectBody(e.reject), { status: 400, headers: { 'content-type': 'application/json' } })
