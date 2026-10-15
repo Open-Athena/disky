@@ -127,6 +127,8 @@ NAME_SUMMARY_STATIC = "1"
 STATIC_GEN = "2026-10-10cw"
 FILTER_STATIC_HEAVY = "1"
 SERVED_R2 = "1"   # snapshot JSONs + extras read through INDEX_R2 (the same bucket as `STORE_BUCKET`), not the S3 seam
+PATH_STORE = "intervals"   # every request reads the interval store (INDEX_R2) for the scans its generation holds; others read per-scan (`_lib/index.ts`)
+INTERVAL_STORE_GEN = "2026-10-14cw"   # the interval store generation (specs/interval-store.md): base by `job/cw-interval-submit.sh build`, each later scan appended by `cw-run.sh` 4c'
 
 # Worker-served indexes (the static name index), read through a native binding (the store seam's S3 creds are
 # for the path store; this is the same bucket).
@@ -240,6 +242,8 @@ NAME_SUMMARY_STATIC = "1"
 STATIC_GEN = "2026-10-10cw"
 FILTER_STATIC_HEAVY = "1"
 SERVED_R2 = "1"   # snapshot JSONs + extras read through INDEX_R2 (the same bucket as `STORE_BUCKET`), not the S3 seam
+PATH_STORE = "intervals"   # every request reads the interval store (INDEX_R2) for the scans its generation holds; others read per-scan (`_lib/index.ts`)
+INTERVAL_STORE_GEN = "2026-10-14cw"   # the interval store generation (specs/interval-store.md): base by `job/cw-interval-submit.sh build`, each later scan appended by `cw-run.sh` 4c'
 
 # Worker-served indexes (the static name index), read through a native binding (the store seam's S3 creds are
 # for the path store; this is the same bucket).
