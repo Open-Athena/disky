@@ -7,3 +7,5 @@ config:
   gcs-usage-cf:d1Name: oa-hf-usage-db
   gcs-usage-cf:kvName: oa-hf-usage-cache
   gcs-usage-cf:r2Bucket: oa-hf-usage-index
+secretsprovider: gcpkms://projects/oa-internal-450019/locations/global/keyRings/ops/cryptoKeys/pulumi
+encryptedkey: CiQAqKOWSKdal4qAY3HeSxCeF995xNX3SxWRPnSKkAQ97+NHgAgSSQAw+4V0InXhv/EgGLD0XYxOb3mZiEfRGXRdrhAe+gXCctH/gNO2pds62aiTnTwlkUhrUqr8uF/AUOgzFxAhA44mpSN0YdJTJJo=
