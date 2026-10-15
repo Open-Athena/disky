@@ -116,27 +116,18 @@ cp "$WORK"/web/*.json "$DEST/"
 mkdir -p "/gcs/$DATA/$STORE-l2/$SNAP_ID"
 for s in "${SRC[@]}"; do cp "${s#*=}" "/gcs/$DATA/$STORE-l2/$SNAP_ID/${s%%=*}.parquet"; done
 
-# 4b. Index tiers, footers to D1 under this store (`--store meta`: rows are
-# `store = 'meta'`, variant `meta:path`, never visible to the primary's
-# queries; they need `migrations/cw/0006` applied, and fail loudly otherwise).
+# 4b. Index tiers (their footers go to D1 last, 4e, once the scan is searchable).
 GEN=${GEN:-$(date -u +%Y%m%dT%H%M%SZ)}
 INDEX_KEY="$STORE-l2/$SNAP_ID/index/$GEN"
 dt-cloud index-write -b "${BUCKETS[0]}" -m "${DUCKDB_MEM:-8GB}" -t "${IMPORT_JOBS:-4}" -o "$WORK/index" "${SRC[@]}"
 mkdir -p "/gcs/$DATA/$INDEX_KEY"
 cp "$WORK"/index/*.parquet "/gcs/$DATA/$INDEX_KEY/"
 
-if [ -n "${CLOUDFLARE_API_TOKEN:+set}" ] && [ -n "${CLOUDFLARE_ACCOUNT_ID:-}" ]; then  # `:+set`: xtrace must not print the token
-  dt-cloud index-sync -s "$STORE" -d "/gcs/$DATA/$INDEX_KEY" -g "$GEN" -k "$INDEX_KEY" "$SNAP_ID" \
-    || echo "WARN: index-sync failed (the site keeps serving the previous generation)" >&2
-  dt-cloud index-gc -s "$STORE" "$SNAP_ID" || echo "WARN: index-gc failed" >&2
-else
-  echo "WARN: no CLOUDFLARE_API_TOKEN/ACCOUNT_ID — tiers published but not synced (scan unlisted for the index reader)" >&2
-fi
-
 # 4c. The served subset to R2 (the same bucket the primary serves from, under
-# this store's prefixes — `SNAPSHOTS_SUBDIR` / `LAYER2_PREFIX` above).
+# this store's prefixes — `SNAPSHOTS_SUBDIR` / `LAYER2_PREFIX` above), the per-bucket listings too (R2 is the
+# archive). `-a`: every `index/<gen>/` under the scan, not D1's (this scan isn't in D1 until 4e).
 if [ -n "${R2_ENDPOINT:+set}" ] && [ -n "${R2_BUCKET:-}" ]; then  # `:+set`: xtrace must not print the creds
-  dt-cloud publish-r2 -L "$SNAP_ID" \
+  dt-cloud publish-r2 -a "$SNAP_ID" \
     || echo "WARN: publish-r2 failed for $SNAP_ID (the site keeps serving GCS)" >&2
 else
   echo "no R2_ENDPOINT/R2_BUCKET — skipping publish-r2" >&2
@@ -160,6 +151,17 @@ if [ -n "${R2_ENDPOINT:+set}" ] && [ -n "${R2_BUCKET:-}" ]; then  # `:+set`: xtr
   else
     dt-cloud static-names build "${sn[@]}" -x 16,8 || echo "WARN: static-names build $STATIC_GEN failed (exit $?)" >&2
   fi
+fi
+
+# 4e. Footers to D1 under this store, last: the scan is listed once 4d made it searchable, as on gcs
+# (specs/search-box-no-refusals.md §3.6). `--store meta`: rows are `store = 'meta'`, variant `meta:path`, never
+# visible to the primary's queries (`migrations/cw/0006`).
+if [ -n "${CLOUDFLARE_API_TOKEN:+set}" ] && [ -n "${CLOUDFLARE_ACCOUNT_ID:-}" ]; then  # `:+set`: xtrace must not print the token
+  dt-cloud index-sync -s "$STORE" -d "/gcs/$DATA/$INDEX_KEY" -g "$GEN" -k "$INDEX_KEY" "$SNAP_ID" \
+    || echo "WARN: index-sync failed (the site keeps serving the previous generation)" >&2
+  dt-cloud index-gc -s "$STORE" "$SNAP_ID" || echo "WARN: index-gc failed" >&2
+else
+  echo "WARN: no CLOUDFLARE_API_TOKEN/ACCOUNT_ID — tiers published but not synced (scan unlisted for the index reader)" >&2
 fi
 
 echo "META-SCAN-JOB-DONE $SNAP_ID -> gs://$DATA/snapshots/$STORE/$SNAP_ID"

@@ -215,11 +215,10 @@ phase index-write
 # this job's image): the stages run as this job's account (`cw-s3-job`, cw's profile; it holds the scratch bucket).
 # See specs/cw-static-names.md. It reads the index tiers just copied (found by their GCS layout, not D1), and its
 # stages are separate Batch jobs this VM only waits on, so it starts here in the background (an `overlapped` phase
-# in job/scan-runs.json, recorded from when it began) and `index-sync` below waits for it, up to
-# STATIC_NAMES_WAIT_S (default 40 min): a scan is listed once it is searchable, as on gcs. Past the wait the scan is
-# listed anyway (its filter reads "not indexed yet" until the append lands) and the job waits for the stage before
-# finishing. Never fatal: a scan the index doesn't hold is caught up by a later run's `-c`. Exit 3 = not the next
-# scan yet.
+# in job/scan-runs.json, recorded from when it began) and `index-sync` below waits for it to end, however long it
+# takes: a scan is listed once it is searchable, as on gcs (specs/search-box-no-refusals.md §3.6). A failed append
+# still lists the scan (its filter reads "not indexed" for that scan only). Never fatal: a scan the index doesn't
+# hold is caught up by a later run's `-c`. Exit 3 = not the next scan yet.
 STATIC_PID=""
 if [ "${STATIC_NAMES:-0}" = "1" ] && [ "${REPROC:-0}" != "1" ]; then
   (
@@ -230,8 +229,7 @@ if [ "${STATIC_NAMES:-0}" = "1" ] && [ "${REPROC:-0}" != "1" ]; then
   ) &
   STATIC_PID=$!
   begin static-wait
-  for ((i = 0; i < ${STATIC_NAMES_WAIT_S:-2400} / 10; i++)); do kill -0 "$STATIC_PID" 2>/dev/null || break; sleep 10; done
-  kill -0 "$STATIC_PID" 2>/dev/null && echo "WARN: static-names still running after ${STATIC_NAMES_WAIT_S:-2400}s; listing $SNAP_ID before it is searchable" >&2
+  wait "$STATIC_PID" || echo "WARN: static-names stage exited $?" >&2
   phase static-wait
 fi
 begin index-sync
@@ -358,7 +356,5 @@ else
   echo "no Slack bot transport (SLACK_BOT_TOKEN+SLACK_CHANNEL) — skipping usage digest" >&2
 fi
 phase digest
-
-[ -z "$STATIC_PID" ] || wait "$STATIC_PID" || echo "WARN: static-names stage exited $?" >&2
 
 echo "CW-SCAN-JOB-DONE $SNAP_ID -> gs://$DATA/snapshots/cw/$SNAP_ID"
