@@ -89,7 +89,8 @@ dt-cloud interval-store append [-c] [-n] SCAN_ID  # Append one scan to the inter
                           # strictly in scan-id order (exit 3: not published / not next; `-c` catches up)
 dt-cloud static-names build -g GEN -L LAYOUT -s SCANS -o STORE -x off|MIN,TAIL  # The static name index's base generation
                           # on ONE machine (`static_local.py`): the staged (Batch) path's stages in-process — ranges,
-                          # coalesced versions, suffix shards, catalog, drill (`build_drill`) + `roots-measure/` — over a
+                          # coalesced versions, suffix shards, catalog, drill (`build_drill`) + `roots-measure/`, and
+                          # anchored search (`names/` + `anchors/`: `^q`, `^q$`, heavy `q$`, path terms; `-A` skips it) — over a
                           # work dir (`-w`), then copied to `<STORE>/static-names/GEN/` (a dir or `r2://`/`s3://` URL;
                           # never over a generation). SCANS + `-L` templates (`{id}`, `{gen}`) find the `path` sorts.
                           # The drill is chunked as the staged path (`-c` rows, default 4M: suffix rows per member-loop
@@ -97,7 +98,8 @@ dt-cloud static-names build -g GEN -L LAYOUT -s SCANS -o STORE -x off|MIN,TAIL  
                           # so its working set is `-c`-bound, not the corpus's; byte-identical at any `-c`. Logs a
                           # `build GEN: drill/<step>` line per sub-step (seconds, disk / RSS peaks, row counts)
 dt-cloud static-names add -g GEN -L LAYOUT -s SCANS -o STORE  # Append every scan after GEN's newest as a run (append, shards,
-                          # catalog delta, drill run, `manifests/<id>.json`), then the binary counter's carries; a URL
+                          # catalog delta, drill run, + `names/`/`anchors/` when GEN's base has them — an anchorless GEN
+                          # gets them only by a rebuild into a new GEN — `manifests/<id>.json`), then the binary counter's carries; a URL
                           # store's generation is mirrored into `-w`, new files go up data → `meta.json`s → manifests.
                           # Small deployments' path (the r2 demo's daily ingest); gcs/cw run the stages on Batch
 dt-cloud interval-store build -g GEN -L LAYOUT -s SCANS -o STORE  # The interval store's base generation on ONE machine
@@ -213,7 +215,7 @@ Tests build their listing fixtures inline (`tmp_path` parquets). CI and the job 
 Every deployment (gcs, cw-s3, r2, hf, the r2 demo, …) ships the current full feature set. A new deployment, or a feature landing on `cloud`, reaches each of them without being asked; only a store that can't support a feature skips it, and its deployment spec says which and why. The baseline today:
 - **Hosts:** prod and a dev stack: `dev.<host>` (a `branchAliases` CNAME onto the Pages branch `dev`), wrangler's `[env.preview]` with prod's bindings, preview-env secrets, every origin + callback (prod, dev, the `pages.dev` alias, localhost) on the Google OAuth client.
 - **Auth:** app sign-in (Google OIDC + emailed codes), staff domain, admin console, personal agent tokens.
-- **Serving:** the path store (`path` + `bysize`, footers in D1), search sidecars, the static name index (`FILTER_STATIC`, `NAME_SUMMARY_STATIC`, `FILTER_STATIC_HEAVY`), the interval store as the Map's path store (`PATH_STORE = "intervals"` once `interval-store verify` / a `ps=iv` parity check passes on the first scans).
+- **Serving:** the interval store as the Map's path store (`PATH_STORE = "intervals"`, following `interval-store/CURRENT.json`, once `interval-store verify` / a `ps=iv` parity check passes on the first scans); search from the prebuilt static name index only (`FILTER_STATIC`, `NAME_SUMMARY_STATIC`, `FILTER_STATIC_HEAVY`, `FILTER_INDEXED_ONLY = "1"`), no per-scan search sidecars. Per-scan `path`/`bysize` sorts are on their way out (`specs/lean-scans.md`).
 - **Job:** `scan-run supervise` (phases, alerts, `/scans` records, cost labels), `index-gc`, cache warm-up (`warm-cache`) and the serving probe (`probe -c`) after each scan, the Slack digest thread.
 - **Meta:** the "data behind this site" store (`STORES_JSON` `meta`) with its own static index.
 
