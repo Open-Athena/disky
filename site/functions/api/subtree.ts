@@ -59,7 +59,7 @@ async function subtree(ctx0: SubtreeCtx, gate: boolean, member?: MemberRead): Pr
   // `store=<key>`: a secondary store's env overlay (none = the primary, as is).
   const ctx1 = withStore(ctx0)
   if (ctx1 instanceof Response) return ctx1
-  const ctx = withPathStore(ctx1)
+  const ctx = await withPathStore(ctx1)
   const st = serverTiming()
   traceJoins(ctx.env, st.trace)
   if (!storeReady(ctx.env)) {

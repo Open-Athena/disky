@@ -52,7 +52,7 @@ async function diffOf(ctx0: DiffCtx, member?: MemberDiff): Promise<Response> {
   // `store=<key>`: a secondary store's env overlay (none = the primary, as is).
   const ctx1 = withStore(ctx0)
   if (ctx1 instanceof Response) return ctx1
-  const ctx = withPathStore(ctx1)
+  const ctx = await withPathStore(ctx1)
   const st = serverTiming()
   traceJoins(ctx.env, st.trace)
   if (!storeReady(ctx.env)) {
