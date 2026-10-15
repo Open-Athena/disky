@@ -27,6 +27,7 @@
  "hex_runs": "16,8",
  "compact_level": 5,
  "standard_stages": [
-  "anchors"
+  "anchors",
+  "drill"
  ]
 }
