@@ -44,7 +44,9 @@
  *
  * A view may say how the scan picker and the map mark each member (`sources`, keyed by member): a `label`
  * (default: the member's `ROOT_LABEL`, else its key) and an `icon` — an absolute `http(s)://` URL or a path the
- * site serves (`/…`). Each deployment sets its own; none is assumed:
+ * site serves (`/…`). Each deployment sets its own; none is assumed. A site path must be a static asset the
+ * Functions never see: under `/icons/` (excluded in `public/_routes.json`; anywhere else the catch-all answers it
+ * with the SPA's `index.html` and the mark silently falls back to its label — `/api/union-scans` warns of one):
  *
  *   "all": {"union": ["primary", "meta"], "main": true,
  *           "sources": {"primary": {"label": "Buckets", "icon": "/icons/buckets.svg"}, "meta": {"icon": "https://example.com/meta.png"}}}

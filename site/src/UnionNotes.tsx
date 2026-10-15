@@ -2,7 +2,8 @@
  *  scan beside its name, a member that refused the filter, a series' stretch some member hadn't scanned yet. */
 import { fmtScan } from './scan'
 import { SourceMark } from './SourceMark'
-import { refusedSources, rootSource, seriesMissing, useUnionMarks, type UnionVector } from './unionSources'
+import { fmtCutoff } from './federatedPickerModel'
+import { missingSources, refusedSources, rootSource, seriesMissing, useUnionMarks, type UnionVector } from './unionSources'
 
 /** A union root child's store mark, its tooltip that store's scan ("Index · scan 10/14 6:02a"). Nothing for any
  *  other node. */
@@ -39,6 +40,19 @@ export function SeriesMissingNote({ points }: { points?: readonly { date: string
   return (
     <p className="hint series-missing" role="status">
       {missing.map(m => <span key={m.mark.source}>Partial through {fmtScan(m.through)}: no <SourceMark mark={m.mark} /> scan yet. </span>)}
+    </p>
+  )
+}
+
+/** A union root's members with no scan at or before its cutoff: "No Index scan at or before Oct 13, 7:35 AM: not
+ *  on the map or in the table." Nothing when every member has one. */
+export function UnionMissingNote({ union }: { union?: UnionVector }) {
+  const missing = missingSources(union, useUnionMarks())
+  if (!missing.length || !union?.at) return null
+  const when = fmtCutoff(union.at, Intl.DateTimeFormat().resolvedOptions().timeZone)
+  return (
+    <p className="tab-note union-missing" role="status">
+      No {missing.map((m, i) => <span key={m.source}>{i ? ' or ' : ''}<SourceMark mark={m} inline /></span>)} scan at or before {when}: not on the map or in the table.
     </p>
   )
 }
