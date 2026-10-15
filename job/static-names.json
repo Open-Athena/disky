@@ -29,5 +29,6 @@
  "standard_stages": [
   "anchors",
   "drill"
- ]
+ ],
+ "drill_checkpoint": "oa-gcs-usage-scratch"
 }
