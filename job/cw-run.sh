@@ -254,9 +254,9 @@ phase index-sync
 # `R2_BUCKET`, from `cw-batch-submit.sh`); the site keeps serving GCS then.
 begin publish-r2
 if [ -n "${R2_ENDPOINT:+set}" ] && [ -n "${R2_BUCKET:-}" ]; then  # `:+set`: xtrace must not print the creds
-  # `-L`: the canonical per-bucket listings stay in GCS only (specs/listing-slim.md
-  # phase 2; nothing served reads them — the site reads the tiers).
-  dt-cloud publish-r2 -L "$SNAP_ID" \
+  # The canonical per-bucket listings (layer-2) go too: R2 is the archive the later
+  # one-shots (reindex, recompress, REPROC) read, GCS only the job's scratch.
+  dt-cloud publish-r2 "$SNAP_ID" \
     || echo "WARN: publish-r2 failed for $SNAP_ID (the site keeps serving GCS)" >&2
 else
   echo "no R2_ENDPOINT/R2_BUCKET — skipping publish-r2" >&2

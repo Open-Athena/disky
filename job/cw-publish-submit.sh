@@ -9,12 +9,14 @@
 #   job/cw-publish-submit.sh $(cat scans.txt)           # many, one task each
 #   DRY=1 job/cw-publish-submit.sh …                    # print the body only
 #   PARALLELISM=8 job/cw-publish-submit.sh …            # concurrent tasks (default 4)
+#   LISTINGS=1 job/cw-publish-submit.sh …               # also the per-bucket listings (layer-2; the backfill
+#                                                       # that leaves R2 the only archive), not just the tiers
 #
 # Each task streams its scan GCS → R2 through the APIs (no bucket mount); the
 # job SA reads GCS via ADC and the R2 creds are the isolated CW secrets, as
 # in cw-batch-submit.sh. It copies only the `index/<gen>/` dirs D1 points at
-# (so it reads D1: `D1_DB_ID` + the `cw-s3-cf-pages-token` secret) and, as the scan
-# job's 4c (`-L`), leaves the per-bucket rollups in GCS.
+# (so it reads D1: `D1_DB_ID` + the `cw-s3-cf-pages-token` secret) and, unless `LISTINGS=1`, leaves the
+# per-bucket listings in GCS (`-L`).
 set -euo pipefail
 
 if [ $# -eq 0 ]; then echo "usage: $0 <scan-id>…" >&2; exit 2; fi
@@ -30,7 +32,8 @@ PARALLELISM=${PARALLELISM:-4}
 JOB_ID=${JOB_ID:-cw-publish-r2-$(date -u +%Y%m%d-%H%M%S)}
 
 # The scan list rides in the command as a bash array; task N publishes scan N.
-export PROJECT SA IMAGE DATA_BUCKET R2_BUCKET PARALLELISM
+LISTINGS=${LISTINGS:-}
+export PROJECT SA IMAGE DATA_BUCKET R2_BUCKET PARALLELISM LISTINGS
 body=$(python3 - "${SCANS[@]}" <<'EOF'
 import json, os, sys
 scans = sys.argv[1:]
@@ -39,7 +42,7 @@ cmd = (
     f"SCANS=({' '.join(scans)})\n"
     'SNAP_ID=${SCANS[$BATCH_TASK_INDEX]}\n'
     'echo "task $BATCH_TASK_INDEX → publish-r2 $SNAP_ID"\n'
-    'dt-cloud publish-r2 -L "$SNAP_ID"\n'
+    f'dt-cloud publish-r2 {"" if os.environ["LISTINGS"] else "-L "}"$SNAP_ID"\n'
     'echo PUBLISH_DONE "$SNAP_ID"'
 )
 P = os.environ["PROJECT"]
