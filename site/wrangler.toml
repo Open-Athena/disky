@@ -33,6 +33,7 @@ ROOT_LABEL = "Marin CoreWeave"  # the store root's crumb label (`_lib/view.ts`)
 # Deployment as configuration (the base's `vite.config.ts` reads these from
 # this file at build time; `src/stores.ts` registry key + client whoami source):
 STORE = "cw"                    # the store this build serves (`src/stores.ts`)
+MARK = "cw"                     # favicon/badge: the CoreWeave mark (`public/icons/cw*`; the build injects the links)
 PROD_HOST = "cw-s3.oa.dev"      # `g d` toggles with DEV_HOST (src/hosts.ts)
 DEV_HOST = "dev.cw-s3.oa.dev"
 AUTH_MODE = "app"                # own sign-in: Google OIDC + emailed codes (specs/done/oidc-cutover-cw.md P4, 2026-09-28)
@@ -176,6 +177,7 @@ ROOT_LABEL = "Marin CoreWeave (dev)"
 # pinned so dev.cw-s3.oa.dev and the `pages.dev` alias share one.
 CACHE_NS = "dev.cw-s3.oa.dev"
 STORE = "cw"
+MARK = "cw"
 AUTH_MODE = "app"                     # own sign-in (specs/done/oidc-cutover-cw.md P3); production flips at P4
 OG_CARDS = "1"
 OG_ANONYMOUS = "generic"
