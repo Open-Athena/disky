@@ -25,7 +25,7 @@
 #
 # Env (`job/hf-batch-submit.sh` sets them on Batch; every one has a default or is a secret):
 #   HF_URI (default hf://open-athena; the namespace is the store's one bucket), HF_THREADS (requests in flight),
-#   SNAP_ID (default the UTC date: one scan a day, as the r2 demo), STORE_ROOT (default r2://$R2_BUCKET; a local dir
+#   SNAP_ID (default the UTC start minute, `YYYY-MM-DDTHHMM`, as gcs/cw), STORE_ROOT (default r2://$R2_BUCKET; a local dir
 #   for a dry run), WORK_DIR, MEM (DuckDB memory limit). Secrets: HF_TOKEN, CLOUDFLARE_API_TOKEN (D1 edit),
 #   CLOUDFLARE_ACCOUNT_ID, R2_ENDPOINT, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY, SLACK_BOT_TOKEN (+ SLACK_ALERT_CHANNEL).
 # Deployment config comes from `site/wrangler.toml` (baked into the image): the D1 (`database_id` /
@@ -59,9 +59,11 @@ URI=${HF_URI:-hf://open-athena}
 NS=${URI#hf://}; NS=${NS%%/*}             # the namespace: the listing's (and the store's) one bucket
 R2_BUCKET=${R2_BUCKET:-oa-hf-usage-index}
 STORE_ROOT=${STORE_ROOT:-r2://$R2_BUCKET}
-SNAP_ID=${SNAP_ID:-$(date -u +%F)}
+SNAP_ID=${SNAP_ID:-$(date -u +%Y-%m-%dT%H%M)}   # as gcs/cw: a re-run is a new scan, never a second answer for one
 export SNAP_ID
 DATE=${SNAP_ID%%T*}
+HM=${SNAP_ID#"$DATE"}; HM=${HM#T}
+if [ -n "$HM" ]; then SCAN_TIME="${DATE}T${HM:0:2}:${HM:2:2}:00+00:00"; else SCAN_TIME="${DATE}T00:00:00+00:00"; fi
 GEN=${GEN:-$(date -u +%Y%m%dT%H%M%SZ)}   # this run's index generation, stamped once
 MEM=${MEM:-8GB}
 NPROC=$(nproc 2>/dev/null || sysctl -n hw.ncpu)
@@ -109,7 +111,7 @@ phase list
 begin import
 env DISK_TREE_ROOT="$WORK/l2" \
   disk-tree import -e duckdb -M "$MEM" -n "$NPROC" -m -p storage_class_id \
-    -s hf -t "${DATE}T00:00:00+00:00" -l "$WORK/listing/shard-*.parquet" -b "$NS"
+    -s hf -t "$SCAN_TIME" -l "$WORK/listing/shard-*.parquet" -b "$NS"
 L2=$(ls "$WORK/l2"/scans/*.parquet | head -1)
 phase import
 

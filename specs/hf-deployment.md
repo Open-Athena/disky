@@ -26,9 +26,9 @@ A new OA deployment, modeled on cw-s3 (GCP Batch job → R2 + D1 → Cloudflare 
 2. `disk-tree import -e duckdb -m -p storage_class_id -s hf -b open-athena`: the layer-2 with `sum_storage_class_id_{1,5,6}` (public, private, unbilled git).
 3. `dt-cloud index-write -S`: the path store (`path` + `bysize` sorts, age pyramid, search sidecars) from the layer-2.
 4. `dt-cloud path-index` (no `-P`): the snapshot JSONs (`age.json`, `meta.json` with the listing's `started`).
-5. Upload to R2 (`dt_cloud.blobstore.Store`, markers last): `listing/<date>/index/<gen>/*.parquet`, `listing/<date>/open-athena.parquet` (layer-2), `listing/<date>/open-athena.listing.json` (the lister's `_SUCCESS.json`: `hf.expected` = Σ bucket size + Σ repo `usedStorage`, the request count), `snapshots/hf/<date>/`.
+5. Upload to R2 (`dt_cloud.blobstore.Store`, markers last): `listing/<scan>/index/<gen>/*.parquet`, `listing/<scan>/open-athena.parquet` (layer-2), `listing/<scan>/open-athena.listing.json` (the lister's `_SUCCESS.json`: `hf.expected` = Σ bucket size + Σ repo `usedStorage`, the request count), `snapshots/hf/<scan>/`.
 6. `dt-cloud static-names add` (`build -x 16,8` when the generation doesn't exist), on the R2 store. Non-fatal (`-W`).
-7. `dt-cloud index-sync -d r2://oa-hf-usage-index/listing/<date>/index/<gen>`: footers → D1, pointer last. Fatal: the scan isn't listed without it.
+7. `dt-cloud index-sync -d r2://oa-hf-usage-index/listing/<scan>/index/<gen>`: footers → D1, pointer last. Fatal: the scan isn't listed without it.
 8. `dt-cloud interval-store add` (`build` the first time), on the R2 store. Non-fatal.
 9. `dt-cloud index-gc -m 2d -F r2://oa-hf-usage-index`: superseded generations' D1 rows and R2 dirs. Non-fatal.
 
@@ -38,7 +38,7 @@ Decisions, and where they differ from what was asked:
 - **R2 only.** No GCS bucket at all, not even scratch: the VM's boot disk (100 GB pd-balanced) is the work dir.
 - **The path store comes from `index-write`, not `path-index -P`.** `path-index` re-aggregates the listing and carries only the GCS tier pivots (2–4), so the public / private / git split would be lost; `index-write` cuts the layer-2 as it is. `path-index` still writes the snapshot JSONs. Its `meta.json` `class_bytes` folds classes 5 and 6 into 1 (a generic `viz.py` limitation; hidden here since `prices: false`).
 - **`-e duckdb`, not `-e stream`.** The HF lister writes shards in API order, and the stream engine wants key-sorted listings.
-- **Date scan ids** (one scan a day, as the r2 demo). A same-day re-run writes a new generation and flips the pointer; static-names won't re-append a date it holds.
+- **Timestamped scan ids** (`YYYY-MM-DDTHHMM`, the run's start minute, as gcs/cw). A re-run is a new scan. Under date ids, a same-day re-run re-pointed the date's path store at a new listing while the append-only static index and interval store kept the first, so `ps=iv` and the per-scan read gave two answers for one scan (r2.rbw.sh, 2026-10-15). The first scan, `2026-10-15`, predates the switch and keeps its date id.
 - **Layout under the base's `listing/` prefix** (cw's `cw-l2/<scan>/` shape), so the site needs no `STORE_PREFIXES`.
 
 ## Billing / quota
@@ -105,12 +105,12 @@ export UV_PROJECT_ENVIRONMENT=$PWD/infra/.venv   # for pulumi; never the repo's 
    job/hf-batch-submit.sh                         # prints the job id (DISKY_LABELS from the .envrc)
    gcloud batch jobs describe <id> --project oa-internal-450019 --location us-central1 --format='value(status.state)'
    ```
-   Logs: the `logs_url` in `job/hf-scan-runs.json` (`labels.job_uid`). Expect `PHASE list` at ~10 min, the rest in minutes, `HF-SCAN-JOB-DONE <date>`.
+   Logs: the `logs_url` in `job/hf-scan-runs.json` (`labels.job_uid`). Expect `PHASE list` at ~10 min, the rest in minutes, `HF-SCAN-JOB-DONE <scan>`.
 10. **Verify, then resume the cron.**
-    - R2 holds `listing/<date>/index/<gen>/path-index.parquet` (+ `-bysize`, age pyramid, search sidecars), `listing/<date>/open-athena.{parquet,listing.json}`, `snapshots/hf/<date>/{age,meta}.json`, `static-names/2026-10-14hf/`, `interval-store/2026-10-14hf/`.
+    - R2 holds `listing/<scan>/index/<gen>/path-index.parquet` (+ `-bysize`, age pyramid, search sidecars), `listing/<scan>/open-athena.{parquet,listing.json}`, `snapshots/hf/<scan>/{age,meta}.json`, `static-names/2026-10-14hf/`, `interval-store/2026-10-14hf/`.
     - The listing reconciles with billing: `open-athena.listing.json` `hf.expected` ≈ 15.72 TB (public + private), `hf.over` empty.
     - The layer-2 root (`path = '.'`): `sum_storage_class_id_1` ≈ 15.7 TB, `sum_storage_class_id_5` ≈ 0.02 TB, `size - sum_storage_class_id_6` = `hf.expected`.
-    - D1: `SELECT date, variant, gen FROM index_schema` → `path`, `bysize` and the `age-pyramid-*` variants for `<date>`; `SELECT scan, status, failed_phase, machine, cost_usd FROM scan_runs` → one `succeeded` run.
+    - D1: `SELECT date, variant, gen FROM index_schema` → `path`, `bysize` and the `age-pyramid-*` variants for `<scan>`; `SELECT scan, status, failed_phase, machine, cost_usd FROM scan_runs` → one `succeeded` run.
     - Site: the map renders the org (`buckets/`, `models/`, `datasets/`, `spaces/`); `/scans` shows the run; a `?f=` name search answers; `?ps=iv` renders the same view (the interval store); `dt-cloud healthcheck -u https://hf.oa.dev -s hf/` with a personal agent token (`/api/token`).
     - The interval store matches the per-scan reads (`dt-cloud interval-store verify`, and `?ps=iv` vs the default on subtrees, `?f=` and a diff once there are two scans); then `PATH_STORE = "intervals"` in both `[vars]` and `[env.preview.vars]`, and redeploy.
     - `gcloud scheduler jobs resume hf-usage-snapshot --project oa-internal-450019 --location us-central1`.
