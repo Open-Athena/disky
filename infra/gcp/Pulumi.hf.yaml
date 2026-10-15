@@ -5,3 +5,5 @@ config:
   gcp:project: oa-internal-450019
   gcp:region: us-central1
   gcs-usage-gcp:adopting: "false"
+secretsprovider: gcpkms://projects/oa-internal-450019/locations/global/keyRings/ops/cryptoKeys/pulumi
+encryptedkey: CiQAqKOWSHjPVsUoHPPLOd1jncncTHDAS0S4CZWmqEfdN5sJ828SSQAw+4V0szZSvdsaHPqvVnmY9WvNAt5feLa6elZbjikoT93lAKkyGqOs17jCFkkgJGVNBrnCspA1sbQiqS6VkgxW/iVlVQPj4sI=
