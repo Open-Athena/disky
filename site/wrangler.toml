@@ -1,0 +1,77 @@
+# CF Pages project config (oa-hf-usage → hf.oa.dev): the Hugging Face org `open-athena`'s storage, one store, one
+# bucket (the namespace). `wrangler pages deploy` reads this, so the bindings + vars declared here apply to the
+# deployment it creates; the job (job/hf-run.sh, baked into its image) reads its D1 and its static-names /
+# interval-store generations from here too, so the two always name the same ones. Sign-in is the app's own (Google
+# OIDC + emailed codes, `@open-athena/auth`), Open Athena staff only. Every key: `wrangler.example.toml`.
+name = "oa-hf-usage"
+pages_build_output_dir = "dist"
+compatibility_date = "2026-06-01"
+compatibility_flags = ["enable_request_signal"]  # interval-store reads evict a cancelled request's in-flight fetches
+
+# The index footer (index_schema + index_row_groups), sign-in, grants and scan runs: the cw lineage, applied from
+# scratch (`wrangler d1 migrations apply oa-hf-usage-db --remote`). The id is the `d1_database_id` output of the
+# `hf` CF stack (infra/cf); a D1 id is not a secret.
+[[d1_databases]]
+binding = "DB"
+database_name = "oa-hf-usage-db"
+database_id = "00000000-0000-0000-0000-000000000000"   # ← `pulumi stack output d1_database_id -s hf` (specs/hf-deployment.md)
+migrations_dir = "migrations/cw"
+remote = true   # dev-only: local dev reads the real D1; deploys ignore it
+
+[observability]
+enabled = true
+
+[vars]
+ROOT_LABEL = "Open Athena on Hugging Face"   # the store root's crumb label
+ROOT_TITLE = "The open-athena org's Storage Buckets and model, dataset and space repos"
+# Build time (vite.config.ts): the `src/stores.ts` registry key, and the app's own sign-in.
+STORE = "hf"
+AUTH_MODE = "app"
+PROD_HOST = "hf.oa.dev"
+REPO_URL = "https://github.com/Open-Athena/marin-gcs-usage"
+OG_CARDS = "1"
+OG_ANONYMOUS = "generic"         # no sizes, counts, paths or people in ordinary unfurls
+# Who may see it (_lib/auth.ts): Open Athena staff by email domain; `admin_emails` rows (migrations/cw/0001) on top.
+BASE_SCOPE = "hf"
+STAFF_DOMAIN = "openathena.ai"
+ADMIN_EMAILS = "1"
+# The plan prefix shape (`_lib/plans.ts`): one "bucket", the namespace. No staging / executor: nothing here deletes.
+STORE_SCHEME = "hf://"
+STORE_BUCKETS = "open-athena"
+SNAPSHOTS_SUBDIR = "hf"          # snapshots/hf/<scan>/ (job/hf-run.sh)
+# The index store: the R2 bucket the job writes (`r2_bucket` output of the `hf` CF stack), through the S3 seam with
+# a read-only key pair (secrets below). Keys under the base's default prefixes (`listing/`, `snapshots/`).
+STORE_BUCKET = "oa-hf-usage-index"
+STORE_REGION = "auto"
+SEARCH_SIDECARS = "1"            # the job writes them (`index-write -S`)
+SERVED_R2 = "1"                  # snapshot JSONs + extras through INDEX_R2 (the same bucket), not the S3 seam
+# The static name index (the map's `?f=` and /names), in INDEX_R2 under `static-names/<STATIC_GEN>/`: the job's first
+# run builds this generation (`static-names build -x 16,8`), each later one appends its scan (`add`).
+FILTER_STATIC = "1"
+NAME_SUMMARY_STATIC = "1"
+FILTER_STATIC_HEAVY = "1"
+STATIC_GEN = "2026-10-14hf"
+# The interval store, in INDEX_R2 under `interval-store/<INTERVAL_STORE_GEN>/`: built by the job's first run, then
+# one `add` per scan. `opt-in` serves it only to `ps=iv` requests (parity checks: `dt-cloud interval-store verify`);
+# flip to `intervals` to make it the Map's path store.
+INTERVAL_STORE_GEN = "2026-10-14hf"
+PATH_STORE = "opt-in"
+
+# The static name index and the snapshot JSONs, read through a native binding (the S3 seam's keys are for the path
+# store; this is the same bucket).
+[[r2_buckets]]
+binding = "INDEX_R2"
+bucket_name = "oa-hf-usage-index"
+
+# The global cache tier behind each colo's cache (`_lib/edgeCache.ts`): the `cache_kv_id` output of the `hf` CF stack.
+[[kv_namespaces]]
+binding = "CACHE_KV"
+id = "00000000000000000000000000000000"   # ← `pulumi stack output cache_kv_id -s hf`
+
+# Secrets (`infra/cf/hf-secrets -P`, or `wrangler pages secret put <NAME> --project-name oa-hf-usage`):
+#   STORE_ENDPOINT          = https://<account id>.r2.cloudflarestorage.com (kept out of git with the account id)
+#   STORE_ACCESS_KEY_ID     = the `site_r2_access_key_id` output (a read-only token on the bucket)
+#   STORE_SECRET_ACCESS_KEY = the `site_r2_secret_access_key` output
+#   SESSION_SECRET          = HMAC key for session cookies (absent = sign-in 503s)
+#   RESEND_API_KEY / MAIL_FROM — emailed-code sign-in
+#   GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET — the "hf.oa.dev" OAuth Web client
