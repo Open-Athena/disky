@@ -214,19 +214,19 @@ function AppContent() {
   // `fq` below is the applied filter (undefined: none).
   const [qsP, setQsP] = useUrlState('qs', stringParam(), true)
   const storeSyntax = syntaxById(store.querySyntax ?? '') ?? DEFAULT_SYNTAX
-  const syntax = (qsP && syntaxById(qsP)) || storeSyntax
-  // An indexed-only deployment (`FILTER_INDEXED_ONLY`): one literal substring of a name, unscoped; any
-  // other form is refused inline, never sent.
+  // An indexed-only deployment (`FILTER_INDEXED_ONLY`): its one syntax, `plain` (every character literal; `?qs=`
+  // doesn't apply); what the static index can't answer yet is refused inline, never sent.
   const { indexedOnly, rootLabel, rootTitle } = useFilterCaps()
-  const boxSyntax = indexedOnly ? INDEXED_SYNTAX : syntax
+  const syntax = indexedOnly ? INDEXED_SYNTAX : (qsP && syntaxById(qsP)) || storeSyntax
+  const boxSyntax = syntax
   const fParse = useMemo((): { ok: boolean; error?: string } => {
-    if (qsP && !syntaxById(qsP)) return { ok: false, error: `unknown query syntax '${qsP}' (want ${SYNTAXES.map(x => x.id).join('|')})` }
+    if (!indexedOnly && qsP && !syntaxById(qsP)) return { ok: false, error: `unknown query syntax '${qsP}' (want ${SYNTAXES.map(x => x.id).join('|')})` }
     if (!fqRaw) return { ok: false }
-    const refused = indexedOnly ? rejectQuery(fqRaw, qsP, store.querySyntax) : null
+    const refused = indexedOnly ? rejectQuery(fqRaw) : null
     if (refused) return { ok: false, error: refused.message }
     const r = syntax.parse(fqRaw)
     return r.error !== undefined ? { ok: false, error: r.error } : { ok: !!r.ast }
-  }, [fqRaw, qsP, syntax, indexedOnly, store.querySyntax])
+  }, [fqRaw, qsP, syntax, indexedOnly])
   // The box edits a local draft; the URL (and every query keyed on it) follows
   // after a 250 ms pause — one request pair per phrase, not per keystroke.
   const [fqDraft, setFqDraft] = useState<string | null>(null)

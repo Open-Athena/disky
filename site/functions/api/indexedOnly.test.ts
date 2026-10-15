@@ -94,10 +94,6 @@ describe.each(LINEAGES)('D1, %s lineage', lineage => {
 
   /** Every rejected form, its code. */
   const FORMS: [string, string, FilterRejectCode][] = [
-    ['regex syntax', 'q=ckpt.*pt&qs=regex', 'unsupported-regex'],
-    ['a /…/ regex', `q=${encodeURIComponent('/ckpt.*pt/')}`, 'unsupported-regex'],
-    ['a glob', `q=${encodeURIComponent('tom*t')}`, 'unsupported-glob'],
-    ['a glob in an exclusion', `q=${encodeURIComponent('tomat -tom*t')}`, 'unsupported-glob'],
     ['a `/`', `q=${encodeURIComponent('data/tomat')}`, 'unsupported-slash'],
     ['a `/` in an alternative', `q=${encodeURIComponent('tomat|data/x')}`, 'unsupported-slash'],
     ['`is:file`', `q=${encodeURIComponent('tomat is:file')}`, 'unsupported-kind'],
@@ -107,16 +103,18 @@ describe.each(LINEAGES)('D1, %s lineage', lineage => {
   ]
 
   describe('rejectQuery: what an indexed-only deployment refuses', () => {
-    it('literals (any length, quoted spaces too) and AND / OR / NOT of them pass; every other form has its code', () => {
-      const code = (q: string, qs?: string) => rejectQuery(q, qs)?.code ?? null
+    it('literals (any length, quoted spaces too) and AND / OR / NOT of them pass — `*`, `?` and regex characters are text; every other form has its code', () => {
+      const code = (q: string) => rejectQuery(q)?.code ?? null
       expect([
         code('tomat'), code('TOMAT'), code('.'), code('ab'), code('"final ckpt"'), code(''), code('  '),
         code('tomat -bin'), code('-ttl'), code('a b'), code('a|b'), code('a b|c -d'), code('"is:file" x'),
-        code('ckpt.*pt', 'regex'), code('/ckpt/'), code('tom*t'), code('a -b*c'), code('data/tomat'), code('a|b/c'), code('is:file'), code('-is:dir x'), code('*'),
+        code('ckpt.*pt'), code('tom*t'), code('a -b*c'), code('*'), code('a?b'), code('(x)+[y]'),
+        code('/ckpt/'), code('data/tomat'), code('a|b/c'), code('is:file'), code('-is:dir x'),
       ]).toEqual([
         null, null, null, null, null, null, null,
         null, null, null, null, null, null,
-        'unsupported-regex', 'unsupported-regex', 'unsupported-glob', 'unsupported-glob', 'unsupported-slash', 'unsupported-slash', 'unsupported-kind', 'unsupported-kind', 'unsupported-glob',
+        null, null, null, null, null, null,
+        'unsupported-slash', 'unsupported-slash', 'unsupported-slash', 'unsupported-kind', 'unsupported-kind',
       ])
     })
     it('one anchored literal passes (`^q` from 2 characters, `q$` from 3, `^q$` from 1); shorter ones, globs and slashes don\'t', () => {
@@ -128,7 +126,7 @@ describe.each(LINEAGES)('D1, %s lineage', lineage => {
       ]).toEqual([
         null, null, null, null, null, null, null, null,
         null, null, null,
-        'anchor-too-short', 'anchor-too-short', 'unsupported-glob', 'unsupported-slash', 'anchor-too-short', 'anchor-too-short',
+        'anchor-too-short', 'anchor-too-short', null, 'unsupported-slash', 'anchor-too-short', 'anchor-too-short',
       ])
     })
   })
@@ -141,7 +139,7 @@ describe.each(LINEAGES)('D1, %s lineage', lineage => {
         code('^a\\$'), code('^a'), code('a$'), code('\\^a*b'), code('\\^a -b'),
       ]).toEqual([
         null, null, null, null, null, null, null, null,
-        null, 'anchor-too-short', 'anchor-too-short', 'unsupported-glob', null,
+        null, 'anchor-too-short', 'anchor-too-short', null, null,
       ])
     })
     it('the map routes, flag set: subtree, diff and series answer them', async () => {
@@ -155,6 +153,30 @@ describe.each(LINEAGES)('D1, %s lineage', lineage => {
         ]))
       }
       expect(got).toEqual(Array(3).fill([[200, 'ok'], [200, 'ok'], [200, 'ok']]))
+    })
+  })
+
+  describe('`plain`: every character is text, `qs=` doesn\'t apply', () => {
+    /** A subtree body, its timing-free fields. */
+    const body = async (qs: string) => {
+      const r = await subtree({ request: new Request(`http://localhost/api/x?${qs}`), env: envOf(true) })
+      return [r.status, await r.json()]
+    }
+    it('`*`, `?` and regex characters search those characters (nothing here holds them): an empty view, no refusal', async () => {
+      const got = await Promise.all(['tom*t', 'tomat?', '(tomat)'].map(async q => {
+        const [status, j] = await body(`date=${A}&path=bk&q=${encodeURIComponent(q)}`) as [number, { tier: string; tree: { b: number }; matches: string[] }]
+        return [q, status, j.tier, j.tree.b, j.matches]
+      }))
+      expect(got).toEqual([
+        ['tom*t', 200, 'none', 0, []],
+        ['tomat?', 200, 'none', 0, []],
+        ['(tomat)', 200, 'none', 0, []],
+      ])
+    })
+    it('`qs=regex` / `qs=simple` are ignored: the same body as none', async () => {
+      const q = `date=${A}&path=bk&q=tomat`
+      const [plain, regex, simple] = await Promise.all([body(q), body(`${q}&qs=regex`), body(`${q}&qs=simple`)])
+      expect([regex, simple]).toEqual([plain, plain])
     })
   })
 

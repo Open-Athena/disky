@@ -117,16 +117,16 @@ async function cover(ctx0: Ctx): Promise<Response> {
   const qRaw = url.searchParams.get('q') ?? ''
   let qp: ReturnType<typeof queryParam>
   try {
-    qp = queryParam(url.searchParams, ctx.env.QUERY_SYNTAX)
+    qp = queryParam(url.searchParams, ctx.env.QUERY_SYNTAX, indexedOnly(ctx.env))
   } catch (e) {
-    const r = e instanceof QueryError && indexedOnly(ctx.env) ? rejectQuery(qRaw, url.searchParams.get('qs'), ctx.env.QUERY_SYNTAX) : null
+    const r = e instanceof QueryError && indexedOnly(ctx.env) ? rejectQuery(qRaw) : null
     if (r) return new Response(rejectBody(r), { status: 400, headers: { 'content-type': 'application/json' } })
     if (e instanceof QueryError) return new Response(`bad query: ${e.message}`, { status: 400 })
     throw e
   }
   let query = qp.query
   if (!query) return jsonRes({ error: 'q= (a filter) is required' }, 400)
-  const refused = indexedOnly(ctx.env) ? rejectQuery(qRaw, url.searchParams.get('qs'), ctx.env.QUERY_SYNTAX) : null
+  const refused = indexedOnly(ctx.env) ? rejectQuery(qRaw) : null
   if (refused) return new Response(rejectBody(refused), { status: 400, headers: { 'content-type': 'application/json' } })
   // An exclusion (`-x`) leaves holes inside its match roots: a root is then no exact prefix.
   if (query.neg) return jsonRes({ error: 'A filter with exclusions can’t be turned into whole folders or files to act on; drop the exclusion to act on the matches.', code: 'cover-exclusions' }, 400)

@@ -458,7 +458,11 @@ export async function indexedGate(env: StaticFilterEnv, ast: QueryAst | undefine
     // A compound query (`staticBool.ts`): its answer under `path`, every date covered, else why not. A view root
     // the query matches with nothing to exclude is the plain view.
     const plan = ast ? boolPlan(ast) : null
-    if (!plan) return (ast && rejectAst(ast)) ?? reject('unsupported-glob')
+    if (!plan) {
+      const r = ast && rejectAst(ast)
+      if (!r) throw new Error('indexedGate: a query with no static plan and no refusal')
+      return r
+    }
     const rule = await staticHexRule(env)
     if (!plan.neg.length && plan.alts.some(g => g.every(t => termInPath(t, path, rule)))) return null
     if (!s) return declined(s, null, null)

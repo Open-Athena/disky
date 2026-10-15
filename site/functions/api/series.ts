@@ -191,17 +191,17 @@ async function seriesOf(ctx0: SeriesCtx): Promise<Response> {
   // matches is matched whole: its plain series.
   let qp: ReturnType<typeof queryParam>
   try {
-    qp = queryParam(url.searchParams, env.QUERY_SYNTAX)
+    qp = queryParam(url.searchParams, env.QUERY_SYNTAX, indexedOnly(env))
   } catch (e) {
     // Indexed-only: a form it refuses is refused as such (`a b` is "one term", not "too short").
-    const r = e instanceof QueryError && indexedOnly(env) ? rejectQuery(url.searchParams.get('q'), url.searchParams.get('qs'), env.QUERY_SYNTAX) : null
+    const r = e instanceof QueryError && indexedOnly(env) ? rejectQuery(url.searchParams.get('q')) : null
     if (r) return new Response(rejectBody(r), { status: 400, headers: { 'content-type': 'application/json' } })
     if (e instanceof QueryError) return json({ error: `bad query: ${e.message}` }, 400)
     throw e
   }
   // An indexed-only deployment: one literal, unscoped (`_lib/indexedOnly.ts`).
   const strict = !!qp.query && indexedOnly(env)
-  const refused = strict ? rejectQuery(url.searchParams.get('q'), url.searchParams.get('qs'), env.QUERY_SYNTAX) ?? rejectScope(!!(lens || owner || classes)) : null
+  const refused = strict ? rejectQuery(url.searchParams.get('q')) ?? rejectScope(!!(lens || owner || classes)) : null
   if (refused) return new Response(rejectBody(refused), { status: 400, headers: { 'content-type': 'application/json' } })
   // The static index's hex-run rule: substrings match where they `occur` under it, static or not (`hexRuns.ts`).
   const hx = await hexQuery(env, qp.query)
