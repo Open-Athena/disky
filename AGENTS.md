@@ -204,3 +204,29 @@ Tests build their listing fixtures inline (`tmp_path` parquets). CI and the job 
 
 - Depth column enables parquet predicate pushdown (only load needed rows)
 - The site reads the path store by row-group range reads, planned from footers in D1 (`index-sync`)
+
+## hf
+
+This branch is the hf.oa.dev deployment: the shared `cloud` base (everything above) plus the Hugging Face store, the org `open-athena`'s Storage Buckets and model, dataset and space repos as one bucket. This section covers what is hf's own. Apply state and the ordered checklist: `specs/hf-deployment.md`.
+
+The repo is **public**: no emails, account ids, tokens or other secrets in tracked files or commit messages. The CF account and zone ids come from the environment (`$CLOUDFLARE_ACCOUNT_ID`, `$CF_ZONE_ID`), never from `Pulumi.hf.yaml`; the job gets the account id and the R2 endpoint from Secret Manager.
+
+### Branches
+
+- `hf` merges the local `cloud` branch (`git merge refs/heads/cloud`); never rebase onto it. Shared fixes are `[cloud]` commits, cherry-picked up by the root session; deployment commits are `[hf]`.
+- Migrations: the cw lineage, `site/migrations/cw/`, applied from scratch to `oa-hf-usage-db`.
+
+### Layout (hf's own)
+
+- `job/hf-run.sh`: the daily scan, every step a shared CLI — `disk-tree bulk-list hf://open-athena` → `disk-tree import -e duckdb -p storage_class_id` → `dt-cloud index-write -S` (path store) + `dt-cloud path-index` (snapshot JSONs only) → upload to R2 → `dt-cloud static-names add|build` → `dt-cloud index-sync -d r2://…` → `dt-cloud interval-store add|build` → `dt-cloud index-gc -F`. Under `dt-cloud scan-run supervise`, with the scan-job-wrapper traps and phases; profile `job/hf-scan-runs.json`. It reads its D1 and the static-names / interval-store generations from `site/wrangler.toml` (baked into the image), so the job writes what the site reads.
+- `job/hf-batch-submit.sh`: the Batch spec (e2-standard-4, on demand; `PIN=1 DRY=1` prints the cron body). `job/build.sh` + `job/Dockerfile` + `job/cloudbuild.yaml`: the `:hf` image (Cloud Build, a staged minimal context; no site build, no wrangler).
+- R2 layout (`oa-hf-usage-index`, no GCS anywhere): `listing/<scan>/index/<gen>/` (tiers), `listing/<scan>/open-athena.parquet` (layer-2) + `open-athena.listing.json` (the lister's `_SUCCESS.json`: billed-bytes reconciliation, request count), `snapshots/hf/<scan>/`, `static-names/<gen>/`, `interval-store/<gen>/`. Scan ids are dates (one scan a day).
+- `site/wrangler.toml` + `site/src/stores/hf.tsx`: the store (`STORE = "hf"`, app sign-in, `STAFF_DOMAIN = "openathena.ai"`). The billing allowances (no API for them) are declared values in `hf.tsx` (`HF_ALLOWANCES`), shown in the About panel.
+- `infra/gcp/` (stack `hf`): the job account `hf-usage-job`, the `hf-usage` image repository, the `hf-usage-*` secret containers, the `hf-usage-snapshot` cron (daily 08:00 UTC). `infra/cf/` (stack `hf`, entrypoint `hf_stack.py` over the shared `stack/`): the `oa-hf-usage` Pages project, `hf.oa.dev`, the D1 `oa-hf-usage-db`, KV `oa-hf-usage-cache`, R2 `oa-hf-usage-index` with its read/write token (the job's), a read-only token (the site's `STORE_*`) and the job's D1 token. `infra/cf/hf-secrets` delivers the outputs to Pages and Secret Manager without printing them; `infra/cf/run` runs pulumi with `CF_IAC_TOKEN`.
+- Storage classes (`storage_class_id`): public 1, private 5, unbilled git 6; the layer-2 and the path store carry `sum_storage_class_id_{1,5,6}`.
+
+### Dev workflow
+
+- Tests: `infra/tests/test_hf_stacks.py` (both stacks under Pulumi's mocks, the cron body against the secrets and the profile); `cd site && pnpm build && pnpm vitest run`.
+- A local dry run of the job (a tiny real listing, a local store dir, no D1): `HF_URI=hf://open-athena/spaces/README STORE_ROOT=tmp/store WORK_DIR=tmp/work bash job/hf-run.sh` (with `disk-tree` / `dt-cloud` on `PATH`). Never list the whole org from the laptop.
+- `site/deploy` (from `site/`): deploys to hf.oa.dev and pushes to `o` (`-P` skips the push); `CLOUDFLARE_ACCOUNT_ID` from the environment.
