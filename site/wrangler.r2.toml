@@ -51,8 +51,8 @@ SEARCH_SIDECARS = "1"            # the daily ingest builds them (`path-index -S`
 # the daily ingest appends each scan to it (`dt-cloud static-names add`), and builds the generation when it doesn't exist
 # yet (`static-names build`), reading STATIC_GEN from here. A generation built since `static-names build` builds anchors
 # (`names/`, `anchors/`: `^q`, `^q$`, heavy `q$`, path terms) carries them, its runs too; an older one (2026-10-14) has
-# none, and those terms are `anchor-not-indexed` until STATIC_GEN names a new generation (the ingest builds it).
-STATIC_GEN = "2026-10-14"
+# none; 2026-10-15 was built with anchors (the ingest builds a STATIC_GEN that does not exist yet).
+STATIC_GEN = "2026-10-15"
 # The interval store (every scan's tree as versioned intervals; `_lib/index.ts` `intervalsOn`), in INDEX_R2 under
 # `interval-store/<gen>/`: built by the daily ingest's `interval-store build` on its first run, then one `add` per scan,
 # which compacts it into a new generation every 2^5 scans and moves `interval-store/CURRENT.json` to it. No
