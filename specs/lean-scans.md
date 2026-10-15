@@ -17,6 +17,7 @@
 | **cw-s3** | no: layer-1 shards are transient (`job/cw-run.sh:160`) | yes, GCS `cw-l2/<scan>/<bucket>.parquet` (`:195-196`) + R2 archive via `publish-r2` (`:255-260`) | `index-write` → `cw-l2/<scan>/index/<gen>/` (`:206-210`), `index-sync` + `index-gc` (`:239-241`) | no | one machine, `add -s $R2_ARCHIVE -L 'cw-l2/{id}/index/{gen}/path-index.parquet'` (`:274-278`) | staged Batch (`:226-227`) | `1` |
 | **hf** | no (`job/hf-run.sh:108`, `$WORK`) | yes, `listing/<scan>/<ns>.parquet` on R2 (`:142`) | `index-write -S` (`:121`), uploaded (`:141`), `index-sync` | yes (`-S`; `SEARCH_SIDECARS=1`) | one machine `add` | one machine `add`/`build` (`:154-155`) | unset |
 | **r2 demo** (r2.rbw.sh) | **no**: listings stay in the runner's `work/` (`.github/workflows/daily-ingest.yml:76-82`) | no | `path-index -S -P` (`:85`), uploaded to `listing/<date>/index/<gen>/` (`:96`), `index-sync -v path -v bysize` (`:108`) | yes (`SEARCH_SIDECARS=1`, `site/wrangler.r2.toml:49`; no anchors, `:52`) | one machine, `-s r2://$BUCKET -L 'listing/{id}/index/{gen}/path-index.parquet'` (`:142-148`) | one machine (`:123-129`) | unset |
+| **r2** (r2.oa.dev, branch `r2`) | **no**: `job/r2-scan` bulk-lists into the Batch work dir only | no | written **twice**, ~246 MB/scan each (rows 66 + trigrams 62 + `bysize` 55 + `path` 44 + age pyramids ~19 MB): GCS `oa-r2-usage-data/scans/<id>/<gen>/index/` (2.2 GB total) and R2 `oa-r2-usage-index/listing/<id>/index/<gen>/` (1.7 GB), as measured by r2.oa.dev's /meta scan | prod yes; dropped on dev (`38c0523b`: no `path-index -S`, no `SEARCH_SIDECARS`), image not rebuilt | one machine, gen `2026-10-15r2` on R2, `PATH_STORE=intervals` | one machine, `2026-10-15r2` + `2026-10-15meta` (the /meta store, a union member, ~12 KB/scan, same per-scan readers) | dev only (`38c0523b`) |
 | **m3** | layer-1 capture shards `r2://disk-tree/captures/m3/root/<stamp>/` (m3 `AGENTS.md`), retention unstated | no | `path-index -g -P` (m3 `infra/aws/ingest.sh:126`), `index-sync` (`:147`) | no | **none** (m3 `site/wrangler.toml` has no `INTERVAL_STORE_GEN`) | one machine (`:152-167`) | unset |
 
 Branch refs (`job/*.sh`, m3 files) are on the deployment branches (`gcs`, `cw-s3`, `hf`, `m3`). Everything else is on `cloud`.
@@ -282,14 +283,15 @@ It lacks three things:
      - make the `scanned` check (`:66-71`) the manifest.
    - Step 4 *adds* a listing upload (`listing/<id>/<bucket>/`), rolling 30 days, since r2 keeps none today.
    - The r2 session adopts these as they land.
-2. **hf.** Same one-machine shape (`hf-run.sh`). Its layer-2 rule waits on P2.
-3. **cw-s3.**
+2. **r2** (r2.oa.dev). The demo's one-machine shape plus a GCS duplicate of every per-scan tree: drop both copies' writes, retire both backlogs (GCS 2.2 GB, R2 1.7 GB), and add a rolling 30-day listing upload (it keeps none today). /meta has the same per-scan readers at ~12 KB/scan.
+3. **hf.** Same one-machine shape (`hf-run.sh`). Its layer-2 rule waits on P2.
+4. **cw-s3.**
    - The interval store is already one machine from R2 (`cw-run.sh:274-278`).
    - The static index is staged, so `pending/` is a GCS key in the static profile's bucket (B1').
    - The R2 archive copy of layer-2 follows (d)'s window.
    - It has 151 scans of per-scan tiers to retire (110.8 GiB measured 2026-09-30, several generations per old scan).
-4. **gcs.** Both stores staged (`pending/` in the profile bucket); `dir-cache/` latest 7; `attr.tsv` kept; the largest backlog (21.7 GB/scan of path stores, ~71+ scans); raw listings (10.7 GB/scan) to (d).
-5. **m3.** It needs an interval store first: `interval-store build` from its existing per-scan sorts, *before* any retention, plus `INTERVAL_STORE_GEN` and `PATH_STORE` in m3's `site/wrangler.toml`. Then the same checklist. Capture shards (`captures/m3/…`) get (d)'s window.
+5. **gcs.** Both stores staged (`pending/` in the profile bucket); `dir-cache/` latest 7; `attr.tsv` kept; the largest backlog (21.7 GB/scan of path stores, ~71+ scans); raw listings (10.7 GB/scan) to (d).
+6. **m3.** It needs an interval store first: `interval-store build` from its existing per-scan sorts, *before* any retention, plus `INTERVAL_STORE_GEN` and `PATH_STORE` in m3's `site/wrangler.toml`. Then the same checklist. Capture shards (`captures/m3/…`) get (d)'s window.
 
 ## Open questions
 
