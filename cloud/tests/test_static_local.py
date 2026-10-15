@@ -30,9 +30,9 @@ def _layout(scans: dict) -> str:
     return s["src"].replace(s["id"], "{id}")
 
 
-def _build(root: Path, scans: dict, store: Path | str, work: Path, gen: str = "g", through: str | None = None):
+def _build(root: Path, scans: dict, store: Path | str, work: Path, gen: str = "g", through: str | None = None, extra: tuple[str, ...] = ()):
     args = ["-g", gen, "-L", _layout(scans), "-s", str(root), "-o", str(store), "-x", "off", "-w", str(work), "-k", "2", "-n", "60",
-            "-V", str(V), "-R", str(R), "-K", str(KEEP), "-f", str(FLOOR), "-p", "2", "-M", "1GB", *(["-t", through] if through else [])]
+            "-V", str(V), "-R", str(R), "-K", str(KEEP), "-f", str(FLOOR), "-p", "2", "-M", "1GB", *(["-t", through] if through else []), *extra]
     res = CliRunner().invoke(sl.build_cmd, args, catch_exceptions=False)
     assert res.exit_code == 0, res.output
     return json.loads(res.stdout)
@@ -94,6 +94,33 @@ def test_build_drill_is_the_reference_drill(built):
     for sub, kind in (("dirs", "long"), ("short/dirs", "short")):
         got_meas = pq.read_table(gen / "roots-measure" / sub / "s0000.parquet").to_pylist()
         assert got_meas == sorted(pq.read_table(meas[kind]).to_pylist(), key=lambda r: (r["q"], r["k"], r["dir"])), kind
+
+
+def test_build_chunked_drill_is_the_unchunked_one(built, tmp_path):
+    """`-c 1`: each member loop chunk one suffix row group, each short piece about one root, each measurement / rollup range
+    one literal: the same `drill/` and `roots-measure/`, byte for byte, as the default's one chunk per shard, one piece per
+    coalesced-versions file and one range per kind."""
+    root, scans, gen = built["root"], built["scans"], built["gen"]
+    rg, sn.SX_RG = sn.SX_RG, 5
+    try:
+        summary = _build(root, scans, tmp_path / "store", tmp_path / "work", extra=("-c", "1"))
+    finally:
+        sn.SX_RG = rg
+    chunked = tmp_path / "store" / sn.PREFIX / "g"
+    for sub in ("drill", "roots-measure"):
+        assert _files(chunked / sub) == _files(gen / sub), sub
+    shard = dict(zip(*pq.read_table(gen / "catalog" / "members.parquet", columns=["q", "shard"]).to_pydict().values()))
+    held = sorted(set(shard.values()))
+    long_qs = set(pq.read_table(gen / "drill" / "long" / "roots", columns=["q"]).column("q").to_pylist())
+    short_qs = set(pq.read_table(gen / "drill" / "short" / "roots", columns=["q"]).column("q").to_pylist())
+    files = len(list((gen / "cintervals").glob("*.parquet")))
+    assert len(held) > 1 and len(long_qs) > 1
+    assert {k: built["summary"]["drill"][k] for k in ("chunks", "pieces", "groups")} == {"chunks": len(held), "pieces": files,
+                                                                                       "groups": {"long": 1, "short": 1}}
+    assert {k: summary["drill"][k] for k in ("chunks", "groups")} == {
+        "chunks": sum(pq.ParquetFile(gen / "sx" / f"s{i:04d}.parquet").metadata.num_row_groups for i in held),
+        "groups": {"long": len(long_qs), "short": len(short_qs)}}
+    assert summary["drill"]["pieces"] > files
 
 
 def test_build_refuses_an_existing_generation(built, tmp_path):
@@ -244,6 +271,35 @@ def test_add_prunes_the_folded_runs_after_the_grace(appended, tmp_path):
             assert tiered_cat.answer(term, ids) == _catalog(full / "catalog").answer(term, ids), term
 
 
+def test_add_an_unchanged_scan(fixture, tmp_path):  # noqa: F811
+    """A scan identical to the one before it (an idle day: its delta opens and closes nothing) appends as a run, and
+    base ⊕ that run reads as the generation rebuilt over every scan."""
+    import shutil
+
+    from dt_cloud.scan_id import scan_label
+
+    root, scans, _ = fixture
+    last = scans["scans"][-1]
+    idle = scan_label(sn.scan_epoch(last["id"]) + 86400)
+    root2 = tmp_path / "root"
+    shutil.copytree(root, root2)
+    src = last["src"].replace(last["id"], idle)
+    (root2 / src).parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(root / last["src"], root2 / src)
+    scans2 = {**scans, "scans": [*scans["scans"], {**last, "id": idle, "src": src, "ts": sn.scan_epoch(idle)}]}
+    _build(root2, scans2, tmp_path / "store", tmp_path / "work", through=last["id"])
+    out = _add(root2, scans2, tmp_path / "store", tmp_path / "work-add")
+    assert [x["scan"] for x in out["added"]] == [idle]
+    _build(root2, scans2, tmp_path / "full", tmp_path / "work-full")
+    gen, full = tmp_path / "store" / sn.PREFIX / "g", tmp_path / "full" / sn.PREFIX / "g"
+    run = gen / sa.run_key(idle, idle)
+    assert _combine(_sx([gen, run])) == _sx([full])
+    merged = tmp_path / "check"
+    sa.merge_catalogs([gen / "catalog", run / "catalog"], merged)
+    for f in ("cells.parquet", "index.parquet"):
+        assert (merged / f).read_bytes() == (full / "catalog" / f).read_bytes(), f
+
+
 def test_url_store_matches_a_local_one(built, tmp_path):
     """A URL store (fsspec `memory://`) gets the same keys and bytes as a local one (but the catalog's timing)."""
     import fsspec
@@ -279,3 +335,16 @@ def test_disk_peak_per_stage(monkeypatch, tmp_path):
     disk.sample()
     assert disk.close() == 3.0
     assert disk.peak == 2 * sl.GB
+
+
+def test_query_reads_a_non_gcs_store(built):
+    """`static-names query -b <dir>` (as `r2://…`): the base generation's answers through `blobstore.Store`, each the
+    brute force's over the scans."""
+    ids = scan_ids(built["scans"])
+    oracle = _oracle(built["merged"])
+    terms = [t for t in TERMS if len(t) >= 3]
+    res = CliRunner().invoke(sn.cli, ["query", "-b", str(built["tmp"] / "store"), "-g", "g", *(x for d in ids for x in ("-d", d)), *terms],
+                             catch_exceptions=False)
+    assert res.exit_code == 0, res.output
+    got = [json.loads(ln) for ln in res.stdout.splitlines()]
+    assert [o["answers"] for o in got] == [{d: _brute_answer(oracle, t, d) for d in ids} for t in terms]

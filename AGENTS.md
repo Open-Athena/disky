@@ -16,7 +16,8 @@ Key goals:
 ### Python Backend (`src/disk_tree/`)
 
 **Listing** (`find/bulk*.py`): `bulk-list` shards a bucket's object listing (`gcs://`, `s3://`,
-`r2://` via its S3 endpoint) across worker processes into layer-1 listing parquet shards. The
+`r2://` via its S3 endpoint) across worker processes into layer-1 listing parquet shards
+(`hf://<namespace>`: a Hugging Face org's buckets + repos over the Hub API, one rate-limited process). The
 canonical columns are `bucket, name, size_bytes, created, storage_class_id, generation`; generation
 is the exact GCS object identity (nullable for S3/R2 and old listings), retained so a reviewed
 deletion manifest can never resolve to a replacement object at the same path.
@@ -36,7 +37,14 @@ cw-s3's jobs read that blob back (`ls $DISK_TREE_ROOT/scans/*.parquet`) as `dt-c
 **CLI** (`cli/`):
 ```bash
 disk-tree bulk-list URI    # Shard URI's object listing (gcs:// | s3:// | r2:// with `-E <endpoint>`) into
-                          # layer-1 parquet shards at `-o` (`-a` adaptive range-splitting, `-P` procs)
+                          # layer-1 parquet shards at `-o` (`-a` adaptive range-splitting, `-P` procs).
+                          # `hf://<ns>[/<kind>[/<name>]]` (`find/bulk_hf.py`, `HF_TOKEN`) lists a Hugging Face
+                          # namespace as bucket `<ns>`: `buckets/<b>/…`, `{models,datasets,spaces}/<repo>/…`
+                          # (current tree; LFS deduped by oid) + `<repo>/@history/@unlisted` (what
+                          # `usedStorage` bills beyond it), so non-`git` bytes sum to the billing page;
+                          # `storage_class_id` public 1 / private 5 / unbilled git 6 (`import -s hf -p
+                          # storage_class_id`). `-L` per-object history via `lfs-files` (write token), `-D`
+                          # repo-level dates (50→1000 entries/page); `-w` = requests in flight (429s at 8)
 disk-tree import -l GLOB…  # Aggregate listing(s) into a canonical layer-2 per bucket (`-b`; default every
                           # bucket in the listings): `-e pandas|duckdb|stream`, `-p` pivot sums, `-m`
                           # mtime_mean, `-i` also cut the path-store tiers, `-w/--to` write dir or URL
@@ -83,7 +91,11 @@ dt-cloud static-names build -g GEN -L LAYOUT -s SCANS -o STORE -x off|MIN,TAIL  
                           # on ONE machine (`static_local.py`): the staged (Batch) path's stages in-process — ranges,
                           # coalesced versions, suffix shards, catalog, drill (`build_drill`) + `roots-measure/` — over a
                           # work dir (`-w`), then copied to `<STORE>/static-names/GEN/` (a dir or `r2://`/`s3://` URL;
-                          # never over a generation). SCANS + `-L` templates (`{id}`, `{gen}`) find the `path` sorts
+                          # never over a generation). SCANS + `-L` templates (`{id}`, `{gen}`) find the `path` sorts.
+                          # The drill is chunked as the staged path (`-c` rows, default 4M: suffix rows per member-loop
+                          # chunk, roots per short piece and per measured / rolled-up q range; roots spill as parquet),
+                          # so its working set is `-c`-bound, not the corpus's; byte-identical at any `-c`. Logs a
+                          # `build GEN: drill/<step>` line per sub-step (seconds, disk / RSS peaks, row counts)
 dt-cloud static-names add -g GEN -L LAYOUT -s SCANS -o STORE  # Append every scan after GEN's newest as a run (append, shards,
                           # catalog delta, drill run, `manifests/<id>.json`), then the binary counter's carries; a URL
                           # store's generation is mirrored into `-w`, new files go up data → `meta.json`s → manifests.

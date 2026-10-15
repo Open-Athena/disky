@@ -346,32 +346,35 @@ def run_date(store: ir.Store, scan: Scan, date: str, ts: int, prev: tuple[Scan, 
             + (f" — {diffs[:3]}" if diffs else ""))
     if prev:
         pscan, pdate, pts = prev
-        if pscan.v == scan.v:
-            for c in [x for x in cases if "max_depth" not in x][:4]:
-                path = c["path"]
-                ra, rb = pscan.root_b(path), scan.root_b(path)
-                if ra <= 0 or rb <= 0:
-                    continue
-                # `buildDiff`: one floor for both sides, from the larger root.
-                thr = max(ra, rb) * ir.MIN_AREA / (W * H)
-                wa, wb = pscan.view(path, threshold=thr), scan.view(path, threshold=thr)
-                want = ir.diff(wa, wb, pscan.lookup, scan.lookup)
-                ga, gb = store.view(pts, path, W, H, threshold=thr), store.view(ts, path, W, H, threshold=thr)
-                cost = ir.Cost()
-                got = ir.diff(ga, gb, lambda p: store.lookup(pts, p, cost), lambda p: store.lookup(ts, p, cost))
-                ch_cost = ir.Cost()
-                n_changed = store.changes(pts, ts, path, ch_cost)
-                eq = got == want
-                rec = {"kind": "diff", "from": pdate, "to": date, "path": path, "eq": eq, "rows": len(want),
-                       "changed": sum(1 for r in want if r[2] != "unchanged"),
-                       "mismatch": [list(x) for x in sorted(set(got) ^ set(want))][:20],
-                       "iv_cost": {"views": [ga["cost"], gb["cost"]], "lookups": cost.total()},
-                       "changes": {"versions": n_changed, "cost": ch_cost.total()}}
-                out.write(json.dumps(rec) + "\n")
-                out.flush()
-                summary["diffs"] += 1
-                summary["diff_eq"] += eq
-                err(f"  diff {pdate}→{date} {path!r}: eq={eq} rows={len(want)} changed={rec['changed']}")
+        for c in [x for x in cases if "max_depth" not in x][:4]:
+            path = c["path"]
+            ra, rb = pscan.root_b(path), scan.root_b(path)
+            if ra <= 0 or rb <= 0:
+                continue
+            # `buildDiff`: one floor for both sides, from the larger root.
+            thr = max(ra, rb) * ir.MIN_AREA / (W * H)
+            wa, wb = pscan.view(path, threshold=thr), scan.view(path, threshold=thr)
+            # Across the v1 → v2 cutover the objects fold (`ir.diff`'s `fold`): the per-scan side knows each scan's
+            # format from its source, the store from its rows (`Store.view`'s `objects`, what `buildDiff` tests).
+            fold = pscan.v != scan.v
+            want = ir.diff(wa, wb, pscan.lookup, scan.lookup, fold=fold)
+            ga, gb = store.view(pts, path, W, H, threshold=thr), store.view(ts, path, W, H, threshold=thr)
+            cost = ir.Cost()
+            got_fold = ga["objects"] != gb["objects"]
+            got = ir.diff(ga, gb, lambda p: store.lookup(pts, p, cost), lambda p: store.lookup(ts, p, cost), fold=got_fold)
+            ch_cost = ir.Cost()
+            n_changed = store.changes(pts, ts, path, ch_cost)
+            eq = got == want and got_fold == fold
+            rec = {"kind": "diff", "from": pdate, "to": date, "path": path, "eq": eq, "rows": len(want), "fold": [got_fold, fold],
+                   "changed": sum(1 for r in want if r[2] != "unchanged"),
+                   "mismatch": [list(x) for x in sorted(set(got) ^ set(want))][:20],
+                   "iv_cost": {"views": [ga["cost"], gb["cost"]], "lookups": cost.total()},
+                   "changes": {"versions": n_changed, "cost": ch_cost.total()}}
+            out.write(json.dumps(rec) + "\n")
+            out.flush()
+            summary["diffs"] += 1
+            summary["diff_eq"] += eq
+            err(f"  diff {pdate}→{date} {path!r}: eq={eq} rows={len(want)} changed={rec['changed']}")
     return summary
 
 
