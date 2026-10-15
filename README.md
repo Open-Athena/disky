@@ -92,6 +92,19 @@ Monorepo — a shared engine plus the Marin-specific app and site:
 - **`site/`** — the [gcs.oa.dev] web app: a Cloudflare Pages SPA (treemap +
   browse + mark UI) with Pages Functions serving `/data` and `/api/*`.
 
+### Marks
+
+Each deployment's favicon and badge is a small treemap in its store's colors, with a store glyph in the big tile: `scripts/marks/build.mjs` writes them to `site/public/icons/`, a site deployment picks its favicon with `MARK` in its `wrangler.toml` (unset: a badge of its label's initials), and a union view's sources name theirs as `icon: "/icons/<key>.svg"` (`STORES_JSON`). Glyph credits:
+
+- **NAS / Linux**: Tux, by Larry Ewing with The GIMP; path data from [Simple Icons] (CC0).
+- **Hugging Face**: 🤗 from [Noto Emoji] (Apache 2.0), not Hugging Face's own logo.
+- **Cloudflare R2**: the R2 icon from [Cloudflare's docs][cf-docs] (CC-BY 4.0; the license grants no trademark rights).
+- **Amazon S3**: AWS's S3 service icon (via Simple Icons v9). AWS permits its architecture icons in diagrams and documentation; use as a product badge is a grey area.
+- **CoreWeave**: CoreWeave's mark, used to name the store it scans.
+- **macOS** uses the ⌘ symbol, and **Google Cloud Storage** a generic cloud in Google's four colors; neither uses a vendor logo.
+
+All names and marks belong to their owners; disky is not affiliated with or endorsed by any of them.
+
 ## Development
 
 The `dt-cloud` CLI lives in `cloud/`:
@@ -119,3 +132,6 @@ stack (Vite UI + `wrangler pages dev` for the Functions).
 [marin#6790]: https://github.com/marin-community/marin/issues/6790
 [disk-tree]: https://github.com/runsascoded/disk-tree
 [thrds]: https://github.com/runsascoded/thrds
+[Simple Icons]: https://simpleicons.org
+[Noto Emoji]: https://github.com/googlefonts/noto-emoji
+[cf-docs]: https://github.com/cloudflare/cloudflare-docs
