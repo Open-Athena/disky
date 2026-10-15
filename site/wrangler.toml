@@ -14,7 +14,7 @@ compatibility_flags = ["enable_request_signal"]  # interval-store reads evict a 
 [[d1_databases]]
 binding = "DB"
 database_name = "oa-hf-usage-db"
-database_id = "00000000-0000-0000-0000-000000000000"   # ← `pulumi stack output d1_database_id -s hf` (specs/hf-deployment.md)
+database_id = "2f83fdf9-509f-491c-9664-04bef9944988"
 migrations_dir = "migrations/cw"
 remote = true   # dev-only: local dev reads the real D1; deploys ignore it
 
@@ -66,7 +66,7 @@ bucket_name = "oa-hf-usage-index"
 # The global cache tier behind each colo's cache (`_lib/edgeCache.ts`): the `cache_kv_id` output of the `hf` CF stack.
 [[kv_namespaces]]
 binding = "CACHE_KV"
-id = "00000000000000000000000000000000"   # ← `pulumi stack output cache_kv_id -s hf`
+id = "db204aed0ef5440f8d450184cc7c177a"
 
 # Secrets (`infra/cf/hf-secrets -P`, or `wrangler pages secret put <NAME> --project-name oa-hf-usage`):
 #   STORE_ENDPOINT          = https://<account id>.r2.cloudflarestorage.com (kept out of git with the account id)
