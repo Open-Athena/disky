@@ -232,15 +232,6 @@ if [ "${STATIC_NAMES:-0}" = "1" ] && [ "${REPROC:-0}" != "1" ]; then
   wait "$STATIC_PID" || echo "WARN: static-names stage exited $?" >&2
   phase static-wait
 fi
-begin index-sync
-if [ -n "${CLOUDFLARE_API_TOKEN:+set}" ] && [ -n "${CLOUDFLARE_ACCOUNT_ID:-}" ]; then  # `:+set`: xtrace must not print the token
-  dt-cloud index-sync -d "/gcs/$DATA/$INDEX_KEY" -g "$GEN" -k "$INDEX_KEY" -M "/gcs/$DATA/snapshots/cw" "$SNAP_ID" \
-    || echo "WARN: index-sync failed (the site keeps serving the previous generation)" >&2
-  dt-cloud index-gc "$SNAP_ID" || echo "WARN: index-gc failed" >&2
-else
-  echo "WARN: no CLOUDFLARE_API_TOKEN/ACCOUNT_ID — tiers published but not synced (scan unlisted for the index reader)" >&2
-fi
-phase index-sync
 
 # 4c. Publish this scan's served subset to R2 (specs/done/r2-serving-migration.md):
 # the snapshot JSONs + the layer-2 dir (parquets, index tiers, manifests) the
@@ -254,7 +245,8 @@ begin publish-r2
 if [ -n "${R2_ENDPOINT:+set}" ] && [ -n "${R2_BUCKET:-}" ]; then  # `:+set`: xtrace must not print the creds
   # The canonical per-bucket listings (layer-2) go too: R2 is the archive the later
   # one-shots (reindex, recompress, REPROC) read, GCS only the job's scratch.
-  dt-cloud publish-r2 "$SNAP_ID" \
+  # `-a`: every `index/<gen>/` under the scan, not D1's (the scan is listed in D1 after, 4c'').
+  dt-cloud publish-r2 -a "$SNAP_ID" \
     || echo "WARN: publish-r2 failed for $SNAP_ID (the site keeps serving GCS)" >&2
 else
   echo "no R2_ENDPOINT/R2_BUCKET — skipping publish-r2" >&2
@@ -280,6 +272,19 @@ if [ "${INTERVAL_STORE_APPEND:-1}" = "1" ] && [ -n "${R2_ARCHIVE:-}" ] && [ "${R
     echo "no interval store on R2 yet (job/cw-interval-submit.sh build): not appending $SNAP_ID" >&2
   fi
 fi
+
+# 4c''. List the scan: its footers to D1 (`index-sync`), last of the serving steps, so a listed scan is whole —
+# searchable (4b', above), on R2 (4c) and in the interval store (4c') — as gcs lists it. What follows (over-time
+# groups, GC, the cache warm-up, the probe, the digest) reads the listed scan.
+begin index-sync
+if [ -n "${CLOUDFLARE_API_TOKEN:+set}" ] && [ -n "${CLOUDFLARE_ACCOUNT_ID:-}" ]; then  # `:+set`: xtrace must not print the token
+  dt-cloud index-sync -d "/gcs/$DATA/$INDEX_KEY" -g "$GEN" -k "$INDEX_KEY" -M "/gcs/$DATA/snapshots/cw" "$SNAP_ID" \
+    || echo "WARN: index-sync failed (the site keeps serving the previous generation)" >&2
+  dt-cloud index-gc "$SNAP_ID" || echo "WARN: index-gc failed" >&2
+else
+  echo "WARN: no CLOUDFLARE_API_TOKEN/ACCOUNT_ID — tiers published but not synced (scan unlisted for the index reader)" >&2
+fi
+phase index-sync
 
 # 4d. Over-time index groups (specs/obs-axis-indexing.md Phase 1): every full
 # K-scan run of indexed scans not yet in the manifest becomes one sealed
