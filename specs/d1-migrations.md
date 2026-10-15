@@ -1,48 +1,35 @@
-# D1 migrations: what they're for here, and squashing them
+# D1 schema: one current-state file per branch; migrations only while pending
 
-Status: 2026-10-15. An explainer plus a proposal. Nothing has changed yet.
+Status: 2026-10-15, proposal (Ryan's model). Nothing has changed yet.
 
-## Short answers
+## Today
 
-**Are migrations only there so mixed versions of the frontend, backend and database can work together?** No. That's a minor side benefit, and as you say it barely applies here: each deployment has one site and one database, deployed together.
+- There is no "current schema" file. `0001_init.sql` is the schema as of the project's start, and the current schema is whatever results from replaying every file in `migrations_dir` in order. A new database (e.g. hf's) gets created by replaying the whole history, including tables that a later file drops (`marks*`, `mark_log`, `index_schema_new`).
+- `wrangler d1 migrations apply` keeps a `d1_migrations` table in each database, one row per applied file **name**. It applies every file in the directory, sorted by name, whose name has no row yet. It doesn't keep a cursor or index: the number in a file name only sets the order, and rows for files that no longer exist are never consulted again.
+- Each branch carries its own set of migrations: gcs its own (`site/migrations/gcs/`), and the others the set inherited through `cloud` (`site/migrations/cw/`). Per-branch sets with different numbering are expected under the branch-per-deployment model, just as commits get cherry-picked across deployment branches.
+- **Why migrations exist at all:** each deployment's D1 is long-lived and holds data that can't be regenerated (sign-in allowlists and grants, agent and share tokens, sweep plans and approvals, scan-run records, access and session logs). A schema change has to keep those rows, so it's applied to the live database in place, not by recreating it. That's the only reason. Mixed versions in the wild don't apply here.
 
-What migrations actually do is **change a database that already holds data you want to keep**, without throwing that data away. Each deployment's D1 is long-lived, and much of what's in it can't be regenerated:
+## Proposed workflow
 
-| Kind | Tables (cw lineage) | Regenerable? |
-| --- | --- | --- |
-| Sign-in and access | `allowed_emails`, `admin_emails`, `grants`, `agent_tokens`, `og_tokens`, `pending_auth`, `profiles`, `access_requests` | **No.** Who may sign in, issued tokens and share links. |
-| Human actions | `plans`, `plan_items`, `stage_batches`, `stage_replies`, `deletion_runs` / `_bands` / `_progress`, `admin_edits` | **No.** Sweep plans, approvals and history. |
-| Job and usage history | `scan_runs` / `_phases` / `_outputs`, `access_log`, `access_log_daily`, `session_log*` | **No**, or only by re-ingesting old logs. |
-| Index pointers and caches | `index_schema`, `index_row_groups`, `footer_cache`, `owner_prefix_aggs` / `_hist` | Yes, from the files in R2/GCS (`index-sync`, rebuilds). |
+- **`site/schema.sql` is the current state** of the branch's database schema: what a new database is created from, and what tests build from (`sqliteD1`). One file, no history.
+- **A schema change is two commits:**
+  1. Add `site/migrations/<slug>.sql`, the recipe that takes a live database from the old state to the new one (`ALTER`, or rebuild-and-copy), and update `schema.sql` to the new state in the same commit. A CI test checks the two agree: applying the old `schema.sql` plus the recipe to an empty SQLite database, with `PRAGMA foreign_keys=ON`, gives the same normalized `sqlite_master` as the new `schema.sql`.
+  2. After applying it to each of the branch's live databases (prod D1, plus any separate dev D1 such as r2's), `git rm` the recipe.
+- **Pending migrations are the files present.** No numbers are needed. If two are pending at once, which should be rare, a date-prefixed slug orders them. `git log -- site/migrations` is the history.
+- **Shared changes:** the recipe is cherry-picked across branches like any `[cloud]` commit. Each branch updates its own `schema.sql` and removes the recipe once its own databases have it. A branch that never needed a change (a gcs-only table) never sees it.
+- **Applying:** `wrangler d1 execute <db> --remote --file site/migrations/<slug>.sql`, a prod write (Ryan's go). `wrangler d1 migrations apply` and its `d1_migrations` table drop out; existing rows are harmless leftovers. A new database: `wrangler d1 execute <db> --remote --file site/schema.sql`.
+- **Local and test databases** are disposable: rebuilt from `schema.sql` (local dev DBs are seeded from prod exports anyway).
 
-When a change needs a new column or table, or a table rebuilt, a migration does it in place: `ALTER TABLE … ADD COLUMN`, or create, copy, drop, rename. The rows already there survive. The alternative, dropping the database and recreating it from the newest schema, would lose the first three rows of that table.
+## Moving to it (per branch)
 
-**Does the full history need to stay in the worktree forever?** No. A migration file matters only to a database that hasn't applied it yet. Once every live database is past file N, files 1..N are dead weight. Here the set of live databases is small and known: gcs, cw-s3, m3, the r2 demo, r2, hf and their dev stacks, which share the prod databases. So squashing is safe whenever all of them are at the head.
+1. Generate `schema.sql` from the branch's current migrations (replay into an empty SQLite database, dump normalized DDL), and check it against each live database's actual `sqlite_master`. Any difference is drift to resolve first.
+2. Switch the tests and the new-database instructions (`wrangler*.toml` comments, deployment specs) to `schema.sql`.
+3. `git rm` the whole migrations dir, plus `twins.json` and `scripts/port-migration`, which only tracked pairs across the old numbered sets.
 
-**Why did a new deployment (hf) apply all of them?** Because `wrangler d1 migrations apply` is how the schema gets created, and the only schema this repo records is "file 1, then 2, …, then 20". A new deployment doesn't need the history, only the result. Replaying it does no harm, but it's noisy: `0001_init` creates `marks`, `marks_new` and `mark_log`, and `0004_drop_marks` drops them again.
+Step 1 is read-only (schema queries on each live D1). Steps 2–3 are commits on each branch, made by that branch's session.
 
-## How wrangler decides what to apply
+## Caveats
 
-Each database has a `d1_migrations` table holding one row per applied file name. `apply` runs every file in `migrations_dir`, in order, whose name has no row yet. Rows for files that no longer exist aren't a problem; those names are just never looked at again. This is what makes squashing straightforward: replace the files with one baseline, and record that baseline as already applied in every existing database.
-
-## Where the noise actually comes from
-
-- **Two lineages.** gcs has its own numbering (`site/migrations/gcs/`, 20 files numbered up to 0047) and everyone else uses `site/migrations/cw/` (20 files). The same change lands twice under two numbers, so `twins.json` and `scripts/port-migration` exist only to keep the pairs straight. gcs also has tables the cw lineage lacks (`actions`, `claims`, `keep_prefixes`, `mark_totals`, `owner_prefixes`, `owner_totals`, `session_monitor`, `sweep_approvals`, `user_emails`), and cw has one gcs lacks (`admin_emails`).
-- **Created, then dropped.** `marks*`, `mark_log` and `index_schema_new` come and go across the history.
-- **Ceremony per change.** Each new column means a file in each lineage, a twin entry, and an apply on every database.
-
-Only the last item is the real cost of having a persistent database. The first two are history we're keeping without needing it.
-
-## Proposal: squash to a baseline, one lineage
-
-1. **Pin the target schema.** For each lineage, the baseline is what applying every file to an empty SQLite database produces. Check that it matches each live database's actual schema (`sqlite_master`, normalized), with `PRAGMA foreign_keys=ON` (memory `d1-enforces-foreign-keys`). Any mismatch is drift to fix first.
-2. **Merge the lineages.** One `site/migrations/0001_baseline.sql` holding the union of tables. gcs-only tables stay in the baseline as empty tables on the other deployments (cheap), or move to a gcs-only extra file if we'd rather keep them out. Drop tables nothing reads anymore (check the code). Then `twins.json` and `port-migration` go away.
-3. **Mark the baseline applied** on every live database (one write each, so each is a prod write needing your go): `INSERT INTO d1_migrations (name) VALUES ('0001_baseline.sql')`. Their old rows stay and are harmless.
-4. **Delete the old files.** Tests that build databases from the migrations (`sqliteD1('cw')`) apply the baseline instead.
-5. **Going forward:** a schema change is still one file (`0002_…`), since live databases hold data the change must keep. Squash again whenever the files pile up and every database is at the head, say every few months, the same way.
-
-## What doesn't change
-
-- **A schema change still needs a migration file.** The live databases hold sign-ins, tokens, sweep history and run records; a migration is how a change keeps them.
-- **Deploy order still matters, briefly.** Apply the migration, then deploy the code that reads the new column. Additive changes (new table, new nullable column) keep the old code working in between. That's the one place "different versions running together" applies: a minute or two during a deploy.
-- **Some data could move out of D1 entirely.** For the regenerable tables, a rebuild could replace a migration. Not worth doing on its own; mentioned only for completeness.
+- **Don't remove a recipe early.** It goes only after every database of that branch has it: prod, a separate dev database if there is one, and the r2 demo database for `cloud`.
+- **Deploy order still matters, briefly:** apply the recipe, then deploy the code that reads the new column. Additive changes (a new table, a new nullable column) keep the old code working in between.
+- **D1 enforces foreign keys** where SQLite by default doesn't: test recipes with `foreign_keys=ON` on a seeded database, and never rebuild a table something else references (memory `d1-enforces-foreign-keys`).
