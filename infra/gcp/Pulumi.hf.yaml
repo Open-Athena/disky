@@ -1,0 +1,7 @@
+# `pulumi stack init hf --secrets-provider gcpkms://projects/oa-internal-450019/locations/global/keyRings/ops/cryptoKeys/pulumi`
+# adds the `secretsprovider` / `encryptedkey` lines (specs/hf-deployment.md). Nothing here predates the stack, so
+# nothing is adopted.
+config:
+  gcp:project: oa-internal-450019
+  gcp:region: us-central1
+  gcs-usage-gcp:adopting: "false"

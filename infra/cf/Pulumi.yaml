@@ -1,0 +1,15 @@
+# One project, one stack per deployment branch (`gcs`, `cw-s3`, `hf` here); each branch's cf/ selects only its own
+# stack. Distinct project name from gcp/'s so the two don't collide in the shared gs://oa-pulumi backend (keyed by
+# <project>/<stack>).
+name: gcs-usage-cf
+description: Cloudflare resources for the storage-usage dashboards — Pages project shell, custom domain + oa.dev CNAME, D1, cache KV, the R2 index bucket and its tokens. Deployments + app config stay with site/deploy (wrangler).
+main: hf_stack.py
+backend:
+  url: gs://oa-pulumi
+runtime:
+  name: python
+  options:
+    toolchain: uv
+config:
+  gcs-usage-cf:zoneId:
+    description: "Cloudflare zone id for oa.dev (holds the hf.oa.dev CNAME); unset here: $CF_ZONE_ID (hf_stack.py)"

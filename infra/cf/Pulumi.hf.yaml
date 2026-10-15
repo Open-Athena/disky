@@ -1,0 +1,9 @@
+# hf.oa.dev's Cloudflare resources (the shared `stack/` program, run by `hf_stack.py`). The account and zone ids are
+# not here (a public repo): `hf_stack.py` takes them from `$CLOUDFLARE_ACCOUNT_ID` / `$CF_ZONE_ID` (the worktree's
+# `.envrc`). `pulumi stack init hf --secrets-provider gcpkms://…` adds the `secretsprovider` / `encryptedkey` lines.
+config:
+  gcs-usage-cf:pagesProject: oa-hf-usage
+  gcs-usage-cf:domain: hf.oa.dev
+  gcs-usage-cf:d1Name: oa-hf-usage-db
+  gcs-usage-cf:kvName: oa-hf-usage-cache
+  gcs-usage-cf:r2Bucket: oa-hf-usage-index
