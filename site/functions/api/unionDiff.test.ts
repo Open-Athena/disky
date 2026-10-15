@@ -106,7 +106,7 @@ describe.each(LINEAGES)('D1, %s lineage', lineage => {
 })
 
 describe('unionDiffRows', () => {
-  const view = { key: 'all', members: ['primary', 'meta'], main: true }
+  const view = { key: 'all', members: ['primary', 'meta'], main: true, sources: {} }
   const row = (p: string, d: number, a: number, b: number, s = a === b ? 'unchanged' : 'changed') => ({ p, d, k: 'dir' as const, s: s as 'changed', a, b, oa: 1, ob: 1 })
   it('tags depth-1 rows, keeps deeper ones, sums the `(other)` folds (restating their status)', () => {
     expect(unionDiffRows(view, [

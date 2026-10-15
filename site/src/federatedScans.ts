@@ -25,6 +25,8 @@ export interface SourceCatalog {
   version: 1
   source: string
   label: string
+  /** The source's mark in the picker and on the map: a URL or a path the site serves; absent = its label. */
+  icon?: string
   mount: string
   scope: SourceScope
   scans: SourceScan[]
@@ -112,6 +114,12 @@ function scopeOf(value: unknown): SourceScope {
   if (prefix && !prefix.endsWith('/')) throw new Error('nonempty scope prefix must end with /')
   return { store: string(s.store), prefix }
 }
+/** A source's icon: an absolute `http(s)://` URL or a path the site serves (`/…`); nothing a link could run. */
+function iconRef(value: unknown): string {
+  const s = string(value)
+  if (!/^(https?:\/\/\S+|\/[^\s/]\S*)$/.test(s)) throw new Error('expected an icon URL or site path')
+  return s
+}
 function contentDigest(value: unknown): string {
   const s = string(value)
   if (!/^[a-f0-9]{64}$/.test(s)) throw new Error('expected a SHA-256 content digest')
@@ -145,8 +153,8 @@ export function parseSourceCatalog(value: unknown): SourceCatalog {
   const refs = scans.map(s => JSON.stringify([s.id, s.revision]))
   if (new Set(refs).size !== refs.length) throw new Error('duplicate scan revision')
   return {
-    version: 1, source: identifier(c.source), label: string(c.label), mount: identifier(c.mount),
-    scope, scans,
+    version: 1, source: identifier(c.source), label: string(c.label), ...(c.icon === undefined ? {} : { icon: iconRef(c.icon) }),
+    mount: identifier(c.mount), scope, scans,
   }
 }
 
