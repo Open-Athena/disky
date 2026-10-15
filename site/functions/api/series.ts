@@ -152,7 +152,7 @@ async function seriesOf(ctx0: SeriesCtx): Promise<Response> {
   // `store=<key>`: a secondary store's env overlay (none = the primary, as is).
   const ctx1 = withStore(ctx0)
   if (ctx1 instanceof Response) return ctx1
-  const ctx = withPathStore(ctx1)
+  const ctx = await withPathStore(ctx1)
   const { env, request } = ctx
   if (!env.DB) return json({ error: 'index backend not configured (DB)' }, 503)
   if (!storeReady(env)) return json({ error: 'index reader not configured' }, 503)

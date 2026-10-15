@@ -105,12 +105,15 @@ dt-cloud interval-store build -g GEN -L LAYOUT -s SCANS -o STORE  # The interval
                           # owner slices, every served sort — the staged stages in-process over `-w` — then copied to
                           # `<STORE>/interval-store/GEN/` (a dir or `gs://`/`r2://`/`s3://` URL; `scans.json` last;
                           # never over a generation). The staged per-range Batch stage is `interval-store build-ranges`
-dt-cloud interval-store add -g GEN -L LAYOUT -s SCANS -o STORE  # Append every scan after GEN's newest as a run (per-range
+dt-cloud interval-store add [-g GEN] -L LAYOUT -s SCANS -o STORE  # Append every scan after GEN's newest as a run (per-range
                           # append over the open versions refolded from base + runs, run cut, `manifests/<id>.json`),
                           # then the due carries; a URL store mirrors into `-w`, uploads data → `meta.json`s → manifests.
                           # Reports peak work-disk/RSS per stage and scan. Every interval-store key goes through
                           # `blobstore.Store` (a profile's bare bucket name = `gs://`); `r2`/`r2-copy` are no-ops when the
-                          # store is the serving R2 bucket
+                          # store is the serving R2 bucket. Every 2^L scans (`-C L`, default 5; `none`: never) it compacts
+                          # base + runs into a new generation (`interval_compact`: a fresh build's bytes), then moves
+                          # `interval-store/CURRENT.json` to it (the site follows it when `INTERVAL_STORE_GEN` is unset);
+                          # `-g` defaults to that pointer. `interval-store current -o STORE [-s GEN]` prints / sets it
 disk-tree tiers plan SIDECAR P THR  # The reader's span selection run offline over a tier's `.groups.json`
                           # (phase 0's instrument): for `path` it mirrors `readRects` exactly (depth rect
                           # `dP+1..`, path range `[P/, P0)`, `b_max ≥ thr·atten^(d−dP−1)` per group); for
