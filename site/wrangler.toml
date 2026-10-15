@@ -9,17 +9,15 @@ compatibility_flags = ["enable_request_signal"]   # `request.signal` aborts when
 
 # D1: the @open-athena/auth tables (grants, access_log, access_requests,
 # profiles, pending_auth) plus the app's own (allowlist, the owner ledger
-# (`actions`/`owner_prefixes`/`claims`, `owner_totals`), index metadata, plans, sweeps) — one squashed lineage,
-# `migrations/gcs/0001_init.sql`, rebaselined on both copies 2026-09-25.
-# Created with `wrangler d1 create oa-gcs-usage-auth`; apply with `wrangler d1
-# migrations apply oa-gcs-usage-auth --remote` (needs
-# CLOUDFLARE_ACCOUNT_ID=74981a43… + the D1-scoped token).
+# (`actions`/`owner_prefixes`/`claims`, `owner_totals`), index metadata, plans, sweeps). Its current
+# schema is `schema.sql` (gcs's own; specs/done/d1-migrations.md); a change is a recipe in
+# `migrations/<slug>.sql`, applied with `wrangler d1 execute oa-gcs-usage-auth --remote --file
+# migrations/<slug>.sql` (needs CLOUDFLARE_ACCOUNT_ID=74981a43… + the D1-scoped token), then removed.
+# `dt-cloud d1-schema check -d oa-gcs-usage-auth` compares the live schema with `schema.sql`.
 [[d1_databases]]
 binding = "DB"
 database_name = "oa-gcs-usage-auth"
 database_id = "e52398b7-5538-4bc4-83db-3355a1b5ef9a"
-# One D1 lineage per deployment (`migrations/cw` is cw-s3's + the r2 demo's).
-migrations_dir = "migrations/gcs"
 # `wrangler pages dev` binds the REAL prod D1 (RW). `site/dev --local-db` runs
 # against a copy of this file with the line stripped, for a local miniflare D1.
 remote = true
@@ -139,7 +137,6 @@ META_TREE_URL = "https://cw-s3.oa.dev/meta"   # /scans outputs link into the /me
 binding = "DB"
 database_name = "oa-gcs-usage-auth"   # the SAME ledger as prod (marks made on dev are real)
 database_id = "e52398b7-5538-4bc4-83db-3355a1b5ef9a"
-migrations_dir = "migrations/gcs"
 
 [env.preview.vars]
 SESSION_MONITOR = "0"           # shared D1: preview may dry-run, never send monitor alerts

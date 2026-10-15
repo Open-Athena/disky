@@ -14,7 +14,8 @@ beforeEach(() => { vi.useFakeTimers(); vi.setSystemTime(NOW * 1000) })
 afterEach(() => { vi.useRealTimers(); vi.unstubAllGlobals() })
 
 async function setup() {
-  const { db, raw } = await sqliteD1('gcs')
+  const { db, raw } = await sqliteD1()
+  raw.exec('INSERT INTO session_monitor (id) VALUES (1)')  // its one row, as prod has it (seeded when the table was made)
   raw.prepare('INSERT INTO session_log_switch VALUES (1, ?, ?, ?)').run(MONITOR_END_MS, 'test', NOW)
   const env = { DB: db, SESSION_SECRET: 's'.repeat(32), BASE_SCOPE: 'gcs', PROD_HOST: 'gcs.oa.dev', SESSION_MONITOR: '1', SLACK_BOT_TOKEN: 'test-token', SLACK_ADMIN_CHANNEL: 'test-channel' }
   const put = (events: Record<string, unknown>[], received = NOW - 1, seq = 0, sid = 'sid-test') =>

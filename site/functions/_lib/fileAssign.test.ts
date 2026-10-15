@@ -9,7 +9,7 @@ import { actionLog } from './actionLog'
 import { computeOwners, foldLatest, newAgg, type OwnerRow, type PathAgg } from './ownerBands'
 import { ownerLens } from './owners'
 import { canonicalObject, digestLines, planDetail, planDigest, planStagingItems, prefixShape, snapshotPlan, snapshotPlanBuckets, type PlanItem } from './plans'
-import { GCS_LEDGER, LEDGER_KIND, migrations, sqliteD1 } from './testD1'
+import { sqliteD1, withLedger } from './testD1'
 import { ownerIndex } from '../../src/ownerIndex'
 import { onRequest as actionsRoute } from '../api/actions'
 import { onRequest as plansRoute } from '../api/plans/[[path]]'
@@ -102,8 +102,8 @@ describe('ledger resolution: file vs folder, nested, newest wins', () => {
 
 describe('actionLog with object rows', () => {
   it('an object is overridden only by a newer folder above it, superseded only by a newer row on the same object', async () => {
-    const { db, raw } = await sqliteD1('cw')
-    raw.exec(GCS_LEDGER)
+    const { db, raw } = await sqliteD1()
+    withLedger(raw)
     const act = (id: number, prefix: string, kind: 'object' | null, owner: string) => raw.exec(
       `INSERT INTO actions (id, actor, ts, scan, pattern, kind, set_owner, owner) VALUES (${id}, 'u', ${100 + id}, 's', '${prefix}', ${kind ? `'${kind}'` : 'NULL'}, 1, '${owner}');` +
       `INSERT INTO owner_prefixes (action_id, prefix, kind, owner, ts) VALUES (${id}, '${prefix}', ${kind ? `'${kind}'` : 'NULL'}, '${owner}', ${100 + id});`,
@@ -125,8 +125,8 @@ describe('actionLog with object rows', () => {
     ])
   })
   it('a newer object never overrides an older object it is a string prefix of', async () => {
-    const { db, raw } = await sqliteD1('cw')
-    raw.exec(GCS_LEDGER)
+    const { db, raw } = await sqliteD1()
+    withLedger(raw)
     raw.exec(`INSERT INTO actions (id, actor, ts, scan, pattern, kind, set_owner, owner) VALUES (1, 'u', 1, 's', 'gs://b/k.mp3.bak', 'object', 1, 'kim'), (2, 'u', 2, 's', 'gs://b/k.mp3', 'object', 1, 'bob');
       INSERT INTO owner_prefixes (action_id, prefix, kind, owner, ts) VALUES (1, 'gs://b/k.mp3.bak', 'object', 'kim', 1), (2, 'gs://b/k.mp3', 'object', 'bob', 2);`)
     expect((await actionLog({ DB: db } as Env, 10, 0)).rows.map(r => [r.id, r.status])).toEqual([[2, 'live'], [1, 'live']])
@@ -142,8 +142,8 @@ describe('POST /api/actions with an exact object', () => {
   const post = (env: object, body: unknown) => actionsRoute({ request: new Request('http://localhost/api/actions', { method: 'POST', body: JSON.stringify(body) }), env } as never).then(answer)
 
   it('records the kind on the action and its owner row, and GET returns it', async () => {
-    const { db, raw } = await sqliteD1('cw')
-    raw.exec(GCS_LEDGER)
+    const { db, raw } = await sqliteD1()
+    withLedger(raw)
     const env = { ...ENV, DB: db }
     const [status] = await post(env, [
       { pattern: SHOW, owner: 'ann', scan: '2026-10-09' },
@@ -170,8 +170,8 @@ describe('POST /api/actions with an exact object', () => {
   })
 
   it('refuses a malformed object, a slash-less folder, and an unknown kind (nothing written)', async () => {
-    const { db, raw } = await sqliteD1('cw')
-    raw.exec(GCS_LEDGER)
+    const { db, raw } = await sqliteD1()
+    withLedger(raw)
     const env = { ...ENV, DB: db }
     const objErr = 'an object pattern must be gs://<bucket>/<key> over a scanned bucket (the exact key, no trailing slash)'
     expect([
@@ -214,7 +214,7 @@ describe('canonicalObject', () => {
 
 describe('POST /api/plans/stage with objects, through to the dispatch snapshots', () => {
   async function staged() {
-    const { db, raw } = await sqliteD1('cw')
+    const { db, raw } = await sqliteD1()
     raw.exec(`INSERT INTO index_schema (date, variant, version, schema_json) VALUES ('2026-10-09', 'path', 2, '[]')`)
     const env = { ...ENV, DB: db }
     const stage = (body: unknown) => plansRoute({ request: new Request('http://localhost/api/plans/stage', { method: 'POST', body: JSON.stringify(body) }), env } as never).then(answer)
@@ -299,40 +299,5 @@ describe('POST /api/plans/stage with objects, through to the dispatch snapshots'
       [{ prefix: CLIP, kind: 'object' }, { prefix: 'gs://b/tmp/', kind: null }],
       { prefixes: ['gs://b/tmp/'], note: undefined, as_of: null },
     ])
-  })
-})
-
-// ── The migrations: additive, foreign keys intact ─────────────────────────────
-
-describe('the `kind` migrations', () => {
-  it('cw 0017 adds a nullable, checked `plan_items.kind` over seeded rows, foreign keys intact', async () => {
-    const { raw } = await sqliteD1('cw', { before: '0017' })
-    raw.exec(`INSERT INTO plans (id, name, state, created_by, created_ts) VALUES (1, 'Staged', 'open', 'ann', 1);
-      INSERT INTO plan_items (plan_id, prefix, added_by, added_ts) VALUES (1, 'gs://b/tmp/', 'ann', 1);`)
-    raw.exec((await migrations('cw')).find(m => m.name === '0017_plan_items_kind.sql')!.sql)
-    raw.exec(`INSERT INTO plan_items (plan_id, prefix, added_by, added_ts, kind) VALUES (1, '${CLIP}', 'ann', 2, 'object')`)
-    let bad: string | null = null
-    try { raw.exec(`INSERT INTO plan_items (plan_id, prefix, added_by, added_ts, kind) VALUES (1, 'gs://b/z', 'ann', 3, 'prefix')`) } catch (e) { bad = (e as Error).message }
-    expect([
-      raw.prepare('SELECT prefix, kind FROM plan_items ORDER BY prefix').all(),
-      raw.prepare('PRAGMA foreign_key_check').all(),
-      bad,
-    ]).toEqual([
-      [{ prefix: CLIP, kind: 'object' }, { prefix: 'gs://b/tmp/', kind: null }],
-      [],
-      'CHECK constraint failed: kind IS NULL OR kind = \'object\'',
-    ])
-  })
-
-  it('the gcs ledger half adds `kind` to `actions` / `owner_prefixes` in place (no rebuild of the referenced table)', async () => {
-    const { raw } = await sqliteD1('cw')
-    raw.exec(GCS_LEDGER.replace(LEDGER_KIND, ''))
-    raw.exec(`INSERT INTO actions (id, actor, ts, scan, pattern, set_owner, owner) VALUES (1, 'ann', 1, 's', '${SHOW}', 1, 'ann');
-      INSERT INTO owner_prefixes (action_id, prefix, owner, ts) VALUES (1, '${SHOW}', 'ann', 1);`)
-    raw.exec(LEDGER_KIND)
-    expect([
-      raw.prepare('SELECT a.id, a.kind AS ak, o.kind AS ok FROM actions a JOIN owner_prefixes o ON o.action_id = a.id').all(),
-      raw.prepare('PRAGMA foreign_key_check').all(),
-    ]).toEqual([[{ id: 1, ak: null, ok: null }], []])
   })
 })

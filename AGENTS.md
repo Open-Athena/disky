@@ -140,6 +140,16 @@ from two workspace packages:
 - **`@disk-tree/react`** (`packages/react/`) — `<TimeSeries>`/`<BytesOverTime>` built on the core
   (which it re-exports for back-compat).
 
+### D1 schema (`site/schema.sql`)
+
+One current-state file per branch (spec `done/d1-migrations.md`): new databases are created from it
+(`wrangler d1 execute <db> --remote --file site/schema.sql`) and the tests build from it (`sqliteD1()`,
+`conftest.d1_db`). A change is a recipe `site/migrations/<slug>.sql` plus `schema.sql` regenerated in the
+same commit (`dt-cloud d1-schema dump site/schema.sql site/migrations/<slug>.sql -o site/schema.sql`;
+`dt-cloud d1-schema check -p` verifies, and CI runs it); the recipe is applied to each of the branch's
+databases (`--file site/migrations/<slug>.sql`; `cloud`'s only one is the r2 demo's `disk-tree-demo-db`),
+then `git rm`'d. `dt-cloud d1-schema check -d <db> [-c <wrangler config>]` compares a live D1, read-only.
+
 ### Cloud site auth routes (`site/functions/`)
 
 One gate (`_lib/auth.ts`, `@open-athena/auth` over D1): `identify` → `Identity` (`via: session | grant | public`), `requireViewer` / `requireStager` / `requireAdmin`.
@@ -284,8 +294,8 @@ stay behind the site's auth.
 
 `gcs` is a deployment branch (`specs/branch-layout.md`): shared code lands on
 `cloud` and merges in (never rebase); this branch carries only gcs's delta —
-`job/`, `cf/` (Pulumi stack), `site/wrangler.toml`, the `site/migrations/gcs`
-D1 lineage, branding, and this section.
+`job/`, `cf/` (Pulumi stack), `site/wrangler.toml`, gcs's D1 schema
+(`site/schema.sql`), branding, and this section.
 
 #### Job
 
@@ -303,8 +313,14 @@ branch (live in GCP, body edited in place, never regenerated). A rebuild is how
   moves the local `prod` branch pointer to the shipped SHA and pushes the branch
   + `prod` to GitHub (`o`) by default (`-P` to skip). `site/deploy --status`
   compares deployed vs HEAD; `site/deploy --dev` ships to dev.gcs.oa.dev.
-- D1 schema: `wrangler d1 migrations apply oa-gcs-usage-auth --remote` (separate
-  from deploy; needs `CLOUDFLARE_ACCOUNT_ID` inline).
+- D1 schema: `site/schema.sql` is gcs's own (`specs/done/d1-migrations.md`). A
+  change is a recipe `site/migrations/<slug>.sql` plus `dt-cloud d1-schema dump
+  site/schema.sql site/migrations/<slug>.sql -o site/schema.sql`; apply with
+  `wrangler d1 execute oa-gcs-usage-auth --remote --file migrations/<slug>.sql`
+  (separate from deploy; needs `CLOUDFLARE_ACCOUNT_ID` inline), then `git rm` it.
+  `dt-cloud d1-schema check -d oa-gcs-usage-auth` diffs the live schema. A `cloud`
+  merge touching `schema.sql` conflicts by design: keep gcs's file, dump cloud's
+  recipe into it.
 
 #### Data flow
 

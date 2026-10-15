@@ -4,7 +4,7 @@
 import { describe, expect, it } from 'vitest'
 import { onRequest as actionsRoute } from './actions'
 import { onRequest as plansRoute } from './plans/[[path]]'
-import { GCS_LEDGER, sqliteD1 } from '../_lib/testD1'
+import { sqliteD1, withLedger, withoutLedger } from '../_lib/testD1'
 import { assignInBatches, HttpError, stageMany } from '../../src/batches'
 import { actController, type ActDeps, type ActState } from '../../src/matchAct'
 import type { CoverItem } from '../_lib/cover'
@@ -14,7 +14,7 @@ const base = { STAGING: '1', STORE_SCHEME: 'gs://', STORE_BUCKETS: B, DEV_EMAIL:
 
 describe('bulk submission against a local D1', () => {
   it('stages 1,100 matching folders in 3 POSTs, merged into one batch', async () => {
-    const { db, raw } = await sqliteD1('cw')
+    const { db, raw } = await sqliteD1()
     raw.exec(`INSERT INTO index_schema (date, variant, version, schema_json) VALUES ('2026-10-09', 'path', 2, '[]')`)
     const env = { ...base, DB: db }
     const prefixes = Array.from({ length: 1100 }, (_, i) => `gs://${B}/d${String(i).padStart(4, '0')}/`)
@@ -44,8 +44,8 @@ describe('bulk submission against a local D1', () => {
   })
 
   it('assigns 1,100 folder prefixes in 3 POSTs (the API takes ≤ 500), one ledger row each', async () => {
-    const { db, raw } = await sqliteD1('cw')
-    raw.exec(GCS_LEDGER)
+    const { db, raw } = await sqliteD1()
+    withLedger(raw)
     const env = { ...base, DB: db }
     const prefixes = Array.from({ length: 1100 }, (_, i) => `gs://${B}/d${String(i).padStart(4, '0')}/`)
     const statuses: number[] = []
@@ -65,9 +65,10 @@ describe('bulk submission against a local D1', () => {
 describe('a click on the matches → confirm → batches → accepted, against a local D1', () => {
   /** A controller sending through the routes; every state it passes through, as a line. */
   async function harness(items: CoverItem[], ledger: boolean) {
-    const { db, raw } = await sqliteD1('cw')
+    const { db, raw } = await sqliteD1()
     raw.exec(`INSERT INTO index_schema (date, variant, version, schema_json) VALUES ('2026-10-09', 'path', 2, '[]')`)
-    if (ledger) raw.exec(GCS_LEDGER)
+    if (ledger) withLedger(raw)
+    else withoutLedger(raw)
     const env = { ...base, DB: db }
     const sent: string[] = []
     const ok = async (r: Response) => { const j = await r.json(); if (!r.ok) throw new HttpError(JSON.stringify(j), r.status); return j }

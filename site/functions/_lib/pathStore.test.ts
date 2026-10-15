@@ -3,7 +3,7 @@ import type { Env } from './auth'
 import { serverTiming } from './edgeCache'
 import { blobKey, chunkSpan, columnsFor, footerKey, groupMatchesSize, indexKey, type IndexHandle, lensSorted, openIndex, pathGens, planRects, planSizeRects, readAsks, readRects, readSizeRects, type Rect, reviveRowGroup, type Row, rowColumns, sizeVariant, withTrace } from './index'
 import { storeEnv } from './stores'
-import { LEDGER_KIND, LINEAGES, sqliteD1 } from './testD1'
+import { sqliteD1, withLedger, withoutLedger } from './testD1'
 import { type D1Variant, fixture, fixtureSize, FILES, GETS, readJson, seedGeneration } from './testStore'
 import { parseQuery } from './scope'
 import { buildDiff, buildView, type DiffRow, lensSort, readRootAgg, SMALL_SUBTREE_ROWS, type ViewNode } from './view'
@@ -55,7 +55,7 @@ let meta: Env
 beforeAll(async () => {
   // `openBlob` caches the manifest in the edge cache: a no-op one here.
   ;(globalThis as unknown as { caches: unknown }).caches = { default: { match: async () => undefined, put: async () => {} } }
-  const { db, raw } = await sqliteD1('cw')
+  const { db, raw } = await sqliteD1()
   const v1 = await readJson<Record<string, D1Variant>>('path-index-zstd.d1.json')
   const v2 = await readJson<Record<string, D1Variant>>('v2/d1.json')
   seedGeneration(raw, { date: V1, gen: 'g1', dir: `listing/${V1}/index/g1`, variants: v1, files: { path: { parquet: 'path-index-zstd.parquet', groups: 'path-index-zstd.groups.json' } } })
@@ -201,7 +201,7 @@ describe('reads', () => {
 
   it('a group is one range read of its projected columns, and neighbouring groups one merged read', async () => {
     // A generation of its own: nothing decoded yet in this isolate.
-    const { db, raw } = await sqliteD1('cw')
+    const { db, raw } = await sqliteD1()
     const v2 = await readJson<Record<string, D1Variant>>('v2/d1.json')
     const dir = 'cw-l2/io2/index/g'
     seedGeneration(raw, { date: 'io2', gen: 'g', dir, variants: v2, files: v2Files })
@@ -220,7 +220,7 @@ describe('reads', () => {
   })
 
   it('a stopped read fetches and decodes nothing more (a filter view past its time budget)', async () => {
-    const { db, raw } = await sqliteD1('cw')
+    const { db, raw } = await sqliteD1()
     const v2 = await readJson<Record<string, D1Variant>>('v2/d1.json')
     const dir = 'cw-l2/io3/index/g'
     seedGeneration(raw, { date: 'io3', gen: 'g', dir, variants: v2, files: v2Files })
@@ -304,7 +304,7 @@ describe('readAsks: the group budget, before the span queries', () => {
 describe('the cold footer tier (`.groups.parquet`)', () => {
   it('reads its footer once, then decodes only the footer groups a span predicate can match', async () => {
     // A generation of its own, so no earlier test warmed its footer groups in the isolate cache.
-    const { db, raw } = await sqliteD1('cw')
+    const { db, raw } = await sqliteD1()
     const v2 = await readJson<Record<string, D1Variant>>('v2/d1.json')
     const dir = 'cw-l2/io/index/g7'
     seedGeneration(raw, { date: 'io', gen: 'g7', dir, variants: v2, files: v2PqFiles, retired: ['path', 'bysize'] })
@@ -386,8 +386,8 @@ describe('buildView on a store generation', () => {
     expect(v.tree).toEqual(want.tree)
   })
 
-  it.each(LINEAGES)('a lens on a store generation reads the store’s own sorts, filtered per row — not a missing or stale v1 `user` sort (%s)', async lineage => {
-    const { db, raw } = await sqliteD1(lineage)
+  it('a lens on a store generation reads the store’s own sorts, filtered per row — not a missing or stale v1 `user` sort', async () => {
+    const { db, raw } = await sqliteD1()
     const v1 = await readJson<Record<string, D1Variant>>('path-index-zstd.d1.json')
     const v2Lens = await readJson<Record<string, D1Variant>>('v2-lens/d1.json')
     seedGeneration(raw, { date: V2_LENS, gen: 'g0', dir: `listing/${V2_LENS}/index/g0`, variants: { user: v1.path }, files: { user: { parquet: 'path-index-zstd.parquet', groups: 'path-index-zstd.groups.json' } } })
@@ -422,10 +422,12 @@ describe('buildView on a store generation', () => {
 
   it('owner pools follow the live ledger: bytes assigned since the scan leave the unowned pool and join the owned one', async () => {
     const v2Lens = await readJson<Record<string, D1Variant>>('v2-lens/d1.json')
-    const envWith = async (ledger: string): Promise<Env> => {
-      const { db, raw } = await sqliteD1('cw')
+    /** `ledger` null: no ledger tables (cw's D1); else the ledger, with `ledger` (SQL) in it. */
+    const envWith = async (ledger: string | null): Promise<Env> => {
+      const { db, raw } = await sqliteD1()
       seedGeneration(raw, { date: V2_LENS, gen: 'g5', dir: `cw-l2/${V2_LENS}/index/g5`, variants: v2Lens, files: lensFiles(false) })
-      raw.exec(ledger)
+      if (ledger === null) withoutLedger(raw)
+      else { withLedger(raw); raw.exec(ledger) }
       return { DB: db, ROOT_LABEL: 'root', BASE_SCOPE: 'gcs', GCS_HMAC_KEY_ID: 'k', GCS_HMAC_SECRET: 's' } as Env
     }
     // `small/` is unowned in the scan (the fixture labels only `nest/` and `flat/`, and leaves their ancestors unsplit).
@@ -442,17 +444,13 @@ describe('buildView on a store generation', () => {
       }
     }
     // No ledger tables (cw's D1): the scan's attribution.
-    expect(await pools(await envWith(''))).toEqual({ unowned: [6000, 3], kids: [['s2', 3000], ['s1', 2000], ['s0', 1000]], agg: [[6000, 3], [0, 0]] })
+    expect(await pools(await envWith(null))).toEqual({ unowned: [6000, 3], kids: [['s2', 3000], ['s1', 2000], ['s0', 1000]], agg: [[6000, 3], [0, 0]] })
     // A ledger assigning `small/s2` (3000 B, unowned in the scan) to carol.
     const assigned = [{ prefix: 'gs://bk/small/s2', owner: 'carol', ts: 1, action_id: 1, bytes: 3000, objects: 1, us: {} }]
     const env = await envWith(`
-      CREATE TABLE actions (id INTEGER PRIMARY KEY, actor TEXT NOT NULL, ts INTEGER NOT NULL, scan TEXT NOT NULL, pattern TEXT NOT NULL, set_owner INTEGER NOT NULL DEFAULT 0, owner TEXT);
-      CREATE TABLE owner_prefixes (action_id INTEGER NOT NULL REFERENCES actions (id), prefix TEXT NOT NULL, owner TEXT, ts INTEGER NOT NULL, tombstoned TEXT, PRIMARY KEY (prefix, action_id));
-      ${LEDGER_KIND}
-      CREATE TABLE owner_totals (scan TEXT NOT NULL, head INTEGER NOT NULL, body TEXT NOT NULL, claims TEXT NOT NULL, computed_ts INTEGER, ms INTEGER, PRIMARY KEY (scan, head));
       INSERT INTO actions (id, actor, ts, scan, pattern, set_owner, owner) VALUES (1, 'ann', 1, '${V2_LENS}', 'gs://bk/small/s2', 1, 'carol');
       INSERT INTO owner_prefixes (action_id, prefix, owner, ts) VALUES (1, 'gs://bk/small/s2', 'carol', 1);
-      INSERT INTO owner_totals (scan, head, body, claims) VALUES ('${V2_LENS}', 1, '{}', '${JSON.stringify(assigned)}');
+      INSERT INTO owner_totals (scan, head, body, claims, computed_ts) VALUES ('${V2_LENS}', 1, '{}', '${JSON.stringify(assigned)}', 1);
     `)
     expect(await pools(env)).toEqual({ unowned: [3000, 2], kids: [['s1', 2000], ['s0', 1000]], agg: [[3000, 2], [3000, 1]] })
   })
@@ -627,8 +625,8 @@ it('fixtures are registered', () => {
 })
 
 describe('pathGens', () => {
-  it.each(LINEAGES)('folds each date’s `path` generation into the cache-key token: a re-sync is a new key (%s)', async lineage => {
-    const { db, raw } = await sqliteD1(lineage)
+  it('folds each date’s `path` generation into the cache-key token: a re-sync is a new key', async () => {
+    const { db, raw } = await sqliteD1()
     const v2 = await readJson<Record<string, D1Variant>>('v2/d1.json')
     const files = { path: { parquet: 'v2/path-index.parquet', groups: 'v2/path-index.groups.json' }, bysize: { parquet: 'v2/path-index-bysize.parquet', groups: 'v2/path-index-bysize.groups.json' } }
     seedGeneration(raw, { date: 'd1', gen: 'g1', dir: 'x/d1/g1', variants: v2, files })
@@ -640,8 +638,8 @@ describe('pathGens', () => {
     expect(await pathGens(e, ['d1', 'd2'])).not.toBe(both)
     expect(await pathGens({ ROOT_LABEL: 'root' } as Env, ['d1'])).toBe('')
   })
-  it.each(LINEAGES)('a `bysize` repoint alone is a new key too (2026-10-09: re-cut `bysize` gens served stale cached views) (%s)', async lineage => {
-    const { db, raw } = await sqliteD1(lineage)
+  it('a `bysize` repoint alone is a new key too (2026-10-09: re-cut `bysize` gens served stale cached views)', async () => {
+    const { db, raw } = await sqliteD1()
     const v2 = await readJson<Record<string, D1Variant>>('v2/d1.json')
     const files = { path: { parquet: 'v2/path-index.parquet', groups: 'v2/path-index.groups.json' }, bysize: { parquet: 'v2/path-index-bysize.parquet', groups: 'v2/path-index-bysize.groups.json' } }
     seedGeneration(raw, { date: 'd1', gen: 'g1', dir: 'x/d1/g1', variants: v2, files })
