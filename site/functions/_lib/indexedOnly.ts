@@ -19,6 +19,7 @@ import { ESCAPE_NOTE, KIND_ERROR, plain } from './querySyntax.js'
 export type FilterRejectCode =
   | 'unsupported-kind'
   | 'unsupported-slash'
+  | 'slash-tail-short'
   | 'unsupported-scope'
   | 'owner-too-common'
   | 'scan-not-indexed'
@@ -35,12 +36,13 @@ export const ONLY_PLAIN = 'Only text search (substrings of file or folder names,
 export const REJECT_MESSAGES: Record<FilterRejectCode, string> = {
   'unsupported-kind': `${KIND_ERROR}.`,
   'unsupported-slash': `${ONLY_PLAIN}; a term can’t contain “/” (it matches within one name).`,
+  'slash-tail-short': 'After a term’s last “/”, type at least 2 characters of the name (e.g. “ckpt/mo”), or end it with “$” (“ckpt/m$”).',
   'unsupported-scope': 'Search isn’t available with a person or storage-class scope here; clear the scope to search.',
   'owner-too-common': 'This term is too common in this folder to split by owner here; open a folder, or clear the owner scope.',
   'scan-not-indexed': 'Search isn’t available for this scan yet.',
   'term-too-common': 'This term matches too many files to search here; try a longer one.',
   'anchor-too-short': 'An anchored term needs at least 3 characters before “$” (add the dot: “.gz$”) and 2 after “^”.',
-  'anchor-not-indexed': 'Starts-with (^) and ends-with ($) search isn’t indexed on this deployment yet; search for a plain substring instead.',
+  'anchor-not-indexed': 'Starts-with (^), ends-with ($) and “/” search isn’t indexed on this deployment yet; search for a plain substring instead.',
   'too-broad': 'These terms match too much here to combine exactly; open a folder, or make a term more specific.',
   'scan-dirs-only': 'One of these scans lists folders only (files aren’t searchable on it), so a search can’t be compared across the two; compare two scans that both list files.',
 }
@@ -73,14 +75,23 @@ export function rejectQuery(q: string | null | undefined): FilterReject | null {
  *  `^q$` is one exact key. */
 export const ANCHOR_MIN = { end: 3, start: 2, exact: 1 } as const
 
+/** A path term's tail: its text after the last `/` (the start of a match root's name; with `$`, the whole name). */
+export const pathTail = (text: string): string => text.slice(text.lastIndexOf('/') + 1)
+/** The fewest tail characters (code points) a path term needs: its tail's name-index range `/t…` lies in one shard
+ *  from two (`ANCHOR_MIN.start`; `staticAnchors.ts` reads it); `$` reads the exact key `/t`, one is enough. */
+export const PATH_TAIL_MIN = { prefix: 2, exact: 1 } as const
+/** Whether a path term's tail is long enough to read (`PATH_TAIL_MIN`). */
+export const pathTailOk = (text: string, end: boolean): boolean => [...pathTail(text)].length >= (end ? PATH_TAIL_MIN.exact : PATH_TAIL_MIN.prefix)
+
 /** Why a parsed query isn't indexed literals (`staticBool.ts` `boolPlan`'s shape); null when it is. Each term,
  *  positive or negative, is checked alike. */
 export function rejectAst(ast: QueryAst): FilterReject | null {
   const all = [...ast.alts.flat(), ...ast.neg]
   // `plain` parses neither; another syntax's AST (a test's) is refused as a slash-less literal can't be.
   if (all.some(m => m.kind !== 'sub')) throw new Error(`indexed-only: a ${all.find(m => m.kind !== 'sub')!.kind} matcher (only \`plain\` literals)`)
-  if (all.some(m => m.kind === 'sub' && m.text.includes('/'))) return reject('unsupported-slash')
   for (const m of all) {
+    // A path term (its text holds `/`): read from its tail's name-index range, which needs the tail (`staticAnchors.ts`).
+    if (m.kind === 'sub' && m.text.includes('/')) { if (!pathTailOk(m.text, !!m.end)) return reject('slash-tail-short'); continue }
     if (m.kind !== 'sub' || !(m.start || m.end)) continue
     const need = m.start && m.end ? ANCHOR_MIN.exact : m.start ? ANCHOR_MIN.start : ANCHOR_MIN.end
     if ([...m.text].length < need) return anchorTooShort(m.start && m.end ? 'exact' : m.start ? 'start' : 'end')
@@ -113,6 +124,7 @@ export const INDEXED_HELP: SyntaxHelp = {
     { form: 'a b', meaning: 'both (AND), in any names along the path', example: 'llama sft' },
     { form: 'a|b', meaning: 'either (OR; looser than AND)', example: 'qwen|llama' },
     { form: '-x', meaning: 'exclude what contains x (the whole query’s)', example: 'ckpt -tmp' },
+    { form: 'a/b', meaning: 'along the path: a name ending in a, then one starting with b', example: 'run-a/ckpt' },
     { form: '"…"', meaning: 'literal, spaces, -, |, ^ and $ included', example: '"final ckpt"' },
   ],
   notes: [

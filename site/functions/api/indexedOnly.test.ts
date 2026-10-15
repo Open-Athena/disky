@@ -94,8 +94,6 @@ describe.each(LINEAGES)('D1, %s lineage', lineage => {
 
   /** Every rejected form, its code. */
   const FORMS: [string, string, FilterRejectCode][] = [
-    ['a `/`', `q=${encodeURIComponent('data/tomat')}`, 'unsupported-slash'],
-    ['a `/` in an alternative', `q=${encodeURIComponent('tomat|data/x')}`, 'unsupported-slash'],
     ['`is:file`', `q=${encodeURIComponent('tomat is:file')}`, 'unsupported-kind'],
     ['a user lens', 'q=tomat&lens=user:alice', 'unsupported-scope'],
     ['a class scope', 'q=tomat&cl=s', 'unsupported-scope'],
@@ -108,12 +106,12 @@ describe.each(LINEAGES)('D1, %s lineage', lineage => {
         code('tomat'), code('TOMAT'), code('.'), code('ab'), code('"final ckpt"'), code(''), code('  '),
         code('tomat -bin'), code('-ttl'), code('a b'), code('a|b'), code('a b|c -d'), code('"is:file" x'),
         code('ckpt.*pt'), code('tom*t'), code('a -b*c'), code('*'), code('a?b'), code('(x)+[y]'),
-        code('/ckpt/'), code('data/tomat'), code('a|b/c'), code('is:file'), code('-is:dir x'),
+        code('/ckpt/'), code('data/tomat'), code('a|b/c'), code('a/bc$|x'), code('is:file'), code('-is:dir x'),
       ]).toEqual([
         null, null, null, null, null, null, null,
         null, null, null, null, null, null,
         null, null, null, null, null, null,
-        'unsupported-slash', 'unsupported-slash', 'unsupported-slash', 'unsupported-kind', 'unsupported-kind',
+        'slash-tail-short', null, 'slash-tail-short', null, 'unsupported-kind', 'unsupported-kind',
       ])
     })
     it('one anchored literal passes (`^q` from 2 characters, `q$` from 3, `^q$` from 1); shorter ones, globs and slashes don\'t', () => {
@@ -125,7 +123,7 @@ describe.each(LINEAGES)('D1, %s lineage', lineage => {
       ]).toEqual([
         null, null, null, null, null, null, null, null,
         null, null, null,
-        'anchor-too-short', 'anchor-too-short', null, 'unsupported-slash', 'anchor-too-short', 'anchor-too-short',
+        'anchor-too-short', 'anchor-too-short', null, 'slash-tail-short', 'anchor-too-short', 'anchor-too-short',
       ])
     })
   })
@@ -212,6 +210,30 @@ describe.each(LINEAGES)('D1, %s lineage', lineage => {
         call(diff, `from=${A}&to=${B}&path=bk/fill&o=unowned&${enc('f00')}`, envOf(true)),
         call(series, `path=bk/fill&o=unowned&${enc('f00')}`, envOf(true)),
       ])).toEqual([refusal('owner-too-common'), refusal('owner-too-common'), refusal('owner-too-common')])
+    })
+  })
+
+  describe('path terms (`a/b`): read from the name index (`staticAnchors.ts`)', () => {
+    const enc = (t: string) => `q=${encodeURIComponent(t)}`
+    it('this fixture has none: `anchor-not-indexed` on every route, alone or in a compound; a tail too short is `slash-tail-short`', async () => {
+      const got = []
+      for (const t of ['data/tomat', 'tomat|data/raw', 'tomat -data/raw', '/tomat/', 'data/t']) {
+        got.push(await Promise.all([
+          call(subtree, `date=${A}&path=bk&${enc(t)}`, envOf(true)),
+          call(diff, `from=${A}&to=${B}&path=bk&${enc(t)}`, envOf(true)),
+          call(series, `path=bk&${enc(t)}`, envOf(true)),
+        ]))
+      }
+      expect(got).toEqual([
+        ...Array(3).fill([refusal('anchor-not-indexed'), refusal('anchor-not-indexed'), refusal('anchor-not-indexed')]),
+        ...Array(2).fill([refusal('slash-tail-short'), refusal('slash-tail-short'), refusal('slash-tail-short')]),
+      ])
+    })
+    it('says so in words', () => {
+      expect([refusal('slash-tail-short'), refusal('anchor-not-indexed')]).toEqual([
+        [400, { error: 'After a term’s last “/”, type at least 2 characters of the name (e.g. “ckpt/mo”), or end it with “$” (“ckpt/m$”).', code: 'slash-tail-short' }],
+        [400, { error: 'Starts-with (^), ends-with ($) and “/” search isn’t indexed on this deployment yet; search for a plain substring instead.', code: 'anchor-not-indexed' }],
+      ])
     })
   })
 
@@ -424,7 +446,7 @@ describe.each(LINEAGES)('D1, %s lineage', lineage => {
     }
     const q = (term: string) => `q=${encodeURIComponent(term)}`
     it('says so in words', () => {
-      expect(refusal('anchor-not-indexed')).toEqual([400, { error: 'Starts-with (^) and ends-with ($) search isn’t indexed on this deployment yet; search for a plain substring instead.', code: 'anchor-not-indexed' }])
+      expect(refusal('anchor-not-indexed')).toEqual([400, { error: 'Starts-with (^), ends-with ($) and “/” search isn’t indexed on this deployment yet; search for a plain substring instead.', code: 'anchor-not-indexed' }])
     })
     it.each([[false], [true]])('`^q`, `^q$` and a heavy `q$` are `anchor-not-indexed` on subtree, diff and series (flag %s), never the walk', async flag => {
       const env = envOf(flag, anchorless(0))
