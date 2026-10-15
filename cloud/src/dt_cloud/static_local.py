@@ -76,20 +76,21 @@ def rss_peak_gb() -> float:
 class DiskPeak:
     """Peak bytes used on the work dir's filesystem above its level at start, sampled every `every_s` on a daemon
     thread (DuckDB's spill and the stages' intermediates land there between samples, so a stage's peak is a lower
-    bound to within one interval). `take()` returns the peak since the previous `take()` (one stage) and resets it.
+    bound to within one interval). `take()` returns the peak since the previous `take()` (one stage) and resets it;
+    `take_step()` the same within a stage (since the previous `take_step()` or `take()`), leaving the stage's peak.
     The filesystem is the job's own scratch, so other writers' bytes count too; on a shared disk this over-states."""
 
     def __init__(self, path: Path, every_s: float = 2.0):
         self.path, self.every_s = path, every_s
         self.base = shutil.disk_usage(path).used
-        self.peak = self.total = 0
+        self.peak = self.total = self.step = 0
         self.stop = threading.Event()
         self.thread = threading.Thread(target=self.run, daemon=True)
         self.thread.start()
 
     def sample(self) -> None:
         used = max(0, shutil.disk_usage(self.path).used - self.base)
-        self.peak, self.total = max(self.peak, used), max(self.total, used)
+        self.peak, self.total, self.step = max(self.peak, used), max(self.total, used), max(self.step, used)
 
     def run(self) -> None:
         while not self.stop.wait(self.every_s):
@@ -97,8 +98,13 @@ class DiskPeak:
 
     def take(self) -> float:
         self.sample()
-        peak, self.peak = self.peak, 0
+        peak, self.peak, self.step = self.peak, 0, 0
         return round(peak / GB, 2)
+
+    def take_step(self) -> float:
+        self.sample()
+        step, self.step = self.step, 0
+        return round(step / GB, 2)
 
     def close(self) -> float:
         self.stop.set()
@@ -199,6 +205,15 @@ def build_gen(scans: dict, mount: str, gen_dir: Path, work: Path, *, gen: str, r
         err(f"build {gen}: {stage} in {times[stage]}s (work disk peak {peaks[stage]['disk_gb']} GiB, RSS peak {peaks[stage]['rss_gb']} GiB)")
         return monotonic()
 
+    steps: dict[str, float] = {}
+
+    def step(name: str, t: float, **counts: int) -> float:
+        """A sub-step's line within a stage (`drill/<step>`): its seconds, work-disk and RSS peaks, and row counts."""
+        steps[name] = round(monotonic() - t, 1)
+        n = "".join(f", {k} {v:,}" for k, v in counts.items())
+        err(f"build {gen}: {name} in {steps[name]}s (work disk peak {disk.take_step()} GiB, RSS peak {rss_peak_gb()} GiB{n})")
+        return monotonic()
+
     tmp = work / "duckdb"
     con = sn.connect(threads, mem, tmp)
     doc = {**{k_: v for k_, v in scans.items() if k_ != "mount"}, **rule_json(rule)}
@@ -245,27 +260,34 @@ def build_gen(scans: dict, mount: str, gen_dir: Path, work: Path, *, gen: str, r
     meta = sc.catalog_meta(gen, assembled, round(monotonic() - t1, 1), members, rule)
     (cat / "meta.json").write_text(json.dumps(meta, indent=1) + "\n")
     t = done("catalog", t)
-    drill = build_base_drill(con, gen_dir, R=R, K=K, floor=floor, rule=rule)
+    drill = build_base_drill(con, gen_dir, R=R, K=K, floor=floor, rule=rule, step=step)
     done("drill", t)
     disk.close()
     return {"gen": gen, "scans": len(doc["scans"]), "ranges": k, "suffix_rows": int(sum(side.column("rows").to_pylist())),
             "shards": len(shard_names), "members": members["members"], "cells_rows": meta["cells_rows"], "drill": drill,
-            "s": round(monotonic() - t0, 1), "stages": times, "peaks": peaks}
+            "s": round(monotonic() - t0, 1), "stages": times, "steps": steps, "peaks": peaks}
 
 
-def build_base_drill(con, gen_dir: Path, *, R: int, K: int, floor: int, rule) -> dict:
+def _nop_step(name: str, t: float, **counts: int) -> float:
+    return monotonic()
+
+
+def build_base_drill(con, gen_dir: Path, *, R: int, K: int, floor: int, rule, step=_nop_step) -> dict:
     """The base generation's `drill/` (`static_drill.build_drill`: every member's roots and rollups, in the layout the runs'
     drills share) and its measurement (`roots-measure/`: per member, the directories with at least `floor` root rows, which
     a run's drill reads to decide heaviness), from the generation's `sx/`, `catalog/members.parquet` and `cintervals/`.
     Long members with equal root sets share their least member's rows (`aliases.parquet`, by root-set digest, as
-    `roots digest` → `roots alias-plan`)."""
+    `roots digest` → `roots alias-plan`). `step(name, t, **counts)` reports each sub-step (`build_gen`'s `drill/…` lines)."""
+    t = monotonic()
     sx = "[" + ", ".join(q(str(p)) for p in sorted((gen_dir / "sx").glob("*.parquet"))) + "]"
     members = str(gen_dir / "catalog" / "members.parquet")
     con.execute(f"CREATE OR REPLACE TABLE mem AS SELECT q, rows FROM read_parquet({q(members)})")
     con.execute(f"DROP TABLE IF EXISTS dg; CREATE TABLE dg ({sr.DIGEST_COLS})")
     rows = sr.sx_rows_sql(f"read_parquet({sx})")
-    if con.execute("SELECT count(*) FROM mem").fetchone()[0]:
+    n_mem = count(con, "mem")
+    if n_mem:
         sr.member_roots(con, rows, "mem", "dg", agg="digest", rule=rule)
+    t = step("drill/digest", t, members=n_mem, digest_rows=count(con, "dg"))
     con.execute("""CREATE OR REPLACE TABLE dgq AS SELECT q, sum(n)::BIGINT AS n, (sum(h1) % 18446744073709551616)::UBIGINT AS h1,
         (sum(h2) % 18446744073709551616)::UBIGINT AS h2 FROM dg GROUP BY q""")
     con.execute("CREATE OR REPLACE TABLE al AS SELECT q, min(q) OVER (PARTITION BY n, h1, h2) AS canonical FROM dgq")
@@ -274,10 +296,13 @@ def build_base_drill(con, gen_dir: Path, *, R: int, K: int, floor: int, rule) ->
         raise RuntimeError(f"{missing} members without a root-set digest")
     aliases = con.execute("SELECT q, canonical FROM al ORDER BY q").to_arrow_table()
     con.execute("CREATE OR REPLACE TABLE canon AS SELECT DISTINCT canonical AS q FROM al")
+    t = step("drill/aliases", t, members=aliases.num_rows, canonical=count(con, "canon"))
     con.execute("DROP TABLE IF EXISTS lcan; DROP TABLE IF EXISTS sall")
     sr.member_roots(con, rows, "canon", "lcan", rule=rule)
+    t = step("drill/canonical-roots", t, lcan=count(con, "lcan"))
     ci = "[" + ", ".join(q(str(p)) for p in sorted((gen_dir / "cintervals").glob("*.parquet"))) + "]"
     sr.short_roots(con, f"SELECT * FROM read_parquet({ci})", "sall", rule=rule)
+    t = step("drill/short-roots", t, sall=count(con, "sall"))
     meas = gen_dir / "roots-measure"
     for kind, table, sub in (("long", "lcan", "dirs"), ("short", "sall", "short/dirs")):
         con.execute(f"""CREATE OR REPLACE TABLE rp AS SELECT q, depth, path, count(*) AS n, count(*) FILTER (WHERE vt = {sn.OPEN}) AS n_open
@@ -290,11 +315,16 @@ def build_base_drill(con, gen_dir: Path, *, R: int, K: int, floor: int, rule) ->
         con.unregister("dirs_in")
         (meas / sub).mkdir(parents=True, exist_ok=True)
         pq.write_table(dirs, meas / sub / "s0000.parquet", compression=sn.CODEC)
+        t = step(f"drill/measure/{kind}", t, rp=count(con, "rp"), dirs=dirs.num_rows)
     meta = sd.build_drill(con, gen_dir / "drill", long_roots="lcan", short_roots="sall", aliases=aliases, R=R, K=K,
-                          meta={"floor": floor})
-    for t in ("dg", "dgq", "al", "canon", "lcan", "sall", "rp", "mem"):
-        con.execute(f"DROP TABLE IF EXISTS {t}")
+                          meta={"floor": floor}, step=step)
+    for tb in ("dg", "dgq", "al", "canon", "lcan", "sall", "rp", "mem"):
+        con.execute(f"DROP TABLE IF EXISTS {tb}")
     return {"members": aliases.num_rows, "canonical": len(set(aliases.column("canonical").to_pylist())), **{k: meta[k] for k in ("R", "K")}}
+
+
+def count(con, table: str) -> int:
+    return con.execute(f"SELECT count(*) FROM {table}").fetchone()[0]
 
 
 # ── add: scans appended as runs ────────────────────────────────────────────
