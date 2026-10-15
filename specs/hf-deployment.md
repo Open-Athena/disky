@@ -1,6 +1,6 @@
 # hf.oa.dev: the Hugging Face deployment
 
-Status: **built, not applied** (2026-10-14). Everything below is commits on the `hf` branch; no cloud resource exists yet. The main session runs the apply checklist, in order.
+Status: **applying** (2026-10-15, the `wt/hf` session). Done: steps 1–5, 6 except the Pages secrets and the OAuth client, 7, and the dev stack's CF side; the first scan (step 9) is running. Waiting: the Pages secrets (`hf-secrets -P -d`, needs `RESEND_API_KEY` from `$oa/.envrc`) and the OAuth client's Create, both Ryan's (Claude Code's safety check refuses them), then 8 and 10.
 
 ## What it is
 
@@ -14,7 +14,7 @@ A new OA deployment, modeled on cw-s3 (GCP Batch job → R2 + D1 → Cloudflare 
 | cron | `hf-usage-snapshot`, daily 08:00 UTC, Batch on one `e2-standard-4`, on demand |
 | secrets | `hf-usage-hf-token`, `hf-usage-cf-token`, `hf-usage-cf-account-id`, `hf-usage-r2-endpoint`, `hf-usage-r2-access-key-id`, `hf-usage-r2-secret-access-key`, `hf-usage-slack-bot-token` |
 | Pulumi stacks | `hf` in `infra/gcp` (project `gcs-usage-gcp`) and `infra/cf` (project `gcs-usage-cf`), backend `gs://oa-pulumi` |
-| Pages project / domain | `oa-hf-usage` / `hf.oa.dev` (OA Cloudflare account, zone `oa.dev`) |
+| Pages project / domains | `oa-hf-usage` / `hf.oa.dev`, dev stack `dev.hf.oa.dev` (branch alias `dev`; OA Cloudflare account, zone `oa.dev`) |
 | D1 / KV / R2 | `oa-hf-usage-db` (cw lineage) / `oa-hf-usage-cache` / `oa-hf-usage-index` |
 | cost labels | `app=disky,deployment=hf` (`$DISKY_LABELS`) |
 
@@ -45,7 +45,7 @@ Decisions, and where they differ from what was asked:
 
 The org's billing page (read 2026-10-14) shows public storage 15.7 TB of 253 TB (including a 245 TB contract add-on), private 0.02 TB of 5.1 TB (including a 5 TB add-on), and egress 5.12 TB of 30 TB this month. The Hub has no API for these, so the allowances are declared values in `site/src/stores/hf.tsx` (`HF_ALLOWANCES`, with the source in its comment) and shown in the About panel. Bars or headroom on the map are a follow-up.
 
-## Apply checklist (main session)
+## Apply checklist
 
 Run from the `hf` worktree (e.g. `wt/hf`). Its `.envrc` (untracked) needs `source_up` plus:
 
@@ -92,11 +92,14 @@ export UV_PROJECT_ENVIRONMENT=$PWD/infra/.venv   # for pulumi; never the repo's 
      | gcloud secrets versions add hf-usage-slack-bot-token --project oa-internal-450019 --data-file=-
    # (or another bot in #gcs-usage-alerts; with none, drop SLACK_BOT_TOKEN from job/hf-batch-submit.sh and the stack:
    #  Batch refuses to start a job whose secret has no version)
-   infra/cf/hf-secrets -P                          # Pages: STORE_ENDPOINT/ACCESS_KEY_ID/SECRET_ACCESS_KEY, SESSION_SECRET, RESEND_API_KEY, MAIL_FROM
+   # Pages, production (-P) and the dev stack's preview env (-d): STORE_ENDPOINT/ACCESS_KEY_ID/SECRET_ACCESS_KEY,
+   # SESSION_SECRET, RESEND_API_KEY, MAIL_FROM. RESEND_API_KEY is in $oa/.envrc; carry it under another name, since
+   # the inner `direnv exec` unloads what the outer one loaded:
+   direnv exec ~/c/oa bash -c 'export HF_RESEND=$RESEND_API_KEY; cd ~/c/disky/wt/hf && direnv exec . bash -c "RESEND_API_KEY=\$HF_RESEND infra/cf/hf-secrets -P -d"'
    ```
-   Then the Google OAuth client for `hf.oa.dev` (redirect `https://hf.oa.dev/auth/google/callback`), as cw-s3's: the auth repo's `scripts/provision-oauth-client.mjs --from-json … --pages-project oa-hf-usage --run`.
+   Then the Google OAuth client `hf.oa.dev (disky)` in project `oa-auth-509611` (as cw-s3's), origins `https://hf.oa.dev`, `http://localhost:3263`, `https://dev.hf.oa.dev`, `https://dev.oa-hf-usage.pages.dev`, each with its `/auth/google/callback`; after Create + Download JSON, the auth repo's `scripts/provision-oauth-client.mjs --project oa-auth-509611 --app-origin … --redirect-uri … --pages-project oa-hf-usage --from-json … --run` (production), and the same through a `--wrangler` wrapper appending `--env preview` for the dev stack (cw-s3's recipe, `specs/done/oidc-cutover-cw.md`).
 7. **Image.** `job/build.sh` (Cloud Build into `hf-usage`; the build account needs Artifact Registry write on it, as cw-s3's builds into `cw-s3-usage`).
-8. **Site.** `cd site && ./deploy -P` (first deploy, no push). hf.oa.dev should show the sign-in wall; after sign-in, an empty store until the first scan.
+8. **Site.** `cd site && ./deploy -P` (first deploy, no push), and `./deploy --dev` (dev.hf.oa.dev). Both should show the sign-in wall; after sign-in, an empty store until the first scan.
 9. **First manual run.**
    ```bash
    job/hf-batch-submit.sh                         # prints the job id (DISKY_LABELS from the .envrc)
@@ -109,14 +112,22 @@ export UV_PROJECT_ENVIRONMENT=$PWD/infra/.venv   # for pulumi; never the repo's 
     - The layer-2 root (`path = '.'`): `sum_storage_class_id_1` ≈ 15.7 TB, `sum_storage_class_id_5` ≈ 0.02 TB, `size - sum_storage_class_id_6` = `hf.expected`.
     - D1: `SELECT date, variant, gen FROM index_schema` → `path`, `bysize` and the `age-pyramid-*` variants for `<date>`; `SELECT scan, status, failed_phase, machine, cost_usd FROM scan_runs` → one `succeeded` run.
     - Site: the map renders the org (`buckets/`, `models/`, `datasets/`, `spaces/`); `/scans` shows the run; a `?f=` name search answers; `?ps=iv` renders the same view (the interval store); `dt-cloud healthcheck -u https://hf.oa.dev -s hf/` with a personal agent token (`/api/token`).
+    - The interval store matches the per-scan reads (`dt-cloud interval-store verify`, and `?ps=iv` vs the default on subtrees, `?f=` and a diff once there are two scans); then `PATH_STORE = "intervals"` in both `[vars]` and `[env.preview.vars]`, and redeploy.
     - `gcloud scheduler jobs resume hf-usage-snapshot --project oa-internal-450019 --location us-central1`.
 11. **Push** `hf` to `o` (with `site/deploy`'s pointer `hf-prod`), once the above is good.
 
-## Follow-ups
+## Gaps against the deployment baseline
+
+`AGENTS.md` "Deployments: parity by default" is the baseline; these are hf's missing items, open work in this order:
+- `PATH_STORE = "intervals"`: after the first scans verify (step 10).
+- Cache warm-up and the serving probe after each scan (cw-s3's `warm-cache` / `probe -c` stages): need the site live and a read-only grant for the job (cw-s3's `cw-s3-job-grant` recipe).
+- The Slack digest thread (cw-s3's `dt-cloud digest -T …`): needs a channel choice.
+- The meta store ("data behind this site"): waits on the shared self-scan + index step the root session is building on `cloud`.
+- Not applicable: staging / executor / sweeps (the site deletes nothing on the Hub), lifecycle pull (no lifecycle rules on the Hub).
+
+## Hub-specific follow-ups
 
 - UI: allowance bars / headroom (public and private storage vs `HF_ALLOWANCES`), an egress note; links from a file to its Hub page (`objectBases` can't express `models/<repo>/…` → `huggingface.co/<org>/<repo>/blob/main/…`).
-- `PATH_STORE = "intervals"` once `?ps=iv` parity holds over a few scans.
 - Measure the first runs (`/scans` cost and phases) and resize the machine; consider `-D` (repo-level dates, 1000 entries per tree page) if the listing outgrows its window.
 - Old LFS versions per object (`bulk-list -L`) need a write token; today they're one `@history/@unlisted` row per repo.
-- The digest thread, cache warm-up and serving probe (cw-s3's stages 4b'/4c'/5), a `dev.hf.oa.dev` preview stack.
 - Least privilege as the `r2` branch does it: a scheduler account with only `batch.jobs.create`, so the job account needs no `batch.jobsEditor`.
