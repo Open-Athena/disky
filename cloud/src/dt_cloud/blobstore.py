@@ -193,6 +193,17 @@ class Store:
         with ThreadPoolExecutor(workers) as ex:
             return sum(ex.map(one, list(keys)))
 
+    def size(self, key: str) -> int:
+        return (Path(self.root) / key).stat().st_size if not self.url else int(self.fs.size(self._p(key)))
+
+    def read_range(self, key: str, lo: int, hi: int) -> bytes:
+        """Bytes `[lo, hi)` of `key`: one ranged read."""
+        if self.url:
+            return self.fs.cat_file(self._p(key), start=lo, end=hi)
+        with open(Path(self.root) / key, "rb") as f:
+            f.seek(lo)
+            return f.read(hi - lo)
+
     def get(self, key: str, dst: Path) -> None:
         dst.parent.mkdir(parents=True, exist_ok=True)
         if self.url:

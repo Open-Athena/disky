@@ -279,3 +279,16 @@ def test_disk_peak_per_stage(monkeypatch, tmp_path):
     disk.sample()
     assert disk.close() == 3.0
     assert disk.peak == 2 * sl.GB
+
+
+def test_query_reads_a_non_gcs_store(built):
+    """`static-names query -b <dir>` (as `r2://…`): the base generation's answers through `blobstore.Store`, each the
+    brute force's over the scans."""
+    ids = scan_ids(built["scans"])
+    oracle = _oracle(built["merged"])
+    terms = [t for t in TERMS if len(t) >= 3]
+    res = CliRunner().invoke(sn.cli, ["query", "-b", str(built["tmp"] / "store"), "-g", "g", *(x for d in ids for x in ("-d", d)), *terms],
+                             catch_exceptions=False)
+    assert res.exit_code == 0, res.output
+    got = [json.loads(ln) for ln in res.stdout.splitlines()]
+    assert [o["answers"] for o in got] == [{d: _brute_answer(oracle, t, d) for d in ids} for t in terms]
