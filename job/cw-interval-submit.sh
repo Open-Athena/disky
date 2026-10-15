@@ -28,17 +28,23 @@ MACHINE=${MACHINE:-n2-highmem-16}
 MEM=${MEM:-100GB}
 DISK_GB=${DISK_GB:-1000}
 JOB_ID=${JOB_ID:-cw-iv-$CMD-$(date -u +%Y%m%d-%H%M%S)}
+STORE=${STORE:-}
+SEED_GEN=${SEED_GEN:-}
 
-export PROJECT SA IMAGE R2_BUCKET GEN MACHINE MEM DISK_GB CMD
+export PROJECT SA IMAGE R2_BUCKET GEN MACHINE MEM DISK_GB CMD STORE SEED_GEN
 body=$(python3 - "$@" <<'EOF'
 import json, os, shlex, sys
 extra = " ".join(shlex.quote(a) for a in sys.argv[1:])
 CMD, GEN = os.environ["CMD"], os.environ["GEN"]
+STORE, SEED = os.environ["STORE"], os.environ["SEED_GEN"]
+out = shlex.quote(STORE) if STORE else '"$R2_ARCHIVE"'
 if CMD == "verify":  # every case's lines + summary land in /stage/verify (and the generation's verify/ on R2); the summary is printed
     run = f'dt-cloud interval-store verify -b "$R2_ARCHIVE" -g {GEN} -i 0 -n 1 -T /stage/tmp -o /stage {extra}\n'
 else:
     run = (f"dt-cloud interval-store {CMD} -g {GEN} -L 'cw-l2/{{id}}/index/{{gen}}/path-index.parquet'"
-           f' -s "$R2_ARCHIVE" -o "$R2_ARCHIVE" -w /stage/iv -M {os.environ["MEM"]} -p "$(nproc)" {extra}\n')
+           f' -s "$R2_ARCHIVE" -o {out} -w /stage/iv -M {os.environ["MEM"]} -p "$(nproc)" {extra}\n')
+if SEED:  # a store at the base's scans, which `add` re-appends from: the generation's base files, server-side
+    run = f'python job/iv-seed.py "$R2_ARCHIVE" {out} {shlex.quote(SEED)}\n' + run
 cmd = (
     "set -euo pipefail\n"
     ". job/r2-profile.sh\n"
