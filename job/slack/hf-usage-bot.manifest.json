@@ -1,0 +1,41 @@
+{
+  "_metadata": {
+    "major_version": 1,
+    "minor_version": 1
+  },
+  "display_information": {
+    "name": "HF Usage Bot",
+    "description": "Storage-usage digest for the open-athena Hugging Face org \u2014 hf.oa.dev",
+    "background_color": "#0d1117"
+  },
+  "features": {
+    "bot_user": {
+      "display_name": "HF Usage Bot",
+      "always_online": false
+    }
+  },
+  "oauth_config": {
+    "scopes": {
+      "bot": [
+        "chat:write",
+        "chat:write.customize",
+        "chat:write.public",
+        "channels:history",
+        "groups:history",
+        "channels:read",
+        "groups:read",
+        "users:read",
+        "users:read.email",
+        "emoji:read"
+      ]
+    }
+  },
+  "settings": {
+    "org_deploy_enabled": false,
+    "socket_mode_enabled": false,
+    "token_rotation_enabled": false,
+    "interactivity": {
+      "is_enabled": false
+    }
+  }
+}
