@@ -10,6 +10,6 @@ runtime:
   name: python
   options:
     toolchain: uv
-config:
-  gcs-usage-cf:zoneId:
-    description: "Cloudflare zone id for oa.dev (holds the hf.oa.dev CNAME); unset here: $CF_ZONE_ID (hf_stack.py)"
+# The account and zone ids are not declared here: a declared key without a value fails `pulumi preview` before the
+# program runs, and this public repo keeps them out of `Pulumi.hf.yaml`; `hf_stack.py` fills them from
+# `$CLOUDFLARE_ACCOUNT_ID` / `$CF_ZONE_ID` (the worktree's `.envrc`).
