@@ -79,6 +79,10 @@ export const reqOf = (env: object): Req | undefined => (env as { [REQ]?: Req })[
 /** `env` carrying a request (`signal`: its client disconnect); one already carrying one is returned as is. */
 export const withReq = <E extends object>(env: E, signal?: AbortSignal | null): E => (reqOf(env) ? env : { ...env, [REQ]: new Req(signal) })
 
+/** `env`'s request's join of kind `name` (what a memo passes `shared` / `inFlight`: `env`'s request owns what it
+ *  starts and joins what another holds). */
+export const joinOf = (env: object, name: string): Join => ({ name, req: reqOf(env) })
+
 /** Trace `env`'s request's joins to `trace` (`join-<memo>` ms, `join-evict` per conviction). */
 export const traceJoins = (env: object, trace: Trace): void => {
   const r = reqOf(env)

@@ -37,7 +37,7 @@ import { type SearchFound, type SearchLimits, searchRoots } from './search.js'
 import { planNegative, planPositive } from './searchQuery.js'
 import { hasLedger } from './ledger.js'
 import { ownerAssignments } from './ownerTotals.js'
-import { shared } from './shared.js'
+import { joinOf, shared } from './shared.js'
 import { storeKey } from './stores.js'
 import { extrasFor } from './extras.js'
 import { loadRegistry } from './identity.js'
@@ -589,7 +589,7 @@ async function assignerMap(env: Env): Promise<Map<string, string>> {
     const ue = await env.DB!.prepare('SELECT email, user FROM user_emails').all<{ email: string; user: string }>()
     for (const r of ue.results) m.set(r.email.toLowerCase(), r.user)
     return m
-  }, 10_000)
+  }, 10_000, joinOf(env, 'assigners'))
 }
 async function ownerLensFor(env: Env, date: string, lens: Lens, by?: string): Promise<FoldedLens | null> {
   let assignments = await ownerAssignments(env, date)
