@@ -8,8 +8,10 @@
 # the generation is the site's `STATIC_GEN`, built once by `static-names build`
 # when it doesn't exist yet) → append it to the interval store (`dt-cloud
 # interval-store add`: every scan's tree as versioned intervals, the Map's path
-# store under `PATH_STORE`; the generation is the site's `INTERVAL_STORE_GEN`,
-# built once by `interval-store build`). Idempotent per date: a date already scanned is
+# store under `PATH_STORE`; the generation is the store's current one,
+# `interval-store/CURRENT.json`, built once by `interval-store build` and compacted
+# into a new one by `add` every 2^5 scans, the pointer the site follows moved with
+# it). Idempotent per date: a date already scanned is
 # not scanned again (the scan id is the date; the indexes append by it), and a
 # date the indexes already hold is not re-appended. Run it by
 # hand anytime via "Run workflow" (workflow_dispatch).
@@ -136,17 +138,28 @@ jobs:
           DISK_TREE_R2_ENDPOINT_URL: ${{ vars.R2_ENDPOINT_URL }}
         run: |
           set -euo pipefail
-          # One source of truth: the generation the site reads (`site/wrangler.r2.toml`).
-          gen=$(sed -nE 's/^INTERVAL_STORE_GEN *= *"([^"]+)".*/\1/p' site/wrangler.r2.toml)
-          if [ -z "$gen" ]; then echo "no INTERVAL_STORE_GEN in site/wrangler.r2.toml: no interval store"; exit 0; fi
+          # The site serves the interval store under PATH_STORE (`site/wrangler.r2.toml`); without it there is none.
+          if ! grep -qE '^PATH_STORE *= *"' site/wrangler.r2.toml; then echo "no PATH_STORE in site/wrangler.r2.toml: no interval store"; exit 0; fi
+          # A pinned generation (INTERVAL_STORE_GEN there) is appended to without compacting (a compacted generation
+          # leaves R2 after the grace, and the pinned site would lose it); unpinned, the store's current one, compacted
+          # every 2^5 scans (`add -C`, default 5) with CURRENT.json, which the site follows, moved to the new generation.
+          pin=$(sed -nE 's/^INTERVAL_STORE_GEN *= *"([^"]+)".*/\1/p' site/wrangler.r2.toml)
           L='listing/{id}/index/{gen}/path-index.parquet'
-          cmd=add
-          if ! aws s3 ls "s3://$BUCKET/interval-store/$gen/scans.json" --endpoint-url "$RAC_ENDPOINT" > /dev/null; then
-            cmd=build  # the first run: the base generation over every scan so far
+          cd cloud
+          common=(-L "$L" -s "r2://$BUCKET" -o "r2://$BUCKET" -w "$RUNNER_TEMP/interval-store" -p 4 -M 10GB)
+          # CURRENT.json's generation, else the store's only one; empty when it has none (several and no pointer: fails).
+          gen=$(uv run dt-cloud interval-store current -o "r2://$BUCKET")
+          if [ -n "$pin" ]; then
+            echo "interval-store add -g $pin (pinned: no compaction)"
+            uv run dt-cloud interval-store add -g "$pin" -C none "${common[@]}"
+          elif [ -n "$gen" ]; then
+            echo "interval-store add (current: $gen)"
+            uv run dt-cloud interval-store add "${common[@]}"
+          else
+            gen="${{ steps.d.outputs.date }}"
+            echo "interval-store build -g $gen"  # the first run: the base generation over every scan so far
+            uv run dt-cloud interval-store build -g "$gen" "${common[@]}"
           fi
-          echo "interval-store $cmd -g $gen"
-          cd cloud && uv run dt-cloud interval-store "$cmd" -g "$gen" -L "$L" -s "r2://$BUCKET" -o "r2://$BUCKET" \
-            -w "$RUNNER_TEMP/interval-store" -p 4 -M 10GB
       - name: Smoke — the new generation serves
         run: |
           set -euo pipefail
