@@ -287,12 +287,14 @@ def plan(image: str) -> None:
 
 @main.command()
 @option("-g", "--generation", help="Archived generation to backfill (requires --scan)")
+@option("-i", "--index-only", is_flag=True, help="Build or catch up both stores' static name and interval indexes; no scan")
 @option("-m", "--meta-only", is_flag=True, help="Scan only this deployment's derived storage")
 @option("-n", "--name", required=True, help="New Batch job name, starting oa-r2-scan-")
 @option("-s", "--scan", help="Backfill age indexes for this existing scan (requires --generation)")
 @argument("image")
 def submit(
     generation: str | None,
+    index_only: bool,
     meta_only: bool,
     name: str,
     scan: str | None,
@@ -306,6 +308,13 @@ def submit(
     spec = scratch / f"{name}.json"
     planned = job_spec(image, config)
     planned["taskGroups"][0]["taskSpec"]["environment"]["variables"]["OA_R2_JOB_NAME"] = name
+    if index_only:
+        if meta_only or scan or generation:
+            raise ClickException("Index-only is its own job mode")
+        task = planned["taskGroups"][0]["taskSpec"]
+        task["runnables"][0]["container"].update(entrypoint="python", commands=["job/r2-scan", "index"])
+        for secret in ("SOURCE_ACCESS_KEY_ID", "SOURCE_SECRET_ACCESS_KEY"):
+            del task["environment"]["secretVariables"][secret]
     if meta_only:
         if scan or generation:
             raise ClickException("Meta-only and age backfill are separate job modes")
@@ -412,6 +421,17 @@ def backfill_runs(dry_run: bool, save_inputs: Path | None) -> None:
         write_all(D1Sink(profile()["database_id"]), records, now)
     print(dumps([as_json(rec) for rec in records], indent=2))
     print(f"OA R2 scan-run backfill: {len(records)} runs", file=stderr)
+
+
+@main.command(name="index")
+def index_run() -> None:
+    """Build or catch up both stores' indexes without scanning (the base generations' one-shot)."""
+    if "BATCH_TASK_INDEX" not in environ:
+        raise ClickException("Index builds run only on a remote Batch job")
+    config = profile()
+    work = Path("/stage") / datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+    for meta in (False, True):
+        index_store(config, work / ("meta" if meta else "primary"), MetaReporter(), meta)
 
 
 @main.command(name="run")
@@ -539,7 +559,37 @@ def execute_scan(
         run([*sync, "-r"], check=True)
         run([*sync, "-p"], check=True)
         data.blob(f"{'meta-scans' if meta else 'scans'}/{scan}/{generation}/_SUCCESS.json").upload_from_string(dumps(report), content_type="application/json", if_generation_match=0)
+    index_store(config, work, reporter, meta)
     print(dumps(report))
+
+
+def index_store(
+    config: dict,
+    work: Path,
+    reporter: ScanReporter | MetaReporter,
+    meta: bool,
+) -> None:
+    """The store's static name index and (primary only: the site reads a secondary store per-scan) its interval
+    store, over the published scans' `path` sorts on R2: the first run builds each base generation over every scan
+    so far, later runs append each scan after its newest. Never fatal: a failed stage warns, and the next run's
+    `add` catches up (the site reads a scan an index doesn't hold per-scan, or says it isn't searchable yet)."""
+    from dt_cloud.blobstore import Store
+
+    store = f"r2://{config['serving_bucket']}"
+    common = ["-L", f"{'meta-l2' if meta else 'listing'}/{{id}}/index/{{gen}}/path-index.parquet", "-s", store, "-o", store,
+              "-M", environ.get("DUCKDB_MEM", "12GB"), "-p", environ.get("DUCKDB_THREADS", "8")]
+    env = {**environ, "AWS_ACCESS_KEY_ID": environ["R2_ACCESS_KEY_ID"].strip(), "AWS_SECRET_ACCESS_KEY": environ["R2_SECRET_ACCESS_KEY"].strip()}
+    stages = [("static-names", config["meta_static_gen" if meta else "static_gen"], ["-x", "16,8"])]
+    if not meta:
+        stages.append(("interval-store", config["interval_gen"], []))
+    for kind, gen, build_args in stages:
+        verb = "add" if Store(store).exists(f"{kind}/{gen}/scans.json") else "build"
+        command = ["dt-cloud", kind, verb, "-g", gen, *common, "-w", str(work / kind), *(build_args if verb == "build" else [])]
+        with reporter.phase(kind):
+            print(join(command), file=stderr, flush=True)
+            done = run(command, env=env)
+            if done.returncode:
+                print(f"WARN: {kind} {verb} {gen} failed (exit {done.returncode}); a later run catches up", file=stderr, flush=True)
 
 
 if __name__ == "__main__":

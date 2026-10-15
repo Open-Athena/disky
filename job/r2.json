@@ -15,6 +15,9 @@
   "memory_mib": 28000,
   "disk_gb": 100,
   "timeout_seconds": 7200,
+  "static_gen": "2026-10-15r2",
+  "meta_static_gen": "2026-10-15meta",
+  "interval_gen": "2026-10-15r2",
   "secrets": {
     "SOURCE_ACCESS_KEY_ID": "oa-r2-source-access-key-id",
     "SOURCE_SECRET_ACCESS_KEY": "oa-r2-source-secret-access-key",
