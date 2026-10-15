@@ -2108,6 +2108,12 @@ function sumInteriors(a?: View['interiors'], b?: View['interiors']): NonNullable
   return { read: xs.reduce((n, x) => n + x.read, 0), skipped: xs.reduce((n, x) => n + x.skipped, 0), reason: [...new Set(xs.map(x => x.reason))].join(' · '), ...(late ? { late } : {}) }
 }
 
+/** Whether a side's scan lists objects (a store generation) or only directories (a v1 index). Per-scan, its handle
+ *  says; on the interval store every scan reads one store sort, so its rows say: a version from a v1 scan has no
+ *  structural counts (`n_children` / `n_desc` -1 in the store, null as a `Row`), a store generation's always do — the
+ *  same test a view's `(other)` count makes (`f`). */
+const listsObjects = (v: Read): boolean => isStore(v.idx) && (v.idx.asOf == null || v.rootAll.nd != null)
+
 /** What changed under P between two scans (specs/done/view-serving.md §2):
  * both sides are read from their index tiers at ONE absolute byte floor —
  * the larger side's pixel-budget threshold — so a directory is named on both
@@ -2196,7 +2202,7 @@ export async function buildDiff(env0: Env, o: DiffOpts): Promise<Diff> {
   // One side a v1 generation (dirs only), the other a store (objects too):
   // the objects have no counterpart to be compared with, so they fold into
   // `(other)` on the store side rather than reading as added / removed.
-  if (va && vb && isStore(va.idx) !== isStore(vb.idx)) {
+  if (va && vb && listsObjects(va) !== listsObjects(vb)) {
     for (const v of [va, vb]) for (const [p, a] of v.kept) if (a.kind === 'file') v.kept.delete(p)
   }
   const walkStart = performance.now()
