@@ -192,11 +192,18 @@ export async function memberOf(r: Resolved, path: string): Promise<Member | null
 /** Two members hold the same root: the union would double count it. */
 export class UnionOverlap extends Error {}
 
+/** A member's root rows (`readRootRows`): every top-level path at its scan, drawn or not. */
+export type RootRow = { path: string; b: number; o: number; m?: number | null; k?: 'file' | 'dir' }
+
 /** The union's root from its members' root trees (each read under the union's threshold): every member's
  *  top-level nodes, tagged with its store (`src`) and scan (`at`), largest first; the members' `(other)`s
  *  summed into one, last; the totals summed under `label`. A top-level name two members draw is a
- *  misconfigured union (`UnionOverlap`), never a sum. */
-export function unionRoot(view: UnionView, label: string, members: readonly { store: string; date: string; tree: ViewNode }[]): ViewNode {
+ *  misconfigured union (`UnionOverlap`), never a sum.
+ *
+ *  With a member's `roots` (the plain root; never a filtered one, whose roots are its matches), every root the
+ *  threshold folded into its `(other)` is listed too, out of the fold: the root's bucket table lists every
+ *  member's every root, however small against the union's total (the treemap may still dust it). */
+export function unionRoot(view: UnionView, label: string, members: readonly { store: string; date: string; tree: ViewNode; roots?: readonly RootRow[] | null }[]): ViewNode {
   const kids: ViewNode[] = []
   const other: ViewNode = { n: '(other)', k: 'dir', b: 0, o: 0, f: 0 }
   const seen = new Map<string, string>()
@@ -211,8 +218,21 @@ export function unionRoot(view: UnionView, label: string, members: readonly { st
       seen.set(c.n, m.store)
       kids.push({ ...c, src: m.store, at: m.date })
     }
+    const drawn = new Set((m.tree.c ?? []).map(c => c.n))
+    for (const r of m.roots ?? []) {
+      if (drawn.has(r.path)) continue
+      const prev = seen.get(r.path)
+      if (prev) throw new UnionOverlap(`union view '${view.key}': root '${r.path}' is in stores ${prev}, ${m.store}`)
+      seen.set(r.path, m.store)
+      kids.push({ n: r.path, k: r.k ?? 'dir', b: r.b, o: r.o, ...(r.m != null ? { d: Math.floor(r.m / 86400) } : {}), src: m.store, at: m.date })
+      other.b -= r.b; other.o -= r.o
+      if (other.f !== undefined) other.f -= 1
+    }
   }
-  kids.sort((x, y) => y.b - x.b)
+  if (other.f !== undefined && other.f <= 0) delete other.f
+  kids.sort((x, y) => y.b - x.b || (x.n < y.n ? -1 : x.n > y.n ? 1 : 0))
+  // Lifted roots leave the fold what the threshold folded beside them (nothing, at a bucket root); never below zero.
+  other.b = Math.max(0, other.b); other.o = Math.max(0, other.o)
   if (other.b > 0 || other.o > 0) kids.push(other)
   return {
     n: label, k: 'dir',
