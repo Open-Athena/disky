@@ -29,10 +29,10 @@ A new OA deployment, modeled on cw-s3 (GCP Batch job → R2 + D1 → Cloudflare 
 5. Upload to R2 (`dt_cloud.blobstore.Store`, markers last): `listing/<scan>/index/<gen>/*.parquet`, `listing/<scan>/open-athena.parquet` (layer-2), `listing/<scan>/open-athena.listing.json` (the lister's `_SUCCESS.json`: `hf.expected` = Σ bucket size + Σ repo `usedStorage`, the request count), `snapshots/hf/<scan>/`.
 6. `dt-cloud static-names add` (`build -x 16,8` when the generation doesn't exist), on the R2 store. Non-fatal (`-W`).
 7. `dt-cloud index-sync -d r2://oa-hf-usage-index/listing/<scan>/index/<gen>`: footers → D1, pointer last. Fatal: the scan isn't listed without it.
-8. `dt-cloud interval-store add` (`build` the first time), on the R2 store. Non-fatal.
+8. `dt-cloud interval-store add` (`build` the first time), on the R2 store: the generation `interval-store/CURRENT.json` names, compacted into a new one every 2^5 scans (the pointer moves; the site follows it). Non-fatal.
 9. `dt-cloud index-gc -m 2d -F r2://oa-hf-usage-index`: superseded generations' D1 rows and R2 dirs. Non-fatal.
 
-The static-names and interval-store generations, and the D1, are read from `site/wrangler.toml` (baked into the image), so the job always writes what the site reads.
+The static-names generation and the D1 are read from `site/wrangler.toml` (baked into the image), so the job always writes what the site reads; the interval store's generation is `CURRENT.json`'s for both (an `INTERVAL_STORE_GEN` pin there would make the job append without compacting).
 
 Decisions, and where they differ from what was asked:
 - **R2 only.** No GCS bucket at all, not even scratch: the VM's boot disk (100 GB pd-balanced) is the work dir.

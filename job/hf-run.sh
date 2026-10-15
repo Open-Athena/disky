@@ -75,7 +75,7 @@ export D1_DB_ID=${D1_DB_ID:-$(wvar database_id)}
 export D1_DB_NAME=${D1_DB_NAME:-$(wvar database_name)}
 export SNAPSHOTS_SUBDIR=$SUB SITE_URL=${SITE_URL:-https://hf.oa.dev}
 STATIC_GEN=${STATIC_GEN:-$(wvar STATIC_GEN)}
-IV_GEN=${INTERVAL_STORE_GEN:-$(wvar INTERVAL_STORE_GEN)}
+IV_PIN=${INTERVAL_STORE_GEN:-$(wvar INTERVAL_STORE_GEN)}   # empty: follow `interval-store/CURRENT.json`
 
 # Scan-run record + failure alerts (specs/scan-job-wrapper.md): each phase's PHASE line, the run in D1 (`scan_runs`,
 # shown at /scans) under Batch (BATCH_JOB_UID is the run id), and one alert to SLACK_ALERT_CHANNEL on a failure,
@@ -167,12 +167,16 @@ fi
 
 # 8. The interval store (every scan's tree as versioned intervals; the site reads it under `PATH_STORE`), one machine
 # on the R2 store, reading the scans' `path` sorts from it. Non-fatal: a scan it doesn't hold reads per-scan.
-if [ -n "$IV_GEN" ]; then
-  iv=(-g "$IV_GEN" -L "$LAYOUT" -s "$STORE_ROOT" -o "$STORE_ROOT" -w "$WORK/interval-store" -p "$NPROC" -M "$MEM")
-  if exists "interval-store/$IV_GEN/scans.json"; then iv=(add "${iv[@]}"); else iv=(build "${iv[@]}"); fi
-  sr phase interval-store -W -T "${INTERVAL_STORE_TIMEOUT:-60m}" -m "the scan reads per-scan until a later run appends it" \
-    -- dt-cloud interval-store "${iv[@]}"
-fi
+# A pinned generation (INTERVAL_STORE_GEN in site/wrangler.toml) is appended to without compacting: a compacted one
+# leaves R2 after the grace, and the pinned site would lose it. Unpinned (hf's default), the store's current one,
+# compacted every 2^5 scans (`add -C`, default 5) with CURRENT.json, which the site follows, moved to the new one.
+iv=(-L "$LAYOUT" -s "$STORE_ROOT" -o "$STORE_ROOT" -w "$WORK/interval-store" -p "$NPROC" -M "$MEM")
+IV_CUR=$(dt-cloud interval-store current -o "$STORE_ROOT")   # CURRENT.json's, else the only one; empty: none yet
+if [ -n "$IV_PIN" ]; then iv=(add -g "$IV_PIN" -C none "${iv[@]}")
+elif [ -n "$IV_CUR" ]; then iv=(add "${iv[@]}")
+else iv=(build -g "${DATE}hf" "${iv[@]}"); fi
+sr phase interval-store -W -T "${INTERVAL_STORE_TIMEOUT:-60m}" -m "the scan reads per-scan until a later run appends it" \
+  -- dt-cloud interval-store "${iv[@]}"
 
 # 9. Superseded generations (a same-day re-run's previous one): their D1 rows (every scan's; the store is small),
 # then their R2 dirs older than the grace.

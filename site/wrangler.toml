@@ -52,10 +52,11 @@ FILTER_STATIC = "1"
 NAME_SUMMARY_STATIC = "1"
 FILTER_STATIC_HEAVY = "1"
 STATIC_GEN = "2026-10-14hf"
-# The interval store, in INDEX_R2 under `interval-store/<INTERVAL_STORE_GEN>/`: built by the job's first run, then
-# one `add` per scan. `intervals`: the Map's path store, since the first scan's parity check (`interval-store verify`,
-# 11/11 views equal; 2026-10-15). `opt-in` would serve it only to `ps=iv` requests.
-INTERVAL_STORE_GEN = "2026-10-14hf"
+# The interval store, in INDEX_R2 under `interval-store/<gen>/`: built by the job's first run, then one `add` per scan,
+# which compacts it into a new generation every 2^5 scans and moves `interval-store/CURRENT.json` to it. No
+# INTERVAL_STORE_GEN: the site serves the generation CURRENT.json names (`ivGen`); setting one pins it (and the job then
+# appends without compacting). `intervals`: the Map's path store, since the first scan's parity check
+# (`interval-store verify`, 11/11 views equal; 2026-10-15).
 PATH_STORE = "intervals"
 
 # The static name index and the snapshot JSONs, read through a native binding (the S3 seam's keys are for the path
@@ -111,7 +112,6 @@ FILTER_STATIC = "1"
 NAME_SUMMARY_STATIC = "1"
 FILTER_STATIC_HEAVY = "1"
 STATIC_GEN = "2026-10-14hf"
-INTERVAL_STORE_GEN = "2026-10-14hf"
 PATH_STORE = "intervals"
 
 [[env.preview.r2_buckets]]
