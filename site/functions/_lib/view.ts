@@ -601,7 +601,7 @@ async function ownerLensFor(env: Env, date: string, lens: Lens, by?: string): Pr
 }
 
 /** An owner pool's ledger fold for a scan (null: no pool, or no assignments). */
-async function poolLensFor(env: Env, date: string, owner: OwnerScope | undefined): Promise<FoldedLens | null> {
+export async function poolLensFor(env: Env, date: string, owner: OwnerScope | undefined): Promise<FoldedLens | null> {
   if (!owner || !(await hasLedger(env))) return null
   return poolLens(await ownerAssignments(env, date), owner, await loadRegistry(env))
 }
@@ -926,7 +926,8 @@ async function readView(env: Env, o: ViewOpts, cov: Coverage = {}): Promise<Read
       // catalog's buckets on a scan past its stack — or a heavy literal its heavy source declined: `scan-not-indexed`,
       // never the thresholded walk, which can't see the literal's small matches and reads as "no matches".
       if (skey && (raw ? !covers(raw, [date]) : !!sfs!.source.heavyDeclined?.(skey))) throw new FilterRejected(reject('scan-not-indexed'))
-      // A heavy literal's rollups know no owners: under one, the view reads as before.
+      // A heavy literal's rollups know no owners: under one, an indexed-only deployment refuses (`owner-too-common`),
+      // any other reads as before.
       const off = shits?.rollup && owner ? 'rollup: no owners' : null
       if (off) shits = null
       // An indexed-only deployment never walks the path store for a filter (`indexedOnly.ts`); nor does a heavy
@@ -934,7 +935,7 @@ async function readView(env: Env, o: ViewOpts, cov: Coverage = {}): Promise<Read
       // matches": below the fleet root it is `term-too-common`, and the root's catalog buckets know no owners.
       // Nor does an anchored term on a generation with no anchors build (`anchor-not-indexed`), indexed-only or not.
       const noDrill = !!sfs && !!skey && sfs.source.heavy === false
-      const why = shits || sb ? null : (noDrill || raw?.rollup?.scopedBelow) && raw?.rollup?.bucketsOnly && owner ? reject('unsupported-scope') : declined(sfs, skey, raw)
+      const why = shits || sb ? null : off || ((noDrill || raw?.rollup?.scopedBelow) && raw?.rollup?.bucketsOnly && owner) ? reject('owner-too-common') : declined(sfs, skey, raw)
       if (why && (indexedOnly(env) || why.code === 'anchor-not-indexed' || (noDrill && why.code !== 'scan-not-indexed'))) throw new FilterRejected(why)
       tr?.('static', performance.now() - t0, shits ? `${skey} ${shits.rollup ? `rollup ${shits.rollup.cells.length}` : shits.hits.length}` : skey ? `declined${off ? ` (${off})` : ''}` : undefined)
       if (shits?.rollup) {

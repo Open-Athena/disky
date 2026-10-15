@@ -97,7 +97,6 @@ describe.each(LINEAGES)('D1, %s lineage', lineage => {
     ['a `/`', `q=${encodeURIComponent('data/tomat')}`, 'unsupported-slash'],
     ['a `/` in an alternative', `q=${encodeURIComponent('tomat|data/x')}`, 'unsupported-slash'],
     ['`is:file`', `q=${encodeURIComponent('tomat is:file')}`, 'unsupported-kind'],
-    ['an owner pool', 'q=tomat&o=owned', 'unsupported-scope'],
     ['a user lens', 'q=tomat&lens=user:alice', 'unsupported-scope'],
     ['a class scope', 'q=tomat&cl=s', 'unsupported-scope'],
   ]
@@ -177,6 +176,42 @@ describe.each(LINEAGES)('D1, %s lineage', lineage => {
       const q = `date=${A}&path=bk&q=tomat`
       const [plain, regex, simple] = await Promise.all([body(q), body(`${q}&qs=regex`), body(`${q}&qs=simple`)])
       expect([regex, simple]).toEqual([plain, plain])
+    })
+  })
+
+  describe('owner pools (`o=`): the static hits are owner slices, so a pool applies; a rollup has none', () => {
+    const enc = (t: string) => `q=${encodeURIComponent(t)}`
+    const POOLS: [string, (u: string | null) => boolean][] = [['owned', u => u != null], ['unowned', u => u == null], ['!alice', u => u != null && u !== 'alice']]
+    const bodyOf = async (route: Route, qs: string, env: Env) => {
+      const r = await route({ request: new Request(`http://localhost/api/x?${qs}`), env })
+      return [r.status, await r.json()]
+    }
+    it('flag set: subtree and diff answer exactly what the static view answers unflagged', async () => {
+      const cases: [Route, string][] = []
+      for (const [o] of POOLS) for (const t of ['tomat', 'tomat -bin']) for (const path of ['', 'bk']) {
+        cases.push([subtree, `date=${A}&path=${path}&o=${o}&${enc(t)}`], [diff, `from=${A}&to=${B}&path=${path}&o=${o}&${enc(t)}`])
+      }
+      const [set, unset] = await Promise.all([true, false].map(flag => Promise.all(cases.map(([r, qs]) => bodyOf(r, qs, envOf(flag))))))
+      expect(set.map(b => b[0])).toEqual(cases.map(() => 200))
+      expect(set).toEqual(unset)
+    })
+    it('flag set: the series is each scan\'s in-pool matched total, as brute force', async () => {
+      const cases: [string, string, string][] = []
+      for (const [o] of POOLS) for (const t of ['tomat', 'tomat -bin']) cases.push([o, t, 'bk'])
+      const got = await Promise.all(cases.map(async ([o, t, root]) => {
+        const r = await series({ request: new Request(`http://localhost/api/series?path=${root}&o=${o}&${enc(t)}`), env: envOf(true) })
+        const j = await r.json() as { points: { date: string; b: number; o: number }[] }
+        return [r.status, j.points.map(p => [p.date, p.b, p.o])]
+      }))
+      expect(got).toEqual(cases.map(([o, t, root]) => [200, SCANS.map(d => [d, ...brute(fixtureObjects(d), parseQuery(t)!, root, POOLS.find(p => p[0] === o)![1]).total])]))
+    })
+    it('a heavy literal\'s rollup (`f00` under `bk/fill`) under a pool: `owner-too-common` on every route', async () => {
+      expect(refusal('owner-too-common')).toEqual([400, { error: 'This term is too common in this folder to split by owner here; open a folder, or clear the owner scope.', code: 'owner-too-common' }])
+      expect(await Promise.all([
+        call(subtree, `date=${A}&path=bk/fill&o=unowned&${enc('f00')}`, envOf(true)),
+        call(diff, `from=${A}&to=${B}&path=bk/fill&o=unowned&${enc('f00')}`, envOf(true)),
+        call(series, `path=bk/fill&o=unowned&${enc('f00')}`, envOf(true)),
+      ])).toEqual([refusal('owner-too-common'), refusal('owner-too-common'), refusal('owner-too-common')])
     })
   })
 

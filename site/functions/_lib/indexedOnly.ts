@@ -20,6 +20,7 @@ export type FilterRejectCode =
   | 'unsupported-kind'
   | 'unsupported-slash'
   | 'unsupported-scope'
+  | 'owner-too-common'
   | 'scan-not-indexed'
   | 'term-too-common'
   | 'anchor-too-short'
@@ -34,7 +35,8 @@ export const ONLY_PLAIN = 'Only text search (substrings of file or folder names,
 export const REJECT_MESSAGES: Record<FilterRejectCode, string> = {
   'unsupported-kind': `${KIND_ERROR}.`,
   'unsupported-slash': `${ONLY_PLAIN}; a term can’t contain “/” (it matches within one name).`,
-  'unsupported-scope': 'Search isn’t available with an owner, user or storage-class scope here; clear the scope to search.',
+  'unsupported-scope': 'Search isn’t available with a person or storage-class scope here; clear the scope to search.',
+  'owner-too-common': 'This term is too common in this folder to split by owner here; open a folder, or clear the owner scope.',
   'scan-not-indexed': 'Search isn’t available for this scan yet.',
   'term-too-common': 'This term matches too many files to search here; try a longer one.',
   'anchor-too-short': 'An anchored term needs at least 3 characters before “$” (add the dot: “.gz$”) and 2 after “^”.',
@@ -86,7 +88,8 @@ export function rejectAst(ast: QueryAst): FilterReject | null {
   return null
 }
 
-/** A filter under a scope (owner pool, user lens, storage classes) isn't indexed. */
+/** A filter under a user lens or storage classes isn't indexed (the static index's hits carry an owner slice, so
+ *  an owner pool is; its rollups don't: `owner-too-common`). */
 export const rejectScope = (scoped: boolean): FilterReject | null => (scoped ? reject('unsupported-scope') : null)
 
 /** The 400 an API answers a refusal with. */
@@ -114,7 +117,7 @@ export const INDEXED_HELP: SyntaxHelp = {
   ],
   notes: [
     'Every character is literal text: *, ?, ( and . are searched as themselves. Terms too common to combine exactly here are refused; open a folder, or make one more specific.',
-    'Unscoped: clear an owner, user or storage-class scope to search.',
+    'Owner pools (owned, unowned, all but some people) apply; clear a person or storage-class scope to search.',
     ESCAPE_NOTE,
   ],
 }

@@ -108,8 +108,8 @@ async function subtree(ctx0: SubtreeCtx, gate: boolean, member?: MemberRead): Pr
     throw e
   }
   let query = qp.query
-  // An indexed-only deployment: one literal, unscoped (`_lib/indexedOnly.ts`), before auth or any read.
-  const refused = query && indexedOnly(ctx.env) ? rejectQuery(qRaw) ?? rejectScope(!!(lens || owner || classes)) : null
+  // An indexed-only deployment: what the static index answers, no user lens or class scope (`_lib/indexedOnly.ts`), before auth or any read.
+  const refused = query && indexedOnly(ctx.env) ? rejectQuery(qRaw) ?? rejectScope(!!(lens || classes)) : null
   if (refused) return new Response(rejectBody(refused), { status: 400, headers: { 'content-type': 'application/json' } })
 
   // Data is gated (store-specific scope), like /data/*.

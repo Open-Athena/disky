@@ -283,8 +283,8 @@ function AppContent() {
   // view-serving.md §2): a user (`lens=user:`, the live assignments folded in), a
   // pool (`o=`), the classes (`cl=`), the name filter (`q=`). The client
   // receives exactly the current view and only draws it.
-  // …and unscoped: a filter under a user, owner pool or class scope is refused there too.
-  const fScopeRefused = indexedOnly && !!fqRaw && fParse.ok && (!!activeLens || ownerMode !== 'all' || !!classSet) ? REJECT_MESSAGES['unsupported-scope'] : undefined
+  // …and under an owner pool (the static index's hits are owner slices), not a person or a class scope (refused there too).
+  const fScopeRefused = indexedOnly && !!fqRaw && fParse.ok && (!!activeLens || !!classSet) ? REJECT_MESSAGES['unsupported-scope'] : undefined
   const fq = fParse.ok && !fScopeRefused ? fqRaw : undefined
   const scopeQs =
     owner.qs +
