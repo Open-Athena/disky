@@ -4,7 +4,7 @@
  *  (`missing`), a member's refused filter (`union.sources[].refused`) — as what the page shows. */
 import { createContext, useContext } from 'react'
 import { useQuery } from '@tanstack/react-query'
-import { compareScans, type Observation } from './federatedScans'
+import { compareScans, latestObserved, type Observation } from './federatedScans'
 import { markOf, type PickerSource, type SourceMarkInfo } from './federatedPickerModel'
 import { storeUrl, type Store } from './stores'
 
@@ -69,6 +69,17 @@ export function scanAtCutoff(sources: readonly PickerSource[], at: string, picka
   return best?.id ?? null
 }
 
+/** What a picked cutoff writes to the URL: the familiar `?d=` scan id when one says it exactly (the newest
+ *  observation through it among `pickable`, the page's scans, at whose own instant every member reads the scan it
+ *  reads at the pick), else the instant itself (`?at=`). A meta-only update chip (meta 10/13 19:35, the primary's
+ *  newest by then 10/13 06:07) is not the primary's scan: at that scan's instant meta reads an older scan (or
+ *  none), so it is `{at}`. */
+export function pickCutoff(sources: readonly PickerSource[], at: string, pickable?: ReadonlySet<string>): { d: string } | { at: string } {
+  const id = scanAtCutoff(sources, at, pickable)
+  const c = id ? cutoffOfScan(sources, id) : null
+  return id && c && sources.every(s => latestObserved(s.scans, at)?.id === latestObserved(s.scans, c)?.id) ? { d: id } : { at }
+}
+
 /** Sources trimmed to observations strictly before `before` (a diff's start must precede its end). */
 export const sourcesBefore = (sources: readonly PickerSource[], before: string): PickerSource[] =>
   sources.map(s => ({ ...s, scans: s.scans.filter(o => o.observed_through < before) }))
@@ -90,6 +101,23 @@ export interface UnionVector {
 export interface Refused { mark: SourceMarkInfo; code: string; error: string }
 export function refusedSources(union: UnionVector | undefined, marks: ReadonlyMap<string, SourceMarkInfo> | null): Refused[] {
   return (union?.sources ?? []).flatMap(s => (s.refused ? [{ mark: markFor(marks, s.store), code: s.refused.code, error: s.refused.error }] : []))
+}
+
+/** The path a page's series and diff ask: the drilled path — or, at a filtered union root (`?f=`) whose matches
+ *  sit under one root, that root. The map opens inside a lone root (`mapPath`) without changing the URL path, but
+ *  a union root's series and diff refuse `q=` (each member answers only for its own mount: "drill into one
+ *  store"), while the lone root's path is one member's mount, which that member answers. `tree`: the filtered
+ *  root's answer; `undefined` while it isn't here (wait: asking the root would only be refused). */
+export function scopedPath(path: string, { union, filtered, tree }: { union: boolean; filtered: boolean; tree: { c?: readonly { n: string }[] } | null | undefined }): string | undefined {
+  if (!union || !filtered || path !== '') return path
+  if (!tree) return undefined
+  return tree.c?.length === 1 ? tree.c[0].n : ''
+}
+
+/** A union answer's members with no scan at or before its cutoff (`union.sources[].date === null`): left out of the
+ *  map and the table, so the page names them. */
+export function missingSources(union: UnionVector | undefined, marks: ReadonlyMap<string, SourceMarkInfo> | null): SourceMarkInfo[] {
+  return (union?.sources ?? []).flatMap(s => (s.date === null ? [markFor(marks, s.store)] : []))
 }
 
 /** A union series' partial stretch (points naming `missing` members): each member not yet scanned, and the
