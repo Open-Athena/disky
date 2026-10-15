@@ -12,7 +12,6 @@ id = "30572c48b81a4950883ff11f1d9a5c59"
 binding = "DB"
 database_name = "oa-r2-usage-db"
 database_id = "3bd87725-4f09-4316-877c-d089563a992e"
-migrations_dir = "migrations/cw"
 
 [observability]
 enabled = true
