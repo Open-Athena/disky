@@ -1,6 +1,6 @@
 // hf.oa.dev's store: the Hugging Face org `open-athena` (its Storage Buckets and model, dataset and space repos) as
 // one bucket, listed daily by job/hf-run.sh (`disk-tree bulk-list hf://open-athena`).
-import type { Store } from '../stores'
+import type { ExternalLink, Store } from '../stores'
 
 /** The org's storage allowances, as declared values: the Hub has no API for them. Source: the org's billing page
  *  (huggingface.co/organizations/open-athena/settings/billing), read 2026-10-14 — public storage 15.7 TB used of
@@ -11,6 +11,28 @@ export const HF_ALLOWANCES = {
   privateStorage: 5.1e12,
   egressPerMonth: 30e12,
 } as const
+
+const HUB = 'https://huggingface.co'
+const REPO_KINDS = new Set(['models', 'datasets', 'spaces'])
+const enc = (segs: string[]) => segs.map(encodeURIComponent).join('/')
+
+/** A path's page on the Hub, by the listing's layout (`find/bulk_hf.py`): `<org>/buckets/<b>/…` →
+ *  `/buckets/<org>/<b>/tree/…` (files and folders alike); `<org>/{models,datasets,spaces}/<repo>/…` → the repo's
+ *  `tree/main/…` (folder) or `blob/main/…` (file), a model repo without the kind prefix; a repo's `@history` (the
+ *  versions its tree no longer references) → its commits; the org and a kind's folder → the org's listing tab. */
+export function hubLink(segs: string[], dir: boolean): ExternalLink | undefined {
+  const [org, kind, name, ...rest] = segs
+  if (!org) return undefined
+  const label = 'on Hugging Face'
+  if (!kind) return { href: `${HUB}/${enc([org])}`, label }
+  if (kind !== 'buckets' && !REPO_KINDS.has(kind)) return undefined
+  if (!name) return { href: `${HUB}/${enc([org, kind])}`, label }
+  if (kind === 'buckets') return { href: `${HUB}/${enc(['buckets', org, name])}${rest.length ? `/tree/${enc(rest)}` : ''}`, label }
+  const repo = `${HUB}/${enc(kind === 'models' ? [org, name] : [kind, org, name])}`
+  if (!rest.length) return { href: repo, label }
+  if (rest[0] === '@history') return { href: `${repo}/commits/main`, label }
+  return { href: `${repo}/${dir ? 'tree' : 'blob'}/main/${enc(rest)}`, label }
+}
 
 const TB = (b: number) => `${+(b / 1e12).toFixed(1)} TB`
 
@@ -44,6 +66,15 @@ const store: Store = {
   executor: 'plan-sweep',
   buckets: ['open-athena'],
   rootLabel: 'the whole org',
+  externalLink: hubLink,
+  allowances: {
+    rows: [
+      { label: 'Public storage', bytes: HF_ALLOWANCES.publicStorage, name: '253 TB', classes: [1] },
+      { label: 'Private storage', bytes: HF_ALLOWANCES.privateStorage, name: '5.1 TB', classes: [5] },
+    ],
+    source: { label: 'billing page', href: `${HUB}/organizations/open-athena/settings/billing`, asof: '2026-10-14' },
+    note: <>Plain git files (READMEs, small JSON) count toward neither. Egress (downloads) has a separate {TB(HF_ALLOWANCES.egressPerMonth)} a month, which listings can’t measure.</>,
+  },
   objectsNote: 'A repo file’s time is its last commit; an old version’s is when it was pushed; a Storage Bucket file’s is its upload.',
   wall: {
     restrict: 'Access is limited to Open Athena staff.',
