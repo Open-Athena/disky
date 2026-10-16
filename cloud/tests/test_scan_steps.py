@@ -390,3 +390,19 @@ def test_interval_store_staged_append(tmp_path, env, monkeypatch):
     S.interval_store(c, None)
     assert ran == [(["dt-cloud", "interval-store", "append", "-c", "-w", "1800", "2026-10-16T1200"], 3600.0,
                     "/app/job/interval-store.json", "img@sha256:abc")]
+
+
+def test_lifecycle_pull_takes_the_s3_sources_endpoint(tmp_path, env, monkeypatch):
+    """The publish step's `lifecycle pull` passes the S3 sources' `endpoint` (`-E`), not the sweep's `$SWEEP_S3_ENDPOINT`."""
+    (tmp_path / "t").mkdir(exist_ok=True)
+    p = parse({"deployment": "fix", "executor": {"kind": "local"}, "work": str(tmp_path / "w"), "data": str(tmp_path / "d"),
+               "layout": {"layer2": "l2/{scan}/", "snapshots": ""},
+               "sources": [{"uri": "s3://a", "endpoint": "https://s3.example"}, {"uri": "s3://b", "endpoint": "https://s3.example"}],
+               "skip": ["static-names", "digest"], "options": {"list": {"import": True}, "index": {"lifecycle": True}}})
+    c = S.make_ctx(p, env)
+    c.sh_impl = runner = Runner(tmp_path)
+    web = tmp_path / "web"
+    web.mkdir()
+    S._publish(c, web)
+    assert runner.calls == [f"dt-cloud lifecycle pull -k -E https://s3.example -b a -b b -o {tmp_path}/d/snapshots/2026-10-16T1200/lifecycle.json"
+                            .replace(str(tmp_path), "<tmp>")]

@@ -1414,9 +1414,10 @@ def lifecycle() -> None:
     bucket, the per-scan snapshot shape."""
 
 
-def _lifecycle_clients(buckets: tuple[str, ...]):
+def _lifecycle_clients(buckets: tuple[str, ...], endpoint: str | None = None):
     """The S3 and/or GCS client the given bucket URIs need (`None` for a cloud
-    none of them name), so one `pull` can snapshot a mixed set."""
+    none of them name), so one `pull` can snapshot a mixed set. `endpoint`: the S3
+    buckets' (default `$SWEEP_S3_ENDPOINT`)."""
     from .lifecycle import is_gcs
 
     gcs = s3 = None
@@ -1427,7 +1428,7 @@ def _lifecycle_clients(buckets: tuple[str, ...]):
     if any(not is_gcs(b) for b in buckets):
         from .sweep import s3_client
 
-        s3 = s3_client()
+        s3 = s3_client(endpoint)
     return s3, gcs
 
 
@@ -1444,14 +1445,15 @@ def _lc_buckets(buckets: tuple[str, ...]) -> tuple[str, ...]:
 
 @lifecycle.command("pull")
 @_LC_BUCKET
+@option("-E", "--endpoint", help="The S3 buckets' endpoint (default $SWEEP_S3_ENDPOINT)")
 @option("-k", "--keep-going", is_flag=True, help="A bucket whose rules can't be read (e.g. no `storage.buckets.get`) is reported and left out, instead of failing the whole pull — for the job's fleet snapshot")
 @option("-o", "--out", type=Path, help="Write here instead of stdout")
-def lifecycle_pull(buckets: tuple[str, ...], keep_going: bool, out: Path | None) -> None:
+def lifecycle_pull(buckets: tuple[str, ...], endpoint: str | None, keep_going: bool, out: Path | None) -> None:
     """One bucket → the bare rule list; several → `{<bucket>: rules}` in this order."""
     from .lifecycle import dump, dump_map, pull_any, pull_many
 
     buckets = _lc_buckets(buckets)
-    s3, gcs = _lifecycle_clients(buckets)
+    s3, gcs = _lifecycle_clients(buckets, endpoint)
     if len(buckets) == 1:
         text = dump(pull_any(buckets[0], s3=s3, gcs=gcs), bucket=buckets[0])
     else:

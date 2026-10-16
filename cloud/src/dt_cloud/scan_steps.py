@@ -493,7 +493,12 @@ def _publish(ctx: Ctx, web: Path) -> None:
             copy_atomic(f, dest / f.name)
         if ctx.opt("index", "lifecycle", False):
             # a GCS source by its `gs://` URI (the pull picks the cloud by scheme); `-k`: an unreadable bucket is left out
-            ctx.sh(["dt-cloud", "lifecycle", "pull", "-k",
+            # the S3 sources' endpoint from the profile (one per pull: they share a store), not the sweep's env var
+            eps = sorted({src.endpoint for src in ctx.profile.sources if src.kind != "gcs" and src.endpoint})
+            if len(eps) > 1:
+                err(f"WARN: lifecycle pull: the S3 sources name {len(eps)} endpoints; pulling through $SWEEP_S3_ENDPOINT")
+                eps = []
+            ctx.sh(["dt-cloud", "lifecycle", "pull", "-k", *(["-E", eps[0]] if eps else []),
                     *[a for s in ctx.profile.sources for a in ("-b", f"gs://{s.bucket}" if s.kind == "gcs" else s.bucket)],
                     "-o", dest / "lifecycle.json"], fatal=False, warn="lifecycle pull failed")
         if ctx.opt("index", "rules", False):
