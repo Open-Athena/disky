@@ -5,7 +5,7 @@
  ],
  "bucket": "oa-cw-s3-usage-data",
  "scratch": "oa-cw-s3-usage-scratch",
- "gen": "2026-10-10cw",
+ "gen": "2026-10-15cw",
  "r2_bucket": "oa-cw-s3-usage-index",
  "r2_secrets": {
   "endpoint": "cw-s3-r2-endpoint",
@@ -23,8 +23,13 @@
  "spot": true,
  "append_tasks": 16,
  "drill": true,
- "anchors": false,
+ "anchors": true,
  "src": [],
  "hex_runs": "16,8",
- "compact_level": 5
+ "compact_level": 5,
+ "standard_stages": [
+  "anchors",
+  "drill"
+ ],
+ "drill_checkpoint": "oa-cw-s3-usage-scratch"
 }
