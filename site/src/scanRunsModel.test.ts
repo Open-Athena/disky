@@ -2,7 +2,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   batchHref, failedAt, logsHref, mapHref, metaHref, outputIndex, phaseIssues, phaseOutcome, phaseOrder, phaseSpans, runTime, type ScanRun, type ScanRunOutput,
-  type ScanRunPhase, structureOf, summarize, withDeltas, runOutcome, overlappingFailures, runTasks,
+  type ScanRunPhase, structureOf, summarize, withDeltas, runOutcome, overlappingFailures, runTasks, taskLogsHref,
 } from './scanRunsModel'
 
 export const run = (o: Partial<ScanRun> & Pick<ScanRun, 'run_id' | 'scan'>): ScanRun => ({
@@ -200,5 +200,14 @@ describe('runTasks', () => {
   })
   it('is empty for a one-VM run', () => {
     expect(runTasks([phase('u1', 'listing', 0, 0, 10)])).toEqual([])
+  })
+})
+
+describe('taskLogsHref', () => {
+  it('queries the task job\'s logs by name, which outlive the deleted job', () => {
+    const q = 'log_id("batch_task_logs")\nlabels.task_group_name:"/jobs/nf-e8646fb0-1792179471443/"\ntimestamp >= "2027-01-15T07:50:00.000Z"'
+    expect(taskLogsHref('p', 'nf-e8646fb0-1792179471443', 1_800_000_000)).toBe(
+      `https://console.cloud.google.com/logs/query;query=${encodeURIComponent(q).replace(/\(/g, '%28').replace(/\)/g, '%29')}?project=p`,
+    )
   })
 })

@@ -271,6 +271,14 @@ export const batchHref = (project: string, region: string, job: string, tab: 'de
  * too (`encodeURIComponent` leaves them), or the query is cut at the first `(`. */
 export const logsQueryParam = (query: string): string => encodeURIComponent(query).replace(/\(/g, '%28').replace(/\)/g, '%29')
 
+/** A step task's logs: Logs Explorer over its Batch job by name (`labels.task_group_name` = `…/jobs/<name>/taskGroups/…`).
+ * Not the job's Logs tab: Nextflow deletes a task's job when it finishes, and its logs outlive it. */
+export function taskLogsHref(project: string, job: string, since: number | null): string {
+  const t = since != null ? new Date((since - 600) * 1000).toISOString() : null
+  const query = `log_id("batch_task_logs")\nlabels.task_group_name:"/jobs/${job}/"${t ? `\ntimestamp >= "${t}"` : ''}`
+  return `https://console.cloud.google.com/logs/query;query=${logsQueryParam(query)}?project=${encodeURIComponent(project)}`
+}
+
 /** The run's logs: its Batch job's Logs tab (task + agent logs, no query to
  * get wrong), else Logs Explorer over its task logs (`labels.job_uid` is the
  * run id). */
