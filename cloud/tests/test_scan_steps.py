@@ -373,3 +373,20 @@ def test_a_hard_failure_fails_a_soft_step(tmp_path, monkeypatch):
     (tmp_path / "t").mkdir()
     env = {"SNAP_ID": "2026-10-16T1200", "GEN": "G1", "DT_JOB_START": "1", "TMPDIR": str(tmp_path / "t"), "HOME": str(tmp_path / "home")}
     assert S.run_step("boom", None, env) == 3
+
+
+def test_interval_store_staged_append(tmp_path, env, monkeypatch):
+    from dt_cloud import scan_runs
+
+    ran = []
+
+    def run_grouped(cmd, timeout, grace, session=None, signal_grace=None, env=None):
+        ran.append((cmd, timeout, env["INTERVAL_STORE_PROFILE"], env["INTERVAL_STORE_IMAGE"]))
+        return scan_runs.Ran(0, False, None)
+
+    monkeypatch.setattr(scan_runs, "run_grouped", run_grouped)
+    c = gcs_ctx(tmp_path, env, monkeypatch, **{"interval-store": {"profile": "/app/job/interval-store.json", "merge_wait": 1800, "timeout": "60m"}})
+    c.env["JOB_IMAGE"] = "img@sha256:abc"
+    S.interval_store(c, None)
+    assert ran == [(["dt-cloud", "interval-store", "append", "-c", "-w", "1800", "2026-10-16T1200"], 3600.0,
+                    "/app/job/interval-store.json", "img@sha256:abc")]
