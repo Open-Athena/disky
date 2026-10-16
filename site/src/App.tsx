@@ -20,7 +20,6 @@ import type { DiffData } from './diffModel'
 import { ScanCombobox } from './ScanCombobox'
 import { ago, buildUserIndex, epochDaysToDate } from './colors'
 import { ChildrenTable } from './ChildrenTable'
-import { LargestFiles } from './LargestFiles'
 import { FitSelect } from './FitSelect'
 import { PathPopover } from './PathPopover'
 import { fromUrlPath, pathCopy, pathText, toUrlPath } from './pathCrumbs'
@@ -137,7 +136,7 @@ const SPANS: [string, number][] = [['1d', 1], ['3d', 3], ['7d', 7], ['14d', 14],
 // five minutes since) is never replayed after a reader rule changes. Bump
 // with `CACHE_V` in functions/_lib/edgeCache.ts.
 const API_CV = '2'
-const SECTION_IDS = ['tree-map', 'tbl', 'largest', 'over-time', 'diff', 'mtime']
+const SECTION_IDS = ['tree-map', 'tbl', 'over-time', 'diff', 'mtime']
 const LEGACY_ANCHORS: Record<string, string> = {
   'size-over-time': 'over-time', 'created-date': 'mtime', changes: 'diff',
 }
@@ -1405,12 +1404,15 @@ function AppContent() {
               />
             </Suspense>
           )}
-          {/* The map's own listing — this node's children. */}
+          {/* The map's own listing — this node's children, or (`?tm=`) the largest files / folders anywhere below it:
+              the whole directory's, so not under a scope (lens, owner pool, class, name filter) it couldn't honor. */}
           {mapPath && (
             <div id="tbl"><ChildrenTable
               node={mapPath[mapPath.length - 1]}
               segs={tblSegs}
               scheme={store.scheme}
+              scan={asof}
+              flatOk={objects && !scopeQs}
               ownerIdx={ownersMode ? ownerIdx : undefined}
               userIdx={userIdx}
               onPickUser={u => pickUser(u, false)}
@@ -1420,19 +1422,6 @@ function AppContent() {
               rowMatches={tblRowMatches}
               brush={brush}
               onBrush={setBrush}
-            /></div>
-          )}
-          {/* …and its flat twin: the largest files anywhere below it. The whole directory's, so not
-              shown under a scope (lens, owner pool, class, name filter) it couldn't honor. */}
-          {mapPath && objects && (
-            <div id="ltbl"><LargestFiles
-              segs={tblSegs}
-              scheme={store.scheme}
-              scan={asof}
-              total={mapPath[mapPath.length - 1].b}
-              enabled={!scopeQs}
-              onOpen={openPath}
-              onOpenObject={openObject}
             /></div>
           )}
         </>

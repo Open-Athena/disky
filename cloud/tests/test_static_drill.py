@@ -680,6 +680,50 @@ def test_settling_in_chunks_writes_the_same_bytes(world, run_rg, tmp_path, monke
     assert chunks == [1] * sum(whole)
 
 
+@pytest.mark.parametrize("i", range(len(DAYS) - BASE), ids=lambda i: f"run{i + 1}")
+def test_explode_parts_write_the_same_bytes(world, run_rg, tmp_path, monkeypatch, i):
+    """A run's drill is the same files, byte for byte, with the aggregations over `dr`'s ancestors (`tdir`, `tch`) run in
+    several `hash(q)` parts as in one pass."""
+    rebuild = world["rebuilds"][i]
+    parts: list[int] = []
+    explode_parts = sd._explode_parts
+
+    def counted(con):
+        n = explode_parts(con)
+        parts.append(n)
+        return n
+
+    monkeypatch.setattr(sd, "_explode_parts", counted)
+    rebuild(tmp_path / "whole")
+    assert set(parts) == {1}
+    parts.clear()
+    monkeypatch.setattr(sd, "EXPLODE_PART_ROWS", 7)
+    rebuild(tmp_path / "parts")
+    assert _tree(tmp_path / "parts", drop={"s", "reads"}) == _tree(tmp_path / "whole", drop={"s", "reads"})
+    assert min(parts) > 1
+
+
+@pytest.mark.parametrize("i", range(len(DAYS) - BASE), ids=lambda i: f"run{i + 1}")
+def test_span_cache_is_bounded(world, run_rg, tmp_path, monkeypatch, i):
+    """A run's drill is the same files, byte for byte, with the index span cache capped at 2, and no group file ever holds
+    more spans than the cap."""
+    rebuild = world["rebuilds"][i]
+    rebuild(tmp_path / "unbounded")
+    held: list[int] = []
+    span = sd.CachedGroupFile._span
+
+    def spy(self, a, b):
+        out = span(self, a, b)
+        held.append(len(self._spans))
+        return out
+
+    monkeypatch.setattr(sd, "SPAN_CACHE", 2)
+    monkeypatch.setattr(sd.CachedGroupFile, "_span", spy)
+    rebuild(tmp_path / "capped")
+    assert _tree(tmp_path / "capped", drop={"s", "reads"}) == _tree(tmp_path / "unbounded", drop={"s", "reads"})
+    assert (len(held) > 0, max(held, default=0) <= 2) == (True, True)
+
+
 def test_settle_chunks():
     """Directories in order, cut where the next would take a chunk past `chunk_rows`; one over it alone is its own."""
     aff = [("a", "x"), ("a", "y"), ("b", "x"), ("b", "y"), ("c", "x")]
