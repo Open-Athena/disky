@@ -301,7 +301,8 @@ CREATE TABLE scan_runs (
 
 CREATE TABLE scan_run_dags (
   run_id  TEXT PRIMARY KEY REFERENCES scan_runs(run_id),
-  mermaid TEXT NOT NULL
+  engine  TEXT NOT NULL,
+  dag     TEXT NOT NULL
 );
 
 CREATE TABLE scan_run_outputs (

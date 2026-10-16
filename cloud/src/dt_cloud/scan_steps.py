@@ -226,9 +226,11 @@ class Ctx:
         return len(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity") else os.cpu_count() or 1
 
     def expand(self, args: Sequence[str], **extra: object) -> list[str]:
-        """`args` with `{nproc}`, `{scan}`, `{date}`, `{gen}`, `{work}` (+ `extra`) filled; an arg that is exactly
-        `{<key>}` of a list value expands to its items."""
+        """`args` with `{nproc}`, `{scan}`, `{date}`, `{gen}`, `{work}`, `{data}` (the data store's local root,
+        `data_root`) (+ `extra`) filled; an arg that is exactly `{<key>}` of a list value expands to its items."""
         vals: dict[str, object] = dict(nproc=self.nproc, scan=self.scan, date=self.date, gen=self.gen, work=self.work, **extra)
+        if any("{data}" in a for a in args):
+            vals["data"] = self.data_root
         out: list[str] = []
         for a in args:
             k = a[1:-1] if a.startswith("{") and a.endswith("}") else None
@@ -274,6 +276,12 @@ class Ctx:
             err(f"{what or 'output'} exists, skipping: {path}")
             return True
         return False
+
+    def store_has(self, root: str, key: str) -> bool:
+        """Whether the store at `root` (a dir or URL, `blobstore.Store`) holds `key`."""
+        from .blobstore import Store
+
+        return Store(root).exists(key)
 
     def need(self, path: Path, step: str) -> Path:
         if not path.exists():
@@ -414,7 +422,9 @@ def list_source(ctx: Ctx, uri: str | None) -> None:
             weights = ["-W", f"{prior}/*.parquet"]
     with ctx.phase(f"list {b}"):
         ctx.sh(["disk-tree", "bulk-list", *ctx.opt("list", "bulk_args", []), uri,
-                *(["-E", src.endpoint] if src.endpoint else []), "-o", ctx.listing_out(b), "-P", src.procs or ctx.nproc,
+                *(["-E", src.endpoint] if src.endpoint else []), "-o", ctx.listing_out(b),
+                # the Hub lister is one rate-limited process (`-w` requests in flight); it refuses `-P`
+                *(["-P", src.procs or ctx.nproc] if src.kind != "hf" else []),
                 *(["-w", threads] if threads else []), "-x", "clear", *weights, *src.args])
     if imports:
         with ctx.phase(f"import {b}"):
@@ -477,7 +487,7 @@ def index(ctx: Ctx, arg: str | None) -> None:
     out = ctx.work / "index"
     with ctx.phase("index-write"):
         ctx.sh(["dt-cloud", "index-write", *(["-m", ctx.opt("index", "mem")] if ctx.opt("index", "mem") else []),
-                "-t", ctx.opt("index", "threads") or ctx.nproc, "-o", out, *ctx.opt("index", "args", []), *srcs])
+                "-t", ctx.opt("index", "threads") or ctx.nproc, "-o", out, *ctx.expand(ctx.opt("index", "args", [])), *srcs])
         files = sorted(out.glob("*.parquet"), key=lambda p: (p.name == "path-index.parquet", p.name))
         for f in files:
             copy_atomic(f, key_dir / f.name)
@@ -493,7 +503,12 @@ def _publish(ctx: Ctx, web: Path) -> None:
             copy_atomic(f, dest / f.name)
         if ctx.opt("index", "lifecycle", False):
             # a GCS source by its `gs://` URI (the pull picks the cloud by scheme); `-k`: an unreadable bucket is left out
-            ctx.sh(["dt-cloud", "lifecycle", "pull", "-k",
+            # the S3 sources' endpoint from the profile (one per pull: they share a store), not the sweep's env var
+            eps = sorted({src.endpoint for src in ctx.profile.sources if src.kind != "gcs" and src.endpoint})
+            if len(eps) > 1:
+                err(f"WARN: lifecycle pull: the S3 sources name {len(eps)} endpoints; pulling through $SWEEP_S3_ENDPOINT")
+                eps = []
+            ctx.sh(["dt-cloud", "lifecycle", "pull", "-k", *(["-E", eps[0]] if eps else []),
                     *[a for s in ctx.profile.sources for a in ("-b", f"gs://{s.bucket}" if s.kind == "gcs" else s.bucket)],
                     "-o", dest / "lifecycle.json"], fatal=False, warn="lifecycle pull failed")
         if ctx.opt("index", "rules", False):
@@ -561,18 +576,42 @@ def path_index(ctx: Ctx) -> None:
 
 
 def _static_check(p: ScanProfile) -> list[str]:
-    if not p.opts("static-names").get("profile") and not p.env.get("STATIC_NAMES_PROFILE"):
-        return ["options.static-names.profile: required (the deployment's static-names profile; or env STATIC_NAMES_PROFILE, or skip: [static-names])"]
-    return []
+    o = p.opts("static-names")
+    if o.get("gen"):
+        return [f"options.static-names.{k}: not with gen (the one-machine path)" for k in ("profile",) if k in o]
+    problems = [f"options.static-names.{k}: only with gen (the one-machine path)" for k in ("store", "mem", "build_args") if k in o]
+    if not o.get("profile") and not p.env.get("STATIC_NAMES_PROFILE"):
+        problems.append("options.static-names.profile: required (the deployment's static-names profile; or env STATIC_NAMES_PROFILE, "
+                        "or gen: the one-machine path, or skip: [static-names])")
+    return problems
 
 
-@step("static-names", stage="serve", soft=True, options={"profile": str}, requires=_static_check)
+@step("static-names", stage="serve", soft=True, options={"profile": str, "gen": str, "store": str, "mem": str, "build_args": list},
+      requires=_static_check)
 def static_names(ctx: Ctx, arg: str | None) -> None:
     """Append this scan (and any earlier one still pending, in scan-id order) to the static name index as a run
     (`static-names runs add -c`: its stages are Batch jobs of their own; idempotent). Runs beside publish-r2 →
-    interval-store (an `overlapped` phase); a failure still lists the scan, a later run's `-c` catches it up."""
+    interval-store (an `overlapped` phase); a failure still lists the scan, a later run's `-c` catches it up.
+
+    `options.static-names.gen`: the one-machine path instead, for a small deployment (`static-names add` in this task:
+    every scan in the data store after the generation's newest, read at the layer-2 layout's `path` sorts, appended to
+    the generation in `store`, default `$R2_ARCHIVE`); `build` (+ `build_args`) when the store has no such generation."""
     if ctx.reproc:
         err("static-names off under REPROC")
+        return
+    gen = ctx.opt("static-names", "gen")
+    if gen:
+        store = ctx.opt("static-names", "store") or ctx.env.get("R2_ARCHIVE")
+        if not store:
+            err(f"static-names: not appending {ctx.scan} (no store: options.static-names.store or R2)")
+            return
+        layout = ctx.profile.layout.layer2.replace("{scan}", "{id}") + "index/{gen}/path-index.parquet"
+        args = ["-g", gen, "-L", layout, "-s", ctx.data_uri, "-o", store, "-w", ctx.work / "static-names", "-p", ctx.nproc,
+                *(["-M", ctx.opt("static-names", "mem")] if ctx.opt("static-names", "mem") else [])]
+        with ctx.phase("static-names", note="overlapped"):
+            sub = (["add", *args] if ctx.store_has(store, f"static-names/{gen}/scans.json")
+                   else ["build", *args, *ctx.opt("static-names", "build_args", [])])
+            ctx.sh(["dt-cloud", "static-names", *sub], fatal=False, warn=f"static-names {sub[0]} failed for {ctx.scan}")
         return
     prof = ctx.opt("static-names", "profile") or ctx.env["STATIC_NAMES_PROFILE"]
     with ctx.phase("static-names", note="overlapped"):
@@ -764,7 +803,9 @@ def _digest_check(p: ScanProfile) -> list[str]:
 @step("digest", soft=True, options={"template": str, "config": str, "args": list, "platforms": list}, requires=_digest_check)
 def digest(ctx: Ctx, arg: str | None) -> None:
     """Converge the usage-digest thread on each platform (`dt-cloud digest -T <template> -C <config> -P <platform>`;
-    `options.digest.platforms`, default slack), each skipped without its transport's env."""
+    `options.digest.platforms`, default slack), each skipped without its transport's env. The plot's upload
+    (`wrangler pages deploy`) authenticates with `CLOUDFLARE_API_TOKEN`: `$CF_PAGES_TOKEN` when set, for a deployment
+    whose D1 token can't deploy Pages."""
     if ctx.reproc:
         err("REPROC: skipping the usage digest")
         return
@@ -775,7 +816,8 @@ def digest(ctx: Ctx, arg: str | None) -> None:
                 continue
             ctx.sh(["dt-cloud", "digest", "-T", ctx.opt("digest", "template"), "-C", ctx.opt("digest", "config"), "-P", platform,
                     *ctx.opt("digest", "args", []), "-r", f"{ctx.data_uri}/{ctx.snapshots}"], fatal=False,
-                   warn=f"{platform} usage-digest step failed")
+                   warn=f"{platform} usage-digest step failed",
+                   env={"CLOUDFLARE_API_TOKEN": ctx.env["CF_PAGES_TOKEN"]} if ctx.has("CF_PAGES_TOKEN") else None)
 
 
 #: Core steps a profile may `skip`.
