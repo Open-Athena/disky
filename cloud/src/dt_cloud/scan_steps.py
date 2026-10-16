@@ -526,12 +526,13 @@ def path_index(ctx: Ctx) -> None:
     aggregation makes several passes), aggregated in one pass (`dt-cloud path-index`: the snapshot JSONs and the path
     store's sorts, with the attribution-independent rollups cached at `<listing>/dir-cache`), then the tiers uploaded
     to `<layer2>/index/<gen>/` (`path-index.parquet` last, the skip-if-done mark) and the JSONs published."""
-    bucket = ctx.profile.data_bucket
+    store = ctx.data_uri.split("://", 1)[1]  # `<bucket>[/<prefix>]`
     key_dir = ctx.data_root / ctx.index_key
-    listings = [ctx.need(ctx.listing_dir(s.bucket) / "_SUCCESS.json", "list").parent for s in ctx.profile.sources]
+    for s in ctx.profile.sources:
+        ctx.need(ctx.listing_dir(s.bucket) / "_SUCCESS.json", "list")
     if ctx.done(key_dir / "path-index.parquet", "index tiers") and ctx.done(ctx.data_root / ctx.snapshots / ctx.scan / "meta.json", "snapshot"):
         return
-    gcs = lambda key: f"/gcs/{bucket}/{key}"  # noqa: E731 — `dt-cloud stage`'s glob form
+    gcs = lambda key: f"/gcs/{store}/{key}"  # noqa: E731 — `dt-cloud stage`'s glob form
     lglobs = [gcs(f"{ctx.listing_key(s.bucket)}/*.parquet") for s in ctx.profile.sources]
     attr = [gcs(a) for a in ctx.opt("index", "attribution", [])]
     access = ctx.opt("index", "access")
@@ -554,8 +555,8 @@ def path_index(ctx: Ctx) -> None:
     with ctx.phase("path-index upload"):
         files = sorted((f for f in pi.iterdir() if f.is_file() and not f.name.startswith(".")),
                        key=lambda f: (f.name == "path-index.parquet", f.name))
-        err(f"uploading {len(files)} files ({sum(f.stat().st_size for f in files) / 1e9:.1f} GB) to gs://{bucket}/{ctx.index_key}/")
-        upload(files, f"gs://{bucket}/{ctx.index_key}")
+        err(f"uploading {len(files)} files ({sum(f.stat().st_size for f in files) / 1e9:.1f} GB) to {ctx.data_uri}/{ctx.index_key}/")
+        upload(files, f"{ctx.data_uri}/{ctx.index_key}")
     _publish(ctx, snap)
 
 
