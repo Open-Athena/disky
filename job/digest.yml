@@ -25,6 +25,8 @@ plot_base: https://plot.oa-hf-usage-icons.pages.dev
 variant: sender
 reply_hour: 0
 provisional: false
+# HF bills in decimal TB (the billing page: 15.72 TB of the 253 TB allowance), so the digest speaks TB, not TiB
+units: TB
 primary: open-athena
 # `path: ""`: the site serves the org at its root, not `/open-athena`. The quota is the org's public-storage allowance
 # (billing page, 2026-10-14; `HF_ALLOWANCES` in site/src/stores/hf.tsx). The total also counts private storage (5.1 TB
