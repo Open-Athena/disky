@@ -1,7 +1,8 @@
 import { useMemo } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { intParam, useUrlState } from 'use-prms'
-import { dateColor, epochDaysToMonthShort } from './colors'
+import { epochDaysToMonthShort } from './colors'
+import { dateInk, useDateScale } from './dateScale'
 import { elideMid } from './CopyName'
 import { pathText } from './pathCrumbs'
 import { useStore, useStoreFetch } from './store'
@@ -72,15 +73,15 @@ export function LargestFiles({ segs, scheme, scan, total, enabled = true, onOpen
   const q = useLargest(path, scan, n, enabled && open)
   const files = useMemo(() => q.data?.files ?? [], [q.data])
   // Created-month ink over the listed rows' range, as in the children table.
-  const [dMin, dMax] = useMemo(() => {
-    const ds = files.map(f => f.mtime).filter((t): t is number => t != null).map(t => Math.floor(t / 86400))
-    return ds.length ? [Math.min(...ds), Math.max(...ds)] : [0, 0]
-  }, [files])
+  const [dateScale] = useDateScale()
+  const ageInk = useMemo(
+    () => dateInk(files.flatMap(f => (f.mtime != null ? [[Math.floor(f.mtime / 86400), f.size] as const] : [])), dateScale),
+    [files, dateScale],
+  )
   if (!enabled || !scan) return null
   // Nothing to say: a scan without objects (409), or a directory with no files under it.
   if (q.error && /^409/.test(q.error.message)) return null
   if (q.data && !files.length) return null
-  const ageInk = (d: number) => dateColor(dMax > dMin ? (d - dMin) / (dMax - dMin) : 1)
   const createdParts = (d: number) => epochDaysToMonthShort(d).split(' ')
   const hasYr = files.some(f => f.mtime != null && createdParts(Math.floor(f.mtime / 86400)).length > 1)
   const sum = files.reduce((s, f) => s + f.size, 0)

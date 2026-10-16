@@ -35,6 +35,7 @@ import { LifecycleFold } from './LifecycleFold'
 import { ClassMixTip, Tooltip } from './Tooltip'
 import { Treemap } from './Treemap'
 import type { DateRange, Highlight, ShadeMode } from './Treemap'
+import { dateAxis, useDateScale } from './dateScale'
 import type { DayBand } from './dayBand'
 import { DEFAULT_SYNTAX, SYNTAXES, syntaxById } from './filterTree'
 import { fetchCover, matchedListOf, prefetchCover, rowCover, rowMatchesOf, useFilterCover } from './filterCover'
@@ -1025,22 +1026,33 @@ function AppContent() {
     ),
   })
 
-  // The written-date gradient's domain: the drawn leaves' dates — objects and
-  // directories whose children this view didn't load alike (each is one cell).
-  const dateRange = useMemo((): DateRange | null => {
-    if (!mapTree) return null
-    let min = Infinity
-    let max = -Infinity
+  // The written-date gradient's axis: the drawn leaves' dates — objects and
+  // directories whose children this view didn't load alike (each is one cell)
+  // — under the page's scale (`?ts=`; `rank` weighs each by its bytes). The
+  // read lens keeps the access-log window as its domain, the same scale over it.
+  const [dateScale] = useDateScale()
+  const { dateRange, readAxis } = useMemo(() => {
+    const ds: [number, number][] = []
+    const as: [number, number][] = []
     const walk = (n: TreeNode) => {
-      if (n.d != null && !n.c) {
-        if (n.d < min) min = n.d
-        if (n.d > max) max = n.d
+      if (!n.c) {
+        if (n.d != null) ds.push([n.d, n.b])
+        if (n.a != null) as.push([n.a, n.b])
       }
       n.c?.forEach(walk)
     }
-    walk(mapTree)
-    return min < max ? { min, max } : null
-  }, [mapTree])
+    if (mapTree) walk(mapTree)
+    let min = Infinity
+    let max = -Infinity
+    for (const [d] of ds) {
+      if (d < min) min = d
+      if (d > max) max = d
+    }
+    return {
+      dateRange: min < max ? dateAxis({ min, max }, dateScale, ds) : null,
+      readAxis: readRange ? dateAxis(readRange, dateScale, as) : null,
+    }
+  }, [mapTree, dateScale, readRange])
 
   const catOrder = useMemo(() => {
     if (!mapTree) return []
@@ -1340,7 +1352,7 @@ function AppContent() {
             shade={shade}
             userIdx={userIdx}
             dateRange={dateRange}
-            readRange={readRange}
+            readRange={readAxis}
             hl={effHl}
             onPickUser={u => pickUser(u, false)}
             onPickUnowned={pickUnowned}
