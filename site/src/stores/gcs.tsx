@@ -1,5 +1,20 @@
 // gcs.oa.dev's store (oa-decoupling step 6): its registry entry, contact and About text.
-import type { Store } from '../stores'
+import type { ExternalLink, Store } from '../stores'
+
+const CONSOLE = 'https://console.cloud.google.com/storage/browser'
+const enc = (segs: string[]) => segs.map(encodeURIComponent).join('/')
+
+/** A path's page in the Cloud Console's storage browser (`Store.externalLink`): the bucket, a folder (its prefix,
+ *  trailing `/`) or an object's details page. The store root has none. */
+export function consoleLink(segs: string[], dir: boolean): ExternalLink | undefined {
+  const [bucket, ...rest] = segs
+  if (!bucket) return undefined
+  const label = 'in the Cloud Console'
+  if (!rest.length) return { href: `${CONSOLE}/${enc([bucket])}`, label }
+  return dir
+    ? { href: `${CONSOLE}/${enc([bucket, ...rest])}/`, label }
+    : { href: `${CONSOLE}/_details/${enc([bucket, ...rest])}`, label }
+}
 
 const store: Store = {
   key: 'gcs',
@@ -18,6 +33,7 @@ const store: Store = {
   buckets: ['marin-us-central2', 'marin-us-central1', 'marin-us-east1', 'marin-us-east5', 'marin-us-west4', 'marin-eu-west4'],
   peer: { label: 'CoreWeave usage', href: 'https://cw-s3.oa.dev/' },
   metaTree: 'https://cw-s3.oa.dev/meta',
+  externalLink: consoleLink,
   rootLabel: 'all buckets',
   objectsNote: 'GCS objects are written by the training jobs and rarely rewritten in place, so created is the object’s upload time; the read axis adds when it was last read.',
   wall: {
