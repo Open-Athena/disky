@@ -12,6 +12,7 @@ import { signInUrl, useCanAssign, useCanStage, useIdent as useIdentity } from '.
 import { AttributionRules } from './AttributionRules'
 import { DiffTreemap, DiffHeader, useDiffModel } from './DiffTreemap'
 import { DiffTable } from './DiffTable'
+import { Allowances } from './Allowances'
 import { DiskSpace } from './DiskSpace'
 import { DiskSpaceDiff, diskDiffScan } from './DiskSpaceDiff'
 import type { DiffData } from './diffModel'
@@ -1174,7 +1175,7 @@ function AppContent() {
         <span key={i}>
           <span className="sep">/</span>
           {i === segs.length - 1
-            ? <PathPopover label={sg} fullPath={crumbFullPath} copy={crumbCopy} />
+            ? <PathPopover label={sg} fullPath={crumbFullPath} copy={crumbCopy} ext={store.externalLink?.(segs, here?.k !== 'file')} />
             : <Tooltip content={<code>{pathText(pathScheme, segs.slice(0, i + 1))}</code>}><button type="button" onClick={() => drillTo(segs.slice(0, i + 1))}>{sg}</button></Tooltip>}
         </span>
       ))}
@@ -1306,6 +1307,7 @@ function AppContent() {
       )}
 
       <DiskSpace space={meta?.disk_space} />
+      {segs.length <= storeRoot.length && <Allowances spec={store.allowances} classBytes={meta?.class_bytes} />}
 
       {mapTree && !mapFailed ? (
         <>
