@@ -1,0 +1,68 @@
+# r2.oa.dev's scan as a Nextflow DAG (specs/pipelines-everywhere.md §3.5): `dt-cloud scan head /app/job/profiles/r2.yml`,
+# beside `r2-meta.yml` (the "data behind this site" store). The one-VM job (`job/r2-scan run`) stays the cron until the
+# scratch run (`r2-scratch.yml`) and a prod run pass; the image is pinned here at the switch.
+deployment: r2
+executor:
+  kind: google-batch
+  project: oa-internal-450019
+  region: us-west1
+  service_account: oa-r2-usage-job@oa-internal-450019.iam.gserviceaccount.com
+  image: us-west1-docker.pkg.dev/oa-internal-450019/oa-r2-usage/scan:nf
+  boot_disk: 50
+work: gs://oa-r2-usage-data/nf
+data: gs://oa-r2-usage-data
+layout:
+  layer2: listing/{scan}/
+  snapshots: r2
+  listing: listing/{scan}/
+sources:
+  - {uri: r2://marin-na, endpoint: https://74981a43be0de7712369306c7b19133d.r2.cloudflarestorage.com, procs: 4, threads: 4}
+  - {uri: r2://marin-discord, endpoint: https://74981a43be0de7712369306c7b19133d.r2.cloudflarestorage.com, procs: 4, threads: 4}
+  - {uri: r2://oa-cw-s3-usage-index, endpoint: https://74981a43be0de7712369306c7b19133d.r2.cloudflarestorage.com, procs: 4, threads: 4}
+  - {uri: r2://oa-gcs-usage-index, endpoint: https://74981a43be0de7712369306c7b19133d.r2.cloudflarestorage.com, procs: 4, threads: 4}
+machines:
+  small: e2-standard-2
+  medium: e2-standard-4
+  # path-index, the age pyramids and the check: the one-VM job's machine (DuckDB at 12 GB over ~57M rows)
+  big: {type: e2-standard-8, disk: 100}
+  list: {type: e2-standard-4, disk: 50}
+  post: e2-standard-8
+# r2 scans four approved buckets of an account that holds many more (specs/r2-deployment.md): an unscanned-bucket
+# alert would fire every run, and the source key can't list the account's buckets anyway
+skip: [bucket-check]
+secrets:
+  R2_ACCESS_KEY_ID: oa-r2-index-access-key-id
+  R2_SECRET_ACCESS_KEY: oa-r2-index-secret-access-key
+  CLOUDFLARE_API_TOKEN: oa-r2-d1-token
+  SITE_TOKEN: oa-r2-site-grant
+  SLACK_BOT_TOKEN: oa-r2-slack-bot-token
+env:
+  SCAN_RUNS_PROFILE: /app/job/r2-nf-scan-runs.json
+  SITE_URL: https://r2.oa.dev
+  D1_DB_ID: 3bd87725-4f09-4316-877c-d089563a992e
+  D1_DB_NAME: oa-r2-usage-db
+  CLOUDFLARE_ACCOUNT_ID: 74981a43be0de7712369306c7b19133d
+  R2_ENDPOINT: https://74981a43be0de7712369306c7b19133d.r2.cloudflarestorage.com
+  R2_BUCKET: oa-r2-usage-index
+  SLACK_CHANNEL: C0C9J6CE8BD
+  SLACK_ALERT_CHANNEL: C0C9U47KTM2
+  AWS_DEFAULT_REGION: auto
+  AWS_EC2_METADATA_DISABLED: "true"
+  DUCKDB_MEM: 12GB
+  DUCKDB_THREADS: "8"
+pass: [DT_RECORD, DT_ALERTS, DISKY_LABELS]
+labels: {deployment: oa-r2}
+options:
+  # the source key (read-only on the four buckets) for listing only; every other call gets the serving key
+  list:
+    secrets: {AWS_ACCESS_KEY_ID: oa-r2-source-access-key-id, AWS_SECRET_ACCESS_KEY: oa-r2-source-secret-access-key}
+  index: {mode: path-index, args: [-U], mem: 12GB, age_pyramids: true, verify: true}
+  static-names: {gen: 2026-10-15r2b, mem: 12GB, build_args: [-x, "16,8"]}
+  interval-store: {mem: 12GB}
+  # R2 has no soft delete: superseded generation dirs are listed only until Ryan reviews a list
+  index-gc: {dry: true}
+  digest:
+    template: cw
+    config: /app/job/digest.yml
+    args: [-i, /app/job/icons-r2]
+    secrets: {CF_PAGES_TOKEN: oa-r2-cf-pages-token}

@@ -1,0 +1,55 @@
+# r2.oa.dev's "data behind this site" store (`store: meta`, specs/pipelines-everywhere.md §3.1): its own data and
+# serving buckets through the same `scan.nf`, a second head beside `r2.yml`'s. A secondary store is served per scan:
+# no interval store, and warm-cache / probe carry no `store=` yet.
+deployment: r2
+store: meta
+executor:
+  kind: google-batch
+  project: oa-internal-450019
+  region: us-west1
+  service_account: oa-r2-usage-job@oa-internal-450019.iam.gserviceaccount.com
+  image: us-west1-docker.pkg.dev/oa-internal-450019/oa-r2-usage/scan:nf
+  boot_disk: 50
+work: gs://oa-r2-usage-data/nf
+data: gs://oa-r2-usage-data
+layout:
+  layer2: meta-l2/{scan}/
+  snapshots: meta
+  listing: meta-listing/{scan}/
+sources:
+  - {uri: gcs://oa-r2-usage-data, procs: 4, threads: 4}
+  - uri: r2://oa-r2-usage-index
+    endpoint: https://74981a43be0de7712369306c7b19133d.r2.cloudflarestorage.com
+    procs: 4
+    threads: 4
+    secrets: {AWS_ACCESS_KEY_ID: oa-r2-index-access-key-id, AWS_SECRET_ACCESS_KEY: oa-r2-index-secret-access-key}
+machines:
+  small: e2-standard-2
+  medium: e2-standard-4
+  big: {type: e2-standard-8, disk: 100}
+  list: {type: e2-standard-4, disk: 50}
+  post: e2-standard-4
+skip: [bucket-check, interval-store, over-time, warm-cache, probe, digest]
+secrets:
+  R2_ACCESS_KEY_ID: oa-r2-index-access-key-id
+  R2_SECRET_ACCESS_KEY: oa-r2-index-secret-access-key
+  CLOUDFLARE_API_TOKEN: oa-r2-d1-token
+  SLACK_BOT_TOKEN: oa-r2-slack-bot-token
+env:
+  SCAN_RUNS_PROFILE: /app/job/r2-nf-scan-runs.json
+  D1_DB_ID: 3bd87725-4f09-4316-877c-d089563a992e
+  D1_DB_NAME: oa-r2-usage-db
+  CLOUDFLARE_ACCOUNT_ID: 74981a43be0de7712369306c7b19133d
+  R2_ENDPOINT: https://74981a43be0de7712369306c7b19133d.r2.cloudflarestorage.com
+  R2_BUCKET: oa-r2-usage-index
+  SLACK_ALERT_CHANNEL: C0C9U47KTM2
+  AWS_DEFAULT_REGION: auto
+  AWS_EC2_METADATA_DISABLED: "true"
+  DUCKDB_MEM: 12GB
+  DUCKDB_THREADS: "8"
+pass: [DT_RECORD, DT_ALERTS, DISKY_LABELS]
+labels: {deployment: oa-r2}
+options:
+  index: {mode: path-index, args: [-U], mem: 12GB, age_pyramids: true, verify: true}
+  static-names: {gen: 2026-10-15metab, mem: 12GB, build_args: [-x, "16,8"]}
+  index-gc: {dry: true}

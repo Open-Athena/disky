@@ -1,0 +1,23 @@
+{
+  "name": "oa-r2",
+  "comment": "r2.oa.dev's scan-run profile on the Nextflow pipeline (`job/profiles/r2.yml`, `r2-meta.yml`: `dt-cloud scan head`): a run is its head plus its step tasks (`finish -l nf-session=…`), filed under the profile's store. Outputs are the data store's layout keys (specs/pipelines-everywhere.md §3.3). Prices: e2 list $/h, us-west1, compute only.",
+  "store": "primary",
+  "project": "oa-internal-450019",
+  "regions": ["us-west1"],
+  "run_id_env": ["DT_RUN_ID", "BATCH_JOB_UID"],
+  "overlapped": ["static-names"],
+  "jobs": [
+    {"kind": "scan", "where": {"commands": "^scan head /app/job/profiles/r2(-meta)?\\.yml$"},
+     "scan": [{"env": "SNAP_ID"}, {"log": "^SCAN-JOB-DONE (\\S+)"}, {"started": "%Y-%m-%dT%H%M"}]}
+  ],
+  "alerts": {"label": "OA R2 scan", "logs_url": "https://console.cloud.google.com/logs/query;query=labels.job_uid%3D%22{job_uid}%22?project={project}"},
+  "secrets": ["AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY", "CLOUDFLARE_API_TOKEN", "SLACK_BOT_TOKEN", "SITE_TOKEN", "CF_PAGES_TOKEN"],
+  "outputs": [
+    {"key": "listing", "uri": "gs://oa-r2-usage-data/listing/{scan}/", "exclude": ["index/"], "split": "dir", "after": "path-index"},
+    {"key": "path-index", "uri": "gs://oa-r2-usage-data/listing/{scan}/index/{gen}/", "split": "stem", "rows": "groups", "after": "path-index upload"},
+    {"key": "snapshot", "uri": "gs://oa-r2-usage-data/snapshots/r2/{scan}/", "after": "publish"},
+    {"key": "nf-dag", "uri": "gs://oa-r2-usage-data/nf/runs/{scan}/dag.mmd"}
+  ],
+  "prices": {"e2-standard-2": 0.0767, "e2-standard-4": 0.1534, "e2-standard-8": 0.3068},
+  "log_days": 30
+}

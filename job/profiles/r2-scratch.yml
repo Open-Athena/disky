@@ -10,7 +10,7 @@ executor:
   project: oa-internal-450019
   region: us-west1
   service_account: oa-r2-usage-job@oa-internal-450019.iam.gserviceaccount.com
-  image: us-west1-docker.pkg.dev/oa-internal-450019/oa-r2-usage/scan:nf-scratch
+  image: us-west1-docker.pkg.dev/oa-internal-450019/oa-r2-usage/scan:nf
   boot_disk: 50
 work: gs://oa-r2-usage-scratch/nf
 data: gs://oa-r2-usage-scratch
@@ -31,9 +31,6 @@ machines:
   list: {type: e2-standard-4, disk: 50}
   post: e2-standard-4
 skip: [bucket-check, static-names, interval-store, over-time, index-gc, warm-cache, probe, digest]
-secrets:
-  AWS_ACCESS_KEY_ID: oa-r2-source-access-key-id
-  AWS_SECRET_ACCESS_KEY: oa-r2-source-secret-access-key
 env:
   AWS_DEFAULT_REGION: auto
   AWS_EC2_METADATA_DISABLED: "true"
@@ -41,7 +38,8 @@ env:
   DUCKDB_THREADS: "8"
 labels: {deployment: oa-r2, purpose: scratch}
 options:
-  index:
-    mode: path-index
-    # the one-VM job's `path-index -U`: no `-by-user` sort copies
-    args: [-U]
+  # as `r2.yml`: the source key for listing only
+  list:
+    secrets: {AWS_ACCESS_KEY_ID: oa-r2-source-access-key-id, AWS_SECRET_ACCESS_KEY: oa-r2-source-secret-access-key}
+  # as `r2.yml`: the one-VM job's `path-index -U`, its age pyramids and `verification.json`
+  index: {mode: path-index, args: [-U], mem: 12GB, age_pyramids: true, verify: true}

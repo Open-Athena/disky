@@ -550,3 +550,11 @@ def test_head_job_refuses_a_path_outside_profiles() -> None:
 
     with pytest.raises(ClickException, match="No profile at job/profiles/r2.json"):
         module["head_job"](module["job_spec"](image, config), "job/r2.json")
+
+
+@pytest.mark.parametrize("name", ["r2", "r2-meta", "r2-scratch"])
+def test_profiles_validate(name: str) -> None:
+    from dt_cloud.scan_profile import load
+
+    p = load(Path(module["HERE"]) / "profiles" / f"{name}.yml")
+    assert (p.deployment, p.store) == ("r2-scratch" if name == "r2-scratch" else "r2", "meta" if name == "r2-meta" else "primary")
