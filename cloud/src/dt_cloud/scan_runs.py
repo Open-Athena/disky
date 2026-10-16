@@ -1398,7 +1398,7 @@ def signame(sig: int) -> str:
 
 
 def run_grouped(cmd: Sequence[str], timeout: float | None, grace: float, session: bool | None = None,
-                signal_grace: float | None = None) -> Ran:
+                signal_grace: float | None = None, env: Mapping[str, str] | None = None) -> Ran:
     """Run `cmd`, in its own session when `session` (default: with `timeout`). Past `timeout`, TERM its whole process
     group, wait `grace` for the group to empty, then KILL what's left (coreutils `timeout -k`, but group-wide:
     multiprocessing spawn workers and Batch submitters must not outlive it); a timeout is rc 124, a missing CMD 127.
@@ -1432,7 +1432,7 @@ def run_grouped(cmd: Sequence[str], timeout: float | None, grace: float, session
     prev = {s: signal.signal(s, handle) for s in (signal.SIGTERM, signal.SIGINT)}
     try:
         try:
-            p = subprocess.Popen(list(cmd), start_new_session=session)
+            p = subprocess.Popen(list(cmd), start_new_session=session, env=None if env is None else dict(env))
         except OSError as e:
             err(f"scan-run: {cmd[0]}: {e.strerror or e}")
             return Ran(127, signal=got[0] if got else None)

@@ -603,14 +603,33 @@ def publish_r2(ctx: Ctx, arg: str | None) -> None:
                                     "remains visible; repair the R2 copy, then resume", hard=True)
 
 
-@step("interval-store", stage="serve", soft=True, options={"store": str, "timeout": str, "mem": str})
+@step("interval-store", stage="serve", soft=True, options={"store": str, "timeout": str, "mem": str, "profile": str, "merge_wait": int})
 def interval_store(ctx: Ctx, arg: str | None) -> None:
     """Append this scan (and any pending) to the change-interval path store beside its current generation, then the
     due carries / compaction (`interval-store add`). Never fatal (`-W`): a failure or the timeout warns, the next run
-    catches up. Reads the scans' `path` sorts at `<layer2>/index/<gen>/path-index.parquet` from the store."""
+    catches up. Reads the scans' `path` sorts at `<layer2>/index/<gen>/path-index.parquet` from the store.
+    `options.interval-store.profile`: the staged path instead (`interval-store append -c`, its per-range stages Batch
+    jobs of their own, in this task's image; `merge_wait` seconds on the merge job), for a store too big for one task."""
+    if ctx.reproc:
+        err(f"interval-store: not appending {ctx.scan} (REPROC)")
+        return
+    from .scan_runs import duration, run_grouped
+
+    timeout = ctx.opt("interval-store", "timeout")
+    if ctx.opt("interval-store", "profile"):
+        cmd = ["dt-cloud", "interval-store", "append", "-c", "-w", str(ctx.opt("interval-store", "merge_wait", 0)), ctx.scan]
+        env = {"INTERVAL_STORE_PROFILE": str(ctx.opt("interval-store", "profile"))}
+        if ctx.env.get("JOB_IMAGE"):
+            env["INTERVAL_STORE_IMAGE"] = ctx.env["JOB_IMAGE"]
+        ctx.run.begin("interval-store")
+        err("+ " + " ".join(cmd))
+        ran = run_grouped(cmd, duration(timeout) if timeout else None, 30.0, env={**ctx.env, **env})
+        ctx.run.end("interval-store", ran.rc, warn=True, msg="the scan reads per-scan until a later run appends it",
+                    timed_out=timeout if ran.timed_out else None, terminated=ran.signal if ran.rc else None)
+        return
     store = ctx.opt("interval-store", "store") or ctx.env.get("R2_ARCHIVE")
-    if ctx.reproc or not store:
-        err(f"interval-store: not appending {ctx.scan} ({'REPROC' if ctx.reproc else 'no store: options.interval-store.store or R2'})")
+    if not store:
+        err(f"interval-store: not appending {ctx.scan} (no store: options.interval-store.store or R2)")
         return
     cur = ctx.sh(["dt-cloud", "interval-store", "current", "-o", store], fatal=False, capture=True)
     if cur is None:
@@ -619,15 +638,12 @@ def interval_store(ctx: Ctx, arg: str | None) -> None:
     if not cur.strip():
         err(f"no interval store at {store} yet: not appending {ctx.scan}")
         return
-    from .scan_runs import duration, run_grouped
-
     layout = ctx.profile.layout.layer2.replace("{scan}", "{id}") + "index/{gen}/path-index.parquet"
     cmd = ["dt-cloud", "interval-store", "add", "-L", layout, "-s", store, "-o", store, "-w", str(ctx.work / "interval-store"),
            *(["-M", ctx.opt("interval-store", "mem")] if ctx.opt("interval-store", "mem") else []), "-p", str(ctx.nproc)]
-    timeout = ctx.opt("interval-store", "timeout")
     ctx.run.begin("interval-store")
     err("+ " + " ".join(cmd))
-    ran = run_grouped(cmd, duration(timeout) if timeout else None, 30.0)
+    ran = run_grouped(cmd, duration(timeout) if timeout else None, 30.0, env=ctx.env)
     ctx.run.end("interval-store", ran.rc, warn=True, msg="the scan reads per-scan until a later run appends it",
                 timed_out=timeout if ran.timed_out else None, terminated=ran.signal if ran.rc else None)
 
