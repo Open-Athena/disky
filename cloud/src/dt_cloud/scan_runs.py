@@ -581,6 +581,15 @@ def cost(profile: Profile, machine: str | None, spot: bool | None, tasks: int | 
     return round(rate * seconds / 3600 * (tasks or 1), 4)
 
 
+def labelled_cost(profile: Profile, jobs: Iterable[Mapping], labels: Mapping[str, str], now: int | None = None) -> float | None:
+    """The summed cost estimate (`job_fields`) of the Batch `jobs` carrying every one of `labels`: a run that spans
+    several jobs (a Nextflow head's step tasks, by their `nf-session`). None when none matches or none is priced."""
+    costs = [job_fields(profile, j, now)["cost_usd"] for j in jobs
+             if all((j.get("labels") or {}).get(k) == v for k, v in labels.items())]
+    priced = [c for c in costs if c is not None]
+    return round(sum(priced), 4) if priced else None
+
+
 # ── `record`: the job's incremental writes ──────────────────────────────────
 
 
@@ -635,13 +644,15 @@ def record(
     parent: str | None = None,
     job: Mapping | None = None,
     facts: Mapping[str, object] | None = None,
+    extra_cost: float | None = None,
 ) -> Record:
     """One incremental write of run `run_id` (scan `scan`): start it, start/close a phase (measuring completed outputs tied to
     it), measure named outputs, finish it (`exit_code`, or `nop`). The run row is upserted every time, so any call
     may come first. Returns what was written.
 
     `facts`: job facts the caller states (`JOB_FACTS`; a None is "unknown", never a clear). With a machine known (here
-    or stored) and no Batch `job`, the finishing write estimates the run's cost over its billed time (`billed_secs`)."""
+    or stored) and no Batch `job`, the finishing write estimates the run's cost over its billed time (`billed_secs`),
+    plus `extra_cost` (the jobs it ran apart from its own: `labelled_cost`)."""
     check_scan_id(scan)
     if phase_start and not phase:
         raise ValueError("scan-run: a phase start needs a phase name")
@@ -689,7 +700,8 @@ def record(
         tasks = run.tasks if run.tasks is not None else (row.get("tasks") if row else None)
         merged = {p["phase"]: p for p in phases} | {p.phase: p for p in new_phases}  # this write's phases over the stored
         secs = billed_secs(profile, run.started_ts or started, now, merged.values())
-        run = replace(run, cost_usd=cost(profile, machine, bool(spot), tasks, secs))
+        own = cost(profile, machine, bool(spot), tasks, secs)
+        run = replace(run, cost_usd=round(own + (extra_cost or 0), 4) if own is not None else None)
     outs: list[Output] = []
     gen_now = gen or (row.get("gen") if row else None)
     if store is not None and phase and not phase_start:
@@ -1218,7 +1230,7 @@ class JobRun:
         except Exception as e:  # noqa: BLE001
             err(self.redact(f"alert failed (the job continues): {type(e).__name__}: {e}"))
 
-    def finish(self, rc: int, error: str | None = None) -> None:
+    def finish(self, rc: int, error: str | None = None, extra_cost: float | None = None) -> None:
         """Record the run finished with `rc` (`error` its one-line reason), and on a failure post the `fail` alert
         unless one was already posted (a phase's, or an earlier `finish`'s)."""
         error = self.redact(error) if error else None
@@ -1231,7 +1243,7 @@ class JobRun:
         # doesn't, so the one phase still running is the failure's. Several running (background phases): none named.
         running = st.get("running", [])
         failed_phase = st.get("failed_phase") or (running[0] if rc and len(running) == 1 else None)
-        self.write(exit_code=rc, error=error, failed_phase=failed_phase)
+        self.write(exit_code=rc, error=error, failed_phase=failed_phase, extra_cost=extra_cost)
         if rc and not self.alerted():
             self.mark_alerted()
             self.alert("fail", f"run failed (exit {rc}){f' in {failed_phase}' if failed_phase else ''}{f': {clip_error(error)}' if error else ''}")
@@ -1557,14 +1569,24 @@ def nop_cmd(profile_path, d1, dry_run, run_id, sqlite) -> None:
 
 @cli.command("finish")
 @option("-e", "--error", default=None, help="With a non-zero -x: the failure's one-line reason (the ERR trap's)")
+@option("-l", "--cost-of", "cost_labels", multiple=True, help="KEY=VALUE (repeatable): add the estimated cost of the Batch jobs carrying all these labels (a Nextflow head's step tasks: `nf-session=<id>`)")
 @option("-x", "--exit", "rc", type=IntRange(0, 255), required=True, help="The job's exit code (0 = succeeded)")
 @_wrapper_opts
-def finish_cmd(error, rc, profile_path, d1, dry_run, run_id, sqlite) -> None:
+def finish_cmd(error, cost_labels, rc, profile_path, d1, dry_run, run_id, sqlite) -> None:
     """The job's EXIT trap: record the run finished (`record -x`; ERR as `scan_runs.error`), and on a non-zero RC
     post the `fail` alert unless a phase already did. Never fails the job. Under `supervise`, the state and the
     alerted marker are left for it."""
     j = JobRun(profile_path, d1, dry_run, run_id, sqlite)
-    j.finish(rc, error)
+    extra = None
+    if cost_labels:
+        from . import scan_runs_backfill as bf
+
+        try:
+            labels = dict(l.split("=", 1) for l in cost_labels)
+            extra = labelled_cost(j.profile, bf.fetch_jobs(j.profile.project or "", j.profile.regions), labels, _now())
+        except Exception as e:  # noqa: BLE001 — the cost is an estimate; the record must still finish
+            report_failure(e)
+    j.finish(rc, error, extra)
     if j.supervised:
         j.save(finished=rc)  # `supervise` reads it (and clears the state) once the job has exited
     else:

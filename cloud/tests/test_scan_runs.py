@@ -12,7 +12,8 @@ from dt_cloud import scan_runs
 from dt_cloud.d1_schema import table_ddl
 
 from dt_cloud.scan_runs import (
-    ALL, Output, Phase, PrintSink, Record, Run, SqliteSink, cli, cost, env_run_id, fill, load_profile, measure, measure_after,
+    ALL, Output, Phase, PrintSink, Record, Run, SqliteSink, cli, cost, env_run_id, fill, labelled_cost, load_profile, measure,
+    measure_after,
     parse_profile, record, record_sql, recovery_record, write_all,
 )
 from dt_cloud.scan_runs_backfill import classify, failure_of, log_filter, phases_of, reconstruct, task_lines
@@ -653,6 +654,32 @@ def test_record_without_a_priced_machine_has_no_cost():
     assert record(s, QUEUED, "2026-10-14T0600", "job-3", 3600, exit_code=0).run.cost_usd is None
     record(s, QUEUED, "2026-10-14T0600", "job-4", 0, start=True)
     assert record(s, QUEUED, "2026-10-14T0600", "job-4", 3600, exit_code=0).run.cost_usd is None
+
+
+def test_labelled_cost_sums_the_jobs_carrying_every_label():
+    def tagged(name, machine, labels, end="2026-10-08T08:01:00Z"):
+        j = job(name, f"uid-{name}", "2026-10-08T07:00:00Z", "SUCCEEDED",
+                [(*RUNNING, "2026-10-08T07:01:00Z"), ("RUNNING", "SUCCEEDED", end)], machine=machine)
+        return {**j, "labels": labels}
+
+    jobs = [
+        tagged("nf-a", "m-32", {"nf-session": "s1", "deployment": "cw-s3"}),           # 1 h × 2.0 $/h
+        tagged("nf-b", "m-32", {"nf-session": "s1"}, end="2026-10-08T07:31:00Z"),     # 0.5 h × 2.0 $/h
+        tagged("nf-c", "unpriced", {"nf-session": "s1"}),                             # unpriced: left out
+        tagged("nf-d", "m-32", {"nf-session": "s2"}),                                 # another session
+    ]
+    assert labelled_cost(PROFILE, jobs, {"nf-session": "s1"}) == 3.0
+    assert labelled_cost(PROFILE, jobs, {"nf-session": "s1", "deployment": "cw-s3"}) == 2.0
+    assert labelled_cost(PROFILE, jobs, {"nf-session": "s3"}) is None
+
+
+def test_record_finish_adds_the_runs_other_jobs_cost():
+    s = sink()
+    record(s, QUEUED, "2026-10-14T0600", "job-6", 0, start=True, facts={"machine": "box-1", "spot": False})
+    fin = record(s, QUEUED, "2026-10-14T0600", "job-6", 3600, exit_code=0, extra_cost=1.25)
+    assert fin.run.cost_usd == 1.61  # 0.36 $/h × 1 h + 1.25
+    record(s, QUEUED, "2026-10-14T0600", "job-7", 0, start=True, facts={"machine": "unpriced"})
+    assert record(s, QUEUED, "2026-10-14T0600", "job-7", 3600, exit_code=0, extra_cost=1.25).run.cost_usd is None
 
 
 def test_record_refuses_unknown_facts():
