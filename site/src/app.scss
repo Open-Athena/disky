@@ -556,6 +556,8 @@ h2 { font-size: 17px; font-weight: 650; margin: 0 0 4px; }
   margin: 0;
   font-variant-numeric: tabular-nums;
   b { color: var(--ink); font-weight: 600; }
+  // An inline path (`<code>{path}</code>`) breaks anywhere rather than widen the page at phone width.
+  code { overflow-wrap: anywhere; }
   .scanpick {
     background: var(--panel);
     color: var(--ink);
