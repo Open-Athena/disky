@@ -152,7 +152,7 @@ def test_serving_steps_commands(tmp_path, env):
         "dt-cloud index-gc -R -m 2d -F <tmp>/data -F r2",
         "dt-cloud warm-cache -d 2026-10-16T1200 -r r2://r2b/snapshots/sub",
         "dt-cloud probe -c -u https://site.example.org -o <tmp>/data/probes/sub/",
-        "dt-cloud digest -T t -C c.yml -r <tmp>/data/snapshots/sub",
+        "dt-cloud digest -T t -C c.yml -P slack -r <tmp>/data/snapshots/sub",
     ]
     assert (tmp_path / "home/.config/disk-tree/buckets.yml").read_text() == (
         "buckets:\n  - uri: r2://r2b\n    endpoint_url: https://r2.example.org\n    profile: r2\n")
@@ -230,3 +230,146 @@ def test_identity_is_required(tmp_path):
     with pytest.raises(S.StepFailed) as e:
         S.make_ctx(p, {"SNAP_ID": "2026-10-16"})
     assert str(e.value) == "the scan's identity is stamped by the head: $GEN, $DT_JOB_START unset"
+
+
+def gcs_ctx(tmp_path, env, monkeypatch, **opts):
+    """A gcs-shaped profile: `gs://` sources listed into the data bucket (FUSE-mounted at `<tmp>/mnt`), indexed by
+    `path-index`."""
+    monkeypatch.setattr(S.Ctx, "nproc", property(lambda self: 32))
+    (tmp_path / "t").mkdir(exist_ok=True)
+    p = parse({"deployment": "fix", "executor": {"kind": "google-batch", "project": "p", "region": "r", "image": "i"},
+               "work": "gs://dvx/nf", "data": "gs://dvx",
+               "layout": {"layer2": "listing/{scan}/", "snapshots": "", "listing": "listing/{scan}/"},
+               "sources": ["gcs://east", "gcs://eu"], "steps": ["access-ingest", "healthcheck"],
+               "options": {"list": {"weights": True, "threads": 10},
+                           "index": {"mode": "path-index", "attribution": ["attr/a.parquet"], "access": "access/agg/*/*.parquet",
+                                     "args": ["-u", "bysize"], "lifecycle": True, "rules": True},
+                           "static-names": {"profile": "sn.json"},
+                           "digest": {"template": "gcs", "config": "d.yml", "platforms": ["slack", "discord"]}, **opts}})
+    c = S.make_ctx(p, {**env, "DT_DATA_MOUNT": str(tmp_path / "mnt")})
+    c.sh_impl = Runner(tmp_path)
+    return c
+
+
+def test_list_weights_from_the_newest_earlier_listing(tmp_path, env, monkeypatch):
+    root = tmp_path / "mnt/dvx/listing"
+    for scan, done in (("2026-10-15T0701", True), ("2026-10-16T0701", True), ("2026-10-16T0900", False), ("2026-10-17T0701", True)):
+        (root / scan / "east").mkdir(parents=True)
+        if done:
+            (root / scan / "east/_SUCCESS.json").write_text("{}")
+    c = gcs_ctx(tmp_path, env, monkeypatch)
+    S.list_source(c, "gcs://east")
+    S.list_source(c, "gcs://eu")
+    assert c.sh_impl.calls == [
+        "disk-tree bulk-list gcs://east -o gs://dvx/listing/2026-10-16T1200/east -P 32 -w 10 -x clear "
+        "-W <tmp>/mnt/dvx/listing/2026-10-16T0701/east/*.parquet",
+        "disk-tree bulk-list gcs://eu -o gs://dvx/listing/2026-10-16T1200/eu -P 32 -w 10 -x clear",
+    ]
+
+
+def test_path_index_stages_aggregates_uploads_and_publishes(tmp_path, env, monkeypatch):
+    mnt = tmp_path / "mnt/dvx"
+    for b in ("east", "eu"):
+        (mnt / f"listing/2026-10-16T1200/{b}").mkdir(parents=True)
+        (mnt / f"listing/2026-10-16T1200/{b}/_SUCCESS.json").write_text("{}")
+    (mnt / "access/agg/2026-10-15").mkdir(parents=True)
+    (mnt / "access/agg/2026-10-15/x.parquet").write_text("")
+    uploads = []
+
+    def upload(files, dest):
+        uploads.append(([f.name for f in files], dest))
+        d = mnt / dest.removeprefix("gs://dvx/")
+        d.mkdir(parents=True, exist_ok=True)
+        for f in files:
+            (d / f.name).write_text(f.read_text())
+
+    monkeypatch.setattr(S, "upload", upload)
+    c = gcs_ctx(tmp_path, env, monkeypatch)
+    runner = c.sh_impl
+
+    def run(argv, env, stdout=None, text=True):
+        r = runner(argv, env, stdout, text)
+        if argv[:2] == ["dt-cloud", "path-index"]:
+            assert env["DUCKDB_TMP"] == f"{tmp_path}/t/dt-scan/2026-10-16T1200/stage/.duckdb-tmp"
+            pi = Path(argv[argv.index("-P") + 1]).parent
+            for n in ("path-index.parquet", "path-index-bysize.parquet", "path-index-bysize-by-user.parquet"):
+                (pi / n).write_text(n)
+            out = Path(argv[argv.index("-o") + 1])
+            out.mkdir(parents=True)
+            (out / "meta.json").write_text("{}")
+        if argv[:3] == ["dt-cloud", "rules", "-o"]:
+            Path(argv[3]).write_text("{}")
+        return r
+
+    c.sh_impl, calls = run, runner.calls
+    S.index(c, None)
+    w = "<tmp>/t/dt-scan/2026-10-16T1200"
+    st = f"{w}/stage/dvx"
+    assert calls == [
+        f"dt-cloud stage -o {w}/stage /gcs/dvx/listing/2026-10-16T1200/east/*.parquet /gcs/dvx/listing/2026-10-16T1200/eu/*.parquet "
+        "/gcs/dvx/listing/2026-10-16T1200/east/_SUCCESS.json /gcs/dvx/listing/2026-10-16T1200/eu/_SUCCESS.json "
+        "/gcs/dvx/attr/a.parquet /gcs/dvx/access/agg/*/*.parquet",
+        f"dt-cloud path-index -d 2026-10-16 -l {st}/listing/2026-10-16T1200/east/*.parquet -l {st}/listing/2026-10-16T1200/eu/*.parquet "
+        f"-a {st}/attr/a.parquet -x {st}/access/agg/*/*.parquet -o {w}/snap -c <tmp>/mnt/dvx/listing/2026-10-16T1200/dir-cache "
+        f"-P {w}/path-index/path-index.parquet -u bysize",
+        "dt-cloud lifecycle pull -k -b gs://east -b gs://eu -o <tmp>/mnt/dvx/snapshots/2026-10-16T1200/lifecycle.json",
+        f"dt-cloud rules -o {w}/rules.json",
+    ]
+    assert uploads == [(["path-index-bysize-by-user.parquet", "path-index-bysize.parquet", "path-index.parquet"],
+                        "gs://dvx/listing/2026-10-16T1200/index/G1")]
+    assert sorted(p.relative_to(mnt).as_posix() for p in (mnt / "snapshots").rglob("*") if p.is_file()) == [
+        "snapshots/2026-10-16T1200/meta.json",
+        "snapshots/rules.json",
+    ]
+    calls.clear()
+    S.index(c, None)
+    assert calls == []
+
+
+def test_gcs_extra_steps(tmp_path, env, monkeypatch):
+    c = gcs_ctx(tmp_path, env, monkeypatch, **{"access-ingest": {"args": ["-j", "8"]}, "index-sync": {"retain": 30}})
+    c.env.update(SITE_TOKEN="t", SITE_URL="https://site.example.org", SLACK_BOT_TOKEN="s", SLACK_CHANNEL="C1",
+                 CLOUDFLARE_API_TOKEN="cf", CLOUDFLARE_ACCOUNT_ID="acct")
+    S.access_ingest(c, None)
+    S.index_sync(c, None)
+    S.healthcheck(c, None)
+    S.digest(c, None)
+    k = "listing/2026-10-16T1200/index/G1"
+    assert c.sh_impl.calls == [
+        "dt-cloud access ingest -j 8",
+        f"dt-cloud index-sync -p -d <tmp>/mnt/dvx/{k} -g G1 -k {k} -M <tmp>/mnt/dvx/snapshots 2026-10-16T1200",
+        "dt-cloud index-gc -r 30 2026-10-16T1200",
+        "dt-cloud healthcheck -d 2026-10-16T1200",
+        "dt-cloud digest -T gcs -C d.yml -P slack -r gs://dvx/snapshots",
+    ]
+
+
+def test_publish_r2_barrier(tmp_path, env, monkeypatch):
+    opts = {"publish-r2": {"args": ["-S"], "require": ["{snapshots}/{scan}/meta.json", "{index}/attr.tsv"],
+                           "keys": ["snapshots/rules.json"], "barrier": True}}
+    c = gcs_ctx(tmp_path, env, monkeypatch, **opts)
+    c.env.update(R2_ENDPOINT="https://r2.example.org", R2_BUCKET="idx")
+    S.publish_r2(c, None)
+    assert c.sh_impl.calls == [
+        "dt-cloud publish-r2 -S -a -R snapshots/2026-10-16T1200/meta.json -R listing/2026-10-16T1200/index/G1/attr.tsv 2026-10-16T1200",
+        "dt-cloud publish-r2 -a -p snapshots/rules.json -R snapshots/rules.json 2026-10-16T1200",
+    ]
+    failing = gcs_ctx(tmp_path, env, monkeypatch, **opts)
+    failing.env.update(R2_ENDPOINT="https://r2.example.org", R2_BUCKET="idx")
+    failing.sh_impl = Runner(tmp_path, fail=("dt-cloud publish-r2 -S",))
+    with pytest.raises(S.StepFailed) as e:
+        S.publish_r2(failing, None)
+    assert (e.value.hard, failing.sh_impl.calls) == (True, [
+        "dt-cloud publish-r2 -S -a -R snapshots/2026-10-16T1200/meta.json -R listing/2026-10-16T1200/index/G1/attr.tsv 2026-10-16T1200",
+    ])
+
+
+def test_a_hard_failure_fails_a_soft_step(tmp_path, monkeypatch):
+    def boom(ctx, arg):
+        raise S.StepFailed(3, "barrier", hard=True)
+
+    monkeypatch.setitem(S.STEPS, "boom", S.Step("boom", boom, soft=True))
+    monkeypatch.setattr(S, "load_profile_env", lambda env, path=None: profile(tmp_path))
+    (tmp_path / "t").mkdir()
+    env = {"SNAP_ID": "2026-10-16T1200", "GEN": "G1", "DT_JOB_START": "1", "TMPDIR": str(tmp_path / "t"), "HOME": str(tmp_path / "home")}
+    assert S.run_step("boom", None, env) == 3
