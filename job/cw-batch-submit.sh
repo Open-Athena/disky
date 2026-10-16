@@ -10,6 +10,7 @@
 #
 #   ./job/cw-batch-submit.sh              # submit, print job id
 #   DRY=1 ./job/cw-batch-submit.sh        # print the spec (for a scheduler body)
+#   NF=0 ./job/cw-batch-submit.sh         # the one-VM driver (job/cw-run.sh) instead of the Nextflow head
 #
 # Prereq (one-time): the CAIOS S3 keypair in Secret Manager, readable by the SA.
 #   printf %s "$KEY_ID" | gcloud secrets create cw-s3-access-key-id --data-file=-
@@ -143,10 +144,11 @@ cat > "$spec" <<EOF
 }
 EOF
 
-# NF=1: the Nextflow head (job/nf/cw-head.sh, specs/workflow-engine.md §7) instead of the one-VM driver. The head only
+# The Nextflow head (job/nf/cw-head.sh, specs/workflow-engine.md §7) is the default, and so the cron's body (PIN=1 runs
+# under a scrubbed env); NF=0 submits the one-VM driver (job/cw-run.sh) instead. The head only
 # drives the DAG (each step is a Batch task of its own, which fetches its own secrets), so: a small VM, no stage disk,
 # and of the secrets only what the head itself uses (the scan-run record's D1 token, the alert's Slack token).
-if [ "${NF:-}" = 1 ]; then
+if [ "${NF:-1}" = 1 ]; then
   python3 - "$spec" <<'PY'
 import json, sys
 p = sys.argv[1]; j = json.load(open(p))
