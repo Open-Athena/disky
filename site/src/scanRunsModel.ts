@@ -40,6 +40,8 @@ export interface ScanRunPhase {
   /** The Batch job the phase ran in when not the run's own (a Nextflow step's task), and its machine */
   job_name?: string | null
   machine?: string | null
+  /** The pipeline node that ran it: a Nextflow task's `<process> (<tag>)` */
+  task?: string | null
 }
 
 export interface ScanRunOutput {
@@ -192,7 +194,7 @@ export function phaseSpans(run: Pick<ScanRun, 'started_ts'> & Partial<Pick<ScanR
     const start = Math.max(0, p.started_ts - t0), end = Math.max(start, until - t0)
     let lane = laneEnds.findIndex(e => e <= start)
     if (lane < 0) { lane = laneEnds.length; laneEnds.push(end) } else laneEnds[lane] = end
-    return [{ phase: p.phase, start, end, status: phaseStatus(p), note: p.note, lane, machine: p.machine }]
+    return [{ phase: p.phase, start, end, status: phaseStatus(p), note: p.note, lane, ...(p.machine ? { machine: p.machine } : {}) }]
   })
 }
 

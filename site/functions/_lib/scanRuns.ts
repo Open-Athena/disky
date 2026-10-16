@@ -26,6 +26,17 @@ export async function loadScanRuns(db: D1Database, store: string): Promise<ScanR
   }
 }
 
+/** The run's pipeline DAG (its head's Nextflow `-with-dag` Mermaid), or null: a one-VM run, or no `scan_run_dags`. */
+export async function loadDag(db: D1Database, runId: string): Promise<string | null> {
+  try {
+    const r = await db.prepare('SELECT mermaid FROM scan_run_dags WHERE run_id = ?').bind(runId).first<{ mermaid: string }>()
+    return r?.mermaid ?? null
+  } catch (e) {
+    if (/no such table/i.test(String((e as Error).message ?? e))) return null
+    throw e
+  }
+}
+
 export interface ScanRunsList { configured: boolean; runs: RunSummary[] }
 
 export const scanRunsList = (rows: ScanRunRows | null, now: number): ScanRunsList =>
@@ -47,6 +58,8 @@ export interface ScanRunDetail {
   next_scan: string | null
   phase_issues: PhaseIssue[]
   recoveries: PhaseRecovery[]
+  /** The pipeline DAG (Mermaid), when its head recorded one */
+  dag?: string | null
 }
 
 export function scanRunDetail(rows: ScanRunRows, id: string, now: number): ScanRunDetail | null {
