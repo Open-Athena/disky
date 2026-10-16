@@ -34,5 +34,5 @@
     "SITE_TOKEN": "oa-r2-site-grant",
     "CF_PAGES_TOKEN": "oa-r2-cf-pages-token"
   },
-  "optional_secrets_live": []
+  "optional_secrets_live": ["SLACK_BOT_TOKEN", "SITE_TOKEN", "CF_PAGES_TOKEN"]
 }
