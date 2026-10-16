@@ -117,6 +117,13 @@ def build_command(context: Path, tag: str, config: dict) -> list[str]:
     ]
 
 
+def index_env() -> dict[str, str]:
+    """The job's env with the serving bucket's key as the ambient S3 credentials: what a `dt-cloud` stage that reads
+    `r2://<serving>` from its own process (`index-sync`'s uploaded-generation check, the index stores' existence checks)
+    authenticates with. The primary scan's listing env carries the source key instead."""
+    return {**environ, "AWS_ACCESS_KEY_ID": environ["R2_ACCESS_KEY_ID"].strip(), "AWS_SECRET_ACCESS_KEY": environ["R2_SECRET_ACCESS_KEY"].strip()}
+
+
 def verify_uploads(publisher: object, bucket: str, files: list[tuple[str, int]]) -> None:
     for key, size in files:
         actual = publisher.head_object(Bucket=bucket, Key=key)["ContentLength"]
@@ -368,8 +375,8 @@ def backfill_age(scan: str, generation: str) -> None:
         uploaded.append((object_key, path.stat().st_size))
     verify_uploads(publisher, config["serving_bucket"], uploaded)
     sync = ["dt-cloud", "index-sync", scan, "-A", "-b", f"r2://{config['serving_bucket']}", "-d", str(out), "-g", stamp, "-k", key]
-    run([*sync, "-r"], check=True)
-    run([*sync, "-p"], check=True)
+    run([*sync, "-r"], env=index_env(), check=True)
+    run([*sync, "-p"], env=index_env(), check=True)
     data.blob(f"age-backfills/{scan}/{stamp}/_SUCCESS.json").upload_from_string(dumps({"scan": scan, "source_generation": generation, "age_generation": stamp}), content_type="application/json", if_generation_match=0)
 
 
@@ -556,8 +563,8 @@ def execute_scan(
     for variant in ("path", "bysize", *AGE_PYRAMID_VARIANTS.values()):
         sync.extend(("-v", variant))
     with reporter.phase("publish"):
-        run([*sync, "-r"], check=True)
-        run([*sync, "-p"], check=True)
+        run([*sync, "-r"], env=index_env(), check=True)
+        run([*sync, "-p"], env=index_env(), check=True)
         data.blob(f"{'meta-scans' if meta else 'scans'}/{scan}/{generation}/_SUCCESS.json").upload_from_string(dumps(report), content_type="application/json", if_generation_match=0)
     index_store(config, work, reporter, meta)
     print(dumps(report))
@@ -578,7 +585,7 @@ def index_store(
     store = f"r2://{config['serving_bucket']}"
     common = ["-L", f"{'meta-l2' if meta else 'listing'}/{{id}}/index/{{gen}}/path-index.parquet", "-s", store, "-o", store,
               "-M", environ.get("DUCKDB_MEM", "12GB"), "-p", environ.get("DUCKDB_THREADS", "8")]
-    env = {**environ, "AWS_ACCESS_KEY_ID": environ["R2_ACCESS_KEY_ID"].strip(), "AWS_SECRET_ACCESS_KEY": environ["R2_SECRET_ACCESS_KEY"].strip()}
+    env = index_env()
     # The existence checks below read the index bucket from this process: without its key they read nothing, and every
     # stage would `build` (refused over an existing generation).
     environ.update(AWS_ACCESS_KEY_ID=env["AWS_ACCESS_KEY_ID"], AWS_SECRET_ACCESS_KEY=env["AWS_SECRET_ACCESS_KEY"])

@@ -291,3 +291,15 @@ def test_corrupt_age_tier_refuses_publication(scan: Path) -> None:
     write_table(table, tier)
     with pytest.raises(ValueError, match="^Age pyramid 1h does not match the dated path population$"):
         module["verify_scan"](scan, config, "2026-10-12T1200")
+
+
+def test_index_stages_authenticate_with_the_serving_key_not_the_source_key(monkeypatch) -> None:
+    namespace = module["index_env"].__globals__
+    monkeypatch.setitem(namespace, "environ", {
+        "AWS_ACCESS_KEY_ID": "source-id", "AWS_SECRET_ACCESS_KEY": "source-secret",
+        "R2_ACCESS_KEY_ID": "index-id\n", "R2_SECRET_ACCESS_KEY": "index-secret\n", "TEST_FLAG": "1",
+    })
+    assert module["index_env"]() == {
+        "AWS_ACCESS_KEY_ID": "index-id", "AWS_SECRET_ACCESS_KEY": "index-secret",
+        "R2_ACCESS_KEY_ID": "index-id\n", "R2_SECRET_ACCESS_KEY": "index-secret\n", "TEST_FLAG": "1",
+    }
