@@ -27,8 +27,30 @@ def profile() -> dict:
     return loads((HERE / "r2.json").read_text())
 
 
+def job_run() -> "JobRun":
+    """This run's view through the shared job wrapper (`dt_cloud.scan_runs.JobRun`, what the shell jobs drive as
+    `dt-cloud scan-run start / phase / finish`): the profile, the run id (`BATCH_JOB_UID`), the D1 record and the
+    state file the phases, `finish` and an enclosing `scan-run supervise` share."""
+    from dt_cloud.scan_runs import JobRun
+
+    return JobRun(str(HERE / "r2-scan-runs.json"), profile()["database_id"], False, environ.get("BATCH_JOB_UID", "").strip() or None, None)
+
+
+def exit_code(exc: BaseException | None) -> int:
+    """A failure's exit status: a subprocess's own (a signal death as 128+N), else 1."""
+    if exc is None:
+        return 0
+    code = getattr(exc, "returncode", None)
+    if not isinstance(code, int) or code == 0:
+        return 1
+    return 128 - code if code < 0 else min(code, 255)
+
+
 class ScanReporter:
-    """Best-effort telemetry; a reporting outage must not interrupt index publication."""
+    """The run's record and alerts through the shared job wrapper (`job_run`): the scan-run row and its phases in D1
+    (/scans), one `fail` alert per failed run naming its phase, a `warn` per failed non-fatal step, and the pointer
+    the image's entrypoint (`dt-cloud scan-run supervise`) finishes the run from when the job is killed before its own
+    exit (a preemption, the OOM killer). Best-effort: a reporting outage never interrupts publication."""
 
     def __init__(
         self,
@@ -37,27 +59,9 @@ class ScanReporter:
     ) -> None:
         self.scan = scan
         self.generation = generation
-        self.started = int(time())
         self.job = None
-        self.failed_phase = "initialize"
-
-    def write(self, **kwargs: object) -> None:
-        from dt_cloud.scan_runs import AnyStore, D1Sink, load_profile, record
-
-        try:
-            uid = environ["BATCH_JOB_UID"].strip()
-            if not uid:
-                raise ValueError("Empty BATCH_JOB_UID")
-            rec = record(
-                D1Sink(profile()["database_id"]), load_profile(HERE / "r2-scan-runs.json"),
-                self.scan, uid, int(time()), gen=self.generation,
-                store=AnyStore() if kwargs.get("phase") == "archive" else None,
-                job=self.job,
-                **kwargs,
-            )
-            print(f"scan-run: {self.scan} {uid} {rec.run.status}", file=stderr, flush=True)
-        except (Exception, SystemExit) as exc:
-            print(f"scan-run reporting failed (scan continues): {type(exc).__name__}: {exc}", file=stderr, flush=True)
+        environ.setdefault("DT_JOB_START", str(int(time())))  # the PHASE lines' clock
+        self.run = job_run()
 
     def __enter__(self) -> "ScanReporter":
         # The Batch-assigned task-group resource is exposed on the VM's instance metadata.
@@ -80,16 +84,33 @@ class ScanReporter:
         except (Exception, SystemExit) as exc:
             print(f"Batch link metadata unavailable: {type(exc).__name__}", file=stderr, flush=True)
         print(f"OA-R2-SCAN-START {self.scan} {self.generation}", file=stderr, flush=True)
-        self.write(start=True)
+        # `scan-run start`'s steps, in process
+        self.run.clear()
+        self.run.save(fresh=True, scan=self.scan, kind="scan", gen=self.generation)
+        rec = self.run.write(start=True, job=self.job)
+        if rec is not None:
+            self.run.save(region=rec.run.region, job_name=rec.run.job_name)
+        self.run.point_supervisor(str(HERE / "r2-scan-runs.json"), profile()["database_id"], False, None)
         return self
 
     @contextmanager
     def phase(self, name: str):
-        self.failed_phase = name
-        began = int(time())
-        yield
-        print(f"PHASE {name}: {int(time()) - self.started}s", file=stderr, flush=True)
-        self.write(phase=name, began=began)
+        """A fatal phase: a failure inside records it failed, alerts `fail` once (naming it) and propagates."""
+        self.run.begin(name)
+        try:
+            yield
+        except BaseException as exc:
+            self.run.end(name, exit_code(exc), msg=type(exc).__name__)
+            raise
+        self.run.end(name)
+
+    def step(self, name: str, command: list[str], env: dict[str, str], meaning: str) -> int:
+        """A non-fatal phase running COMMAND: a failure records it failed and alerts `warn` (with what it means); the
+        scan stands. Returns COMMAND's exit status."""
+        self.run.begin(name)
+        rc = run(command, env=env).returncode
+        self.run.end(name, rc, warn=True, msg=meaning, measure=False)
+        return rc
 
     def __exit__(
         self,
@@ -98,10 +119,12 @@ class ScanReporter:
         traceback: object,
     ) -> None:
         # Error types and exit codes are safe to report without serializing credentials or request bodies.
-        code = getattr(exc, "returncode", 1) if exc is not None else 0
-        self.write(exit_code=code, failed_phase=self.failed_phase if exc else None, error=exc_type.__name__ if exc_type else None)
-        if exc is not None:
-            alert("fail", f"run failed (exit {code}) in {self.failed_phase}: {exc_type.__name__}")
+        rc = exit_code(exc)
+        self.run.finish(rc, exc_type.__name__ if exc_type else None)
+        if self.run.supervised:
+            self.run.save(finished=rc)  # `supervise` reads it (and clears the state) once the job has exited
+        else:
+            self.run.clear()
 
 
 def build_command(context: Path, tag: str, config: dict) -> list[str]:
@@ -124,9 +147,7 @@ def alert(level: str, message: str) -> None:
     redacted of the profile's `secrets`, the Batch logs link): Slack once `SLACK_BOT_TOKEN` and `SLACK_ALERT_CHANNEL`
     are set, else printed. Never raises."""
     try:
-        from dt_cloud.scan_runs import JobRun
-
-        JobRun(str(HERE / "r2-scan-runs.json"), None, False, environ.get("BATCH_JOB_UID", "").strip() or None, None).alert(level, message)
+        job_run().alert(level, message)
     except Exception as exc:  # noqa: BLE001 — alerting must never mask what it reports
         print(f"alert failed (the job continues): {type(exc).__name__}", file=stderr, flush=True)
 
@@ -478,6 +499,8 @@ def scan_run() -> None:
         execute_scan(config, scan, generation, work, reporter)
         with reporter.phase("meta"):
             execute_meta(config, scan, generation, work / "meta")
+        for name, command, env, meaning in gc_steps(config):
+            reporter.step(name, command, env, meaning)
         serve(config, scan, reporter)
 
 
@@ -507,11 +530,28 @@ def serve_steps(config: dict, scan: str) -> list[tuple[str, list[str], dict[str,
 def serve(config: dict, scan: str, reporter: "ScanReporter") -> None:
     """`serve_steps`, each its own phase and never fatal: a failure warns, the scan stands."""
     for name, command, env, meaning in serve_steps(config, scan):
-        with reporter.phase(name):
-            done = run(command, env=env)
-            if done.returncode:
-                print(f"WARN: {name} failed (exit {done.returncode})", file=stderr, flush=True)
-                alert("warn", f"{name} failed (exit {done.returncode}): {meaning}")
+        reporter.step(name, command, env, meaning)
+
+
+def gc_steps(config: dict) -> list[tuple[str, list[str], dict[str, str], str]]:
+    """Superseded index generations, per store (the primary's and meta's): their D1 row groups, then their dirs on the
+    serving bucket (`listing/<scan>/index/<gen>/`, `meta-l2/…`) that no pointer names, older than 2 days
+    (`dt_cloud.gen_gc`). The dirs are listed only (`-n`, what would go, in the log) until `index_gc_files` is on in
+    job/r2.json: R2 has no soft delete, so the first deletions wait for a reviewed list."""
+    env = {**index_env(), "R2_ENDPOINT": environ["DISK_TREE_R2_ENDPOINT_URL"]}
+    files = ["-F", f"r2://{config['serving_bucket']}"]
+    steps = []
+    for store in ("primary", "meta"):
+        name = "index-gc" if store == "primary" else "index-gc-meta"
+        meaning = "superseded generations stay until the next run"
+        if config["index_gc_files"]:
+            steps.append((name, ["dt-cloud", "index-gc", "-s", store, "-m", "2d", *files], env, meaning))
+        else:
+            steps += [
+                (name, ["dt-cloud", "index-gc", "-s", store], env, meaning),
+                (f"{name}-files", ["dt-cloud", "index-gc", "-s", store, "-R", "-n", "-m", "2d", *files], env, "the would-delete list is missing from this run's log"),
+            ]
+    return steps
 
 
 class MetaReporter:
@@ -521,6 +561,14 @@ class MetaReporter:
     def phase(self, name: str):
         print(f"META-PHASE {name}", file=stderr, flush=True)
         yield
+
+    def step(self, name: str, command: list[str], env: dict[str, str], meaning: str) -> int:
+        print(f"META-PHASE {name}", file=stderr, flush=True)
+        rc = run(command, env=env).returncode
+        if rc:
+            print(f"WARN: meta {name} failed (exit {rc})", file=stderr, flush=True)
+            alert("warn", f"meta {name} failed (exit {rc}): {meaning}")
+        return rc
 
 
 def execute_meta(
@@ -654,12 +702,8 @@ def index_store(
         verb = "add" if current or Store(store).exists(f"{kind}/{gen}/scans.json") else "build"
         pin = verb == "build" or kind != "interval-store"
         command = ["dt-cloud", kind, verb, *(["-g", gen] if pin else []), *common, "-w", str(work / kind), *(build_args if verb == "build" else [])]
-        with reporter.phase(kind):
-            print(join(command), file=stderr, flush=True)
-            done = run(command, env=env)
-            if done.returncode:
-                print(f"WARN: {kind} {verb} {gen} failed (exit {done.returncode}); a later run catches up", file=stderr, flush=True)
-                alert("warn", f"{'meta ' if meta else ''}{kind} {verb} failed (exit {done.returncode}): a later run catches up")
+        print(join(command), file=stderr, flush=True)
+        reporter.step(kind, command, env, f"{kind} {verb} didn't take this scan; a later run catches up")
 
 
 if __name__ == "__main__":

@@ -4,11 +4,13 @@ The deployment's launch is [`done/r2-launch.md`]. This spec tracks the CLAUDE.md
 
 ## Job baseline (2026-10-16)
 
-The daily job (`job/r2-scan`, a Python driver on GCP Batch, 07:15 UTC) already records each run (`/scans`, `ScanReporter` over `dt_cloud.scan_runs.record`) and appends the static name index and interval store. Built on `r2` (not yet in an image):
+The daily job (`job/r2-scan`, a Python driver on GCP Batch, 07:15 UTC) records each run (`/scans`) and appends the static name index and interval store. Built on `r2` (not yet in an image):
 
 | item | how | needs |
 |---|---|---|
-| Failure alerts → #r2-usage-alerts | `alert()` posts through the shared wrapper's `scan_runs.JobRun.alert` (`disk-tree notify`, redacted of `r2-scan-runs.json`'s `secrets`, a Batch logs link): `fail` once per failed run, naming the phase; `warn` on a failed index stage or serving step | `SLACK_BOT_TOKEN`, `slack_alert_channel` in `job/r2.json` |
+| Run record + failure alerts → #r2-usage-alerts | the shared job wrapper: `ScanReporter` drives `dt_cloud.scan_runs.JobRun` in process (`scan-run start` / `phase` / `finish`'s steps: the D1 record, PHASE lines, `disk-tree notify` redacted of `r2-scan-runs.json`'s `secrets` with a Batch logs link): `fail` once per failed run, naming the phase; `warn` on a failed non-fatal step (an index stage, index-gc, a serving step) | `SLACK_BOT_TOKEN`, `slack_alert_channel` (C0C9U47KTM2) |
+| Killed runs (preemption, OOM) | the image's entrypoint is `dt-cloud scan-run supervise -- python job/r2-scan run`: the reporter points it at its run, and a run killed before its own exit is recorded failed (`terminated (SIGTERM)` / `killed (SIGKILL), most likely out of memory`) and alerts once. Index-only and age-backfill jobs override the entrypoint and aren't supervised | — |
+| `index-gc` | after the meta phase, per store (primary, meta): `dt-cloud index-gc -s <store>` (D1 row groups of unpointed generations), then the serving bucket's unpointed generation dirs older than 2 days. Those R2 deletions are gated: until `index_gc_files` is `true` in `job/r2.json` the dirs are only listed (`-R -n -F r2://oa-r2-usage-index`, in the log). Dry run 2026-10-16 (`tmp/r2-index-gc-dryrun.txt`): 0 row groups, 0 dirs in both stores (every generation dir is pointed: 8 primary scans, 4 meta) | — |
 | Cache warm-up | `dt-cloud warm-cache -d <scan> -r r2://oa-r2-usage-index/snapshots/r2`, its own phase, never fatal | `SITE_TOKEN` |
 | Serving probe | `dt-cloud probe -c -s r2 -u https://r2.oa.dev -o r2://oa-r2-usage-index/probes/r2/`, never fatal | `SITE_TOKEN` |
 | Slack digest → #r2-usage | `dt-cloud digest -T cw -C job/digest.yml` (one reply per UTC day, decimal TB as the site renders, no quotas); state `r2://oa-r2-usage-index/digest/r2/…`; plot on `oa-r2-usage-icons`'s `plot` branch; avatars = `job/icons-r2/` (the shared arrows) on its production | `SLACK_BOT_TOKEN`, `slack_channel`, `SITE_TOKEN`, `CF_PAGES_TOKEN` |
@@ -26,7 +28,7 @@ Dry digest over prod snapshots (2026-10-16, `-n`, no plot without a site grant):
 3. **Pages token → GCP**: `infra/cf/sync-secrets -g` (also re-installs the existing job secrets from the stack outputs, unchanged) adds `oa-r2-cf-pages-token`'s version.
 4. **Avatars**: `wrangler pages deploy job/icons-r2 --project-name oa-r2-usage-icons --branch main` (OA account token, as the site deploys).
 5. **Slack app**: api.slack.com/apps → Create New App → From a manifest → the OA workspace → paste `job/slack/r2-usage-bot.manifest.json` → Create → Install to Workspace. Upload `site/public/icons/r2-512.png` as the app icon (Basic Information). Store the `xoxb-…` token: `gcloud secrets versions add oa-r2-slack-bot-token --project oa-internal-450019 --data-file=-` (paste, then Ctrl-D; never anywhere else).
-6. **Channels**: create #r2-usage (digest) and #r2-usage-alerts (alerts). Public channels need no invite (`chat:write.public`); `/invite @R2 Usage Bot` in any private one. Put both channel ids in `job/r2.json` (`slack_channel`, `slack_alert_channel`).
+6. **Channels**: done — #r2-usage `C0C9J6CE8BD`, #r2-usage-alerts `C0C9U47KTM2`, in `job/r2.json`. `/invite @R2 Usage Bot` in either if private (public ones need no invite: `chat:write.public`).
 7. **Site grant**: mint a read-only grant at https://r2.oa.dev/admin, then `gcloud secrets versions add oa-r2-site-grant --project oa-internal-450019 --data-file=-`.
 8. **Go live**: list all three in `optional_secrets_live`, build the image (`job/r2-scan build <tag>`), pin it in `infra/gcp/Pulumi.r2.yaml` (`r2:scanImage`), and `pulumi up -s r2` in `infra/gcp` again. The next scan warms, probes, posts the day's digest reply, and alerts on any failure.
 
@@ -34,7 +36,6 @@ Steps 1–4 can go before Slack exists; step 8 must follow 3, 5 and 7, since a l
 
 ## Still open
 
-- `index-gc` after each scan (baseline) is not run by `job/r2-scan`.
-- The job is a bespoke Python driver, not `dt-cloud scan-run supervise` (preemptions / OOM kills aren't recorded as a failed run, so they don't alert).
+- `index_gc_files` (R2 deletion of unpointed generation dirs) stays off until Ryan reviews a run's `index-gc-files` list.
 
 [`done/r2-launch.md`]: done/r2-launch.md

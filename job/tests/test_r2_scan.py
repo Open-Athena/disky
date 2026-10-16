@@ -3,6 +3,7 @@ from json import loads
 from pathlib import Path
 from runpy import run_path
 from subprocess import CalledProcessError
+import sys
 
 import pytest
 
@@ -13,9 +14,27 @@ image = "us-west1-docker.pkg.dev/oa-internal-450019/oa-r2-usage/scan@sha256:" + 
 
 
 @pytest.fixture(autouse=True)
-def batch_identity(monkeypatch) -> None:
+def batch_identity(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setenv("OA_R2_JOB_NAME", "oa-r2-scan-test")
     monkeypatch.setenv("OA_R2_IMAGE", image)
+    # the shared job wrapper's state files (`$TMPDIR/dt-scan-run/`) and the PHASE lines' clock
+    monkeypatch.setenv("TMPDIR", str(tmp_path))
+    monkeypatch.setenv("DT_JOB_START", "100")
+    for name in ("DT_SUPERVISE", "SCAN_ID"):
+        monkeypatch.delenv(name, raising=False)
+    # The shared wrapper's `err` is bound to the `sys.stderr` of whichever test imported it first (a capture since closed)
+    from dt_cloud import scan_runs
+
+    monkeypatch.setattr(scan_runs, "err", lambda *a: print(*a, file=sys.stderr))
+
+
+def clock(monkeypatch) -> list[int]:
+    """The shared job wrapper's clock (`scan_runs._now`), set by the test between steps."""
+    from dt_cloud import scan_runs
+
+    now = [100]
+    monkeypatch.setattr(scan_runs, "_now", lambda: now[0])
+    return now
 
 
 def test_profile_accepts_only_own_full_scans_and_immutable_archive() -> None:
@@ -82,16 +101,19 @@ def test_live_reporter_keeps_phase_and_records_scan_exit(monkeypatch, fails: boo
     sink = scan_runs.SqliteSink(":memory:")
     monkeypatch.setattr(scan_runs, "D1Sink", lambda db: sink)
     monkeypatch.setenv("BATCH_JOB_UID", "own-uid")
+    monkeypatch.setenv("DT_ALERTS", "stderr")
+    now = clock(monkeypatch)
     reporter_type = module["ScanReporter"]
-    clock = iter([100, 100, 110, 120, 120, 125, 130])
-    monkeypatch.setitem(reporter_type.__init__.__globals__, "time", lambda: next(clock))
     def execute() -> None:
         with reporter_type("2026-10-13T0716", "20261013T071607992442Z") as reporter:
+            now[0] = 110
             with reporter.phase("listing"):
-                pass
+                now[0] = 120
             if fails:
                 with reporter.phase("path-index"):
+                    now[0] = 130
                     raise CalledProcessError(7, ["path-index", "private-value"])
+            now[0] = 125
 
     if fails:
         with pytest.raises(CalledProcessError):
@@ -103,11 +125,13 @@ def test_live_reporter_keeps_phase_and_records_scan_exit(monkeypatch, fails: boo
         "started_ts": 100, "finished_ts": 130 if fails else 125, "failed_phase": "path-index" if fails else None, "error": "CalledProcessError" if fails else None,
         "gen": "20261013T071607992442Z",
     }]
-    assert sink.query("SELECT phase, seq, started_ts, finished_ts, status FROM scan_run_phases") == [{"phase": "listing", "seq": 0, "started_ts": 110, "finished_ts": 120, "status": "done"}]
+    assert sink.query("SELECT phase, seq, started_ts, finished_ts, status FROM scan_run_phases") == [
+        {"phase": "listing", "seq": 0, "started_ts": 110, "finished_ts": 120, "status": "done"},
+        *([{"phase": "path-index", "seq": 1, "started_ts": 120, "finished_ts": 130, "status": "failed"}] if fails else []),
+    ]
 
 
 def test_reporting_outage_does_not_fail_successful_scan(monkeypatch, capsys) -> None:
-    from sys import stderr
     from dt_cloud import scan_runs
 
     def unavailable(db: str) -> None:
@@ -115,13 +139,14 @@ def test_reporting_outage_does_not_fail_successful_scan(monkeypatch, capsys) -> 
 
     monkeypatch.setattr(scan_runs, "D1Sink", unavailable)
     monkeypatch.setenv("BATCH_JOB_UID", "own-uid")
-    monkeypatch.setitem(module["ScanReporter"].write.__globals__, "stderr", stderr)
+    monkeypatch.setitem(module["ScanReporter"].__enter__.__globals__, "stderr", sys.stderr)
+    clock(monkeypatch)
     with module["ScanReporter"]("2026-10-13T0716", "20261013T071607992442Z"):
         pass
     assert capsys.readouterr().err.splitlines() == [
         "OA-R2-SCAN-START 2026-10-13T0716 20261013T071607992442Z",
-        "scan-run reporting failed (scan continues): ConnectionError: D1 unavailable",
-        "scan-run reporting failed (scan continues): ConnectionError: D1 unavailable",
+        "scan-run record failed (the scan continues): ConnectionError: D1 unavailable",
+        "scan-run record failed (the scan continues): ConnectionError: D1 unavailable",
     ]
 
 
@@ -188,6 +213,8 @@ def test_job_uses_only_r2_resources_and_secret_containers() -> None:
                 "OA_R2_IMAGE": image,
             "DISKY_LABELS": "app=disky,deployment=oa-r2,component=scan",
             "SITE_URL": "https://r2.oa.dev",
+            "SLACK_CHANNEL": "C0C9J6CE8BD",
+            "SLACK_ALERT_CHANNEL": "C0C9U47KTM2",
         },
         "secretVariables": {
             "SOURCE_ACCESS_KEY_ID": "projects/oa-internal-450019/secrets/oa-r2-source-access-key-id/versions/latest",
@@ -355,7 +382,7 @@ def test_failed_run_alerts_the_alert_channel_once_naming_its_phase(monkeypatch, 
                 raise CalledProcessError(7, ["path-index", "xoxb-secret"])
     assert posts == [{
         "url": "https://slack.com/api/chat.postMessage", "auth": "Bearer xoxb-secret", "channel": "C0R2ALERTS",
-        "text": "*❌ OA R2 scan*\nrun failed (exit 7) in path-index: CalledProcessError\n"
+        "text": "*❌ OA R2 scan 2026-10-13T0716*\npath-index failed (exit 7): CalledProcessError\n"
                 "<https://console.cloud.google.com/logs/query;query=labels.job_uid%3D%22own-uid%22?project=oa-internal-450019|task logs>",
         "unfurl_links": False, "unfurl_media": False,
     }]
@@ -403,20 +430,93 @@ def test_serving_steps_with_every_credential_end_in_the_digest(monkeypatch) -> N
     ]
 
 
-def test_a_failed_serving_step_warns_and_the_scan_stands(monkeypatch) -> None:
-    from subprocess import CompletedProcess
-
+def test_serving_steps_each_run_as_a_non_fatal_step(monkeypatch) -> None:
     namespace = module["serve"].__globals__
     monkeypatch.setitem(namespace, "environ", {"R2_ACCESS_KEY_ID": "index-id", "R2_SECRET_ACCESS_KEY": "index-secret", "SITE_TOKEN": "grant"})
-    monkeypatch.setitem(namespace, "run", lambda command, env: CompletedProcess(command, 0 if command[1] == "warm-cache" else 1))
-    alerts, phases = [], []
-    monkeypatch.setitem(namespace, "alert", lambda level, message: alerts.append((level, message)))
+    steps = []
 
     class Reporter:
-        @module["contextmanager"]
-        def phase(self, name: str):
-            phases.append(name)
-            yield
+        def step(self, name: str, command: list[str], env: dict[str, str], meaning: str) -> int:
+            steps.append((name, meaning))
+            return 0
 
     module["serve"](config, "2026-10-16T0715", Reporter())
-    assert (phases, alerts) == (["warm-cache", "probe"], [("warn", "probe failed (exit 1): a page load 5xx'd or dropped (the data is fine); see the probe record")])
+    assert steps == [
+        ("warm-cache", "the first viewers of this scan compute their views cold"),
+        ("probe", "a page load 5xx'd or dropped (the data is fine); see the probe record"),
+    ]
+
+
+def test_a_failed_step_records_its_phase_failed_warns_once_and_the_scan_stands(monkeypatch, tmp_path: Path) -> None:
+    from subprocess import CompletedProcess
+    from dt_cloud import scan_runs
+
+    sink = scan_runs.SqliteSink(":memory:")
+    monkeypatch.setattr(scan_runs, "D1Sink", lambda db: sink)
+    monkeypatch.setenv("BATCH_JOB_UID", "own-uid")
+    monkeypatch.setenv("SLACK_BOT_TOKEN", "xoxb-secret")
+    monkeypatch.setenv("SLACK_ALERT_CHANNEL", "C0R2ALERTS")
+    for name in ("DISK_TREE_NOTIFY", "DT_ALERTS"):
+        monkeypatch.delenv(name, raising=False)
+    posts = slack_posts(monkeypatch)
+    now = clock(monkeypatch)
+    monkeypatch.setitem(module["ScanReporter"].step.__globals__, "run", lambda command, env: CompletedProcess(command, 3))
+    with module["ScanReporter"]("2026-10-16T0715", "20261016T071500000000Z") as reporter:
+        now[0] = 110
+        rc = reporter.step("probe", ["dt-cloud", "probe"], {}, "a page load 5xx'd")
+    assert rc == 3
+    assert sink.query("SELECT status, failed_phase, error FROM scan_runs") == [{"status": "succeeded", "failed_phase": None, "error": None}]
+    assert sink.query("SELECT phase, status, note FROM scan_run_phases") == [{"phase": "probe", "status": "failed", "note": "failed (exit 3)"}]
+    assert [post["text"].split("\n")[:2] for post in posts] == [["*⚠️ OA R2 scan 2026-10-16T0715*", "probe failed (exit 3): a page load 5xx'd"]]
+
+
+@pytest.mark.parametrize("live", [False, True])
+def test_index_gc_lists_r2_dirs_until_their_deletion_is_switched_on(monkeypatch, live: bool) -> None:
+    monkeypatch.setitem(module["gc_steps"].__globals__, "environ", {
+        "R2_ACCESS_KEY_ID": "index-id", "R2_SECRET_ACCESS_KEY": "index-secret",
+        "DISK_TREE_R2_ENDPOINT_URL": "https://74981a43be0de7712369306c7b19133d.r2.cloudflarestorage.com",
+    })
+    steps = module["gc_steps"]({**config, "index_gc_files": live})
+    assert [(name, command) for name, command, _, _ in steps] == ([
+        ("index-gc", ["dt-cloud", "index-gc", "-s", "primary", "-m", "2d", "-F", "r2://oa-r2-usage-index"]),
+        ("index-gc-meta", ["dt-cloud", "index-gc", "-s", "meta", "-m", "2d", "-F", "r2://oa-r2-usage-index"]),
+    ] if live else [
+        ("index-gc", ["dt-cloud", "index-gc", "-s", "primary"]),
+        ("index-gc-files", ["dt-cloud", "index-gc", "-s", "primary", "-R", "-n", "-m", "2d", "-F", "r2://oa-r2-usage-index"]),
+        ("index-gc-meta", ["dt-cloud", "index-gc", "-s", "meta"]),
+        ("index-gc-meta-files", ["dt-cloud", "index-gc", "-s", "meta", "-R", "-n", "-m", "2d", "-F", "r2://oa-r2-usage-index"]),
+    ])
+    assert {(env["R2_ENDPOINT"], env["AWS_ACCESS_KEY_ID"]) for _, _, env, _ in steps} == {
+        ("https://74981a43be0de7712369306c7b19133d.r2.cloudflarestorage.com", "index-id"),
+    }
+    assert config["index_gc_files"] is False
+
+
+@pytest.mark.parametrize("killed", [False, True])
+def test_supervise_finishes_a_run_killed_before_its_own_exit(monkeypatch, tmp_path: Path, killed: bool) -> None:
+    """The image's entrypoint is `dt-cloud scan-run supervise -- python job/r2-scan run`: the reporter tells it which
+    run it started; a run killed before `__exit__` (the OOM killer's SIGKILL) is recorded failed by the supervisor and
+    alerts once, and a run that finished keeps its own record."""
+    from dt_cloud import scan_runs
+
+    sink = scan_runs.SqliteSink(":memory:")
+    monkeypatch.setattr(scan_runs, "D1Sink", lambda db: sink)
+    monkeypatch.setenv("BATCH_JOB_UID", "own-uid")
+    monkeypatch.setenv("DT_ALERTS", "stderr")
+    monkeypatch.setenv("DT_CGROUP", str(tmp_path / "no-cgroup"))
+    ptr = tmp_path / "supervise.json"
+    monkeypatch.setenv("DT_SUPERVISE", str(ptr))
+    now = clock(monkeypatch)
+    alerts = []
+    monkeypatch.setattr(scan_runs.JobRun, "alert", lambda self, level, message: alerts.append((level, message)))
+    reporter = module["ScanReporter"]("2026-10-16T0715", "20261016T071500000000Z").__enter__()
+    now[0] = 110
+    if not killed:
+        reporter.__exit__(None, None, None)
+    monkeypatch.delenv("DT_SUPERVISE")
+    scan_runs.supervised_finish(ptr, scan_runs.Ran(137, died_of=9) if killed else scan_runs.Ran(0), 20)
+    assert sink.query("SELECT status, error FROM scan_runs") == [
+        {"status": "failed", "error": "killed (SIGKILL), most likely out of memory"} if killed else {"status": "succeeded", "error": None},
+    ]
+    assert alerts == ([("fail", "run failed (exit 137): killed (SIGKILL), most likely out of memory")] if killed else [])
+    assert sorted(p.name for p in (tmp_path / "dt-scan-run").iterdir()) == []

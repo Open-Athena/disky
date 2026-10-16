@@ -18,4 +18,6 @@ RUN uv sync --frozen --no-dev --no-editable --package dt-cloud --extra s3
 COPY job/r2.json job/r2-scan-runs.json job/r2-scan job/digest.yml ./job/
 # The digest's icons dir: the plot is rendered into it and the dir deployed to the icons project's `plot` branch.
 COPY job/icons-r2 ./job/icons-r2
-ENTRYPOINT ["python", "job/r2-scan", "run"]
+# `scan-run supervise` (the shared job wrapper): the scan runs in its own session; a TERM (preemption) reaches its whole
+# group, and a run killed before its own exit (TERM, the OOM killer) is recorded failed and alerts once.
+ENTRYPOINT ["dt-cloud", "scan-run", "supervise", "--", "python", "job/r2-scan", "run"]

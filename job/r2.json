@@ -18,9 +18,10 @@
   "static_gen": "2026-10-15r2b",
   "meta_static_gen": "2026-10-15metab",
   "interval_gen": "2026-10-15r2",
+  "index_gc_files": false,
   "site_url": "https://r2.oa.dev",
-  "slack_channel": "",
-  "slack_alert_channel": "",
+  "slack_channel": "C0C9J6CE8BD",
+  "slack_alert_channel": "C0C9U47KTM2",
   "secrets": {
     "SOURCE_ACCESS_KEY_ID": "oa-r2-source-access-key-id",
     "SOURCE_SECRET_ACCESS_KEY": "oa-r2-source-secret-access-key",
