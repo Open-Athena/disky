@@ -1400,8 +1400,7 @@ def warm_cache(date: str | None, jobs: int, dry_run: bool, root: str | None, tok
         return
     headers = headers or auth()
     res = wm.warm(site_url, headers, paths, jobs=jobs)
-    bad = [r for r in res if r[1] != 200]
-    err(f"warm-cache: {len(res) - len(bad)}/{len(res)} warmed for {date} in {sum(r[2] for r in res):.0f}s of request time" + (f"; {len(bad)} failed" if bad else ""))
+    err(wm.summary(res, date))
 
 
 @main.group()

@@ -134,3 +134,12 @@ def warm(url: str, headers: dict[str, str], paths: list[str], jobs: int = 4, tim
 
     with ThreadPoolExecutor(max_workers=jobs) as ex:
         return list(ex.map(one, paths))
+
+
+def summary(res: list[tuple[str, int, float, str]], date: str) -> str:
+    """`warm`'s results as one line: warmed (200), refused (409: the site can't answer that view, e.g. a diff from before a
+    union store's first scan — a definite answer, nothing to warm) and failed (anything else)."""
+    refused = sum(1 for r in res if r[1] == 409)
+    failed = sum(1 for r in res if r[1] not in (200, 409))
+    tail = (f"; {refused} refused (409)" if refused else "") + (f"; {failed} failed" if failed else "")
+    return f"warm-cache: {len(res) - refused - failed}/{len(res)} warmed for {date} in {sum(r[2] for r in res):.0f}s of request time{tail}"
