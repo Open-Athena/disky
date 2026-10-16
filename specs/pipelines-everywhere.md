@@ -122,6 +122,12 @@ Each deployment's old script is deleted when its first week on the DAG is clean.
 
 ## 7. Open
 
+- **Capacity for big tasks.** gcs's first scratch run on google-batch (2026-10-16T2030) produced the same outputs as the one-VM scan, and its index on local SSD took 42.5 min against 48. But its n2-highmem-32 with 4 local SSDs waited ~30 min for a VM: `CODE_GCE_ZONE_RESOURCE_POOL_EXHAUSTED` ×7, then Batch requeued it. The one-VM job acquires its machine once, at the start; the DAG acquires the big one mid-run, so a stockout lands on the critical path. Options:
+  - fallback machine types per label (e.g. `n2d-highmem-32`). Batch takes one instance policy per job, and a stuck task stays SCHEDULED rather than failing, so a fallback needs the head to cancel and resubmit after a queued timeout;
+  - `google.batch.allowedLocations` with a second region, at the cost of egress for the index's reads;
+  - first, measure whether `n2d-highmem-32` schedules more readily.
+- **Engine-neutral DAG store** (asked by Ryan): `scan_run_dags` holds `{engine, dag}` with a nodes/edges JSON reduced by the writer; the raw Mermaid stays in the GCS archive. cw is doing it.
+
 - m3: awsbatch, or google-batch over its uploads (§4).
 - `options.index.mode: path-index` (gcs's index over every listing at once) is declared and refused as not ported; its `attribution` / `access` keys are accepted only with it.
 - `NXF_CLOUDCACHE_PATH` on R2 (the demo's resume across runners), unprobed with nf-cloudcache 0.6.2.
