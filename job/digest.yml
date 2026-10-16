@@ -12,6 +12,8 @@ discord_state: digest/discord/{webhook}
 discord_webhook_env: DISCORD_GCS_USAGE_WEBHOOK
 # reply avatars (colour-coded arrows) are served from the icons Pages project
 icons_base: https://gcs-usage-icons.pages.dev
+# the month OP's sender icon: the gcs mark (`job/icons/mark.png`, 256 px from deploy/slack/icons/gcs.png)
+op_icon: mark.png
 # the mosaic plot is rendered here, then `wrangler pages deploy`ed to the icons project
 icons_dir: job/icons
 plot_project: gcs-usage-icons
