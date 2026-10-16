@@ -21,6 +21,7 @@ params.sources = []        // [[uri:, machine:, disk: [request:, type:]]]
 params.list_default = [:]  // the profile's `machines.list`: [machine:, disk:]
 params.steps = []          // every enabled step (core minus `skip`, plus the profile's `steps`)
 params.pre = []            // enabled extra steps beside `list`, before `index` (soft: index runs without them)
+params.pre_label = 'small'
 params.post = []           // the post task's steps, in order
 params.fold = []
 params.skip_list = false   // REPROC: run from `index`
@@ -70,7 +71,7 @@ process bucket_check {
 }
 
 process pre {
-    label 'small'
+    label params.pre_label  // `pre` when the profile sizes it (`machines.pre`: gcs's access ingest wants ~64 GB), else `small`
     output: path 'done'
     script: stepScript(params.pre)
 }

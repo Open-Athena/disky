@@ -47,6 +47,7 @@
   "digest"
  ],
  "pre": [],
+ "pre_label": "small",
  "post": [
   "over-time",
   "index-gc",
