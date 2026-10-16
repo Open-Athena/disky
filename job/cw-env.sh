@@ -22,7 +22,7 @@ unset n v
 if [ -z "${SITE_TOKEN+set}" ] && [ -n "${GCS_USAGE_TOKEN+set}" ]; then export SITE_TOKEN=$GCS_USAGE_TOKEN; fi
 unset GCS_USAGE_TOKEN
 # The R2 archive through blobfs (`R2_ARCHIVE`): R2's own credentials profile + `buckets.yml` entry.
-. "$(dirname "$0")/r2-profile.sh"
+. "$(dirname "${BASH_SOURCE[0]}")/r2-profile.sh"
 set -x
 
 # Deployment config for the shared CLI (cloud/src/dt_cloud/{index_footer,warm}.py).
