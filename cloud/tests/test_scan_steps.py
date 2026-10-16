@@ -501,6 +501,16 @@ def test_digest_uploads_with_the_pages_token(tmp_path, env):
     ]
 
 
+def test_digest_root_from_the_profile(tmp_path, env):
+    """`options.digest.root` (`{snapshots}` filled) is the snapshots root the digest reads and keeps its thread state
+    beside (r2's live state is on R2, its data store on GCS); unset, the data store's."""
+    env.update(SLACK_BOT_TOKEN="x", SLACK_CHANNEL="C1")
+    hf = hf_profile()
+    c = ctx(tmp_path, env, **{**hf, "options": {**hf["options"], "digest": {**hf["options"]["digest"], "root": "r2://idx/{snapshots}"}}})
+    S.digest(c, None)
+    assert c.sh_impl.calls == ["dt-cloud digest -T cw -C d.yml -P slack -r r2://idx/snapshots/hf"]
+
+
 def meta_ctx(tmp_path, env, **opts):
     """A second store's profile (`store: meta`): the steps that serve it, and the ones that can't skipped."""
     return ctx(tmp_path, env, store="meta", skip=["interval-store", "warm-cache", "probe"],

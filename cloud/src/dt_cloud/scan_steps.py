@@ -849,12 +849,14 @@ def _digest_check(p: ScanProfile) -> list[str]:
                        for x in o.get("platforms", []) if x not in DIGEST_TRANSPORTS]
 
 
-@step("digest", soft=True, options={"template": str, "config": str, "args": list, "platforms": list}, requires=_digest_check)
+@step("digest", soft=True, options={"template": str, "config": str, "args": list, "platforms": list, "root": str}, requires=_digest_check)
 def digest(ctx: Ctx, arg: str | None) -> None:
     """Converge the usage-digest thread on each platform (`dt-cloud digest -T <template> -C <config> -P <platform>`;
     `options.digest.platforms`, default slack), each skipped without its transport's env. The plot's upload
     (`wrangler pages deploy`) authenticates with `CLOUDFLARE_API_TOKEN`: `$CF_PAGES_TOKEN` when set, for a deployment
-    whose D1 token can't deploy Pages."""
+    whose D1 token can't deploy Pages. `options.digest.root` (`{snapshots}` filled): the snapshots root the digest reads
+    and keeps its thread state beside (`<root>/digest/…`), when that isn't the data store's (`<data>/<snapshots>`), e.g.
+    a deployment whose live state and earlier snapshots are on R2: a wrong root finds no state and posts a second OP."""
     if ctx.reproc:
         err("REPROC: skipping the usage digest")
         return
@@ -864,9 +866,15 @@ def digest(ctx: Ctx, arg: str | None) -> None:
                 err(f"no {platform} transport ({'+'.join(DIGEST_TRANSPORTS[platform])}): skipping its digest")
                 continue
             ctx.sh(["dt-cloud", "digest", "-T", ctx.opt("digest", "template"), "-C", ctx.opt("digest", "config"), "-P", platform,
-                    *ctx.opt("digest", "args", []), "-r", f"{ctx.data_uri}/{ctx.snapshots}"], fatal=False,
+                    *ctx.opt("digest", "args", []), "-r", _digest_root(ctx)], fatal=False,
                    warn=f"{platform} usage-digest step failed",
                    env={"CLOUDFLARE_API_TOKEN": ctx.env["CF_PAGES_TOKEN"]} if ctx.has("CF_PAGES_TOKEN") else None)
+
+
+def _digest_root(ctx: Ctx) -> str:
+    """The digest's snapshots root: `options.digest.root` (`{snapshots}` filled), else the data store's."""
+    root = ctx.opt("digest", "root", None)
+    return root.format(snapshots=ctx.snapshots) if root else f"{ctx.data_uri}/{ctx.snapshots}"
 
 
 #: Core steps a profile may `skip`.
