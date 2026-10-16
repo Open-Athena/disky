@@ -17,7 +17,7 @@ import { STORES, type Store } from './stores'
 import { useMinSlug } from './scan'
 import {
   batchHref, logsHref, mapHref, metaHref, type OutputDelta, phaseOrder, type PhaseSpan, type RunSummary, type ScanRun,
-  type ScanRunPhase, type PhaseIssue, type PhaseRecovery, overlappingFailures, phaseFill, phaseOutcome, runOutcome, runTasks, type RunTask,
+  type ScanRunPhase, type PhaseIssue, type PhaseRecovery, overlappingFailures, phaseFill, phaseOutcome, runOutcome, runTasks, type RunTask, taskLogsHref,
 } from './scanRunsModel'
 import { colorer, fmtDur, fmtRunTime, getJson, type Links, PhaseBar, runDay, RunWhen, scanRunsApi, scansHref, scansStore, Status, useScanRuns } from './scanRunsUi'
 import './scans.scss'
@@ -254,15 +254,15 @@ function PhaseTimeline({ spans, secs, color }: { spans: PhaseSpan[]; secs: numbe
 /** A Nextflow run's step tasks: each its own Batch job, with its machine, phases and logs. */
 function TasksTable({ tasks, run, project }: { tasks: RunTask[]; run: ScanRun; project: string | null }) {
   const t0 = run.started_ts
-  const link = (job: string, tab?: 'logs') => project && run.region ? batchHref(project, run.region, job, tab) : null
   return (
     <div className="runs-wrap">
       <table className="runs sr-tasks">
         <thead><tr>
-          <th>phases</th><th>machine</th><th className="num">start</th><th className="num">duration</th><th>Batch job</th><th>logs</th>
+          <th>phases</th><th>machine</th><th className="num">start</th><th className="num">duration</th>
+          <th><Tooltip content="Nextflow deletes a task's Batch job when it finishes (its logs stay), so the job links only while it runs.">Batch job</Tooltip></th><th>logs</th>
         </tr></thead>
         <tbody>{tasks.map(t => {
-          const job = link(t.job_name), logs = link(t.job_name, 'logs')
+          const live = t.status === 'running' && project && run.region ? batchHref(project, run.region, t.job_name) : null
           const end = t.end ?? (t.status === 'running' ? Math.floor(Date.now() / 1000) : null)
           return (
             <tr key={t.job_name}>
@@ -270,8 +270,8 @@ function TasksTable({ tasks, run, project }: { tasks: RunTask[]; run: ScanRun; p
               <td className="nb">{t.machine ?? <span className="dim">—</span>}</td>
               <td className="num nb">{t.start != null && t0 != null ? `+${fmtDur(t.start - t0)}` : '—'}</td>
               <td className="num nb">{t.start != null && end != null ? fmtDur(end - t.start) : '—'}</td>
-              <td className="nb">{job ? <a href={job} target="_blank" rel="noreferrer"><code>{t.job_name}</code></a> : <code>{t.job_name}</code>}</td>
-              <td className="nb">{logs ? <a href={logs} target="_blank" rel="noreferrer">logs ↗</a> : <span className="dim">—</span>}</td>
+              <td className="nb">{live ? <a href={live} target="_blank" rel="noreferrer"><code>{t.job_name}</code></a> : <code className="dim">{t.job_name}</code>}</td>
+              <td className="nb">{project ? <a href={taskLogsHref(project, t.job_name, t.start)} target="_blank" rel="noreferrer">logs ↗</a> : <span className="dim">—</span>}</td>
             </tr>
           )
         })}</tbody>
