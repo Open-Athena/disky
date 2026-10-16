@@ -1,6 +1,6 @@
 # Scan pipelines as declared DAGs: steps, executors, orchestrator
 
-Status: **proposal** (2026-10-16), written from cw-s3. It covers every deployment's scan pipeline (gcs, cw-s3, m3, the r2 demo, hf). The decision asked for is in [§6](#6-decision-asked-for).
+Status: **decided: Nextflow** (2026-10-16), written from cw-s3. It covers every deployment's scan pipeline (gcs, cw-s3, m3, the r2 demo, hf). Ryan: Nextflow only; "no server" is the killer app, and nobody writes Batch bindings for fray or Dagster. A GCP Batch executor for DVX is specced separately, in that repo (`specs/gcp-batch-executor.md`). Phase 1 is in progress on cw ([§7](#7-phase-1-as-built-cw)).
 
 ## 1. Problem
 
@@ -124,10 +124,43 @@ For A, that means `StepSpec`-shaped steps, a fray `Client` for GCP Batch built f
 
 **My lean: B (Nextflow)**, unless Marin agrees to extract their executor. B is the only option that meets requirements 3–5 without us writing the executor or running a server. A's advantage is ecosystem alignment, and it only becomes real once `StepRunner` is importable without `marin`'s dependency tree.
 
-## 6. Decision asked for
+## 6. Decision (2026-10-16)
+
+Nextflow for every deployment; option A and the Marin questions are dropped. Phase 0's overlap shipped with Phase 1's step split (§7), not separately.
+
+The questions as they were put:
 
 1. Phase 0 (DAG table + the publish-r2 / interval-store overlap in `cw-run.sh`, then an image rebuild): go?
 2. Phase 1: prototype both A and B, or only B?
 3. Should someone ask Marin about extracting `marin.execution`, and separately about running cw's steps on Iris? Who asks?
+
+
+## 7. Phase 1 as built (cw)
+
+**What the probes settled** (Nextflow 26.10.2, nf-google 1.29.1, a 3-step pipeline on Batch in the scratch bucket):
+- **No `local` steps with a `gs://` work dir.** The `local` executor refuses it ("requires the use of POSIX compatible file system") unless Fusion is used, and Fusion needs Seqera's Wave. So every step is its own Batch task, and the head runs only the driver. That also ends today's 38 idle minutes of an n2-standard-8 waiting on static-names: each step gets its own machine size.
+- **Each task mounts the work dir's bucket at `/mnt/disks/<bucket>`, read-write, with `implicit-dirs`.** With the work dir in the data bucket, the steps' `$GCS/$DATA/…` paths work unchanged.
+- **The scan image's ENTRYPOINT is the one-VM driver.** A task's `/bin/bash … .command.run` would be appended to it, so tasks set `containerOptions = '--entrypoint=/usr/bin/env'`.
+- **Secrets:** nf-google has no Secret Manager support, and Nextflow's own `secret` store writes values into `.command.run` in the work bucket. So each step fetches its own (`dt-cloud secrets exec -s ENV=SECRET -- …`, as the VM's service account). Already-set variables win, so the one-VM job's `secretVariables` still apply.
+- **Resume with no local state.** Nextflow's cache can live in GCS (`NXF_CLOUDCACHE_PATH`), but Nextflow finds a session only through its local `.nextflow/history`. So the head derives the session id from the scan id (`uuid5`), writes that one history line, and runs `-resume <id>`. Verified: a run failing at its last step, re-run from a fresh directory, ran only that step (`completed=1 cached=2`). A fully finished session re-ran in 13 s with every step cached.
+- **Overhead:** each task's VM start plus image pull is about 1–2 min.
+
+**Layout:**
+- `job/cw-step.sh STEP` holds the step bodies. `job/cw-env.sh` is the env every step sources.
+- There are two drivers:
+  - `job/cw-run.sh`: one VM, today's cron. Its order is unchanged, except static-names now runs alongside publish-r2 → interval-store.
+  - `job/nf/cw.nf` + `nextflow.config` + `cw-head.sh`.
+- The DAG:
+  - bucket-check, and scan-bucket ×N run in parallel; then index;
+  - static-names ∥ (publish-r2 → interval-store);
+  - index-sync;
+  - post: over-time, index-gc, warm-cache, probe, digest.
+- Steps hand off through the data bucket. Nextflow channels carry only `done` markers.
+- Each task records into the head's run: `DT_RUN_ID`, which `scan-runs.json` `run_id_env` reads before the task's own `BATCH_JOB_UID`.
+
+**Next:**
+1. A scratch run of the whole DAG: the data bucket set to the scratch bucket, the four small buckets, and serving steps without credentials (they skip). Check the timing, a resume after an injected failure, and the head on Batch.
+2. Then the cutover: the cron submits the head job instead of the one-VM job, and the first scans run under it in prod, after a go.
+3. Then gcs, m3 and the r2 demo.
 
 [search-box-no-refusals.md §3.6]: search-box-no-refusals.md
