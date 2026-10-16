@@ -167,8 +167,7 @@ def record_sql(rec: Record, now: int) -> list[str]:
     """The statements writing `rec`: the run first (its children reference it)."""
     return ([run_sql(rec.run, now)]
             + [phase_sql(rec.run.run_id, p) for p in rec.phases]
-            + [output_sql(rec.run.run_id, o) for o in rec.outputs]
-            + ([dag_sql(rec.run.run_id, *rec.dag)] if rec.dag is not None else []))
+            + [output_sql(rec.run.run_id, o) for o in rec.outputs])
 
 
 # ── Sinks: D1 (the job, the backfill), a local SQLite file (dry runs, tests), stdout (`-n`) ──────────────────
@@ -740,6 +739,13 @@ def record(
         outs += measure(OutputSpec(key=key, uri=uri, split=None), scan, gen_now, store)
     rec = Record(run, tuple(new_phases), tuple(outs), dag)
     sink.execute(record_sql(rec, now))
+    if dag is not None:
+        # apart from the run's own write: the DAG is a view, and its failure (a database without `scan_run_dags` in
+        # this shape) must never leave the run unfinished
+        try:
+            sink.execute([dag_sql(run_id, *dag)])
+        except Exception as e:  # noqa: BLE001
+            report_failure(e)
     return rec
 
 
