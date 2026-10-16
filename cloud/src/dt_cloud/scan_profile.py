@@ -67,6 +67,8 @@ _MACHINE = {"type", "disk", "cpus", "memory", "time"}
 _DISK = {"request", "type"}
 _DISK_TYPES = ("local-ssd", "pd-balanced", "pd-ssd", "pd-standard")
 _NAME = re.compile(r"[a-z0-9][a-z0-9-]*")
+#: A machine label: written bare into the executor config (`withLabel: <label> { … }`), so a Groovy identifier.
+_LABEL = re.compile(r"[a-z][a-z0-9_]*")
 _ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 
 
@@ -344,8 +346,8 @@ def parse(d: object, where: str = "profile") -> ScanProfile:
         ms = {}
     for label, m in ms.items():
         p = f"machines.{label}"
-        if not _NAME.fullmatch(str(label)):
-            problems.append(f"{p}: a label of lowercase letters, digits and '-'")
+        if not _LABEL.fullmatch(str(label)):
+            problems.append(f"{p}: a label of lowercase letters, digits and '_' (it is written bare into the Nextflow config)")
         if isinstance(m, str):
             machines[str(label)] = Machine(type=m)
             continue
