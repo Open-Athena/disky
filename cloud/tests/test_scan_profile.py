@@ -53,7 +53,7 @@ def test_unknown_keys_refused():
         "colour: unknown key",
         "executor.zone: unknown key",
         "sources[0].size: unknown key",
-        "options.list.turbo: unknown key (known: import, bulk_args, import_args, threads)",
+        "options.list.turbo: unknown key (known: import, bulk_args, import_args, threads, weights)",
         "options.nope: unknown step",
     ]
 
@@ -111,7 +111,7 @@ def test_step_requirements():
         "layout.layer2: a template with `{scan}`",
         "layout.snapshots: required (\"\" for `snapshots/` itself)",
         "layout.listing: required unless options.list.import is true (index reads the listings from the data store)",
-        "options.index.mode: path-index (gcs's `dt-cloud path-index` over the listings) is not ported yet (spec §6)",
+        "data: a gs:// bucket with options.index.mode path-index (its inputs are staged from GCS)",
         "options.static-names.profile: required (the deployment's static-names profile; or env STATIC_NAMES_PROFILE, or skip: [static-names])",
         "options.digest.template: required (or skip: [digest])",
         "options.digest.config: required (or skip: [digest])",
