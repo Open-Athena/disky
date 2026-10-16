@@ -14,6 +14,8 @@ discord_webhook_env: null
 # the reply avatars (`arrows/av_deg<N>.png`) are the icons project's production deployment of `job/icons-r2/`
 icons_base: https://oa-r2-usage-icons.pages.dev
 icons_dir: job/icons-r2
+# the month OP's sender icon: the R2 mark (`job/icons-r2/mark.png`, 256 px from site/public/icons/r2-512.png)
+op_icon: mark.png
 # the OP's plot (drawn by the site, `POST /api/digest-image` with SITE_TOKEN) goes to the icons project's `plot`
 # preview branch, never the production alias that serves the avatars
 plot_project: oa-r2-usage-icons
