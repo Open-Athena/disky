@@ -1,0 +1,90 @@
+# gcs.oa.dev's scan as a Nextflow DAG (specs/pipelines-everywhere.md): `dt-cloud scan head job/profiles/gcs.yml`.
+# The one-VM job (`job/run.sh`, `job/batch-submit.sh`) stays the cron until this profile's scratch and prod runs pass.
+deployment: gcs
+executor:
+  kind: google-batch
+  project: oa-internal-450019
+  region: us-central1
+  service_account: gcs-usage-job@oa-internal-450019.iam.gserviceaccount.com
+  image: us-central1-docker.pkg.dev/oa-internal-450019/cloud-run-source-deploy/gcs-usage-snapshot:latest
+  boot_disk: 50
+work: gs://oa-gcs-usage-dvx/nf
+data: gs://oa-gcs-usage-dvx
+layout:
+  layer2: listing/{scan}/
+  snapshots: ""
+  listing: listing/{scan}/
+# One `list` task per bucket, written straight to `listing/<scan>/<bucket>/`. marin-eu-west4 was listed from a
+# europe-west4 VM (cross-ocean list pages pay full RTT); nf-google has no per-task location, so it lists from
+# us-central1 here.
+sources:
+  - {uri: gcs://marin-us-central2, procs: 24}
+  - {uri: gcs://marin-eu-west4, procs: 24}
+  - {uri: gcs://marin-us-central1, procs: 24}
+  - {uri: gcs://marin-us-east5, procs: 24}
+  - {uri: gcs://marin-us-east1, procs: 24}
+  - {uri: gcs://marin-us-west4, procs: 24}
+machines:
+  list: n2-standard-32
+  # path-index: DuckDB at 100GB (+ ~40GB it doesn't account for), its inputs staged to local SSD (n2 32-vCPU
+  # machines take 4, 8, 16 or 24 local SSDs)
+  big: {type: n2-highmem-32, disk: {request: 1500, type: local-ssd}}
+  pre: n2-highmem-8
+  small: e2-standard-2
+  medium: e2-standard-4
+  post: e2-standard-4
+steps: [access-ingest, healthcheck]
+# over-time groups and the generation-file sweep (`index-gc -F`) aren't in the one-VM job yet: each is its own change
+skip: [bucket-check, over-time, index-gc]
+secrets:
+  SLACK_BOT_TOKEN: gcs-alert-slack-bot-token
+  SLACK_WEBHOOK: gcs-alert-slack-webhook
+  CLOUDFLARE_API_TOKEN: cf-pages-token
+  R2_ACCESS_KEY_ID: gcs-static-index-r2-key-id
+  R2_SECRET_ACCESS_KEY: gcs-static-index-r2-secret
+  SITE_TOKEN: gcs-snapshot-site-token
+  DISCORD_GCS_USAGE_WEBHOOK: gcs-usage-discord-webhook
+  DISCORD_BOT_TOKEN: marin-discord-bot-token
+env:
+  SCAN_RUNS_PROFILE: /app/job/scan-runs.json
+  SITE_URL: https://gcs.oa.dev
+  GCP_PROJECT: oa-internal-450019
+  JOB_SA: gcs-usage-job@oa-internal-450019.iam.gserviceaccount.com
+  JOB_IMAGE: us-central1-docker.pkg.dev/oa-internal-450019/cloud-run-source-deploy/gcs-usage-snapshot:latest
+  D1_DB_ID: e52398b7-5538-4bc4-83db-3355a1b5ef9a
+  D1_DB_NAME: oa-gcs-usage-auth
+  DT_CLOUD_IDENTITIES: gs://oa-gcs-usage-dvx/config/identities.yaml
+  ACCESS_LOG_BUCKET: marin-usage-logs
+  ACCESS_BUCKETS: marin-us-central1 marin-us-central2 marin-us-east1 marin-us-east5 marin-eu-west4 marin-us-west1 marin-us-west4
+  WARM_PATHS: ",marin-us-central2,marin-us-east5,marin-us-central1,marin-eu-west4,marin-us-west4,marin-us-east1"
+  PROTECTED_BUCKETS: marin-*
+  DUCKDB_MEM: 100GB
+  DUCKDB_MEM_ACCESS: 48GB
+  DUCKDB_THREADS: "16"
+  SLACK_CHANNEL: C0BNWAASXFW
+  SLACK_ALERT_CHANNEL: C0BTUNT3B5Z
+  CLOUDFLARE_ACCOUNT_ID: 74981a43be0de7712369306c7b19133d
+  R2_ENDPOINT: https://74981a43be0de7712369306c7b19133d.r2.cloudflarestorage.com
+  R2_BUCKET: oa-gcs-usage-index
+  STATIC_NAMES_IMAGE: us-central1-docker.pkg.dev/oa-internal-450019/cloud-run-source-deploy/gcs-usage-snapshot:latest
+pass: [DT_RECORD, DT_ALERTS, DISKY_LABELS]
+labels: {deployment: gcs}
+options:
+  list: {weights: true, threads: 10}
+  index:
+    mode: path-index
+    attribution: [attr/attribution-2026-07-20.parquet, attr/attribution-wandb.parquet]
+    access: access/agg/*/*.parquet
+    # one user-first copy, `bysize-user`, which a lens view reads
+    args: [-u, bysize]
+    lifecycle: true
+    rules: true
+  publish-r2:
+    args: [-S]
+    require: ["{snapshots}/{scan}/meta.json", "{snapshots}/{scan}/age.json", "{index}/attr.tsv", "{index}/attr.tsv.idx.json"]
+    keys: [snapshots/rules.json]
+    barrier: true
+  static-names: {profile: /app/job/static-names.json}
+  interval-store: {profile: /app/job/interval-store.json, merge_wait: 1800, timeout: 60m}
+  index-sync: {retain: 30}
+  digest: {template: gcs, config: /app/job/digest.yml, platforms: [slack, discord]}

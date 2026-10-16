@@ -25,6 +25,15 @@ RUN ln -s /usr/local/lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm \
 # curl: thrds's Discord clients shell out to it (the 2026-09-15 job's Discord
 # digest died with `FileNotFoundError: 'curl'`); python:slim ships none.
 RUN apt-get update -qq && apt-get install -y -qq --no-install-recommends time curl ca-certificates && rm -rf /var/lib/apt/lists/*
+# Nextflow (specs/pipelines-everywhere.md): `dt-cloud scan head` runs the scan as a DAG of Batch tasks in this same
+# image. A JRE (Nextflow takes 17–26), `ps` (procps: Nextflow's task-metrics wrapper refuses to run without it), the
+# launcher pinned by NXF_VER, its runtime and the plugins it loads fetched at build time, so neither the head nor a
+# task downloads anything.
+ENV NXF_VER=26.10.2 NXF_HOME=/opt/nextflow
+RUN apt-get update -qq && apt-get install -y -qq --no-install-recommends default-jre-headless procps && rm -rf /var/lib/apt/lists/* \
+    && curl -fsSL "https://github.com/nextflow-io/nextflow/releases/download/v$NXF_VER/nextflow" -o /usr/local/bin/nextflow \
+    && chmod +x /usr/local/bin/nextflow && nextflow -version \
+    && nextflow plugin install nf-google@1.29.1,nf-cloudcache@0.6.2
 WORKDIR /app
 # Python deps come from the workspace lockfile (`uv.lock` at the root covers
 # the engine and `cloud/`), `--frozen`, into the image's own interpreter
