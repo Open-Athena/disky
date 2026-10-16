@@ -32,16 +32,21 @@ ALL = ["bucket-check", "list s3://a", "list s3://b", "list s3://c", "index", "st
        "interval-store", "index-sync", "over-time", "index-gc", "warm-cache", "probe", "digest"]
 
 
-def head(tmp_path: Path, marks: Path, *args: str, extra: str = "", **env) -> subprocess.CompletedProcess:
+SOURCES = "[s3://a, s3://b, {uri: s3://c, machine: m1, disk: {request: 375, type: local-ssd}}]"
+OPTIONS = "{list: {import: true}, static-names: {profile: sn.json}, digest: {template: t, config: c.yml}}"
+
+
+def head(tmp_path: Path, marks: Path, *args: str, extra: str = "", sources: str = SOURCES, options: str = OPTIONS,
+         path: tuple[Path, ...] = (), **env) -> subprocess.CompletedProcess:
     prof = tmp_path / "fixture.yml"
     prof.write_text(f"deployment: fixture\nexecutor: {{kind: local}}\nwork: {tmp_path}/nf\ndata: {tmp_path}/data\n"
                     "layout: {layer2: 'l2/{scan}/', snapshots: ''}\n"
-                    "sources: [s3://a, s3://b, {uri: s3://c, machine: m1, disk: {request: 375, type: local-ssd}}]\n"
+                    f"sources: {sources}\n"
                     "machines: {list: {type: m2, disk: 100}, big: {cpus: 1}}\n"
-                    "options: {list: {import: true}, static-names: {profile: sn.json}, digest: {template: t, config: c.yml}}\n" + extra)
+                    f"options: {options}\n" + extra)
     pypath = os.pathsep.join(str(Path(m.__file__).parents[1]) for m in (dt_cloud, disk_tree))
     e = {k: v for k, v in os.environ.items() if k not in ("SCAN_RUNS_PROFILE", "DT_SCAN_STEP_FAIL", "DISKY_LABELS")}
-    e.update(PATH=f"{Path(sys.executable).parent}{os.pathsep}{e['PATH']}", PYTHONPATH=pypath, NXF_OFFLINE="true",
+    e.update(PATH=os.pathsep.join([*map(str, path), str(Path(sys.executable).parent), e["PATH"]]), PYTHONPATH=pypath, NXF_OFFLINE="true",
              DT_SCAN_STEP_FAKE=str(marks), SNAP_ID="2026-10-16T1200", GEN="G1", DT_JOB_START="1", **env)
     return subprocess.run([sys.executable, "-m", "dt_cloud.cli", "scan", "head", *args, "-N", str(REPO / "job/nf"), str(prof)],
                           capture_output=True, text=True, env=e, timeout=600)
@@ -100,3 +105,37 @@ def test_reproc_unfolded(tmp_path):
     assert max(at["static-names"], at["interval-store"], at["index-rows"]) < at["index-sync"]
     assert [x for x in ran[at["index-sync"]:] if x != "over-time"] == ["index-sync", "index-gc", "warm-cache", "probe", "digest"]
     assert at["index-sync"] < at["over-time"]
+
+
+def test_per_call_secrets(tmp_path):
+    """Each step's call fetches its own bindings: the profile's `secrets`, overlaid by `options.<step>.secrets`, and a
+    list call's by its source's `secrets`, also where a step is folded into another's task (bucket-check in the first
+    list task, index-sync in post). A `dt-cloud` shim first on PATH logs each `secrets exec` (no Secret Manager here)."""
+    shim, log = tmp_path / "shim", tmp_path / "secrets.log"
+    shim.mkdir()
+    (shim / "dt-cloud").write_text(
+        "#!/bin/sh\n"
+        'if [ "$1 $2" = "secrets exec" ]; then\n'
+        "  shift 2; b=''\n"
+        '  while [ "$1" != "--" ]; do b="$b $1"; shift; done\n'
+        "  shift\n"
+        f'  echo "$4 $5|$b" >> {log}\n'
+        '  exec "$@"\n'
+        "fi\n"
+        f'exec {sys.executable} -m dt_cloud.cli "$@"\n')
+    (shim / "dt-cloud").chmod(0o755)
+    r = head(tmp_path, tmp_path / "marks", path=(shim,),
+             sources="[{uri: s3://a, secrets: {AWS_ACCESS_KEY_ID: a-key}}, s3://b]",
+             options="{list: {import: true, secrets: {AWS_ACCESS_KEY_ID: list-key}}, static-names: {profile: sn.json}, "
+                     "digest: {template: t, config: c.yml}, index-gc: {secrets: {CLOUDFLARE_API_TOKEN: gc-cf}}}",
+             extra="secrets: {AWS_ACCESS_KEY_ID: base-key, CLOUDFLARE_API_TOKEN: cf}\n")
+    assert r.returncode == 0, r.stderr
+    base = " -s AWS_ACCESS_KEY_ID=base-key -s CLOUDFLARE_API_TOKEN=cf"
+    assert sorted(log.read_text().splitlines()) == sorted([
+        f"bucket-check |{base}",
+        "list s3://a| -s AWS_ACCESS_KEY_ID=a-key -s CLOUDFLARE_API_TOKEN=cf",
+        "list s3://b| -s AWS_ACCESS_KEY_ID=list-key -s CLOUDFLARE_API_TOKEN=cf",
+        *(f"{s} |{base}" for s in ("index", "static-names", "publish-r2", "index-rows", "interval-store", "index-sync",
+                                   "over-time", "warm-cache", "probe", "digest")),
+        "index-gc | -s AWS_ACCESS_KEY_ID=base-key -s CLOUDFLARE_API_TOKEN=gc-cf",
+    ])

@@ -1,7 +1,8 @@
 """`dt-cloud scan head` (specs/pipelines-everywhere.md §2.3): one scan as a Nextflow run of `job/nf/scan.nf`.
 
-It stamps the scan's identity once (`SNAP_ID`, `GEN`, `DT_JOB_START`), starts its scan-run record, derives the
-Nextflow session from the scan (uuid5 of `disky/<deployment>/scan/<scan>`), writes the session's `.nextflow/history`
+It stamps the scan's identity once (`SNAP_ID`, `GEN`, `DT_JOB_START`), starts its scan-run record (in the profile's
+`store`), derives the Nextflow session from the scan (uuid5 of `disky/<deployment>/scan/<scan>`, or
+`disky/<deployment>/<store>/scan/<scan>` for a store other than the primary), writes the session's `.nextflow/history`
 line (Nextflow finds a session only there; its cache is in the work store, `NXF_CLOUDCACHE_PATH`), writes the params
 and the executor config from the profile, runs Nextflow with `-resume <session>`, and finishes the record with
 Nextflow's exit status (the first failed task named) and the labelled cost of its tasks. Re-running the head for a
@@ -26,7 +27,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from urllib.parse import urlparse
 
-from .scan_profile import Disk, ScanProfile
+from .scan_profile import PRIMARY_STORE, Disk, Machine, ScanProfile
 from .scan_steps import DATA_MOUNT_ENV, PROFILE_JSON_ENV, STEPS
 
 
@@ -46,8 +47,12 @@ def identity(env: Mapping[str, str], now: dt.datetime | None = None) -> tuple[st
             env.get("DT_JOB_START") or str(int(now.timestamp())))
 
 
-def session_id(deployment: str, scan: str) -> str:
-    return str(uuid.uuid5(uuid.NAMESPACE_URL, f"disky/{deployment}/scan/{scan}"))
+def session_id(deployment: str, scan: str, store: str = PRIMARY_STORE) -> str:
+    """The scan's Nextflow session: uuid5 of `disky/<deployment>/scan/<scan>` (the primary store's: unchanged, so a scan
+    started before stores existed resumes), `disky/<deployment>/<store>/scan/<scan>` for another store (its scan of the
+    same id is another run)."""
+    ns = f"disky/{deployment}/scan/{scan}" if store == PRIMARY_STORE else f"disky/{deployment}/{store}/scan/{scan}"
+    return str(uuid.uuid5(uuid.NAMESPACE_URL, ns))
 
 
 def history_line(now: dt.datetime, scan: str, session: str) -> str:
@@ -72,6 +77,16 @@ def _disk(d: Disk | None) -> dict | None:
     return None if d is None else {"request": d.request, "type": d.type}
 
 
+def _bindings(m: Mapping[str, str]) -> list[str]:
+    return [f"{k}={v}" for k, v in m.items()]
+
+
+def step_secrets(profile: ScanProfile) -> dict[str, list[str]]:
+    """Each step whose call fetches other bindings than the profile's `secrets` (`options.<step>.secrets`), its whole
+    `ENV=SECRET` list: scan.nf passes a call `params.step_secrets[<step>]` when set, else `params.secrets`."""
+    return {n: _bindings(profile.secrets_for(n)) for n, o in profile.options.items() if o.get("secrets")}
+
+
 def params(profile: ScanProfile, profile_json: str, scan: str, gen: str, job_start: str, run_id: str, session: str,
            env: Mapping[str, str], *, reproc: bool = False, fresh: bool = False) -> dict:
     """`scan.nf`'s params file."""
@@ -85,7 +100,9 @@ def params(profile: ScanProfile, profile_json: str, scan: str, gen: str, job_sta
     lst = profile.machines.get("list")
     return {
         "scan": scan, "gen": gen, "job_start": job_start, "run_id": run_id, "session": session,
-        "sources": [{"uri": s.uri, "machine": s.machine, "disk": _disk(s.disk)} for s in profile.sources],
+        # a source's `secrets`: its list call's whole binding list (else the list step's), when it has its own
+        "sources": [{"uri": s.uri, "machine": s.machine, "disk": _disk(s.disk),
+                     **({"secrets": _bindings(profile.secrets_for("list", s.uri))} if s.secrets else {})} for s in profile.sources],
         "list_default": {"machine": lst.type if lst else None, "disk": _disk(lst.disk) if lst else None},
         "steps": list(enabled),
         "pre": [n for n in enabled if STEPS[n].stage == "pre" and n != "bucket-check"],
@@ -96,7 +113,8 @@ def params(profile: ScanProfile, profile_json: str, scan: str, gen: str, job_sta
         "over_time_label": "over_time" if "over_time" in profile.machines else "post",
         "fold": list(profile.fold),
         "skip_list": reproc,
-        "secrets": [f"{k}={v}" for k, v in profile.secrets.items()],
+        "secrets": _bindings(profile.secrets),
+        "step_secrets": step_secrets(profile),
         "secrets_project": profile.executor.project or "",
         "env": step_env,
         "profile_json": profile_json,
@@ -118,7 +136,8 @@ def _disk_cfg(d: Disk) -> str:
 def executor_config(profile: ScanProfile) -> str:
     """The deployment's executor block, generated (never hand-written per deployment): work dir, plugins, the
     executor's own scope, the image, and one `withLabel` per machine (`list` excepted: scan.nf sets each list task's
-    machine from its source, falling back to `machines.list`, since a config selector would override it)."""
+    machine from its source, falling back to `machines.list`, since a config selector would override it). A label with
+    `fallback` types gets a block choosing its machine by submit attempt (`fallback_block`)."""
     ex = profile.executor
     lines = [f"// Generated by `dt-cloud scan head` from the {profile.deployment} profile: not edited by hand.",
              f"workDir = {_q(profile.work.rstrip('/') + '/work')}"]
@@ -146,6 +165,9 @@ def executor_config(profile: ScanProfile) -> str:
     for label, m in sorted(profile.machines.items()):
         if label == "list":
             continue
+        if m.fallback:
+            lines += fallback_block(label, m)
+            continue
         ds = []
         if m.type and ex.kind == "google-batch":
             ds.append(f"machineType = {_q(m.type)}")
@@ -163,15 +185,53 @@ def executor_config(profile: ScanProfile) -> str:
     return "\n".join(lines) + "\n"
 
 
+#: What Nextflow raises when a task is still SUBMITTED (Batch: QUEUED / SCHEDULED) past its `maxSubmitAwait`. Nextflow
+#: then deletes the task's Batch job itself (`handler.kill()`), and the fallback label's errorStrategy retries on this
+#: cause alone.
+SUBMIT_TIMEOUT = "nextflow.exception.ProcessSubmitTimeoutException"
+
+
+def fallback_block(label: str, m: Machine) -> list[str]:
+    """A label with fallback machine types (spec §7 "Capacity for big tasks"), as its `withLabel` block. Submit attempt
+    k runs on `types[k-1]`. Every attempt but the last has `maxSubmitAwait = queue_timeout`: past it Nextflow deletes the
+    still-queued Batch job and fails the task with a `ProcessSubmitTimeoutException`. The errorStrategy retries on that
+    cause alone (the retry is the next submit attempt) and finishes on any real failure, as every other label does.
+    `maxRetries` bounds the submit retries (a submit timeout never counts as a task failure, so `task.attempt` stays 1)."""
+    types, n = m.types, len(m.types)
+    ts = "[" + ", ".join(_q(t) for t in types) + "]"
+    out = [f"    withLabel: {label} {{", f"        machineType = {{ {ts}[task.submitAttempt - 1] }}"]
+    if m.disk:
+        out.append(f"        disk = {_disk_cfg(m.disk)}")
+    if m.cpus:
+        out.append(f"        cpus = {m.cpus}")
+    if m.memory:
+        out.append(f"        memory = {_q(m.memory)}")
+    if m.time:
+        out.append(f"        time = {_q(m.time)}")
+    last = "${task.submitAttempt + 1 < " + str(n) + " ? '' : ' (the last: no queue timeout)'}"
+    out += [f"        maxSubmitAwait = {{ task.submitAttempt < {n} ? '{m.queue_timeout}m' : null }}",
+            f"        maxRetries = {n - 1}",
+            "        errorStrategy = {",
+            f"            if( !(task.previousException?.cause instanceof {SUBMIT_TIMEOUT}) ) return 'finish'",
+            f'            log.warn "scan head: ${{task.process}} queued {m.queue_timeout} min on ${{task.machineType}}; '
+            f'retrying on ${{{ts}[task.submitAttempt]}}{last}"',
+            "            return 'retry'",
+            "        }",
+            "    }"]
+    return out
+
+
 def first_failed(trace: Path) -> str | None:
-    """`<task> (exit N)` for the trace's first FAILED task."""
+    """`<task> (exit N)` for the trace's first FAILED task that wasn't retried: a fallback label's queue timeout is a
+    FAILED row followed by its retry's row, of the same name (the trace's `error_action` reads `-` for it, not RETRY)."""
     try:
         with trace.open() as f:
-            for row in csv.DictReader(f, delimiter="\t"):
-                if row.get("status") == "FAILED":
-                    return f"{row['name']} (exit {row.get('exit', '-')})"
+            rows = list(csv.DictReader(f, delimiter="\t"))
     except OSError:
         return None
+    for i, row in enumerate(rows):
+        if row.get("status") == "FAILED" and not any(r.get("name") == row.get("name") for r in rows[i + 1:]):
+            return f"{row['name']} (exit {row.get('exit', '-')})"
     return None
 
 
@@ -215,10 +275,23 @@ def publish_reports(profile: ScanProfile, scan: str, launch: Path) -> list[str]:
     return keys
 
 
+def start_args(profile: ScanProfile, gen: str, scan: str) -> list[str]:
+    """`scan-run start`'s arguments: the head's Batch job (`-B`), the generation, and a store other than the primary
+    (`-K`: the run's `store`, which `finish` and every task's phase keep)."""
+    return ["-B", "-g", gen, *([] if profile.primary else ["-K", profile.store]), scan]
+
+
 def finish_args(rc: int, error: str | None, cost: list[str], dag: Path) -> list[str]:
     """`scan-run finish`'s arguments: the exit status, the error, the cost labels, and the run's DAG (`-D`, stored with
     the run for the site's pipeline view) when Nextflow wrote one."""
     return ["-x", str(rc), *(["-e", error] if error else []), *cost, *(["-D", str(dag)] if dag.is_file() else [])]
+
+
+def nextflow_argv(nf_dir: Path, launch: Path, session: str) -> list[str]:
+    """The Nextflow command the head runs in `launch` (after writing its params, executor config and history line)."""
+    return ["nextflow", "run", str(nf_dir / "scan.nf"), "-c", str(nf_dir / "base.config"), "-c", str(launch / "executor.config"),
+            "-params-file", str(launch / "params.json"), "-resume", session, "-with-trace", str(launch / "trace.tsv"),
+            "-with-dag", str(launch / "dag.mmd"), "-with-timeline", str(launch / "timeline.html"), "-with-report", str(launch / "report.html")]
 
 
 def head(profile_path: Path, nf_dir: Path, launch: Path | None, *, reproc: bool = False, fresh: bool = False,
@@ -238,7 +311,7 @@ def head(profile_path: Path, nf_dir: Path, launch: Path | None, *, reproc: bool 
             env.setdefault(k, profile.env[k])
     if reproc:
         env.update(REPROC="1", DT_RECORD="off")
-    session = session_id(profile.deployment, scan)
+    session = session_id(profile.deployment, scan, profile.store)
     cloud = profile.executor.kind != "local"
     if launch is None:
         launch = Path(profile.work) if not cloud else Path(env.get("TMPDIR") or "/tmp") / f"nf-{scan}"
@@ -251,20 +324,18 @@ def head(profile_path: Path, nf_dir: Path, launch: Path | None, *, reproc: bool 
     trace = launch / "trace.tsv"
     for name in REPORTS:
         (launch / name).unlink(missing_ok=True)
-    argv = ["nextflow", "run", str(nf_dir / "scan.nf"), "-c", str(nf_dir / "base.config"), "-c", str(launch / "executor.config"),
-            "-params-file", str(launch / "params.json"), "-resume", session, "-with-trace", str(trace),
-            "-with-dag", str(launch / "dag.mmd"), "-with-timeline", str(launch / "timeline.html"), "-with-report", str(launch / "report.html")]
+    argv = nextflow_argv(nf_dir, launch, session)
     nf_env = {**env, "NXF_ANSI_LOG": "false"}
     if cloud:
         nf_env["NXF_CLOUDCACHE_PATH"] = profile.work.rstrip("/") + "/cache"
-    err(f"scan head: {profile.deployment} scan {scan} gen {gen} session {session} in {launch}")
+    err(f"scan head: {profile.deployment}{'' if profile.primary else f' [{profile.store}]'} scan {scan} gen {gen} session {session} in {launch}")
     err("+ " + " ".join(argv))
     if dry_run:
         return 0
     recording = bool(env.get(PROFILE_ENV))
     cost = ["-l", f"nf-session={session}"] if profile.executor.kind == "google-batch" else []
     if recording:
-        _record(start_cmd, ["-B", "-g", gen, scan])
+        _record(start_cmd, start_args(profile, gen, scan))
 
     proc = subprocess.Popen(argv, cwd=launch, env=nf_env, start_new_session=True)
     stopped: list[int] = []
