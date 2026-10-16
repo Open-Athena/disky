@@ -190,6 +190,23 @@ describe('D1', () => {
       ])
     })
 
+    it('counts the batches still holding a path, as the parent does: a batch absorbed by a later one drops out', async () => {
+      const calls = fakeSlack()
+      const { db } = await planDb()
+      await notifyPlan(env, db, 1, SITE, await stage(db, 1, run(1, 2)), { now: 1000 })
+      // Staging `run-1/` absorbs batch #1's two steps (`stageItems` deletes them).
+      await db.prepare("DELETE FROM plan_items WHERE batch_id = 1").run()
+      await notifyPlan(env, db, 1, SITE, await stage(db, 2, ['gs://b/ckpt/run-1/']), { now: 1060 })
+      const upd = calls.filter(c => c.method === 'chat.update').at(-1)!.body
+      expect([
+        calls.filter(c => c.method === 'chat.update' && c.body.ts === PARENT).map(c => sectionText(c.body.blocks).split('\n')[0]),
+        [sectionText(upd.blocks), (upd.blocks as { elements?: { text: { text: string } }[] }[])[1].elements!.map(e => e.text.text)],
+      ]).toEqual([
+        ['*Staged for deletion* · plan #1 · 3 prefixes in 2 batches', '*Staged for deletion* · plan #1 · 2 prefixes in 2 batches'],
+        [':wastebasket: *Ann Bee* staged 1 path · *1.0 TiB* · 10 objects\n`b/ckpt/run-1/` 1.0 TiB', ['Reject batch', 'View in www']],
+      ])
+    })
+
     it('concurrent stages by one stager claim one reply, which ends up covering both', async () => {
       const calls = fakeSlack({ delayMs: 5 })
       const { db, raw } = await planDb()

@@ -227,9 +227,13 @@ export interface ReplyView {
   batchId?: number
   /** The stager, as named (`who`). */
   by: string
+  /** Every batch it covers, live or not (named only once nothing is left). */
   batches: number
   /** What its batches still have staged. */
   prefixes: string[]
+  /** Each prefix's batch: the counts shown are of the batches still holding a
+   *  path (a batch absorbed or unstaged entirely drops out), as the parent's are. */
+  batchOf: Record<string, number>
   /** Bytes / objects by prefix at the latest scan; null = unsized. */
   stats: Record<string, PrefixStat> | null
   /** The latest batch note, if any. */
@@ -246,7 +250,11 @@ export function stageReply(v: ReplyView): { text: string; blocks: unknown[] } {
   const empty = n - held.length
   let b = 0, o = 0
   for (const p of held) { b += v.stats?.[p]?.b ?? 0; o += v.stats?.[p]?.o ?? 0 }
-  const inBatches = v.batches > 1 ? ` in ${plural(v.batches, 'batch', 'batches')}` : ''
+  const batchesOf = (ps: readonly string[]) => new Set(ps.map(p => v.batchOf[p])).size
+  // The batches holding what is shown (the title), and what a reject unstages (the button).
+  const shown = batchesOf(held.length ? held : v.prefixes)
+  const live = batchesOf(v.prefixes)
+  const inBatches = shown > 1 ? ` in ${plural(shown, 'batch', 'batches')}` : ''
   const emptyNote = empty ? ` (+${fmtN(empty)} empty at scan)` : ''
   const size = v.stats ? ` · *${fmtBytes(b)}* · ${plural(o, 'object')}${emptyNote}` : ''
   const note = v.note ? `\n> ${(v.note.length > 140 ? `${v.note.slice(0, 139)}…` : v.note).replace(/\s*\n\s*/g, ' ')}` : ''
@@ -260,12 +268,12 @@ export function stageReply(v: ReplyView): { text: string; blocks: unknown[] } {
       ],
     }
   }
-  const many = v.batches > 1
+  const many = live > 1
   const reject = {
     type: 'button', action_id: 'staged_reject', value: v.replyId != null ? `${v.planId}:r${v.replyId}` : `${v.planId}:${v.batchId}`,
-    text: { type: 'plain_text', text: many ? `Reject ${fmtN(v.batches)} batches` : 'Reject batch' },
+    text: { type: 'plain_text', text: many ? `Reject ${fmtN(live)} batches` : 'Reject batch' },
     confirm: {
-      title: { type: 'plain_text', text: many ? `Reject these ${fmtN(v.batches)} batches?` : 'Reject this batch?' },
+      title: { type: 'plain_text', text: many ? `Reject these ${fmtN(live)} batches?` : 'Reject this batch?' },
       text: { type: 'mrkdwn', text: `Unstages the ${plural(n, 'path')} ${many ? 'they' : 'it'} staged. Nothing is deleted.` },
       confirm: { type: 'plain_text', text: 'Reject' },
       deny: { type: 'plain_text', text: 'Cancel' },
@@ -503,22 +511,22 @@ async function detach(db: D1Database, planId: number, ts: string): Promise<{ won
 
 /** A stage reply's content from D1: a coalesced reply (`replyId`: its batches)
  *  or a pre-coalescing one (`batchId`). Null when it no longer exists. */
-async function loadReply(db: D1Database, planId: number, ref: { replyId: number } | { batchId: number }): Promise<{ by: string; batches: number; prefixes: string[]; note: string | null } | null> {
+async function loadReply(db: D1Database, planId: number, ref: { replyId: number } | { batchId: number }): Promise<{ by: string; batches: number; prefixes: string[]; batchOf: Record<string, number>; note: string | null } | null> {
   const batches = 'replyId' in ref
     ? (await db.prepare('SELECT id, note, created_by FROM stage_batches WHERE reply_id = ? AND plan_id = ? ORDER BY id').bind(ref.replyId, planId).all<{ id: number; note: string | null; created_by: string }>()).results
     : (await db.prepare('SELECT id, note, created_by FROM stage_batches WHERE id = ? AND plan_id = ?').bind(ref.batchId, planId).all<{ id: number; note: string | null; created_by: string }>()).results
   if (!batches.length) return null
   const ids = batches.map(b => b.id)
-  const prefixes = (await db.prepare(`SELECT prefix FROM plan_items WHERE plan_id = ? AND batch_id IN (${ids.map(() => '?').join(',')}) ORDER BY prefix`).bind(planId, ...ids).all<{ prefix: string }>()).results.map(r => r.prefix)
+  const items = (await db.prepare('SELECT prefix, batch_id FROM plan_items WHERE plan_id = ? AND batch_id IN (SELECT value FROM json_each(?)) ORDER BY prefix').bind(planId, JSON.stringify(ids)).all<{ prefix: string; batch_id: number }>()).results
   const note = [...batches].reverse().find(b => b.note)?.note ?? null
-  return { by: batches[0].created_by, batches: batches.length, prefixes, note }
+  return { by: batches[0].created_by, batches: batches.length, prefixes: items.map(i => i.prefix), batchOf: Object.fromEntries(items.map(i => [i.prefix, i.batch_id])), note }
 }
 
 interface ReplyCtx { planId: number; siteUrl: string; names: Names; stats: Record<string, PrefixStat> | null }
 async function renderReply(db: D1Database, c: ReplyCtx, ref: { replyId: number } | { batchId: number }): Promise<{ text: string; blocks: unknown[] } | null> {
   const r = await loadReply(db, c.planId, ref)
   if (!r) return null
-  return stageReply({ planId: c.planId, replyId: 'replyId' in ref ? ref.replyId : null, batchId: 'batchId' in ref ? ref.batchId : undefined, by: who(r.by, c.names), batches: r.batches, prefixes: r.prefixes, stats: c.stats, note: r.note, siteUrl: c.siteUrl })
+  return stageReply({ planId: c.planId, replyId: 'replyId' in ref ? ref.replyId : null, batchId: 'batchId' in ref ? ref.batchId : undefined, by: who(r.by, c.names), batches: r.batches, prefixes: r.prefixes, batchOf: r.batchOf, stats: c.stats, note: r.note, siteUrl: c.siteUrl })
 }
 
 /** A claimed reply not posted within this many seconds was claimed by a
