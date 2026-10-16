@@ -6,6 +6,8 @@ import { elideMid } from './CopyName'
 import { pathText } from './pathCrumbs'
 import { useStore, useStoreFetch } from './store'
 import { Tooltip } from './Tooltip'
+import { useLargestPref } from './prefs'
+import { SectionAnchor } from './SectionAnchor'
 import { useUnits } from './units'
 
 // "Large Files": the biggest objects anywhere under the drilled directory —
@@ -65,7 +67,9 @@ export function LargestFiles({ segs, scheme, scan, total, enabled = true, onOpen
   const [nP, setNP] = useUrlState('ln', intParam(20))
   const n = COUNTS.includes(nP) ? nP : 20
   const path = segs.join('/')
-  const q = useLargest(path, scan, n, enabled)
+  const [fold, setFold] = useLargestPref()
+  const open = fold === 'open'
+  const q = useLargest(path, scan, n, enabled && open)
   const files = useMemo(() => q.data?.files ?? [], [q.data])
   // Created-month ink over the listed rows' range, as in the children table.
   const [dMin, dMax] = useMemo(() => {
@@ -81,9 +85,10 @@ export function LargestFiles({ segs, scheme, scan, total, enabled = true, onOpen
   const hasYr = files.some(f => f.mtime != null && createdParts(Math.floor(f.mtime / 86400)).length > 1)
   const sum = files.reduce((s, f) => s + f.size, 0)
   return (
-    <section className="children-tbl largest-tbl" aria-label="largest files">
+    <section id="largest" className={`children-tbl largest-tbl${open ? '' : ' folded'}`} aria-label="largest files">
       <h3>
-        Largest files
+        <button type="button" className="fold" aria-expanded={open} aria-label={open ? 'Fold the largest files' : 'Show the largest files'} onClick={() => setFold(open ? 'folded' : 'open')}>{open ? '▾' : '▸'}</button>
+        <SectionAnchor id="largest">Largest files</SectionAnchor>
         <Tooltip content={<>
           The biggest files anywhere under <code>{pathText(scheme, segs, true)}</code>, however deep — files only, never folders.
           Sizes are per-path: a cloned or hard-linked file is charged in full here, so deleting it can free less.
@@ -92,7 +97,7 @@ export function LargestFiles({ segs, scheme, scan, total, enabled = true, onOpen
           {COUNTS.map(c => <option key={c} value={c}>top {c}</option>)}
         </select>
       </h3>
-      {q.error ? <p className="err">Couldn’t list the largest files: {q.error.message}</p>
+      {!open ? null : q.error ? <p className="err">Couldn’t list the largest files: {q.error.message}</p>
         : !q.data ? <p className="loading">listing the largest files…</p>
         : (
           <table className="worklist">
