@@ -100,6 +100,8 @@ class ScanReporter:
         # Error types and exit codes are safe to report without serializing credentials or request bodies.
         code = getattr(exc, "returncode", 1) if exc is not None else 0
         self.write(exit_code=code, failed_phase=self.failed_phase if exc else None, error=exc_type.__name__ if exc_type else None)
+        if exc is not None:
+            alert("fail", f"run failed (exit {code}) in {self.failed_phase}: {exc_type.__name__}")
 
 
 def build_command(context: Path, tag: str, config: dict) -> list[str]:
@@ -115,6 +117,18 @@ def build_command(context: Path, tag: str, config: dict) -> list[str]:
         "--polling-interval", "15",
         "--substitutions", f"_IMAGE={image}",
     ]
+
+
+def alert(level: str, message: str) -> None:
+    """A `fail` / `warn` alert through the shared job wrapper's channel (`scan_runs.JobRun.alert`: `disk-tree notify`,
+    redacted of the profile's `secrets`, the Batch logs link): Slack once `SLACK_BOT_TOKEN` and `SLACK_ALERT_CHANNEL`
+    are set, else printed. Never raises."""
+    try:
+        from dt_cloud.scan_runs import JobRun
+
+        JobRun(str(HERE / "r2-scan-runs.json"), None, False, environ.get("BATCH_JOB_UID", "").strip() or None, None).alert(level, message)
+    except Exception as exc:  # noqa: BLE001 — alerting must never mask what it reports
+        print(f"alert failed (the job continues): {type(exc).__name__}", file=stderr, flush=True)
 
 
 def index_env() -> dict[str, str]:
@@ -182,7 +196,14 @@ def job_spec(image: str, config: dict) -> dict:
         "DUCKDB_THREADS": "8",
         "OA_R2_IMAGE": image,
         "DISKY_LABELS": "app=disky,deployment=oa-r2,component=scan",
+        "SITE_URL": config["site_url"],
+        **{name: config[key] for name, key in (("SLACK_CHANNEL", "slack_channel"), ("SLACK_ALERT_CHANNEL", "slack_alert_channel")) if config[key]},
     }
+    # Batch refuses a job whose secret has no version, so an optional secret is passed only once it is listed live
+    # (its version added): until then the step it serves is skipped (`serve`, `alert`).
+    if unknown := sorted(set(config["optional_secrets_live"]) - set(config["optional_secrets"])):
+        raise ValueError(f"optional_secrets_live names no optional secret: {unknown}")
+    secrets = {**config["secrets"], **{name: config["optional_secrets"][name] for name in config["optional_secrets_live"]}}
     return {
         "taskGroups": [{
             "taskCount": 1,
@@ -199,7 +220,7 @@ def job_spec(image: str, config: dict) -> dict:
                     "variables": variables,
                     "secretVariables": {
                         name: f"projects/{config['project']}/secrets/{secret}/versions/latest"
-                        for name, secret in config["secrets"].items()
+                        for name, secret in secrets.items()
                     },
                 },
                 "volumes": [{"mountPath": "/mnt/disks/r2-stage", "deviceName": "r2-stage"}],
@@ -275,9 +296,9 @@ def build(dry_run: bool, tag: str) -> None:
     context = root / "tmp" / f"oa-r2-build-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S%fZ')}"
     command = build_command(context, tag, profile())
     context.mkdir(parents=True, exist_ok=False)
-    for directory in ("src", "cloud/src"):
+    for directory in ("src", "cloud/src", "job/icons-r2"):
         copytree(root / directory, context / directory, ignore=ignore_patterns("__pycache__", "*.pyc"))
-    for filename in ("README.md", "pyproject.toml", "uv.lock", "cloud/pyproject.toml", "job/Dockerfile", "job/cloudbuild.yaml", "job/r2.json", "job/r2-scan-runs.json", "job/r2-scan"):
+    for filename in ("README.md", "pyproject.toml", "uv.lock", "cloud/pyproject.toml", "job/Dockerfile", "job/cloudbuild.yaml", "job/r2.json", "job/r2-scan-runs.json", "job/r2-scan", "job/digest.yml"):
         target = context / filename
         target.parent.mkdir(parents=True, exist_ok=True)
         copy2(root / filename, target)
@@ -457,6 +478,40 @@ def scan_run() -> None:
         execute_scan(config, scan, generation, work, reporter)
         with reporter.phase("meta"):
             execute_meta(config, scan, generation, work / "meta")
+        serve(config, scan, reporter)
+
+
+def serve_steps(config: dict, scan: str) -> list[tuple[str, list[str], dict[str, str], str]]:
+    """After a published scan: the site's cache warm-up, the uncached serving probe and the Slack digest, each with
+    the env it runs in and what its failure means. A step whose credentials aren't in the env (an optional secret not
+    yet live, an unset channel) is left out, and says so."""
+    root = f"r2://{config['serving_bucket']}"
+    env = index_env()
+    steps = []
+    if environ.get("SITE_TOKEN", "").strip():
+        steps += [
+            ("warm-cache", ["dt-cloud", "warm-cache", "-d", scan, "-r", f"{root}/snapshots/r2"], env, "the first viewers of this scan compute their views cold"),
+            ("probe", ["dt-cloud", "probe", "-c", "-s", "r2", "-u", config["site_url"], "-o", f"{root}/probes/r2/"], env, "a page load 5xx'd or dropped (the data is fine); see the probe record"),
+        ]
+    else:
+        print("no SITE_TOKEN: cache warm-up and the serving probe skipped", file=stderr, flush=True)
+    if all(environ.get(name, "").strip() for name in ("SLACK_BOT_TOKEN", "SLACK_CHANNEL", "SITE_TOKEN", "CF_PAGES_TOKEN")):
+        # wrangler (the plot's `pages deploy`) gets the Pages token for this step only
+        steps.append(("digest", ["dt-cloud", "digest", "-T", "cw", "-C", str(HERE / "digest.yml"), "-i", str(HERE / "icons-r2"), "-r", f"{root}/snapshots/r2"],
+                      {**env, "CLOUDFLARE_API_TOKEN": environ["CF_PAGES_TOKEN"].strip()}, "today's #r2-usage digest reply didn't post (the scan is fine)"))
+    else:
+        print("no SLACK_BOT_TOKEN + SLACK_CHANNEL + SITE_TOKEN + CF_PAGES_TOKEN: the Slack digest skipped", file=stderr, flush=True)
+    return steps
+
+
+def serve(config: dict, scan: str, reporter: "ScanReporter") -> None:
+    """`serve_steps`, each its own phase and never fatal: a failure warns, the scan stands."""
+    for name, command, env, meaning in serve_steps(config, scan):
+        with reporter.phase(name):
+            done = run(command, env=env)
+            if done.returncode:
+                print(f"WARN: {name} failed (exit {done.returncode})", file=stderr, flush=True)
+                alert("warn", f"{name} failed (exit {done.returncode}): {meaning}")
 
 
 class MetaReporter:
@@ -604,6 +659,7 @@ def index_store(
             done = run(command, env=env)
             if done.returncode:
                 print(f"WARN: {kind} {verb} {gen} failed (exit {done.returncode}); a later run catches up", file=stderr, flush=True)
+                alert("warn", f"{'meta ' if meta else ''}{kind} {verb} failed (exit {done.returncode}): a later run catches up")
 
 
 if __name__ == "__main__":

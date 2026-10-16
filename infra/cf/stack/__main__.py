@@ -170,3 +170,32 @@ if cfg.get_bool("d1Publisher"):
         opts=pulumi.ResourceOptions(ignore_changes=["policies"]),
     )
     pulumi.export("d1_publish_token", pulumi.Output.secret(d1_publisher.value))
+
+# The Slack digest's icons: a Pages project serving the reply avatars (its production deployment of `job/icons-r2/`)
+# and the OP's plot (the `plot` branch, deployed by `dt-cloud digest`), and the job's Pages token. Pages tokens can't be
+# scoped to one project, so it is Pages Write on the account, held only by the job.
+if icons_project := cfg.get("iconsProject"):
+    icons = cloudflare.PagesProject(
+        "icons",
+        account_id=account_id,
+        name=icons_project,
+        production_branch="main",
+        build_config=cloudflare.PagesProjectBuildConfigArgs(destination_dir="."),
+        # direct uploads (`wrangler pages deploy`) record their deployments' configs on the project
+        opts=pulumi.ResourceOptions(ignore_changes=["deployment_configs"]),
+    )
+    pages_group = cloudflare.get_account_api_token_permission_groups_list_output(
+        account_id=account_id, name="Pages Write",
+    ).apply(lambda result: _only_permission_group(result, "Pages Write"))
+    pages_publisher = cloudflare.AccountToken(
+        "pages-publisher",
+        account_id=account_id,
+        name="oa-r2-usage Pages publisher (job: digest plot)",
+        policies=[{
+            "effect": "allow", "permission_groups": [{"id": pages_group}],
+            "resources": json.dumps({f"com.cloudflare.api.account.{account_id}": "*"}),
+        }],
+        opts=pulumi.ResourceOptions(ignore_changes=["policies"]),
+    )
+    pulumi.export("icons_project", icons.name)
+    pulumi.export("job_pages_token", pulumi.Output.secret(pages_publisher.value))

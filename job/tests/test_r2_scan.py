@@ -187,6 +187,7 @@ def test_job_uses_only_r2_resources_and_secret_containers() -> None:
             "DUCKDB_THREADS": "8",
                 "OA_R2_IMAGE": image,
             "DISKY_LABELS": "app=disky,deployment=oa-r2,component=scan",
+            "SITE_URL": "https://r2.oa.dev",
         },
         "secretVariables": {
             "SOURCE_ACCESS_KEY_ID": "projects/oa-internal-450019/secrets/oa-r2-source-access-key-id/versions/latest",
@@ -303,3 +304,119 @@ def test_index_stages_authenticate_with_the_serving_key_not_the_source_key(monke
         "AWS_ACCESS_KEY_ID": "index-id", "AWS_SECRET_ACCESS_KEY": "index-secret",
         "R2_ACCESS_KEY_ID": "index-id\n", "R2_SECRET_ACCESS_KEY": "index-secret\n", "TEST_FLAG": "1",
     }
+
+
+def test_optional_secrets_reach_the_job_only_once_live() -> None:
+    live = {**config, "optional_secrets_live": ["SLACK_BOT_TOKEN", "SITE_TOKEN"], "slack_channel": "C0R2USAGE", "slack_alert_channel": "C0R2ALERTS"}
+    env = module["job_spec"](image, live)["taskGroups"][0]["taskSpec"]["environment"]
+    assert ({k: env["variables"][k] for k in ("SLACK_CHANNEL", "SLACK_ALERT_CHANNEL")}, sorted(env["secretVariables"].items())[:3]) == (
+        {"SLACK_CHANNEL": "C0R2USAGE", "SLACK_ALERT_CHANNEL": "C0R2ALERTS"},
+        [
+            ("CLOUDFLARE_API_TOKEN", "projects/oa-internal-450019/secrets/oa-r2-d1-token/versions/latest"),
+            ("R2_ACCESS_KEY_ID", "projects/oa-internal-450019/secrets/oa-r2-index-access-key-id/versions/latest"),
+            ("R2_SECRET_ACCESS_KEY", "projects/oa-internal-450019/secrets/oa-r2-index-secret-access-key/versions/latest"),
+        ],
+    )
+    assert {k: v for k, v in env["secretVariables"].items() if k in config["optional_secrets"]} == {
+        "SLACK_BOT_TOKEN": "projects/oa-internal-450019/secrets/oa-r2-slack-bot-token/versions/latest",
+        "SITE_TOKEN": "projects/oa-internal-450019/secrets/oa-r2-site-grant/versions/latest",
+    }
+    with pytest.raises(ValueError, match=r"^optional_secrets_live names no optional secret: \['HF_TOKEN'\]$"):
+        module["job_spec"](image, {**config, "optional_secrets_live": ["HF_TOKEN"]})
+
+
+def slack_posts(monkeypatch) -> list[dict]:
+    from disk_tree.notify import push
+
+    posts = []
+    def post(url: str, body: bytes, headers: dict) -> tuple[int, str]:
+        posts.append({"url": url, "auth": headers["Authorization"], **loads(body)})
+        return 200, '{"ok": true}'
+    monkeypatch.setattr(push, "http_post", post)
+    return posts
+
+
+def test_failed_run_alerts_the_alert_channel_once_naming_its_phase(monkeypatch, tmp_path: Path) -> None:
+    from dt_cloud import scan_runs
+
+    monkeypatch.setattr(scan_runs, "D1Sink", lambda db: scan_runs.SqliteSink(":memory:"))
+    monkeypatch.setenv("TMPDIR", str(tmp_path))
+    monkeypatch.setenv("BATCH_JOB_UID", "own-uid")
+    monkeypatch.setenv("SLACK_BOT_TOKEN", "xoxb-secret")
+    monkeypatch.setenv("SLACK_ALERT_CHANNEL", "C0R2ALERTS")
+    monkeypatch.delenv("DISK_TREE_NOTIFY", raising=False)
+    monkeypatch.delenv("DT_ALERTS", raising=False)
+    posts = slack_posts(monkeypatch)
+    with pytest.raises(CalledProcessError):
+        with module["ScanReporter"]("2026-10-13T0716", "20261013T071607992442Z") as reporter:
+            with reporter.phase("listing"):
+                pass
+            with reporter.phase("path-index"):
+                raise CalledProcessError(7, ["path-index", "xoxb-secret"])
+    assert posts == [{
+        "url": "https://slack.com/api/chat.postMessage", "auth": "Bearer xoxb-secret", "channel": "C0R2ALERTS",
+        "text": "*❌ OA R2 scan*\nrun failed (exit 7) in path-index: CalledProcessError\n"
+                "<https://console.cloud.google.com/logs/query;query=labels.job_uid%3D%22own-uid%22?project=oa-internal-450019|task logs>",
+        "unfurl_links": False, "unfurl_media": False,
+    }]
+
+
+def test_without_an_alert_channel_a_failure_posts_nothing(monkeypatch, tmp_path: Path) -> None:
+    from dt_cloud import scan_runs
+
+    monkeypatch.setattr(scan_runs, "D1Sink", lambda db: scan_runs.SqliteSink(":memory:"))
+    monkeypatch.setenv("TMPDIR", str(tmp_path))
+    monkeypatch.setenv("BATCH_JOB_UID", "own-uid")
+    monkeypatch.setenv("SLACK_BOT_TOKEN", "xoxb-secret")
+    for name in ("SLACK_ALERT_CHANNEL", "DISK_TREE_NOTIFY", "DT_ALERTS", "PUSHOVER_TOKEN", "DISCORD_NOTIFY_WEBHOOK"):
+        monkeypatch.delenv(name, raising=False)
+    posts = slack_posts(monkeypatch)
+    with pytest.raises(RuntimeError):
+        with module["ScanReporter"]("2026-10-13T0716", "20261013T071607992442Z"):
+            raise RuntimeError("boom")
+    assert posts == []
+
+
+SERVE_SECRETS = ("SITE_TOKEN", "SLACK_BOT_TOKEN", "SLACK_CHANNEL", "CF_PAGES_TOKEN")
+
+
+def serve_names(monkeypatch, **env: str) -> list[tuple[str, list[str], str | None]]:
+    namespace = module["serve_steps"].__globals__
+    monkeypatch.setitem(namespace, "environ", {"R2_ACCESS_KEY_ID": "index-id", "R2_SECRET_ACCESS_KEY": "index-secret", **env})
+    return [(name, command, step_env.get("CLOUDFLARE_API_TOKEN")) for name, command, step_env, _ in module["serve_steps"](config, "2026-10-16T0715")]
+
+
+def test_serving_steps_are_skipped_without_their_credentials(monkeypatch) -> None:
+    assert serve_names(monkeypatch) == []
+    assert serve_names(monkeypatch, SITE_TOKEN="grant", SLACK_BOT_TOKEN="xoxb", SLACK_CHANNEL="C0R2USAGE") == [
+        ("warm-cache", ["dt-cloud", "warm-cache", "-d", "2026-10-16T0715", "-r", "r2://oa-r2-usage-index/snapshots/r2"], None),
+        ("probe", ["dt-cloud", "probe", "-c", "-s", "r2", "-u", "https://r2.oa.dev", "-o", "r2://oa-r2-usage-index/probes/r2/"], None),
+    ]
+
+
+def test_serving_steps_with_every_credential_end_in_the_digest(monkeypatch) -> None:
+    here = module["HERE"]
+    assert serve_names(monkeypatch, SITE_TOKEN="grant", SLACK_BOT_TOKEN="xoxb", SLACK_CHANNEL="C0R2USAGE", CF_PAGES_TOKEN="pages\n") == [
+        ("warm-cache", ["dt-cloud", "warm-cache", "-d", "2026-10-16T0715", "-r", "r2://oa-r2-usage-index/snapshots/r2"], None),
+        ("probe", ["dt-cloud", "probe", "-c", "-s", "r2", "-u", "https://r2.oa.dev", "-o", "r2://oa-r2-usage-index/probes/r2/"], None),
+        ("digest", ["dt-cloud", "digest", "-T", "cw", "-C", str(here / "digest.yml"), "-i", str(here / "icons-r2"), "-r", "r2://oa-r2-usage-index/snapshots/r2"], "pages"),
+    ]
+
+
+def test_a_failed_serving_step_warns_and_the_scan_stands(monkeypatch) -> None:
+    from subprocess import CompletedProcess
+
+    namespace = module["serve"].__globals__
+    monkeypatch.setitem(namespace, "environ", {"R2_ACCESS_KEY_ID": "index-id", "R2_SECRET_ACCESS_KEY": "index-secret", "SITE_TOKEN": "grant"})
+    monkeypatch.setitem(namespace, "run", lambda command, env: CompletedProcess(command, 0 if command[1] == "warm-cache" else 1))
+    alerts, phases = [], []
+    monkeypatch.setitem(namespace, "alert", lambda level, message: alerts.append((level, message)))
+
+    class Reporter:
+        @module["contextmanager"]
+        def phase(self, name: str):
+            phases.append(name)
+            yield
+
+    module["serve"](config, "2026-10-16T0715", Reporter())
+    assert (phases, alerts) == (["warm-cache", "probe"], [("warn", "probe failed (exit 1): a page load 5xx'd or dropped (the data is fine); see the probe record")])

@@ -1,0 +1,35 @@
+# r2.oa.dev's Slack usage digest (`dt-cloud digest -T cw -C job/digest.yml`): the `cw` template (a monthly thread, one
+# reply per UTC day), field by field as cw-s3's and hf's `job/digest.yml`. Validated on load: unknown keys raise.
+# Secrets and the channel stay env-only (`SLACK_BOT_TOKEN`, `SLACK_CHANNEL` = #r2-usage, from `job/r2.json`).
+template: cw
+title: Open Athena R2
+site_url: https://r2.oa.dev
+# the job passes `-r` anyway
+root: r2://oa-r2-usage-index/snapshots/r2
+# beside `snapshots/`: r2://oa-r2-usage-index/digest/r2/<channel>/<variant>/<YYYY-MM>.json, keyed by channel (a
+# staging converge never masquerades as prod) and variant
+state: digest/r2/{channel}/{variant}
+discord_state: digest/discord/{webhook}
+discord_webhook_env: null
+# the reply avatars (`arrows/av_deg<N>.png`) are the icons project's production deployment of `job/icons-r2/`
+icons_base: https://oa-r2-usage-icons.pages.dev
+icons_dir: job/icons-r2
+# the OP's plot (drawn by the site, `POST /api/digest-image` with SITE_TOKEN) goes to the icons project's `plot`
+# preview branch, never the production alias that serves the avatars
+plot_project: oa-r2-usage-icons
+plot_branch: plot
+plot_base: https://plot.oa-r2-usage-icons.pages.dev
+# sender: the headline as the reply's sender name + a trend-arrow avatar. The scan runs once a day (07:15 UTC), so
+# the day's reply is its first scan from 00Z on, and there is no provisional reply
+variant: sender
+reply_hour: 0
+provisional: false
+# decimal units, as the site renders sizes (288 T on the Map = 262 TiB) and as R2 bills (GB-month). No per-bucket quota
+units: TB
+primary: marin-na
+buckets:
+  marin-na: {label: marin-na}
+  marin-discord: {label: marin-discord}
+  oa-cw-s3-usage-index: {label: cw-s3 index}
+  oa-gcs-usage-index: {label: gcs index}
+prices: {}

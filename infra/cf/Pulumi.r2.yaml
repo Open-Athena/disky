@@ -8,6 +8,7 @@ config:
   oa-r2-usage-cf:kvName: oa-r2-usage-cache
   oa-r2-usage-cf:r2Bucket: oa-r2-usage-index
   oa-r2-usage-cf:d1Publisher: true
+  oa-r2-usage-cf:iconsProject: oa-r2-usage-icons
   oa-r2-usage-cf:sourceBuckets:
     - marin-na
     - marin-discord

@@ -18,11 +18,20 @@
   "static_gen": "2026-10-15r2b",
   "meta_static_gen": "2026-10-15metab",
   "interval_gen": "2026-10-15r2",
+  "site_url": "https://r2.oa.dev",
+  "slack_channel": "",
+  "slack_alert_channel": "",
   "secrets": {
     "SOURCE_ACCESS_KEY_ID": "oa-r2-source-access-key-id",
     "SOURCE_SECRET_ACCESS_KEY": "oa-r2-source-secret-access-key",
     "R2_ACCESS_KEY_ID": "oa-r2-index-access-key-id",
     "R2_SECRET_ACCESS_KEY": "oa-r2-index-secret-access-key",
     "CLOUDFLARE_API_TOKEN": "oa-r2-d1-token"
-  }
+  },
+  "optional_secrets": {
+    "SLACK_BOT_TOKEN": "oa-r2-slack-bot-token",
+    "SITE_TOKEN": "oa-r2-site-grant",
+    "CF_PAGES_TOKEN": "oa-r2-cf-pages-token"
+  },
+  "optional_secrets_live": []
 }

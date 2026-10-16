@@ -19,6 +19,8 @@
       ]
     }
   ],
+  "alerts": {"label": "OA R2 scan", "logs_url": "https://console.cloud.google.com/logs/query;query=labels.job_uid%3D%22{job_uid}%22?project={project}"},
+  "secrets": ["SOURCE_ACCESS_KEY_ID", "SOURCE_SECRET_ACCESS_KEY", "R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY", "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "CLOUDFLARE_API_TOKEN", "SLACK_BOT_TOKEN", "SITE_TOKEN", "CF_PAGES_TOKEN"],
   "outputs": [
     {"key": "listing", "uri": "gs://oa-r2-usage-data/scans/{scan}/{gen}/listing/", "split": "dir", "rows": {"json": "_SUCCESS.json", "field": "objects"}, "after": "archive"},
     {"key": "path-index", "uri": "gs://oa-r2-usage-data/scans/{scan}/{gen}/index/", "split": "stem", "rows": "groups", "after": "archive"},

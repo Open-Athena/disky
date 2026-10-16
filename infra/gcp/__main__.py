@@ -102,7 +102,9 @@ image_writer = gcp.artifactregistry.RepositoryIamMember(
 secrets = Secrets(
     "r2-secrets",
     project=project,
-    secrets={name: {**labels, "component": "secret"} for name in profile["secrets"].values()},
+    # the optional ones (the Slack bot, the site grant, the Pages token) too: a container without a version costs
+    # nothing, and the job is handed one only once `optional_secrets_live` lists it (`job/r2-scan` `job_spec`)
+    secrets={name: {**labels, "component": "secret"} for name in [*profile["secrets"].values(), *profile["optional_secrets"].values()]},
     accessor=job.member,
     accessor_email=job.email_literal,
     adopt=Adopt(False),
