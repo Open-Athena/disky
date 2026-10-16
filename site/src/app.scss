@@ -1342,6 +1342,9 @@ input::placeholder, textarea::placeholder { color: var(--ink-3); opacity: 1; }
 #over-time h2 .gran { margin-left: 12px; font-weight: 400; vertical-align: middle; }
 .sub .gran { margin-left: 10px; vertical-align: middle; }
 
+// A wide table scrolls inside its own box, never the page (`LifecycleFold`'s rules table is ~714 px).
+.tbl-scroll { overflow-x: auto; max-width: 100%; }
+
 .classes {
   border-collapse: collapse;
   font-variant-numeric: tabular-nums;
