@@ -68,6 +68,9 @@ class Phase:
     finished_ts: int | None
     status: str = "done"
     note: str | None = None
+    #: The Batch job the phase ran in, when not the run's own (a Nextflow step's task), and its machine
+    job_name: str | None = None
+    machine: str | None = None
 
 
 def phase_status(note: str | None) -> str:
@@ -129,11 +132,17 @@ def run_sql(run: Run, now: int) -> str:
 def phase_sql(run_id: str, p: Phase) -> str:
     cols = ["run_id", "phase", "seq", "started_ts", "finished_ts", "status", "note"]
     vals = [run_id, p.phase, p.seq, p.started_ts, p.finished_ts, p.status, p.note]
+    # The task columns only when known, so a database without them (migration `scan-run-phase-jobs`) still takes
+    # every one-VM run's phases.
+    task = [(c, v) for c, v in (("job_name", p.job_name), ("machine", p.machine)) if v is not None]
+    cols += [c for c, _ in task]
+    vals += [v for _, v in task]
     return (f"INSERT INTO scan_run_phases ({', '.join(cols)}) VALUES ({', '.join(lit(v) for v in vals)}) "
             "ON CONFLICT(run_id, phase) DO UPDATE SET seq = excluded.seq, status = excluded.status, "
             "started_ts = COALESCE(excluded.started_ts, scan_run_phases.started_ts), "
             "finished_ts = COALESCE(excluded.finished_ts, scan_run_phases.finished_ts), "
-            "note = COALESCE(excluded.note, scan_run_phases.note)")
+            "note = COALESCE(excluded.note, scan_run_phases.note)"
+            + "".join(f", {c} = COALESCE(excluded.{c}, scan_run_phases.{c})" for c, _ in task))
 
 
 def output_sql(run_id: str, o: Output) -> str:
@@ -645,6 +654,7 @@ def record(
     job: Mapping | None = None,
     facts: Mapping[str, object] | None = None,
     extra_cost: float | None = None,
+    task: Mapping[str, str] | None = None,
 ) -> Record:
     """One incremental write of run `run_id` (scan `scan`): start it, start/close a phase (measuring completed outputs tied to
     it), measure named outputs, finish it (`exit_code`, or `nop`). The run row is upserted every time, so any call
@@ -652,7 +662,9 @@ def record(
 
     `facts`: job facts the caller states (`JOB_FACTS`; a None is "unknown", never a clear). With a machine known (here
     or stored) and no Batch `job`, the finishing write estimates the run's cost over its billed time (`billed_secs`),
-    plus `extra_cost` (the jobs it ran apart from its own: `labelled_cost`)."""
+    plus `extra_cost` (the jobs it ran apart from its own: `labelled_cost`).
+
+    `task`: the Batch job phase `phase` ran in, when not the run's own (`job_name`, `machine`; `task_job`)."""
     check_scan_id(scan)
     if phase_start and not phase:
         raise ValueError("scan-run: a phase start needs a phase name")
@@ -690,7 +702,8 @@ def record(
         seq = next((p["seq"] for p in phases if p["phase"] == phase), len(phases))
         if not phase_start or not existing or existing["finished_ts"] is None:
             new_phases.append(Phase(phase, seq, p_start, None if phase_start else now,
-                                    "running" if phase_start else phase_status(note), note))
+                                    "running" if phase_start else phase_status(note), note,
+                                    **{k: v for k, v in (task or {}).items() if k in ("job_name", "machine")}))
     if exit_code:
         new_phases.extend(Phase(p["phase"], p["seq"], p["started_ts"], now, "failed", f"failed (exit {exit_code})")
                           for p in phases if p["status"] == "running" and p["finished_ts"] is None)
@@ -1192,9 +1205,36 @@ class JobRun:
 
     # alerts
 
+    def task(self) -> dict[str, str]:
+        """The Batch job this process runs in when it isn't the run's own (a Nextflow step's task, `$BATCH_JOB_UID` ≠
+        the run id): `uid`, `job_name`, `region`, `machine`; {} otherwise. Looked up once per task, kept in the state file."""
+        st = self.state()
+        if "task" in st:
+            return st["task"]
+        uid = (self.env.get("BATCH_JOB_UID") or "").strip()
+        t: dict[str, str] = {}
+        if uid and uid != self.run_id and self.recording:
+            try:
+                from .gcp import batch_job_by_uid
+
+                job = next((j for r in (self.profile.regions or ("us-central1",))
+                            if (j := batch_job_by_uid(uid, self.profile.project, r))), None)
+                if job is None:
+                    err(f"scan-run: no Batch job with uid {uid} in {self.profile.regions}")
+                else:
+                    jf = job_fields(self.profile, job)
+                    t = {"uid": uid, **{k: jf[k] for k in ("job_name", "region", "machine") if jf[k]}}
+            except Exception as e:  # noqa: BLE001 — the task's links are a nicety; the phase records without them
+                err(f"scan-run: task lookup failed ({type(e).__name__}: {e}); phases record without their task")
+        self.save(task=t)
+        return t
+
     def facts(self) -> dict[str, str]:
         st = self.state()
-        f = {"job_uid": self.run_id, "project": self.profile.project, "region": st.get("region"), "job": st.get("job_name"),
+        # a step's alert links its own task (`job_uid`, `job`), not the head
+        task = st.get("task") or {}
+        f = {"job_uid": task.get("uid") or self.run_id, "project": self.profile.project, "region": task.get("region") or st.get("region"),
+             "job": task.get("job_name") or st.get("job_name"),
              "scan": self.scan, "kind": st.get("kind", "scan"), "store": st.get("store") or self.profile.store}
         return {k: str(v) for k, v in f.items() if v}
 
@@ -1294,7 +1334,7 @@ class JobRun:
     def begin(self, name: str, began: int | None = None, gen: str | None = None) -> None:
         err(phase_line(name, self.clock(began), start=True))
         self.save(running=[*(r for r in self.state().get("running", []) if r != name), name], **({"gen": gen} if gen else {}))
-        self.write(phase=name, phase_start=True, began=began, gen=gen)
+        self.write(phase=name, phase_start=True, began=began, gen=gen, task=self.task())
 
     def end(
         self,
@@ -1320,7 +1360,8 @@ class JobRun:
         err(phase_line(name, secs, note))
         pairs = [tuple(o.split("=", 1)) for o in outputs]
         # a failed phase's outputs are not measured: what it left is partial
-        self.write(at, phase=name, note=note, store=AnyStore() if measure and not rc else None, outputs=() if rc else pairs)
+        self.write(at, phase=name, note=note, store=AnyStore() if measure and not rc else None, outputs=() if rc else pairs,
+                   task=self.task())
         if not rc:
             return 0
         why = f", timed out after {timed_out}" if timed_out else f", terminated by {signame(terminated)}" if terminated else ""

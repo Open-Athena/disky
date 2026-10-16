@@ -96,6 +96,13 @@ def batch_job(name: str, project: str | None = None, region: str = REGION) -> di
     return _get(f"https://batch.googleapis.com/v1/projects/{project}/locations/{region}/jobs/{name}")
 
 
+def batch_job_by_uid(uid: str, project: str | None = None, region: str = REGION) -> dict | None:
+    """The Batch job whose uid is `uid` (a task knows only its `$BATCH_JOB_UID`), or None."""
+    project = project or gcp_project()
+    jobs = _get(f"https://batch.googleapis.com/v1/projects/{project}/locations/{region}/jobs", filter=f'uid="{uid}"').get("jobs", [])
+    return jobs[0] if jobs else None
+
+
 def log_entries(
     filter_: str,
     project: str | None = None,

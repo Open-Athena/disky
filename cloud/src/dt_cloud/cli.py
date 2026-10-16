@@ -3152,5 +3152,39 @@ def _batch_cancel(labels: tuple[str, ...], dry_run: bool, region: str | None) ->
         print(n)
 
 
+@main.group("scan")
+def _scan() -> None:
+    """A scan as a Nextflow DAG (specs/pipelines-everywhere.md): `head` runs it, each task runs one `step`."""
+
+
+@_scan.command("step")
+@option("-p", "--profile", "profile_path", default=None, help="The deployment's scan profile YAML (default `$DT_SCAN_PROFILE_JSON`, as the head passes it, else `$DT_SCAN_PROFILE`)")
+@argument("name")
+@argument("arg", required=False)
+def _scan_step(profile_path: str | None, name: str, arg: str | None) -> None:
+    """Run scan step NAME (ARG: `list`'s source URI) for the scan `$SNAP_ID` / `$GEN` / `$DT_JOB_START` the head
+    stamped, recording its phases into the run `$DT_RUN_ID`. Idempotent: done work is skipped. Steps:
+    `dt_cloud.scan_steps.STEPS`."""
+    from .scan_steps import run_step
+
+    sys.exit(run_step(name, arg, profile_path=profile_path))
+
+
+@_scan.command("head")
+@option("-F", "--fresh", is_flag=True, help="Run every task with Nextflow's cache off (each step still skips what its own outputs say is done): after a cached task's output was lost")
+@option("-n", "--dry-run", is_flag=True, help="Write the params, executor config and history line; print the Nextflow command; run nothing")
+@option("-N", "--nf-dir", type=Path, default=None, help="Where `scan.nf` + `base.config` are (default `$DT_NF_DIR`, else `job/nf`)")
+@option("-R", "--reproc", is_flag=True, help="Re-aggregate from the archived listings / layer-2s: skip `list`, run from `index` (REPROC=1: unrecorded, no serving side effects)")
+@option("-w", "--launch-dir", type=Path, default=None, help="Nextflow's launch dir (default: the profile's `work` for the local executor, else `$TMPDIR/nf-<scan>`)")
+@argument("profile_path", type=Path)
+def _scan_head(fresh: bool, dry_run: bool, nf_dir: Path | None, reproc: bool, launch_dir: Path | None, profile_path: Path) -> None:
+    """Run one scan of the deployment PROFILE_PATH describes (`job/profiles/<deployment>.yml`) through
+    `job/nf/scan.nf`: `$SNAP_ID` / `$GEN` / `$DT_JOB_START` when set (resuming that scan's session), else stamped now."""
+    from .scan_head import head
+
+    nf = nf_dir or Path(os.environ.get("DT_NF_DIR") or "job/nf")
+    sys.exit(head(profile_path, nf.absolute(), launch_dir, reproc=reproc, fresh=fresh, dry_run=dry_run))
+
+
 if __name__ == "__main__":
     main()

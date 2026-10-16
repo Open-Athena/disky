@@ -1,0 +1,155 @@
+// Every deployment's scan as one DAG (specs/pipelines-everywhere.md): each step is `dt-cloud scan step <name> [arg]`
+// in the scan image, run as its own task once its inputs are done. Steps hand off through the data store (the work
+// dir's bucket, FUSE-mounted in every google-batch task); the channels carry only `done` markers, which `-resume`
+// keys on. `dt-cloud scan head` writes the params (from the deployment's profile), starts and finishes the scan-run
+// record, and resumes a failed scan's session.
+//
+//   bucket-check, pre ─┐
+//   list ×source ──────┴→ index ─┬→ static-names ─────────────────┐
+//                                ├→ publish-r2 → interval-store ──┼→ index-sync → post (over-time, index-gc, …)
+//                                └→ index-rows ───────────────────┘
+//
+// `params.fold`: bucket-check runs in the first source's list task, index-sync in the post task (a task's VM boots in
+// ~1.5–2 min; the local executor can't take a cloud work dir, so tiny steps can't run in the head).
+nextflow.enable.dsl = 2
+
+params.scan = null
+params.gen = null
+params.job_start = null
+params.run_id = ''
+params.sources = []        // [[uri:, machine:, disk: [request:, type:]]]
+params.list_default = [:]  // the profile's `machines.list`: [machine:, disk:]
+params.steps = []          // every enabled step (core minus `skip`, plus the profile's `steps`)
+params.pre = []            // enabled extra steps beside `list`, before `index` (soft: index runs without them)
+params.post = []           // the post task's steps, in order
+params.fold = []
+params.skip_list = false   // REPROC: run from `index`
+params.secrets = []        // `ENV=SECRET`, fetched in-task (never Nextflow's `secret`: it lands in .command.run)
+params.secrets_project = ''
+params.env = [:]
+params.profile_json = ''
+
+def q(v) { "'" + v.toString().replace("'", "'\\''") + "'" }
+
+def on(String s) { s in params.steps }
+
+def folded(String s) { on(s) && s in params.fold }
+
+def stepEnv() {
+    def e = [SNAP_ID: params.scan, SCAN_ID: params.scan, GEN: params.gen, DT_JOB_START: params.job_start,
+             DT_RUN_ID: params.run_id, DT_SCAN_PROFILE_JSON: params.profile_json] + params.env
+    e.collect { k, v -> "export ${k}=${q(v)}" }.join('\n')
+}
+
+// The task's script: each [name, arg] step through `secrets exec`, then the `done` marker.
+def stepScript(List steps) {
+    def sec = params.secrets.collect { "-s ${q(it)} " }.join('')
+    def proj = params.secrets_project ? "-p ${q(params.secrets_project)} " : ''
+    def calls = steps.collect { s ->
+        def (n, a) = s instanceof List ? s : [s, '']
+        "dt-cloud secrets exec ${proj}${sec}-- dt-cloud scan step ${n}${a ? ' ' + q(a) : ''}"
+    }
+    def done = "echo ${q(steps.collect { it instanceof List ? it.join(' ') : it }.join(', '))} > done"
+    ([stepEnv()] + calls + [done]).join('\n') + '\n'
+}
+
+// Every item of `ch` as one sorted list of strings (`[]` for none): a task's input must not depend on the order its
+// upstream tasks finished in, or `-resume` misses its cache.
+def gathered(ch) { ch.toList().map { l -> l.collect { it.toString() }.sort() } }
+
+def diskOf(d) {
+    if (!d) return null
+    def size = nextflow.util.MemoryUnit.of("${d.request} GB")
+    d.type ? [request: size, type: d.type] : size
+}
+
+process bucket_check {
+    label 'small'
+    output: path 'done'
+    script: stepScript(['bucket-check'])
+}
+
+process pre {
+    label 'small'
+    output: path 'done'
+    script: stepScript(params.pre)
+}
+
+process list_source {
+    tag "${src.uri}"
+    label 'list'
+    machineType { src.machine ?: params.list_default.machine }
+    disk { diskOf(src.disk ?: params.list_default.disk) }
+    input: val src
+    output: path 'done'
+    script:
+    def first = params.sources && src.uri == params.sources[0].uri
+    stepScript((first && folded('bucket-check') ? ['bucket-check'] : []) + [['list', src.uri]])
+}
+
+process index {
+    label 'big'
+    input: val deps
+    output: path 'done'
+    script: stepScript(['index'])
+}
+
+process static_names {
+    label 'small'
+    time '6h'
+    input: val indexed
+    output: path 'done'
+    script: stepScript(['static-names'])
+}
+
+process publish_r2 {
+    label 'medium'
+    input: val indexed
+    output: path 'done'
+    script: stepScript(['publish-r2'])
+}
+
+process interval_store {
+    label 'big'
+    input: val published
+    output: path 'done'
+    script: stepScript(['interval-store'])
+}
+
+process index_rows {
+    label 'small'
+    input: val indexed
+    output: path 'done'
+    script: stepScript(['index-rows'])
+}
+
+process index_sync {
+    label 'small'
+    input: val deps
+    output: path 'done'
+    script: stepScript(['index-sync'])
+}
+
+process post {
+    label 'post'
+    input: val deps
+    output: path 'done'
+    script: stepScript((folded('index-sync') ? ['index-sync'] : []) + params.post)
+}
+
+workflow {
+    if (!params.scan || !params.gen || !params.job_start) error "--scan, --gen and --job_start are required (`dt-cloud scan head` sets them)"
+    def ready = Channel.empty()
+    if (on('bucket-check') && !folded('bucket-check') && !params.skip_list) ready = ready.mix(bucket_check())
+    if (params.pre) ready = ready.mix(pre())
+    if (!params.skip_list) ready = ready.mix(list_source(Channel.fromList(params.sources)))
+    def indexed = index(gathered(ready))
+    def none = Channel.value('skipped')
+    def st = on('static-names') ? static_names(indexed) : none
+    def pub = on('publish-r2') ? publish_r2(indexed) : indexed
+    def iv = on('interval-store') ? interval_store(pub) : pub
+    def rows = index_rows(indexed)
+    def serving = gathered(rows.mix(st, iv))
+    def synced = folded('index-sync') ? serving : gathered(index_sync(serving))
+    if (params.post || folded('index-sync')) post(synced)
+}

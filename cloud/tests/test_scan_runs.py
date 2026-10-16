@@ -722,3 +722,17 @@ def test_record_cli_without_a_run_id_reports_and_exits_zero(tmp_path, monkeypatc
     assert (r.exit_code, r.stdout, said) == (
         0, "", ["scan-run record failed (the scan continues): SystemExit: scan-run: no run id: pass -r or set $JOB_ID"],
     )
+
+
+def test_phase_sql_names_the_task_columns_only_when_known():
+    """A one-VM run's phase writes no task columns, so a D1 without them (before `scan-run-phase-jobs`) still takes it."""
+    head = ("INSERT INTO scan_run_phases (run_id, phase, seq, started_ts, finished_ts, status, note{c}) "
+            "VALUES ('u1', 'list', 0, 1, 2, 'done', NULL{v}) ON CONFLICT(run_id, phase) DO UPDATE SET seq = excluded.seq, "
+            "status = excluded.status, started_ts = COALESCE(excluded.started_ts, scan_run_phases.started_ts), "
+            "finished_ts = COALESCE(excluded.finished_ts, scan_run_phases.finished_ts), "
+            "note = COALESCE(excluded.note, scan_run_phases.note){u}")
+    assert scan_runs.phase_sql("u1", Phase("list", 0, 1, 2)) == head.format(c="", v="", u="")
+    assert scan_runs.phase_sql("u1", Phase("list", 0, 1, 2, job_name="nf-1", machine="e2-standard-4")) == head.format(
+        c=", job_name, machine", v=", 'nf-1', 'e2-standard-4'",
+        u=", job_name = COALESCE(excluded.job_name, scan_run_phases.job_name), machine = COALESCE(excluded.machine, scan_run_phases.machine)",
+    )
