@@ -317,7 +317,7 @@ def build(dry_run: bool, tag: str) -> None:
     context = root / "tmp" / f"oa-r2-build-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S%fZ')}"
     command = build_command(context, tag, profile())
     context.mkdir(parents=True, exist_ok=False)
-    for directory in ("src", "cloud/src", "job/icons-r2"):
+    for directory in ("src", "cloud/src", "job/icons-r2", "job/nf", "job/profiles"):
         copytree(root / directory, context / directory, ignore=ignore_patterns("__pycache__", "*.pyc"))
     for filename in ("README.md", "pyproject.toml", "uv.lock", "cloud/pyproject.toml", "job/Dockerfile", "job/cloudbuild.yaml", "job/r2.json", "job/r2-scan-runs.json", "job/r2-scan", "job/digest.yml"):
         target = context / filename
@@ -336,6 +336,7 @@ def plan(image: str) -> None:
 
 @main.command()
 @option("-g", "--generation", help="Archived generation to backfill (requires --scan)")
+@option("-H", "--head", "head_profile", help="Run the scan on the generic Nextflow pipeline: `dt-cloud scan head` over this profile (a `job/profiles/` path)")
 @option("-i", "--index-only", is_flag=True, help="Build or catch up both stores' static name and interval indexes; no scan")
 @option("-m", "--meta-only", is_flag=True, help="Scan only this deployment's derived storage")
 @option("-n", "--name", required=True, help="New Batch job name, starting oa-r2-scan-")
@@ -343,6 +344,7 @@ def plan(image: str) -> None:
 @argument("image")
 def submit(
     generation: str | None,
+    head_profile: str | None,
     index_only: bool,
     meta_only: bool,
     name: str,
@@ -364,6 +366,10 @@ def submit(
         task["runnables"][0]["container"].update(entrypoint="python", commands=["job/r2-scan", "index"])
         for secret in ("SOURCE_ACCESS_KEY_ID", "SOURCE_SECRET_ACCESS_KEY"):
             del task["environment"]["secretVariables"][secret]
+    if head_profile:
+        if index_only or meta_only or scan or generation:
+            raise ClickException("A Nextflow head is its own job mode")
+        head_job(planned, head_profile)
     if meta_only:
         if scan or generation:
             raise ClickException("Meta-only and age backfill are separate job modes")
@@ -381,6 +387,31 @@ def submit(
         "gcloud", "batch", "jobs", "submit", name,
         "--project", config["project"], "--location", config["region"], "--config", str(spec),
     ], check=True)
+
+
+def head_job(planned: dict, profile_path: str) -> None:
+    """Rewrite the one-VM job's spec as a Nextflow head's (`dt-cloud scan head`, specs/pipelines-everywhere.md): the
+    head only drives the DAG, each step a Batch task of its own that fetches its own secrets, so a small VM, no stage
+    disk, and of the secrets only what the head itself uses when the profile records the run (the scan-run record's
+    D1 token, the alert's Slack token)."""
+    from yaml import safe_load
+
+    path = HERE.parent / profile_path
+    if not path.is_file() or path.parent != HERE / "profiles":
+        raise ClickException(f"No profile at job/profiles/{path.name}")
+    records = "SCAN_RUNS_PROFILE" in (safe_load(path.read_text()).get("env") or {})
+    task = planned["taskGroups"][0]["taskSpec"]
+    container = task["runnables"][0]["container"]
+    container.update(entrypoint="dt-cloud", commands=["scan", "head", f"/app/job/profiles/{path.name}"], volumes=[])
+    task["volumes"] = []
+    task["computeResource"] = {"cpuMilli": 2000, "memoryMib": 7000}
+    task["maxRunDuration"] = "21600s"
+    keep = {"CLOUDFLARE_API_TOKEN", "SLACK_BOT_TOKEN"} if records else set()
+    task["environment"]["secretVariables"] = {k: v for k, v in task["environment"]["secretVariables"].items() if k in keep}
+    policy = planned["allocationPolicy"]["instances"][0]["policy"]
+    policy["machineType"] = "e2-standard-2"
+    policy.pop("disks")
+    policy["bootDisk"] = {"type": "pd-balanced", "sizeGb": "30"}
 
 
 def validate_archive(scan: str, generation: str) -> None:

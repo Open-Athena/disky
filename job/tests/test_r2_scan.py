@@ -523,3 +523,30 @@ def test_supervise_finishes_a_run_killed_before_its_own_exit(monkeypatch, tmp_pa
     ]
     assert alerts == ([("fail", "run failed (exit 137): killed (SIGKILL), most likely out of memory")] if killed else [])
     assert sorted(p.name for p in (tmp_path / "dt-scan-run").iterdir()) == []
+
+
+def test_head_job_scratch_profile_drops_disk_and_secrets() -> None:
+    spec = module["job_spec"](image, config)
+    module["head_job"](spec, "job/profiles/r2-scratch.yml")
+    task = spec["taskGroups"][0]["taskSpec"]
+    assert task["runnables"][0]["container"] == {
+        "imageUri": image,
+        "volumes": [],
+        "entrypoint": "dt-cloud",
+        "commands": ["scan", "head", "/app/job/profiles/r2-scratch.yml"],
+    }
+    assert (task["volumes"], task["computeResource"], task["maxRunDuration"]) == ([], {"cpuMilli": 2000, "memoryMib": 7000}, "21600s")
+    # the scratch profile records nothing, so the head gets no secrets at all
+    assert task["environment"]["secretVariables"] == {}
+    assert spec["allocationPolicy"]["instances"][0]["policy"] == {
+        "machineType": "e2-standard-2",
+        "provisioningModel": "STANDARD",
+        "bootDisk": {"type": "pd-balanced", "sizeGb": "30"},
+    }
+
+
+def test_head_job_refuses_a_path_outside_profiles() -> None:
+    from click import ClickException
+
+    with pytest.raises(ClickException, match="No profile at job/profiles/r2.json"):
+        module["head_job"](module["job_spec"](image, config), "job/r2.json")

@@ -36,8 +36,10 @@ job = JobAccount(
     account_id=profile["job_account"],
     display_name="OA R2 metadata scan",
     description="Lists the four approved OA R2 buckets and publishes only OA R2's derived index",
-    roles=["roles/batch.agentReporter", "roles/logging.logWriter"],
-    acts_as_self=False,
+    # batch.jobsEditor + acting as itself: a Nextflow head (`dt-cloud scan head`, specs/pipelines-everywhere.md) submits,
+    # polls and cancels its steps' Batch jobs, each running as this account
+    roles=["roles/batch.agentReporter", "roles/batch.jobsEditor", "roles/logging.logWriter"],
+    acts_as_self=True,
     adopt=Adopt(False),
 )
 resources = []

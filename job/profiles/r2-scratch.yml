@@ -1,0 +1,47 @@
+# A scratch run of r2.oa.dev's scan on the generic pipeline (specs/pipelines-everywhere.md §6.4): the four R2 buckets
+# listed with the source key, the scratch bucket as the data store, and no index / D1 / site / Slack credentials, so
+# every serving step (publish-r2, static-names, interval-store, index-rows / index-sync, warm-cache, probe, digest)
+# skips, and nothing is recorded (no `SCAN_RUNS_PROFILE`). Its own deployment name, so its sessions never resume a
+# prod scan's. Its outputs (`listing/<scan>/index/<gen>/`, `snapshots/r2/<scan>/`) compare against the one-VM job's.
+#   job/r2-scan submit -H job/profiles/r2-scratch.yml -n oa-r2-scan-nf-scratch-<n> <image@sha256>
+deployment: r2-scratch
+executor:
+  kind: google-batch
+  project: oa-internal-450019
+  region: us-west1
+  service_account: oa-r2-usage-job@oa-internal-450019.iam.gserviceaccount.com
+  image: us-west1-docker.pkg.dev/oa-internal-450019/oa-r2-usage/scan:nf-scratch
+  boot_disk: 50
+work: gs://oa-r2-usage-scratch/nf
+data: gs://oa-r2-usage-scratch
+layout:
+  layer2: listing/{scan}/
+  snapshots: r2
+  listing: listing/{scan}/
+sources:
+  - {uri: r2://marin-na, endpoint: https://74981a43be0de7712369306c7b19133d.r2.cloudflarestorage.com, procs: 4, threads: 4}
+  - {uri: r2://marin-discord, endpoint: https://74981a43be0de7712369306c7b19133d.r2.cloudflarestorage.com, procs: 4, threads: 4}
+  - {uri: r2://oa-cw-s3-usage-index, endpoint: https://74981a43be0de7712369306c7b19133d.r2.cloudflarestorage.com, procs: 4, threads: 4}
+  - {uri: r2://oa-gcs-usage-index, endpoint: https://74981a43be0de7712369306c7b19133d.r2.cloudflarestorage.com, procs: 4, threads: 4}
+machines:
+  small: e2-standard-2
+  medium: e2-standard-4
+  # path-index: the one-VM job's machine (DuckDB at 12 GB over ~57M rows)
+  big: {type: e2-standard-8, disk: 100}
+  list: {type: e2-standard-4, disk: 50}
+  post: e2-standard-4
+skip: [bucket-check, static-names, interval-store, over-time, index-gc, warm-cache, probe, digest]
+secrets:
+  AWS_ACCESS_KEY_ID: oa-r2-source-access-key-id
+  AWS_SECRET_ACCESS_KEY: oa-r2-source-secret-access-key
+env:
+  AWS_DEFAULT_REGION: auto
+  AWS_EC2_METADATA_DISABLED: "true"
+  DUCKDB_MEM: 12GB
+  DUCKDB_THREADS: "8"
+labels: {deployment: oa-r2, purpose: scratch}
+options:
+  index:
+    mode: path-index
+    # the one-VM job's `path-index -U`: no `-by-user` sort copies
+    args: [-U]
