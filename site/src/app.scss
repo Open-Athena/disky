@@ -393,6 +393,19 @@ button.mini.neg {
     code { font-size: 11px; }
   }
   &.user-menu { min-width: 250px; .user-card { padding: 4px 6px 2px; } }
+  // A submenu's trigger ("Display ▸"): the caret flush right; lit while its flyout is open.
+  .mi-sub {
+    .mi-caret { margin-left: auto; padding-left: 12px; color: var(--ink-3); font-size: 11px; }
+    &.open { background: var(--line); }
+  }
+  // The flyout (`DisplayMenu`): a check column so radio / checkbox labels align.
+  &.sub-menu {
+    min-width: 230px;
+    .mi-check { display: inline-block; width: 1em; text-align: center; color: var(--accent, #58a6ff); font-weight: 700; }
+    .menu-head { padding: 3px 10px 2px; font-size: 11.5px; color: var(--ink-3); text-transform: uppercase; letter-spacing: 0.04em; }
+    [role="group"] { display: flex; flex-direction: column; }
+    .dim { color: var(--ink-3); font-size: 12px; }
+  }
 }
 .scan-tip { display: grid; gap: 3px; b { color: inherit; } .classmix { margin-top: 4px; } }
 
@@ -1341,6 +1354,9 @@ input::placeholder, textarea::placeholder { color: var(--ink-3); opacity: 1; }
 }
 #over-time h2 .gran { margin-left: 12px; font-weight: 400; vertical-align: middle; }
 .sub .gran { margin-left: 10px; vertical-align: middle; }
+
+// A wide table scrolls inside its own box, never the page (`LifecycleFold`'s rules table is ~714 px).
+.tbl-scroll { overflow-x: auto; max-width: 100%; }
 
 .classes {
   border-collapse: collapse;
