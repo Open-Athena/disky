@@ -1,0 +1,84 @@
+"""`job/nf/scan.nf` end to end under the local executor (spec §4: the tests' executor): `dt-cloud scan head` over a
+fixture profile, every step faked (`DT_SCAN_STEP_FAKE`: each appends `<name> <arg>` to a file). Checks the DAG's
+order, a failure stopping the post task, and `-resume` re-running only what didn't finish.
+
+Skipped without a working `nextflow` (it needs Java ≤ 25: `NXF_JAVA_HOME`)."""
+from __future__ import annotations
+
+import os
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+
+import pytest
+
+import dt_cloud
+import disk_tree
+
+REPO = Path(__file__).resolve().parents[2]
+
+
+def _nextflow_works() -> bool:
+    if not shutil.which("nextflow"):
+        return False
+    r = subprocess.run(["nextflow", "-version"], capture_output=True, text=True, env={**os.environ, "NXF_OFFLINE": "true"})
+    return r.returncode == 0
+
+
+pytestmark = pytest.mark.skipif(not _nextflow_works(), reason="no working `nextflow` (set NXF_JAVA_HOME to a Java ≤ 25)")
+
+ALL = ["bucket-check", "list s3://a", "list s3://b", "list s3://c", "index", "static-names", "publish-r2", "index-rows",
+       "interval-store", "index-sync", "over-time", "index-gc", "warm-cache", "probe", "digest"]
+
+
+def head(tmp_path: Path, marks: Path, *args: str, extra: str = "", **env) -> subprocess.CompletedProcess:
+    prof = tmp_path / "fixture.yml"
+    prof.write_text(f"deployment: fixture\nexecutor: {{kind: local}}\nwork: {tmp_path}/nf\ndata: {tmp_path}/data\n"
+                    "layout: {layer2: 'l2/{scan}/', snapshots: ''}\n"
+                    "sources: [s3://a, s3://b, {uri: s3://c, machine: m1, disk: {request: 375, type: local-ssd}}]\n"
+                    "machines: {list: {type: m2, disk: 100}, big: {cpus: 1}}\n"
+                    "options: {list: {import: true}, static-names: {profile: sn.json}, digest: {template: t, config: c.yml}}\n" + extra)
+    pypath = os.pathsep.join(str(Path(m.__file__).parents[1]) for m in (dt_cloud, disk_tree))
+    e = {k: v for k, v in os.environ.items() if k not in ("SCAN_RUNS_PROFILE", "DT_SCAN_STEP_FAIL", "DISKY_LABELS")}
+    e.update(PATH=f"{Path(sys.executable).parent}{os.pathsep}{e['PATH']}", PYTHONPATH=pypath, NXF_OFFLINE="true",
+             DT_SCAN_STEP_FAKE=str(marks), SNAP_ID="2026-10-16T1200", GEN="G1", DT_JOB_START="1", **env)
+    return subprocess.run([sys.executable, "-m", "dt_cloud.cli", "scan", "head", *args, "-N", str(REPO / "job/nf"), str(prof)],
+                          capture_output=True, text=True, env=e, timeout=600)
+
+
+def test_dag_order_and_resume(tmp_path):
+    marks = tmp_path / "marks"
+    r1 = head(tmp_path, marks, DT_SCAN_STEP_FAIL="probe")
+    assert r1.returncode != 0, r1.stderr
+    ran = marks.read_text().splitlines()
+    # everything up to the failing post step ran once; bucket-check folded into s3://a's list task
+    assert sorted(ran) == sorted(ALL[:-2])
+    at = {s: ran.index(s) for s in ran}
+    lists = [at[f"list s3://{b}"] for b in "abc"]
+    assert at["bucket-check"] < at["list s3://a"]
+    assert max(lists) < at["index"]
+    assert at["index"] < min(at["static-names"], at["publish-r2"], at["index-rows"])
+    assert at["publish-r2"] < at["interval-store"]
+    assert max(at["static-names"], at["interval-store"], at["index-rows"]) < at["index-sync"]
+    assert ran[at["index-sync"]:] == ["index-sync", "over-time", "index-gc", "warm-cache"]
+
+    marks.unlink()
+    r2 = head(tmp_path, marks)
+    assert r2.returncode == 0, r2.stderr
+    # the resume ran only the post task (its steps skip their own done work)
+    assert marks.read_text().splitlines() == ["index-sync", "over-time", "index-gc", "warm-cache", "probe", "digest"]
+    assert r2.stdout.splitlines()[-1] == f"SCAN-JOB-DONE 2026-10-16T1200 -> {tmp_path}/data/snapshots/2026-10-16T1200"
+
+
+def test_reproc_unfolded(tmp_path):
+    """`-R` runs from `index` (no list tasks, no bucket-check); `fold: []` gives index-sync its own task."""
+    marks = tmp_path / "marks"
+    r = head(tmp_path, marks, "-R", extra="fold: []\n")
+    assert r.returncode == 0, r.stderr
+    ran = marks.read_text().splitlines()
+    assert sorted(ran) == sorted(ALL[4:])
+    at = {s: ran.index(s) for s in ran}
+    assert ran[0] == "index"
+    assert max(at["static-names"], at["interval-store"], at["index-rows"]) < at["index-sync"]
+    assert ran[at["index-sync"]:] == ["index-sync", "over-time", "index-gc", "warm-cache", "probe", "digest"]
