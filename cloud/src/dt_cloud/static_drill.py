@@ -512,6 +512,20 @@ class TierReads:
                                 if matched.num_rows:
                                     yield matched
 
+    def cache_stats(self) -> dict:
+        """What the reads' caches hold now: decoded groups (and their Arrow bytes), parsed index row groups, raw bytes."""
+        groups = [v for _, gf in self.items if gf is not None for v in gf._groups.values()]
+        return {"decoded_groups": len(groups), "decoded_bytes": sum(t.nbytes for t, _ in groups),
+                "index_groups": sum(len(gf._entries) + len(gf._peeked) for _, gf in self.items if gf is not None),
+                "raw_bytes": self.raw.size if self.raw is not None else 0}
+
+    def drop_decoded(self) -> None:
+        """Drop the decoded groups (each group file's LRU; the index and raw bytes stay): between loops that read different
+        ranges, so one loop's working set isn't carried into the next."""
+        for _, gf in self.items:
+            if gf is not None:
+                gf._groups.clear()
+
     def close(self) -> None:
         """Free what the reads hold: the byte cache (whose keys hold the group files: a cycle), each group file's decoded
         groups and index entries."""
@@ -1033,6 +1047,8 @@ def day_rollups(con, prior: list[Tier], kind: str, D: int, *, R: int, K: int, fl
             LEFT JOIN rc USING (q, dir) WHERE (n.db <> 0 OR n.dn <> 0) AND (n.q, n.dir) NOT IN (SELECT q, dir FROM aff)""")
     t1 = monotonic()
     doc["restated"] = _settle(con, D, K, reads, kind, log, ck)
+    reads.drop_decoded()
+    release_heap()
     if doc["affected"]:
         log(f"drill {kind}: {doc['affected']:,} directories settled one by one, {doc['restated']:,} restated in {monotonic() - t1:.0f}s")
     # directories that become heavy: S = base rows (measured, else counted) + the prior runs' + today's
@@ -1060,6 +1076,9 @@ def day_rollups(con, prior: list[Tier], kind: str, D: int, *, R: int, K: int, fl
     t2 = step(f"drill/rollups/{kind}", t0, heavy_touched=doc["heavy_touched"], affected=doc["affected"], restated=doc["restated"])
     count = 0
     if doc["heavy_new"]:
+        reads.drop_decoded()
+        release_heap()
+        resource_stage(f"{kind}: newly-heavy start", directories=doc["heavy_new"], **duckdb_resources(con), **reads.cache_stats())
         count = newly_heavy_rollups(con, reads, kind, K, log=log, ck=ck)
         log(f"drill {kind}: {doc['heavy_new']:,} newly heavy, {count:,} earlier tier roots inserted in {monotonic() - t0:.0f}s ({reads.io()})")
     step(f"drill/newly-heavy/{kind}", t2, directories=doc["heavy_new"], prior_roots=count)
@@ -1182,6 +1201,20 @@ def duckdb_resources(con) -> dict:
     return {"duckdb_bytes": int(memory), "duckdb_spill_bytes": int(spill)}
 
 
+def release_heap() -> None:
+    """Return the C heap's free pages to the OS (glibc `malloc_trim`; elsewhere nothing): after a step that built and freed
+    many Python rows, so RSS reflects what is held, and the next step's DuckDB has the room."""
+    import ctypes
+    import ctypes.util
+
+    try:
+        libc = ctypes.CDLL(ctypes.util.find_library("c") or "libc.so.6")
+        trim = libc.malloc_trim
+    except (OSError, AttributeError):
+        return
+    trim(0)
+
+
 def insert_prior_roots(
     con,
     reads: TierReads,
@@ -1255,7 +1288,7 @@ def _settle(con, D: int, K: int, reads: TierReads, kind: str = "", log=err, ck: 
     t_fetch = t_settle = 0.0
     slow: list[tuple] = []
     done, t_log = 0, monotonic()
-    for chunk in chunks:
+    for j, chunk in enumerate(chunks):
         out: list[tuple] = []
         saved = 0
         t1 = monotonic()
@@ -1306,6 +1339,8 @@ def _settle(con, D: int, K: int, reads: TierReads, kind: str = "", log=err, ck: 
             t_settle += monotonic() - t2
         restated += _settled(con, out)
         del out, kept, others, cands, hdr, opens, rest, heavy_tot, ctx, plans
+        release_heap()
+        resource_stage(f"{kind}: settle", chunk=j + 1, chunks=len(chunks), settled=start + done, **duckdb_resources(con), **reads.cache_stats())
     io = Counter(reads.io())
     io.subtract(io0)
     rq = Counter(reads.requests())
