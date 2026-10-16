@@ -32,7 +32,7 @@ PROFILE = {
 }
 SECRET = "s3cr3t-site-token"
 NOTIFY_ENV = ("PUSHOVER_TOKEN", "PUSHOVER_USER", "DISCORD_NOTIFY_WEBHOOK", "SLACK_BOT_TOKEN", "SLACK_ALERT_CHANNEL",
-              "DISK_TREE_NOTIFY", "DT_ALERTS", "DT_RECORD", "SCAN_ID", "BATCH_JOB_UID")
+              "DISK_TREE_NOTIFY", "DT_ALERTS", "DT_RECORD", "SCAN_ID", "BATCH_JOB_UID", "NF_PROCESS", "NF_TAG")
 
 
 class Transport:
@@ -590,14 +590,16 @@ def test_a_nextflow_task_records_its_own_job_and_alerts_with_its_logs(job, monke
     monkeypatch.setattr("dt_cloud.gcp.batch_job_by_uid", by_uid)
     assert job("start", "-j", "head-job", "-R", "us-central1", SCAN, at=T0) == 0
     job.mp.setenv("BATCH_JOB_UID", "task-uid-1")
+    job.mp.setenv("NF_PROCESS", "list_source")
+    job.mp.setenv("NF_TAG", "s3://b1")
     assert job("phase-begin", "list b1", at=T0 + 120) == 0
     assert job("phase-end", "-M", "list b1", at=T0 + 600) == 0
     assert job("phase-begin", "import b1", at=T0 + 600) == 0
     assert job("phase-end", "-M", "import b1", at=T0 + 700) == 0
     assert looked == [("task-uid-1", "proj-1", "us-central1")]
-    assert job.rows("SELECT phase, started_ts, finished_ts, job_name, machine FROM scan_run_phases ORDER BY seq") == [
-        ("list b1", T0 + 120, T0 + 600, "nf-1a2b", "n2-standard-16"),
-        ("import b1", T0 + 600, T0 + 700, "nf-1a2b", "n2-standard-16"),
+    assert job.rows("SELECT phase, started_ts, finished_ts, job_name, machine, task FROM scan_run_phases ORDER BY seq") == [
+        ("list b1", T0 + 120, T0 + 600, "nf-1a2b", "n2-standard-16", "list_source (s3://b1)"),
+        ("import b1", T0 + 600, T0 + 700, "nf-1a2b", "n2-standard-16", "list_source (s3://b1)"),
     ]
     assert job.rows("SELECT job_name, machine FROM scan_runs") == [("head-job", None)]
     jr = scan_runs.JobRun(str(job.profile), None, False, None, str(job.db))
@@ -610,4 +612,20 @@ def test_the_runs_own_job_looks_nothing_up(job, monkeypatch):
     assert job("start", SCAN, at=T0) == 0
     assert job("phase-begin", "listing", at=T0 + 10) == 0
     assert job("phase-end", "-M", "listing", at=T0 + 70) == 0
-    assert job.rows("SELECT phase, job_name, machine FROM scan_run_phases") == [("listing", None, None)]
+    assert job.rows("SELECT phase, job_name, machine, task FROM scan_run_phases") == [("listing", None, None, None)]
+
+
+def test_finish_stores_the_runs_dag_and_a_local_tasks_node(job, tmp_path):
+    """`finish -D`: the head's DAG beside the run; a task without a Batch job of its own (the local executor) still
+    names its pipeline node, untagged."""
+    dag = tmp_path / "dag.mmd"
+    dag.write_text('flowchart TB\n    v0(["index"])\n    v1(["post"])\n    v0 --> v1\n')
+    assert job("start", SCAN, at=T0) == 0
+    job.mp.setenv("NF_PROCESS", "index")
+    job.mp.setenv("NF_TAG", "")
+    assert job("phase-begin", "index-write", at=T0 + 10) == 0
+    assert job("phase-end", "-M", "index-write", at=T0 + 70) == 0
+    job.mp.delenv("NF_PROCESS")
+    assert job("finish", "-x", "0", "-D", str(dag), at=T0 + 80) == 0
+    assert job.rows("SELECT phase, job_name, task FROM scan_run_phases") == [("index-write", None, "index")]
+    assert job.rows("SELECT run_id, mermaid FROM scan_run_dags") == [("u1", dag.read_text())]

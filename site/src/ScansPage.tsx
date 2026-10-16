@@ -20,12 +20,13 @@ import {
   type ScanRunPhase, type PhaseIssue, type PhaseRecovery, overlappingFailures, phaseFill, phaseOutcome, runOutcome, runTasks, type RunTask, taskLogsHref,
 } from './scanRunsModel'
 import { colorer, fmtDur, fmtRunTime, getJson, type Links, PhaseBar, runDay, RunWhen, scanRunsApi, scansHref, scansStore, Status, useScanRuns } from './scanRunsUi'
+import { dagNodes, parseDag, type DagNode } from './runDag'
 import './scans.scss'
 
 type DetailResponse = Links & {
   run: ScanRun; secs: number | null; failed_at: string | null; phases: ScanRunPhase[]; spans: PhaseSpan[]
   outputs: OutputDelta[]; downstream: ScanRun[]; siblings: ScanRun[]; prev_scan: string | null; next_scan: string | null
-  phase_issues: PhaseIssue[]; recoveries: PhaseRecovery[]
+  phase_issues: PhaseIssue[]; recoveries: PhaseRecovery[]; dag?: string | null
 }
 
 const useScanRun = (id: string, store: Store) => useQuery<DetailResponse, Error>({
@@ -251,6 +252,53 @@ function PhaseTimeline({ spans, secs, color }: { spans: PhaseSpan[]; secs: numbe
   )
 }
 
+/** The run's pipeline DAG: its processes in dependency columns, each coloured by its tasks' phases, a one-task
+ * process linking that task's logs. */
+function RunDag({ mermaid, phases, run, project }: { mermaid: string; phases: ScanRunPhase[]; run: ScanRun; project: string | null }) {
+  const tip = useSvgTip()
+  const nodes = useMemo(() => dagNodes(parseDag(mermaid), phases, run.status === 'running'), [mermaid, phases, run.status])
+  const edges = useMemo(() => parseDag(mermaid).edges, [mermaid])
+  if (!nodes.length) return null
+  const w = 168, h = 46, gx = 44, gy = 14, pad = 4
+  const cols = Math.max(...nodes.map(n => n.layer)) + 1, rows = Math.max(...nodes.map(n => n.row)) + 1
+  const W = cols * w + (cols - 1) * gx + 2 * pad, H = rows * h + (rows - 1) * gy + 2 * pad
+  const at = new Map(nodes.map(n => [n.name, { x: pad + n.layer * (w + gx), y: pad + n.row * (h + gy) }]))
+  const now = Math.floor(Date.now() / 1000)
+  const sub = (n: DagNode) => {
+    const k = n.tasks.length > 1 ? `${n.tasks.length} tasks · ` : ''
+    if (n.status === 'pending' || n.status === 'unrecorded') return n.status === 'pending' ? 'waiting' : 'no phases recorded'
+    return `${k}${n.start != null ? fmtDur((n.end ?? now) - n.start) : ''}${n.status === 'running' ? ' · running' : n.status === 'failed' ? ' · failed' : ''}`
+  }
+  const tipOf = (n: DagNode) => <>
+    <div><b>{n.name}</b></div>
+    {n.tasks.length ? n.tasks.map(t => <div key={t.task}>{t.tag || n.name}{t.machine ? ` · ${t.machine}` : ''}{t.start != null ? ` · ${fmtDur((t.end ?? now) - t.start)}` : ''}<div className="dim">{t.phases.join(', ')}</div></div>)
+      : <div className="dim">{n.status === 'pending' ? 'Not started yet.' : 'This process recorded no phases (a run before phases named their task, or it ran nothing).'}</div>}
+  </>
+  return (
+    <div className="sr-svgwrap sr-dagwrap"><div className="runs-wrap">
+      <svg className="sr-dag" width={W} height={H} viewBox={`0 0 ${W} ${H}`} role="img" aria-label="Pipeline DAG">
+        <defs><marker id="sr-dag-arrow" viewBox="0 0 8 8" refX="8" refY="4" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L8,4 L0,8 z" className="arrow" /></marker></defs>
+        {edges.map(([f, t]) => {
+          const a = at.get(f), b = at.get(t)
+          if (!a || !b) return null
+          const x1 = a.x + w, y1 = a.y + h / 2, x2 = b.x, y2 = b.y + h / 2, mx = (x1 + x2) / 2
+          return <path key={`${f}>${t}`} className="edge" d={`M${x1},${y1} C${mx},${y1} ${mx},${y2} ${x2},${y2}`} markerEnd="url(#sr-dag-arrow)" />
+        })}
+        {nodes.map(n => {
+          const { x, y } = at.get(n.name)!
+          const one = n.tasks.length === 1 && n.tasks[0].job_name && project ? taskLogsHref(project, n.tasks[0].job_name, n.tasks[0].start) : null
+          const body = <g className={`node ${n.status}`} {...tip.on(tipOf(n))}>
+            <rect x={x} y={y} width={w} height={h} rx={6} />
+            <text className="name" x={x + 10} y={y + 19}>{n.name}</text>
+            <text className="sub" x={x + 10} y={y + 36}>{sub(n)}</text>
+          </g>
+          return one ? <a key={n.name} href={one} target="_blank" rel="noreferrer">{body}</a> : <g key={n.name}>{body}</g>
+        })}
+      </svg>
+    </div>{tip.el}</div>
+  )
+}
+
 /** A Nextflow run's step tasks: each its own Batch job, with its machine, phases and logs. */
 function TasksTable({ tasks, run, project }: { tasks: RunTask[]; run: ScanRun; project: string | null }) {
   const t0 = run.started_ts
@@ -390,6 +438,10 @@ export function ScanRunPage() {
           {r.image && <div><dt>image</dt><dd><code>{r.image}</code></dd></div>}
           <div><dt>recorded by</dt><dd>{r.source === 'job' ? 'the job' : 'backfill (Batch, logs, the bucket)'}</dd></div>
         </dl>
+        {d.dag && <>
+          <h3>Pipeline</h3>
+          <RunDag mermaid={d.dag} phases={d.phases} run={r} project={d.project} />
+        </>}
         <h3>Phases</h3>
         {!!d.phase_issues?.length && <p className="dim">Original attempt: failed bars include time spent waiting until failure or timeout, not successful build time. Later recoveries are separate below.</p>}
         <PhaseTimeline spans={d.spans} secs={d.secs} color={color} />
