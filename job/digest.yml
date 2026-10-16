@@ -13,6 +13,9 @@ state: digest/cw/{channel}/{variant}
 discord_state: digest/discord/{webhook}
 discord_webhook_env: null
 icons_base: https://oa-cw-s3-usage-icons.pages.dev
+# the month OP's (and the day line's) sender icon: the store's mark (`deploy/slack/icons/cw.png`, 256 px), served from
+# `job/icons/` on the icons project's production alias
+op_icon: mark.png
 icons_dir: job/icons-cw
 # plots go to the icons project's `cw` preview branch, never the production
 # alias that serves CW's arrow avatars

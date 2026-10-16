@@ -25,6 +25,7 @@ CW = DG.DigestConfig(
     discord_state="digest/discord/{webhook}",
     discord_webhook_env=None,
     icons_base="https://oa-cw-s3-usage-icons.pages.dev",
+    op_icon="mark.png",
     icons_dir="job/icons-cw",
     plot_project="oa-cw-s3-usage-icons",
     plot_branch="cw",
