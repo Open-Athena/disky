@@ -4,6 +4,7 @@
 # unknown keys raise. Secrets stay env-only (`SLACK_BOT_TOKEN`, `SLACK_CHANNEL`).
 template: cw
 title: CoreWeave usage
+units: TiB                 # binary sizes (the default; `TB` for a store billed in decimal TB)
 site_url: https://cw-s3.oa.dev
 # `{DATA_BUCKET}` reads the env; the job passes `-r` anyway
 root: gs://{DATA_BUCKET}/snapshots/cw
