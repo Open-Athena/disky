@@ -22,7 +22,7 @@ enabled = true
 
 [vars]
 MARK = "hf"                      # build-time: the 🤗 favicon / touch icons (`public/icons/hf*`, vite.config.ts)
-ROOT_LABEL = "Open Athena on Hugging Face"   # the store root's crumb label
+ROOT_LABEL = "Open Athena Hugging Face"   # the store root's crumb label
 ROOT_TITLE = "The open-athena org's Storage Buckets and model, dataset and space repos"
 # Build time (vite.config.ts): the `src/stores.ts` registry key, and the app's own sign-in.
 STORE = "hf"
@@ -88,7 +88,7 @@ database_id = "2f83fdf9-509f-491c-9664-04bef9944988"
 
 [env.preview.vars]
 MARK = "hf"
-ROOT_LABEL = "Open Athena on Hugging Face (dev)"
+ROOT_LABEL = "Open Athena Hugging Face (dev)"
 CACHE_NS = "dev.hf.oa.dev"
 ROOT_TITLE = "The open-athena org's Storage Buckets and model, dataset and space repos"
 STORE = "hf"

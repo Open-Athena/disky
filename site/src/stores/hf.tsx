@@ -57,6 +57,8 @@ const store: Store = {
     </>
   ),
   path: '/',
+  // the org is the store's one bucket: the map opens there, and the crumbs start there (no `/ open-athena` crumb)
+  root: ['open-athena'],
   scheme: 'hf://',
   base: '/data/hf',
   ogImage: '/og.jpg',
