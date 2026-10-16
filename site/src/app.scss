@@ -1024,6 +1024,7 @@ body:has(.og) :is(.help-chip, .help-card) { display: none; }
   .gradbar {
     position: relative;
     display: inline-block;
+    flex: none;  // a fixed width for the whole drag: the pointer maps over the bar's rect
     width: 120px;
     height: 10px;
     border-radius: 3px;
@@ -1040,6 +1041,16 @@ body:has(.og) :is(.help-chip, .help-card) { display: none; }
     pointer-events: none;
   }
   .gradsel {
+    position: absolute;
+    bottom: calc(100% + 4px);
+    left: 50%;
+    transform: translateX(-50%);
+    padding: 0 4px;
+    border-radius: 3px;
+    background: var(--panel);
+    white-space: nowrap;
+    pointer-events: none;
+    font-size: 11px;
     font-variant-numeric: tabular-nums;
     font-weight: 600;
   }

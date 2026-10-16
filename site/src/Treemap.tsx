@@ -554,6 +554,8 @@ export function Treemap({ root, mode, shade = 'none', userIdx, dateRange, readRa
           aria-label="Hover to highlight cells from these dates"
         >
           {shown && <span className="gradwin" style={{ left: `${100 * lo}%`, width: `${Math.max(1, 100 * (hi - lo))}%` }} />}
+          {/* out of the row's flow (above the bar): showing or changing it never moves the bar under the pointer */}
+          {shown && <span className="gradsel">{shown.lo === shown.hi ? epochDaysToDate(shown.lo) : `${epochDaysToDate(shown.lo)}–${epochDaysToDate(shown.hi)}`}</span>}
         </span>
         {epochDaysToDate(range.max)}
         <Explain text={SCALE_TIP} label="date scale">
@@ -563,7 +565,6 @@ export function Treemap({ root, mode, shade = 'none', userIdx, dateRange, readRa
             ))}
           </span>
         </Explain>
-        {shown && <span className="gradsel">{shown.lo === shown.hi ? epochDaysToDate(shown.lo) : `${epochDaysToDate(shown.lo)}–${epochDaysToDate(shown.hi)}`}</span>}
       </span>
     )
   }

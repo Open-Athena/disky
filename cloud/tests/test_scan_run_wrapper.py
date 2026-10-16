@@ -616,7 +616,7 @@ def test_the_runs_own_job_looks_nothing_up(job, monkeypatch):
 
 
 def test_finish_stores_the_runs_dag_and_a_local_tasks_node(job, tmp_path):
-    """`finish -D`: the head's DAG beside the run; a task without a Batch job of its own (the local executor) still
+    """`finish -D`: the head's DAG, reduced to the engine-neutral graph, beside the run; a task without a Batch job of its own (the local executor) still
     names its pipeline node, untagged."""
     dag = tmp_path / "dag.mmd"
     dag.write_text('flowchart TB\n    v0(["index"])\n    v1(["post"])\n    v0 --> v1\n')
@@ -628,4 +628,31 @@ def test_finish_stores_the_runs_dag_and_a_local_tasks_node(job, tmp_path):
     job.mp.delenv("NF_PROCESS")
     assert job("finish", "-x", "0", "-D", str(dag), at=T0 + 80) == 0
     assert job.rows("SELECT phase, job_name, task FROM scan_run_phases") == [("index-write", None, "index")]
-    assert job.rows("SELECT run_id, mermaid FROM scan_run_dags") == [("u1", dag.read_text())]
+    assert job.rows("SELECT run_id, engine, dag FROM scan_run_dags") == [
+        ("u1", "nextflow", '{"nodes":[{"id":"index","label":"index"},{"id":"post","label":"post"}],"edges":[["index","post"]]}'),
+    ]
+
+
+def test_dag_command_stores_a_runs_archived_dag(job, tmp_path):
+    """`scan-run dag RUN FILE`: a run recorded before its head stored its DAG gets it from the archive's `dag.mmd`."""
+    dag = tmp_path / "dag.mmd"
+    dag.write_text('flowchart TB\n    v0(["list_source"])\n    v1(( ))\n    v2(["index"])\n    v0 --> v1\n    v1 --> v2\n')
+    assert job("start", SCAN, at=T0) == 0
+    r = CliRunner().invoke(cli, ["dag", "-c", str(job.profile), "-s", str(job.db), "u1", str(dag)])
+    assert (r.exit_code, r.stdout, job.take()[-1]) == (0, "", "scan-run dag: u1 · nextflow · 2 nodes, 1 edges")
+    assert job.rows("SELECT run_id, engine, dag FROM scan_run_dags") == [
+        ("u1", "nextflow", '{"nodes":[{"id":"list_source","label":"list_source"},{"id":"index","label":"index"}],"edges":[["list_source","index"]]}'),
+    ]
+
+
+def test_a_dag_the_database_refuses_never_leaves_the_run_unfinished(job, tmp_path):
+    """A database whose `scan_run_dags` is in another shape (the migration not applied yet): the run still finishes."""
+    SqliteSink(job.db).execute(["DROP TABLE scan_run_dags", "CREATE TABLE scan_run_dags (run_id TEXT PRIMARY KEY, mermaid TEXT NOT NULL)"])
+    dag = tmp_path / "dag.mmd"
+    dag.write_text('flowchart TB\n    v0(["index"])\n')
+    assert job("start", SCAN, at=T0) == 0
+    assert job("finish", "-x", "0", "-D", str(dag), at=T0 + 80) == 0
+    assert job.rows("SELECT status, finished_ts FROM scan_runs") == [("succeeded", T0 + 80)]
+    assert [l for l in job.take() if l.startswith("scan-run record failed")] == [
+        "scan-run record failed (the scan continues): OperationalError: table scan_run_dags has no column named engine",
+    ]
