@@ -30,9 +30,14 @@ provisional: false
 # HF bills in decimal TB (the billing page: 15.72 TB of the 253 TB allowance), so the digest speaks TB, not TiB
 units: TB
 primary: open-athena
-# `path: ""`: the site serves the org at its root, not `/open-athena`. The quota is the org's public-storage allowance
-# (billing page, 2026-10-14; `HF_ALLOWANCES` in site/src/stores/hf.tsx). The total also counts private storage (5.1 TB
-# allowance) and unbilled git files, both a fraction of a percent of it
+# `path: ""`: the site serves the org at its root, not `/open-athena`. The quotas are the org's allowances (billing
+# page, 2026-10-14; `HF_ALLOWANCES` in site/src/stores/hf.tsx), each over its storage class (`meta.json`
+# `class_bytes`): public (1) and private (5). Unbilled git files (6) count toward neither; the headline is the total
 buckets:
-  open-athena: {label: open-athena, path: "", quota: {bytes: 253 TB, name: 253 TB public, short: 253T}}
+  open-athena:
+    label: open-athena
+    path: ""
+    quota:
+      - {bytes: 253 TB, name: 253 TB public, short: 253T public, classes: [1]}
+      - {bytes: 5.1 TB, name: 5.1 TB private, short: 5.1T private, classes: [5]}
 prices: {}
