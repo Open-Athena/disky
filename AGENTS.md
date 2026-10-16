@@ -254,5 +254,5 @@ The repo is **public**: no emails, account ids, tokens or other secrets in track
 ### Dev workflow
 
 - Tests: `infra/tests/test_hf_stacks.py` (both stacks under Pulumi's mocks, the cron body against the secrets and the profile); `cd site && pnpm build && pnpm vitest run`.
-- A local dry run of the job (a tiny real listing, a local store dir, no D1): `HF_URI=hf://open-athena/spaces/README STORE_ROOT=$PWD/tmp/store WORK_DIR=$PWD/tmp/work bash job/hf-run.sh` (absolute: `index-gc -F` refuses a relative dir) (with `disk-tree` / `dt-cloud` on `PATH`). Never list the whole org from the laptop.
+- A local dry run of the job (a tiny real listing, a local store dir; a local `STORE_ROOT` unsets the D1, site and Slack credentials, so direnv's never reach hf.oa.dev): `HF_URI=hf://open-athena/spaces/README STORE_ROOT=$PWD/tmp/store WORK_DIR=$PWD/tmp/work bash job/hf-run.sh` (absolute: `index-gc -F` refuses a relative dir) (with `disk-tree` / `dt-cloud` on `PATH`). Never list the whole org from the laptop.
 - `site/deploy` (from `site/`): deploys to hf.oa.dev and pushes to `o` (`-P` skips the push); `CLOUDFLARE_ACCOUNT_ID` from the environment.

@@ -62,6 +62,14 @@ URI=${HF_URI:-hf://open-athena}
 NS=${URI#hf://}; NS=${NS%%/*}             # the namespace: the listing's (and the store's) one bucket
 R2_BUCKET=${R2_BUCKET:-oa-hf-usage-index}
 STORE_ROOT=${STORE_ROOT:-r2://$R2_BUCKET}
+# A local store is a dry run: it never reaches the deployment's shared state. The D1 (index-sync, index-gc, the
+# scan-run records), the site (warm-up, probe) and Slack (digest, alerts) all key off these credentials, which a
+# laptop's direnv supplies; without this, a dry run lists its scan on hf.oa.dev (2026-10-16T0025 did).
+case "$STORE_ROOT" in
+  *://*) ;;
+  *) echo "dry run (STORE_ROOT is a local dir): no D1, site or Slack writes" >&2
+     unset CLOUDFLARE_API_TOKEN CLOUDFLARE_ACCOUNT_ID CF_PAGES_TOKEN SLACK_BOT_TOKEN SITE_TOKEN ;;
+esac
 SNAP_ID=${SNAP_ID:-$(date -u +%Y-%m-%dT%H%M)}   # as gcs/cw: a re-run is a new scan, never a second answer for one
 export SNAP_ID
 DATE=${SNAP_ID%%T*}
