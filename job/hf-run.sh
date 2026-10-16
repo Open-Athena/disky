@@ -3,7 +3,7 @@
 # its model, dataset and space repos — as one store, served from R2. Every step is a shared CLI:
 #   1. bulk-list   `hf://open-athena` → layer-1 listing shards (`find/bulk_hf.py`; HF_TOKEN sees private repos)
 #   2. import      shards → the canonical layer-2 (`-p storage_class_id`: public 1, private 5, unbilled git 6)
-#   3. index-write layer-2 → the path store (`path` + `bysize` sorts, age pyramid, search sidecars)
+#   3. index-write layer-2 → the path store (`path` + `bysize` sorts, age pyramid; no search sidecars: search is the static name index)
 #   4. path-index  the listing → the scan's snapshot JSONs (`age.json`, `meta.json`)
 #   5. upload      tiers, snapshot, layer-2 and the listing's `_SUCCESS.json` to the R2 index bucket
 #   6. static-names add (`build` on the first run): the scan into the static name index, on R2
@@ -120,7 +120,7 @@ phase import
 
 # 3. The path store, bucket-prefixed (`open-athena/models/…`), spill outside the upload dir.
 begin index-write
-dt-cloud index-write -S -m "$MEM" -t "$NPROC" -T "$WORK/duckdb-tmp" -o "$WORK/index" "$NS=$L2"
+dt-cloud index-write -m "$MEM" -t "$NPROC" -T "$WORK/duckdb-tmp" -o "$WORK/index" "$NS=$L2"
 phase index-write
 
 # 4. The snapshot JSONs (`meta.json` carries the listing's `started`, which index-sync records on the pointer).

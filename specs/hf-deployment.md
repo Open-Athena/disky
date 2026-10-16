@@ -25,7 +25,7 @@ A new OA deployment, modeled on cw-s3 (GCP Batch job → R2 + D1 → Cloudflare 
 
 1. `disk-tree bulk-list hf://open-athena` (Hub read token `HF_TOKEN`; per-file commit dates; 3 requests in flight). Rate-bound: ~2,000 requests at 1000 / 5 min, ~10 min.
 2. `disk-tree import -e duckdb -m -p storage_class_id -s hf -b open-athena`: the layer-2 with `sum_storage_class_id_{1,5,6}` (public, private, unbilled git).
-3. `dt-cloud index-write -S`: the path store (`path` + `bysize` sorts, age pyramid, search sidecars) from the layer-2.
+3. `dt-cloud index-write`: the path store (`path` + `bysize` sorts, age pyramid) from the layer-2. No search sidecars (no `-S`): search is the static name index only (`FILTER_INDEXED_ONLY = "1"`).
 4. `dt-cloud path-index` (no `-P`): the snapshot JSONs (`age.json`, `meta.json` with the listing's `started`).
 5. Upload to R2 (`dt_cloud.blobstore.Store`, markers last): `listing/<scan>/index/<gen>/*.parquet`, `listing/<scan>/open-athena.parquet` (layer-2), `listing/<scan>/open-athena.listing.json` (the lister's `_SUCCESS.json`: `hf.expected` = Σ bucket size + Σ repo `usedStorage`, the request count), `snapshots/hf/<scan>/`.
 6. `dt-cloud static-names add` (`build -x 16,8` when the generation doesn't exist), on the R2 store. Non-fatal (`-W`).

@@ -44,10 +44,10 @@ SNAPSHOTS_SUBDIR = "hf"          # snapshots/hf/<scan>/ (job/hf-run.sh)
 # a read-only key pair (secrets below). Keys under the base's default prefixes (`listing/`, `snapshots/`).
 STORE_BUCKET = "oa-hf-usage-index"
 STORE_REGION = "auto"
-SEARCH_SIDECARS = "1"            # the job writes them (`index-write -S`)
 SERVED_R2 = "1"                  # snapshot JSONs + extras through INDEX_R2 (the same bucket), not the S3 seam
 # The static name index (the map's `?f=` and /names), in INDEX_R2 under `static-names/<STATIC_GEN>/`: the job's first
 # run builds this generation (`static-names build -x 16,8`), each later one appends its scan (`add`).
+FILTER_INDEXED_ONLY = "1"        # search is the static name index only: a form it can't answer is refused, never walked
 FILTER_STATIC = "1"
 NAME_SUMMARY_STATIC = "1"
 FILTER_STATIC_HEAVY = "1"
@@ -106,8 +106,8 @@ STORE_BUCKETS = "open-athena"
 SNAPSHOTS_SUBDIR = "hf"
 STORE_BUCKET = "oa-hf-usage-index"
 STORE_REGION = "auto"
-SEARCH_SIDECARS = "1"
 SERVED_R2 = "1"
+FILTER_INDEXED_ONLY = "1"
 FILTER_STATIC = "1"
 NAME_SUMMARY_STATIC = "1"
 FILTER_STATIC_HEAVY = "1"
