@@ -90,13 +90,17 @@ main {
   gap: var(--main-gap);
 }
 header h1 { font-size: 24px; font-weight: 700; margin: 0 0 4px; letter-spacing: -0.01em; }
-.disk-space {
+.disk-space, .allowances {
   font-size: 12px;
   font-variant-numeric: tabular-nums;
   .disk-space-labels { display: flex; justify-content: space-between; flex-wrap: wrap; gap: 4px 16px; margin-bottom: 6px; }
   .disk-space-labels > span { white-space: nowrap; }
   .disk-space-bar { height: 5px; overflow: hidden; border-radius: 3px; background: var(--line); }
   .disk-space-bar > span { display: block; height: 100%; background: var(--s1); }
+}
+.allowances {
+  display: flex; flex-direction: column; gap: 8px;
+  .allowances-note { margin: 0; .nowrap { white-space: nowrap; } }
 }
 header .hrow {
   display: flex;
@@ -301,6 +305,8 @@ header .hrow {
     &:hover { color: var(--ink); background: color-mix(in oklab, var(--ink) 9%, transparent); }
     .copied { color: var(--keep, #6cc070); font-weight: 700; }
   }
+  // the path's own page at its provider (`Store.externalLink`)
+  .path-ext { flex: none; white-space: nowrap; font-family: system-ui, sans-serif; }
 }
 
 // The scan picker: a filterable listbox (ARIA combobox) standing in for a
@@ -2387,7 +2393,7 @@ a.staged-chip {
     display: flex; align-items: baseline; flex-wrap: wrap; gap: 4px 12px;
     .obj-name { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 14px; overflow-wrap: anywhere; cursor: copy; }
     .obj-meta { color: var(--ink-2); font-size: 12.5px; font-variant-numeric: tabular-nums; }
-    .obj-dl { font-size: 12.5px; }
+    .obj-dl, .obj-ext { font-size: 12.5px; }
     .obj-close {
       margin-left: auto; border: none; background: none; color: var(--ink-2);
       font-size: 20px; line-height: 1; cursor: pointer; padding: 0 2px;
