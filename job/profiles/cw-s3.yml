@@ -1,0 +1,79 @@
+# The cw scan on the generic pipeline (specs/pipelines-everywhere.md §6.2): `dt-cloud scan head job/profiles/cw-s3.yml`
+# runs `job/nf/scan.nf`, each step `dt-cloud scan step <name>` in its own Batch task. Replaces `job/nf/cw.nf` +
+# `cw-head.sh` + `cw-step.sh` (and `cw-env.sh`'s config, which is this file's `env`).
+deployment: cw-s3
+executor:
+  kind: google-batch
+  project: oa-internal-450019
+  region: us-central1
+  service_account: cw-s3-job@oa-internal-450019.iam.gserviceaccount.com
+  image: us-central1-docker.pkg.dev/oa-internal-450019/cw-s3-usage/scan:cw
+  boot_disk: 50
+work: gs://oa-cw-s3-usage-data/nf
+data: gs://oa-cw-s3-usage-data
+layout:
+  layer2: cw-l2/{scan}/
+  snapshots: cw
+# The primary first. The 02a listing is CPU-bound (22.8 min on 16 vCPUs, 33–42 on 8) and stages its shards + import on
+# a local SSD; the small buckets fit an e2 (which takes no local SSD) and its boot disk.
+sources:
+  - {uri: s3://marin-us-east-02a, endpoint: https://cwobject.com, machine: n2-standard-16, disk: {request: 375, type: local-ssd}}
+  - {uri: s3://hero-checkpoints, endpoint: https://cwobject.com}
+  - {uri: s3://marin-us-east-06a, endpoint: https://cwobject.com}
+  - {uri: s3://rhoarnet-us-east-08a, endpoint: https://cwobject.com}
+  - {uri: s3://marin-us-west-04a, endpoint: https://cwobject.com}
+machines:
+  small: e2-standard-2
+  medium: e2-standard-4
+  # index-write (DuckDB, 16 GB) and the interval store's append (16 GiB RSS, ~25 GiB disk at a compaction), staged on a
+  # local SSD (an untyped disk only grows the pd boot disk: the 02a import took 8.1 min there vs 5.5–6.8 on NVMe)
+  big: {type: n2-standard-8, disk: {request: 375, type: local-ssd}}
+  list: {type: e2-standard-4, disk: 100}
+  # over-time caps DuckDB at 16 GB, all of an e2-standard-4
+  post: e2-highmem-4
+secrets:
+  AWS_ACCESS_KEY_ID: cw-s3-access-key-id
+  AWS_SECRET_ACCESS_KEY: cw-s3-secret-access-key
+  SLACK_BOT_TOKEN: cw-s3-slack-bot-token
+  CLOUDFLARE_API_TOKEN: cw-s3-cf-pages-token
+  SITE_TOKEN: cw-s3-job-grant
+  R2_ENDPOINT: cw-s3-r2-endpoint
+  R2_ACCESS_KEY_ID: cw-s3-isolated-r2-access-key-id
+  R2_SECRET_ACCESS_KEY: cw-s3-isolated-r2-secret-access-key
+env:
+  SCAN_RUNS_PROFILE: /app/job/scan-runs.json
+  D1_DB_ID: 7f1e1326-b879-4ecd-8621-846621c24f36   # oa-cw-s3-usage-db (site/wrangler.toml)
+  D1_DB_NAME: oa-cw-s3-usage-db
+  INDEX_VARIANTS: path                              # no user-sorted tiers here
+  SITE_URL: https://cw-s3.oa.dev
+  WARM_PATHS: ",marin-us-east-02a,marin-us-east-02a/marin,marin-us-east-02a/tmp,marin-us-east-02a/iris,hero-checkpoints,hero-checkpoints/tmp,hero-checkpoints/marin,marin-us-east-06a,marin-us-east-06a/marin,rhoarnet-us-east-08a,marin-us-west-04a"
+  SWEEP_BUCKET: marin-us-east-02a
+  SWEEP_S3_ENDPOINT: https://cwobject.com
+  # the R2 serving bucket each scan's served subset is published to (`cw-s3` CF stack's `r2_bucket`)
+  R2_BUCKET: oa-cw-s3-usage-index
+  SLACK_CHANNEL: C0C1YR7D0KU          # #cw-s3-usage: the digest
+  SLACK_ALERT_CHANNEL: C0BTUNT3B5Z    # failure alerts, shared with the GCS job
+  CLOUDFLARE_ACCOUNT_ID: 74981a43be0de7712369306c7b19133d   # the digest plot's `wrangler pages deploy`
+  # boto needs a region though CAIOS ignores it; CAIOS rejects path-style requests, which boto's auto picks for a custom
+  # endpoint
+  AWS_DEFAULT_REGION: us-east-1
+  AWS_EC2_METADATA_DISABLED: "true"
+  DT_S3_ADDRESSING_STYLE: virtual
+  STATIC_NAMES_IMAGE: us-central1-docker.pkg.dev/oa-internal-450019/cw-s3-usage/scan:cw
+pass: [DT_RECORD, DT_ALERTS]
+labels: {deployment: cw-s3}
+queue_size: 20
+options:
+  list:
+    import: true
+    bulk_args: [-a]
+    threads: 8
+    import_args: [-e, stream, -j, "{nproc}", -m, -p, storage_class_id]
+  index:
+    webdata: [python, /app/job/cw-webdata.py, "{web}", "{sources}", -l, Marin CoreWeave, -a, "{date}"]
+    lifecycle: true
+    mem: 16GB
+  static-names: {profile: /app/job/static-names.json}
+  interval-store: {timeout: 90m, mem: 12GB}
+  over-time: {mem: 16GB}
+  digest: {template: cw, config: /app/job/digest.yml}

@@ -11,6 +11,7 @@
 #   ./job/cw-batch-submit.sh              # submit, print job id
 #   DRY=1 ./job/cw-batch-submit.sh        # print the spec (for a scheduler body)
 #   NF=0 ./job/cw-batch-submit.sh         # the one-VM driver (job/cw-run.sh) instead of the Nextflow head
+#   NF=scan ./job/cw-batch-submit.sh      # the generic head (`dt-cloud scan head $PROFILE`, specs/pipelines-everywhere.md)
 #
 # Prereq (one-time): the CAIOS S3 keypair in Secret Manager, readable by the SA.
 #   printf %s "$KEY_ID" | gcloud secrets create cw-s3-access-key-id --data-file=-
@@ -148,14 +149,19 @@ EOF
 # under a scrubbed env); NF=0 submits the one-VM driver (job/cw-run.sh) instead. The head only
 # drives the DAG (each step is a Batch task of its own, which fetches its own secrets), so: a small VM, no stage disk,
 # and of the secrets only what the head itself uses (the scan-run record's D1 token, the alert's Slack token).
-if [ "${NF:-1}" = 1 ]; then
-  python3 - "$spec" <<'PY'
-import json, sys
+# NF=scan: the generic head over the deployment's profile (`PROFILE`, a path in the image), the same small VM.
+if [ "${NF:-1}" != 0 ]; then
+  NF=${NF:-1} PROFILE=${PROFILE:-/app/job/profiles/cw-s3.yml} python3 - "$spec" <<'PY'
+import json, os, sys
 p = sys.argv[1]; j = json.load(open(p))
 t = j["taskGroups"][0]["taskSpec"]
 c = t["runnables"][0]["container"]
-c["entrypoint"] = "bash"
-c["commands"] = ["job/nf/cw-head.sh"]
+if os.environ["NF"] == "scan":
+    c["entrypoint"] = "dt-cloud"
+    c["commands"] = ["scan", "head", os.environ["PROFILE"]]
+else:
+    c["entrypoint"] = "bash"
+    c["commands"] = ["job/nf/cw-head.sh"]
 c["volumes"] = []
 t["volumes"] = []
 t["computeResource"] = {"cpuMilli": 2000, "memoryMib": 7000}

@@ -1,0 +1,55 @@
+# A scratch run of the cw scan on the generic pipeline (specs/pipelines-everywhere.md §6.2): the four small buckets,
+# the scratch bucket as the data store, and only the CAIOS keys, so every serving step (publish-r2, interval-store,
+# index-rows / index-sync, over-time, warm-cache, probe) skips for want of credentials, and nothing is recorded (no
+# `SCAN_RUNS_PROFILE`). Its own deployment name, so its Nextflow sessions never resume a prod scan's.
+#   NF=scan PROFILE=/app/job/profiles/cw-s3-scratch.yml IMAGE=…/scan:cw-scratch job/cw-batch-submit.sh
+deployment: cw-s3-scratch
+executor:
+  kind: google-batch
+  project: oa-internal-450019
+  region: us-central1
+  service_account: cw-s3-job@oa-internal-450019.iam.gserviceaccount.com
+  image: us-central1-docker.pkg.dev/oa-internal-450019/cw-s3-usage/scan:cw-scratch
+  boot_disk: 50
+work: gs://oa-cw-s3-usage-scratch/nf
+data: gs://oa-cw-s3-usage-scratch
+layout:
+  layer2: cw-l2/{scan}/
+  snapshots: cw
+sources:
+  - {uri: s3://hero-checkpoints, endpoint: https://cwobject.com}
+  - {uri: s3://marin-us-east-06a, endpoint: https://cwobject.com}
+  - {uri: s3://rhoarnet-us-east-08a, endpoint: https://cwobject.com}
+  - {uri: s3://marin-us-west-04a, endpoint: https://cwobject.com, machine: n2-standard-8, disk: {request: 375, type: local-ssd}}
+machines:
+  small: e2-standard-2
+  medium: e2-standard-4
+  # index-write (DuckDB, 16 GB) and the interval store's append (16 GiB RSS, ~25 GiB disk at a compaction), staged on a
+  # local SSD (an untyped disk only grows the pd boot disk: the 02a import took 8.1 min there vs 5.5–6.8 on NVMe)
+  big: {type: n2-standard-8, disk: {request: 375, type: local-ssd}}
+  list: {type: e2-standard-4, disk: 100}
+  # over-time caps DuckDB at 16 GB, all of an e2-standard-4
+  post: e2-highmem-4
+secrets:
+  AWS_ACCESS_KEY_ID: cw-s3-access-key-id
+  AWS_SECRET_ACCESS_KEY: cw-s3-secret-access-key
+env:
+  INDEX_VARIANTS: path
+  AWS_DEFAULT_REGION: us-east-1
+  AWS_EC2_METADATA_DISABLED: "true"
+  DT_S3_ADDRESSING_STYLE: virtual
+labels: {deployment: cw-s3, purpose: scratch}
+queue_size: 20
+skip: [static-names, digest]
+options:
+  list:
+    import: true
+    bulk_args: [-a]
+    threads: 8
+    import_args: [-e, stream, -j, "{nproc}", -m, -p, storage_class_id]
+  index:
+    webdata: [python, /app/job/cw-webdata.py, "{web}", "{sources}", -l, Marin CoreWeave, -a, "{date}"]
+    lifecycle: true
+    mem: 16GB
+  interval-store: {timeout: 90m, mem: 12GB}
+  over-time: {mem: 16GB}
