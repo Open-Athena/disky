@@ -12,13 +12,14 @@ import { signInUrl, useCanAssign, useCanStage, useIdent as useIdentity } from '.
 import { AttributionRules } from './AttributionRules'
 import { DiffTreemap, DiffHeader, useDiffModel } from './DiffTreemap'
 import { DiffTable } from './DiffTable'
+import { Allowances } from './Allowances'
 import { DiskSpace } from './DiskSpace'
+import { ExtLink } from './ExtLink'
 import { DiskSpaceDiff, diskDiffScan } from './DiskSpaceDiff'
 import type { DiffData } from './diffModel'
 import { ScanCombobox } from './ScanCombobox'
 import { ago, buildUserIndex, epochDaysToDate } from './colors'
 import { ChildrenTable } from './ChildrenTable'
-import { LargestFiles } from './LargestFiles'
 import { FitSelect } from './FitSelect'
 import { PathPopover } from './PathPopover'
 import { fromUrlPath, pathCopy, pathText, toUrlPath } from './pathCrumbs'
@@ -33,6 +34,7 @@ import { LifecycleFold } from './LifecycleFold'
 import { ClassMixTip, Tooltip } from './Tooltip'
 import { Treemap } from './Treemap'
 import type { DateRange, Highlight, ShadeMode } from './Treemap'
+import { dateAxis, useDateScale } from './dateScale'
 import type { DayBand } from './dayBand'
 import { DEFAULT_SYNTAX, SYNTAXES, syntaxById } from './filterTree'
 import { fetchCover, matchedListOf, prefetchCover, rowCover, rowMatchesOf, useFilterCover } from './filterCover'
@@ -134,7 +136,7 @@ const SPANS: [string, number][] = [['1d', 1], ['3d', 3], ['7d', 7], ['14d', 14],
 // five minutes since) is never replayed after a reader rule changes. Bump
 // with `CACHE_V` in functions/_lib/edgeCache.ts.
 const API_CV = '2'
-const SECTION_IDS = ['tree-map', 'tbl', 'largest', 'over-time', 'diff', 'mtime']
+const SECTION_IDS = ['tree-map', 'tbl', 'over-time', 'diff', 'mtime']
 const LEGACY_ANCHORS: Record<string, string> = {
   'size-over-time': 'over-time', 'created-date': 'mtime', changes: 'diff',
 }
@@ -1023,22 +1025,33 @@ function AppContent() {
     ),
   })
 
-  // The written-date gradient's domain: the drawn leaves' dates — objects and
-  // directories whose children this view didn't load alike (each is one cell).
-  const dateRange = useMemo((): DateRange | null => {
-    if (!mapTree) return null
-    let min = Infinity
-    let max = -Infinity
+  // The written-date gradient's axis: the drawn leaves' dates — objects and
+  // directories whose children this view didn't load alike (each is one cell)
+  // — under the page's scale (`?ts=`; `rank` weighs each by its bytes). The
+  // read lens keeps the access-log window as its domain, the same scale over it.
+  const [dateScale] = useDateScale()
+  const { dateRange, readAxis } = useMemo(() => {
+    const ds: [number, number][] = []
+    const as: [number, number][] = []
     const walk = (n: TreeNode) => {
-      if (n.d != null && !n.c) {
-        if (n.d < min) min = n.d
-        if (n.d > max) max = n.d
+      if (!n.c) {
+        if (n.d != null) ds.push([n.d, n.b])
+        if (n.a != null) as.push([n.a, n.b])
       }
       n.c?.forEach(walk)
     }
-    walk(mapTree)
-    return min < max ? { min, max } : null
-  }, [mapTree])
+    if (mapTree) walk(mapTree)
+    let min = Infinity
+    let max = -Infinity
+    for (const [d] of ds) {
+      if (d < min) min = d
+      if (d > max) max = d
+    }
+    return {
+      dateRange: min < max ? dateAxis({ min, max }, dateScale, ds) : null,
+      readAxis: readRange ? dateAxis(readRange, dateScale, as) : null,
+    }
+  }, [mapTree, dateScale, readRange])
 
   const catOrder = useMemo(() => {
     if (!mapTree) return []
@@ -1167,14 +1180,18 @@ function AppContent() {
   const storeRoot = store.root && store.root.every((r, i) => segs[i] === r) ? store.root : []
   const crumbFullPath = pathText(pathScheme, segs, true)
   const crumbCopy = pathCopy(pathScheme, segs, true)
+  // The deepest crumb's page at the provider (`Store.externalLink`), as an icon right after its name.
+  const atRoot = segs.length <= storeRoot.length
+  const ext = <ExtLink link={store.externalLink?.(segs, here?.k !== 'file')} />
+  const rootCrumb = <RootCrumb treeName={mapTree?.n} rootLabel={rootLabel} rootTitle={rootTitle} scopeWord={store.rootLabel} here={atRoot} onClick={() => drillTo(storeRoot)} />
   const crumbs = (
     <span className="tb-path" aria-label="Drilled path">
-      <RootCrumb treeName={mapTree?.n} rootLabel={rootLabel} rootTitle={rootTitle} scopeWord={store.rootLabel} here={segs.length <= storeRoot.length} onClick={() => drillTo(storeRoot)} />
+      {atRoot ? <span>{rootCrumb}{ext}</span> : rootCrumb}
       {segs.map((sg, i) => i < storeRoot.length ? null : (
         <span key={i}>
           <span className="sep">/</span>
           {i === segs.length - 1
-            ? <PathPopover label={sg} fullPath={crumbFullPath} copy={crumbCopy} />
+            ? <><PathPopover label={sg} fullPath={crumbFullPath} copy={crumbCopy} />{ext}</>
             : <Tooltip content={<code>{pathText(pathScheme, segs.slice(0, i + 1))}</code>}><button type="button" onClick={() => drillTo(segs.slice(0, i + 1))}>{sg}</button></Tooltip>}
         </span>
       ))}
@@ -1306,6 +1323,7 @@ function AppContent() {
       )}
 
       <DiskSpace space={meta?.disk_space} />
+      {atRoot && <Allowances spec={store.allowances} classBytes={meta?.class_bytes} />}
 
       {mapTree && !mapFailed ? (
         <>
@@ -1333,7 +1351,7 @@ function AppContent() {
             shade={shade}
             userIdx={userIdx}
             dateRange={dateRange}
-            readRange={readRange}
+            readRange={readAxis}
             hl={effHl}
             onPickUser={u => pickUser(u, false)}
             onPickUnowned={pickUnowned}
@@ -1386,12 +1404,15 @@ function AppContent() {
               />
             </Suspense>
           )}
-          {/* The map's own listing — this node's children. */}
+          {/* The map's own listing — this node's children, or (`?tm=`) the largest files / folders anywhere below it:
+              the whole directory's, so not under a scope (lens, owner pool, class, name filter) it couldn't honor. */}
           {mapPath && (
             <div id="tbl"><ChildrenTable
               node={mapPath[mapPath.length - 1]}
               segs={tblSegs}
               scheme={store.scheme}
+              scan={asof}
+              flatOk={objects && !scopeQs}
               ownerIdx={ownersMode ? ownerIdx : undefined}
               userIdx={userIdx}
               onPickUser={u => pickUser(u, false)}
@@ -1401,19 +1422,6 @@ function AppContent() {
               rowMatches={tblRowMatches}
               brush={brush}
               onBrush={setBrush}
-            /></div>
-          )}
-          {/* …and its flat twin: the largest files anywhere below it. The whole directory's, so not
-              shown under a scope (lens, owner pool, class, name filter) it couldn't honor. */}
-          {mapPath && objects && (
-            <div id="ltbl"><LargestFiles
-              segs={tblSegs}
-              scheme={store.scheme}
-              scan={asof}
-              total={mapPath[mapPath.length - 1].b}
-              enabled={!scopeQs}
-              onOpen={openPath}
-              onOpenObject={openObject}
             /></div>
           )}
         </>

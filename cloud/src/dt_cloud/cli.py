@@ -1414,9 +1414,10 @@ def lifecycle() -> None:
     bucket, the per-scan snapshot shape."""
 
 
-def _lifecycle_clients(buckets: tuple[str, ...]):
+def _lifecycle_clients(buckets: tuple[str, ...], endpoint: str | None = None):
     """The S3 and/or GCS client the given bucket URIs need (`None` for a cloud
-    none of them name), so one `pull` can snapshot a mixed set."""
+    none of them name), so one `pull` can snapshot a mixed set. `endpoint`: the S3
+    buckets' (default `$SWEEP_S3_ENDPOINT`)."""
     from .lifecycle import is_gcs
 
     gcs = s3 = None
@@ -1427,7 +1428,7 @@ def _lifecycle_clients(buckets: tuple[str, ...]):
     if any(not is_gcs(b) for b in buckets):
         from .sweep import s3_client
 
-        s3 = s3_client()
+        s3 = s3_client(endpoint)
     return s3, gcs
 
 
@@ -1444,14 +1445,15 @@ def _lc_buckets(buckets: tuple[str, ...]) -> tuple[str, ...]:
 
 @lifecycle.command("pull")
 @_LC_BUCKET
+@option("-E", "--endpoint", help="The S3 buckets' endpoint (default $SWEEP_S3_ENDPOINT)")
 @option("-k", "--keep-going", is_flag=True, help="A bucket whose rules can't be read (e.g. no `storage.buckets.get`) is reported and left out, instead of failing the whole pull — for the job's fleet snapshot")
 @option("-o", "--out", type=Path, help="Write here instead of stdout")
-def lifecycle_pull(buckets: tuple[str, ...], keep_going: bool, out: Path | None) -> None:
+def lifecycle_pull(buckets: tuple[str, ...], endpoint: str | None, keep_going: bool, out: Path | None) -> None:
     """One bucket → the bare rule list; several → `{<bucket>: rules}` in this order."""
     from .lifecycle import dump, dump_map, pull_any, pull_many
 
     buckets = _lc_buckets(buckets)
-    s3, gcs = _lifecycle_clients(buckets)
+    s3, gcs = _lifecycle_clients(buckets, endpoint)
     if len(buckets) == 1:
         text = dump(pull_any(buckets[0], s3=s3, gcs=gcs), bucket=buckets[0])
     else:
@@ -3146,6 +3148,40 @@ def _batch_cancel(labels: tuple[str, ...], dry_run: bool, region: str | None) ->
         want[k] = v
     for n in cancel_labelled(want, region=region or REGION, dry_run=dry_run, log=err):
         print(n)
+
+
+@main.group("scan")
+def _scan() -> None:
+    """A scan as a Nextflow DAG (specs/pipelines-everywhere.md): `head` runs it, each task runs one `step`."""
+
+
+@_scan.command("step")
+@option("-p", "--profile", "profile_path", default=None, help="The deployment's scan profile YAML (default `$DT_SCAN_PROFILE_JSON`, as the head passes it, else `$DT_SCAN_PROFILE`)")
+@argument("name")
+@argument("arg", required=False)
+def _scan_step(profile_path: str | None, name: str, arg: str | None) -> None:
+    """Run scan step NAME (ARG: `list`'s source URI) for the scan `$SNAP_ID` / `$GEN` / `$DT_JOB_START` the head
+    stamped, recording its phases into the run `$DT_RUN_ID`. Idempotent: done work is skipped. Steps:
+    `dt_cloud.scan_steps.STEPS`."""
+    from .scan_steps import run_step
+
+    sys.exit(run_step(name, arg, profile_path=profile_path))
+
+
+@_scan.command("head")
+@option("-F", "--fresh", is_flag=True, help="Run every task with Nextflow's cache off (each step still skips what its own outputs say is done): after a cached task's output was lost")
+@option("-n", "--dry-run", is_flag=True, help="Write the params, executor config and history line; print the Nextflow command; run nothing")
+@option("-N", "--nf-dir", type=Path, default=None, help="Where `scan.nf` + `base.config` are (default `$DT_NF_DIR`, else `job/nf`)")
+@option("-R", "--reproc", is_flag=True, help="Re-aggregate from the archived listings / layer-2s: skip `list`, run from `index` (REPROC=1: unrecorded, no serving side effects)")
+@option("-w", "--launch-dir", type=Path, default=None, help="Nextflow's launch dir (default: the profile's `work` for the local executor, else `$TMPDIR/nf-<scan>`)")
+@argument("profile_path", type=Path)
+def _scan_head(fresh: bool, dry_run: bool, nf_dir: Path | None, reproc: bool, launch_dir: Path | None, profile_path: Path) -> None:
+    """Run one scan of the deployment PROFILE_PATH describes (`job/profiles/<deployment>.yml`) through
+    `job/nf/scan.nf`: `$SNAP_ID` / `$GEN` / `$DT_JOB_START` when set (resuming that scan's session), else stamped now."""
+    from .scan_head import head
+
+    nf = nf_dir or Path(os.environ.get("DT_NF_DIR") or "job/nf")
+    sys.exit(head(profile_path, nf.absolute(), launch_dir, reproc=reproc, fresh=fresh, dry_run=dry_run))
 
 
 if __name__ == "__main__":

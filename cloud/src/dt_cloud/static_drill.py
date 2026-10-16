@@ -39,6 +39,10 @@ FILE_ROWS = 50_000_000
 RUN_RG = 2048
 #: Decoded row groups kept per group file by the builder's reads.
 GROUP_CACHE = 2048
+#: Index spans (`CachedGroupFile._span`: a run of index row groups' entries and key tuples) kept per group file.
+SPAN_CACHE = 512
+#: `dr` rows (at depth ≥ 2) per part of the aggregations over their ancestors (`_by_parts`).
+EXPLODE_PART_ROWS = 1 << 23
 #: Settling's input rows (affected directories' touched and kept children, as Python rows) loaded at once.
 SETTLE_CHUNK_ROWS = 1 << 22
 #: Concurrent ranged reads when the builder prefetches the groups its loops will read (`build -j`); ≤ 1: no prefetch, the
@@ -130,7 +134,7 @@ class CachedGroupFile(sr.GroupFile):
         self._peeked: dict[int, list[dict]] = {}
         self._md: dict[str, pq.FileMetaData] = {}
         self._groups: OrderedDict[tuple[str, int], tuple[pa.Table, list[tuple]]] = OrderedDict()
-        self._spans: dict[tuple[int, int], tuple[list[dict], list[tuple], list[tuple]]] = {}
+        self._spans: OrderedDict[tuple[int, int], tuple[list[dict], list[tuple], list[tuple]]] = OrderedDict()
         self.cap_groups = cache_groups
         self.raw: ByteCache | None = None
         self.fetch_io: Counter = Counter()
@@ -200,11 +204,17 @@ class CachedGroupFile(sr.GroupFile):
 
     def _span(self, a: int, b: int) -> tuple[list[dict], list[tuple], list[tuple]]:
         """The entries of index row groups `top[a:b]` and their last / first keys, built once per span (a per-call build
-        over the ~1K entries a top row group holds was most of a probe's time)."""
+        over the ~1K entries a top row group holds was most of a probe's time). The newest `SPAN_CACHE` spans are kept: each
+        holds its own key tuples, and a loop's distinct spans grow with its reads (unbounded, they were the likeliest holder
+        of the ~16 GiB outside DuckDB that gcs 0701's long settling grew by)."""
         s = self._spans.get((a, b))
         if s is None:
             entries = [e for t in self.top[a:b] for e in self._peek_top(t)]
             s = self._spans[(a, b)] = (entries, [(e["q_max"], e["k_max"]) for e in entries], [(e["q_min"], e["k_min"]) for e in entries])
+            if len(self._spans) > SPAN_CACHE:
+                self._spans.popitem(last=False)
+        else:
+            self._spans.move_to_end((a, b))
         return s
 
     def _sel(self, a: int, b: int, lo, hi) -> list[dict]:
@@ -517,6 +527,7 @@ class TierReads:
         groups = [v for _, gf in self.items if gf is not None for v in gf._groups.values()]
         return {"decoded_groups": len(groups), "decoded_bytes": sum(t.nbytes for t, _ in groups),
                 "index_groups": sum(len(gf._entries) + len(gf._peeked) for _, gf in self.items if gf is not None),
+                "index_spans": sum(len(gf._spans) for _, gf in self.items if gf is not None),
                 "raw_bytes": self.raw.size if self.raw is not None else 0}
 
     def drop_decoded(self) -> None:
@@ -946,6 +957,22 @@ def _explode(where: str = "") -> str:
             FROM dr WHERE depth >= 2 {where})"""
 
 
+def _explode_parts(con) -> int:
+    """How many parts (by `hash(q)`) the aggregations over `_explode` run in: one per `EXPLODE_PART_ROWS` of `dr`'s rows at
+    depth ≥ 2, each exploded once per ancestor. Every group key leads with `q`, so a part's groups are whole."""
+    rows = con.execute("SELECT count(*) FROM dr WHERE depth >= 2").fetchone()[0]
+    return max(1, -(-rows // EXPLODE_PART_ROWS))
+
+
+def _by_parts(con, table: str, parts: int, select) -> None:
+    """Table `table` as `select(where)`'s rows over `parts` disjoint parts of `q` (`where` restricts `dr`'s rows to one), run
+    one after another: an aggregation's working set is a part's, not the whole exploded `dr`'s (gcs 2026-10-16T0701's short
+    kind: DuckDB couldn't pin a block at its 60 GB limit computing `tch` in one pass)."""
+    for i in range(parts):
+        w = f"AND hash(q) % {parts} = {i}" if parts > 1 else ""
+        con.execute(f"{'CREATE OR REPLACE TABLE' if i == 0 else 'INSERT INTO'} {table} {'AS ' if i == 0 else ''}{select(w)}")
+
+
 def _nop_step(name: str, t: float, **counts: int) -> float:
     return monotonic()
 
@@ -963,8 +990,9 @@ def day_rollups(con, prior: list[Tier], kind: str, D: int, *, R: int, K: int, fl
     doc: Counter = Counter()
     _cmap(con, prior, kind)
     # today's rows under each directory
-    con.execute(f"""CREATE OR REPLACE TABLE tdir AS SELECT q, dir, any_value(k) AS k, count(*)::BIGINT AS rows,
-            count(*) FILTER (WHERE vf = {D})::BIGINT AS opens FROM ({_explode()}) GROUP BY q, dir""")
+    parts = _explode_parts(con)
+    _by_parts(con, "tdir", parts, lambda w: f"""SELECT q, dir, any_value(k) AS k, count(*)::BIGINT AS rows,
+            count(*) FILTER (WHERE vf = {D})::BIGINT AS opens FROM ({_explode(w)}) GROUP BY q, dir""")
     # the prior state of the touched directories: each tier's rows for the member's canonical there, from the newest full header on
     con.execute(f"CREATE OR REPLACE TABLE ru (tier INTEGER, {ROLLUP_COLS})")
     for i, t in enumerate(prior):
@@ -990,12 +1018,12 @@ def day_rollups(con, prior: list[Tier], kind: str, D: int, *, R: int, K: int, fl
         raise RuntimeError(f"{bad} heavy directories whose kept children are not min(K, children) named cells")
     doc["heavy_touched"] = con.execute("SELECT count(*) FROM hdr").fetchone()[0]
     # per child of each touched heavy directory: today's change, and whether it is new
-    con.execute(f"""CREATE OR REPLACE TABLE tch AS SELECT e.q, e.dir, e.child, bool_or(e.k + 1 = e.depth) AS rootchild,
+    _by_parts(con, "tch", parts, lambda w: f"""SELECT e.q, e.dir, e.child, bool_or(e.k + 1 = e.depth) AS rootchild,
             sum(CASE WHEN e.vf = {D} THEN e.size ELSE -e.size END)::BIGINT AS db,
             sum(CASE WHEN e.vf = {D} THEN e.n_files ELSE -e.n_files END)::BIGINT AS dn,
             count(*) FILTER (WHERE e.vf <> {D})::BIGINT AS n_close,
             count(*) FILTER (WHERE e.vf = {D} AND pn.path IS NULL)::BIGINT AS n_open_old
-        FROM ({_explode("AND q NOT IN (SELECT q FROM newq)")}) AS e SEMI JOIN hdr USING (q, dir)
+        FROM ({_explode("AND q NOT IN (SELECT q FROM newq) " + w)}) AS e SEMI JOIN hdr USING (q, dir)
         LEFT JOIN pnew AS pn ON pn.depth = e.depth AND pn.path = e.path
         GROUP BY e.q, e.dir, e.child""")
     con.execute("""CREATE OR REPLACE TABLE nk AS SELECT t.*, (h.ho > h.kept_n) AS has_rem FROM tch AS t ANTI JOIN kc USING (q, dir, child)
