@@ -53,12 +53,15 @@ def test_params_reproc_fresh_and_extras():
                "steps": ["access-ingest", "healthcheck"], "skip": ["digest", "static-names"],
                "options": {"list": {"import": True}}})
     got = H.params(p, "{}", "2026-10-16", "G", "1", "", "S", {}, reproc=True, fresh=True)
-    assert {k: got[k] for k in ("steps", "pre", "pre_label", "post", "skip_list", "cache", "env", "work_bucket", "secrets_project")} == {
+    assert {k: got[k] for k in ("steps", "pre", "pre_label", "post", "over_time", "over_time_label", "skip_list", "cache", "env",
+                                "work_bucket", "secrets_project")} == {
         "steps": ["bucket-check", "access-ingest", "list", "index", "publish-r2", "interval-store", "index-rows", "index-sync",
                   "over-time", "index-gc", "healthcheck", "warm-cache", "probe"],
         "pre": ["access-ingest"],
         "pre_label": "small",
-        "post": ["over-time", "index-gc", "healthcheck", "warm-cache", "probe"],
+        "post": ["index-gc", "healthcheck", "warm-cache", "probe"],
+        "over_time": True,
+        "over_time_label": "post",
         "skip_list": True,
         "cache": False,
         "env": {"REPROC": "1"},
