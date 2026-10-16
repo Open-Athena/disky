@@ -29,6 +29,8 @@ from concurrent.futures import ThreadPoolExecutor
 
 WIDTHS = (512, 1280, 1536, 1792, 1920)
 SPANS = (1, 3, 7, 14, 30)
+# Every request carries it: Cloudflare bans urllib's default User-Agent (error 1010, a 403)
+UA = "gcs-usage-warm/1.0"
 
 
 def env_paths() -> tuple[str, ...] | None:
@@ -51,7 +53,7 @@ def top_paths(base_url: str, headers: dict[str, str], date: str, timeout: float 
     site's root view of ``date`` lists them."""
     import json
 
-    req = urllib.request.Request(f"{base_url.rstrip('/')}/api/subtree?date={date}&path=&w=1280&h=768&depth=1", headers=headers)
+    req = urllib.request.Request(f"{base_url.rstrip('/')}/api/subtree?date={date}&path=&w=1280&h=768&depth=1", headers={**headers, "User-Agent": UA})
     with urllib.request.urlopen(req, timeout=timeout) as r:
         return root_children(json.load(r))
 
@@ -116,7 +118,7 @@ def warm(url: str, headers: dict[str, str], paths: list[str], jobs: int = 4, tim
     ``(path, status, seconds, x-cache)`` per request (status 0 = transport
     error). Logs one line per request to stderr."""
     def one(path: str) -> tuple[str, int, float, str]:
-        req = urllib.request.Request(url.rstrip("/") + path, headers={**headers, "User-Agent": "gcs-usage-warm/1.0"})
+        req = urllib.request.Request(url.rstrip("/") + path, headers={**headers, "User-Agent": UA})
         t0 = time.time()
         try:
             with urllib.request.urlopen(req, timeout=timeout) as r:
