@@ -116,6 +116,10 @@ It replaces each script's top-of-file constants, `NF_SECRETS` / `NF_PASS`, the c
 
 Each deployment's old script is deleted when its first week on the DAG is clean. Every move carries the baseline in [CLAUDE.md "Deployments: parity by default"] (scan-run records, alerts, warm-cache, probe, digest).
 
+### Run reports (DAG view)
+
+`dt-cloud scan head` runs Nextflow with `-with-dag dag.mmd -with-timeline timeline.html -with-report report.html` (beside `-with-trace trace.tsv`). It uploads whichever exist to `<work>/runs/<scan>/` before `scan-run finish`, even when the run failed or was stopped. An upload error is logged and never fails the run. A deployment records the DAG as a scan-run output by adding `{key: nf-dag, uri: <work>/runs/{scan}/dag.mmd}` to its `scan-runs.json`. The site's /scans view draws it, colouring each node by its phase status (cw builds that part on `cloud`).
+
 ## 7. Open
 
 - m3: awsbatch, or google-batch over its uploads (§4).

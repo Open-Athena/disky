@@ -5,6 +5,7 @@ from __future__ import annotations
 import datetime as dt
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 from click.testing import CliRunner
 
@@ -115,5 +116,19 @@ def test_dry_run_writes_the_launch_files(tmp_path, monkeypatch):
     assert line[1:] == ["-", "scan_2026_10_16T1200", "OK", "-", session, "nextflow run scan.nf\n"]
     assert r.stderr.rstrip().split("\n")[-1] == (
         f"+ nextflow run {tmp_path}/nf/scan.nf -c {tmp_path}/nf/base.config -c {launch}/executor.config "
-        f"-params-file {launch}/params.json -resume {session} -with-trace {launch}/trace.tsv"
+        f"-params-file {launch}/params.json -resume {session} -with-trace {launch}/trace.tsv "
+        f"-with-dag {launch}/dag.mmd -with-timeline {launch}/timeline.html -with-report {launch}/report.html"
     )
+
+
+def test_publish_reports(tmp_path):
+    """The reports that exist go to `<work>/runs/<scan>/`; a missing one is skipped."""
+    launch, work = tmp_path / "launch", tmp_path / "work"
+    launch.mkdir()
+    (launch / "dag.mmd").write_text("flowchart TB\n")
+    (launch / "trace.tsv").write_text("task_id\n")
+    profile = SimpleNamespace(work=str(work))
+    assert H.publish_reports(profile, "2026-10-16T1200", launch) == ["runs/2026-10-16T1200/dag.mmd", "runs/2026-10-16T1200/trace.tsv"]
+    assert sorted(p.relative_to(work).as_posix() for p in work.rglob("*") if p.is_file()) == [
+        "runs/2026-10-16T1200/dag.mmd", "runs/2026-10-16T1200/trace.tsv"]
+    assert (work / "runs/2026-10-16T1200/dag.mmd").read_text() == "flowchart TB\n"

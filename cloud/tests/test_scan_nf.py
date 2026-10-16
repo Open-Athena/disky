@@ -69,6 +69,10 @@ def test_dag_order_and_resume(tmp_path):
     # the resume ran only the post task (its steps skip their own done work)
     assert marks.read_text().splitlines() == ["index-sync", "over-time", "index-gc", "warm-cache", "probe", "digest"]
     assert r2.stdout.splitlines()[-1] == f"SCAN-JOB-DONE 2026-10-16T1200 -> {tmp_path}/data/snapshots/2026-10-16T1200"
+    # the run's reports beside it in the work store (`scan head` → `<work>/runs/<scan>/`), the DAG as Mermaid
+    runs = tmp_path / "nf/runs/2026-10-16T1200"
+    assert sorted(p.name for p in runs.iterdir()) == ["dag.mmd", "report.html", "timeline.html", "trace.tsv"]
+    assert (runs / "dag.mmd").read_text().splitlines()[0] == "flowchart TB"
 
 
 def test_reproc_unfolded(tmp_path):
