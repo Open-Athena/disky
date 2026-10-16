@@ -3,10 +3,10 @@
 # requires-python = ">=3.11"
 # dependencies = ["click", "pillow"]
 # ///
-"""Generate GCS Usage Bot Slack icons from the GCS "Cloud Storage" mark.
+"""Generate GCS Usage Bot per-message Slack avatars from the GCS "Cloud Storage" mark.
+(The app's own icon is `deploy/slack/icons/gcs.png`, the store mark; `deploy/slack/README.md`.)
 
 Outputs (512px PNGs):
-  gcs-app-{light,dark}.png  — static app icon (upload in the Slack app's Basic Information)
   gcs-digest.png            — per-message avatar for a normal digest (mark + :bar_chart: badge)
   gcs-breach.png            — per-message avatar for a ceiling/spike breach (mark + :rotating_light:)
 
@@ -20,7 +20,6 @@ from click import argument, command, option
 S = 1024          # internal working size; outputs downscale to 512
 OUT = 512
 LIGHT = (255, 255, 255, 255)
-DARK = (13, 17, 23, 255)      # GitHub dark, reads well in Slack dark mode
 
 
 def emoji_glyph(ch: str, px: int):
@@ -64,10 +63,8 @@ def save(img, path: Path):
 @option("-o", "--out-dir", type=Path, default=Path(__file__).parent / "icons", help="output dir")
 def main(mark: Path, out_dir: Path):
     out_dir.mkdir(parents=True, exist_ok=True)
-    light, dark = base(mark, LIGHT), base(mark, DARK)
+    light = base(mark, LIGHT)
     made = [
-        save(light, out_dir / "gcs-app-light.png"),
-        save(dark, out_dir / "gcs-app-dark.png"),
         save(badge(light, "\U0001F4CA"), out_dir / "gcs-digest.png"),   # 📊
         save(badge(light, "\U0001F6A8"), out_dir / "gcs-breach.png"),   # 🚨
     ]
