@@ -575,3 +575,39 @@ def test_an_unphased_failure_inside_a_begun_phase_names_it(job):
     assert [ln for ln in job.take() if ln.startswith("alert")] == [
         f"alert (suppressed): ❌ cw-s3 {SCAN}: run failed (exit 3) in index: exit 3: cp a b (run.sh:9)",
     ]
+
+
+def test_a_nextflow_task_records_its_own_job_and_alerts_with_its_logs(job, monkeypatch):
+    """A step in its own Batch job (`$BATCH_JOB_UID` ≠ the run id): each phase records that job + machine, looked up
+    once per task, and the step's alert links the task's logs."""
+    looked: list[tuple] = []
+
+    def by_uid(uid, project=None, region="us-central1"):
+        looked.append((uid, project, region))
+        return {"name": f"projects/{project}/locations/{region}/jobs/nf-1a2b", "uid": uid,
+                "allocationPolicy": {"instances": [{"policy": {"machineType": "n2-standard-16"}}]}}
+
+    monkeypatch.setattr("dt_cloud.gcp.batch_job_by_uid", by_uid)
+    assert job("start", "-j", "head-job", "-R", "us-central1", SCAN, at=T0) == 0
+    job.mp.setenv("BATCH_JOB_UID", "task-uid-1")
+    assert job("phase-begin", "list b1", at=T0 + 120) == 0
+    assert job("phase-end", "-M", "list b1", at=T0 + 600) == 0
+    assert job("phase-begin", "import b1", at=T0 + 600) == 0
+    assert job("phase-end", "-M", "import b1", at=T0 + 700) == 0
+    assert looked == [("task-uid-1", "proj-1", "us-central1")]
+    assert job.rows("SELECT phase, started_ts, finished_ts, job_name, machine FROM scan_run_phases ORDER BY seq") == [
+        ("list b1", T0 + 120, T0 + 600, "nf-1a2b", "n2-standard-16"),
+        ("import b1", T0 + 600, T0 + 700, "nf-1a2b", "n2-standard-16"),
+    ]
+    assert job.rows("SELECT job_name, machine FROM scan_runs") == [("head-job", None)]
+    jr = scan_runs.JobRun(str(job.profile), None, False, None, str(job.db))
+    assert jr.logs_url() == "https://logs.test/q;uid=task-uid-1?project=proj-1&job=nf-1a2b"
+
+
+def test_the_runs_own_job_looks_nothing_up(job, monkeypatch):
+    monkeypatch.setattr("dt_cloud.gcp.batch_job_by_uid", lambda *a, **k: pytest.fail("looked up the run's own job"))
+    job.mp.setenv("BATCH_JOB_UID", "u1")
+    assert job("start", SCAN, at=T0) == 0
+    assert job("phase-begin", "listing", at=T0 + 10) == 0
+    assert job("phase-end", "-M", "listing", at=T0 + 70) == 0
+    assert job.rows("SELECT phase, job_name, machine FROM scan_run_phases") == [("listing", None, None)]
