@@ -23,6 +23,8 @@ params.steps = []          // every enabled step (core minus `skip`, plus the pr
 params.pre = []            // enabled extra steps beside `list`, before `index` (soft: index runs without them)
 params.pre_label = 'small'
 params.interval_label = 'big'
+params.over_time = false
+params.over_time_label = 'post'
 params.post = []           // the post task's steps, in order
 params.fold = []
 params.skip_list = false   // REPROC: run from `index`
@@ -141,6 +143,17 @@ process post {
     script: stepScript(task, (folded('index-sync') ? ['index-sync'] : []) + params.post)
 }
 
+// over-time apart from `post`: every Nth scan it builds a sealed group (cw's 16-scan groups: ~90 min), which in `post`
+// held warm-cache, probe and digest behind it. Its own task (`machines.over_time`, else post's), beside `post` once
+// the scan's stores are written (after index-sync when that is its own task; it needs the scan's outputs, not its
+// listing), so a failed post step never stops it.
+process over_time {
+    label params.over_time_label
+    input: val deps
+    output: path 'done'
+    script: stepScript(task, ['over-time'])
+}
+
 workflow {
     if (!params.scan || !params.gen || !params.job_start) error "--scan, --gen and --job_start are required (`dt-cloud scan head` sets them)"
     def ready = Channel.empty()
@@ -156,4 +169,5 @@ workflow {
     def serving = gathered(rows.mix(st, iv))
     def synced = folded('index-sync') ? serving : gathered(index_sync(serving))
     if (params.post || folded('index-sync')) post(synced)
+    if (params.over_time) over_time(synced)
 }
