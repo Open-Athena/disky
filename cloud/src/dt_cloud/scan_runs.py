@@ -186,7 +186,9 @@ class D1Sink:
     def __init__(self, db_id: str | None = None):
         from . import index_footer as f
 
-        self.db_id = db_id or f.D1_DB_ID
+        # the env now, not `index_footer.D1_DB_ID` (read at its import): `scan head` sets `$D1_DB_ID` from the profile
+        # after the CLI has imported it, and its own start / finish found no database
+        self.db_id = db_id or os.environ.get("D1_DB_ID") or f.D1_DB_ID
         if not self.db_id:
             raise SystemExit("scan-run: no D1 database: set $D1_DB_ID to this deployment's D1 (or pass --sqlite / -n)")
         self._tok, self._acct = f._creds()

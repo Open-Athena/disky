@@ -736,3 +736,18 @@ def test_phase_sql_names_the_task_columns_only_when_known():
         c=", job_name, machine", v=", 'nf-1', 'e2-standard-4'",
         u=", job_name = COALESCE(excluded.job_name, scan_run_phases.job_name), machine = COALESCE(excluded.machine, scan_run_phases.machine)",
     )
+
+
+def test_d1_sink_reads_the_database_id_when_made(monkeypatch):
+    """`scan head` sets `$D1_DB_ID` from the profile after `index_footer` (whose `D1_DB_ID` is read at import) is loaded;
+    the sink takes the env's value then, not the stale one (the generic head's first prod run recorded no start)."""
+    from dt_cloud import index_footer
+
+    monkeypatch.setattr(index_footer, "D1_DB_ID", "")
+    monkeypatch.setattr(index_footer, "_creds", lambda: ("tok", "acct"))
+    monkeypatch.setenv("D1_DB_ID", "db-from-profile")
+    assert scan_runs.D1Sink().db_id == "db-from-profile"
+    monkeypatch.delenv("D1_DB_ID")
+    with pytest.raises(SystemExit) as e:
+        scan_runs.D1Sink()
+    assert str(e.value) == "scan-run: no D1 database: set $D1_DB_ID to this deployment's D1 (or pass --sqlite / -n)"
