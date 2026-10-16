@@ -28,8 +28,11 @@ machines:
   list: n2-standard-32
   # path-index: DuckDB at 100GB (+ ~40GB it doesn't account for), its inputs staged to local SSD (n2 32-vCPU
   # machines take 4, 8, 16 or 24 local SSDs)
-  big: {type: n2-highmem-32, disk: {request: 1500, type: local-ssd}}
+  # a us-central1 stockout of this shape held the 2026-10-16 scratch index ~30 min: n2d (AMD) is a separate pool
+  big: {type: n2-highmem-32, disk: {request: 1500, type: local-ssd}, fallback: [n2d-highmem-32], queue_timeout: 10}
   pre: n2-highmem-8
+  # the staged interval-store append only orchestrates its own Batch jobs (run.sh ran it on the scan VM)
+  interval: n2-standard-8
   small: e2-standard-2
   medium: e2-standard-4
   post: e2-standard-4
