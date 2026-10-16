@@ -15,6 +15,7 @@ import { renderMarkdown } from '@rdub/file-tree/renderers/markdown'
 import type { ElideCtx } from '@rdub/file-tree/renderers/table'
 import { NotFoundError, type GetResult, type ListResult, type Range, type Store as FtStore } from '@rdub/file-tree'
 import { CopyName } from './CopyName'
+import { ExtLink } from './ExtLink'
 import { epochDaysToDate } from './colors'
 import { listingTime } from './listingTime'
 import { objectSource, publicUrl, type ObjectSource, type ProxyInfo } from './objects'
@@ -174,7 +175,6 @@ export default function ObjectPanel({ segs, node, onClose }: {
   const uri = store.scheme + segs.join('/')
   const shown = pathText(store.scheme, segs)
   const dl = ft?.getUrl?.(key)
-  const ext = store.externalLink?.(segs, false)
   // Opening scrolls the panel into view; Escape closes it.
   useEffect(() => { ref.current?.scrollIntoView({ behavior: 'smooth', block: 'nearest' }) }, [uri])
   useEffect(() => {
@@ -186,11 +186,11 @@ export default function ObjectPanel({ segs, node, onClose }: {
     <section className="object-panel" id="object" ref={ref} aria-label={`object ${segs[segs.length - 1]}`}>
       <header>
         <CopyName text={pathCopy(store.scheme, segs)}><b className="obj-name">{segs[segs.length - 1]}</b></CopyName>
+        <ExtLink link={store.externalLink?.(segs, false)} />
         <span className="obj-meta">
           {node && <>{fmtBytes(node.b)}</>}
           {node?.d != null && <> · {listingTime(store.scheme).label} {epochDaysToDate(node.d)}</>}
         </span>
-        {ext && <a className="obj-ext" href={ext.href} target="_blank" rel="noreferrer">{ext.label} ↗</a>}
         {dl && <a className="obj-dl" href={dl} download={segs[segs.length - 1]} target="_blank" rel="noreferrer">download</a>}
         <button type="button" className="obj-close" aria-label="Close the object (Esc)" title="Close (Esc)" onClick={onClose}>×</button>
       </header>
