@@ -63,6 +63,8 @@ options:
   index-gc: {dry: true}
   digest:
     template: cw
+    # the thread state (`digest/r2/…`) and every earlier scan's snapshots are on R2, as the one-VM job reads them
+    root: r2://oa-r2-usage-index/{snapshots}
     config: /app/job/digest.yml
     args: [-i, /app/job/icons-r2]
     secrets: {CF_PAGES_TOKEN: oa-r2-cf-pages-token}
