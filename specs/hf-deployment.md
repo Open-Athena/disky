@@ -1,6 +1,6 @@
 # hf.oa.dev: the Hugging Face deployment
 
-Status: **live** (2026-10-15). First scan `2026-10-15`: 47 min, $0.11, 234,832 objects; billed bytes 15,753,134,621,714 B = the layer-2 root's non-git bytes exactly (billing page: 15.72 TB). Waiting on Ryan: the dev stack's Pages secrets (`hf-secrets -d`), the job's site grant (8b), then resuming the cron.
+Status: **live** (2026-10-15). First scan `2026-10-15`: 47 min, $0.11, 234,832 objects; billed bytes 15,753,134,621,714 B = the layer-2 root's non-git bytes exactly (billing page: 15.72 TB). Dev stack, site grant and cron all done. First scheduled scan `2026-10-16T0801` (2026-10-16, 44 min): every phase passed but `warm-cache` (Cloudflare 403'd urllib's default User-Agent in `top_paths`; fixed in `[cloud]` `b1930925`, image rebuilt, that scan warmed by hand, 32/32); the probe passed and the digest posted October's thread in #hf-usage (OP plot + TB replies for 10/15 and 10/16).
 
 ## What it is
 
