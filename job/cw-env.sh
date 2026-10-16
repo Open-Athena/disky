@@ -51,6 +51,9 @@ SNAP_ID=${SNAP_ID:-$(date -u +%Y-%m-%dT%H%M)}
 DATE=${SNAP_ID%%T*}
 GEN=${GEN:-$(date -u +%Y%m%dT%H%M%SZ)}  # this run's index generation (step 4b), stamped once at start
 export SNAP_ID DATE GEN DATA PROCS WORKERS BUCKETS BUCKET ENDPOINT
+# The scan-run wrapper's scan (`$SCAN_ID`) when a step runs without the driver's state file (a Nextflow task, on its own
+# VM), and the `scan` cost label on the Batch jobs the steps submit (`cost_labels`)
+export SCAN_ID=${SCAN_ID:-$SNAP_ID}
 export GCS=${GCS:-/gcs}
 WORK=${WORK_DIR:-/stage/cw-$SNAP_ID}
 INDEX_KEY="cw-l2/$SNAP_ID/index/$GEN"
