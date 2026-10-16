@@ -125,7 +125,7 @@ export UV_PROJECT_ENVIRONMENT=$PWD/infra/.venv   # for pulumi; never the repo's 
 - ~~`PATH_STORE = "intervals"`~~: done 2026-10-15 (first scan: `interval-store verify` 11/11 views equal). Diff parity is checked once there are two scans.
 - Cache warm-up and the serving probe: built (job steps 10–11, `probe -c` records under `probes/hf/`); they run once the job's grant exists (checklist step 8b).
 - The Slack digest thread: built 2026-10-15 (job step 12, `job/digest.yml`: the `cw` template, one reply per UTC day, % of the 253 TB public allowance, in decimal TB (`units: TB`, as HF bills); #hf-usage). It runs once these are applied, in order:
-  1. The HF Usage Bot app from `job/slack/hf-usage-bot.manifest.json` (api.slack.com/apps → From a manifest), installed; its `xoxb-` token → `hf-usage-slack-bot-token` (replacing the copy of cw-s3's), the icon `job/slack/hf-app.png`.
+  1. The HF Usage Bot app from `job/slack/hf-usage-bot.manifest.json` (api.slack.com/apps → From a manifest), installed; its `xoxb-` token → `hf-usage-slack-bot-token` (replacing the copy of cw-s3's), the icon `deploy/slack/icons/hf.png`.
   2. `infra/cf/run up -s hf`: the icons Pages project `oa-hf-usage-icons` + the job's Pages token (`job_pages_token`).
   3. `infra/cf/hf-secrets -g`: now also `hf-usage-cf-pages-token`, after the GCP stack has its container: `pulumi up -s hf` in `infra/gcp` (+1 secret, +1 accessor; the cron body gains `SLACK_CHANNEL` + `CF_PAGES_TOKEN`). The secret needs its version before the next scheduled run: Batch refuses to start a job whose secret has none.
   4. The avatars on the icons project's production branch, once: `wrangler pages deploy job/icons-hf --project-name oa-hf-usage-icons --branch main`.
