@@ -39,3 +39,22 @@ Steps 1–4 can go before Slack exists; step 8 must follow 3, 5 and 7, since a l
 - `index_gc_files` (R2 deletion of unpointed generation dirs) stays off until Ryan reviews a run's `index-gc-files` list.
 
 [`done/r2-launch.md`]: done/r2-launch.md
+
+## The switch to the Nextflow pipeline ([`pipelines-everywhere.md`] §3.5)
+
+Profiles in `job/profiles/`: `r2.yml` (primary), `r2-meta.yml` (`store: meta`, a second head), `r2-scratch.yml` (the scratch run: the four buckets into `oa-r2-usage-scratch`, no serving credentials, nothing recorded). The run record is `job/r2-nf-scan-runs.json` (outputs at the data store's layout keys). The image (`scan:nf`) carries Nextflow beside the one-VM entrypoint; `job/r2-scan submit -H job/profiles/<p>.yml -n <name> <image@digest>` submits a head.
+
+What changes against the one-VM job:
+- per-call keys: the source key for `list` only (`options.list.secrets`), the serving key everywhere else, `CF_PAGES_TOKEN` for the digest only;
+- `bucket-check` skipped (r2 scans four approved buckets of a larger account);
+- the digest reads `r2://oa-r2-usage-index/snapshots/r2` (`options.digest.root`), where its thread state and every earlier scan are;
+- new for r2: over-time groups (`over-time`), the run's DAG on /scans;
+- not carried: the age pyramids' `.groups` sidecars (no reader) and the `gs://oa-r2-usage-data/scans/<scan>/<gen>/` archive (the data store's layout is the archive); probe records go to `gs://oa-r2-usage-data/probes/r2/` instead of R2.
+
+Steps, in order (each a go from Ryan):
+1. `infra/gcp` `pulumi up -s r2`: the job account gets `roles/batch.jobsEditor` and acts as itself (a head submits its tasks' jobs as it).
+2. Scratch run; compare its `listing/<scan>/index/<gen>/` and `snapshots/r2/<scan>/` against the same day's one-VM scan.
+3. A prod run of both heads (primary, then meta) beside the cron, then the scheduler body → `dt-cloud scan head /app/job/profiles/r2.yml` (+ meta), the image pinned by digest in both profiles.
+4. `job/r2-scan run` and its helpers are deleted after a clean week.
+
+[`pipelines-everywhere.md`]: pipelines-everywhere.md
