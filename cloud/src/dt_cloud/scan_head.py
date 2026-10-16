@@ -1,7 +1,8 @@
 """`dt-cloud scan head` (specs/pipelines-everywhere.md §2.3): one scan as a Nextflow run of `job/nf/scan.nf`.
 
-It stamps the scan's identity once (`SNAP_ID`, `GEN`, `DT_JOB_START`), starts its scan-run record, derives the
-Nextflow session from the scan (uuid5 of `disky/<deployment>/scan/<scan>`), writes the session's `.nextflow/history`
+It stamps the scan's identity once (`SNAP_ID`, `GEN`, `DT_JOB_START`), starts its scan-run record (in the profile's
+`store`), derives the Nextflow session from the scan (uuid5 of `disky/<deployment>/scan/<scan>`, or
+`disky/<deployment>/<store>/scan/<scan>` for a store other than the primary), writes the session's `.nextflow/history`
 line (Nextflow finds a session only there; its cache is in the work store, `NXF_CLOUDCACHE_PATH`), writes the params
 and the executor config from the profile, runs Nextflow with `-resume <session>`, and finishes the record with
 Nextflow's exit status (the first failed task named) and the labelled cost of its tasks. Re-running the head for a
@@ -26,7 +27,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from urllib.parse import urlparse
 
-from .scan_profile import Disk, Machine, ScanProfile
+from .scan_profile import PRIMARY_STORE, Disk, Machine, ScanProfile
 from .scan_steps import DATA_MOUNT_ENV, PROFILE_JSON_ENV, STEPS
 
 
@@ -46,8 +47,12 @@ def identity(env: Mapping[str, str], now: dt.datetime | None = None) -> tuple[st
             env.get("DT_JOB_START") or str(int(now.timestamp())))
 
 
-def session_id(deployment: str, scan: str) -> str:
-    return str(uuid.uuid5(uuid.NAMESPACE_URL, f"disky/{deployment}/scan/{scan}"))
+def session_id(deployment: str, scan: str, store: str = PRIMARY_STORE) -> str:
+    """The scan's Nextflow session: uuid5 of `disky/<deployment>/scan/<scan>` (the primary store's: unchanged, so a scan
+    started before stores existed resumes), `disky/<deployment>/<store>/scan/<scan>` for another store (its scan of the
+    same id is another run)."""
+    ns = f"disky/{deployment}/scan/{scan}" if store == PRIMARY_STORE else f"disky/{deployment}/{store}/scan/{scan}"
+    return str(uuid.uuid5(uuid.NAMESPACE_URL, ns))
 
 
 def history_line(now: dt.datetime, scan: str, session: str) -> str:
@@ -72,6 +77,16 @@ def _disk(d: Disk | None) -> dict | None:
     return None if d is None else {"request": d.request, "type": d.type}
 
 
+def _bindings(m: Mapping[str, str]) -> list[str]:
+    return [f"{k}={v}" for k, v in m.items()]
+
+
+def step_secrets(profile: ScanProfile) -> dict[str, list[str]]:
+    """Each step whose call fetches other bindings than the profile's `secrets` (`options.<step>.secrets`), its whole
+    `ENV=SECRET` list: scan.nf passes a call `params.step_secrets[<step>]` when set, else `params.secrets`."""
+    return {n: _bindings(profile.secrets_for(n)) for n, o in profile.options.items() if o.get("secrets")}
+
+
 def params(profile: ScanProfile, profile_json: str, scan: str, gen: str, job_start: str, run_id: str, session: str,
            env: Mapping[str, str], *, reproc: bool = False, fresh: bool = False) -> dict:
     """`scan.nf`'s params file."""
@@ -85,7 +100,9 @@ def params(profile: ScanProfile, profile_json: str, scan: str, gen: str, job_sta
     lst = profile.machines.get("list")
     return {
         "scan": scan, "gen": gen, "job_start": job_start, "run_id": run_id, "session": session,
-        "sources": [{"uri": s.uri, "machine": s.machine, "disk": _disk(s.disk)} for s in profile.sources],
+        # a source's `secrets`: its list call's whole binding list (else the list step's), when it has its own
+        "sources": [{"uri": s.uri, "machine": s.machine, "disk": _disk(s.disk),
+                     **({"secrets": _bindings(profile.secrets_for("list", s.uri))} if s.secrets else {})} for s in profile.sources],
         "list_default": {"machine": lst.type if lst else None, "disk": _disk(lst.disk) if lst else None},
         "steps": list(enabled),
         "pre": [n for n in enabled if STEPS[n].stage == "pre" and n != "bucket-check"],
@@ -96,7 +113,8 @@ def params(profile: ScanProfile, profile_json: str, scan: str, gen: str, job_sta
         "over_time_label": "over_time" if "over_time" in profile.machines else "post",
         "fold": list(profile.fold),
         "skip_list": reproc,
-        "secrets": [f"{k}={v}" for k, v in profile.secrets.items()],
+        "secrets": _bindings(profile.secrets),
+        "step_secrets": step_secrets(profile),
         "secrets_project": profile.executor.project or "",
         "env": step_env,
         "profile_json": profile_json,
@@ -257,6 +275,12 @@ def publish_reports(profile: ScanProfile, scan: str, launch: Path) -> list[str]:
     return keys
 
 
+def start_args(profile: ScanProfile, gen: str, scan: str) -> list[str]:
+    """`scan-run start`'s arguments: the head's Batch job (`-B`), the generation, and a store other than the primary
+    (`-K`: the run's `store`, which `finish` and every task's phase keep)."""
+    return ["-B", "-g", gen, *([] if profile.primary else ["-K", profile.store]), scan]
+
+
 def finish_args(rc: int, error: str | None, cost: list[str], dag: Path) -> list[str]:
     """`scan-run finish`'s arguments: the exit status, the error, the cost labels, and the run's DAG (`-D`, stored with
     the run for the site's pipeline view) when Nextflow wrote one."""
@@ -287,7 +311,7 @@ def head(profile_path: Path, nf_dir: Path, launch: Path | None, *, reproc: bool 
             env.setdefault(k, profile.env[k])
     if reproc:
         env.update(REPROC="1", DT_RECORD="off")
-    session = session_id(profile.deployment, scan)
+    session = session_id(profile.deployment, scan, profile.store)
     cloud = profile.executor.kind != "local"
     if launch is None:
         launch = Path(profile.work) if not cloud else Path(env.get("TMPDIR") or "/tmp") / f"nf-{scan}"
@@ -304,14 +328,14 @@ def head(profile_path: Path, nf_dir: Path, launch: Path | None, *, reproc: bool 
     nf_env = {**env, "NXF_ANSI_LOG": "false"}
     if cloud:
         nf_env["NXF_CLOUDCACHE_PATH"] = profile.work.rstrip("/") + "/cache"
-    err(f"scan head: {profile.deployment} scan {scan} gen {gen} session {session} in {launch}")
+    err(f"scan head: {profile.deployment}{'' if profile.primary else f' [{profile.store}]'} scan {scan} gen {gen} session {session} in {launch}")
     err("+ " + " ".join(argv))
     if dry_run:
         return 0
     recording = bool(env.get(PROFILE_ENV))
     cost = ["-l", f"nf-session={session}"] if profile.executor.kind == "google-batch" else []
     if recording:
-        _record(start_cmd, ["-B", "-g", gen, scan])
+        _record(start_cmd, start_args(profile, gen, scan))
 
     proc = subprocess.Popen(argv, cwd=launch, env=nf_env, start_new_session=True)
     stopped: list[int] = []

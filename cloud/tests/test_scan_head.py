@@ -30,6 +30,32 @@ def test_session_id():
     assert H.session_id("other", "2026-10-16T1200") == "8b68f678-566c-5e77-9089-7305bed64c57"
 
 
+def test_session_id_per_store():
+    """A store other than the primary namespaces its sessions (`disky/<deployment>/<store>/scan/<scan>`): the same scan id
+    of the deployment's meta store is another run. The primary's is unchanged, so its sessions still resume."""
+    import uuid
+
+    assert H.session_id("cw-s3", "2026-10-16T1200", "primary") == "06a5f601-f0b7-58a3-9817-fc0a8fee5e63"
+    assert H.session_id("cw-s3", "2026-10-16T1200", "meta") == str(uuid.uuid5(uuid.NAMESPACE_URL, "disky/cw-s3/meta/scan/2026-10-16T1200"))
+    assert H.session_id("cw-s3", "2026-10-16T1200", "meta") == "43a92eb7-2c67-54bb-9a9a-4c56a2b389b0"
+
+
+def test_start_args_carry_the_store():
+    assert (H.start_args(load(FIX / "cw-s3.yml"), "G", "2026-10-16T1200"), H.start_args(load(FIX / "meta-store.yml"), "G", "2026-10-16T1200")) == (
+        ["-B", "-g", "G", "2026-10-16T1200"],
+        ["-B", "-g", "G", "-K", "meta", "2026-10-16T1200"],
+    )
+
+
+def test_params_golden_per_call_secrets():
+    """The meta-store fixture: a source's own bindings (its list call's whole list) and a step's (`step_secrets`), each
+    the profile's overlaid; a step with none of its own reads `secrets`."""
+    p = load(FIX / "meta-store.yml")
+    got = H.params(p, "<profile>", "2026-10-16T1200", "20261016T120001Z", "1792152001", "run-1",
+                   H.session_id("example", "2026-10-16T1200", "meta"), {})
+    assert got == json.loads((FIX / "meta-store.params.json").read_text())
+
+
 def test_history_line():
     assert H.history_line(NOW, "2026-10-16T1200", "S") == "2026-10-16 12:00:01\t-\tscan_2026_10_16T1200\tOK\t-\tS\tnextflow run scan.nf\n"
 

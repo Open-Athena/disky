@@ -17,7 +17,7 @@ params.scan = null
 params.gen = null
 params.job_start = null
 params.run_id = ''
-params.sources = []        // [[uri:, machine:, disk: [request:, type:]]]
+params.sources = []        // [[uri:, machine:, disk: [request:, type:], secrets: [ENV=SECRET, …] (only a source's own)]]
 params.list_default = [:]  // the profile's `machines.list`: [machine:, disk:]
 params.steps = []          // every enabled step (core minus `skip`, plus the profile's `steps`)
 params.pre = []            // enabled extra steps beside `list`, before `index` (soft: index runs without them)
@@ -29,6 +29,7 @@ params.post = []           // the post task's steps, in order
 params.fold = []
 params.skip_list = false   // REPROC: run from `index`
 params.secrets = []        // `ENV=SECRET`, fetched in-task (never Nextflow's `secret`: it lands in .command.run)
+params.step_secrets = [:]  // step → its whole `ENV=SECRET` list, where `options.<step>.secrets` overlays the profile's
 params.secrets_project = ''
 params.env = [:]
 params.profile_json = ''
@@ -48,12 +49,20 @@ def stepEnv(task) {
     e.collect { k, v -> "export ${k}=${q(v)}" }.join('\n')
 }
 
+// A call's `ENV=SECRET` bindings: a list call's source's own (`sources[].secrets`, already overlaid), else the step's
+// (`params.step_secrets`: `options.<step>.secrets` over the profile's), else the profile's. Each call is its own
+// `secrets exec`, so a folded step never sees its neighbour's.
+def secretsFor(String n, String a) {
+    def src = (n == 'list' && a) ? params.sources.find { it.uri == a } : null
+    src?.secrets != null ? src.secrets : (params.step_secrets[n] != null ? params.step_secrets[n] : params.secrets)
+}
+
 // The task's script: each [name, arg] step through `secrets exec`, then the `done` marker.
 def stepScript(task, List steps) {
-    def sec = params.secrets.collect { "-s ${q(it)} " }.join('')
     def proj = params.secrets_project ? "-p ${q(params.secrets_project)} " : ''
     def calls = steps.collect { s ->
         def (n, a) = s instanceof List ? s : [s, '']
+        def sec = secretsFor(n, a).collect { "-s ${q(it)} " }.join('')
         "dt-cloud secrets exec ${proj}${sec}-- dt-cloud scan step ${n}${a ? ' ' + q(a) : ''}"
     }
     def done = "echo ${q(steps.collect { it instanceof List ? it.join(' ') : it }.join(', '))} > done"
