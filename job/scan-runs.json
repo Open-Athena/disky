@@ -6,7 +6,7 @@
   "run_id_env": ["DT_RUN_ID", "BATCH_JOB_UID"],
   "overlapped": ["static-names"],
   "jobs": [
-    {"kind": "scan", "where": {"commands": "^job/cw-run\\.sh"},
+    {"kind": "scan", "where": {"commands": "^job/(cw-run|nf/cw-head)\\.sh"},
      "scan": [{"env": "SNAP_ID"}, {"log": "^CW-SCAN-JOB-DONE (\\S+)"}, {"started": "%Y-%m-%dT%H%M"}]}
   ],
   "error_marker": ["^\\+\\+ scan_err (?P<rc>\\d+) (?P<line>\\d+) (?P<cmd>.*)", "^\\+\\+ on_err (?P<rc>\\d+) (?P<line>\\d+) (?P<cmd>.*)"],
