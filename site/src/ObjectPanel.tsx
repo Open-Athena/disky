@@ -174,6 +174,7 @@ export default function ObjectPanel({ segs, node, onClose }: {
   const uri = store.scheme + segs.join('/')
   const shown = pathText(store.scheme, segs)
   const dl = ft?.getUrl?.(key)
+  const ext = store.externalLink?.(segs, false)
   // Opening scrolls the panel into view; Escape closes it.
   useEffect(() => { ref.current?.scrollIntoView({ behavior: 'smooth', block: 'nearest' }) }, [uri])
   useEffect(() => {
@@ -189,6 +190,7 @@ export default function ObjectPanel({ segs, node, onClose }: {
           {node && <>{fmtBytes(node.b)}</>}
           {node?.d != null && <> · {listingTime(store.scheme).label} {epochDaysToDate(node.d)}</>}
         </span>
+        {ext && <a className="obj-ext" href={ext.href} target="_blank" rel="noreferrer">{ext.label} ↗</a>}
         {dl && <a className="obj-dl" href={dl} download={segs[segs.length - 1]} target="_blank" rel="noreferrer">download</a>}
         <button type="button" className="obj-close" aria-label="Close the object (Esc)" title="Close (Esc)" onClick={onClose}>×</button>
       </header>
