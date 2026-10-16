@@ -436,10 +436,16 @@ export function sizeOf(at: ScanStats, prefixes: readonly string[], ownerName: (i
 /** A staged item, as the parent counts it. */
 export interface QueuedItem { prefix: string; added_by: string; batch_id: number | null }
 
-/** What the parent title counts: the `live` items (no real run deleted them)
- *  less those `empty` at the latest scan — their prefixes, batches, stagers. */
-export function queuedOf(live: readonly QueuedItem[], empty: ReadonlySet<string> = new Set()): NonNullable<ParentView['queued']> {
-  const held = live.filter(i => !empty.has(i.prefix))
+/** The staged items every count shows (the Slack parent's title, size line
+ *  and the plan's card): those no real run `deleted`, less those empty at the
+ *  scan (`stats`; null = unsized, so none is known empty). */
+export function countedItems<T extends { prefix: string }>(items: readonly T[], deleted: ReadonlySet<string>, stats: Record<string, PrefixStat> | null): T[] {
+  return items.filter(i => !deleted.has(i.prefix) && !(stats && emptyAt(stats[i.prefix])))
+}
+
+/** What the parent title counts of the `held` items (`countedItems`): their
+ *  prefixes, batches, stagers. */
+export function queuedOf(held: readonly QueuedItem[]): NonNullable<ParentView['queued']> {
   return {
     items: held.length,
     batches: new Set(held.map(i => i.batch_id).filter(b => b != null)).size,
@@ -473,7 +479,7 @@ async function loadView(db: D1Database, planId: number, siteUrl: string, actions
 }
 
 /** Items a real run of the plan deleted since they were staged (not undone). */
-async function deletedItems(db: D1Database, planId: number): Promise<Set<string>> {
+export async function deletedItems(db: D1Database, planId: number): Promise<Set<string>> {
   const { results } = await db.prepare(`
     SELECT DISTINCT i.prefix FROM plan_items i JOIN deletion_bands b ON b.prefix = i.prefix
     JOIN deletion_runs r ON r.run_id = b.run_id
@@ -634,8 +640,7 @@ export async function notifyPlan(env: NotifyEnv, db: D1Database, planId: number,
     const names: Names = Object.fromEntries(Object.entries(people).flatMap(([e, p]) => p.name ? [[e, p.name]] : []))
     const size = at ? sizeOf(at, queued, u => reg[u]?.name ?? u) : undefined
     // Sized, prefixes empty at the scan leave the title's counts (the size line names them apart).
-    const empty = at ? new Set(queued.filter(p => emptyAt(at.stats[p]))) : undefined
-    const parent = renderParent({ ...v, queued: queuedOf(v.live, empty), names, size, image: await stagedCardUrl(env, db, siteUrl, v.digest) ?? undefined })
+    const parent = renderParent({ ...v, queued: queuedOf(countedItems(v.live, v.deleted, at?.stats ?? null)), names, size, image: await stagedCardUrl(env, db, siteUrl, v.digest) ?? undefined })
     const event: Event | undefined = runEv
       ? { text: runEvent(runEv.run, runEv.phase, { via: runEv.via, names, siteUrl }), ...(by ? { sender: personSender(by, people[by.toLowerCase()], 'dispatched') } : {}) }
       : stage ? undefined : (ev as Event | undefined)

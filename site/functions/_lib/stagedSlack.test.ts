@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { closedParent, PLAN_SENDER, queueWasEmpty, queuedOf, fmtBytes, personSender, renderParent, runEvent, runUrl, shortPath, sizeOf, stageReply, stagedCardUrl, topFolders, type RunRow } from './stagedSlack.js'
+import { closedParent, countedItems, PLAN_SENDER, queueWasEmpty, queuedOf, fmtBytes, personSender, renderParent, runEvent, runUrl, shortPath, sizeOf, stageReply, stagedCardUrl, topFolders, type RunRow } from './stagedSlack.js'
 import { sqliteD1 } from './testD1.js'
 
 const run = (o: Partial<RunRow>): RunRow => ({
@@ -83,16 +83,18 @@ describe('names and sizes (plain text, never a mention)', () => {
     const at = { scan: 'S', stats: { 'gs://b/a/': { b: 5, o: 2, us: [['u1', 3], ['u2', 2]] as [string, number][] }, 'gs://b/c/': { b: 4, o: 1, us: [['u2', 4]] as [string, number][] }, 'gs://b/z/': { b: 0, o: 0 }, 'gs://b/zb/': { b: 0, o: 3 } } }
     expect(sizeOf(at, ['gs://b/a/', 'gs://b/c/', 'gs://b/z/', 'gs://b/zb/', 'gs://b/gone/'], u => u.toUpperCase(), 1)).toEqual({ scan: 'S', b: 9, o: 6, empty: 2, owners: [{ label: 'U2', b: 6 }] })
   })
-  it('queuedOf: the title counts prefixes, batches and stagers over what is not empty at the scan', () => {
+  it('queuedOf: the title counts prefixes, batches and stagers over what is neither deleted nor empty at the scan (`countedItems`)', () => {
     const live = [
       { prefix: 'gs://b/a/', added_by: 'ann', batch_id: 1 },
       { prefix: 'gs://b/e1/', added_by: 'ann', batch_id: 1 },
       { prefix: 'gs://b/e2/', added_by: 'bo', batch_id: 2 },
       { prefix: 'gs://b/legacy/', added_by: 'cy', batch_id: null },
     ]
-    expect([queuedOf(live), queuedOf(live, new Set(['gs://b/e1/', 'gs://b/e2/']))]).toEqual([
+    const stats = { 'gs://b/a/': { b: 1, o: 1 }, 'gs://b/legacy/': { b: 1, o: 1 } }
+    expect([queuedOf(countedItems(live, new Set(), null)), queuedOf(countedItems(live, new Set(), stats)), queuedOf(countedItems(live, new Set(['gs://b/legacy/']), stats))]).toEqual([
       { items: 4, batches: 2, stagers: ['ann', 'bo', 'cy'] },
       { items: 2, batches: 1, stagers: ['ann', 'cy'] },
+      { items: 1, batches: 1, stagers: ['ann'] },
     ])
   })
 })
