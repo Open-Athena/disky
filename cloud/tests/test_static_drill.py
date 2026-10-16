@@ -506,7 +506,7 @@ def test_prefetch_writes_the_same_bytes(world, run_rg, tmp_path, i):
 
 def test_a_run_holds_no_bulk_read_groups(world, run_rg, tmp_path, monkeypatch):
     """The newly heavy directories' prior roots (a bulk read: each group read once) leave no decoded group nor prefetched
-    group bytes behind, and each kind's reads of the prior tiers are released when it is done, so what the reads hold
+    group bytes behind (and the step starts with the earlier loops' decoded groups dropped), and each kind's reads of the prior tiers are released when it is done, so what the reads hold
     doesn't grow with those roots nor carry into the next kind (m3's 2026-10-15T2210 add: 19.2M prior roots, OOM at 8 GiB)."""
     seen, released = [], []
     newly_heavy, build_day = sd.newly_heavy_rollups, sd.build_day
@@ -532,7 +532,9 @@ def test_a_run_holds_no_bulk_read_groups(world, run_rg, tmp_path, monkeypatch):
     monkeypatch.setattr(sd, "build_day", bd)
     for i, rebuild in enumerate(world["rebuilds"]):
         rebuild(tmp_path / f"run{i}")
-    assert [after for _, _, before, after in seen] == [before for _, _, before, _ in seen]
+    # the decoded groups are dropped before the step and none are kept by it; it takes prefetched bytes only out of the cache
+    assert [(before[0], after[0]) for _, _, before, after in seen] == [(0, 0)] * len(seen)
+    assert [after[1] <= before[1] for _, _, before, after in seen] == [True] * len(seen)
     assert any(n and read for n, read, _, _ in seen)  # some newly heavy directory read prior roots, decoding groups
     assert released == [[[] for _ in r] for r in released]
     assert len(released) == len(world["rebuilds"])

@@ -33,6 +33,7 @@ import TokenModal from './TokenModal'
 import { UserCard, ghHandle, shortName } from './UserChip'
 import { useUnits } from './units'
 import { Tooltip } from './Tooltip'
+import { useScrollSpyPref } from './prefs'
 
 /** The deployment's mark (`MARK`, `scripts/marks/`): the favicon, and the header's logo beside the title — a store's own
  *  `mark` instead while its routes are open, as the tab icon does (`marks.ts`). */
@@ -232,6 +233,7 @@ function NavMenu({ extra }: { extra?: MenuEntry[] }) {
                 <button type="button" role="menuitem" className="mi" onClick={() => { m.setOpen(false); openDialog('share') }}>Share…</button>
               )}
               <button type="button" role="menuitem" className="mi" onClick={() => { m.setOpen(false); openDialog('about') }}>About — the data, axes &amp; colors</button>
+              <ScrollSpyItem />
               {extra?.map(e => (
                 <button key={e.key} type="button" role="menuitem" className="mi" onClick={() => { m.setOpen(false); e.onClick() }}>{e.label}</button>
               ))}
@@ -245,6 +247,18 @@ function NavMenu({ extra }: { extra?: MenuEntry[] }) {
         </FloatingPortal>
       )}
     </>
+  )
+}
+
+/** The scroll-spy toggle (`prefs`): whether the URL's `#section` follows the reader's scrolling. */
+function ScrollSpyItem() {
+  const [spy, setSpy] = useScrollSpyPref()
+  return (
+    <Tooltip content="On: as you scroll the map page, the URL's #section names the section in view, so a copied link opens there. Off: the URL keeps the section you last linked or clicked. Remembered in this browser.">
+      <button type="button" role="menuitemcheckbox" aria-checked={spy === 'on'} className="mi" onClick={() => setSpy(spy === 'on' ? 'off' : 'on')}>
+        {spy === 'on' ? '☑' : '☐'} Section in URL while scrolling
+      </button>
+    </Tooltip>
   )
 }
 
