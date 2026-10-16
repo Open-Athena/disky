@@ -38,8 +38,10 @@ PROD_HOST = "cw-s3.oa.dev"      # `g d` toggles with DEV_HOST (src/hosts.ts)
 DEV_HOST = "dev.cw-s3.oa.dev"
 AUTH_MODE = "app"                # own sign-in: Google OIDC + emailed codes (specs/done/oidc-cutover-cw.md P4, 2026-09-28)
 OG_CARDS = "1"
-OG_ANONYMOUS = "generic"         # No protected sizes, counts, paths or people in ordinary unfurls.
-OG_DEFAULT_COLOR = "t"           # Match CW's frontend default; detailed cards require an explicit share.
+OG_ANONYMOUS = "full"            # Link previews show the full card (labelled tiles, sizes, owners): the site stays behind
+                                 # sign-in, its unfurls don't (Ryan 2026-10-16: OA's storage is gifted, the project's
+                                 # transparency is a feature; gcs keeps "generic")
+OG_DEFAULT_COLOR = "t"           # Match CW's frontend default
 # The plan prefix shape (`_lib/plans.ts` prefixShape): CoreWeave's S3-compatible
 # buckets; explicit here so the deployment declares it rather than inheriting a default.
 STORE_SCHEME = "s3://"
@@ -180,7 +182,7 @@ STORE = "cw"
 MARK = "cw"
 AUTH_MODE = "app"                     # own sign-in (specs/done/oidc-cutover-cw.md P3); production flips at P4
 OG_CARDS = "1"
-OG_ANONYMOUS = "generic"
+OG_ANONYMOUS = "full"
 OG_DEFAULT_COLOR = "t"
 STORE_SCHEME = "s3://"
 STORE_BUCKETS = "marin-us-east-02a,hero-checkpoints,marin-us-east-06a,rhoarnet-us-east-08a,marin-us-west-04a"
