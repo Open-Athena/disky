@@ -37,6 +37,9 @@ export interface ScanRunPhase {
   finished_ts: number | null
   status: 'running' | 'done' | 'failed'
   note: string | null
+  /** The Batch job the phase ran in when not the run's own (a Nextflow step's task), and its machine */
+  job_name?: string | null
+  machine?: string | null
 }
 
 export interface ScanRunOutput {
@@ -119,7 +122,7 @@ export function withDeltas(run: ScanRun, outputs: readonly ScanRunOutput[], inde
 }
 
 /** A phase on the run's clock: seconds from the run's start. */
-export interface PhaseSpan { phase: string; start: number; end: number; status: ScanRunPhase['status']; note: string | null; lane: number }
+export interface PhaseSpan { phase: string; start: number; end: number; status: ScanRunPhase['status']; note: string | null; lane: number; machine?: string | null }
 
 export function phaseStatus(p: Pick<ScanRunPhase, 'status' | 'note'>): ScanRunPhase['status'] {
   return /(?:^|,\s*)failed\b/i.test(p.note ?? '') ? 'failed' : p.status
@@ -160,6 +163,25 @@ export function phaseIssues(run: ScanRun, runs: readonly ScanRun[], phases: read
 /** A run's phases as spans, in order, each on a lane: a phase overlapping the
  * one before it (an overlapped phase, `access-ingest` beside the listing)
  * takes the next free lane. */
+/** A run's step tasks (its phases' own Batch jobs, a Nextflow run's): one per job, in start order. */
+export interface RunTask { job_name: string; machine: string | null; phases: string[]; start: number | null; end: number | null; status: ScanRunPhase['status'] }
+
+export function runTasks(phases: readonly ScanRunPhase[]): RunTask[] {
+  const by = new Map<string, RunTask>()
+  for (const p of [...phases].sort((a, b) => (a.started_ts ?? Infinity) - (b.started_ts ?? Infinity) || a.seq - b.seq)) {
+    if (!p.job_name) continue
+    const t = by.get(p.job_name) ?? { job_name: p.job_name, machine: null, phases: [], start: null, end: null, status: 'done' as const }
+    t.machine ??= p.machine ?? null
+    t.phases.push(p.phase)
+    if (p.started_ts != null) t.start = t.start == null ? p.started_ts : Math.min(t.start, p.started_ts)
+    if (p.finished_ts != null) t.end = t.end == null ? p.finished_ts : Math.max(t.end, p.finished_ts)
+    const st = phaseStatus(p)
+    if (st === 'failed' || (st === 'running' && t.status === 'done')) t.status = st
+    by.set(p.job_name, t)
+  }
+  return [...by.values()]
+}
+
 export function phaseSpans(run: Pick<ScanRun, 'started_ts'> & Partial<Pick<ScanRun, 'status'>>, phases: readonly ScanRunPhase[], now?: number): PhaseSpan[] {
   const t0 = run.started_ts
   if (t0 == null) return []
@@ -170,7 +192,7 @@ export function phaseSpans(run: Pick<ScanRun, 'started_ts'> & Partial<Pick<ScanR
     const start = Math.max(0, p.started_ts - t0), end = Math.max(start, until - t0)
     let lane = laneEnds.findIndex(e => e <= start)
     if (lane < 0) { lane = laneEnds.length; laneEnds.push(end) } else laneEnds[lane] = end
-    return [{ phase: p.phase, start, end, status: phaseStatus(p), note: p.note, lane }]
+    return [{ phase: p.phase, start, end, status: phaseStatus(p), note: p.note, lane, machine: p.machine }]
   })
 }
 
