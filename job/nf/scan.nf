@@ -35,14 +35,16 @@ def on(String s) { s in params.steps }
 
 def folded(String s) { on(s) && s in params.fold }
 
-def stepEnv() {
+def stepEnv(task) {
+    // NF_PROCESS / NF_TAG: the task's process and tag, so a step's scan-run phases name the DAG node that ran them
     def e = [SNAP_ID: params.scan, SCAN_ID: params.scan, GEN: params.gen, DT_JOB_START: params.job_start,
-             DT_RUN_ID: params.run_id, DT_SCAN_PROFILE_JSON: params.profile_json] + params.env
+             DT_RUN_ID: params.run_id, DT_SCAN_PROFILE_JSON: params.profile_json,
+             NF_PROCESS: task.process, NF_TAG: task.tag ?: ''] + params.env
     e.collect { k, v -> "export ${k}=${q(v)}" }.join('\n')
 }
 
 // The task's script: each [name, arg] step through `secrets exec`, then the `done` marker.
-def stepScript(List steps) {
+def stepScript(task, List steps) {
     def sec = params.secrets.collect { "-s ${q(it)} " }.join('')
     def proj = params.secrets_project ? "-p ${q(params.secrets_project)} " : ''
     def calls = steps.collect { s ->
@@ -50,7 +52,7 @@ def stepScript(List steps) {
         "dt-cloud secrets exec ${proj}${sec}-- dt-cloud scan step ${n}${a ? ' ' + q(a) : ''}"
     }
     def done = "echo ${q(steps.collect { it instanceof List ? it.join(' ') : it }.join(', '))} > done"
-    ([stepEnv()] + calls + [done]).join('\n') + '\n'
+    ([stepEnv(task)] + calls + [done]).join('\n') + '\n'
 }
 
 // Every item of `ch` as one sorted list of strings (`[]` for none): a task's input must not depend on the order its
@@ -66,13 +68,13 @@ def diskOf(d) {
 process bucket_check {
     label 'small'
     output: path 'done'
-    script: stepScript(['bucket-check'])
+    script: stepScript(task, ['bucket-check'])
 }
 
 process pre {
     label 'small'
     output: path 'done'
-    script: stepScript(params.pre)
+    script: stepScript(task, params.pre)
 }
 
 process list_source {
@@ -84,14 +86,14 @@ process list_source {
     output: path 'done'
     script:
     def first = params.sources && src.uri == params.sources[0].uri
-    stepScript((first && folded('bucket-check') ? ['bucket-check'] : []) + [['list', src.uri]])
+    stepScript(task, (first && folded('bucket-check') ? ['bucket-check'] : []) + [['list', src.uri]])
 }
 
 process index {
     label 'big'
     input: val deps
     output: path 'done'
-    script: stepScript(['index'])
+    script: stepScript(task, ['index'])
 }
 
 process static_names {
@@ -99,42 +101,42 @@ process static_names {
     time '6h'
     input: val indexed
     output: path 'done'
-    script: stepScript(['static-names'])
+    script: stepScript(task, ['static-names'])
 }
 
 process publish_r2 {
     label 'medium'
     input: val indexed
     output: path 'done'
-    script: stepScript(['publish-r2'])
+    script: stepScript(task, ['publish-r2'])
 }
 
 process interval_store {
     label 'big'
     input: val published
     output: path 'done'
-    script: stepScript(['interval-store'])
+    script: stepScript(task, ['interval-store'])
 }
 
 process index_rows {
     label 'small'
     input: val indexed
     output: path 'done'
-    script: stepScript(['index-rows'])
+    script: stepScript(task, ['index-rows'])
 }
 
 process index_sync {
     label 'small'
     input: val deps
     output: path 'done'
-    script: stepScript(['index-sync'])
+    script: stepScript(task, ['index-sync'])
 }
 
 process post {
     label 'post'
     input: val deps
     output: path 'done'
-    script: stepScript((folded('index-sync') ? ['index-sync'] : []) + params.post)
+    script: stepScript(task, (folded('index-sync') ? ['index-sync'] : []) + params.post)
 }
 
 workflow {
