@@ -2,5 +2,5 @@ config:
   gcp:project: oa-internal-450019
   gcp:region: us-west1
   r2:dailyEnabled: true
-  r2:scanImage: us-west1-docker.pkg.dev/oa-internal-450019/oa-r2-usage/scan@sha256:054009ecafd799161aec7d57f24ccb6a228b55af01806b0b5627a11a828bb50d
+  r2:scanImage: us-west1-docker.pkg.dev/oa-internal-450019/oa-r2-usage/scan@sha256:8055b6fa32a31748289a4c2b12072bf6be0597fa1607053e3213959b5d130fd5
 encryptionsalt: v1:4n8ZoN24W1M=:v1:ySInqEEkOMCnjmrx:lRyqE4LFIZIvLahnFniXqHbfJiUGWw==
