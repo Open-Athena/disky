@@ -27,7 +27,7 @@ Every problem is reported at once (`ProfileError`, one line each).
         endpoint: https://…       #   bulk-list `-E` (s3 / r2)
         region: <region>          #   reserved: nf-google 1.29.1 has no per-task location (refused unless = executor's)
         args: [-L, …]             #   extra lister args
-    machines: {<label>: <type> | {type, disk, cpus, memory, time}}   # labels: small medium big list post pre (+ any)
+    machines: {<label>: <type> | {type, disk, cpus, memory, time}}   # labels: small medium big list post pre interval over_time (+ any)
     steps: [<extra step>, …]      # deployment-only steps on top of the core (`scan_steps.STEPS`, `core=False`)
     skip: [<core step>, …]        # core steps this deployment leaves out (each listed in `SKIPPABLE`)
     fold: [bucket-check, index-sync]   # tiny steps run inside a neighbour's task (default: both; [] = own tasks)
@@ -67,6 +67,8 @@ _MACHINE = {"type", "disk", "cpus", "memory", "time"}
 _DISK = {"request", "type"}
 _DISK_TYPES = ("local-ssd", "pd-balanced", "pd-ssd", "pd-standard")
 _NAME = re.compile(r"[a-z0-9][a-z0-9-]*")
+#: A machine label: written bare into the executor config (`withLabel: <label> { … }`), so a Groovy identifier.
+_LABEL = re.compile(r"[a-z][a-z0-9_]*")
 _ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 
 
@@ -344,8 +346,8 @@ def parse(d: object, where: str = "profile") -> ScanProfile:
         ms = {}
     for label, m in ms.items():
         p = f"machines.{label}"
-        if not _NAME.fullmatch(str(label)):
-            problems.append(f"{p}: a label of lowercase letters, digits and '-'")
+        if not _LABEL.fullmatch(str(label)):
+            problems.append(f"{p}: a label of lowercase letters, digits and '_' (it is written bare into the Nextflow config)")
         if isinstance(m, str):
             machines[str(label)] = Machine(type=m)
             continue

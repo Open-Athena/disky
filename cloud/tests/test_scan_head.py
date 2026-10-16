@@ -5,6 +5,7 @@ from __future__ import annotations
 import datetime as dt
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 from click.testing import CliRunner
 
@@ -52,12 +53,15 @@ def test_params_reproc_fresh_and_extras():
                "steps": ["access-ingest", "healthcheck"], "skip": ["digest", "static-names"],
                "options": {"list": {"import": True}}})
     got = H.params(p, "{}", "2026-10-16", "G", "1", "", "S", {}, reproc=True, fresh=True)
-    assert {k: got[k] for k in ("steps", "pre", "pre_label", "post", "skip_list", "cache", "env", "work_bucket", "secrets_project")} == {
+    assert {k: got[k] for k in ("steps", "pre", "pre_label", "post", "over_time", "over_time_label", "skip_list", "cache", "env",
+                                "work_bucket", "secrets_project")} == {
         "steps": ["bucket-check", "access-ingest", "list", "index", "publish-r2", "interval-store", "index-rows", "index-sync",
                   "over-time", "index-gc", "healthcheck", "warm-cache", "probe"],
         "pre": ["access-ingest"],
         "pre_label": "small",
-        "post": ["over-time", "index-gc", "healthcheck", "warm-cache", "probe"],
+        "post": ["index-gc", "healthcheck", "warm-cache", "probe"],
+        "over_time": True,
+        "over_time_label": "post",
         "skip_list": True,
         "cache": False,
         "env": {"REPROC": "1"},
@@ -112,5 +116,27 @@ def test_dry_run_writes_the_launch_files(tmp_path, monkeypatch):
     assert line[1:] == ["-", "scan_2026_10_16T1200", "OK", "-", session, "nextflow run scan.nf\n"]
     assert r.stderr.rstrip().split("\n")[-1] == (
         f"+ nextflow run {tmp_path}/nf/scan.nf -c {tmp_path}/nf/base.config -c {launch}/executor.config "
-        f"-params-file {launch}/params.json -resume {session} -with-trace {launch}/trace.tsv"
+        f"-params-file {launch}/params.json -resume {session} -with-trace {launch}/trace.tsv "
+        f"-with-dag {launch}/dag.mmd -with-timeline {launch}/timeline.html -with-report {launch}/report.html"
     )
+
+
+def test_publish_reports(tmp_path):
+    """The reports that exist go to `<work>/runs/<scan>/`; a missing one is skipped."""
+    launch, work = tmp_path / "launch", tmp_path / "work"
+    launch.mkdir()
+    (launch / "dag.mmd").write_text("flowchart TB\n")
+    (launch / "trace.tsv").write_text("task_id\n")
+    profile = SimpleNamespace(work=str(work))
+    assert H.publish_reports(profile, "2026-10-16T1200", launch) == ["runs/2026-10-16T1200/dag.mmd", "runs/2026-10-16T1200/trace.tsv"]
+    assert sorted(p.relative_to(work).as_posix() for p in work.rglob("*") if p.is_file()) == [
+        "runs/2026-10-16T1200/dag.mmd", "runs/2026-10-16T1200/trace.tsv"]
+    assert (work / "runs/2026-10-16T1200/dag.mmd").read_text() == "flowchart TB\n"
+
+
+def test_finish_args(tmp_path):
+    """The DAG goes to `finish -D` only when Nextflow wrote it."""
+    dag = tmp_path / "dag.mmd"
+    assert H.finish_args(1, "nextflow exit 1", ["-l", "nf-session=s"], dag) == ["-x", "1", "-e", "nextflow exit 1", "-l", "nf-session=s"]
+    dag.write_text("flowchart TB\n")
+    assert H.finish_args(0, None, [], dag) == ["-x", "0", "-D", str(dag)]

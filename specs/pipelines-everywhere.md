@@ -87,7 +87,7 @@ options:
 It replaces each script's top-of-file constants, `NF_SECRETS` / `NF_PASS`, the cron's env, `STATIC_NAMES=1` (on by default, `skip` to drop), `INTERVAL_STORE_APPEND` (`skip`), and `LISTING_PROCS` / `LISTING_WORKERS` / `IMPORT_JOBS` / `DUCKDB_MEM` (per-source `procs` / `threads`, `{nproc}`, step options).
 
 - **Disks.** `disk: N` only resizes the pd-balanced boot disk. `{request: 375·k, type: local-ssd}` gives k NVMe local SSDs in RAID0, ext4, mounted at `/tmp` inside the container, the task's cwd on it too. **Probe passed** (gcs, 2026-10-16: Nextflow 26.10.2 + nf-google 1.29.1, n2-highmem-32, `request: 1500.GB` → 4×375G, 1.5T, 1.6 GB/s direct writes). The request is validated as a multiple of 375; the counts a machine allows (n2-highmem-32: 0/4/8/16/24) are GCE's to refuse at submit. Steps stage under `${TMPDIR:-/tmp}` (`TMPDIR` is unset in tasks), so a local SSD is used without config.
-- **Per-source region** is reserved and refused unless it equals the executor's: nf-google 1.29.1 has no per-task location (`google.location` and `google.batch.allowedLocations` are global config, the job's region is the client's). gcs's `marin-eu-west4` from europe-west4 is open (§7).
+- **Per-source region** is reserved and refused unless it equals the executor's: nf-google 1.29.1 has no per-task location (`google.location` and `google.batch.allowedLocations` are global config, the job's region is the client's). Decided (2026-10-16): every source lists from the executor's region. gcs measured `marin-eu-west4` (164M objects) from us-central1 at 1681 s, against 1205–1536 s from europe-west4: 2.5–7.5 min more, off the critical path (marin-us-central2 lists for ~34 min). That isn't worth a second executor, so `region` stays reserved.
 
 ## 4. Executors
 
@@ -116,10 +116,13 @@ It replaces each script's top-of-file constants, `NF_SECRETS` / `NF_PASS`, the c
 
 Each deployment's old script is deleted when its first week on the DAG is clean. Every move carries the baseline in [CLAUDE.md "Deployments: parity by default"] (scan-run records, alerts, warm-cache, probe, digest).
 
+### Run reports (DAG view)
+
+`dt-cloud scan head` runs Nextflow with `-with-dag dag.mmd -with-timeline timeline.html -with-report report.html` (beside `-with-trace trace.tsv`). It uploads whichever exist to `<work>/runs/<scan>/` before `scan-run finish`, even when the run failed or was stopped. An upload error is logged and never fails the run. A deployment records the DAG as a scan-run output by adding `{key: nf-dag, uri: <work>/runs/{scan}/dag.mmd}` to its `scan-runs.json`. The site's /scans view draws it, colouring each node by its phase status (cw builds that part on `cloud`).
+
 ## 7. Open
 
 - m3: awsbatch, or google-batch over its uploads (§4).
-- Per-source region (gcs's europe-west4 bucket): nf-google has no per-task location, so either that source's `list` submits its own Batch job in the region (gcs's old `submit-listing`), lists cross-region from the executor's (egress), or a second head. The profile refuses a differing `region` until one is picked.
 - `options.index.mode: path-index` (gcs's index over every listing at once) is declared and refused as not ported; its `attribution` / `access` keys are accepted only with it.
 - `NXF_CLOUDCACHE_PATH` on R2 (the demo's resume across runners), unprobed with nf-cloudcache 0.6.2.
 - Static-names / interval-store stages as DAG processes (§5): when, and whether `append_runner`'s lease survives.

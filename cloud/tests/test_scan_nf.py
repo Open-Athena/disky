@@ -47,6 +47,12 @@ def head(tmp_path: Path, marks: Path, *args: str, extra: str = "", **env) -> sub
                           capture_output=True, text=True, env=e, timeout=600)
 
 
+def _nf_node(script: Path) -> tuple[str, str]:
+    """A task script's `(NF_PROCESS, NF_TAG)` exports."""
+    ex = dict(line[len("export "):].split("=", 1) for line in script.read_text().splitlines() if line.startswith("export NF_"))
+    return ex["NF_PROCESS"].strip("'"), ex["NF_TAG"].strip("'")
+
+
 def test_dag_order_and_resume(tmp_path):
     marks = tmp_path / "marks"
     r1 = head(tmp_path, marks, DT_SCAN_STEP_FAIL="probe")
@@ -61,14 +67,25 @@ def test_dag_order_and_resume(tmp_path):
     assert at["index"] < min(at["static-names"], at["publish-r2"], at["index-rows"])
     assert at["publish-r2"] < at["interval-store"]
     assert max(at["static-names"], at["interval-store"], at["index-rows"]) < at["index-sync"]
-    assert ran[at["index-sync"]:] == ["index-sync", "over-time", "index-gc", "warm-cache"]
+    # post runs its steps in order; over-time is its own task beside it, once the stores are written
+    assert [x for x in ran[at["index-sync"]:] if x != "over-time"] == ["index-sync", "index-gc", "warm-cache"]
+    assert max(at["static-names"], at["interval-store"], at["index-rows"]) < at["over-time"]
 
     marks.unlink()
     r2 = head(tmp_path, marks)
     assert r2.returncode == 0, r2.stderr
-    # the resume ran only the post task (its steps skip their own done work)
-    assert marks.read_text().splitlines() == ["index-sync", "over-time", "index-gc", "warm-cache", "probe", "digest"]
+    # the resume ran only the post task (its steps skip their own done work); over-time's task was cached
+    assert marks.read_text().splitlines() == ["index-sync", "index-gc", "warm-cache", "probe", "digest"]
     assert r2.stdout.splitlines()[-1] == f"SCAN-JOB-DONE 2026-10-16T1200 -> {tmp_path}/data/snapshots/2026-10-16T1200"
+    # each task exports its DAG node (`NF_PROCESS`, `NF_TAG`), which the steps' scan-run phases record (index-sync and
+    # bucket-check are folded into post and the first list task by default)
+    nodes = sorted({_nf_node(p) for p in (tmp_path / "nf/work").rglob(".command.sh")})
+    assert nodes == [("index", ""), ("index_rows", ""), ("interval_store", ""), ("list_source", "s3://a"),
+                     ("list_source", "s3://b"), ("list_source", "s3://c"), ("over_time", ""), ("post", ""), ("publish_r2", ""), ("static_names", "")]
+    # the run's reports beside it in the work store (`scan head` → `<work>/runs/<scan>/`), the DAG as Mermaid
+    runs = tmp_path / "nf/runs/2026-10-16T1200"
+    assert sorted(p.name for p in runs.iterdir()) == ["dag.mmd", "report.html", "timeline.html", "trace.tsv"]
+    assert (runs / "dag.mmd").read_text().splitlines()[0] == "flowchart TB"
 
 
 def test_reproc_unfolded(tmp_path):
@@ -81,4 +98,5 @@ def test_reproc_unfolded(tmp_path):
     at = {s: ran.index(s) for s in ran}
     assert ran[0] == "index"
     assert max(at["static-names"], at["interval-store"], at["index-rows"]) < at["index-sync"]
-    assert ran[at["index-sync"]:] == ["index-sync", "over-time", "index-gc", "warm-cache", "probe", "digest"]
+    assert [x for x in ran[at["index-sync"]:] if x != "over-time"] == ["index-sync", "index-gc", "warm-cache", "probe", "digest"]
+    assert at["index-sync"] < at["over-time"]

@@ -90,7 +90,10 @@ def params(profile: ScanProfile, profile_json: str, scan: str, gen: str, job_sta
         "steps": list(enabled),
         "pre": [n for n in enabled if STEPS[n].stage == "pre" and n != "bucket-check"],
         "pre_label": "pre" if "pre" in profile.machines else "small",
-        "post": [n for n in enabled if STEPS[n].stage == "post"],
+        "interval_label": "interval" if "interval" in profile.machines else "big",
+        "post": [n for n in enabled if STEPS[n].stage == "post" and n != "over-time"],
+        "over_time": "over-time" in enabled,
+        "over_time_label": "over_time" if "over_time" in profile.machines else "post",
         "fold": list(profile.fold),
         "skip_list": reproc,
         "secrets": [f"{k}={v}" for k, v in profile.secrets.items()],
@@ -180,6 +183,44 @@ def _record(cmd, args: list[str]) -> None:
         pass
 
 
+#: Nextflow's run reports, written in the launch dir and uploaded beside the run (`runs_prefix`): the DAG (Mermaid; the
+#: site draws it with each node's phase status), the timeline, the resource report and the trace.
+REPORTS = ("dag.mmd", "timeline.html", "report.html", "trace.tsv")
+
+
+def runs_prefix(scan: str) -> str:
+    """Where a scan's run reports go, under the profile's work store: `<work>/runs/<scan>/` (e.g. a deployment's
+    `scan-runs.json` output `nf-dag` = `<work>/runs/{scan}/dag.mmd`)."""
+    return f"runs/{scan}"
+
+
+def publish_reports(profile: ScanProfile, scan: str, launch: Path) -> list[str]:
+    """Upload the run's reports that exist to `<work>/runs/<scan>/` (a re-run replaces them); returns the keys. Never fails
+    the run: a missing report (Nextflow stopped early) or an upload error is logged."""
+    from .blobstore import Store
+
+    store, keys = Store(profile.work), []
+    for name in REPORTS:
+        src = launch / name
+        if not src.is_file():
+            continue
+        key = f"{runs_prefix(scan)}/{name}"
+        try:
+            store.put(src, key)
+            keys.append(key)
+        except Exception as e:  # noqa: BLE001 — reports are a view of the run, not its output
+            err(f"scan head: upload {key} failed: {type(e).__name__}: {e}")
+    if keys:
+        err(f"scan head: reports → {store.uri(runs_prefix(scan))}/ ({', '.join(k.rsplit('/', 1)[1] for k in keys)})")
+    return keys
+
+
+def finish_args(rc: int, error: str | None, cost: list[str], dag: Path) -> list[str]:
+    """`scan-run finish`'s arguments: the exit status, the error, the cost labels, and the run's DAG (`-D`, stored with
+    the run for the site's pipeline view) when Nextflow wrote one."""
+    return ["-x", str(rc), *(["-e", error] if error else []), *cost, *(["-D", str(dag)] if dag.is_file() else [])]
+
+
 def head(profile_path: Path, nf_dir: Path, launch: Path | None, *, reproc: bool = False, fresh: bool = False,
          dry_run: bool = False, env: dict[str, str] | None = None) -> int:
     from . import scan_profile
@@ -208,9 +249,11 @@ def head(profile_path: Path, nf_dir: Path, launch: Path | None, *, reproc: bool 
         params(profile, profile_json, scan, gen, job_start, run_id, session, env, reproc=reproc, fresh=fresh), indent=1) + "\n")
     (launch / "executor.config").write_text(executor_config(profile))
     trace = launch / "trace.tsv"
-    trace.unlink(missing_ok=True)
+    for name in REPORTS:
+        (launch / name).unlink(missing_ok=True)
     argv = ["nextflow", "run", str(nf_dir / "scan.nf"), "-c", str(nf_dir / "base.config"), "-c", str(launch / "executor.config"),
-            "-params-file", str(launch / "params.json"), "-resume", session, "-with-trace", str(trace)]
+            "-params-file", str(launch / "params.json"), "-resume", session, "-with-trace", str(trace),
+            "-with-dag", str(launch / "dag.mmd"), "-with-timeline", str(launch / "timeline.html"), "-with-report", str(launch / "report.html")]
     nf_env = {**env, "NXF_ANSI_LOG": "false"}
     if cloud:
         nf_env["NXF_CLOUDCACHE_PATH"] = profile.work.rstrip("/") + "/cache"
@@ -254,8 +297,9 @@ def head(profile_path: Path, nf_dir: Path, launch: Path | None, *, reproc: bool 
     else:
         f = first_failed(trace) if rc else None
         error = f"nextflow exit {rc}" + (f": {f} failed" if f else "") + f" (session {session})" if rc else None
+    publish_reports(profile, scan, launch)
     if recording:
-        _record(finish_cmd, ["-x", str(rc), *(["-e", error] if error else []), *cost])
+        _record(finish_cmd, finish_args(rc, error, cost, launch / "dag.mmd"))
     if rc == 0:
         print(f"SCAN-JOB-DONE {scan} -> {profile.data.rstrip('/')}/{profile.layout.snapshots_dir()}/{scan}")
     return rc

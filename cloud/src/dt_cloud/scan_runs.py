@@ -30,7 +30,7 @@ from .scan_id import check_scan_id
 err = partial(print, file=sys.stderr)
 
 PROFILE_ENV = "SCAN_RUNS_PROFILE"
-TABLES = ("scan_runs", "scan_run_phases", "scan_run_outputs")
+TABLES = ("scan_runs", "scan_run_phases", "scan_run_outputs", "scan_run_dags")
 STATUSES = ("running", "succeeded", "failed", "nop")
 
 
@@ -71,6 +71,8 @@ class Phase:
     #: The Batch job the phase ran in, when not the run's own (a Nextflow step's task), and its machine
     job_name: str | None = None
     machine: str | None = None
+    #: The pipeline node that ran it: a Nextflow task's `<process> (<tag>)` (`$NF_PROCESS`, `$NF_TAG`)
+    task: str | None = None
 
 
 def phase_status(note: str | None) -> str:
@@ -94,6 +96,8 @@ class Record:
     run: Run
     phases: tuple[Phase, ...] = ()
     outputs: tuple[Output, ...] = ()
+    #: The run's pipeline DAG (Nextflow's `-with-dag` Mermaid), written by its head's `finish --dag`
+    dag: str | None = None
 
 
 def lit(v: object) -> str:
@@ -132,9 +136,9 @@ def run_sql(run: Run, now: int) -> str:
 def phase_sql(run_id: str, p: Phase) -> str:
     cols = ["run_id", "phase", "seq", "started_ts", "finished_ts", "status", "note"]
     vals = [run_id, p.phase, p.seq, p.started_ts, p.finished_ts, p.status, p.note]
-    # The task columns only when known, so a database without them (migration `scan-run-phase-jobs`) still takes
-    # every one-VM run's phases.
-    task = [(c, v) for c, v in (("job_name", p.job_name), ("machine", p.machine)) if v is not None]
+    # The task columns only when known, so a database without them (migrations `scan-run-phase-jobs`,
+    # `scan-run-dags`) still takes every one-VM run's phases.
+    task = [(c, v) for c, v in (("job_name", p.job_name), ("machine", p.machine), ("task", p.task)) if v is not None]
     cols += [c for c, _ in task]
     vals += [v for _, v in task]
     return (f"INSERT INTO scan_run_phases ({', '.join(cols)}) VALUES ({', '.join(lit(v) for v in vals)}) "
@@ -153,11 +157,17 @@ def output_sql(run_id: str, o: Output) -> str:
             "objects = excluded.objects, rows = excluded.rows, gen = COALESCE(excluded.gen, scan_run_outputs.gen)")
 
 
+def dag_sql(run_id: str, mermaid: str) -> str:
+    return (f"INSERT INTO scan_run_dags (run_id, mermaid) VALUES ({lit(run_id)}, {lit(mermaid)}) "
+            "ON CONFLICT(run_id) DO UPDATE SET mermaid = excluded.mermaid")
+
+
 def record_sql(rec: Record, now: int) -> list[str]:
     """The statements writing `rec`: the run first (its children reference it)."""
     return ([run_sql(rec.run, now)]
             + [phase_sql(rec.run.run_id, p) for p in rec.phases]
-            + [output_sql(rec.run.run_id, o) for o in rec.outputs])
+            + [output_sql(rec.run.run_id, o) for o in rec.outputs]
+            + ([dag_sql(rec.run.run_id, rec.dag)] if rec.dag is not None else []))
 
 
 # ── Sinks: D1 (the job, the backfill), a local SQLite file (dry runs, tests), stdout (`-n`) ──────────────────
@@ -655,6 +665,7 @@ def record(
     facts: Mapping[str, object] | None = None,
     extra_cost: float | None = None,
     task: Mapping[str, str] | None = None,
+    dag: str | None = None,
 ) -> Record:
     """One incremental write of run `run_id` (scan `scan`): start it, start/close a phase (measuring completed outputs tied to
     it), measure named outputs, finish it (`exit_code`, or `nop`). The run row is upserted every time, so any call
@@ -664,7 +675,8 @@ def record(
     or stored) and no Batch `job`, the finishing write estimates the run's cost over its billed time (`billed_secs`),
     plus `extra_cost` (the jobs it ran apart from its own: `labelled_cost`).
 
-    `task`: the Batch job phase `phase` ran in, when not the run's own (`job_name`, `machine`; `task_job`)."""
+    `task`: where phase `phase` ran: its Batch job when not the run's own (`job_name`, `machine`) and its pipeline node
+    (`task`; `JobRun.task`). `dag`: the run's pipeline DAG (Mermaid)."""
     check_scan_id(scan)
     if phase_start and not phase:
         raise ValueError("scan-run: a phase start needs a phase name")
@@ -703,7 +715,7 @@ def record(
         if not phase_start or not existing or existing["finished_ts"] is None:
             new_phases.append(Phase(phase, seq, p_start, None if phase_start else now,
                                     "running" if phase_start else phase_status(note), note,
-                                    **{k: v for k, v in (task or {}).items() if k in ("job_name", "machine")}))
+                                    **{k: v for k, v in (task or {}).items() if k in ("job_name", "machine", "task")}))
     if exit_code:
         new_phases.extend(Phase(p["phase"], p["seq"], p["started_ts"], now, "failed", f"failed (exit {exit_code})")
                           for p in phases if p["status"] == "running" and p["finished_ts"] is None)
@@ -725,7 +737,7 @@ def record(
         if store is None:
             raise SystemExit("scan-run: -o needs a store to measure (it isn't available under this sink)")
         outs += measure(OutputSpec(key=key, uri=uri, split=None), scan, gen_now, store)
-    rec = Record(run, tuple(new_phases), tuple(outs))
+    rec = Record(run, tuple(new_phases), tuple(outs), dag)
     sink.execute(record_sql(rec, now))
     return rec
 
@@ -1207,10 +1219,13 @@ class JobRun:
 
     def task(self) -> dict[str, str]:
         """The Batch job this process runs in when it isn't the run's own (a Nextflow step's task, `$BATCH_JOB_UID` ≠
-        the run id): `uid`, `job_name`, `region`, `machine`; {} otherwise. Looked up once per task, kept in the state file."""
+        the run id): `uid`, `job_name`, `region`, `machine`; {} otherwise. Looked up once per task, kept in the state file.
+        Plus `task`, the pipeline node running it (`$NF_PROCESS` + ` ($NF_TAG)`), on any executor."""
+        proc, tag = (self.env.get("NF_PROCESS") or "").strip(), (self.env.get("NF_TAG") or "").strip()
+        node = {"task": f"{proc} ({tag})" if tag else proc} if proc else {}
         st = self.state()
         if "task" in st:
-            return st["task"]
+            return {**st["task"], **node}
         uid = (self.env.get("BATCH_JOB_UID") or "").strip()
         t: dict[str, str] = {}
         if uid and uid != self.run_id and self.recording:
@@ -1227,7 +1242,7 @@ class JobRun:
             except Exception as e:  # noqa: BLE001 — the task's links are a nicety; the phase records without them
                 err(f"scan-run: task lookup failed ({type(e).__name__}: {e}); phases record without their task")
         self.save(task=t)
-        return t
+        return {**t, **node}
 
     def facts(self) -> dict[str, str]:
         st = self.state()
@@ -1270,7 +1285,7 @@ class JobRun:
         except Exception as e:  # noqa: BLE001
             err(self.redact(f"alert failed (the job continues): {type(e).__name__}: {e}"))
 
-    def finish(self, rc: int, error: str | None = None, extra_cost: float | None = None) -> None:
+    def finish(self, rc: int, error: str | None = None, extra_cost: float | None = None, dag: str | None = None) -> None:
         """Record the run finished with `rc` (`error` its one-line reason), and on a failure post the `fail` alert
         unless one was already posted (a phase's, or an earlier `finish`'s)."""
         error = self.redact(error) if error else None
@@ -1283,7 +1298,7 @@ class JobRun:
         # doesn't, so the one phase still running is the failure's. Several running (background phases): none named.
         running = st.get("running", [])
         failed_phase = st.get("failed_phase") or (running[0] if rc and len(running) == 1 else None)
-        self.write(exit_code=rc, error=error, failed_phase=failed_phase, extra_cost=extra_cost)
+        self.write(exit_code=rc, error=error, failed_phase=failed_phase, extra_cost=extra_cost, dag=dag)
         if rc and not self.alerted():
             self.mark_alerted()
             self.alert("fail", f"run failed (exit {rc}){f' in {failed_phase}' if failed_phase else ''}{f': {clip_error(error)}' if error else ''}")
@@ -1609,11 +1624,12 @@ def nop_cmd(profile_path, d1, dry_run, run_id, sqlite) -> None:
 
 
 @cli.command("finish")
+@option("-D", "--dag", "dag_path", default=None, help="The run's pipeline DAG (Nextflow's `-with-dag` Mermaid file), stored with the run for /scans")
 @option("-e", "--error", default=None, help="With a non-zero -x: the failure's one-line reason (the ERR trap's)")
 @option("-l", "--cost-of", "cost_labels", multiple=True, help="KEY=VALUE (repeatable): add the estimated cost of the Batch jobs carrying all these labels (a Nextflow head's step tasks: `nf-session=<id>`)")
 @option("-x", "--exit", "rc", type=IntRange(0, 255), required=True, help="The job's exit code (0 = succeeded)")
 @_wrapper_opts
-def finish_cmd(error, cost_labels, rc, profile_path, d1, dry_run, run_id, sqlite) -> None:
+def finish_cmd(dag_path, error, cost_labels, rc, profile_path, d1, dry_run, run_id, sqlite) -> None:
     """The job's EXIT trap: record the run finished (`record -x`; ERR as `scan_runs.error`), and on a non-zero RC
     post the `fail` alert unless a phase already did. Never fails the job. Under `supervise`, the state and the
     alerted marker are left for it."""
@@ -1627,7 +1643,13 @@ def finish_cmd(error, cost_labels, rc, profile_path, d1, dry_run, run_id, sqlite
             extra = labelled_cost(j.profile, bf.fetch_jobs(j.profile.project or "", j.profile.regions), labels, _now())
         except Exception as e:  # noqa: BLE001 — the cost is an estimate; the record must still finish
             report_failure(e)
-    j.finish(rc, error, extra)
+    dag = None
+    if dag_path:
+        try:
+            dag = Path(dag_path).read_text()
+        except OSError as e:  # the DAG is a view; the record must still finish
+            report_failure(e)
+    j.finish(rc, error, extra, dag)
     if j.supervised:
         j.save(finished=rc)  # `supervise` reads it (and clears the state) once the job has exited
     else:

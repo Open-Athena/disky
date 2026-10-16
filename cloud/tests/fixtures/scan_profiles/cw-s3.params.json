@@ -48,13 +48,15 @@
  ],
  "pre": [],
  "pre_label": "small",
+ "interval_label": "big",
  "post": [
-  "over-time",
   "index-gc",
   "warm-cache",
   "probe",
   "digest"
  ],
+ "over_time": true,
+ "over_time_label": "post",
  "fold": [
   "bucket-check",
   "index-sync"
