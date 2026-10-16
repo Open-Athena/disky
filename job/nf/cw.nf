@@ -83,7 +83,7 @@ process index_sync {
 }
 
 process post {
-    label 'medium'
+    label 'post'
     input: path 'listed'
     output: path 'done'
     script:
