@@ -135,3 +135,44 @@ def test_machine_labels_are_groovy_identifiers():
         "machines.over-time: a label of lowercase letters, digits and '_' (it is written bare into the Nextflow config)",
         "machines.Big: a label of lowercase letters, digits and '_' (it is written bare into the Nextflow config)",
     ]
+
+
+GB = {"kind": "google-batch", "project": "p", "region": "r", "image": "i"}
+
+
+def gb(**machines) -> dict:
+    return minimal(executor=GB, work="gs://w/nf", data="gs://w", machines=machines)
+
+
+def test_machine_fallback():
+    """A label's `fallback` types + `queue_timeout` (spec §7): the types by submit attempt, the primary first."""
+    big = {"type": "n2-highmem-32", "disk": {"request": 1500, "type": "local-ssd"}, "fallback": ["n2d-highmem-32"], "queue_timeout": 10}
+    m = parse(gb(big=big)).machines["big"]
+    assert m == Machine("n2-highmem-32", Disk(1500, "local-ssd"), fallback=("n2d-highmem-32",), queue_timeout=10)
+    assert m.types == ("n2-highmem-32", "n2d-highmem-32")
+    assert parse(gb(big="n2-highmem-32")).machines["big"].types == ("n2-highmem-32",)
+
+
+def test_machine_fallback_refused():
+    assert problems(gb(
+        a={"type": "t", "fallback": ["u"]},
+        b={"type": "t", "queue_timeout": 10},
+        c={"type": "t", "fallback": [], "queue_timeout": 0},
+        d={"fallback": ["u"], "queue_timeout": 5},
+        e={"type": "t", "fallback": ["u", "t"], "queue_timeout": 5},
+        f={"type": "t", "fallback": "u", "queue_timeout": "10m"},
+        list={"type": "t", "fallback": ["u"], "queue_timeout": 5},
+    )) == [
+        "machines.a.fallback: needs `queue_timeout` (a queued task never fails, so nothing else moves it on)",
+        "machines.b.queue_timeout: only with `fallback` (a resubmit of the same type waits in the same pool)",
+        "machines.c.fallback: a non-empty list of machine types",
+        "machines.c.queue_timeout: a positive number of minutes",
+        "machines.d.fallback: needs the primary `type`",
+        "machines.e.fallback: each machine type once (with `type`)",
+        "machines.f.fallback: a list of strings",
+        "machines.f.queue_timeout: a positive number of minutes",
+        "machines.list.fallback: not on `list` (each source's machine is its own)",
+    ]
+    assert problems(minimal(machines={"big": {"type": "t", "fallback": ["u"], "queue_timeout": 5}})) == [
+        "machines.big.fallback: google-batch only (the only executor whose tasks take a machine type)",
+    ]

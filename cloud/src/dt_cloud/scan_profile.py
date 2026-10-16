@@ -27,7 +27,11 @@ Every problem is reported at once (`ProfileError`, one line each).
         endpoint: https://…       #   bulk-list `-E` (s3 / r2)
         region: <region>          #   reserved: nf-google 1.29.1 has no per-task location (refused unless = executor's)
         args: [-L, …]             #   extra lister args
-    machines: {<label>: <type> | {type, disk, cpus, memory, time}}   # labels: small medium big list post pre interval over_time (+ any)
+    machines: {<label>: <type> | {type, disk, cpus, memory, time, fallback, queue_timeout}}   # labels: small medium big list post pre interval over_time (+ any)
+                                  # `fallback: [<type>, …]` + `queue_timeout: <minutes>` (google-batch, together): a task of
+                                  # the label not RUNNING `queue_timeout` min after submit (a GCE stockout leaves it QUEUED /
+                                  # SCHEDULED, never failing) is deleted by Nextflow and resubmitted on the next type; the
+                                  # last type waits (spec §7 "Capacity for big tasks")
     steps: [<extra step>, …]      # deployment-only steps on top of the core (`scan_steps.STEPS`, `core=False`)
     skip: [<core step>, …]        # core steps this deployment leaves out (each listed in `SKIPPABLE`)
     fold: [bucket-check, index-sync]   # tiny steps run inside a neighbour's task (default: both; [] = own tasks)
@@ -63,7 +67,7 @@ _TOP = {"deployment", "executor", "work", "data", "layout", "sources", "machines
         "env", "pass", "labels", "queue_size", "options"}
 _LAYOUT = {"layer2", "snapshots", "listing"}
 _SOURCE = {"uri", "machine", "disk", "procs", "threads", "endpoint", "region", "args"}
-_MACHINE = {"type", "disk", "cpus", "memory", "time"}
+_MACHINE = {"type", "disk", "cpus", "memory", "time", "fallback", "queue_timeout"}
 _DISK = {"request", "type"}
 _DISK_TYPES = ("local-ssd", "pd-balanced", "pd-ssd", "pd-standard")
 _NAME = re.compile(r"[a-z0-9][a-z0-9-]*")
@@ -94,6 +98,14 @@ class Machine:
     cpus: int | None = None
     memory: str | None = None
     time: str | None = None
+    #: Machine types to resubmit on, in turn, when a task of the label is still queued `queue_timeout` minutes after submit.
+    fallback: tuple[str, ...] = ()
+    queue_timeout: int | None = None
+
+    @property
+    def types(self) -> tuple[str, ...]:
+        """Every type a task of the label may run on, by submit attempt: the primary, then each fallback."""
+        return (self.type, *self.fallback) if self.type else ()
 
 
 @dataclass(frozen=True)
@@ -245,6 +257,33 @@ def _disk(v: object, path: str, problems: list[str]) -> Disk | None:
     return Disk(req, typ)
 
 
+def _fallback(m: Mapping, label: str, executor: str, p: str, problems: list[str]) -> tuple[str, ...]:
+    """A label's `fallback` types, checked with its `queue_timeout`: both or neither (a resubmit of the same type waits
+    in the same pool, and fallbacks with no timeout are never reached), on google-batch only (the only executor whose
+    tasks take a machine type), never on `list` (each source names its own machine), each type once."""
+    fb, qt = m.get("fallback"), m.get("queue_timeout")
+    if fb is None and qt is None:
+        return ()
+    types = _str_list(fb, f"{p}.fallback", problems) if fb is not None else ()
+    if isinstance(fb, list) and (not types or not all(types)):
+        problems.append(f"{p}.fallback: a non-empty list of machine types")
+    if qt is not None and (not _int(qt) or qt <= 0):
+        problems.append(f"{p}.queue_timeout: a positive number of minutes")
+    if fb is None:
+        problems.append(f"{p}.queue_timeout: only with `fallback` (a resubmit of the same type waits in the same pool)")
+    elif qt is None:
+        problems.append(f"{p}.fallback: needs `queue_timeout` (a queued task never fails, so nothing else moves it on)")
+    if not m.get("type"):
+        problems.append(f"{p}.fallback: needs the primary `type`")
+    elif m["type"] in types or len(set(types)) < len(types):
+        problems.append(f"{p}.fallback: each machine type once (with `type`)")
+    if label == "list":
+        problems.append(f"{p}.fallback: not on `list` (each source's machine is its own)")
+    if executor != "google-batch":
+        problems.append(f"{p}.fallback: google-batch only (the only executor whose tasks take a machine type)")
+    return types
+
+
 def parse(d: object, where: str = "profile") -> ScanProfile:
     """A validated `ScanProfile` from the YAML's mapping; `ProfileError` lists every problem."""
     from .scan_steps import SKIPPABLE, STEPS
@@ -352,13 +391,15 @@ def parse(d: object, where: str = "profile") -> ScanProfile:
             machines[str(label)] = Machine(type=m)
             continue
         if not isinstance(m, Mapping):
-            problems.append(f"{p}: a machine type or {{type, disk, cpus, memory, time}}")
+            problems.append(f"{p}: a machine type or {{type, disk, cpus, memory, time, fallback, queue_timeout}}")
             continue
         _unknown(m, _MACHINE, f"{p}.", problems)
         if m.get("cpus") is not None and not _int(m["cpus"]):
             problems.append(f"{p}.cpus: an integer")
+        fallback = _fallback(m, str(label), executor.kind, p, problems)
         machines[str(label)] = Machine(m.get("type"), _disk(m.get("disk"), f"{p}.disk", problems), m.get("cpus"),
-                                       m.get("memory"), m.get("time"))
+                                       m.get("memory"), m.get("time"), fallback,
+                                       m["queue_timeout"] if _int(m.get("queue_timeout")) else None)
 
     steps = _str_list(d.get("steps"), "steps", problems)
     for s in steps:
