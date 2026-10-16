@@ -14,6 +14,8 @@ discord_webhook_env: null
 # the reply avatars (`arrows/av_deg<N>.png`) are the icons project's production deployment of `job/icons-hf/`
 icons_base: https://oa-hf-usage-icons.pages.dev
 icons_dir: job/icons-hf
+# the month OP's sender icon: hf's mark (`deploy/slack/icons/hf.png` at 256 px), not 📆
+op_icon: mark.png
 # the OP's plot (drawn by the site, `POST /api/digest-image` with SITE_TOKEN) goes to the icons project's `plot`
 # preview branch, never the production alias that serves the avatars
 plot_project: oa-hf-usage-icons
