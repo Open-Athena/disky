@@ -4,6 +4,8 @@
 #   job/hf-batch-submit.sh              # submit, print the job id
 #   DRY=1 job/hf-batch-submit.sh        # print the spec
 #   PIN=1 DRY=1 job/hf-batch-submit.sh  # the canonical spec: the Cloud Scheduler body (infra/gcp generates it)
+#   NF=scan job/hf-batch-submit.sh      # the Nextflow head (`dt-cloud scan head $PROFILE`, default job/profiles/hf.yml)
+#                                       # instead of the one-VM job; `SNAP_ID=… GEN=…` resumes that scan's session
 #
 # One small on-demand VM: the listing is bound by the Hub's rate limit, not by the machine (job/hf-run.sh's sizing
 # note). No GCS: the job writes R2 only, and scratches on the VM's boot disk.
@@ -14,7 +16,7 @@ set -euo pipefail
 
 # PIN=1: drop every ambient override so the body is byte-identical whatever the caller's shell (`submitter_spec`
 # runs this under a scrubbed env). Must precede the ${VAR:-default} knobs below; the python vars() honors PIN too.
-if [ -n "${PIN:-}" ]; then unset IMAGE MACHINE MEMORY_MIB; fi
+if [ -n "${PIN:-}" ]; then unset IMAGE MACHINE MEMORY_MIB NF PROFILE; fi
 
 PROJECT=oa-internal-450019
 REGION=us-central1
@@ -51,7 +53,7 @@ v = {
     "SLACK_ALERT_CHANNEL": g("SLACK_ALERT_CHANNEL", "C0BTUNT3B5Z"),
 }
 if not pin:  # one-off overrides forwarded only for manual submits, never the cron spec
-    for k in ["SNAP_ID", "HF_THREADS", "MEM", "STORE_ROOT"]:
+    for k in ["SNAP_ID", "GEN", "HF_THREADS", "MEM", "STORE_ROOT", "DT_RECORD", "DT_ALERTS"]:
         if k in os.environ:
             v[k] = os.environ[k]
 print(json.dumps(v))
@@ -108,6 +110,28 @@ cat > "$spec" <<EOF
   "logsPolicy": {"destination": "CLOUD_LOGGING"}
 }
 EOF
+
+# The Nextflow head (specs/pipelines-everywhere.md) only drives the DAG: each step is a Batch task of its own, which
+# fetches its own secrets (the profile's `secrets`), so the head gets a small VM and only what it uses itself: the
+# scan-run record's D1 token + account id, and the failure alert's Slack token.
+if [ "${NF:-0}" != 0 ]; then
+  PROFILE=${PROFILE:-/app/job/profiles/hf.yml} python3 - "$spec" <<'PY'
+import json, os, sys
+p = sys.argv[1]; j = json.load(open(p))
+t = j["taskGroups"][0]["taskSpec"]
+c = t["runnables"][0]["container"]
+c["entrypoint"] = "dt-cloud"
+c["commands"] = ["scan", "head", os.environ["PROFILE"]]
+t["computeResource"] = {"cpuMilli": 2000, "memoryMib": 7000}
+t["maxRunDuration"] = "21600s"
+keep = {"CLOUDFLARE_API_TOKEN", "CLOUDFLARE_ACCOUNT_ID", "SLACK_BOT_TOKEN"}
+t["environment"]["secretVariables"] = {k: v for k, v in t["environment"]["secretVariables"].items() if k in keep}
+pol = j["allocationPolicy"]["instances"][0]["policy"]
+pol["machineType"] = "e2-standard-2"
+pol["bootDisk"] = {"type": "pd-balanced", "sizeGb": "30"}
+json.dump(j, open(p, "w"), indent=2)
+PY
+fi
 
 if [ -n "${DRY:-}" ]; then cat "$spec"; rm -f "$spec"; exit 0; fi
 gcloud batch jobs submit "$JOB_ID" --project "$PROJECT" --location "$REGION" --config "$spec" >&2

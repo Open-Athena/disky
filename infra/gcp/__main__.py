@@ -1,8 +1,9 @@
 """hf's GCP stack: the Hugging Face scan job's account, image repository, secrets and daily cron.
 
 Thin wiring over `gcp_jobs.py` (the shared components, from `cloud`). The cron's Batch spec comes from this
-branch's `job/hf-batch-submit.sh` under `PIN=1 DRY=1`. Everything is new (no adoption). The job writes R2 only, so
-there is no GCS bucket here: its scratch is the VM's boot disk.
+branch's `job/hf-batch-submit.sh` under `PIN=1 DRY=1`. Everything is new (no adoption). The site serves R2; the data
+bucket `oa-hf-usage-data` is the scan pipeline's own store (specs/pipelines-everywhere.md: Nextflow's work dir, and
+the store its steps hand off through, which `publish-r2` copies the served subset of to R2).
 
 Secret values are never managed: the stack creates the containers and the job's `secretAccessor` on each; the values
 go in with `gcloud secrets versions add` (specs/hf-deployment.md).
@@ -32,9 +33,9 @@ if pulumi.get_stack() != STACK:
 # becomes every labelable resource's default labels.
 labeled_provider("hf-labeled", project=project, region=region, labels=cost_labels())
 
-# Least privilege, as the `r2` branch: the cron calls Batch as a submit-only account (one custom role holding
-# `batch.jobs.create`, and `serviceAccountUser` on the job account, which the job then runs as), so the job account
-# needs no rights over other Batch jobs.
+# Least privilege for the cron, as the `r2` branch: it calls Batch as a submit-only account (one custom role holding
+# `batch.jobs.create`, and `serviceAccountUser` on the job account, which the job then runs as). The job account itself
+# edits Batch jobs as itself: the scan's Nextflow head submits each step as a task (and cancels them on a stop).
 scheduler = JobAccount(
     "hf-usage-scheduler",
     project=project,
@@ -65,16 +66,45 @@ job = JobAccount(
     project=project,
     account_id="hf-usage-job",
     display_name="hf Hugging Face scan job",
-    description="Runs the hf.oa.dev daily scan on Batch (job/hf-run.sh); hf-usage-scheduler submits it as this account",
+    description="Runs the hf.oa.dev daily scan on Batch (its Nextflow head and step tasks); hf-usage-scheduler submits the head as this account",
     roles=[
         "roles/batch.agentReporter",
-        "roles/batch.jobsViewer",   # `scan-run start -B` reads its own job back
+        "roles/batch.jobsEditor",   # the head submits its step tasks, and cancels them on a stop
         "roles/logging.logWriter",
     ],
     actors=[scheduler.email_literal],
     actor_deps=[scheduler],
-    acts_as_self=False,
     adopt=adopt,
+)
+
+# The scan's data store + Nextflow's work dir (job/profiles/hf.yml `data` / `work`). Durable: the listings' layer-2s and
+# index tiers, the snapshot JSONs and the digest's state (all also on R2 but the state, which the digest keeps beside
+# its snapshots root). Expired: the raw listings (`raw/`, re-listable; kept a month for `bulk-list -W`-style reuse and
+# debugging) and Nextflow's task dirs and resume cache (`nf/work/`, `nf/cache/`: a scan resumes within days or not at
+# all), and `scratch/` (job/profiles/hf-scratch.yml's test runs) after a week. `nf/runs/` (the run reports, the /scans
+# DAG) stays.
+data = gcp.storage.Bucket(
+    "hf-usage-data",
+    project=project,
+    name="oa-hf-usage-data",
+    location=region.upper(),
+    uniform_bucket_level_access=True,
+    public_access_prevention="enforced",
+    lifecycle_rules=[
+        gcp.storage.BucketLifecycleRuleArgs(
+            action=gcp.storage.BucketLifecycleRuleActionArgs(type="Delete"),
+            condition=gcp.storage.BucketLifecycleRuleConditionArgs(age=age, matches_prefixes=prefixes),
+        )
+        for age, prefixes in ((30, ["raw/"]), (14, ["nf/work/", "nf/cache/"]), (7, ["scratch/"]))
+    ],
+    labels={"component": "data"},
+    opts=pulumi.ResourceOptions(protect=True),
+)
+data_admin = gcp.storage.BucketIAMMember(
+    "hf-usage-data-job",
+    bucket=data.name,
+    role="roles/storage.objectAdmin",
+    member=job.member,
 )
 
 images = gcp.artifactregistry.Repository(
@@ -127,11 +157,12 @@ scan = BatchCron(
     sa_email=scheduler.email,
     description="Daily Hugging Face org scan (job/hf-batch-submit.sh PIN=1 DRY=1 body) -> hf.oa.dev",
     adopt=adopt,
-    depends_on=[job, secrets, images_reader, submit_grant],
+    depends_on=[job, secrets, images_reader, submit_grant, data_admin],
 )
 
 pulumi.export("job_account", job.email)
 pulumi.export("scheduler_account", scheduler.email)
 pulumi.export("image_repository", images.repository_id)
+pulumi.export("data_bucket", data.name)
 pulumi.export("secrets", HF_SECRETS)
 pulumi.export("cron", scan.job.name)

@@ -1,0 +1,44 @@
+# A scratch run of hf's DAG (specs/pipelines-everywhere.md: each deployment's switch starts with one): one tiny listing
+# (a single space), under `scratch/` in the data bucket (expired after 7 days), and only the Hub token, so every
+# serving step (static names, R2, D1, the site, Slack) skips. Submit it without a record or alerts:
+#   NF=scan PROFILE=/app/job/profiles/hf-scratch.yml DT_RECORD=off DT_ALERTS=off job/hf-batch-submit.sh
+deployment: hf-scratch
+executor:
+  kind: google-batch
+  project: oa-internal-450019
+  region: us-central1
+  service_account: hf-usage-job@oa-internal-450019.iam.gserviceaccount.com
+  image: us-central1-docker.pkg.dev/oa-internal-450019/hf-usage/scan:hf
+  boot_disk: 50
+  spot: false
+work: gs://oa-hf-usage-data/scratch/nf
+data: gs://oa-hf-usage-data/scratch
+layout:
+  layer2: listing/{scan}/
+  snapshots: hf
+  listing: raw/{scan}/
+sources:
+  - {uri: "hf://open-athena/spaces/README", threads: 3}
+machines:
+  small: e2-standard-2
+  medium: e2-standard-2
+  big: e2-standard-2
+  list: e2-standard-2
+  post: e2-standard-2
+skip: [bucket-check, over-time]
+secrets:
+  HF_TOKEN: hf-usage-hf-token
+pass: [DT_RECORD, DT_ALERTS]
+labels: {deployment: hf}
+queue_size: 20
+options:
+  list:
+    import_args: [-e, duckdb, -M, 2GB, -n, "{nproc}", -m, -p, storage_class_id]
+  index:
+    webdata: [dt-cloud, path-index, -d, "{scan}", -l, "{data}/raw/{scan}/open-athena/*.parquet", -o, "{web}"]
+    mem: 2GB
+    args: [-T, "{work}/duckdb-tmp"]
+  static-names: {gen: 2026-10-15hf, mem: 2GB}
+  publish-r2: {barrier: false}   # no R2 credentials here: the barrier would stop the run on purpose
+  interval-store: {timeout: 60m, mem: 2GB}
+  digest: {template: cw, config: /app/job/digest.yml}

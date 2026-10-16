@@ -1,0 +1,79 @@
+# The hf scan on the generic pipeline (specs/pipelines-everywhere.md): `dt-cloud scan head job/profiles/hf.yml` runs
+# `job/nf/scan.nf`, each step `dt-cloud scan step <name>` in its own Batch task. Replaces `job/hf-run.sh`.
+#
+# The steps hand off through the data bucket (`oa-hf-usage-data`, infra/gcp); `publish-r2` copies each scan's served
+# subset (the layer-2 dir `listing/<scan>/` and `snapshots/hf/<scan>/`) to the R2 bucket the site reads, under the same
+# keys. The static name index and the interval store live in R2 only. The D1 and the static-names generation are the
+# site's (`site/wrangler.toml`; infra/tests/test_hf_stacks.py checks they agree).
+deployment: hf
+executor:
+  kind: google-batch
+  project: oa-internal-450019
+  region: us-central1
+  service_account: hf-usage-job@oa-internal-450019.iam.gserviceaccount.com
+  image: us-central1-docker.pkg.dev/oa-internal-450019/hf-usage/scan:hf
+  boot_disk: 50
+  spot: false
+work: gs://oa-hf-usage-data/nf
+data: gs://oa-hf-usage-data
+layout:
+  layer2: listing/{scan}/
+  snapshots: hf
+  # the raw listing (shards + the lister's `_SUCCESS.json`: the billing reconciliation), expired after 30 days
+  listing: raw/{scan}/
+# The whole org is one source: a rate-limited Hub lister (1000 requests / 5 min; 429s at 8 in flight), one process.
+sources:
+  - {uri: "hf://open-athena", threads: 3}
+# Small machines: the listing waits on the Hub, and the import, sorts, static names and interval store over one org
+# are minutes at 8 GB of DuckDB (the one-VM job ran all of it on one e2-standard-4).
+machines:
+  small: e2-standard-4
+  medium: e2-standard-4
+  big: e2-standard-4
+  list: e2-standard-2
+  post: e2-standard-4
+# bucket-check is the S3 sources' unscanned-bucket alert; over-time groups aren't served here
+skip: [bucket-check, over-time]
+secrets:
+  HF_TOKEN: hf-usage-hf-token
+  CLOUDFLARE_API_TOKEN: hf-usage-cf-token
+  CF_PAGES_TOKEN: hf-usage-cf-pages-token
+  CLOUDFLARE_ACCOUNT_ID: hf-usage-cf-account-id
+  R2_ENDPOINT: hf-usage-r2-endpoint
+  R2_ACCESS_KEY_ID: hf-usage-r2-access-key-id
+  R2_SECRET_ACCESS_KEY: hf-usage-r2-secret-access-key
+  SLACK_BOT_TOKEN: hf-usage-slack-bot-token
+  SITE_TOKEN: hf-usage-job-grant
+env:
+  SCAN_RUNS_PROFILE: /app/job/hf-scan-runs.json
+  D1_DB_ID: 2f83fdf9-509f-491c-9664-04bef9944988   # oa-hf-usage-db (site/wrangler.toml)
+  D1_DB_NAME: oa-hf-usage-db
+  SITE_URL: https://hf.oa.dev
+  R2_BUCKET: oa-hf-usage-index
+  AWS_DEFAULT_REGION: auto                         # R2's region
+  SLACK_CHANNEL: C0C9G547AP7                       # #hf-usage: the digest
+  SLACK_ALERT_CHANNEL: C0BTUNT3B5Z                 # failure alerts, shared with the gcs and cw-s3 jobs
+pass: [DT_RECORD, DT_ALERTS]
+labels: {deployment: hf}
+queue_size: 20
+options:
+  list:
+    # The HF lister writes its shards in API order, not key order: `-e duckdb` (the stream engine wants sorted
+    # listings). `-p storage_class_id`: the billing classes (public 1, private 5, unbilled git 6) as pivots.
+    import_args: [-e, duckdb, -M, 8GB, -n, "{nproc}", -m, -p, storage_class_id]
+  index:
+    # The snapshot JSONs from the listing (`path-index` without `-P`); the path store from the layer-2 (`index-write`),
+    # which keeps the class pivots `path-index` would fold.
+    webdata: [dt-cloud, path-index, -d, "{scan}", -l, "{data}/raw/{scan}/open-athena/*.parquet", -o, "{web}"]
+    mem: 8GB
+    args: [-T, "{work}/duckdb-tmp"]
+  static-names:
+    gen: 2026-10-15hf   # site/wrangler.toml STATIC_GEN
+    mem: 8GB
+    build_args: [-x, "16,8"]
+  # The site reads the path store and the snapshot JSONs from R2 only: a failed copy keeps the previous scan listed.
+  publish-r2:
+    barrier: true
+    require: ["{index}/path-index.parquet", "{snapshots}/{scan}/meta.json"]
+  interval-store: {timeout: 60m, mem: 8GB}
+  digest: {template: cw, config: /app/job/digest.yml}

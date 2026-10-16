@@ -3,6 +3,7 @@ name, the tokens' scopes, and the cron's Batch spec against the secrets the stac
 
 import base64
 import json
+import re
 import runpy
 import sys
 from pathlib import Path
@@ -139,8 +140,10 @@ def test_gcp_stack(monkeypatch: pytest.MonkeyPatch):
             ("pulumi:providers:gcp", "hf-labeled"),
             ("disky:gcp:JobAccount", "hf-usage-job"),
             ("gcp:serviceaccount/account:Account", "hf-usage-job"),
-            *[("gcp:projects/iAMMember:IAMMember", f"hf-usage-job-{r}") for r in ("batch.agentReporter", "batch.jobsViewer", "logging.logWriter")],
-            ("gcp:serviceaccount/iAMMember:IAMMember", "hf-usage-job-actor-hf-usage-scheduler"),
+            *[("gcp:projects/iAMMember:IAMMember", f"hf-usage-job-{r}") for r in ("batch.agentReporter", "batch.jobsEditor", "logging.logWriter")],
+            *[("gcp:serviceaccount/iAMMember:IAMMember", f"hf-usage-job-actor-{a}") for a in ("hf-usage-job", "hf-usage-scheduler")],
+            ("gcp:storage/bucket:Bucket", "hf-usage-data"),
+            ("gcp:storage/bucketIAMMember:BucketIAMMember", "hf-usage-data-job"),
             ("disky:gcp:JobAccount", "hf-usage-scheduler"),
             ("gcp:serviceaccount/account:Account", "hf-usage-scheduler"),
             ("gcp:projects/iAMCustomRole:IAMCustomRole", "hf-usage-batch-submit"),
@@ -154,13 +157,26 @@ def test_gcp_stack(monkeypatch: pytest.MonkeyPatch):
             ("gcp:cloudscheduler/job:Job", "hf-usage-snapshot"),
         ])
         assert m.inputs("hf-usage-images")["repositoryId"] == "hf-usage"
-        # the cron's caller may only create jobs, and act as the job account (which can't act as itself or edit jobs)
+        # the cron's caller may only create jobs, and act as the job account (which submits its step tasks as itself)
         assert m.inputs("hf-usage-batch-submit")["permissions"] == ["batch.jobs.create"]
         assert m.inputs("hf-usage-scheduler-submit")["member"] == f"serviceAccount:{submitter}"
         assert {k: m.inputs("hf-usage-job-actor-hf-usage-scheduler")[k] for k in ("role", "member")} == {
             "role": "roles/iam.serviceAccountUser", "member": f"serviceAccount:{submitter}",
         }
         assert m.inputs("hf-usage-images-job")["member"] == f"serviceAccount:{sa}"
+        assert {k: m.inputs("hf-usage-job-actor-hf-usage-job")[k] for k in ("role", "member")} == {
+            "role": "roles/iam.serviceAccountUser", "member": f"serviceAccount:{sa}",
+        }
+        bucket = m.inputs("hf-usage-data")
+        assert {k: bucket[k] for k in ("name", "location", "uniformBucketLevelAccess", "publicAccessPrevention")} == {
+            "name": "oa-hf-usage-data", "location": "US-CENTRAL1", "uniformBucketLevelAccess": True, "publicAccessPrevention": "enforced",
+        }
+        assert [(r["condition"]["age"], r["condition"]["matchesPrefixes"], r["action"]["type"]) for r in bucket["lifecycleRules"]] == [
+            (30, ["raw/"], "Delete"), (14, ["nf/work/", "nf/cache/"], "Delete"), (7, ["scratch/"], "Delete"),
+        ]
+        assert {k: m.inputs("hf-usage-data-job")[k] for k in ("bucket", "role", "member")} == {
+            "bucket": "oa-hf-usage-data", "role": "roles/storage.objectAdmin", "member": f"serviceAccount:{sa}",
+        }
         cron = m.inputs("hf-usage-snapshot")
         assert (cron["schedule"], cron["timeZone"], cron["httpTarget"]["oauthToken"]["serviceAccountEmail"]) == ("0 8 * * *", "Etc/UTC", submitter)
         spec = json.loads(base64.b64decode(cron["httpTarget"]["body"]))
@@ -183,4 +199,26 @@ def test_gcp_stack(monkeypatch: pytest.MonkeyPatch):
         assert (policy["serviceAccount"]["email"], policy["instances"][0]["policy"]["machineType"], policy["instances"][0]["policy"]["provisioningModel"]) == (sa, "e2-standard-4", "STANDARD")
         assert policy["labels"] == spec["labels"] == {"app": "disky", "deployment": "hf", "component": "scan"}
 
-    return pulumi.Output.all(g["scan"].job.id, g["images_reader"].id).apply(check)
+    return pulumi.Output.all(g["scan"].job.id, g["images_reader"].id, g["data_admin"].id).apply(check)
+
+
+def test_scan_profile_matches_the_site_and_the_stack():
+    """The DAG's profile (job/profiles/hf.yml) names what the site and the GCP stack do: the site's D1 and static-names
+    generation (`site/wrangler.toml`), only secrets this stack creates, each redacted by the scan-run profile, and the
+    stack's data bucket and job account."""
+    import tomllib
+
+    from dt_cloud.scan_profile import load
+
+    p = load(str(REPO / "job" / "profiles" / "hf.yml"))
+    w = tomllib.loads((REPO / "site" / "wrangler.toml").read_text())
+    [db] = w["d1_databases"]
+    assert (p.env["D1_DB_ID"], p.env["D1_DB_NAME"], p.opts("static-names")["gen"]) == (db["database_id"], db["database_name"], w["vars"]["STATIC_GEN"])
+    block = re.search(r"^HF_SECRETS = \[\n(.*?)^\]", (INFRA / "gcp" / "__main__.py").read_text(), re.M | re.S).group(1)
+    stack_secrets = re.findall(r'^    "([a-z0-9-]+)",', block, re.M)
+    assert len(stack_secrets) == 9
+    assert set(p.secrets.values()) <= set(stack_secrets)
+    redacted = json.loads((REPO / "job" / "hf-scan-runs.json").read_text())["secrets"]
+    assert set(p.secrets) <= set(redacted)
+    assert (p.data, p.work, p.executor.service_account) == (
+        "gs://oa-hf-usage-data", "gs://oa-hf-usage-data/nf", "hf-usage-job@oa-internal-450019.iam.gserviceaccount.com")
