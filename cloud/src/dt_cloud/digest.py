@@ -51,6 +51,20 @@ HOURS_PER_WEEK = 168.0
 AVATAR_REV = 4
 
 
+@dataclass(frozen=True)
+class Units:
+    """The digest's size unit: its ``name`` (`TiB`), ``bytes`` per unit, and the
+    ``short`` suffix of the reply tail's clauses (`Ti`)."""
+
+    name: str
+    bytes: int
+    short: str
+
+
+# `units:` in a digest config: binary TiB (the default), or decimal TB (a store billed in TB, e.g. Hugging Face)
+UNITS = {"TiB": Units("TiB", TIB, "Ti"), "TB": Units("TB", 10**12, "T")}
+
+
 # ---- config -------------------------------------------------------------------
 
 
@@ -96,7 +110,8 @@ class DigestConfig:
     ``plot_base`` unless wrangler names its deployment URL. ``primary`` +
     ``buckets`` (cw template) pick the headline bucket and label/quota each;
     ``prices`` (gcs template) are $/GiB-month by storage-class id.
-    ``provisional`` (cw ``sender``): post a day's early scans as one
+    ``units`` (cw template): `TiB` (default) or `TB`, every size the digest
+    renders (text and plot). ``provisional`` (cw ``sender``): post a day's early scans as one
     provisional reply, edited in place, replaced by the final reply when the
     day's reply scan lands (see `digest_cw`)."""
 
@@ -118,6 +133,11 @@ class DigestConfig:
     primary: str | None = None
     buckets: dict[str, Bucket] = field(default_factory=dict)
     prices: dict[str, float] = field(default_factory=dict)
+    units: str = "TiB"
+
+    @property
+    def unit(self) -> Units:
+        return UNITS[self.units]
 
     def need(self, key: str) -> str:
         """A deployment-resource field (``icons_base``, ``plot_base``,
@@ -191,6 +211,7 @@ _SCALAR_TYPES: dict[str, tuple[type, ...]] = {
     "discord_state": (str,), "discord_webhook_env": (str, type(None)), "icons_base": (str,),
     "icons_dir": (str,), "plot_project": (str,), "plot_branch": (str,), "plot_base": (str,),
     "variant": (str,), "reply_hour": (int,), "provisional": (bool,), "primary": (str, type(None)),
+    "units": (str,),
 }
 
 
@@ -237,8 +258,8 @@ def config_from_dict(d: dict, base: DigestConfig | None = None) -> DigestConfig:
     the preset its ``template`` names). ``buckets`` map names to ``{label,
     quota: {bytes, name, short}, zone}`` (``bytes`` may be `910 TiB`), ``prices``
     storage-class ids to $/GiB-month. Validated: unknown keys (at any level),
-    a wrong-typed value, an unknown template or an out-of-range ``reply_hour``
-    raise ``ValueError``."""
+    a wrong-typed value, an unknown template or ``units``, or an out-of-range
+    ``reply_hour`` raise ``ValueError``."""
     d = dict(_keys("", d, {f.name for f in fields(DigestConfig)}))
     for k, types in _SCALAR_TYPES.items():
         # bool is an int subclass; `reply_hour: true` is a typo, not hour 1
@@ -249,6 +270,8 @@ def config_from_dict(d: dict, base: DigestConfig | None = None) -> DigestConfig:
         raise ValueError(f"digest config: no template (one of {TEMPLATES}): a deployment names its own")
     if "template" in d and d["template"] not in TEMPLATES:
         raise ValueError(f"digest config template: {d['template']!r} is not one of {TEMPLATES}")
+    if "units" in d and d["units"] not in UNITS:
+        raise ValueError(f"digest config units: {d['units']!r} is not one of {tuple(UNITS)}")
     if not 0 <= d.get("reply_hour", 0) <= 23:
         raise ValueError(f"digest config reply_hour: {d['reply_hour']} is not a UTC hour (0–23)")
     base = base or PRESETS[d["template"]]
