@@ -90,7 +90,13 @@ main {
   gap: var(--main-gap);
 }
 header h1 { font-size: 24px; font-weight: 700; margin: 0 0 4px; letter-spacing: -0.01em; }
-.disk-space, .allowances {
+.disk-space, // A path's page at its provider (`ExtLink`): a quiet icon right of the name.
+.ext-link {
+  flex: none; display: inline-flex; align-items: center;
+  color: var(--ink-3); text-decoration: none;
+  &:hover { color: var(--ink); }
+}
+.allowances {
   font-size: 12px;
   font-variant-numeric: tabular-nums;
   .disk-space-labels { display: flex; justify-content: space-between; flex-wrap: wrap; gap: 4px 16px; margin-bottom: 6px; }
@@ -205,6 +211,10 @@ header .hrow {
     > :last-child { min-width: min(6em, 100%); flex-shrink: 1; }
     .sep { flex-shrink: 0; }
     > span > .tt-ref { display: inline-flex; min-width: 0; }
+    .ext-link { margin-left: 6px; font-size: 11px; }
+    // the icon's tooltip wrapper keeps its width: shrunk to 0, the icon spills past the row, and the crumbs'
+    // scroll-to-end then hides the first crumb's start under the mark
+    > span > .tt-ref:has(> .ext-link) { flex: none; }
     button {
       min-width: 0; max-width: 100%; overflow: hidden; text-overflow: ellipsis;
       background: none; border: none; padding: 0 1px; font: inherit; color: var(--ink); cursor: pointer;
@@ -305,8 +315,6 @@ header .hrow {
     &:hover { color: var(--ink); background: color-mix(in oklab, var(--ink) 9%, transparent); }
     .copied { color: var(--keep, #6cc070); font-weight: 700; }
   }
-  // the path's own page at its provider (`Store.externalLink`)
-  .path-ext { flex: none; white-space: nowrap; font-family: system-ui, sans-serif; }
 }
 
 // The scan picker: a filterable listbox (ARIA combobox) standing in for a
@@ -2374,7 +2382,8 @@ a.staged-chip {
     display: flex; align-items: baseline; flex-wrap: wrap; gap: 4px 12px;
     .obj-name { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 14px; overflow-wrap: anywhere; cursor: copy; }
     .obj-meta { color: var(--ink-2); font-size: 12.5px; font-variant-numeric: tabular-nums; }
-    .obj-dl, .obj-ext { font-size: 12.5px; }
+    .obj-dl { font-size: 12.5px; }
+    .ext-link { margin-left: -6px; }
     .obj-close {
       margin-left: auto; border: none; background: none; color: var(--ink-2);
       font-size: 20px; line-height: 1; cursor: pointer; padding: 0 2px;

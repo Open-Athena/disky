@@ -14,6 +14,7 @@ import { DiffTreemap, DiffHeader, useDiffModel } from './DiffTreemap'
 import { DiffTable } from './DiffTable'
 import { Allowances } from './Allowances'
 import { DiskSpace } from './DiskSpace'
+import { ExtLink } from './ExtLink'
 import { DiskSpaceDiff, diskDiffScan } from './DiskSpaceDiff'
 import type { DiffData } from './diffModel'
 import { ScanCombobox } from './ScanCombobox'
@@ -1168,14 +1169,18 @@ function AppContent() {
   const storeRoot = store.root && store.root.every((r, i) => segs[i] === r) ? store.root : []
   const crumbFullPath = pathText(pathScheme, segs, true)
   const crumbCopy = pathCopy(pathScheme, segs, true)
+  // The deepest crumb's page at the provider (`Store.externalLink`), as an icon right after its name.
+  const atRoot = segs.length <= storeRoot.length
+  const ext = <ExtLink link={store.externalLink?.(segs, here?.k !== 'file')} />
+  const rootCrumb = <RootCrumb treeName={mapTree?.n} rootLabel={rootLabel} rootTitle={rootTitle} scopeWord={store.rootLabel} here={atRoot} onClick={() => drillTo(storeRoot)} />
   const crumbs = (
     <span className="tb-path" aria-label="Drilled path">
-      <RootCrumb treeName={mapTree?.n} rootLabel={rootLabel} rootTitle={rootTitle} scopeWord={store.rootLabel} here={segs.length <= storeRoot.length} onClick={() => drillTo(storeRoot)} />
+      {atRoot ? <span>{rootCrumb}{ext}</span> : rootCrumb}
       {segs.map((sg, i) => i < storeRoot.length ? null : (
         <span key={i}>
           <span className="sep">/</span>
           {i === segs.length - 1
-            ? <PathPopover label={sg} fullPath={crumbFullPath} copy={crumbCopy} ext={store.externalLink?.(segs, here?.k !== 'file')} />
+            ? <><PathPopover label={sg} fullPath={crumbFullPath} copy={crumbCopy} />{ext}</>
             : <Tooltip content={<code>{pathText(pathScheme, segs.slice(0, i + 1))}</code>}><button type="button" onClick={() => drillTo(segs.slice(0, i + 1))}>{sg}</button></Tooltip>}
         </span>
       ))}
@@ -1307,7 +1312,7 @@ function AppContent() {
       )}
 
       <DiskSpace space={meta?.disk_space} />
-      {segs.length <= storeRoot.length && <Allowances spec={store.allowances} classBytes={meta?.class_bytes} />}
+      {atRoot && <Allowances spec={store.allowances} classBytes={meta?.class_bytes} />}
 
       {mapTree && !mapFailed ? (
         <>

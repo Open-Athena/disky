@@ -13,7 +13,6 @@ import {
 import { useState } from 'react'
 import { FaRegCopy } from 'react-icons/fa6'
 import { copyText } from './CopyName'
-import type { ExternalLink } from './stores'
 
 // The deepest breadcrumb (the current directory) as a tap-to-open path card,
 // not a hover tooltip: a hover tip stuck open after the tap that drilled here,
@@ -21,7 +20,7 @@ import type { ExternalLink } from './stores'
 // only on a deliberate tap (never on load), holds the full `gs://…/` prefix and
 // a copy button, and dismisses on Esc / tap-away. Ancestor crumbs stay plain
 // navigating links.
-export function PathPopover({ label, fullPath, copy = fullPath, ext }: { label: string; fullPath: string; copy?: string; ext?: ExternalLink }) {
+export function PathPopover({ label, fullPath, copy = fullPath }: { label: string; fullPath: string; copy?: string }) {
   const [open, setOpen] = useState(false)
   const [copied, setCopied] = useState(false)
   const { refs, floatingStyles, context } = useFloating({
@@ -47,7 +46,6 @@ export function PathPopover({ label, fullPath, copy = fullPath, ext }: { label: 
               type="button" className="path-copy" aria-label="Copy path to clipboard" title={copied ? 'copied ✓' : 'Copy path to clipboard'}
               onClick={() => copyText(copy).then(() => { setCopied(true); setTimeout(() => setCopied(false), 1200) })}
             >{copied ? <span className="copied">✓</span> : <FaRegCopy aria-hidden />}</button>
-            {ext && <a className="path-ext" href={ext.href} target="_blank" rel="noreferrer">{ext.label} ↗</a>}
           </div>
         </FloatingPortal>
       )}
