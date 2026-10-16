@@ -203,6 +203,46 @@ def test_dry_run_writes_the_launch_files(tmp_path, monkeypatch):
     )
 
 
+def test_head_records_into_the_profiles_database_and_store(tmp_path, monkeypatch):
+    """`head()` with `D1_DB_ID` (and `SCAN_RUNS_PROFILE`) only in the profile's `env` (cw's first prod run on the generic
+    head: its own start / finish found no database), and a non-primary `store`: both writes go to the profile's D1, the
+    run filed under the store. Nextflow is a fake process that exits 0."""
+    from dt_cloud import index_footer, scan_runs
+
+    for k in ("D1_DB_ID", "SCAN_RUNS_PROFILE", "DT_RECORD", "BATCH_JOB_UID", "DT_RUN_ID", "SNAP_ID", "GEN", "DT_JOB_START",
+              "REPROC", "DISKY_LABELS"):
+        monkeypatch.delenv(k, raising=False)
+    monkeypatch.setenv("TMPDIR", str(tmp_path / "t"))
+    monkeypatch.setenv("SNAP_ID", "2026-10-16T1200")
+    monkeypatch.setenv("GEN", "G1")
+    monkeypatch.setenv("DT_JOB_START", "100")
+    monkeypatch.setenv("DT_RUN_ID", "run-1")
+    runs = tmp_path / "scan-runs.json"
+    runs.write_text('{"store": "primary", "run_id_env": ["DT_RUN_ID", "BATCH_JOB_UID"]}')
+    prof = tmp_path / "p.yml"
+    prof.write_text(f"deployment: fix\nstore: meta\nexecutor: {{kind: local}}\nwork: {tmp_path}/nf\ndata: {tmp_path}/data\n"
+                    "layout: {layer2: 'meta-l2/{scan}/', snapshots: meta}\nsources: [s3://a]\n"
+                    "skip: [static-names, digest, interval-store, warm-cache, probe]\noptions: {list: {import: true}}\n"
+                    f"env: {{SCAN_RUNS_PROFILE: {runs}, D1_DB_ID: db-from-profile}}\n")
+    monkeypatch.setattr(index_footer, "D1_DB_ID", "")
+    monkeypatch.setattr(index_footer, "_creds", lambda: ("tok", "acct"))
+    dbs: list[str] = []
+    monkeypatch.setattr(index_footer, "_d1_query", lambda sql, acct, tok, db: dbs.append(db) or [])
+    monkeypatch.setattr(scan_runs, "lookup_job", lambda *a, **kw: None)
+    runs_written: list[tuple[str, str, str]] = []
+    record_sql = scan_runs.record_sql
+
+    def spy(rec, now):
+        runs_written.append((rec.run.scan, rec.run.store, rec.run.status))
+        return record_sql(rec, now)
+
+    monkeypatch.setattr(scan_runs, "record_sql", spy)
+    monkeypatch.setattr(H.subprocess, "Popen", lambda argv, **kw: SimpleNamespace(pid=0, wait=lambda: 0))
+    assert H.head(prof, tmp_path / "nf-dir", tmp_path / "launch") == 0
+    assert (runs_written[0], runs_written[-1][:2], set(dbs)) == (
+        ("2026-10-16T1200", "meta", "running"), ("2026-10-16T1200", "meta"), {"db-from-profile"})
+
+
 def test_publish_reports(tmp_path):
     """The reports that exist go to `<work>/runs/<scan>/`; a missing one is skipped."""
     launch, work = tmp_path / "launch", tmp_path / "work"
