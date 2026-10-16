@@ -3,8 +3,8 @@
 # requires-python = ">=3.11"
 # dependencies = ["click", "pillow"]
 # ///
-"""Generate GCS Usage Bot per-message Slack avatars from the GCS "Cloud Storage" mark.
-(The app's own icon is `deploy/slack/icons/gcs.png`, the store mark; `deploy/slack/README.md`.)
+"""Generate GCS Usage Bot per-message Slack avatars: the app's icon (`deploy/slack/icons/gcs.png`, the
+store mark from `scripts/marks/`; `deploy/slack/README.md`) with an emoji badge.
 
 Outputs (512px PNGs):
   gcs-digest.png            — per-message avatar for a normal digest (mark + :bar_chart: badge)
@@ -19,7 +19,6 @@ from click import argument, command, option
 
 S = 1024          # internal working size; outputs downscale to 512
 OUT = 512
-LIGHT = (255, 255, 255, 255)
 
 
 def emoji_glyph(ch: str, px: int):
@@ -30,17 +29,10 @@ def emoji_glyph(ch: str, px: int):
     return img.crop(img.getbbox()).resize((px, px), Image.LANCZOS)
 
 
-def base(mark_png: Path, bg: tuple, extent: float = 0.72):
-    """The GCS mark centered on a solid square, scaled to `extent` of the side."""
+def base(mark_png: Path):
+    """The store mark (full-bleed, `scripts/marks/`) at the working size."""
     from PIL import Image
-    mark = Image.open(mark_png).convert("RGBA")
-    mark = mark.crop(mark.getchannel("A").getbbox())  # trim transparent margin
-    box = int(S * extent)
-    scale = min(box / mark.width, box / mark.height)
-    mark = mark.resize((round(mark.width * scale), round(mark.height * scale)), Image.LANCZOS)
-    out = Image.new("RGBA", (S, S), bg)
-    out.alpha_composite(mark, ((S - mark.width) // 2, (S - mark.height) // 2))
-    return out
+    return Image.open(mark_png).convert("RGBA").resize((S, S), Image.LANCZOS)
 
 
 def badge(img, ch: str):
@@ -59,14 +51,14 @@ def save(img, path: Path):
 
 
 @command()
-@option("-m", "--mark", type=Path, default=Path(__file__).parent / "assets/gcs-mark.png", help="GCS mark PNG (transparent)")
+@option("-m", "--mark", type=Path, default=Path(__file__).parent.parent / "deploy/slack/icons/gcs.png", help="Store mark PNG (full-bleed square)")
 @option("-o", "--out-dir", type=Path, default=Path(__file__).parent / "icons", help="output dir")
 def main(mark: Path, out_dir: Path):
     out_dir.mkdir(parents=True, exist_ok=True)
-    light = base(mark, LIGHT)
+    icon = base(mark)
     made = [
-        save(badge(light, "\U0001F4CA"), out_dir / "gcs-digest.png"),   # 📊
-        save(badge(light, "\U0001F6A8"), out_dir / "gcs-breach.png"),   # 🚨
+        save(badge(icon, "\U0001F4CA"), out_dir / "gcs-digest.png"),   # 📊
+        save(badge(icon, "\U0001F6A8"), out_dir / "gcs-breach.png"),   # 🚨
     ]
     for p in made:
         print(p)
