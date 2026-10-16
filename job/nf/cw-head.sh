@@ -38,6 +38,10 @@ p = {
     "run_id": os.environ.get("DT_RUN_ID", ""), "buckets": os.environ["BUCKETS"], "data_bucket": os.environ["DATA"],
     "secrets": os.environ.get("NF_SECRETS", ""), "env": env, "session": os.environ["NF_SESSION"],
 }
+# the tasks' cost labels: the stack's (`$DISKY_LABELS`, as the cron passes them) + `component: scan`
+labels = dict(i.strip().split("=", 1) for i in os.environ.get("DISKY_LABELS", "").split(",") if i.strip())
+if labels:
+    p["labels"] = {**labels, "component": "scan"}
 if os.environ.get("NF_IMAGE"):
     p["image"] = os.environ["NF_IMAGE"]
 json.dump(p, open(sys.argv[1], "w"), indent=1)
