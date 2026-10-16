@@ -10,8 +10,8 @@
 #
 #   ./job/cw-batch-submit.sh              # submit, print job id
 #   DRY=1 ./job/cw-batch-submit.sh        # print the spec (for a scheduler body)
-#   NF=0 ./job/cw-batch-submit.sh         # the one-VM driver (job/cw-run.sh) instead of the Nextflow head
-#   NF=scan ./job/cw-batch-submit.sh      # the generic head (`dt-cloud scan head $PROFILE`, specs/pipelines-everywhere.md)
+#   NF=1 ./job/cw-batch-submit.sh         # cw's own Nextflow head (job/nf/cw-head.sh) instead of the generic one
+#   NF=0 ./job/cw-batch-submit.sh         # the one-VM driver (job/cw-run.sh)
 #
 # Prereq (one-time): the CAIOS S3 keypair in Secret Manager, readable by the SA.
 #   printf %s "$KEY_ID" | gcloud secrets create cw-s3-access-key-id --data-file=-
@@ -145,13 +145,14 @@ cat > "$spec" <<EOF
 }
 EOF
 
-# The Nextflow head (job/nf/cw-head.sh, specs/workflow-engine.md §7) is the default, and so the cron's body (PIN=1 runs
-# under a scrubbed env); NF=0 submits the one-VM driver (job/cw-run.sh) instead. The head only
+# The generic Nextflow head (`dt-cloud scan head $PROFILE`, specs/pipelines-everywhere.md) is the default, and so the
+# cron's body (PIN=1 runs under a scrubbed env); NF=1 submits cw's own head (job/nf/cw-head.sh), NF=0 the one-VM driver
+# (job/cw-run.sh). The head only
 # drives the DAG (each step is a Batch task of its own, which fetches its own secrets), so: a small VM, no stage disk,
 # and of the secrets only what the head itself uses (the scan-run record's D1 token, the alert's Slack token).
-# NF=scan: the generic head over the deployment's profile (`PROFILE`, a path in the image), the same small VM.
-if [ "${NF:-1}" != 0 ]; then
-  NF=${NF:-1} PROFILE=${PROFILE:-/app/job/profiles/cw-s3.yml} python3 - "$spec" <<'PY'
+# The generic head reads the deployment's profile (`PROFILE`, a path in the image).
+if [ "${NF:-scan}" != 0 ]; then
+  NF=${NF:-scan} PROFILE=${PROFILE:-/app/job/profiles/cw-s3.yml} python3 - "$spec" <<'PY'
 import json, os, sys
 p = sys.argv[1]; j = json.load(open(p))
 t = j["taskGroups"][0]["taskSpec"]
