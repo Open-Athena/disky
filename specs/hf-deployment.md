@@ -37,7 +37,7 @@ The static-names generation and the D1 are read from `site/wrangler.toml` (baked
 
 Decisions, and where they differ from what was asked:
 - **R2 only.** No GCS bucket at all, not even scratch: the VM's boot disk (100 GB pd-balanced) is the work dir.
-- **The path store comes from `index-write`, not `path-index -P`.** `path-index` re-aggregates the listing and carries only the GCS tier pivots (2–4), so the public / private / git split would be lost; `index-write` cuts the layer-2 as it is. `path-index` still writes the snapshot JSONs. Its `meta.json` `class_bytes` folds classes 5 and 6 into 1 (a generic `viz.py` limitation; hidden here since `prices: false`).
+- **The path store comes from `index-write`, not `path-index -P`.** `path-index` re-aggregates the listing and carries only the GCS tier pivots (2–4), so the public / private / git split would be lost; `index-write` cuts the layer-2 as it is. `path-index` still writes the snapshot JSONs. Its `meta.json` `class_bytes` keeps public 1, private 5 and git 6 apart (`viz.CLASS_IDS`, since `[cloud]` `0d8e8a2c`; before, 5 and 6 folded into 1).
 - **`-e duckdb`, not `-e stream`.** The HF lister writes shards in API order, and the stream engine wants key-sorted listings.
 - **Timestamped scan ids** (`YYYY-MM-DDTHHMM`, the run's start minute, as gcs/cw). A re-run is a new scan. Under date ids, a same-day re-run re-pointed the date's path store at a new listing while the append-only static index and interval store kept the first, so `ps=iv` and the per-scan read gave two answers for one scan (r2.rbw.sh, 2026-10-15). The first scan, `2026-10-15`, predates the switch and keeps its date id.
 - **Layout under the base's `listing/` prefix** (cw's `cw-l2/<scan>/` shape), so the site needs no `STORE_PREFIXES`.
@@ -123,8 +123,8 @@ export UV_PROJECT_ENVIRONMENT=$PWD/infra/.venv   # for pulumi; never the repo's 
 
 `AGENTS.md` "Deployments: parity by default" is the baseline; these are hf's missing items, open work in this order:
 - ~~`PATH_STORE = "intervals"`~~: done 2026-10-15 (first scan: `interval-store verify` 11/11 views equal). Diff parity is checked once there are two scans.
-- Cache warm-up and the serving probe: built (job steps 10–11, `probe -c` records under `probes/hf/`); they run once the job's grant exists (checklist step 8b).
-- The Slack digest thread: built 2026-10-15 (job step 12, `job/digest.yml`: the `cw` template, one reply per UTC day, % of the 253 TB public allowance, in decimal TB (`units: TB`, as HF bills); #hf-usage). It runs once these are applied, in order:
+- ~~Cache warm-up and the serving probe~~: live since the first scheduled scan (2026-10-16); warm-up's root-view fetch 403'd on urllib's User-Agent that day, fixed (`[cloud]` `b1930925`).
+- ~~The Slack digest thread~~: live since 2026-10-16 (October's thread in #hf-usage; the OP's sender is hf's mark, `op_icon: mark.png`, from November's thread on: `chat.update` can't change an existing OP's icon). Built 2026-10-15 (job step 12, `job/digest.yml`: the `cw` template, one reply per UTC day, % of the 253 TB public allowance, in decimal TB (`units: TB`, as HF bills); #hf-usage). It runs once these are applied, in order:
   1. The HF Usage Bot app from `job/slack/hf-usage-bot.manifest.json` (api.slack.com/apps → From a manifest), installed; its `xoxb-` token → `hf-usage-slack-bot-token` (replacing the copy of cw-s3's), the icon `deploy/slack/icons/hf.png`.
   2. `infra/cf/run up -s hf`: the icons Pages project `oa-hf-usage-icons` + the job's Pages token (`job_pages_token`).
   3. `infra/cf/hf-secrets -g`: now also `hf-usage-cf-pages-token`, after the GCP stack has its container: `pulumi up -s hf` in `infra/gcp` (+1 secret, +1 accessor; the cron body gains `SLACK_CHANNEL` + `CF_PAGES_TOKEN`). The secret needs its version before the next scheduled run: Batch refuses to start a job whose secret has none.
@@ -132,6 +132,7 @@ export UV_PROJECT_ENVIRONMENT=$PWD/infra/.venv   # for pulumi; never the repo's 
   5. The image (`job/build.sh`: now with wrangler, `job/digest.yml`, `job/icons-hf/`), then the cron (resumed after 8b).
   The site grant (8b) is needed too: the OP's plot is drawn by the site (`POST /api/digest-image`). Check a month's thread without posting: `dt-cloud digest -T cw -C job/digest.yml -n -r r2://oa-hf-usage-index/snapshots/hf` (with the R2 keys).
 - The meta store ("data behind this site"): waits on the shared self-scan + index step the root session is building on `cloud`.
+- ~~Share card~~: `site/public/og.jpg` is hf's generic card (`site/scripts/render-og-fallback.mjs`), with `OG_CARDS` / `OG_ANONYMOUS = "generic"` as cw.
 - Not applicable: staging / executor / sweeps (the site deletes nothing on the Hub), lifecycle pull (no lifecycle rules on the Hub).
 
 ## Hub-specific follow-ups
