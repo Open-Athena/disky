@@ -91,3 +91,23 @@ def test_widths_match_the_sites_canvas_snap():
     m = re.search(r"WARMED_WIDTHS = \[([\d, ]+)\]", src)
     assert m is not None
     assert tuple(int(w) for w in m.group(1).split(",")) == W.WIDTHS
+
+
+def test_top_paths_sends_a_user_agent(monkeypatch):
+    # Cloudflare bans urllib's default User-Agent (error 1010 → 403), so the root-view fetch carries the same UA as
+    # the warm requests (hf's first warm-cache, 2026-10-16, 403'd here before a single path was warmed)
+    import io
+    import json
+
+    sent = []
+
+    def urlopen(req, timeout):
+        sent.append((req.full_url, dict(req.header_items())))
+        return io.BytesIO(json.dumps({"tree": {"n": "", "c": [{"n": "buckets"}, {"n": "models"}]}}).encode())
+
+    monkeypatch.setattr(W.urllib.request, "urlopen", urlopen)
+    assert W.top_paths("https://x.test/", {"Authorization": "Bearer t"}, "2026-10-16T0801") == ("", "buckets", "models")
+    assert sent == [(
+        "https://x.test/api/subtree?date=2026-10-16T0801&path=&w=1280&h=768&depth=1",
+        {"Authorization": "Bearer t", "User-agent": "gcs-usage-warm/1.0"},
+    )]
