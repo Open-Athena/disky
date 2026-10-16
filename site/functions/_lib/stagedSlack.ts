@@ -521,18 +521,45 @@ async function renderReply(db: D1Database, c: ReplyCtx, ref: { replyId: number }
   return stageReply({ planId: c.planId, replyId: 'replyId' in ref ? ref.replyId : null, batchId: 'batchId' in ref ? ref.batchId : undefined, by: who(r.by, c.names), batches: r.batches, prefixes: r.prefixes, stats: c.stats, note: r.note, siteUrl: c.siteUrl })
 }
 
-/** Announce stage batch `batchId` in thread `thread`: join its stager's open
- *  reply there (updated within `COALESCE_S`) and edit it in place, or claim a
- *  new one and post it. The claim is the `stage_replies_open` unique index
- *  (one open reply per plan and stager): concurrent stages insert, one wins,
- *  every one attaches its batch to the winner. The winner re-renders after
- *  recording its post's ts, and a joiner that finds that ts edits the reply
- *  itself, so every batch attached ends up shown. */
-async function announceStage(env: SlackEnv, db: D1Database, o: { channel: string; thread: string; batchId: number; by: string; now: number; ctx: ReplyCtx; sender: Sender }): Promise<void> {
+/** A claimed reply not posted within this many seconds was claimed by a
+ *  notify that died (a `waitUntil` cut short): the next announce re-claims. */
+export const CLAIM_GRACE_S = 120
+
+/** Batches of the plan that no posted or pending reply shows: never linked
+ *  (`reply_id` NULL: their notify died before announcing), or linked to a
+ *  reply closed without ever being posted. Bounded to batches still holding
+ *  an item, staged no earlier than `COALESCE_S` before the deployment's first
+ *  coalesced reply: older unlinked batches are pre-coalescing ones, announced
+ *  by replies of their own. Binds `?1` = plan id, `?2` = now (the floor while
+ *  there is no reply yet). */
+const UNSHOWN = `b.plan_id = ?1
+  AND (b.reply_id IS NULL OR b.reply_id IN (SELECT id FROM stage_replies WHERE slack_ts IS NULL AND open IS NULL))
+  AND b.created_ts >= COALESCE((SELECT min(created_ts) FROM stage_replies), ?2) - ${COALESCE_S}
+  AND EXISTS (SELECT 1 FROM plan_items i WHERE i.plan_id = b.plan_id AND i.batch_id = b.id)`
+
+/** Stagers (lowercased) with batches no reply shows (`UNSHOWN`). */
+export async function unshownStagers(db: D1Database, planId: number, now: number): Promise<string[]> {
+  const { results } = await db.prepare(`SELECT DISTINCT lower(b.created_by) AS stager FROM stage_batches b WHERE ${UNSHOWN} ORDER BY stager`).bind(planId, now).all<{ stager: string }>()
+  return results.map(r => r.stager)
+}
+
+/** Announce `stager`'s batches in thread `thread`: join their open reply
+ *  there (updated within `COALESCE_S`) and edit it in place, or claim a new
+ *  one and post it. The reply takes `batchId` (the stage being announced, if
+ *  any) and every batch of theirs no reply shows (`UNSHOWN`), so a batch
+ *  whose own notify died is announced by the next notify that runs — theirs,
+ *  or anyone's (`notifyPlan`'s sweep). The claim is the `stage_replies_open`
+ *  unique index (one open reply per plan and stager): concurrent stages
+ *  insert, one wins, every one attaches its batch to the winner. The winner
+ *  re-renders after recording its post's ts, and a joiner that finds that ts
+ *  edits the reply itself, so every batch attached ends up shown. A claim
+ *  left unposted past `CLAIM_GRACE_S` is closed and its batches re-adopted. */
+async function announceStage(env: SlackEnv, db: D1Database, o: { channel: string; thread: string; batchId?: number; stager: string; now: number; ctx: ReplyCtx; sender: Sender }): Promise<void> {
   const { planId } = o.ctx
-  const stager = o.by.toLowerCase()
-  await db.prepare('UPDATE stage_replies SET open = NULL WHERE plan_id = ? AND stager = ? AND open = 1 AND (channel != ? OR thread_ts != ? OR updated_ts < ?)')
-    .bind(planId, stager, o.channel, o.thread, o.now - COALESCE_S).run()
+  const stager = o.stager.toLowerCase()
+  await db.prepare(`UPDATE stage_replies SET open = NULL WHERE plan_id = ? AND stager = ? AND open = 1
+    AND (channel != ? OR thread_ts != ? OR updated_ts < ? OR (slack_ts IS NULL AND created_ts < ?))`)
+    .bind(planId, stager, o.channel, o.thread, o.now - COALESCE_S, o.now - CLAIM_GRACE_S).run()
   const openReply = () => db.prepare('SELECT id, slack_ts FROM stage_replies WHERE plan_id = ? AND stager = ? AND open = 1').bind(planId, stager).first<{ id: number; slack_ts: string | null }>()
   let r = await openReply()
   let claimed = false
@@ -543,7 +570,8 @@ async function announceStage(env: SlackEnv, db: D1Database, o: { channel: string
     r = await openReply()
   }
   if (!r) return
-  await db.prepare('UPDATE stage_batches SET reply_id = ? WHERE id = ? AND plan_id = ?').bind(r.id, o.batchId, planId).run()
+  if (o.batchId != null) await db.prepare('UPDATE stage_batches SET reply_id = ? WHERE id = ? AND plan_id = ?').bind(r.id, o.batchId, planId).run()
+  await db.prepare(`UPDATE stage_batches AS b SET reply_id = ?3 WHERE ${UNSHOWN} AND lower(b.created_by) = ?4`).bind(planId, o.now, r.id, stager).run()
   await db.prepare('UPDATE stage_replies SET updated_ts = max(updated_ts, ?) WHERE id = ?').bind(o.now, r.id).run()
   const ref = { replyId: r.id }
   // Edit the reply until what it shows is what D1 holds (a joiner may attach
@@ -558,9 +586,11 @@ async function announceStage(env: SlackEnv, db: D1Database, o: { channel: string
   }
   if (claimed) {
     const m = await renderReply(db, o.ctx, ref)
-    if (!m) return
-    const p = await slackApi(env, 'chat.postMessage', { channel: o.channel, thread_ts: o.thread, ...m, ...o.sender, unfurl_links: false })
-    if (!p.ok || !p.ts) {
+    const p = m ? await slackApi(env, 'chat.postMessage', { channel: o.channel, thread_ts: o.thread, ...m, ...o.sender, unfurl_links: false }) : null
+    if (!m || !p?.ok || !p.ts) {
+      // Nothing to show (a sweep raced the batch's own notify) or the post
+      // failed: close the claim, so the next announce claims anew (after a
+      // failed post, re-adopting its batches).
       await db.prepare('UPDATE stage_replies SET open = NULL WHERE id = ?').bind(r.id).run()
       return
     }
@@ -642,14 +672,19 @@ export async function notifyPlan(env: NotifyEnv, db: D1Database, planId: number,
       await slackApi(env, 'chat.postMessage', { channel, thread_ts: old, text: `${ended} Continued in ${link ? `<${link}|a new thread>` : 'a new thread'}.`, ...PLAN_SENDER, unfurl_links: false })
       await slackApi(env, 'chat.update', { channel, ts: old, ...closedParent(planId, siteUrl, link) })
     }
+    const ctx: ReplyCtx = { planId, siteUrl, names, stats: at?.stats ?? null }
     if (stage) {
       await announceStage(env, db, {
-        channel, thread: ts, batchId: stage.batchId, by: stage.by, now,
-        ctx: { planId, siteUrl, names, stats: at?.stats ?? null },
+        channel, thread: ts, batchId: stage.batchId, stager: stage.by, now, ctx,
         sender: personSender(stage.by, people[stage.by.toLowerCase()], 'staged'),
       })
     } else if (event) {
       await slackApi(env, 'chat.postMessage', { channel, thread_ts: ts, text: event.text, ...(event.blocks ? { blocks: event.blocks } : {}), ...(event.sender ?? PLAN_SENDER), unfurl_links: false })
+    }
+    // Batches no reply shows (their own notify died) are announced now, by
+    // whichever notify runs next, each in its stager's reply.
+    for (const s of await unshownStagers(db, planId, now)) {
+      await announceStage(env, db, { channel, thread: ts, stager: s, now, ctx, sender: personSender(s, people[s], 'staged') })
     }
   } catch (e) {
     console.log(`staged slack notify failed for plan ${planId}: ${(e as Error).message}`)
