@@ -643,3 +643,16 @@ def test_dag_command_stores_a_runs_archived_dag(job, tmp_path):
     assert job.rows("SELECT run_id, engine, dag FROM scan_run_dags") == [
         ("u1", "nextflow", '{"nodes":[{"id":"list_source","label":"list_source"},{"id":"index","label":"index"}],"edges":[["list_source","index"]]}'),
     ]
+
+
+def test_a_dag_the_database_refuses_never_leaves_the_run_unfinished(job, tmp_path):
+    """A database whose `scan_run_dags` is in another shape (the migration not applied yet): the run still finishes."""
+    SqliteSink(job.db).execute(["DROP TABLE scan_run_dags", "CREATE TABLE scan_run_dags (run_id TEXT PRIMARY KEY, mermaid TEXT NOT NULL)"])
+    dag = tmp_path / "dag.mmd"
+    dag.write_text('flowchart TB\n    v0(["index"])\n')
+    assert job("start", SCAN, at=T0) == 0
+    assert job("finish", "-x", "0", "-D", str(dag), at=T0 + 80) == 0
+    assert job.rows("SELECT status, finished_ts FROM scan_runs") == [("succeeded", T0 + 80)]
+    assert [l for l in job.take() if l.startswith("scan-run record failed")] == [
+        "scan-run record failed (the scan continues): OperationalError: table scan_run_dags has no column named engine",
+    ]
