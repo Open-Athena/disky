@@ -3133,5 +3133,25 @@ def _secrets_exec(project: str | None, bindings: tuple[str, ...], cmd: tuple[str
     os.execvpe(cmd[0], list(cmd), env)
 
 
+@main.command("batch-cancel")
+@option("-l", "--label", "labels", multiple=True, required=True, help="KEY=VALUE (repeatable): cancel only jobs carrying every one")
+@option("-n", "--dry-run", is_flag=True, help="List the live jobs that match; cancel none")
+@option("-r", "--region", default=None, help="Batch region (default `$BATCH_REGION`, else us-central1)")
+def _batch_cancel(labels: tuple[str, ...], dry_run: bool, region: str | None) -> None:
+    """Cancel (delete) every live Batch job carrying all of the `-l` labels, e.g. a killed Nextflow head's leftover
+    tasks (`-l nf-session=<id>`). Prints each job's name."""
+    from .batch import cancel_labelled
+    from .gcp import REGION
+
+    want = {}
+    for l in labels:
+        k, sep, v = l.partition("=")
+        if not sep or not k:
+            raise UsageError(f"label must be KEY=VALUE: {l!r}")
+        want[k] = v
+    for n in cancel_labelled(want, region=region or REGION, dry_run=dry_run, log=err):
+        print(n)
+
+
 if __name__ == "__main__":
     main()
