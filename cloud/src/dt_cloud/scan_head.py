@@ -90,6 +90,7 @@ def params(profile: ScanProfile, profile_json: str, scan: str, gen: str, job_sta
         "steps": list(enabled),
         "pre": [n for n in enabled if STEPS[n].stage == "pre" and n != "bucket-check"],
         "pre_label": "pre" if "pre" in profile.machines else "small",
+        "interval_label": "interval" if "interval" in profile.machines else "big",
         "post": [n for n in enabled if STEPS[n].stage == "post"],
         "fold": list(profile.fold),
         "skip_list": reproc,

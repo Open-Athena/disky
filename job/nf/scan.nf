@@ -22,6 +22,7 @@ params.list_default = [:]  // the profile's `machines.list`: [machine:, disk:]
 params.steps = []          // every enabled step (core minus `skip`, plus the profile's `steps`)
 params.pre = []            // enabled extra steps beside `list`, before `index` (soft: index runs without them)
 params.pre_label = 'small'
+params.interval_label = 'big'
 params.post = []           // the post task's steps, in order
 params.fold = []
 params.skip_list = false   // REPROC: run from `index`
@@ -113,7 +114,7 @@ process publish_r2 {
 }
 
 process interval_store {
-    label 'big'
+    label params.interval_label  // `interval` when the profile sizes it (`machines.interval`), else `big` (index's machine)
     input: val published
     output: path 'done'
     script: stepScript(task, ['interval-store'])

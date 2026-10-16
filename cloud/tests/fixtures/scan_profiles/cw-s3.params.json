@@ -48,6 +48,7 @@
  ],
  "pre": [],
  "pre_label": "small",
+ "interval_label": "big",
  "post": [
   "over-time",
   "index-gc",
