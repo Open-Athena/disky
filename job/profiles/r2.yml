@@ -28,7 +28,7 @@ machines:
   list: {type: e2-standard-4, disk: 50}
   post: e2-standard-8
 # r2 scans four approved buckets of an account that holds many more (specs/r2-deployment.md): an unscanned-bucket
-# alert would fire every run, and the source key can't list the account's buckets anyway
+# alert would fire every run, and r2 holds no account-wide key to list the account's buckets with (by design)
 skip: [bucket-check]
 secrets:
   R2_ACCESS_KEY_ID: oa-r2-index-access-key-id
