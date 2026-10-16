@@ -670,6 +670,10 @@ function AppContent() {
   const storeBase = store.path === '/' ? '' : store.path
   // Decoded once: a dir name with spaces or URL delimiters travels encoded (`toUrlPath`).
   const drillPath = fromUrlPath(pathname.slice(storeBase.length)).join('/')
+  // A store with its own scan root (`Store.root`) opens there: nothing is above it.
+  useEffect(() => {
+    if (!drillPath && store.root?.length) navigate({ pathname: `${storeBase}/${toUrlPath(store.root)}`, search, hash: window.location.hash }, { replace: true })
+  }, [drillPath, store.root]) // eslint-disable-line react-hooks/exhaustive-deps
   // The series' and the diff's path: at a filtered union root whose matches sit under one root (which the map
   // opens inside), that root — its member answers, where the union root refuses `q=` (`scopedPath`; undefined:
   // the root's answer isn't here yet).
@@ -1156,12 +1160,14 @@ function AppContent() {
   const here = mapPath?.[mapPath.length - 1]
   // The deepest crumb is a tap-to-open path card (the full `<scheme>…/` prefix +
   // copy) rather than another drill link — it's where the page already is.
+  // Where the store's own root is (`Store.root`), when this path is under it: crumbs above it would only bounce back.
+  const storeRoot = store.root && store.root.every((r, i) => segs[i] === r) ? store.root : []
   const crumbFullPath = pathText(pathScheme, segs, true)
   const crumbCopy = pathCopy(pathScheme, segs, true)
   const crumbs = (
     <span className="tb-path" aria-label="Drilled path">
-      <RootCrumb treeName={mapTree?.n} rootLabel={rootLabel} rootTitle={rootTitle} scopeWord={store.rootLabel} here={!segs.length} onClick={() => drillTo([])} />
-      {segs.map((sg, i) => (
+      <RootCrumb treeName={mapTree?.n} rootLabel={rootLabel} rootTitle={rootTitle} scopeWord={store.rootLabel} here={segs.length <= storeRoot.length} onClick={() => drillTo(storeRoot)} />
+      {segs.map((sg, i) => i < storeRoot.length ? null : (
         <span key={i}>
           <span className="sep">/</span>
           {i === segs.length - 1

@@ -45,6 +45,9 @@ export interface Store {
    *  home directory; unset on bucket stores, where the share console's Hide
    *  field refuses `~` lines (`hideScopes`). */
   home?: string[]
+  /** A file store's scan root as segments under `/` (`['mnt', 'user']`) when its paths keep the full path: the map
+   *  opens there (an empty drill path redirects to it), and the crumbs start there. Unset: `/`. */
+  root?: string[]
   /** Mixed-provider stores can label each bucket with its actual URI scheme. */
   bucketSchemes?: Record<string, string>
   base: string     // layer-3 data root
