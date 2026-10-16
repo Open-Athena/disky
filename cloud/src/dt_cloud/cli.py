@@ -3111,5 +3111,27 @@ from .d1_schema import cli as _d1_schema  # noqa: E402
 main.add_command(_d1_schema)
 
 
+@main.group("secrets")
+def _secrets() -> None:
+    """Secret Manager values for a step's environment."""
+
+
+@_secrets.command("exec")
+@option("-p", "--project", help="GCP project the bare secret names are in (default: `$GCP_PROJECT`, else ADC's)")
+@option("-s", "--secret", "bindings", multiple=True, help="ENV=SECRET[@VERSION] (repeatable): set ENV from the secret when it is unset")
+@argument("cmd", nargs=-1, required=True)
+def _secrets_exec(project: str | None, bindings: tuple[str, ...], cmd: tuple[str, ...]) -> None:
+    """Run CMD with each `-s` secret in its environment, fetched as the caller's credentials (a Batch VM's service
+    account). Values never reach argv, logs or a task's work dir (unlike Nextflow's `secret` store, which writes
+    them into `.command.run`); already-set variables are kept, so a job spec's `secretVariables` still win."""
+    from .gcp import gcp_project, session
+    from .secrets import resolve
+
+    env = dict(os.environ)
+    if bindings:
+        env.update(resolve(list(bindings), project or gcp_project(), session(), env))
+    os.execvpe(cmd[0], list(cmd), env)
+
+
 if __name__ == "__main__":
     main()

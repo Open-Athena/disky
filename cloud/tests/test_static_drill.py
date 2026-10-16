@@ -656,6 +656,37 @@ def test_settling_by_ranges_writes_the_same_bytes(world, run_rg, tmp_path, monke
     assert calls == SETTLE_CALLS[world["cfg"]["R"]][i]
 
 
+@pytest.mark.parametrize("i", range(len(DAYS) - BASE), ids=lambda i: f"run{i + 1}")
+def test_settling_in_chunks_writes_the_same_bytes(world, run_rg, tmp_path, monkeypatch, i):
+    """A run's drill is the same files, byte for byte, with settling's inputs loaded one directory at a time (each chunk
+    loads, settles and appends its directories before the next) as all at once."""
+    rebuild = world["rebuilds"][i]
+    chunks: list[int] = []
+    settle_ctx = sd._settle_ctx
+
+    def counted(con, aff, cands):
+        chunks.append(len(aff))
+        return settle_ctx(con, aff, cands)
+
+    monkeypatch.setattr(sd, "_settle_ctx", counted)
+    rebuild(tmp_path / "whole")
+    whole = list(chunks)
+    chunks.clear()
+    monkeypatch.setattr(sd, "SETTLE_CHUNK_ROWS", 1)
+    rebuild(tmp_path / "chunked")
+    assert _tree(tmp_path / "chunked", drop={"s", "reads"}) == _tree(tmp_path / "whole", drop={"s", "reads"})
+    assert chunks == [1] * sum(whole)
+
+
+def test_settle_chunks():
+    """Directories in order, cut where the next would take a chunk past `chunk_rows`; one over it alone is its own."""
+    aff = [("a", "x"), ("a", "y"), ("b", "x"), ("b", "y"), ("c", "x")]
+    sizes = {("a", "x"): 3, ("a", "y"): 4, ("b", "x"): 20, ("b", "y"): 1}
+    assert sd._settle_chunks(aff, sizes, 8) == [[("a", "x"), ("a", "y")], [("b", "x")], [("b", "y"), ("c", "x")]]
+    assert sd._settle_chunks(aff, sizes, 1) == [[("a", "x")], [("a", "y")], [("b", "x")], [("b", "y"), ("c", "x")]]
+    assert sd._settle_chunks([], sizes, 8) == []
+
+
 # ── Checkpoints: a reclaimed task's retry resumes (specs/drill-preemption.md) ──
 
 
