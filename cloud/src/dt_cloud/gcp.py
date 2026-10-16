@@ -97,10 +97,19 @@ def batch_job(name: str, project: str | None = None, region: str = REGION) -> di
 
 
 def batch_job_by_uid(uid: str, project: str | None = None, region: str = REGION) -> dict | None:
-    """The Batch job whose uid is `uid` (a task knows only its `$BATCH_JOB_UID`), or None."""
+    """The Batch job whose uid is `uid` (a task knows only its `$BATCH_JOB_UID`), or None. Follows the pages: a
+    filtered list can answer an empty page and a `nextPageToken` (the filter runs per page), so the first page alone
+    missed 2 of a run's 10 tasks."""
     project = project or gcp_project()
-    jobs = _get(f"https://batch.googleapis.com/v1/projects/{project}/locations/{region}/jobs", filter=f'uid="{uid}"').get("jobs", [])
-    return jobs[0] if jobs else None
+    url = f"https://batch.googleapis.com/v1/projects/{project}/locations/{region}/jobs"
+    params = {"filter": f'uid="{uid}"'}
+    while True:
+        page = _get(url, **params)
+        if jobs := page.get("jobs"):
+            return jobs[0]
+        if not (token := page.get("nextPageToken")):
+            return None
+        params["pageToken"] = token
 
 
 def log_entries(
