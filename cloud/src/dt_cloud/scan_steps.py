@@ -65,8 +65,12 @@ R2 = ("R2_ENDPOINT", "R2_BUCKET")
 
 
 class StepFailed(Exception):
-    def __init__(self, rc: int, what: str):
+    """A step's failure, its exit code `rc`. `hard`: fails the run even from a soft step (a barrier the rest of the
+    DAG must not pass, e.g. publish-r2's `barrier`)."""
+
+    def __init__(self, rc: int, what: str, hard: bool = False):
         self.rc = rc
+        self.hard = hard
         super().__init__(what)
 
 
@@ -181,7 +185,29 @@ class Ctx:
         where `index` reads it."""
         if self.opt("list", "import", False):
             return self.work / "listing" / bucket
-        return self.data_root / self.profile.layout.listing.format(scan=self.scan) / bucket
+        return self.data_root / self.listing_key(bucket)
+
+    def listing_key(self, bucket: str, scan: str | None = None) -> str:
+        """A source's listing dir under the data store (`layout.listing`), for this scan or another."""
+        return f"{self.profile.layout.listing.format(scan=scan or self.scan)}{bucket}"
+
+    def listing_out(self, bucket: str) -> str | Path:
+        """Where `bulk-list` writes a source's listing: the data store's URL when it is one and `index` reads the
+        listing from it (the lister writes shards to `gs://` directly, not through the task's FUSE mount), else
+        `listing_dir`."""
+        if not self.opt("list", "import", False) and urlparse(self.profile.data).scheme:
+            return f"{self.data_uri}/{self.listing_key(bucket)}"
+        return self.listing_dir(bucket)
+
+    def prior_listing(self, bucket: str) -> Path | None:
+        """The newest completed listing of `bucket` from an earlier scan (`<layout.listing>` with any scan id, a
+        `_SUCCESS.json` beside its shards): `bulk-list -W`'s chunk weights, so no worker draws a 100M-object prefix
+        alone and straggles for hours."""
+        tmpl = self.listing_key(bucket, "{scan}")
+        at = tmpl.split("/").index("{scan}")
+        done = sorted(((m.parent.relative_to(self.data_root).parts[at], m.parent)
+                       for m in self.data_root.glob(f"{tmpl.replace('{scan}', '*')}/_SUCCESS.json")), reverse=True)
+        return next((d for scan, d in done if scan < self.scan), None)
 
     # settings
 
@@ -288,6 +314,18 @@ def bucket_check(ctx: Ctx, arg: str | None) -> None:
                 f"non-empty bucket(s) not in the profile's sources: `{text}`"], fatal=False, warn="unscanned-bucket alert not sent")
 
 
+@step("access-ingest", core=False, stage="pre", soft=True, options={"args": list})
+def access_ingest(ctx: Ctx, arg: str | None) -> None:
+    """The buckets' access logs → the read-recency shards (`dt-cloud access ingest`, incremental and watermarked: its
+    settings in the env), beside `list`. Soft: `index` runs without the newest shards, and the next run catches up."""
+    if ctx.reproc:
+        err("access-ingest off under REPROC")
+        return
+    with ctx.phase("access-ingest"):
+        ctx.sh(["dt-cloud", "access", "ingest", *ctx.opt("access-ingest", "args", [])], fatal=False,
+               warn="access ingest failed (read recency lags until the next run's ingest)")
+
+
 def s3_client(endpoint: str | None):
     """A virtual-hosted client (CAIOS rejects path-style object calls, `PathStyleRequestNotAllowed`)."""
     import boto3
@@ -349,11 +387,12 @@ def _import(ctx: Ctx, bucket: str, kind: str, listing: Path) -> None:
 
 
 @step("list", skippable=False, stage="list", arg=True, requires=_list_check,
-      options={"import": bool, "bulk_args": list, "import_args": list, "threads": int})
+      options={"import": bool, "bulk_args": list, "import_args": list, "threads": int, "weights": bool})
 def list_source(ctx: Ctx, uri: str | None) -> None:
     """One source's listing (`disk-tree bulk-list`, `-x clear`: a retried task never merges a half-finished attempt's
     shards), and with `options.list.import` its layer-2 at once (the per-source machine imports what it listed; the
-    layer-2 goes to the data store, the canonical input every later one-shot reads). Skips when its output exists."""
+    layer-2 goes to the data store, the canonical input every later one-shot reads). Skips when its output exists.
+    `options.list.weights`: chunk weights (`-W`) from the source's newest earlier listing in the data store."""
     if not uri:
         raise StepFailed(2, "list needs the source URI")
     src = ctx.profile.source(uri)
@@ -366,10 +405,17 @@ def list_source(ctx: Ctx, uri: str | None) -> None:
         return
     _raise_nofile()
     threads = src.threads or ctx.opt("list", "threads")
+    weights: list[str] = []
+    if ctx.opt("list", "weights", False):
+        prior = ctx.prior_listing(b)
+        if prior is None:
+            err(f"WARN: no earlier completed listing of {b}: listing with unweighted chunks")
+        else:
+            weights = ["-W", f"{prior}/*.parquet"]
     with ctx.phase(f"list {b}"):
         ctx.sh(["disk-tree", "bulk-list", *ctx.opt("list", "bulk_args", []), uri,
-                *(["-E", src.endpoint] if src.endpoint else []), "-o", listing, "-P", src.procs or ctx.nproc,
-                *(["-w", threads] if threads else []), "-x", "clear", *src.args])
+                *(["-E", src.endpoint] if src.endpoint else []), "-o", ctx.listing_out(b), "-P", src.procs or ctx.nproc,
+                *(["-w", threads] if threads else []), "-x", "clear", *weights, *src.args])
     if imports:
         with ctx.phase(f"import {b}"):
             _import(ctx, b, src.kind, listing)
@@ -381,18 +427,27 @@ def _index_check(p: ScanProfile) -> list[str]:
     if mode not in ("layer2", "path-index"):
         return [f"options.index.mode: layer2 or path-index (got {mode!r})"]
     if mode == "path-index":
-        return ["options.index.mode: path-index (gcs's `dt-cloud path-index` over the listings) is not ported yet (spec §6)"]
-    return [f"options.index.{k}: only with mode path-index" for k in ("attribution", "access") if k in o]
+        problems = [f"options.index.{k}: only with mode layer2" for k in ("webdata", "mem", "threads") if k in o]
+        if p.opts("list").get("import"):
+            problems.append("options.list.import: path-index reads the listings themselves (no per-source layer-2)")
+        if urlparse(p.data).scheme not in ("gs", "gcs"):
+            problems.append("data: a gs:// bucket with options.index.mode path-index (its inputs are staged from GCS)")
+        return problems
+    return [f"options.index.{k}: only with mode path-index" for k in ("attribution", "access", "rules") if k in o]
 
 
 @step("index", skippable=False, stage="index", requires=_index_check,
       options={"mode": str, "webdata": list, "lifecycle": bool, "mem": str, "threads": int, "args": list,
-               "attribution": list, "access": str})
+               "attribution": list, "access": str, "rules": bool})
 def index(ctx: Ctx, arg: str | None) -> None:
     """Every source's layer-2 (imported here from the listings unless `list` did), the snapshot JSONs
     (`options.index.webdata`: the deployment's command, `{web}` its out dir, `{sources}` the `<bucket>=<layer-2>` args),
     published to `snapshots/<subdir>/<scan>/` (+ `lifecycle.json`), and the index tiers (`dt-cloud index-write`) under
-    `<layer2>/index/<gen>/`, `path-index.parquet` copied last: the skip-if-done mark."""
+    `<layer2>/index/<gen>/`, `path-index.parquet` copied last: the skip-if-done mark. `options.index.mode: path-index`
+    builds both from the listings in one pass instead (`path_index`)."""
+    if ctx.opt("index", "mode", "layer2") == "path-index":
+        path_index(ctx)
+        return
     imports = bool(ctx.opt("list", "import", False))
     srcs: list[str] = []
     with ctx.phase("layer-2"):
@@ -413,14 +468,7 @@ def index(ctx: Ctx, arg: str | None) -> None:
         web = ctx.work / "web"
         with ctx.phase("webdata"):
             ctx.sh(ctx.expand(webdata, web=web, sources=srcs))
-        dest = ctx.data_root / ctx.snapshots / ctx.scan
-        with ctx.phase("publish"):
-            dest.mkdir(parents=True, exist_ok=True)
-            for f in sorted(web.glob("*.json")):
-                copy_atomic(f, dest / f.name)
-            if ctx.opt("index", "lifecycle", False):
-                ctx.sh(["dt-cloud", "lifecycle", "pull", *[a for s in ctx.profile.sources for a in ("-b", s.bucket)],
-                        "-o", dest / "lifecycle.json"], fatal=False, warn="lifecycle pull failed")
+        _publish(ctx, web)
     else:
         err("no options.index.webdata: no snapshot JSONs")
     key_dir = ctx.data_root / ctx.index_key
@@ -433,6 +481,83 @@ def index(ctx: Ctx, arg: str | None) -> None:
         files = sorted(out.glob("*.parquet"), key=lambda p: (p.name == "path-index.parquet", p.name))
         for f in files:
             copy_atomic(f, key_dir / f.name)
+
+
+def _publish(ctx: Ctx, web: Path) -> None:
+    """The snapshot JSONs in `web` to `snapshots/<subdir>/<scan>/` (+ the sources' `lifecycle.json`, and with
+    `options.index.rules` the attribution rules' `snapshots/<subdir>/rules.json`; both never fatal)."""
+    dest = ctx.data_root / ctx.snapshots / ctx.scan
+    with ctx.phase("publish"):
+        dest.mkdir(parents=True, exist_ok=True)
+        for f in sorted(web.glob("*.json")):
+            copy_atomic(f, dest / f.name)
+        if ctx.opt("index", "lifecycle", False):
+            # a GCS source by its `gs://` URI (the pull picks the cloud by scheme); `-k`: an unreadable bucket is left out
+            ctx.sh(["dt-cloud", "lifecycle", "pull", "-k",
+                    *[a for s in ctx.profile.sources for a in ("-b", f"gs://{s.bucket}" if s.kind == "gcs" else s.bucket)],
+                    "-o", dest / "lifecycle.json"], fatal=False, warn="lifecycle pull failed")
+        if ctx.opt("index", "rules", False):
+            rules = ctx.work / "rules.json"
+            ctx.sh(["dt-cloud", "rules", "-o", rules], fatal=False, warn="attribution rules have findings")
+            if rules.exists():
+                copy_atomic(rules, ctx.data_root / ctx.snapshots / "rules.json")
+
+
+def upload(files: Sequence[Path], dest: str) -> None:
+    """`files` to the `gs://<bucket>/<prefix>` dir `dest` in order (big ones in parallel chunks: the FUSE mount writes
+    ~20-50 MB/s), so a caller lists its skip-if-done mark last."""
+    from google.cloud import storage
+    from google.cloud.storage import transfer_manager
+
+    u = urlparse(dest)
+    bucket = storage.Client().bucket(u.netloc)
+    for f in files:
+        blob = bucket.blob(f"{u.path.strip('/')}/{f.name}")
+        if f.stat().st_size > 256 << 20:
+            transfer_manager.upload_chunks_concurrently(str(f), blob, chunk_size=64 << 20, max_workers=16)
+        else:
+            blob.upload_from_filename(str(f))
+
+
+def path_index(ctx: Ctx) -> None:
+    """`options.index.mode: path-index`: every source's listing (`layout.listing`) + the attribution parquets
+    (`options.index.attribution`, keys in the data store) + the access-log shards (`options.index.access`, a key glob;
+    left out while none exist), staged to the task's local disk (`dt-cloud stage`; gcsfuse reads ~20-50 MB/s and the
+    aggregation makes several passes), aggregated in one pass (`dt-cloud path-index`: the snapshot JSONs and the path
+    store's sorts, with the attribution-independent rollups cached at `<listing>/dir-cache`), then the tiers uploaded
+    to `<layer2>/index/<gen>/` (`path-index.parquet` last, the skip-if-done mark) and the JSONs published."""
+    store = ctx.data_uri.split("://", 1)[1]  # `<bucket>[/<prefix>]`
+    key_dir = ctx.data_root / ctx.index_key
+    for s in ctx.profile.sources:
+        ctx.need(ctx.listing_dir(s.bucket) / "_SUCCESS.json", "list")
+    if ctx.done(key_dir / "path-index.parquet", "index tiers") and ctx.done(ctx.data_root / ctx.snapshots / ctx.scan / "meta.json", "snapshot"):
+        return
+    gcs = lambda key: f"/gcs/{store}/{key}"  # noqa: E731 — `dt-cloud stage`'s glob form
+    lglobs = [gcs(f"{ctx.listing_key(s.bucket)}/*.parquet") for s in ctx.profile.sources]
+    attr = [gcs(a) for a in ctx.opt("index", "attribution", [])]
+    access = ctx.opt("index", "access")
+    xglobs = [gcs(access)] if access and next(iter(ctx.data_root.glob(access)), None) else []
+    if access and not xglobs:
+        err(f"no access shards at {access}: the index runs without read recency")
+    stage = ctx.work / "stage"
+    local = lambda g: str(stage / g.removeprefix("/gcs/"))  # noqa: E731
+    pi = ctx.work / "path-index"
+    snap = ctx.work / "snap"
+    pi.mkdir(parents=True, exist_ok=True)
+    with ctx.phase("path-index"):
+        ctx.sh(["dt-cloud", "stage", "-o", stage, *lglobs, *[g.replace("*.parquet", "_SUCCESS.json") for g in lglobs], *attr, *xglobs])
+        tmp = stage / ".duckdb-tmp"
+        tmp.mkdir(parents=True, exist_ok=True)
+        ctx.sh(["dt-cloud", "path-index", "-d", ctx.date, *[a for g in lglobs for a in ("-l", local(g))],
+                *[a for g in attr for a in ("-a", local(g))], *[a for g in xglobs for a in ("-x", local(g))],
+                "-o", snap, "-c", ctx.data_root / ctx.listing_key("dir-cache"), "-P", pi / "path-index.parquet",
+                *ctx.opt("index", "args", [])], env={"DUCKDB_TMP": str(tmp)})
+    with ctx.phase("path-index upload"):
+        files = sorted((f for f in pi.iterdir() if f.is_file() and not f.name.startswith(".")),
+                       key=lambda f: (f.name == "path-index.parquet", f.name))
+        err(f"uploading {len(files)} files ({sum(f.stat().st_size for f in files) / 1e9:.1f} GB) to {ctx.data_uri}/{ctx.index_key}/")
+        upload(files, f"{ctx.data_uri}/{ctx.index_key}")
+    _publish(ctx, snap)
 
 
 def _static_check(p: ScanProfile) -> list[str]:
@@ -455,25 +580,57 @@ def static_names(ctx: Ctx, arg: str | None) -> None:
                fatal=False, warn=f"static-names runs add failed for {ctx.scan}")
 
 
-@step("publish-r2", stage="serve", soft=True)
+@step("publish-r2", stage="serve", soft=True, options={"args": list, "require": list, "keys": list, "barrier": bool})
 def publish_r2(ctx: Ctx, arg: str | None) -> None:
     """The scan's served subset (snapshot JSONs, the layer-2 dir) to R2, idempotent by size + md5; `-a`: every
-    `index/<gen>/` under the scan, not D1's (the scan is listed after)."""
+    `index/<gen>/` under the scan, not D1's (the scan is listed after). Options: `args` (e.g. `-S`: only the small files
+    the site reads beside the path store), `require` (keys that must be there and verify, `{snapshots}`, `{scan}`,
+    `{index}` filled), `keys` (store-wide keys published beside the scan, each required too), and `barrier`: a site that
+    serves these from R2 only fails the run instead (no D1 pointer moves; the previous scan stays visible)."""
+    barrier = bool(ctx.opt("publish-r2", "barrier", False))
     with ctx.phase("publish-r2"):
         if not ctx.has(*R2):
+            if barrier:
+                raise StepFailed(1, "no R2_ENDPOINT/R2_BUCKET: publication blocked (D1 pointers not advanced)", hard=True)
             err("no R2_ENDPOINT/R2_BUCKET: skipping publish-r2")
             return
-        ctx.sh(["dt-cloud", "publish-r2", "-a", ctx.scan], fatal=False, warn=f"publish-r2 failed for {ctx.scan} (the site keeps serving the data store)")
+        fill = dict(snapshots=ctx.snapshots, scan=ctx.scan, index=ctx.index_key)
+        req = [a for k in ctx.opt("publish-r2", "require", []) for a in ("-R", k.format(**fill))]
+        runs = [["dt-cloud", "publish-r2", *ctx.opt("publish-r2", "args", []), "-a", *req, ctx.scan]]
+        runs += [["dt-cloud", "publish-r2", "-a", "-p", k, "-R", k, ctx.scan] for k in ctx.opt("publish-r2", "keys", [])]
+        for argv in runs:
+            if ctx.sh(argv, fatal=False, warn=f"publish-r2 failed for {ctx.scan} (the site keeps serving the data store)") is None and barrier:
+                raise StepFailed(1, f"publish-r2 failed for {ctx.scan}: D1 pointers were not advanced, so the previous scan "
+                                    "remains visible; repair the R2 copy, then resume", hard=True)
 
 
-@step("interval-store", stage="serve", soft=True, options={"store": str, "timeout": str, "mem": str})
+@step("interval-store", stage="serve", soft=True, options={"store": str, "timeout": str, "mem": str, "profile": str, "merge_wait": int})
 def interval_store(ctx: Ctx, arg: str | None) -> None:
     """Append this scan (and any pending) to the change-interval path store beside its current generation, then the
     due carries / compaction (`interval-store add`). Never fatal (`-W`): a failure or the timeout warns, the next run
-    catches up. Reads the scans' `path` sorts at `<layer2>/index/<gen>/path-index.parquet` from the store."""
+    catches up. Reads the scans' `path` sorts at `<layer2>/index/<gen>/path-index.parquet` from the store.
+    `options.interval-store.profile`: the staged path instead (`interval-store append -c`, its per-range stages Batch
+    jobs of their own, in this task's image; `merge_wait` seconds on the merge job), for a store too big for one task."""
+    if ctx.reproc:
+        err(f"interval-store: not appending {ctx.scan} (REPROC)")
+        return
+    from .scan_runs import duration, run_grouped
+
+    timeout = ctx.opt("interval-store", "timeout")
+    if ctx.opt("interval-store", "profile"):
+        cmd = ["dt-cloud", "interval-store", "append", "-c", "-w", str(ctx.opt("interval-store", "merge_wait", 0)), ctx.scan]
+        env = {"INTERVAL_STORE_PROFILE": str(ctx.opt("interval-store", "profile"))}
+        if ctx.env.get("JOB_IMAGE"):
+            env["INTERVAL_STORE_IMAGE"] = ctx.env["JOB_IMAGE"]
+        ctx.run.begin("interval-store")
+        err("+ " + " ".join(cmd))
+        ran = run_grouped(cmd, duration(timeout) if timeout else None, 30.0, env={**ctx.env, **env})
+        ctx.run.end("interval-store", ran.rc, warn=True, msg="the scan reads per-scan until a later run appends it",
+                    timed_out=timeout if ran.timed_out else None, terminated=ran.signal if ran.rc else None)
+        return
     store = ctx.opt("interval-store", "store") or ctx.env.get("R2_ARCHIVE")
-    if ctx.reproc or not store:
-        err(f"interval-store: not appending {ctx.scan} ({'REPROC' if ctx.reproc else 'no store: options.interval-store.store or R2'})")
+    if not store:
+        err(f"interval-store: not appending {ctx.scan} (no store: options.interval-store.store or R2)")
         return
     cur = ctx.sh(["dt-cloud", "interval-store", "current", "-o", store], fatal=False, capture=True)
     if cur is None:
@@ -482,15 +639,12 @@ def interval_store(ctx: Ctx, arg: str | None) -> None:
     if not cur.strip():
         err(f"no interval store at {store} yet: not appending {ctx.scan}")
         return
-    from .scan_runs import duration, run_grouped
-
     layout = ctx.profile.layout.layer2.replace("{scan}", "{id}") + "index/{gen}/path-index.parquet"
     cmd = ["dt-cloud", "interval-store", "add", "-L", layout, "-s", store, "-o", store, "-w", str(ctx.work / "interval-store"),
            *(["-M", ctx.opt("interval-store", "mem")] if ctx.opt("interval-store", "mem") else []), "-p", str(ctx.nproc)]
-    timeout = ctx.opt("interval-store", "timeout")
     ctx.run.begin("interval-store")
     err("+ " + " ".join(cmd))
-    ran = run_grouped(cmd, duration(timeout) if timeout else None, 30.0)
+    ran = run_grouped(cmd, duration(timeout) if timeout else None, 30.0, env=ctx.env)
     ctx.run.end("interval-store", ran.rc, warn=True, msg="the scan reads per-scan until a later run appends it",
                 timed_out=timeout if ran.timed_out else None, terminated=ran.signal if ran.rc else None)
 
@@ -510,18 +664,20 @@ def index_rows(ctx: Ctx, arg: str | None) -> None:
         ctx.sh(["dt-cloud", "index-sync", "-r", *_sync_args(ctx), ctx.scan], fatal=False, warn="index-sync -r failed (the pointer flip will refuse)")
 
 
-@step("index-sync", skippable=False, stage="sync", soft=True)
+@step("index-sync", skippable=False, stage="sync", soft=True, options={"retain": int})
 def index_sync(ctx: Ctx, arg: str | None) -> None:
     """List the scan: flip its pointers (`index-sync -p`, which checks the rows `index-rows` uploaded), last of the
     serving steps, so a listed scan is whole (searchable, on R2, in the interval store); then drop superseded
-    generations' D1 rows (`index-gc <scan>`)."""
+    generations' D1 rows (`index-gc <scan>`; `options.index-sync.retain` N: also retire the row groups of every scan
+    older than the newest N, read from their cold footer files after, D1's size cap)."""
     with ctx.phase("index-sync"):
         if not ctx.has(*CF):
             err("WARN: no CLOUDFLARE_API_TOKEN/ACCOUNT_ID: tiers published but not synced (scan unlisted)")
             return
         ctx.sh(["dt-cloud", "index-sync", "-p", *_sync_args(ctx), "-M", ctx.data_root / ctx.snapshots, ctx.scan],
                fatal=False, warn="index-sync failed (the site keeps serving the previous generation)")
-        ctx.sh(["dt-cloud", "index-gc", ctx.scan], fatal=False, warn="index-gc failed")
+        retain = ctx.opt("index-sync", "retain")
+        ctx.sh(["dt-cloud", "index-gc", *(["-r", retain] if retain else []), ctx.scan], fatal=False, warn="index-gc failed")
 
 
 @step("over-time", soft=True, options={"mem": str, "threads": int})
@@ -561,6 +717,18 @@ def _snap_root(ctx: Ctx) -> str:
     return f"{ctx.env.get('R2_ARCHIVE') or ctx.data_uri}/{ctx.snapshots}"
 
 
+@step("healthcheck", core=False, soft=True)
+def healthcheck(ctx: Ctx, arg: str | None) -> None:
+    """Is the site serving the scan (`dt-cloud healthcheck -d`: fresh, subtree + the data JSONs serve)? A failure
+    warns: the data is fine, serving may be degraded."""
+    with ctx.phase("healthcheck"):
+        if ctx.reproc or not ctx.has("SITE_TOKEN", "SITE_URL"):
+            err("no SITE_TOKEN/SITE_URL, or REPROC: skipping the health check")
+            return
+        ctx.sh(["dt-cloud", "healthcheck", "-d", ctx.scan], fatal=False,
+               warn=f"the live site's health check failed for {ctx.scan} (data is fine; serving may be degraded)")
+
+
 @step("warm-cache", soft=True)
 def warm_cache(ctx: Ctx, arg: str | None) -> None:
     """Warm the site's subtree + diff caches for the scan (its job grant, `SITE_TOKEN`)."""
@@ -582,20 +750,32 @@ def probe(ctx: Ctx, arg: str | None) -> None:
                fatal=False, warn=f"serving probe failed for {ctx.scan} (a 5xx or a dropped request; data is fine)")
 
 
+#: A digest platform → the env its transport needs (`dt-cloud digest -P`).
+DIGEST_TRANSPORTS = {"slack": ("SLACK_BOT_TOKEN", "SLACK_CHANNEL"), "discord": ("DISCORD_GCS_USAGE_WEBHOOK", "DISCORD_BOT_TOKEN")}
+
+
 def _digest_check(p: ScanProfile) -> list[str]:
     o = p.opts("digest")
-    return [f"options.digest.{k}: required (or skip: [digest])" for k in ("template", "config") if not o.get(k)]
+    problems = [f"options.digest.{k}: required (or skip: [digest])" for k in ("template", "config") if not o.get(k)]
+    return problems + [f"options.digest.platforms: {x!r} is not one of {', '.join(DIGEST_TRANSPORTS)}"
+                       for x in o.get("platforms", []) if x not in DIGEST_TRANSPORTS]
 
 
-@step("digest", soft=True, options={"template": str, "config": str, "args": list}, requires=_digest_check)
+@step("digest", soft=True, options={"template": str, "config": str, "args": list, "platforms": list}, requires=_digest_check)
 def digest(ctx: Ctx, arg: str | None) -> None:
-    """Converge the usage-digest thread (`dt-cloud digest -T <template> -C <config>`), over the Slack Web API."""
+    """Converge the usage-digest thread on each platform (`dt-cloud digest -T <template> -C <config> -P <platform>`;
+    `options.digest.platforms`, default slack), each skipped without its transport's env."""
+    if ctx.reproc:
+        err("REPROC: skipping the usage digest")
+        return
     with ctx.phase("digest"):
-        if not ctx.has("SLACK_BOT_TOKEN", "SLACK_CHANNEL"):
-            err("no Slack bot transport (SLACK_BOT_TOKEN+SLACK_CHANNEL): skipping usage digest")
-            return
-        ctx.sh(["dt-cloud", "digest", "-T", ctx.opt("digest", "template"), "-C", ctx.opt("digest", "config"),
-                *ctx.opt("digest", "args", []), "-r", f"{ctx.data_uri}/{ctx.snapshots}"], fatal=False, warn="usage-digest step failed")
+        for platform in ctx.opt("digest", "platforms", ["slack"]):
+            if not ctx.has(*DIGEST_TRANSPORTS[platform]):
+                err(f"no {platform} transport ({'+'.join(DIGEST_TRANSPORTS[platform])}): skipping its digest")
+                continue
+            ctx.sh(["dt-cloud", "digest", "-T", ctx.opt("digest", "template"), "-C", ctx.opt("digest", "config"), "-P", platform,
+                    *ctx.opt("digest", "args", []), "-r", f"{ctx.data_uri}/{ctx.snapshots}"], fatal=False,
+                   warn=f"{platform} usage-digest step failed")
 
 
 #: Core steps a profile may `skip`.
@@ -693,6 +873,8 @@ def run_step(name: str, arg: str | None, env: dict[str, str] | None = None, prof
     except StepFailed as e:
         err(f"scan step {name}: {e}")
         rc = e.rc or 1
+        if e.hard:
+            return rc
     except Exception as e:  # noqa: BLE001 — a soft step's crash is a warning
         if not s.soft:
             raise

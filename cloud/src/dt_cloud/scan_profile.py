@@ -27,7 +27,7 @@ Every problem is reported at once (`ProfileError`, one line each).
         endpoint: https://…       #   bulk-list `-E` (s3 / r2)
         region: <region>          #   reserved: nf-google 1.29.1 has no per-task location (refused unless = executor's)
         args: [-L, …]             #   extra lister args
-    machines: {<label>: <type> | {type, disk, cpus, memory, time}}   # labels: small medium big list post (+ any)
+    machines: {<label>: <type> | {type, disk, cpus, memory, time}}   # labels: small medium big list post pre interval (+ any)
     steps: [<extra step>, …]      # deployment-only steps on top of the core (`scan_steps.STEPS`, `core=False`)
     skip: [<core step>, …]        # core steps this deployment leaves out (each listed in `SKIPPABLE`)
     fold: [bucket-check, index-sync]   # tiny steps run inside a neighbour's task (default: both; [] = own tasks)

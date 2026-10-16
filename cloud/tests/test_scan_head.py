@@ -45,11 +45,7 @@ def test_params_golden():
     assert got == json.loads((FIX / "cw-s3.params.json").read_text())
 
 
-def test_params_reproc_fresh_and_extras(monkeypatch):
-    from dt_cloud import scan_steps as S
-
-    monkeypatch.setitem(S.STEPS, "access-ingest", S.Step("access-ingest", lambda c, a: None, core=False, stage="pre", soft=True))
-    monkeypatch.setitem(S.STEPS, "healthcheck", S.Step("healthcheck", lambda c, a: None, core=False, stage="post"))
+def test_params_reproc_fresh_and_extras():
     from dt_cloud.scan_profile import parse
 
     p = parse({"deployment": "fix", "executor": {"kind": "local"}, "work": "/w", "data": "/d",
@@ -57,11 +53,12 @@ def test_params_reproc_fresh_and_extras(monkeypatch):
                "steps": ["access-ingest", "healthcheck"], "skip": ["digest", "static-names"],
                "options": {"list": {"import": True}}})
     got = H.params(p, "{}", "2026-10-16", "G", "1", "", "S", {}, reproc=True, fresh=True)
-    assert {k: got[k] for k in ("steps", "pre", "post", "skip_list", "cache", "env", "work_bucket", "secrets_project")} == {
-        "steps": ["bucket-check", "list", "index", "publish-r2", "interval-store", "index-rows", "index-sync", "over-time",
-                  "index-gc", "warm-cache", "probe", "access-ingest", "healthcheck"],
+    assert {k: got[k] for k in ("steps", "pre", "pre_label", "post", "skip_list", "cache", "env", "work_bucket", "secrets_project")} == {
+        "steps": ["bucket-check", "access-ingest", "list", "index", "publish-r2", "interval-store", "index-rows", "index-sync",
+                  "over-time", "index-gc", "healthcheck", "warm-cache", "probe"],
         "pre": ["access-ingest"],
-        "post": ["over-time", "index-gc", "warm-cache", "probe", "healthcheck"],
+        "pre_label": "small",
+        "post": ["over-time", "index-gc", "healthcheck", "warm-cache", "probe"],
         "skip_list": True,
         "cache": False,
         "env": {"REPROC": "1"},
