@@ -32,17 +32,48 @@ if pulumi.get_stack() != STACK:
 # becomes every labelable resource's default labels.
 labeled_provider("hf-labeled", project=project, region=region, labels=cost_labels())
 
+# Least privilege, as the `r2` branch: the cron calls Batch as a submit-only account (one custom role holding
+# `batch.jobs.create`, and `serviceAccountUser` on the job account, which the job then runs as), so the job account
+# needs no rights over other Batch jobs.
+scheduler = JobAccount(
+    "hf-usage-scheduler",
+    project=project,
+    account_id="hf-usage-scheduler",
+    display_name="hf daily scan submitter",
+    description="Cloud Scheduler's caller: creates the hf.oa.dev scan's Batch job, as hf-usage-job, and nothing else",
+    roles=[],
+    acts_as_self=False,
+    adopt=adopt,
+)
+submit_role = gcp.projects.IAMCustomRole(
+    "hf-usage-batch-submit",
+    project=project,
+    role_id="hfUsageBatchSubmit",
+    title="hf Batch submission",
+    permissions=["batch.jobs.create"],
+    description="Create Batch jobs; no access to existing jobs",
+)
+submit_grant = gcp.projects.IAMMember(
+    "hf-usage-scheduler-submit",
+    project=project,
+    role=submit_role.name,
+    member=scheduler.member,
+)
+
 job = JobAccount(
     "hf-usage-job",
     project=project,
     account_id="hf-usage-job",
     display_name="hf Hugging Face scan job",
-    description="Runs the hf.oa.dev daily scan on Batch (job/hf-run.sh); Cloud Scheduler submits it as this account",
+    description="Runs the hf.oa.dev daily scan on Batch (job/hf-run.sh); hf-usage-scheduler submits it as this account",
     roles=[
         "roles/batch.agentReporter",
-        "roles/batch.jobsEditor",   # the cron submits the job as this account; `scan-run start -B` reads it back
+        "roles/batch.jobsViewer",   # `scan-run start -B` reads its own job back
         "roles/logging.logWriter",
     ],
+    actors=[scheduler.email_literal],
+    actor_deps=[scheduler],
+    acts_as_self=False,
     adopt=adopt,
 )
 
@@ -93,13 +124,14 @@ scan = BatchCron(
     region=region,
     schedule="0 8 * * *",
     submitter=job_dir / "hf-batch-submit.sh",
-    sa_email=job.email,
+    sa_email=scheduler.email,
     description="Daily Hugging Face org scan (job/hf-batch-submit.sh PIN=1 DRY=1 body) -> hf.oa.dev",
     adopt=adopt,
-    depends_on=[job, secrets, images_reader],
+    depends_on=[job, secrets, images_reader, submit_grant],
 )
 
 pulumi.export("job_account", job.email)
+pulumi.export("scheduler_account", scheduler.email)
 pulumi.export("image_repository", images.repository_id)
 pulumi.export("secrets", HF_SECRETS)
 pulumi.export("cron", scan.job.name)

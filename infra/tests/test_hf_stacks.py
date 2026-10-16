@@ -132,14 +132,19 @@ def test_gcp_stack(monkeypatch: pytest.MonkeyPatch):
     secrets = g["HF_SECRETS"]
     project = "oa-internal-450019"
     sa = f"hf-usage-job@{project}.iam.gserviceaccount.com"
+    submitter = f"hf-usage-scheduler@{project}.iam.gserviceaccount.com"
 
     def check(_: object) -> None:
         assert m.created() == sorted([
             ("pulumi:providers:gcp", "hf-labeled"),
             ("disky:gcp:JobAccount", "hf-usage-job"),
             ("gcp:serviceaccount/account:Account", "hf-usage-job"),
-            *[("gcp:projects/iAMMember:IAMMember", f"hf-usage-job-{r}") for r in ("batch.agentReporter", "batch.jobsEditor", "logging.logWriter")],
-            ("gcp:serviceaccount/iAMMember:IAMMember", "hf-usage-job-actor-hf-usage-job"),
+            *[("gcp:projects/iAMMember:IAMMember", f"hf-usage-job-{r}") for r in ("batch.agentReporter", "batch.jobsViewer", "logging.logWriter")],
+            ("gcp:serviceaccount/iAMMember:IAMMember", "hf-usage-job-actor-hf-usage-scheduler"),
+            ("disky:gcp:JobAccount", "hf-usage-scheduler"),
+            ("gcp:serviceaccount/account:Account", "hf-usage-scheduler"),
+            ("gcp:projects/iAMCustomRole:IAMCustomRole", "hf-usage-batch-submit"),
+            ("gcp:projects/iAMMember:IAMMember", "hf-usage-scheduler-submit"),
             ("gcp:artifactregistry/repository:Repository", "hf-usage-images"),
             ("gcp:artifactregistry/repositoryIamMember:RepositoryIamMember", "hf-usage-images-job"),
             ("disky:gcp:Secrets", "hf-secrets"),
@@ -149,9 +154,15 @@ def test_gcp_stack(monkeypatch: pytest.MonkeyPatch):
             ("gcp:cloudscheduler/job:Job", "hf-usage-snapshot"),
         ])
         assert m.inputs("hf-usage-images")["repositoryId"] == "hf-usage"
+        # the cron's caller may only create jobs, and act as the job account (which can't act as itself or edit jobs)
+        assert m.inputs("hf-usage-batch-submit")["permissions"] == ["batch.jobs.create"]
+        assert m.inputs("hf-usage-scheduler-submit")["member"] == f"serviceAccount:{submitter}"
+        assert {k: m.inputs("hf-usage-job-actor-hf-usage-scheduler")[k] for k in ("role", "member")} == {
+            "role": "roles/iam.serviceAccountUser", "member": f"serviceAccount:{submitter}",
+        }
         assert m.inputs("hf-usage-images-job")["member"] == f"serviceAccount:{sa}"
         cron = m.inputs("hf-usage-snapshot")
-        assert (cron["schedule"], cron["timeZone"], cron["httpTarget"]["oauthToken"]["serviceAccountEmail"]) == ("0 8 * * *", "Etc/UTC", sa)
+        assert (cron["schedule"], cron["timeZone"], cron["httpTarget"]["oauthToken"]["serviceAccountEmail"]) == ("0 8 * * *", "Etc/UTC", submitter)
         spec = json.loads(base64.b64decode(cron["httpTarget"]["body"]))
         task = spec["taskGroups"][0]["taskSpec"]
         assert task["runnables"][0]["container"] == {
