@@ -319,7 +319,7 @@ def build(dry_run: bool, tag: str) -> None:
     context.mkdir(parents=True, exist_ok=False)
     for directory in ("src", "cloud/src", "job/icons-r2", "job/nf", "job/profiles"):
         copytree(root / directory, context / directory, ignore=ignore_patterns("__pycache__", "*.pyc"))
-    for filename in ("README.md", "pyproject.toml", "uv.lock", "cloud/pyproject.toml", "job/Dockerfile", "job/cloudbuild.yaml", "job/r2.json", "job/r2-scan-runs.json", "job/r2-scan", "job/digest.yml"):
+    for filename in ("README.md", "pyproject.toml", "uv.lock", "cloud/pyproject.toml", "job/Dockerfile", "job/cloudbuild.yaml", "job/r2.json", "job/r2-scan-runs.json", "job/r2-nf-scan-runs.json", "job/r2-scan", "job/digest.yml"):
         target = context / filename
         target.parent.mkdir(parents=True, exist_ok=True)
         copy2(root / filename, target)

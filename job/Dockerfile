@@ -24,7 +24,7 @@ COPY src ./src
 COPY cloud/pyproject.toml ./cloud/
 COPY cloud/src ./cloud/src
 RUN uv sync --frozen --no-dev --no-editable --package dt-cloud --extra s3
-COPY job/r2.json job/r2-scan-runs.json job/r2-scan job/digest.yml ./job/
+COPY job/r2.json job/r2-scan-runs.json job/r2-nf-scan-runs.json job/r2-scan job/digest.yml ./job/
 # The digest's icons dir: the plot is rendered into it and the dir deployed to the icons project's `plot` branch.
 COPY job/icons-r2 ./job/icons-r2
 # The generic scan pipeline and r2's profiles (`dt-cloud scan head /app/job/profiles/<profile>.yml`, `DT_NF_DIR`)
