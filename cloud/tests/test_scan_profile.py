@@ -126,3 +126,12 @@ def test_option_types():
         "options.list.bulk_args: a list of strings",
         "options.index-gc.grace: a string",
     ]
+
+
+def test_machine_labels_are_groovy_identifiers():
+    """A label goes bare into the executor config (`withLabel: over_time { … }`): `_` yes, `-` never."""
+    assert sorted(parse(minimal(machines={"over_time": "n2-standard-8", "post": "e2-highmem-4"})).machines) == ["over_time", "post"]
+    assert problems(minimal(machines={"over-time": "n2-standard-8", "Big": "n2-standard-8"})) == [
+        "machines.over-time: a label of lowercase letters, digits and '_' (it is written bare into the Nextflow config)",
+        "machines.Big: a label of lowercase letters, digits and '_' (it is written bare into the Nextflow config)",
+    ]
