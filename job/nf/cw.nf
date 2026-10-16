@@ -12,7 +12,8 @@ params.buckets = 'marin-us-east-02a hero-checkpoints marin-us-east-06a rhoarnet-
 params.big = 'marin-us-east-02a'    // the buckets listed on the big machine (label `list_big`)
 params.secrets = ''          // `-s ENV=SECRET` bindings for `dt-cloud secrets exec`, space-separated
 params.env = [:]             // extra env for every step (DATA_BUCKET, R2_BUCKET, STATIC_NAMES, …)
-params.machines = [list_big: 'n2-standard-8', list_small: 'e2-standard-4']
+// the 02a listing is CPU-bound: 22.8 min on 16 vCPUs, 33–42 on 8 (2026-10-14/16), at about the same cost per scan
+params.machines = [list_big: 'n2-standard-16', list_small: 'e2-standard-4']
 
 def stepEnv() {
     def e = [SNAP_ID: params.scan, GEN: params.gen, DT_JOB_START: params.job_start, DT_RUN_ID: params.run_id,
@@ -37,8 +38,9 @@ process bucket_check {
 
 process scan_bucket {
     tag "${bucket}"
-    label 'list'
     machineType { bucket in params.big.tokenize(' ') ? params.machines.list_big : params.machines.list_small }
+    // the big listing's shards + import stage on a local SSD (/tmp); e2 machines take none, so the small ones grow the boot disk
+    disk { bucket in params.big.tokenize(' ') ? [request: 375.GB, type: 'local-ssd'] : 100.GB }
     input: val bucket
     output: path 'done'
     script: step('scan-bucket', bucket)
