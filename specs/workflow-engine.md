@@ -158,6 +158,26 @@ The questions as they were put:
 - Steps hand off through the data bucket. Nextflow channels carry only `done` markers.
 - Each task records into the head's run: `DT_RUN_ID`, which `scan-runs.json` `run_id_env` reads before the task's own `BATCH_JOB_UID`.
 
+**The scratch run** (2026-10-16T1300: the four small buckets; the data bucket set to the scratch bucket; only the CAIOS keys, so the serving steps skip):
+- All 11 tasks succeeded, 08:48 → 09:05. The four bucket scans ran at once: 3m48s of compute in the slowest (hero-checkpoints), in a 5m57s task.
+- Its outputs are in scratch: the snapshot JSONs, the layer-2 parquets and the index tiers.
+- A re-run from a fresh head dir took 34 s, with all 11 steps cached.
+
+Found on the way, each fixed:
+- **The image needs `ps`** (`procps`): without it, Nextflow's task wrapper exits 1.
+- **Nextflow binds only the task's own dir into the container**, not the bucket the VM mounts. So writes under `$GCS/$DATA` silently landed in the container's filesystem. `containerOptions` binds `/mnt/disks/<data bucket>` in.
+- **The head must forward TERM to Nextflow.** A deleted head left its five step tasks running: bash holds a trap until its foreground child exits, and the container's KILL then lands first. Nextflow now runs in the background with TERM / INT forwarded, so it cancels its tasks.
+- **A `done` marker is cached even when the step's real output never landed** (the bind bug above). The steps' own skip-if-done stays the safety net, and a run like that has to be re-run under a new session.
+
+**Expected cw timing**, from the 2026-10-16T0601 phases plus ~2 min of VM start per task:
+- critical path: scan 02a (48 m) → index (5 m) → static-names (38 m) → index-sync → post;
+- publish-r2 → interval-store (14 m) runs alongside static-names.
+- That lists a scan at about 1 h 40 m, against 1 h 53 m today.
+
+Where it saves:
+- The four small buckets no longer wait behind 02a.
+- No n2-standard-8 idles through static-names. The machines are sized per step: static-names' driver and index-sync are e2-standard-2.
+
 **Next:**
 1. A scratch run of the whole DAG: the data bucket set to the scratch bucket, the four small buckets, and serving steps without credentials (they skip). Check the timing, a resume after an injected failure, and the head on Batch.
 2. Then the cutover: the cron submits the head job instead of the one-VM job, and the first scans run under it in prod, after a go.

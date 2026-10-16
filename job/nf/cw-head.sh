@@ -27,6 +27,8 @@ NF_PASS=${NF_PASS:-"DATA_BUCKET SCAN_BUCKETS LISTING_PROCS LISTING_WORKERS IMPOR
 export NF_SECRETS NF_PASS
 work=${NF_HOME:-${TMPDIR:-/tmp}/nf-$SNAP_ID}
 mkdir -p "$work/.nextflow" && cd "$work"
+session=$(python3 -c "import sys, uuid; print(uuid.uuid5(uuid.NAMESPACE_URL, 'disky/cw-s3/scan/' + sys.argv[1]))" "$SNAP_ID")
+export NF_SESSION=$session
 params=$work/params.json
 python3 - "$params" <<'PY'
 import json, os, sys
@@ -34,17 +36,30 @@ env = {k: os.environ[k] for k in os.environ.get("NF_PASS", "").split() if k in o
 p = {
     "scan": os.environ["SNAP_ID"], "gen": os.environ["GEN"], "job_start": os.environ["DT_JOB_START"],
     "run_id": os.environ.get("DT_RUN_ID", ""), "buckets": os.environ["BUCKETS"], "data_bucket": os.environ["DATA"],
-    "secrets": os.environ.get("NF_SECRETS", ""), "env": env,
+    "secrets": os.environ.get("NF_SECRETS", ""), "env": env, "session": os.environ["NF_SESSION"],
 }
 if os.environ.get("NF_IMAGE"):
     p["image"] = os.environ["NF_IMAGE"]
 json.dump(p, open(sys.argv[1], "w"), indent=1)
 PY
-session=$(python3 -c "import sys, uuid; print(uuid.uuid5(uuid.NAMESPACE_URL, 'disky/cw-s3/scan/' + sys.argv[1]))" "$SNAP_ID")
 printf '%s\t-\tscan_%s\tOK\t-\t%s\tnextflow run cw.nf\n' "$(date -u '+%F %T')" "${SNAP_ID//[^0-9A-Za-z]/_}" "$session" > .nextflow/history
 export NXF_CLOUDCACHE_PATH=gs://$DATA/nf/cache NXF_ANSI_LOG=false
+# Nextflow in the background, so a TERM / INT to this head (a cancelled or preempted Batch job) reaches it at once and
+# it cancels the step tasks it submitted; in the foreground, bash would hold the trap until Nextflow exited, and the
+# container's KILL would orphan them (seen on a deleted scratch head, 2026-10-16).
+# Its own process group (`set -m`), signalled whole: the `nextflow` launcher is a script whose JVM, the process that
+# cancels the tasks on TERM, is its child.
 rc=0
-nextflow run "$here/cw.nf" -c "$here/nextflow.config" -params-file "$params" -resume "$session" -with-trace trace.tsv || rc=$?
+set -m
+nextflow run "$here/cw.nf" -c "$here/nextflow.config" -params-file "$params" -resume "$session" -with-trace trace.tsv &
+nf=$!
+set +m
+# Nextflow cancels the tasks it knows of; one whose submit was in flight lands after it exits (seen: 23 s later), so
+# the head then cancels whatever still carries the session's label (`nf-session`, nextflow.config).
+stop() { kill -TERM -- "-$nf" 2>/dev/null; wait "$nf" || true; sleep "${NF_SWEEP_DELAY:-30}"; dt-cloud batch-cancel -l "nf-session=$session" || true; sr finish -x "$1" -e "head terminated (signal; session $session)"; exit "$1"; }
+trap 'stop 143' TERM
+trap 'stop 130' INT
+wait "$nf" || rc=$?
 # The first failed task, for the record and the alert.
 if [ "$rc" != 0 ] && [ -f trace.tsv ]; then
   f=$(awk -F'\t' 'NR>1 && $5=="FAILED" {print $4 " (exit " $6 ")"; exit}' trace.tsv)
