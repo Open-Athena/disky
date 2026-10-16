@@ -132,3 +132,11 @@ def test_publish_reports(tmp_path):
     assert sorted(p.relative_to(work).as_posix() for p in work.rglob("*") if p.is_file()) == [
         "runs/2026-10-16T1200/dag.mmd", "runs/2026-10-16T1200/trace.tsv"]
     assert (work / "runs/2026-10-16T1200/dag.mmd").read_text() == "flowchart TB\n"
+
+
+def test_finish_args(tmp_path):
+    """The DAG goes to `finish -D` only when Nextflow wrote it."""
+    dag = tmp_path / "dag.mmd"
+    assert H.finish_args(1, "nextflow exit 1", ["-l", "nf-session=s"], dag) == ["-x", "1", "-e", "nextflow exit 1", "-l", "nf-session=s"]
+    dag.write_text("flowchart TB\n")
+    assert H.finish_args(0, None, [], dag) == ["-x", "0", "-D", str(dag)]

@@ -211,6 +211,12 @@ def publish_reports(profile: ScanProfile, scan: str, launch: Path) -> list[str]:
     return keys
 
 
+def finish_args(rc: int, error: str | None, cost: list[str], dag: Path) -> list[str]:
+    """`scan-run finish`'s arguments: the exit status, the error, the cost labels, and the run's DAG (`-D`, stored with
+    the run for the site's pipeline view) when Nextflow wrote one."""
+    return ["-x", str(rc), *(["-e", error] if error else []), *cost, *(["-D", str(dag)] if dag.is_file() else [])]
+
+
 def head(profile_path: Path, nf_dir: Path, launch: Path | None, *, reproc: bool = False, fresh: bool = False,
          dry_run: bool = False, env: dict[str, str] | None = None) -> int:
     from . import scan_profile
@@ -289,7 +295,7 @@ def head(profile_path: Path, nf_dir: Path, launch: Path | None, *, reproc: bool 
         error = f"nextflow exit {rc}" + (f": {f} failed" if f else "") + f" (session {session})" if rc else None
     publish_reports(profile, scan, launch)
     if recording:
-        _record(finish_cmd, ["-x", str(rc), *(["-e", error] if error else []), *cost])
+        _record(finish_cmd, finish_args(rc, error, cost, launch / "dag.mmd"))
     if rc == 0:
         print(f"SCAN-JOB-DONE {scan} -> {profile.data.rstrip('/')}/{profile.layout.snapshots_dir()}/{scan}")
     return rc
