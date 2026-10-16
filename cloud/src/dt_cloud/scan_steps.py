@@ -26,6 +26,11 @@ Adding a step (gcs's access-ingest, rules, healthcheck, … are steps like any o
   the DAG's "soft dependency" (index waits for access-ingest, but runs without its output).
 - `options`: the keys the step takes under the profile's `options.<step>`, with their types (unknown keys refused).
 - `requires(profile)`: profile-level checks, returned as problems (validated with the profile, before any task).
+- Credentials: every step's call runs under `dt-cloud secrets exec` with the profile's `secrets`, overlaid by its own
+  `options.<step>.secrets` (and a list call's by its source's `secrets`): `ScanProfile.secrets_for`. Nothing to declare.
+- Stores: a profile's `store` (a `STORES_JSON` key, default `primary`) is the site store its scans feed; a step whose
+  command files rows per store passes `store_args(ctx)` (`-s <store>`, nothing for the primary). A step that can't
+  serve another store refuses it in `requires` (`primary_only`).
 - Idempotent: a step skips work whose outputs exist (`ctx.done(path)`), or calls a command that is (publish-r2's
   size + md5, the static-names / interval-store appends after the newest scan they hold). It does not trust
   Nextflow's cache: a cached `done` marker can point at a lost output, so each step also checks its inputs
@@ -289,6 +294,19 @@ class Ctx:
         return path
 
 
+def store_args(ctx: Ctx) -> list[str]:
+    """`-s <store>` for a command that files rows per site store (`index-sync`, `index-gc`, `over-time-groups`); nothing
+    for the primary, so its argv is what it always was."""
+    return [] if ctx.profile.primary else ["-s", ctx.profile.store]
+
+
+def primary_only(step: str, why: str) -> Callable[[ScanProfile], list[str]]:
+    """A `requires` check: `step` serves only the primary store (`why`), so another store's profile must skip it."""
+    def check(p: ScanProfile) -> list[str]:
+        return [] if p.primary else [f"store {p.store}: skip {step} ({why})"]
+    return check
+
+
 def copy_atomic(src: Path, dst: Path) -> None:
     """`src` → `dst` through a sibling temp name, so `dst` exists only whole (a skip check can trust it)."""
     dst.parent.mkdir(parents=True, exist_ok=True)
@@ -437,24 +455,26 @@ def _index_check(p: ScanProfile) -> list[str]:
     if mode not in ("layer2", "path-index"):
         return [f"options.index.mode: layer2 or path-index (got {mode!r})"]
     if mode == "path-index":
-        problems = [f"options.index.{k}: only with mode layer2" for k in ("webdata", "mem", "threads") if k in o]
+        problems = [f"options.index.{k}: only with mode layer2" for k in ("webdata", "threads") if k in o]
         if p.opts("list").get("import"):
             problems.append("options.list.import: path-index reads the listings themselves (no per-source layer-2)")
         if urlparse(p.data).scheme not in ("gs", "gcs"):
             problems.append("data: a gs:// bucket with options.index.mode path-index (its inputs are staged from GCS)")
         return problems
-    return [f"options.index.{k}: only with mode path-index" for k in ("attribution", "access", "rules") if k in o]
+    return [f"options.index.{k}: only with mode path-index" + (" (index-write writes the age pyramids itself)" if k == "age_pyramids" else "")
+            for k in ("attribution", "access", "rules", "age_pyramids", "verify") if k in o]
 
 
 @step("index", skippable=False, stage="index", requires=_index_check,
       options={"mode": str, "webdata": list, "lifecycle": bool, "mem": str, "threads": int, "args": list,
-               "attribution": list, "access": str, "rules": bool})
+               "attribution": list, "access": str, "rules": bool, "age_pyramids": bool, "verify": bool})
 def index(ctx: Ctx, arg: str | None) -> None:
     """Every source's layer-2 (imported here from the listings unless `list` did), the snapshot JSONs
     (`options.index.webdata`: the deployment's command, `{web}` its out dir, `{sources}` the `<bucket>=<layer-2>` args),
     published to `snapshots/<subdir>/<scan>/` (+ `lifecycle.json`), and the index tiers (`dt-cloud index-write`) under
     `<layer2>/index/<gen>/`, `path-index.parquet` copied last: the skip-if-done mark. `options.index.mode: path-index`
-    builds both from the listings in one pass instead (`path_index`)."""
+    builds both from the listings in one pass instead (`path_index`; with `age_pyramids` and `verify`).
+    `options.index.mem`: DuckDB's memory limit (index-write's; under path-index, the age pyramids' and the check's)."""
     if ctx.opt("index", "mode", "layer2") == "path-index":
         path_index(ctx)
         return
@@ -540,7 +560,12 @@ def path_index(ctx: Ctx) -> None:
     left out while none exist), staged to the task's local disk (`dt-cloud stage`; gcsfuse reads ~20-50 MB/s and the
     aggregation makes several passes), aggregated in one pass (`dt-cloud path-index`: the snapshot JSONs and the path
     store's sorts, with the attribution-independent rollups cached at `<listing>/dir-cache`), then the tiers uploaded
-    to `<layer2>/index/<gen>/` (`path-index.parquet` last, the skip-if-done mark) and the JSONs published."""
+    to `<layer2>/index/<gen>/` (`path-index.parquet` last, the skip-if-done mark) and the JSONs published.
+
+    `options.index.age_pyramids`: the age chart's tiers from the `path` sort (`dt-cloud age-pyramid -c`, checked against
+    it), beside the sorts. `options.index.verify`: `dt-cloud index-verify` checks the index against the listings it was
+    built from (per-bucket and total bytes / objects, the snapshot totals and age histogram, the age pyramids and the
+    `bysize` sort, where written) and writes `verification.json` beside the tiers; a mismatch fails the step."""
     store = ctx.data_uri.split("://", 1)[1]  # `<bucket>[/<prefix>]`
     key_dir = ctx.data_root / ctx.index_key
     for s in ctx.profile.sources:
@@ -567,6 +592,15 @@ def path_index(ctx: Ctx) -> None:
                 *[a for g in attr for a in ("-a", local(g))], *[a for g in xglobs for a in ("-x", local(g))],
                 "-o", snap, "-c", ctx.data_root / ctx.listing_key("dir-cache"), "-P", pi / "path-index.parquet",
                 *ctx.opt("index", "args", [])], env={"DUCKDB_TMP": str(tmp)})
+    duck = [*(["-m", ctx.opt("index", "mem")] if ctx.opt("index", "mem") else []), "-t", ctx.nproc]
+    if ctx.opt("index", "age_pyramids", False):
+        with ctx.phase("age-index"):
+            ctx.sh(["dt-cloud", "age-pyramid", "-c", *duck, "-o", pi, pi / "path-index.parquet"])
+    if ctx.opt("index", "verify", False):
+        with ctx.phase("verify"):
+            ctx.sh(["dt-cloud", "index-verify", *duck, "-d", ctx.scan, "-g", ctx.gen,
+                    *[a for s in ctx.profile.sources for a in ("-b", s.bucket)], *[a for g in lglobs for a in ("-l", local(g))],
+                    "-s", snap, "-o", pi / "verification.json", pi / "path-index.parquet"])
     with ctx.phase("path-index upload"):
         files = sorted((f for f in pi.iterdir() if f.is_file() and not f.name.startswith(".")),
                        key=lambda f: (f.name == "path-index.parquet", f.name))
@@ -643,7 +677,9 @@ def publish_r2(ctx: Ctx, arg: str | None) -> None:
                                     "remains visible; repair the R2 copy, then resume", hard=True)
 
 
-@step("interval-store", stage="serve", soft=True, options={"store": str, "timeout": str, "mem": str, "profile": str, "merge_wait": int})
+@step("interval-store", stage="serve", soft=True, options={"store": str, "timeout": str, "mem": str, "profile": str, "merge_wait": int},
+      requires=primary_only("interval-store", "the site serves another store's scans per scan, and the interval store's "
+                                              "`interval-store/CURRENT.json` is the primary's"))
 def interval_store(ctx: Ctx, arg: str | None) -> None:
     """Append this scan (and any pending) to the change-interval path store beside its current generation, then the
     due carries / compaction (`interval-store add`). Never fatal (`-W`): a failure or the timeout warns, the next run
@@ -689,7 +725,17 @@ def interval_store(ctx: Ctx, arg: str | None) -> None:
 
 
 def _sync_args(ctx: Ctx) -> list[str]:
-    return ["-d", str(ctx.data_root / ctx.index_key), "-g", ctx.gen, "-k", ctx.index_key]
+    """Both halves' arguments: the generation, the store, and `options.index-sync.variants` (`-v` each; default every
+    variant the generation holds)."""
+    return [*store_args(ctx), "-d", str(ctx.data_root / ctx.index_key), "-g", ctx.gen, "-k", ctx.index_key,
+            *[a for v in ctx.opt("index-sync", "variants", []) for a in ("-v", v)]]
+
+
+def _sync_check(p: ScanProfile) -> list[str]:
+    from .index_footer import INDEX_VARIANTS
+
+    return [f"options.index-sync.variants: {v!r} is not an index variant (one of {', '.join(INDEX_VARIANTS)})"
+            for v in p.opts("index-sync").get("variants", []) if v not in INDEX_VARIANTS]
 
 
 @step("index-rows", skippable=False, stage="serve", soft=True)
@@ -703,12 +749,13 @@ def index_rows(ctx: Ctx, arg: str | None) -> None:
         ctx.sh(["dt-cloud", "index-sync", "-r", *_sync_args(ctx), ctx.scan], fatal=False, warn="index-sync -r failed (the pointer flip will refuse)")
 
 
-@step("index-sync", skippable=False, stage="sync", soft=True, options={"retain": int})
+@step("index-sync", skippable=False, stage="sync", soft=True, options={"retain": int, "variants": list}, requires=_sync_check)
 def index_sync(ctx: Ctx, arg: str | None) -> None:
     """List the scan: flip its pointers (`index-sync -p`, which checks the rows `index-rows` uploaded), last of the
     serving steps, so a listed scan is whole (searchable, on R2, in the interval store); then drop superseded
     generations' D1 rows (`index-gc <scan>`; `options.index-sync.retain` N: also retire the row groups of every scan
-    older than the newest N, read from their cold footer files after, D1's size cap)."""
+    older than the newest N, read from their cold footer files after, D1's size cap). `options.index-sync.variants`:
+    only those variants, in both halves (`index-rows` reads them here too)."""
     with ctx.phase("index-sync"):
         if not ctx.has(*CF):
             err("WARN: no CLOUDFLARE_API_TOKEN/ACCOUNT_ID: tiers published but not synced (scan unlisted)")
@@ -716,7 +763,7 @@ def index_sync(ctx: Ctx, arg: str | None) -> None:
         ctx.sh(["dt-cloud", "index-sync", "-p", *_sync_args(ctx), "-M", ctx.data_root / ctx.snapshots, ctx.scan],
                fatal=False, warn="index-sync failed (the site keeps serving the previous generation)")
         retain = ctx.opt("index-sync", "retain")
-        ctx.sh(["dt-cloud", "index-gc", *(["-r", retain] if retain else []), ctx.scan], fatal=False, warn="index-gc failed")
+        ctx.sh(["dt-cloud", "index-gc", *store_args(ctx), *(["-r", retain] if retain else []), ctx.scan], fatal=False, warn="index-gc failed")
 
 
 @step("over-time", soft=True, options={"mem": str, "threads": int})
@@ -729,7 +776,7 @@ def over_time(ctx: Ctx, arg: str | None) -> None:
             return
         archive = ctx.env.get("R2_ARCHIVE")
         root = archive or str(ctx.data_root)
-        out = ctx.sh(["dt-cloud", "over-time-groups", "-g", ctx.gen, "-o", ctx.work / "over-time", "-p", root,
+        out = ctx.sh(["dt-cloud", "over-time-groups", *store_args(ctx), "-g", ctx.gen, "-o", ctx.work / "over-time", "-p", root,
                       *(["-m", ctx.opt("over-time", "mem")] if ctx.opt("over-time", "mem") else []),
                       *(["-t", ctx.opt("over-time", "threads")] if ctx.opt("over-time", "threads") else [])],
                      capture=True, fatal=False, warn="over-time groups failed (the series keeps its per-scan reads)")
@@ -740,15 +787,17 @@ def over_time(ctx: Ctx, arg: str | None) -> None:
                 ctx.sh(["dt-cloud", "publish-r2", "-L", gid], fatal=False, warn=f"publish-r2 failed for over-time group {gid}")
 
 
-@step("index-gc", soft=True, options={"grace": str})
+@step("index-gc", soft=True, options={"grace": str, "dry": bool})
 def index_gc(ctx: Ctx, arg: str | None) -> None:
-    """Delete superseded index generations' files (no `index_schema` row names them, older than the grace) from the
-    data store and R2, over every scan."""
+    """Delete superseded index generations' files (no `index_schema` row of the store names them, older than the grace)
+    from the data store and R2, over every scan. `options.index-gc.dry`: list them only (`-n`, what would go, in the
+    log), for a store with no soft delete (R2) until a reviewed list."""
     with ctx.phase("index-gc"):
         if not ctx.has(*CF):
             return
         targets = ["-F", ctx.data_uri, *(["-F", "r2"] if ctx.has(*R2) else [])]
-        ctx.sh(["dt-cloud", "index-gc", "-R", "-m", ctx.opt("index-gc", "grace", "2d"), *targets], fatal=False,
+        dry = ["-n"] if ctx.opt("index-gc", "dry", False) else []
+        ctx.sh(["dt-cloud", "index-gc", *store_args(ctx), "-R", *dry, "-m", ctx.opt("index-gc", "grace", "2d"), *targets], fatal=False,
                warn="index-gc -F failed (superseded generations stay until the next run)")
 
 
@@ -768,7 +817,7 @@ def healthcheck(ctx: Ctx, arg: str | None) -> None:
                warn=f"the live site's health check failed for {ctx.scan} (data is fine; serving may be degraded)")
 
 
-@step("warm-cache", soft=True)
+@step("warm-cache", soft=True, requires=primary_only("warm-cache", "its requests carry no `store=`: it would warm the primary's views"))
 def warm_cache(ctx: Ctx, arg: str | None) -> None:
     """Warm the site's subtree + diff caches for the scan (its job grant, `SITE_TOKEN`)."""
     with ctx.phase("warm-cache"):
@@ -778,7 +827,7 @@ def warm_cache(ctx: Ctx, arg: str | None) -> None:
         ctx.sh(["dt-cloud", "warm-cache", "-d", ctx.scan, "-r", _snap_root(ctx)], fatal=False, warn=f"cache warm-up failed for {ctx.scan}")
 
 
-@step("probe", soft=True)
+@step("probe", soft=True, requires=primary_only("probe", "its requests carry no `store=`: it would probe the primary's views"))
 def probe(ctx: Ctx, arg: str | None) -> None:
     """Replay the site's page loads uncached (`probe -c`): one cold-latency record per scan under `probes/<subdir>/`."""
     with ctx.phase("probe"):
@@ -800,12 +849,14 @@ def _digest_check(p: ScanProfile) -> list[str]:
                        for x in o.get("platforms", []) if x not in DIGEST_TRANSPORTS]
 
 
-@step("digest", soft=True, options={"template": str, "config": str, "args": list, "platforms": list}, requires=_digest_check)
+@step("digest", soft=True, options={"template": str, "config": str, "args": list, "platforms": list, "root": str}, requires=_digest_check)
 def digest(ctx: Ctx, arg: str | None) -> None:
     """Converge the usage-digest thread on each platform (`dt-cloud digest -T <template> -C <config> -P <platform>`;
     `options.digest.platforms`, default slack), each skipped without its transport's env. The plot's upload
     (`wrangler pages deploy`) authenticates with `CLOUDFLARE_API_TOKEN`: `$CF_PAGES_TOKEN` when set, for a deployment
-    whose D1 token can't deploy Pages."""
+    whose D1 token can't deploy Pages. `options.digest.root` (`{snapshots}` filled): the snapshots root the digest reads
+    and keeps its thread state beside (`<root>/digest/…`), when that isn't the data store's (`<data>/<snapshots>`), e.g.
+    a deployment whose live state and earlier snapshots are on R2: a wrong root finds no state and posts a second OP."""
     if ctx.reproc:
         err("REPROC: skipping the usage digest")
         return
@@ -815,9 +866,15 @@ def digest(ctx: Ctx, arg: str | None) -> None:
                 err(f"no {platform} transport ({'+'.join(DIGEST_TRANSPORTS[platform])}): skipping its digest")
                 continue
             ctx.sh(["dt-cloud", "digest", "-T", ctx.opt("digest", "template"), "-C", ctx.opt("digest", "config"), "-P", platform,
-                    *ctx.opt("digest", "args", []), "-r", f"{ctx.data_uri}/{ctx.snapshots}"], fatal=False,
+                    *ctx.opt("digest", "args", []), "-r", _digest_root(ctx)], fatal=False,
                    warn=f"{platform} usage-digest step failed",
                    env={"CLOUDFLARE_API_TOKEN": ctx.env["CF_PAGES_TOKEN"]} if ctx.has("CF_PAGES_TOKEN") else None)
+
+
+def _digest_root(ctx: Ctx) -> str:
+    """The digest's snapshots root: `options.digest.root` (`{snapshots}` filled), else the data store's."""
+    root = ctx.opt("digest", "root", None)
+    return root.format(snapshots=ctx.snapshots) if root else f"{ctx.data_uri}/{ctx.snapshots}"
 
 
 #: Core steps a profile may `skip`.
@@ -838,7 +895,7 @@ def setup_env(profile: ScanProfile, env: dict[str, str]) -> None:
     if profile.data_bucket:
         env.setdefault("DATA_BUCKET", profile.data_bucket)
     env["SCAN_ID"] = env["SNAP_ID"]
-    for n in profile.secrets:
+    for n in sorted(profile.secret_names()):
         if n in env:
             env[n] = env[n].strip()
     if env.get("REPROC") == "1":
@@ -885,6 +942,12 @@ def make_ctx(profile: ScanProfile, env: dict[str, str]) -> Ctx:
     from .scan_runs import PROFILE_ENV, JobRun
 
     run = JobRun(None, None, False, env.get("DT_RUN_ID") or None, None, env=env) if env.get(PROFILE_ENV) else _Printer(env)
+    if isinstance(run, JobRun) and not profile.primary:
+        # a task's phases write the head's run row, whose store a write sets (upsert): the scan profile's, not the
+        # scan-runs profile's default
+        from dataclasses import replace
+
+        run.profile = replace(run.profile, store=profile.store)
     work = Path(env.get("TMPDIR") or "/tmp") / "dt-scan" / env["SNAP_ID"]
     work.mkdir(parents=True, exist_ok=True)
     return Ctx(profile, env["SNAP_ID"], env["GEN"], env, work, run)

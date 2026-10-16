@@ -31,6 +31,8 @@ export interface CardData {
   /** Set by the server only for maps whose base read scope is public. Does
    * not confer a signed/full tier or disclose private grids/owner pages. */
   publicLabels?: boolean
+  /** A full card labels its tiles' children too (the staged card: each staged item inside its bucket's tile). */
+  labelKids?: boolean
   site: string
   title: string
   /** e.g. `scan 2026-10-02 · filter “tomat”`. */
@@ -163,7 +165,7 @@ export function cardSvg(d: CardData): string {
         const top = full && r.h > 40 ? 22 : inset
         for (const k of squarify(kids, r.x + inset, r.y + top, r.w - 2 * inset, r.h - top - inset, k => k.b)) {
           out.push(`<rect class="kid" x="${r1(k.x)}" y="${r1(k.y)}" width="${r1(k.w)}" height="${r1(k.h)}" fill="${svgColor(k.it.color)}" fill-opacity="0.85" stroke="${BG}" stroke-opacity="0.6" stroke-width="1"/>`)
-          if ((d.publicLabels || t.value !== undefined && full) && k.w > 70 && k.h > 30) {
+          if ((d.publicLabels || full && (t.value !== undefined || d.labelKids)) && k.w > 70 && k.h > 30) {
             const label = clip(`${k.it.name} ${k.it.value ?? fmtB(k.it.b)}`, k.w - 10, 13)
             if (label) out.push(text(k.x + 6, k.y + 17, label, 13, { fill: inkOn(k.it.color), weight: 600 }))
           }

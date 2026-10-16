@@ -200,8 +200,26 @@ describe('restricted anonymous OG responses', () => {
   })
 
   it('missing and unknown policy values fail closed; public deployments keep public cards', () => {
-    expect([{}, { OG_ANONYMOUS: 'invalid' }, { OG_ANONYMOUS: 'shape' }, { AUTH_MODE: 'public' }, { AUTH_MODE: 'public', OG_ANONYMOUS: 'invalid' }].map(anonymousPolicy))
-      .toEqual(['generic', 'generic', 'shape', 'shape', 'generic'])
+    expect([{}, { OG_ANONYMOUS: 'invalid' }, { OG_ANONYMOUS: 'shape' }, { OG_ANONYMOUS: 'full' }, { AUTH_MODE: 'public' }, { AUTH_MODE: 'public', OG_ANONYMOUS: 'invalid' }].map(anonymousPolicy))
+      .toEqual(['generic', 'generic', 'shape', 'full', 'shape', 'generic'])
+  })
+
+  it('full policy: an anonymous fetch draws the full card (labelled), cached apart from the other policies', async () => {
+    const response = await serveCard({ request: request('/og/map.png'), env: env({ OG_ANONYMOUS: 'full' }) })
+    expect([response.headers.get('x-og-tier'), mocks.data.mock.calls.map(call => call[4]), textNodes(await response.text())])
+      .toEqual(['anon', ['full'], ['CW storage', 'secret/path', 'scan 2026-10-12T1201', 'secret 99 B', '99 TiB · 123 objects']])
+    expect(mocks.match.mock.calls.map(call => call[0].url)).toEqual([
+      'https://cw.example/og/map.png?policy=full&r=6&s=2026-10-12T1201&tier=anon&h=0',
+    ])
+  })
+
+  it('full policy: an anonymous page preview carries the view\'s scan and totals', async () => {
+    await stampPage(env({ OG_CARDS: '1', OG_ANONYMOUS: 'full' }), new URL('https://cw.example/marin-us-east-02a/marin'), new Response('shell'))
+    const meta = mocks.stamp.mock.calls[0][1]
+    expect([meta.title, meta.desc, new URL(meta.image).searchParams.get('policy'), mocks.data.mock.calls.map(call => [call[3], call[4]])]).toEqual([
+      'marin-us-east-02a/marin', 'scan 2026-10-12T1201 · 99 TiB · 123 objects', 'full',
+      [[{ path: 'marin-us-east-02a/marin', d: '2026-10-12T1201' }, 'full']],
+    ])
   })
 
   it('configured preview defaults match the deployment’s frontend color default', () => {

@@ -1,6 +1,6 @@
 # Every deployment's scan pipeline on one declared DAG
 
-Status: §6.1 (the generic layer on `cloud`) built, 2026-10-16; cw's switch (§6.2) is next. Phase 2 of [workflow-engine.md] (decided: Nextflow), which cw has proven on prod (§7 there). Ryan: "we need to prepare to move all deploys' pipelines to that or sthg similar. the ad hoc bash script 'WF mgmt' is not acceptable."
+Status: §6.1 (the generic layer on `cloud`) built, 2026-10-16, plus r2's gaps (§3.1–3.4: a second store, per-call credentials, the path-index extras, a dry index-gc); cw's switch (§6.2) is next. Phase 2 of [workflow-engine.md] (decided: Nextflow), which cw has proven on prod (§7 there). Ryan: "we need to prepare to move all deploys' pipelines to that or sthg similar. the ad hoc bash script 'WF mgmt' is not acceptable."
 
 ## 1. Where things stand
 
@@ -43,7 +43,7 @@ list ×source ──────┴→ index ─┬→ static-names ────
 3. **One head: `dt-cloud scan head PROFILE`** (`scan_head.py`), replacing `cw-head.sh`:
    - stamps `SNAP_ID`, `GEN` and `DT_JOB_START` (each kept when set: a resume);
    - `scan-run start -B -g GEN` (in-process, when the profile's env names `SCAN_RUNS_PROFILE`);
-   - session = uuid5(URL, `disky/<deployment>/scan/<scan>`): cw's formula, so a scan started under `cw-head.sh` resumes under the generic head; writes that one `.nextflow/history` line;
+   - session = uuid5(URL, `disky/<deployment>/scan/<scan>`): cw's formula, so a scan started under `cw-head.sh` resumes under the generic head; `disky/<deployment>/<store>/scan/<scan>` for a profile whose `store` isn't the primary (§3.1); writes that one `.nextflow/history` line;
    - writes `params.json` and `executor.config` from the profile, runs `nextflow run scan.nf -c base.config -c executor.config -params-file params.json -resume <session> -with-trace trace.tsv` with `NXF_CLOUDCACHE_PATH=<work>/cache` (cloud executors), `start_new_session=True`;
    - on TERM / INT: `os.killpg(TERM)` (the JVM is the launcher script's child), never fails on Nextflow's own exit, sleeps `NF_SWEEP_DELAY` (30 s: a submit in flight lands after Nextflow exits), cancels whatever carries `nf-session=<session>` (`batch.cancel_labelled`), finishes the record 143 / 130;
    - `scan-run finish -x rc [-e "nextflow exit N: <first FAILED task> (exit M) failed (session …)"] -l nf-session=<session>`; on success prints `SCAN-JOB-DONE <scan> -> <data>/snapshots/<subdir>/<scan>`;
@@ -56,6 +56,7 @@ One file per deployment, `job/profiles/<deployment>.yml`, on that deployment's b
 
 ```yaml
 deployment: cw-s3                   # required: session namespace, alert titles
+store: primary                      # the site store fed (`STORES_JSON` key; default primary); §3.1
 executor: {kind: google-batch, project: …, region: us-central1, service_account: …, image: …, boot_disk: 50}  # | awsbatch {queue, region, image, cli_path} | local
 work: gs://<data bucket>/nf         # required: `<work>/work` + the resume cache `<work>/cache`; a local dir for `local`
 data: gs://<data bucket>            # required: the store steps hand off through; google-batch: the work dir's bucket (the one Batch mounts)
@@ -65,13 +66,15 @@ layout:
   listing: listing/{scan}/          # where `list` writes listings when `index` imports them (required unless `list.import`)
 sources:                            # `list`'s fan-out; the scheme picks the kind (gs | gcs | s3 | r2 | hf)
   - {uri: s3://<bucket>, machine: n2-standard-8, procs: 8, threads: 8, endpoint: https://…, args: [-L, …],
-     disk: {request: 1500, type: local-ssd}}   # or `disk: 100` (GB, the pd-balanced boot disk resized)
+     disk: {request: 1500, type: local-ssd},   # or `disk: 100` (GB, the pd-balanced boot disk resized)
+     secrets: {AWS_ACCESS_KEY_ID: <secret>}}   # this source's list call only, over `secrets` + `options.list.secrets` (§3.2)
 machines: {small: e2-standard-2, medium: e2-standard-4, big: {type: n2-standard-8, disk: 200}, list: {type: e2-standard-4, disk: 100}, post: e2-highmem-4}
 # a label may fall back when its task stays queued (google-batch; §7): big: {type: n2-highmem-32, …, fallback: [n2d-highmem-32], queue_timeout: 10}
 steps: [access-ingest, …]           # deployment-only steps (registered with core=False)
 skip: [probe, …]                    # core steps left out (bucket-check, static-names, publish-r2, interval-store, over-time, index-gc, warm-cache, probe, digest)
 fold: [bucket-check, index-sync]    # the default
-secrets: {AWS_ACCESS_KEY_ID: <secret>, …}   # fetched in-task (`secrets exec`, as the task's service account), whitespace-stripped
+secrets: {AWS_ACCESS_KEY_ID: <secret>, …}   # fetched in-task (`secrets exec`, as the task's service account), whitespace-stripped;
+                                             # `options.<step>.secrets` (any step) overlays it for that step's call (§3.2)
 env: {SCAN_RUNS_PROFILE: /app/job/scan-runs.json, D1_DB_ID: …, SITE_URL: …, R2_BUCKET: …}
 pass: [DT_RECORD, DT_ALERTS]        # the head's env vars passed through when set
 labels: {deployment: cw-s3}
@@ -83,12 +86,55 @@ options:
   interval-store: {timeout: 90m, mem: 12GB}       # store: default $R2_ARCHIVE; -L derived from layout.layer2
   over-time: {mem: 16GB}
   digest: {template: cw, config: /app/job/digest.yml}
+  # under `index.mode: path-index` also `age_pyramids: true`, `verify: true` (§3.3); `index-sync: {variants: [path, …]}`;
+  # `index-gc: {dry: true}` (§3.4)
 ```
 
 It replaces each script's top-of-file constants, `NF_SECRETS` / `NF_PASS`, the cron's env, `STATIC_NAMES=1` (on by default, `skip` to drop), `INTERVAL_STORE_APPEND` (`skip`), and `LISTING_PROCS` / `LISTING_WORKERS` / `IMPORT_JOBS` / `DUCKDB_MEM` (per-source `procs` / `threads`, `{nproc}`, step options).
 
 - **Disks.** `disk: N` only resizes the pd-balanced boot disk. `{request: 375·k, type: local-ssd}` gives k NVMe local SSDs in RAID0, ext4, mounted at `/tmp` inside the container, the task's cwd on it too. **Probe passed** (gcs, 2026-10-16: Nextflow 26.10.2 + nf-google 1.29.1, n2-highmem-32, `request: 1500.GB` → 4×375G, 1.5T, 1.6 GB/s direct writes). The request is validated as a multiple of 375; the counts a machine allows (n2-highmem-32: 0/4/8/16/24) are GCE's to refuse at submit. Steps stage under `${TMPDIR:-/tmp}` (`TMPDIR` is unset in tasks), so a local SSD is used without config.
 - **Per-source region** is reserved and refused unless it equals the executor's: nf-google 1.29.1 has no per-task location (`google.location` and `google.batch.allowedLocations` are global config, the job's region is the client's). Decided (2026-10-16): every source lists from the executor's region. gcs measured `marin-eu-west4` (164M objects) from us-central1 at 1681 s, against 1205–1536 s from europe-west4: 2.5–7.5 min more, off the critical path (marin-us-central2 lists for ~34 min). That isn't worth a second executor, so `region` stays reserved.
+
+What r2.oa.dev's switch needed beyond cw's shape (built 2026-10-16; tests `test_scan_{profile,head,steps,nf}.py`, `test_index_verify.py`, the fixture `fixtures/scan_profiles/meta-store.yml` + its params golden):
+
+### 3.1 A second store: `store`
+
+r2, cw and hf also index their own derived storage (the data and serving buckets) as the site store `meta`: its own layer-2 prefix (`meta-l2/{scan}/`), `snapshots/meta/`, D1 rows under store `meta`, its own static-names generation. That is a second profile (`job/profiles/<deployment>-meta.yml`) through the same `scan.nf`, with `store: meta`; its layout, sources, static-names `gen` and skips are its own keys already. What `store` changes:
+- `store` is a `STORES_JSON` key (the site's `stores.ts`: `?store=<key>`; default `primary`, the CLIs' `-s` default).
+- Steps that file rows per store pass `-s <store>`, and pass nothing for the primary, so the primary's argv is unchanged: both `index-sync` halves (index-rows and index-sync), index-sync's per-scan `index-gc`, the `index-gc` step, and `over-time-groups`. `publish-r2`, `warm-cache`, `probe` and `digest` already follow the layout (`LAYER2_PREFIX`, `SNAPSHOTS_SUBDIR`, the snapshots root).
+- The scan-run record: the head's `scan-run start -K <store>`, which `finish` keeps through the state file. Each task's phases write the same row (an upsert that sets `store`), so `make_ctx` gives a task's `JobRun` the profile's store over its scan-runs profile's default.
+- Session: `disky/<deployment>/<store>/scan/<scan>` when not the primary. The meta scan of the same id is another run, and the primary's formula is unchanged, so existing sessions still resume.
+- Refused for a non-primary store (`requires`, `primary_only`), so its profile skips them:
+  - `interval-store`: the site serves a secondary store per scan (`PATH_STORE=intervals` applies only with no `store=`), and `interval-store/CURRENT.json` is the store root's, i.e. the primary's when both share the R2 bucket. r2-scan never appended meta to one.
+  - `warm-cache`, `probe`: their requests carry no `store=`, so they'd warm and probe the primary's views. Teaching them `store=` is open, and cw-meta-run.sh notes the same gap.
+
+### 3.2 Per-call credentials: `sources[].secrets`, `options.<step>.secrets`
+
+A step's call gets the profile's `secrets` overlaid by `options.<step>.secrets`. A list call also gets its source's `secrets` over both. The most specific binding of an ENV wins (`ScanProfile.secrets_for`). r2 lists with a read-only source key and publishes with the serving key, under the same names (`AWS_ACCESS_KEY_ID`), so neither can be profile-wide. Every call in a task is already its own `dt-cloud secrets exec`, so a folded step (bucket-check in a list task, index-sync in post) gets its own bindings, not its neighbour's. The head resolves the lists: `params.step_secrets[<step>]` holds the whole overlaid list for each step that has its own, and `params.sources[i].secrets` holds it for a source that has its own. `scan.nf`'s `secretsFor` picks the source's, then the step's, then `params.secrets`. Every bound name is whitespace-stripped in a step's env, not only the profile-wide ones.
+
+### 3.3 Index extras (path-index mode)
+
+What r2-scan builds after `path-index`, sorted by what [lean-scans.md] keeps:
+- **Age pyramids: kept** (lean-scans §1.3: they stay per scan until an interval age index replaces them). `options.index.age_pyramids: true` runs `dt-cloud age-pyramid -c [-m mem] -t nproc -o <dir> <dir>/path-index.parquet`: a new CLI from r2-scan's `build_age` + `verify_age` (`index_verify.py`). It writes every `AGE_PYRAMID_BINS` tier from the `path` sort and checks each against its dated files. It is a flag, not a list of variants, because the ladder must match the site's (`agePyramid.ts`), and a subset would serve gaps. `index-sync` already syncs every variant present, so the tiers publish with no `-v`. `options.index-sync.variants` (`-v` each, both halves) is there for a deployment that wants r2's explicit list. Layer2 mode refuses the key, since `index-write` writes the tiers itself.
+- **`verification.json`: kept** (the index checked against its listings, which lean-scans doesn't replace; its `interval-store verify` marker checks the store against the per-scan sort, a different check). `options.index.verify: true` runs `dt-cloud index-verify` (r2-scan's `verify_scan`, generic): each source bucket's and the total bytes / objects against the `path` sort's depth-1 rows and `meta.json`, the `age.json` histogram against the dated listing, the age pyramids and the `bysize` views where those files are written. A mismatch fails `index`, so nothing is published. The report goes beside the tiers (`<layer2>/index/<gen>/verification.json`), then to R2 with them. r2's `date_basis` field is left out (it was r2's own annotation). Under lean-scans the `bysize` check goes when that sort does (it is skipped when the file is absent).
+- **`.groups` sidecars: not ported.** `path-index -P` already writes the sorts' `.groups.json` + `.groups.parquet` (`write_sorts`, `groups=True`). The age pyramids' sidecars have no reader: `index-sync` reads footers from the parquet, and `index-gc -r` retires only the sorts. lean-scans makes `.groups.*` transient anyway.
+- **Archive to `gs://…/scans/<scan>/<gen>/`: not ported.** On the DAG the data store already is that archive, by layout: listings at `layout.listing`, tiers at `<layer2>/index/<gen>/`, snapshots at `snapshots/<subdir>/<scan>/`, each written once and skip-if-done. lean-scans drops r2's GCS duplicate of every per-scan tree. r2's `scan-runs.json` outputs (`gs://…/scans/{scan}/{gen}/{listing,index,snap}/`) move to the layout's keys.
+
+`options.index.mem` is now also allowed under path-index: the age pyramids' and the check's DuckDB limit.
+
+### 3.4 `options.index-gc.dry`
+
+`dry: true` adds `-n` to the `index-gc` step's `-F` pass, which lists what would go and deletes nothing. r2's R2 has no soft delete, so the first deletions wait for a reviewed list. The per-scan row sweep in `index-sync` (`index-gc <scan>`) still runs, as in r2-scan. The default is unchanged.
+
+### 3.5 What r2 / cw / hf set
+
+- **r2.oa.dev** (`r2.yml` + `r2-meta.yml`):
+  - both: `index: {mode: path-index, args: [-U], mem: 12GB, age_pyramids: true, verify: true}`, `index-gc: {dry: true}` until a reviewed list, then off. Optional: `index-sync: {variants: [path, bysize, age-pyramid-…]}`, r2's explicit list.
+  - primary: `options.list.secrets` = the read-only source key as `AWS_*`; `secrets` = `R2_*` (serving), `CLOUDFLARE_API_TOKEN`, `SITE_TOKEN`, `SLACK_BOT_TOKEN`; `options.digest.secrets: {CF_PAGES_TOKEN: …}` (only digest needs it).
+  - meta: `store: meta`, `layout: {layer2: meta-l2/{scan}/, snapshots: meta, listing: <its own>/{scan}/}`, sources `gcs://<data>` + `r2://<serving>` with `secrets` = the serving key as `AWS_*`, `static-names: {gen: <meta gen>}`, `skip: [bucket-check, interval-store, over-time, warm-cache, probe, digest]`.
+  - Its `scan-runs.json` outputs move from `scans/{scan}/{gen}/…` to the layout's keys (§3.3).
+- **cw-s3** `cw-s3-meta.yml`: `store: meta`, `layout.layer2: meta-l2/{scan}/`, `snapshots: meta`, sources `gcs://<data>` + `r2://<index bucket>` with that source's R2 key, `index.webdata` = cw-webdata.py with `-l "our storage"`, its static-names `gen`, the same skips as r2's meta. Its primary needs nothing new.
+- **hf**: a meta profile the same way if it keeps its meta store. Its primary needs nothing new (`CF_PAGES_TOKEN` can move to `options.digest.secrets`).
 
 ## 4. Executors
 
@@ -137,10 +183,12 @@ Each deployment's old script is deleted when its first week on the DAG is clean.
 - **Engine-neutral DAG store** (asked by Ryan): `scan_run_dags` holds `{engine, dag}` with a nodes/edges JSON reduced by the writer; the raw Mermaid stays in the GCS archive. cw is doing it.
 
 - m3: awsbatch, or google-batch over its uploads (§4).
+- `warm-cache` / `probe` for a non-primary store (§3.1): `store=` on their requests, then drop the refusal.
 - `options.index.mode: path-index` (gcs's index over every listing at once) is declared and refused as not ported; its `attribution` / `access` keys are accepted only with it.
 - `NXF_CLOUDCACHE_PATH` on R2 (the demo's resume across runners), unprobed with nf-cloudcache 0.6.2.
 - Static-names / interval-store stages as DAG processes (§5): when, and whether `append_runner`'s lease survives.
 - Whether `scan.nf` should be generated from a Python DAG definition (steps, needs, executor and outputs as data, as workflow-engine §5 Phase 0 proposed) rather than hand-written Groovy. As built: hand-written `scan.nf` (~155 lines), the registry's `stage` places deployment-only steps, and the profile carries the variation. Note Nextflow 26's strict parser reserves `run` as a function name.
 
 [workflow-engine.md]: workflow-engine.md
+[lean-scans.md]: lean-scans.md
 [CLAUDE.md "Deployments: parity by default"]: ../CLAUDE.md

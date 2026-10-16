@@ -136,6 +136,7 @@ ROOT_LABEL = "my buckets"                   # the store root's crumb label
 # OG_DEFAULT_COLOR = "w"                     # match Store.defaultColor if set: t=tree, w=written, r=read, u=owner
 # OG_ANONYMOUS = "generic"                   # private default: no data reads/totals/names on plain links; explicit shares may be detailed
 #                                           # "shape" explicitly permits anonymous geometry + totals (GCS's approved policy)
+#                                           # "full": anonymous unfurls get the full card (labelled tiles, sizes, owners; a map's scan + totals)
 #                                           # public AUTH_MODE defaults to shape; unknown values fail closed to generic
 
 # Secrets — `wrangler pages secret put`, never in this file:

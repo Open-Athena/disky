@@ -6,6 +6,9 @@ Validated on load: unknown keys are refused, and a missing required key is named
 Every problem is reported at once (`ProfileError`, one line each).
 
     deployment: <name>            # required: the session namespace (`disky/<deployment>/scan/<scan>`), alert titles
+    store: <name>                 # the site store the scan feeds (`STORES_JSON` key; default `primary`): `index-sync` /
+                                  # `index-gc` / `over-time-groups -s`, the scan-run record's store, and the session
+                                  # namespace (`disky/<deployment>/<store>/scan/<scan>` when not the primary)
     executor:                     # required
       kind: google-batch | awsbatch | local
       project, region, service_account, image, boot_disk, spot     # google-batch (project, region, image required)
@@ -27,6 +30,7 @@ Every problem is reported at once (`ProfileError`, one line each).
         endpoint: https://…       #   bulk-list `-E` (s3 / r2)
         region: <region>          #   reserved: nf-google 1.29.1 has no per-task location (refused unless = executor's)
         args: [-L, …]             #   extra lister args
+        secrets: {ENV: <secret>}  #   this source's list task only, over `secrets` and `options.list.secrets`
     machines: {<label>: <type> | {type, disk, cpus, memory, time, fallback, queue_timeout}}   # labels: small medium big list post pre interval over_time (+ any)
                                   # `fallback: [<type>, …]` + `queue_timeout: <minutes>` (google-batch, together): a task of
                                   # the label not RUNNING `queue_timeout` min after submit (a GCE stockout leaves it QUEUED /
@@ -35,12 +39,15 @@ Every problem is reported at once (`ProfileError`, one line each).
     steps: [<extra step>, …]      # deployment-only steps on top of the core (`scan_steps.STEPS`, `core=False`)
     skip: [<core step>, …]        # core steps this deployment leaves out (each listed in `SKIPPABLE`)
     fold: [bucket-check, index-sync]   # tiny steps run inside a neighbour's task (default: both; [] = own tasks)
-    secrets: {ENV: <secret>}      # Secret Manager names, fetched in-task (`dt-cloud secrets exec`)
+    secrets: {ENV: <secret>}      # Secret Manager names, fetched in-task (`dt-cloud secrets exec`), for every step;
+                                  # `options.<step>.secrets` / `sources[].secrets` overlay it for that step's call (a
+                                  # binding of the same ENV there wins)
     env: {KEY: value}             # every step's environment
     pass: [ENV, …]                # the head's own env vars passed through to every step when set (DT_RECORD, …)
     labels: {key: value}          # Batch labels on every task (+ `$DISKY_LABELS`, `component: scan`, `nf-session`)
     queue_size: 20                # Nextflow `executor.queueSize`
-    options: {<step>: {…}}        # per-step settings, each step's keys in `scan_steps.STEPS[<step>].options`
+    options: {<step>: {…}}        # per-step settings, each step's keys in `scan_steps.STEPS[<step>].options`, plus
+                                  # `secrets` (any step)
 """
 from __future__ import annotations
 
@@ -57,16 +64,18 @@ SOURCE_KINDS = {"gs": "gcs", "gcs": "gcs", "s3": "s3", "r2": "r2", "hf": "hf"}
 FOLDABLE = {"bucket-check": "list", "index-sync": "post"}
 #: A local SSD's size on GCE: a `local-ssd` disk request is a multiple of it.
 LOCAL_SSD_GB = 375
+#: The site's main store (`STORES_JSON` keys name the others); what the CLIs' `-s/--store` default to.
+PRIMARY_STORE = "primary"
 
 _EXECUTOR_KEYS = {
     "google-batch": ({"kind", "project", "region", "service_account", "image", "boot_disk", "spot"}, ("project", "region", "image")),
     "awsbatch": ({"kind", "queue", "region", "image", "cli_path"}, ("queue", "region", "image")),
     "local": ({"kind"}, ()),
 }
-_TOP = {"deployment", "executor", "work", "data", "layout", "sources", "machines", "steps", "skip", "fold", "secrets",
+_TOP = {"deployment", "store", "executor", "work", "data", "layout", "sources", "machines", "steps", "skip", "fold", "secrets",
         "env", "pass", "labels", "queue_size", "options"}
 _LAYOUT = {"layer2", "snapshots", "listing"}
-_SOURCE = {"uri", "machine", "disk", "procs", "threads", "endpoint", "region", "args"}
+_SOURCE = {"uri", "machine", "disk", "procs", "threads", "endpoint", "region", "args", "secrets"}
 _MACHINE = {"type", "disk", "cpus", "memory", "time", "fallback", "queue_timeout"}
 _DISK = {"request", "type"}
 _DISK_TYPES = ("local-ssd", "pd-balanced", "pd-ssd", "pd-standard")
@@ -118,6 +127,8 @@ class Source:
     endpoint: str | None = None
     region: str | None = None
     args: tuple[str, ...] = ()
+    #: This source's list task's bindings, over the profile's and `options.list.secrets`.
+    secrets: Mapping[str, str] = field(default_factory=dict)
 
     @property
     def kind(self) -> str:
@@ -170,6 +181,28 @@ class ScanProfile:
     labels: Mapping[str, str] = field(default_factory=dict)
     queue_size: int = 20
     options: Mapping[str, Mapping[str, object]] = field(default_factory=dict)
+    store: str = PRIMARY_STORE
+
+    @property
+    def primary(self) -> bool:
+        return self.store == PRIMARY_STORE
+
+    def secrets_for(self, step: str, source: str | None = None) -> dict[str, str]:
+        """The Secret Manager bindings one step's call fetches: the profile's, overlaid by `options.<step>.secrets`, then
+        (a list call) by its source's `secrets`. An ENV bound at several levels takes the most specific one's secret."""
+        out = {**self.secrets, **self.opts(step).get("secrets", {})}
+        if source is not None:
+            out.update(self.source(source).secrets)
+        return out
+
+    def secret_names(self) -> set[str]:
+        """Every env var any step's call may hold a secret in (each stripped of whitespace in a step's env)."""
+        names = set(self.secrets)
+        for o in self.options.values():
+            names.update(o.get("secrets", {}))
+        for s in self.sources:
+            names.update(s.secrets)
+        return names
 
     def source(self, uri: str) -> Source:
         for s in self.sources:
@@ -298,6 +331,10 @@ def parse(d: object, where: str = "profile") -> ScanProfile:
     deployment = str(d.get("deployment") or "")
     if deployment and not _NAME.fullmatch(deployment):
         problems.append(f"deployment: lowercase letters, digits and '-' (got {deployment!r})")
+    store = d.get("store", PRIMARY_STORE)
+    if not isinstance(store, str) or not _NAME.fullmatch(store):
+        problems.append(f"store: a `STORES_JSON` key: lowercase letters, digits and '-' (got {store!r})")
+        store = PRIMARY_STORE
 
     ex = d.get("executor") or {}
     executor = Executor(kind="local")
@@ -376,7 +413,8 @@ def parse(d: object, where: str = "profile") -> ScanProfile:
             problems.append(f"{p}.region: {region!r} ≠ the executor's ({executor.region!r}); nf-google 1.29.1 has no "
                             f"per-task location (spec §4 'Per-source region')")
         sources.append(Source(uri, s.get("machine"), _disk(s.get("disk"), f"{p}.disk", problems), s.get("procs"),
-                              s.get("threads"), s.get("endpoint"), region, _str_list(s.get("args"), f"{p}.args", problems)))
+                              s.get("threads"), s.get("endpoint"), region, _str_list(s.get("args"), f"{p}.args", problems),
+                              _str_map(s.get("secrets"), f"{p}.secrets", problems, _ENV_NAME)))
 
     machines: dict[str, Machine] = {}
     ms = d.get("machines") or {}
@@ -429,12 +467,15 @@ def parse(d: object, where: str = "profile") -> ScanProfile:
             problems.append(f"options.{name}: a mapping")
             continue
         spec = STEPS[name].options
+        opt = dict(o)
         for k, v in o.items():
-            if k not in spec:
-                problems.append(f"options.{name}.{k}: unknown key" + (f" (known: {', '.join(spec)})" if spec else " (the step takes none)"))
+            if k == "secrets":
+                opt[k] = _str_map(v, f"options.{name}.secrets", problems, _ENV_NAME)
+            elif k not in spec:
+                problems.append(f"options.{name}.{k}: unknown key (known: {', '.join([*spec, 'secrets'])})")
             elif not _typed(v, spec[k]):
                 problems.append(f"options.{name}.{k}: {_TYPE_NAMES[spec[k]]}")
-        options[name] = dict(o)
+        options[name] = opt
 
     qs = d.get("queue_size", 20)
     if not _int(qs) or qs <= 0:
@@ -445,7 +486,7 @@ def parse(d: object, where: str = "profile") -> ScanProfile:
         machines=machines, steps=steps, skip=skip, fold=fold,
         secrets=_str_map(d.get("secrets"), "secrets", problems, _ENV_NAME), env=_str_map(d.get("env"), "env", problems, _ENV_NAME),
         passthrough=_str_list(d.get("pass"), "pass", problems), labels=_str_map(d.get("labels"), "labels", problems),
-        queue_size=qs if _int(qs) else 20, options=options,
+        queue_size=qs if _int(qs) else 20, options=options, store=store,
     )
     if not missing:  # the steps' own checks, once the profile has its shape
         for name in profile.enabled():

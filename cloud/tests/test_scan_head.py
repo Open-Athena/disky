@@ -30,6 +30,32 @@ def test_session_id():
     assert H.session_id("other", "2026-10-16T1200") == "8b68f678-566c-5e77-9089-7305bed64c57"
 
 
+def test_session_id_per_store():
+    """A store other than the primary namespaces its sessions (`disky/<deployment>/<store>/scan/<scan>`): the same scan id
+    of the deployment's meta store is another run. The primary's is unchanged, so its sessions still resume."""
+    import uuid
+
+    assert H.session_id("cw-s3", "2026-10-16T1200", "primary") == "06a5f601-f0b7-58a3-9817-fc0a8fee5e63"
+    assert H.session_id("cw-s3", "2026-10-16T1200", "meta") == str(uuid.uuid5(uuid.NAMESPACE_URL, "disky/cw-s3/meta/scan/2026-10-16T1200"))
+    assert H.session_id("cw-s3", "2026-10-16T1200", "meta") == "43a92eb7-2c67-54bb-9a9a-4c56a2b389b0"
+
+
+def test_start_args_carry_the_store():
+    assert (H.start_args(load(FIX / "cw-s3.yml"), "G", "2026-10-16T1200"), H.start_args(load(FIX / "meta-store.yml"), "G", "2026-10-16T1200")) == (
+        ["-B", "-g", "G", "2026-10-16T1200"],
+        ["-B", "-g", "G", "-K", "meta", "2026-10-16T1200"],
+    )
+
+
+def test_params_golden_per_call_secrets():
+    """The meta-store fixture: a source's own bindings (its list call's whole list) and a step's (`step_secrets`), each
+    the profile's overlaid; a step with none of its own reads `secrets`."""
+    p = load(FIX / "meta-store.yml")
+    got = H.params(p, "<profile>", "2026-10-16T1200", "20261016T120001Z", "1792152001", "run-1",
+                   H.session_id("example", "2026-10-16T1200", "meta"), {})
+    assert got == json.loads((FIX / "meta-store.params.json").read_text())
+
+
 def test_history_line():
     assert H.history_line(NOW, "2026-10-16T1200", "S") == "2026-10-16 12:00:01\t-\tscan_2026_10_16T1200\tOK\t-\tS\tnextflow run scan.nf\n"
 
@@ -175,6 +201,46 @@ def test_dry_run_writes_the_launch_files(tmp_path, monkeypatch):
         f"-params-file {launch}/params.json -resume {session} -with-trace {launch}/trace.tsv "
         f"-with-dag {launch}/dag.mmd -with-timeline {launch}/timeline.html -with-report {launch}/report.html"
     )
+
+
+def test_head_records_into_the_profiles_database_and_store(tmp_path, monkeypatch):
+    """`head()` with `D1_DB_ID` (and `SCAN_RUNS_PROFILE`) only in the profile's `env` (cw's first prod run on the generic
+    head: its own start / finish found no database), and a non-primary `store`: both writes go to the profile's D1, the
+    run filed under the store. Nextflow is a fake process that exits 0."""
+    from dt_cloud import index_footer, scan_runs
+
+    for k in ("D1_DB_ID", "SCAN_RUNS_PROFILE", "DT_RECORD", "BATCH_JOB_UID", "DT_RUN_ID", "SNAP_ID", "GEN", "DT_JOB_START",
+              "REPROC", "DISKY_LABELS"):
+        monkeypatch.delenv(k, raising=False)
+    monkeypatch.setenv("TMPDIR", str(tmp_path / "t"))
+    monkeypatch.setenv("SNAP_ID", "2026-10-16T1200")
+    monkeypatch.setenv("GEN", "G1")
+    monkeypatch.setenv("DT_JOB_START", "100")
+    monkeypatch.setenv("DT_RUN_ID", "run-1")
+    runs = tmp_path / "scan-runs.json"
+    runs.write_text('{"store": "primary", "run_id_env": ["DT_RUN_ID", "BATCH_JOB_UID"]}')
+    prof = tmp_path / "p.yml"
+    prof.write_text(f"deployment: fix\nstore: meta\nexecutor: {{kind: local}}\nwork: {tmp_path}/nf\ndata: {tmp_path}/data\n"
+                    "layout: {layer2: 'meta-l2/{scan}/', snapshots: meta}\nsources: [s3://a]\n"
+                    "skip: [static-names, digest, interval-store, warm-cache, probe]\noptions: {list: {import: true}}\n"
+                    f"env: {{SCAN_RUNS_PROFILE: {runs}, D1_DB_ID: db-from-profile}}\n")
+    monkeypatch.setattr(index_footer, "D1_DB_ID", "")
+    monkeypatch.setattr(index_footer, "_creds", lambda: ("tok", "acct"))
+    dbs: list[str] = []
+    monkeypatch.setattr(index_footer, "_d1_query", lambda sql, acct, tok, db: dbs.append(db) or [])
+    monkeypatch.setattr(scan_runs, "lookup_job", lambda *a, **kw: None)
+    runs_written: list[tuple[str, str, str]] = []
+    record_sql = scan_runs.record_sql
+
+    def spy(rec, now):
+        runs_written.append((rec.run.scan, rec.run.store, rec.run.status))
+        return record_sql(rec, now)
+
+    monkeypatch.setattr(scan_runs, "record_sql", spy)
+    monkeypatch.setattr(H.subprocess, "Popen", lambda argv, **kw: SimpleNamespace(pid=0, wait=lambda: 0))
+    assert H.head(prof, tmp_path / "nf-dir", tmp_path / "launch") == 0
+    assert (runs_written[0], runs_written[-1][:2], set(dbs)) == (
+        ("2026-10-16T1200", "meta", "running"), ("2026-10-16T1200", "meta"), {"db-from-profile"})
 
 
 def test_publish_reports(tmp_path):
