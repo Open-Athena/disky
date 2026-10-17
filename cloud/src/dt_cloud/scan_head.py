@@ -275,16 +275,24 @@ def publish_reports(profile: ScanProfile, scan: str, launch: Path) -> list[str]:
     return keys
 
 
-def start_args(profile: ScanProfile, gen: str, scan: str) -> list[str]:
-    """`scan-run start`'s arguments: the head's Batch job (`-B`), the generation, and a store other than the primary
-    (`-K`: the run's `store`, which `finish` and every task's phase keep)."""
-    return ["-B", "-g", gen, *([] if profile.primary else ["-K", profile.store]), scan]
+def start_args(profile: ScanProfile, gen: str, scan: str, run_id: str, batch: bool = True) -> list[str]:
+    """`scan-run start`'s arguments: the run id (`-r`, the one every task records into), the head's Batch job's facts
+    (`-B`, when the head is one), the generation, and a store other than the primary (`-K`: the run's `store`, which
+    `finish` and every task's phase keep)."""
+    return ["-r", run_id, *(["-B"] if batch else []), "-g", gen, *([] if profile.primary else ["-K", profile.store]), scan]
 
 
-def finish_args(rc: int, error: str | None, cost: list[str], dag: Path) -> list[str]:
+def local_run_id(profile: ScanProfile, scan: str) -> str:
+    """A head that isn't a Batch job (a laptop, a scratch run)'s run id: without one, `start` recorded nothing and
+    every task, falling back to its own `BATCH_JOB_UID`, became a run of its own (gcs prod, 2026-10-17T0005: 6)."""
+    return "-".join([profile.deployment, *([] if profile.primary else [profile.store]), "nf", scan]).lower()
+
+
+def finish_args(rc: int, error: str | None, cost: list[str], dag: Path, run_id: str = "") -> list[str]:
     """`scan-run finish`'s arguments: the exit status, the error, the cost labels, and the run's DAG (`-D`, stored with
     the run for the site's pipeline view) when Nextflow wrote one."""
-    return ["-x", str(rc), *(["-e", error] if error else []), *cost, *(["-D", str(dag)] if dag.is_file() else [])]
+    return [*(["-r", run_id] if run_id else []), "-x", str(rc), *(["-e", error] if error else []), *cost,
+            *(["-D", str(dag)] if dag.is_file() else [])]
 
 
 def nextflow_argv(nf_dir: Path, launch: Path, session: str) -> list[str]:
@@ -311,6 +319,10 @@ def head(profile_path: Path, nf_dir: Path, launch: Path | None, *, reproc: bool 
             env.setdefault(k, profile.env[k])
     if reproc:
         env.update(REPROC="1", DT_RECORD="off")
+    batch = bool(env.get("BATCH_JOB_UID"))
+    if not run_id and env.get(PROFILE_ENV) and env.get("DT_RECORD") != "off":
+        run_id = env["DT_RUN_ID"] = local_run_id(profile, scan)
+        err(f"scan head: not a Batch job; recording as run {run_id}")
     session = session_id(profile.deployment, scan, profile.store)
     cloud = profile.executor.kind != "local"
     if launch is None:
@@ -335,7 +347,7 @@ def head(profile_path: Path, nf_dir: Path, launch: Path | None, *, reproc: bool 
     recording = bool(env.get(PROFILE_ENV))
     cost = ["-l", f"nf-session={session}"] if profile.executor.kind == "google-batch" else []
     if recording:
-        _record(start_cmd, start_args(profile, gen, scan))
+        _record(start_cmd, start_args(profile, gen, scan, run_id, batch))
 
     proc = subprocess.Popen(argv, cwd=launch, env=nf_env, start_new_session=True)
     stopped: list[int] = []
@@ -370,7 +382,7 @@ def head(profile_path: Path, nf_dir: Path, launch: Path | None, *, reproc: bool 
         error = f"nextflow exit {rc}" + (f": {f} failed" if f else "") + f" (session {session})" if rc else None
     publish_reports(profile, scan, launch)
     if recording:
-        _record(finish_cmd, finish_args(rc, error, cost, launch / "dag.mmd"))
+        _record(finish_cmd, finish_args(rc, error, cost, launch / "dag.mmd", run_id))
     if rc == 0:
         print(f"SCAN-JOB-DONE {scan} -> {profile.data.rstrip('/')}/{profile.layout.snapshots_dir()}/{scan}")
     return rc

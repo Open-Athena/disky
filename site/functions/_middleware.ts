@@ -5,6 +5,7 @@
 // a cached body, the gate, a static asset), leaves with the build that served it
 // (`x-disky-build: <sha> <time>`, `_lib/build.ts`).
 import { withBuild } from './_lib/build.js'
+import { hostRedirect } from './_lib/hostRedirect.js'
 import { restrictGate } from './_lib/restrict.js'
 import { footerCacheDrain } from './_lib/footerCache.js'
 import { coloPutsSettled } from './_lib/index.js'
@@ -32,6 +33,9 @@ type MiddlewareCtx = { request: Request; env: OgEnv; next: () => Promise<Respons
 export const onRequest = async (ctx: MiddlewareCtx): Promise<Response> => withBuild(await serve(ctx))
 
 async function serve(ctx: MiddlewareCtx): Promise<Response> {
+  // a renamed deployment's old hosts: before the gate, so a signed-out visitor follows a posted link to the new host
+  const moved = hostRedirect(ctx.request, ctx.env as never)
+  if (moved) return moved
   const blocked = await restrictGate(ctx.request, ctx.env as never)
   if (blocked) return blocked
   const url = new URL(ctx.request.url)
