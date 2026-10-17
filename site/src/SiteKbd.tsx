@@ -104,7 +104,7 @@ export function SiteKbd({ extra = [], placeholder }: {
     ...Object.fromEntries(
       PEERS.map(p => [
         `peer:${p.prod}`,
-        { label: `This page on ${p.label} (${p.prod})`, group: 'Pages', keywords: [p.prod.split('.')[0]], handler: () => location.assign(peerHref(p, location.href)) },
+        { label: `This page on ${p.label} (${new URL(peerHref(p, location.href)).host})`, group: 'Pages', keywords: [p.prod.split('.')[0]], handler: () => location.assign(peerHref(p, location.href)) },
       ]),
     ),
     'page:github': { label: 'Source on GitHub ↗', group: 'Pages', handler: () => window.open(REPO_URL, '_blank', 'noreferrer') },
