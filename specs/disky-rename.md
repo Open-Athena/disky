@@ -56,4 +56,4 @@ The presentation (~10/19) sets a freeze: until then, only changes no deployment 
 Docs (README, AGENTS.md) follow each step: prose says "disky" now; command lines say `disk-tree` until step 2 makes `disky` the command.
 
 ## Status
-- 2026-10-17: spec written (from disky-m3). Step 1: trash folder done on `local` (56a7fe38), laptop/capture tab titles on `local` (f9053265), demo title/description on `cloud`.
+- 2026-10-17: spec written (from disky-m3). Step 1: trash folder done on `local` (56a7fe38), laptop/capture tab titles on `local` (f9053265), demo title/description on `cloud`. Step 3a on `cloud`: `disk_tree.env` (`get` reads `DISKY_X`, else `DISK_TREE_X`; children are handed `DISKY_X`); every engine read goes through it (`ROOT`, `SCAN_DIRS`, `R2_ENDPOINT_URL`, `PARQUET_CODEC`, `NOTIFY`, `BACKEND`, `SCAN_BATCH_ROWS`, `PARALLEL_FINALIZE_MIN_ROWS`). No deprecation warning yet: it would only add noise until 3b gives deployments a reason to switch. The config dir waits for 3b: `~/.config/disky` already exists (the app's `disky.json`) without a DB or scans, so a naive new-dir-first fallback would point the laptop at an empty root; it needs an explicit migrate.
