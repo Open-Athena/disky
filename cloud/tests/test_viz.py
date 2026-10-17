@@ -205,7 +205,8 @@ def _r2_hour_file(root: Path, ts: dt.datetime, capture: str, rows: list[tuple]) 
 
 def test_r2_agg_cli_feeds_the_read_lens(tmp_path: Path, listing: str, attribution: str):
     """`access r2-agg` over the collector's public hour files → `path-index -x`: a GET marks its key's
-    ancestors read; a HEAD after the scan's instant is cut (the as-of rule), a key-less LIST marks the root, and
+    ancestors read; a HEAD after the scan's instant is cut (the as-of rule), a key-less LIST marks nothing (the root's
+    read is its GET), and
     the sampled hour's rows carry `sampled`."""
     _r2_hour_file(tmp_path / "access", TS["d0702"], "unsampled", [("users/rw/ckpt/x", "GetObject", 2)])
     _r2_hour_file(tmp_path / "access", TS["d0703"], "sampled", [(None, "ListObjectsV2", 1)])
@@ -227,7 +228,7 @@ def test_r2_agg_cli_feeds_the_read_lens(tmp_path: Path, listing: str, attributio
     assert meta["access"] == {"from": epoch_day(TS["d0702"]), "to": epoch_day(TS["d0703"]), "buckets": ["b1"]}
     a_by_path = pd.read_parquet(pidx).groupby("path")["last_read"].max().to_dict()
     assert {p: a_by_path[p] for p in ("b1", "b1/users", "b1/users/rw/ckpt")} == {
-        "b1": epoch_day(TS["d0703"]), "b1/users": epoch_day(TS["d0702"]), "b1/users/rw/ckpt": epoch_day(TS["d0702"]),
+        "b1": epoch_day(TS["d0702"]), "b1/users": epoch_day(TS["d0702"]), "b1/users/rw/ckpt": epoch_day(TS["d0702"]),
     }
     assert pd.isna(a_by_path["b1/datasets"])
 
