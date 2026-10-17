@@ -42,8 +42,8 @@ WORKDIR /app
 # are on PATH as before. `--frozen`: the image runs exactly the pins CI tested
 # (the previous unpinned `pip install` resolved fresh each build — gcsfs 2026.8.1's
 # default prefetcher hung `recompress gs://` on Batch, 2026-09-30). `--package
-# dt-cloud` pulls `disk-tree[gcs,s3]` through dt-cloud's dependency; `[plot]` =
-# matplotlib for the digest's OP mosaic, `[overtime]` = pyrmts' multiscan kernel
+# dt-cloud` pulls `disk-tree[gcs,s3]` through dt-cloud's dependency; `[overtime]` =
+# pyrmts' multiscan kernel
 # (a `git+https` pin — hence git above). Same recipe as deploy/sheet-mirror/Dockerfile.
 COPY --from=ghcr.io/astral-sh/uv:0.12 /uv /bin/uv
 ENV UV_PROJECT_ENVIRONMENT=/usr/local UV_NO_CACHE=1 UV_FROZEN=1
@@ -51,7 +51,7 @@ COPY pyproject.toml README.md uv.lock ./
 COPY src ./src
 COPY cloud/pyproject.toml ./cloud/
 COPY cloud/src ./cloud/src
-RUN uv sync --no-dev --no-editable --package dt-cloud --extra plot --extra overtime
+RUN uv sync --no-dev --no-editable --package dt-cloud --extra overtime
 COPY --from=site /repo/site/dist ./dist
 COPY job ./job
 # The entrypoint runs `job/$JOB` (`job/build.sh` passes `--build-arg JOB=…`):
