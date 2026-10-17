@@ -57,6 +57,9 @@ g = (lambda k, d="": d) if pin else os.environ.get
 v = {
     # the stack's cost labels (PIN keeps them: `submitter_spec` passes them through)
     **({"DISKY_LABELS": os.environ["DISKY_LABELS"]} if os.environ.get("DISKY_LABELS") else {}),
+    # what started the scan (`scan_runs.trigger`, the scan's `trigger.json`): the cron body is the PIN spec;
+    # everything else is a hand submit
+    "DT_TRIGGER": "schedule" if pin else os.environ.get("DT_TRIGGER", "manual"),
     "SWEEP_BUCKET": g("SWEEP_BUCKET", "marin-us-east-02a"),
     "SWEEP_S3_ENDPOINT": g("SWEEP_S3_ENDPOINT", "https://cwobject.com"),
     "DATA_BUCKET": g("DATA_BUCKET", "oa-cw-s3-usage-data"),
