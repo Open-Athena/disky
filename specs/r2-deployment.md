@@ -82,7 +82,7 @@ Status 10/17 ~10:15Z: steps 1 and 3's first apply done. Ryan created the token (
 - the daily replay (`REPLAY_HOURS` 144) ≈ 11.5M events, ~58× that ceiling
 - each day aggregate keeps every event id (`events: {id: [ts, action]}`) — ~1.9M entries, tens of MB of JSON, re-read and rewritten each hour, near a Worker's 128 MB
 
-So the instance stays off until root's collector has a high-volume mode (aggregate counts without per-event ids, a bounded replay, per-hour paging): a generic gap, sent to root.
+So the instance stays off until root's collector has a high-volume mode (aggregate counts without per-event ids, a bounded replay, per-hour paging): a generic gap, sent to root. Root (10/17) is building one mode for both buckets on `cloud`: per-hour aggregates per (key, action) with `n` and first/last ts, no ids persisted, dedup within one hour's drain; a re-drain replaces that hour's aggregate; a page budget per invocation (new settled hours → early-drained hours again → round-robin re-verify) instead of the 144 h replay; `sampled` recorded as normal. OA's cron stays off and the token uninstalled until it lands with the `wrangler.oa.json` knobs.
 
 4. A last-read overlay for the site is later work (derived summaries only; raw events stay in `oa-r2-access-logs`, never the serving bucket).
 
