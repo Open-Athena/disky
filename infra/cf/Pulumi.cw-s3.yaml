@@ -9,5 +9,9 @@ config:
   gcs-usage-cf:d1Name: oa-cw-s3-usage-db
   gcs-usage-cf:branchAliases:
     - {domain: dev.cw-s3.oa.dev, branch: dev}
+  # the rename to cw (specs/rename-cw.md): the new names beside the old, which stay attached and redirect (site)
+  gcs-usage-cf:extraDomains:
+    - {domain: cw.oa.dev}
+    - {domain: dev.cw.oa.dev, branch: dev}
   gcs-usage-cf:kvName: oa-cw-s3-usage-cache
   gcs-usage-cf:r2Bucket: oa-cw-s3-usage-index
