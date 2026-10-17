@@ -314,6 +314,39 @@ def test_day_rows_variants():
         D.day_rows(MONTH, "x", 12)
 
 
+def test_day_rows_sender_skips_manual_scans():
+    # 9/1: a hand-run scan at 12:30Z lands before the 13:00Z cron scan; the cron's is the reply
+    rows = D.rows_from_meta([
+        *[(s, {**m, "trigger": "schedule"}) for s, m in LEAD],
+        ("2026-09-01T1230", {**_meta(711), "trigger": "manual"}),
+        ("2026-09-01T1300", {**_meta(713), "trigger": "schedule"}),
+        ("2026-09-02T0000", {**_meta(712), "trigger": "schedule"}),
+    ], P)
+    month = D.Month(lead=rows[:2], rows=rows[2:])
+    assert [r.trigger for r in month.rows] == ["manual", "schedule", "schedule"]
+    assert D.day_rows(month, "sender", 12) == [
+        D.DayRow("2026-09-01", "2026-09-01T1300", 713.0, 8.0, 25.0, E.scan_ts("2026-08-31T1200")),
+    ]
+    # a day with only a hand-run scan: no reply while it's open, the scan stands in once the next day starts
+    manual = D.Month(lead=rows[:2], rows=[rows[2]])
+    assert D.day_rows(manual, "sender", 12) == []
+    assert D.day_rows(replace(manual, closed=True), "sender", 12) == [
+        D.DayRow("2026-09-01", "2026-09-01T1230", 711.0, 6.0, 24.5, E.scan_ts("2026-08-31T1200")),
+    ]
+    # scans without a trigger (stamped before triggers existed): the clock alone, as before
+    assert D.day_rows(MONTH, "sender", 12)[0].scan == "2026-09-01T1200"
+
+
+def test_load_window_reads_triggers(tmp_path: Path):
+    for s, m in [*LEAD, *SEPT]:
+        (tmp_path / s).mkdir()
+        (tmp_path / s / "meta.json").write_text(json.dumps(m))
+    (tmp_path / "2026-09-01T1200" / "trigger.json").write_text('{"trigger": "manual"}\n')
+    lead, in_month = E.load_window(str(tmp_path), SEP)
+    assert lead == LEAD
+    assert in_month == [SEPT[0], ("2026-09-01T1200", {**SEPT[1][1], "trigger": "manual"}), *SEPT[2:]]
+
+
 def test_day_rows_provisional():
     half = D.Month(lead=MONTH.lead, rows=MONTH.rows[:3])  # 9/2 has only its 00:00 scan
     # the still-open day gets a provisional row over its latest scan, Δ vs the prior day's reply scan

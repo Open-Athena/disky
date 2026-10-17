@@ -19,6 +19,8 @@ SCAN_ID = re.compile(r"(\d{4})-(\d{2})-(\d{2})(?:T(\d{2})(\d{2}))?")
 
 # A published scan's `meta.json` path (`…/<scan id>/meta.json`); group 1 is the id.
 META_PATH = re.compile(rf"/({SCAN_ID.pattern})/meta\.json$")
+# Beside it, what started the scan: `{"trigger": "schedule" | "manual"}` (`scan head`'s `stamp_trigger`).
+TRIGGER_FILE = "trigger.json"
 
 
 def is_scan_id(value: object) -> bool:
