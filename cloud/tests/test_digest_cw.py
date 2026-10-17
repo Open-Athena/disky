@@ -885,3 +885,17 @@ def test_op_sender():
     assert [E.config_from_dict({**base, **extra}).op_sender() for extra in ({}, {"op_icon": "mark.png"}, {"op_icon": "https://x.example/m.png"})] == [
         {"icon_emoji": ":calendar:"}, {"icon_url": "https://icons.example.org/mark.png"}, {"icon_url": "https://x.example/m.png"},
     ]
+
+
+def test_icons_dir_resolves_beside_the_config_from_a_task_work_dir(tmp_path, monkeypatch):
+    """A Nextflow step runs in its task work dir, not /app: the config's relative `icons_dir` resolves against the
+    config's repo root (`<app>/job/digest.yml` → `<app>/job/icons-x`), ahead of the cwd (hf's first NF scan: no digest)."""
+    from dt_cloud.cli import _icons_dir
+
+    app, work = tmp_path / "app", tmp_path / "work" / "ab" / "cd12"
+    (app / "job" / "icons-x").mkdir(parents=True)
+    (app / "job" / "digest.yml").write_text("{}\n")
+    work.mkdir(parents=True)
+    monkeypatch.chdir(work)
+    assert (_icons_dir("job/icons-x", app / "job" / "digest.yml"), _icons_dir("/abs/icons", app / "job" / "digest.yml")) == (
+        app / "job" / "icons-x", Path("/abs/icons"))
