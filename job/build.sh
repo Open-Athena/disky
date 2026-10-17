@@ -17,7 +17,7 @@ mkdir -p "$ctx/cloud" "$ctx/job" "$ctx/site"
 cp -R "$root/pyproject.toml" "$root/README.md" "$root/uv.lock" "$root/src" "$ctx/"
 cp -R "$root/cloud/pyproject.toml" "$root/cloud/src" "$ctx/cloud/"
 cp "$root/site/wrangler.toml" "$ctx/site/"
-cp "$here/Dockerfile" "$here/cloudbuild.yaml" "$here/hf-run.sh" "$here/hf-scan-runs.json" "$here/digest.yml" "$ctx/job/"
+cp "$here/Dockerfile" "$here/cloudbuild.yaml" "$here/hf-scan-runs.json" "$here/digest.yml" "$ctx/job/"
 cp -R "$here/icons-hf" "$here/nf" "$here/profiles" "$ctx/job/"
 find "$ctx" -name __pycache__ -type d -prune -exec rm -rf {} +
 

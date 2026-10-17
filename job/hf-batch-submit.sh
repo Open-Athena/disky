@@ -6,25 +6,22 @@
 #   DRY=1 job/hf-batch-submit.sh        # print the spec
 #   PIN=1 DRY=1 job/hf-batch-submit.sh  # the canonical spec: the Cloud Scheduler body (infra/gcp generates it)
 #   SNAP_ID=… GEN=… job/hf-batch-submit.sh  # resume that scan's session
-#   NF=0 job/hf-batch-submit.sh         # the old one-VM job (job/hf-run.sh), until it is retired
 #
-# Secrets (Secret Manager containers from infra/gcp, values added by hand — specs/hf-deployment.md): the Hub read
-# token, the job's D1 token and the CF account id, the R2 endpoint + read/write key pair, the alert bot's token.
+# The head only drives the DAG: each step is a Batch task of its own, which fetches its own secrets (the profile's
+# `secrets`; Secret Manager containers from infra/gcp, values added by hand — specs/hf-deployment.md), so the head gets
+# a small VM and only what it uses itself: the scan-run record's D1 token + account id, and the failure alert's Slack
+# token.
 set -euo pipefail
 
 # PIN=1: drop every ambient override so the body is byte-identical whatever the caller's shell (`submitter_spec`
 # runs this under a scrubbed env). Must precede the ${VAR:-default} knobs below; the python vars() honors PIN too.
-if [ -n "${PIN:-}" ]; then unset IMAGE MACHINE MEMORY_MIB NF PROFILE; fi
+if [ -n "${PIN:-}" ]; then unset IMAGE PROFILE; fi
 
 PROJECT=oa-internal-450019
 REGION=us-central1
 SA=hf-usage-job@$PROJECT.iam.gserviceaccount.com
 IMAGE=${IMAGE:-us-central1-docker.pkg.dev/$PROJECT/hf-usage/scan:hf}
-# e2-standard-4 (4 vCPU / 16 GB), on demand: the listing waits on the Hub's 1000-requests-per-5-min window, and the
-# import / sorts / static names over one org are minutes. Measure the first runs (/scans) and adjust.
-MACHINE=${MACHINE:-e2-standard-4}
-CPU_MILLI=$(( ${MACHINE##*-} * 1000 ))
-MEMORY_MIB=${MEMORY_MIB:-14000}
+PROFILE=${PROFILE:-/app/job/profiles/hf.yml}
 JOB_ID=${JOB_ID:-hf-scan-$(date -u +%Y%m%d-%H%M%S)}
 
 labels() {  # cost labels (specs/done/cost-labels.md): $DISKY_LABELS + component $1, as JSON; {} when unset
@@ -51,7 +48,7 @@ v = {
     "SLACK_ALERT_CHANNEL": g("SLACK_ALERT_CHANNEL", "C0C9J9VDPV5"),
 }
 if not pin:  # one-off overrides forwarded only for manual submits, never the cron spec
-    for k in ["SNAP_ID", "GEN", "HF_THREADS", "MEM", "STORE_ROOT", "DT_RECORD", "DT_ALERTS"]:
+    for k in ["SNAP_ID", "GEN", "DT_RECORD", "DT_ALERTS"]:
         if k in os.environ:
             v[k] = os.environ[k]
 print(json.dumps(v))
@@ -70,24 +67,18 @@ cat > "$spec" <<EOF
         "container": {
           "imageUri": "$IMAGE",
           "entrypoint": "dt-cloud",
-          "commands": ["scan-run", "supervise", "--", "bash", "job/hf-run.sh"]
+          "commands": ["scan", "head", "$PROFILE"]
         }
       }],
-      "computeResource": {"cpuMilli": $CPU_MILLI, "memoryMib": $MEMORY_MIB},
+      "computeResource": {"cpuMilli": 2000, "memoryMib": 7000},
       "maxRetryCount": 0,
-      "maxRunDuration": "10800s",
+      "maxRunDuration": "21600s",
       "environment": {
         "variables": $(vars),
         "secretVariables": {
-          "HF_TOKEN": "$(secret hf-usage-hf-token)",
           "CLOUDFLARE_API_TOKEN": "$(secret hf-usage-cf-token)",
-          "CF_PAGES_TOKEN": "$(secret hf-usage-cf-pages-token)",
           "CLOUDFLARE_ACCOUNT_ID": "$(secret hf-usage-cf-account-id)",
-          "R2_ENDPOINT": "$(secret hf-usage-r2-endpoint)",
-          "R2_ACCESS_KEY_ID": "$(secret hf-usage-r2-access-key-id)",
-          "R2_SECRET_ACCESS_KEY": "$(secret hf-usage-r2-secret-access-key)",
-          "SLACK_BOT_TOKEN": "$(secret hf-usage-slack-bot-token)",
-          "SITE_TOKEN": "$(secret hf-usage-job-grant)"
+          "SLACK_BOT_TOKEN": "$(secret hf-usage-slack-bot-token)"
         }
       }
     }
@@ -95,9 +86,9 @@ cat > "$spec" <<EOF
   "allocationPolicy": {
     "instances": [{
       "policy": {
-        "machineType": "$MACHINE",
+        "machineType": "e2-standard-2",
         "provisioningModel": "STANDARD",
-        "bootDisk": {"type": "pd-balanced", "sizeGb": "100"}
+        "bootDisk": {"type": "pd-balanced", "sizeGb": "30"}
       }
     }],
     "serviceAccount": {"email": "$SA"},
@@ -108,28 +99,6 @@ cat > "$spec" <<EOF
   "logsPolicy": {"destination": "CLOUD_LOGGING"}
 }
 EOF
-
-# The Nextflow head (specs/pipelines-everywhere.md) only drives the DAG: each step is a Batch task of its own, which
-# fetches its own secrets (the profile's `secrets`), so the head gets a small VM and only what it uses itself: the
-# scan-run record's D1 token + account id, and the failure alert's Slack token.
-if [ "${NF:-scan}" != 0 ]; then
-  PROFILE=${PROFILE:-/app/job/profiles/hf.yml} python3 - "$spec" <<'PY'
-import json, os, sys
-p = sys.argv[1]; j = json.load(open(p))
-t = j["taskGroups"][0]["taskSpec"]
-c = t["runnables"][0]["container"]
-c["entrypoint"] = "dt-cloud"
-c["commands"] = ["scan", "head", os.environ["PROFILE"]]
-t["computeResource"] = {"cpuMilli": 2000, "memoryMib": 7000}
-t["maxRunDuration"] = "21600s"
-keep = {"CLOUDFLARE_API_TOKEN", "CLOUDFLARE_ACCOUNT_ID", "SLACK_BOT_TOKEN"}
-t["environment"]["secretVariables"] = {k: v for k, v in t["environment"]["secretVariables"].items() if k in keep}
-pol = j["allocationPolicy"]["instances"][0]["policy"]
-pol["machineType"] = "e2-standard-2"
-pol["bootDisk"] = {"type": "pd-balanced", "sizeGb": "30"}
-json.dump(j, open(p, "w"), indent=2)
-PY
-fi
 
 if [ -n "${DRY:-}" ]; then cat "$spec"; rm -f "$spec"; exit 0; fi
 gcloud batch jobs submit "$JOB_ID" --project "$PROJECT" --location "$REGION" --config "$spec" >&2

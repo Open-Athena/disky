@@ -1,5 +1,5 @@
 // hf.oa.dev's store: the Hugging Face org `open-athena` (its Storage Buckets and model, dataset and space repos) as
-// one bucket, listed daily by job/hf-run.sh (`disk-tree bulk-list hf://open-athena`).
+// one bucket, listed daily by the scan's `list` step (`disk-tree bulk-list hf://open-athena`).
 import type { ExternalLink, Store } from '../stores'
 
 /** The org's storage allowances, as declared values: the Hub has no API for them. Source: the org's billing page

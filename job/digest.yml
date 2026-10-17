@@ -21,11 +21,11 @@ op_icon: mark.png
 plot_project: oa-hf-usage-icons
 plot_branch: plot
 plot_base: https://plot.oa-hf-usage-icons.pages.dev
-# sender: the headline as the reply's sender name + a trend-arrow avatar. hf scans once a day (08:00 UTC): the reply
-# is the day's first scan from 00Z on (its only one, or the first of a re-run day; the first scan, `2026-10-15`, has
-# a date id, which reads as 00:00Z), so there are no earlier scans and no provisional reply
+# sender: the headline as the reply's sender name + a trend-arrow avatar. hf scans once a day (the 08:00 UTC cron):
+# the reply is the day's first scan from 08Z on, so a manual scan earlier that day (2026-10-17's 02:47 re-run) doesn't
+# preempt the cron's; a day with none from 08Z on gets its last scan once a later day's lands, and no provisional reply
 variant: sender
-reply_hour: 0
+reply_hour: 8
 provisional: false
 # HF bills in decimal TB (the billing page: 15.72 TB of the 253 TB allowance), so the digest speaks TB, not TiB
 units: TB

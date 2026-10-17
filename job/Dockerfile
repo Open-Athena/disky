@@ -1,6 +1,5 @@
 # The hf scan job's image: the `disk-tree` + `dt-cloud` CLIs, Nextflow (the scan's head, `dt-cloud scan head
-# job/profiles/hf.yml`, and each of its step tasks run this image), the one-VM job script (job/hf-run.sh, until the
-# DAG's first clean week), and wrangler (only for the Slack digest's plot upload, `wrangler pages deploy`; D1 writes go
+# job/profiles/hf.yml`, and each of its step tasks run this image), and wrangler (only for the Slack digest's plot upload, `wrangler pages deploy`; D1 writes go
 # over the HTTP API). No site build. Built from the minimal context `job/build.sh` stages
 # (the repo-root layout, trimmed to what's copied here), as deploy/sheet-mirror/'s.
 #
@@ -36,12 +35,11 @@ RUN uv sync --no-dev --no-editable --package dt-cloud --extra s3
 # The job reads its D1 and its static-names / interval-store generations from the site's config, so the job and the
 # site name the same ones (a change to either reaches the job with the next image).
 COPY site/wrangler.toml ./site/wrangler.toml
-COPY job/hf-run.sh job/hf-scan-runs.json job/digest.yml ./job/
+COPY job/hf-scan-runs.json job/digest.yml ./job/
 COPY job/nf ./job/nf
 COPY job/profiles ./job/profiles
 # The digest's icons dir: the plot is rendered into it and the dir deployed to the icons project's `plot` branch.
 COPY job/icons-hf ./job/icons-hf
-# The one-VM Batch spec runs `dt-cloud scan-run supervise -- bash job/hf-run.sh` (specs/scan-job-wrapper.md, "The
-# entrypoint"): a preemption, cancel or OOM kill is recorded as a failed run. The same here, for a bare `docker run`.
-# The head's spec and Nextflow's tasks override it (a task's `containerOptions`: `--entrypoint=/usr/bin/env`).
-ENTRYPOINT ["dt-cloud", "scan-run", "supervise", "--", "bash", "job/hf-run.sh"]
+# The head's spec sets the same entrypoint (`dt-cloud scan head …`); Nextflow's tasks override it (a task's
+# `containerOptions`: `--entrypoint=/usr/bin/env`).
+ENTRYPOINT ["dt-cloud"]

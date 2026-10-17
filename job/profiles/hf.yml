@@ -1,5 +1,5 @@
 # The hf scan on the generic pipeline (specs/pipelines-everywhere.md): `dt-cloud scan head job/profiles/hf.yml` runs
-# `job/nf/scan.nf`, each step `dt-cloud scan step <name>` in its own Batch task. Replaces `job/hf-run.sh`.
+# `job/nf/scan.nf`, each step `dt-cloud scan step <name>` in its own Batch task.
 #
 # The steps hand off through the data bucket (`oa-hf-usage-data`, infra/gcp); `publish-r2` copies each scan's served
 # subset (the layer-2 dir `listing/<scan>/` and `snapshots/hf/<scan>/`) to the R2 bucket the site reads, under the same

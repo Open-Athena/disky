@@ -1,6 +1,6 @@
 # CF Pages project config (oa-hf-usage → hf.oa.dev): the Hugging Face org `open-athena`'s storage, one store, one
 # bucket (the namespace). `wrangler pages deploy` reads this, so the bindings + vars declared here apply to the
-# deployment it creates; the job (job/hf-run.sh, baked into its image) reads its D1 and its static-names /
+# deployment it creates; the job (job/profiles/hf.yml, this file baked into its image) reads its D1 and its static-names /
 # interval-store generations from here too, so the two always name the same ones. Sign-in is the app's own (Google
 # OIDC + emailed codes, `@open-athena/auth`), Open Athena staff only. Every key: `wrangler.example.toml`.
 name = "oa-hf-usage"
@@ -39,7 +39,7 @@ ADMIN_EMAILS = "1"
 # The plan prefix shape (`_lib/plans.ts`): one "bucket", the namespace. No staging / executor: nothing here deletes.
 STORE_SCHEME = "hf://"
 STORE_BUCKETS = "open-athena"
-SNAPSHOTS_SUBDIR = "hf"          # snapshots/hf/<scan>/ (job/hf-run.sh)
+SNAPSHOTS_SUBDIR = "hf"          # snapshots/hf/<scan>/ (the scan's `index` step)
 # The index store: the R2 bucket the job writes (`r2_bucket` output of the `hf` CF stack), through the S3 seam with
 # a read-only key pair (secrets below). Keys under the base's default prefixes (`listing/`, `snapshots/`).
 STORE_BUCKET = "oa-hf-usage-index"
