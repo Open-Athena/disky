@@ -2815,10 +2815,11 @@ def cascade_a2a(bucket: str, index_path: str, as_json: bool, top: int, dirs_tier
         raise SystemExit(1)
 
 
-def _icons_dir(rel: str = "job/icons") -> Path:
-    """``rel`` (e.g. `job/icons`) in both layouts: pip-installed in the job image
-    (cwd=/app → /app/job/icons) or the repo checkout (…/parents[3]/job/icons)."""
-    cands = (Path.cwd() / rel, Path(__file__).resolve().parents[3] / rel)
+def _icons_dir(rel: str = "job/icons", config: Path | None = None) -> Path:
+    """``rel`` (e.g. `job/icons`) in every layout: beside the digest config's repo root (`/app/job/digest.yml` →
+    `/app/job/icons`: a Nextflow step runs in its task work dir, not /app, so the cwd misses it — hf, 2026-10-17),
+    the cwd (the one-VM job, cwd=/app), or the repo checkout (…/parents[3]/job/icons)."""
+    cands = (*([config.resolve().parent.parent / rel] if config else []), Path.cwd() / rel, Path(__file__).resolve().parents[3] / rel)
     return next((c for c in cands if c.exists()), cands[-1])
 
 
@@ -2912,7 +2913,7 @@ def _digest(
     from thrds.slack import SlackClient
 
     client = SlackClient(token, channel)
-    icons = icons_dir or _icons_dir(cfg.icons_dir)
+    icons = icons_dir or _icons_dir(cfg.icons_dir, config_path)
 
     def deploy(local: Path, name: str) -> str | None:
         # publish the icons dir (incl. the freshly-rendered plot) to the
