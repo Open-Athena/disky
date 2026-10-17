@@ -33,7 +33,7 @@ const store: Store = {
   lifecycle: { tracked: 'job/lifecycle/', rules: 'gcs', grouped: true, recordedFrom: '2026-09-16' },
   buckets: ['marin-us-central2', 'marin-us-central1', 'marin-us-east1', 'marin-us-east5', 'marin-us-west4', 'marin-eu-west4'],
   peers: OA_PEERS,
-  metaTree: 'https://cw-s3.oa.dev/meta',
+  metaTree: 'https://cw.oa.dev/meta',
   externalLink: consoleLink,
   rootLabel: 'all buckets',
   objectsNote: 'GCS objects are written by the training jobs and rarely rewritten in place, so created is the object’s upload time; the read axis adds when it was last read.',
