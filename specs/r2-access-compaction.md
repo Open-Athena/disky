@@ -62,9 +62,22 @@ A later step can roll closed months the same way, if per-day files ever add up.
 
 After a day's parquet is written and read back, the job deletes that day's hour aggregates (private `agg/`) and public hour files. The collector's `state.json` `frozen` map stops growing past the rolled point (open question below).
 
-### 5. Durable rows: reads only
+### 5. Rows for reads only (recommended first)
 
-The read lens uses GET/HEAD per key (6e62d37a); a write's recency is already the listing's `mtime`. So past `RETENTION_HOURS`, keep per-key rows only for read actions, and fold every other action into per-hour counts by action (no keys). Whether this is worth doing depends on marin-na's read share of its rows, which hasn't been measured yet. If reads are a few percent, durable storage drops to well under 1 GB/yr.
+The read lens uses GET/HEAD per key (6e62d37a), and a write's recency is already the listing's `mtime`. Measured at marin-na over the same 8 hours:
+
+| action | rows | share of rows |
+|---|---|---|
+| PutObject | 258,900 | 99.8% |
+| GetObject | 405 | |
+| HeadObject | 91 | |
+| everything else (Copy, DeleteObjects, List, multipart) | 61 | |
+
+GET/HEAD are 496 rows over 237 keys, ~0.01 MB zstd'd. GET is ~36% of *events*, but a few hot keys are read many times, while each Put names a new key.
+
+So the collector itself should aggregate per-key rows only for read actions (`ROW_ACTIONS`, default `GetObject,HeadObject`) and keep every other action as per-hour counts by action (no keys). That takes durable aggregates from ~129 MB/day to tens of KB/day, and the public files shrink the same way. Steps 2–3 then matter only for the O(new days) read, not for bytes.
+
+The cost: there's no per-prefix write activity ("who's writing where") from R2 logs. GCS's access pipeline keeps PUT ops per path, so that stays a possible feature there. If R2 write heat is ever wanted, a per-directory (not per-key) write rollup at a fixed depth would be the compact form.
 
 ## Open questions
 
