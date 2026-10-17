@@ -181,6 +181,32 @@ cat > "$spec" <<EOF
 }
 EOF
 
+# NF=scan: the generic Nextflow head (`dt-cloud scan head $PROFILE`, specs/pipelines-everywhere.md) instead of the
+# one-VM `job/run.sh`. The head only drives the DAG (each step is a Batch task of its own, sized by the profile, which
+# fetches its own secrets), so: a small VM, no mounts or stage disk, and of the secrets only what the head itself uses
+# (the scan-run record's D1 token, the alert's Slack token). Its Batch job is the run every task records into.
+if [ "${NF:-0}" = scan ]; then
+  PROFILE=${PROFILE:-/app/job/profiles/gcs.yml} python3 - "$spec" <<'PY'
+import json, os, sys
+p = sys.argv[1]; j = json.load(open(p))
+t = j["taskGroups"][0]["taskSpec"]
+c = t["runnables"][0]["container"]
+c["entrypoint"] = "dt-cloud"
+c["commands"] = ["scan", "head", os.environ["PROFILE"]]
+c["volumes"] = []
+t["volumes"] = []
+t["computeResource"] = {"cpuMilli": 2000, "memoryMib": 7000}
+t["maxRunDuration"] = "21600s"
+keep = {"CLOUDFLARE_API_TOKEN", "SLACK_BOT_TOKEN"}
+t["environment"]["secretVariables"] = {k: v for k, v in t["environment"]["secretVariables"].items() if k in keep}
+pol = j["allocationPolicy"]["instances"][0]["policy"]
+pol["machineType"] = "e2-standard-2"
+pol.pop("disks", None)
+pol["bootDisk"] = {"type": "pd-balanced", "sizeGb": "30"}
+json.dump(j, open(p, "w"), indent=2)
+PY
+fi
+
 # DRY=1: print the job spec (e.g. for the Cloud Scheduler daily body) instead of submitting
 if [ -n "${DRY:-}" ]; then cat "$spec"; rm -f "$spec"; exit 0; fi
 gcloud batch jobs submit "$JOB_ID" --project "$PROJECT" --location "$REGION" --config "$spec" >&2
