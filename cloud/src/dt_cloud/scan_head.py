@@ -12,9 +12,10 @@ A TERM / INT (a cancelled or preempted head job) stops Nextflow's process group 
 child), waits `NF_SWEEP_DELAY` (30 s: a submit in flight lands after Nextflow exits), cancels whatever Batch job still
 carries the session's `nf-session` label, and finishes the record.
 
-What started the scan (`$DT_TRIGGER`: `schedule` from the deployment's cron body, else `manual`) goes on its run record
-and, once per scan, into `<data>/<snapshots>/<scan>/trigger.json` (`stamp_trigger`) beside its `meta.json`, where the
-digest reads it. Not into the steps' params: a resume of a cron scan by hand must hit the same Nextflow cache.
+What started the scan (`$DT_TRIGGER`: `schedule` from the deployment's cron body, `manual` from its hand submits; unset:
+neither) goes on its run record and, once per scan, into `<data>/<snapshots>/<scan>/trigger.json` (`stamp_trigger`)
+beside its `meta.json`, where the digest reads it. Not into the steps' params: a resume of a cron scan by hand must hit
+the same Nextflow cache.
 """
 from __future__ import annotations
 
@@ -337,7 +338,7 @@ def head(profile_path: Path, nf_dir: Path, launch: Path | None, *, reproc: bool 
     scan, gen, job_start = identity(env, now)
     trigger = trigger_of(env)
     run_id = env.get("DT_RUN_ID") or env.get("BATCH_JOB_UID") or ""
-    env.update(SNAP_ID=scan, SCAN_ID=scan, GEN=gen, DT_JOB_START=job_start, DT_RUN_ID=run_id, **{TRIGGER_ENV: trigger})
+    env.update(SNAP_ID=scan, SCAN_ID=scan, GEN=gen, DT_JOB_START=job_start, DT_RUN_ID=run_id)
     for k in (PROFILE_ENV, "D1_DB_ID", "D1_DB_NAME", "SLACK_ALERT_CHANNEL", "DT_ALERTS"):
         if k in profile.env:
             env.setdefault(k, profile.env[k])
@@ -366,11 +367,11 @@ def head(profile_path: Path, nf_dir: Path, launch: Path | None, *, reproc: bool 
     if cloud:
         nf_env["NXF_CLOUDCACHE_PATH"] = profile.work.rstrip("/") + "/cache"
     err(f"scan head: {profile.deployment}{'' if profile.primary else f' [{profile.store}]'} scan {scan} gen {gen} session {session} "
-        f"({trigger}) in {launch}")
+        f"({trigger or f'${TRIGGER_ENV} unset'}) in {launch}")
     err("+ " + " ".join(argv))
     if dry_run:
         return 0
-    if not reproc:  # a reprocessed scan keeps what started it, or stays without one
+    if trigger and not reproc:  # a reprocessed scan keeps what started it, or stays without one
         stamp_trigger(profile, scan, trigger)
     recording = bool(env.get(PROFILE_ENV))
     cost = ["-l", f"nf-session={session}"] if profile.executor.kind == "google-batch" else []

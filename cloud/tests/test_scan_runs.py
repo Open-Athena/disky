@@ -276,7 +276,7 @@ def test_record_trigger():
 
 def test_trigger_of():
     assert [scan_runs.trigger_of(e) for e in ({}, {"DT_TRIGGER": ""}, {"DT_TRIGGER": "schedule"}, {"DT_TRIGGER": "manual"})] == [
-        "manual", "manual", "schedule", "manual"]
+        None, None, "schedule", "manual"]
     with pytest.raises(ValueError, match=r"^\$DT_TRIGGER='cron': not one of \('schedule', 'manual'\)$"):
         scan_runs.trigger_of({"DT_TRIGGER": "cron"})
 

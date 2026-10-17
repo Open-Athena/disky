@@ -269,12 +269,20 @@ def test_head_records_into_the_profiles_database_and_store(tmp_path, monkeypatch
     stamp = tmp_path / "data/snapshots/meta/2026-10-16T1200/trigger.json"
     assert stamp.read_text() == '{"trigger": "schedule"}\n'
     # a resume by hand: its run is manual, the scan stays the cron's
-    monkeypatch.delenv("DT_TRIGGER")
+    monkeypatch.setenv("DT_TRIGGER", "manual")
     monkeypatch.setenv("DT_RUN_ID", "run-2")
     runs_written.clear()
     assert H.head(prof, tmp_path / "nf-dir", tmp_path / "launch") == 0
     assert runs_written[0] == ("2026-10-16T1200", "meta", "running", "manual")
     assert stamp.read_text() == '{"trigger": "schedule"}\n'
+    # a deployment that doesn't state its triggers: none recorded, none stamped (the digest goes by the clock)
+    monkeypatch.delenv("DT_TRIGGER")
+    monkeypatch.setenv("DT_RUN_ID", "run-3")
+    monkeypatch.setenv("SNAP_ID", "2026-10-16T1300")
+    runs_written.clear()
+    assert H.head(prof, tmp_path / "nf-dir", tmp_path / "launch") == 0
+    assert runs_written[0] == ("2026-10-16T1300", "meta", "running", None)
+    assert sorted(p.name for p in (tmp_path / "data/snapshots/meta").iterdir()) == ["2026-10-16T1200"]
 
 
 def test_publish_reports(tmp_path):
