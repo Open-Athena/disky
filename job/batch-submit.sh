@@ -95,6 +95,9 @@ v = {
     # the stack's cost labels (PIN keeps them: `submitter_spec` passes them through), so the
     # jobs this one submits (the listing fan-out, the static-names chain) carry them too
     "DISKY_LABELS": os.environ.get("DISKY_LABELS", ""),
+    # what started the scan (`scan_runs.trigger`, the scan's `trigger.json`): the cron body is the PIN spec;
+    # everything else is a hand submit
+    "DT_TRIGGER": "schedule" if pin else os.environ.get("DT_TRIGGER", "manual"),
     "JOB_IMAGE": os.environ["JOB_IMAGE"],
 }
 v = {k: s for k, s in v.items() if s}
