@@ -24,7 +24,7 @@ IMAGE=${IMAGE:-us-central1-docker.pkg.dev/$PROJECT/hf-usage/scan:hf}
 PROFILE=${PROFILE:-/app/job/profiles/hf.yml}
 JOB_ID=${JOB_ID:-hf-scan-$(date -u +%Y%m%d-%H%M%S)}
 
-# What started the scan (`scan head`: the run record, the scan's `trigger.json`, the digest's reply scan): the cron body
+# What started the run (`scan_runs.trigger`: /scans, and a scan's first run's picks the digest's reply scan): the cron body
 # (PIN) is the schedule; any other submit is by hand. In the job's env (`DT_TRIGGER`) and its labels.
 labels() {  # cost labels (specs/done/cost-labels.md): $DISKY_LABELS + component $1 + trigger, as JSON; {} when unset
   python3 - "$1" <<'PY'
