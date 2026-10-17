@@ -34,7 +34,8 @@ export interface DagTask { task: string; tag: string; job_name: string | null; m
 
 export interface DagNode { id: string; label: string; layer: number; row: number; status: NodeStatus; tasks: DagTask[]; start: number | null; end: number | null }
 
-const processOf = (task: string): string => task.replace(/ \(.*\)$/, '')
+/** The DAG node a phase ran in, from its `task` (`<id> (<tag>)`). */
+export const processOf = (task: string): string => task.replace(/ \(.*\)$/, '')
 const tagOf = (task: string): string => /\((.*)\)$/.exec(task)?.[1] ?? ''
 
 function worst(ss: readonly ScanRunPhase['status'][]): ScanRunPhase['status'] {

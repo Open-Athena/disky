@@ -46,7 +46,10 @@
       &.failed rect { stroke: var(--danger); fill: color-mix(in srgb, var(--danger) 10%, var(--surface)); }
       &.failed .sub { fill: var(--danger); }
       &.pending .name, &.unrecorded .name { fill: var(--ink-3); } }
-    a .node { cursor: pointer; } a:hover .node rect { stroke-width: 2.5; } }
+    a .node { cursor: pointer; } a:hover .node rect { stroke-width: 2.5; }
+    .node.brushed rect { stroke-width: 3; } .node.dimmed { opacity: 0.3; } }
+  // brushing with the pipeline DAG: the hovered step's phases stand out, the rest fade
+  .sr-gantt g.dimmed { opacity: 0.25; } .sr-gantt g.brushed .sr-row-hit { fill: color-mix(in srgb, var(--ink) 8%, transparent); }
   .sr-bar { vertical-align: middle; .sr-bar-bg { fill: var(--other); } }
   .sr-runs .links, .runs .links { color: var(--ink-3); }
   .sr-failure { margin: 10px 0; padding: 8px 12px; border-left: 3px solid var(--danger); background: color-mix(in srgb, var(--danger) 6%, var(--surface)); font-size: 13.5px;

@@ -139,6 +139,8 @@ ROOT_LABEL = "my buckets"                   # the store root's crumb label
 #                                           # "shape" explicitly permits anonymous geometry + totals (GCS's approved policy)
 #                                           # "full": anonymous unfurls get the full card (labelled tiles, sizes, owners; a map's scan + totals)
 #                                           # public AUTH_MODE defaults to shape; unknown values fail closed to generic
+# OG_DEPTH_BUDGET_MS = "1500"                 # a map card's wall-clock budget for reading deeper than 2 levels (0: 2 levels only)
+# OG_MAX_DEPTH = "5"                          # the deepest view a map card reads (levels below the view)
 
 # Secrets — `wrangler pages secret put`, never in this file:
 # secret SESSION_SECRET                     required wherever anyone signs in: signs session cookies and card URLs
