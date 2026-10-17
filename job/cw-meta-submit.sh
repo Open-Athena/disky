@@ -67,8 +67,8 @@ v = {
     # boto needs a region even though R2 ignores it
     "AWS_DEFAULT_REGION": "auto",
     "AWS_EC2_METADATA_DISABLED": "true",
-    # failure alerts go to #gcs-usage-alerts, as the other two jobs' do
-    "SLACK_ALERT_CHANNEL": g("SLACK_ALERT_CHANNEL", "C0BTUNT3B5Z"),
+    # failure alerts go to #cw-s3-admin (with the staging threads); #cw-s3-usage carries only the digest
+    "SLACK_ALERT_CHANNEL": g("SLACK_ALERT_CHANNEL", "C0C53CPM886"),
     "CLOUDFLARE_ACCOUNT_ID": g("CLOUDFLARE_ACCOUNT_ID", "74981a43be0de7712369306c7b19133d"),
     # publish-r2's target: the same R2 bucket the primary serves from, under
     # this store's own prefixes (`meta-l2/`, `snapshots/meta/`)

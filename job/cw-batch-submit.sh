@@ -70,8 +70,8 @@ v = {
     # Slack digest target (specs/cw-slack-digest.md): chat.postMessage (bot
     # token) so per-message avatars apply
     "SLACK_CHANNEL": g("SLACK_CHANNEL", "C0C1YR7D0KU"),  # #cw-s3-usage
-    # failure alerts go to #gcs-usage-alerts (shared with the GCS job), not the digest channel
-    "SLACK_ALERT_CHANNEL": g("SLACK_ALERT_CHANNEL", "C0BTUNT3B5Z"),
+    # failure alerts go to #cw-s3-admin (with the staging threads); #cw-s3-usage carries only the digest
+    "SLACK_ALERT_CHANNEL": g("SLACK_ALERT_CHANNEL", "C0C53CPM886"),
     # CF account for the digest plot's `wrangler pages deploy` (token is a secretVariable)
     "CLOUDFLARE_ACCOUNT_ID": g("CLOUDFLARE_ACCOUNT_ID", "74981a43be0de7712369306c7b19133d"),
     # R2 serving bucket the 4c publish stage copies each scan's served subset

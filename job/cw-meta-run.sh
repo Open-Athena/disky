@@ -67,7 +67,7 @@ SNAP_ID=${SNAP_ID:-$(date -u +%Y-%m-%dT%H%M)}
 DATE=${SNAP_ID%%T*}
 
 # Failure alerting: any command dying under `set -e` posts to Slack
-# (SLACK_ALERT_CHANNEL, #gcs-usage-alerts) through `disk-tree notify` before the
+# (SLACK_ALERT_CHANNEL, #cw-s3-admin) through `disk-tree notify` before the
 # job exits. This one-shot isn't a recorded scan run, so it skips cw-run.sh's
 # `dt-cloud scan-run` wrapper.
 fail_alert() {

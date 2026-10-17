@@ -55,7 +55,7 @@ env:
   # the R2 serving bucket each scan's served subset is published to (`cw-s3` CF stack's `r2_bucket`)
   R2_BUCKET: oa-cw-s3-usage-index
   SLACK_CHANNEL: C0C1YR7D0KU          # #cw-s3-usage: the digest
-  SLACK_ALERT_CHANNEL: C0BTUNT3B5Z    # failure alerts, shared with the GCS job
+  SLACK_ALERT_CHANNEL: C0C53CPM886    # #cw-s3-admin: pipeline alerts beside the staging threads (#<deploy>-usage carries only the digest)
   CLOUDFLARE_ACCOUNT_ID: 74981a43be0de7712369306c7b19133d   # the digest plot's `wrangler pages deploy`
   # boto needs a region though CAIOS ignores it; CAIOS rejects path-style requests, which boto's auto picks for a custom
   # endpoint
