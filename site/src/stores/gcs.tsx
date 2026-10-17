@@ -1,5 +1,6 @@
 // gcs.oa.dev's store (oa-decoupling step 6): its registry entry, contact and About text.
 import type { ExternalLink, Store } from '../stores'
+import { OA_PEERS } from '../oaPeers'
 
 const CONSOLE = 'https://console.cloud.google.com/storage/browser'
 const enc = (segs: string[]) => segs.map(encodeURIComponent).join('/')
@@ -31,7 +32,7 @@ const store: Store = {
   executor: 'sweep',
   lifecycle: { tracked: 'job/lifecycle/', rules: 'gcs', grouped: true, recordedFrom: '2026-09-16' },
   buckets: ['marin-us-central2', 'marin-us-central1', 'marin-us-east1', 'marin-us-east5', 'marin-us-west4', 'marin-eu-west4'],
-  peer: { label: 'CoreWeave usage', href: 'https://cw-s3.oa.dev/' },
+  peers: OA_PEERS,
   metaTree: 'https://cw-s3.oa.dev/meta',
   externalLink: consoleLink,
   rootLabel: 'all buckets',
