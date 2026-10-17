@@ -57,6 +57,8 @@ Steps, in order (each a go from Ryan):
 3. A prod run of both heads (primary, then meta) beside the cron, then the scheduler: `r2:heads` in `Pulumi.r2.yaml` (`[{profile, schedule}]`) gives each head its own scheduler job (`r2-daily` keeps the first; each head is its own Batch job, so its own run record), its body `job/r2-scan plan -H job/profiles/<p> <r2:scanImage>`. The head is pinned by digest (`r2:scanImage`); `plan -H`/`submit -H` set `DT_SCAN_IMAGE` to the same digest, so every task runs the head's image (the profiles' `scan:nf` tag is only the fallback: a profile baked into the image can't name its digest).
 4. `job/r2-scan run` and its helpers are deleted after a clean week.
 
+Status 2026-10-17: steps 1–3 done. The IAM was applied 10/16; scratch run `oa-r2-scan-nf-scratch-1` matched the one-VM scan. Prod runs: `oa-r2-scan-nf-1` (scan 2026-10-17T0311, ~26 min; static-names and over-time failed, both fixed: cloud 8c271ab6 and the `overtime` extra) and `oa-r2-scan-nf-meta-1` (2026-10-17T0356, ~10 min, clean). The scheduler (`r2:heads`) has run the Nextflow heads since 10/17: `oa-r2-usage-daily` r2.yml at 07:15, `oa-r2-usage-daily-meta` r2-meta.yml at 08:15, on scan@sha256:8fa00202 (with `DT_SCAN_IMAGE`). The clean week ends 2026-10-24.
+
 [`pipelines-everywhere.md`]: pipelines-everywhere.md
 
 ## Access logs (the R2 access-log collector, [`r2-access-logging.md`])
