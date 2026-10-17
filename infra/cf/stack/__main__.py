@@ -23,7 +23,7 @@ import pulumi_cloudflare as cloudflare
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from capture_trigger import CaptureTrigger  # noqa: E402
-from cfn_dashboard import AccessApp, BranchAlias, CfnDashboard, Store, _only_permission_group  # noqa: E402
+from cfn_dashboard import AccessApp, BranchAlias, CfnDashboard, ExtraDomain, Store, _only_permission_group  # noqa: E402
 
 cfg = pulumi.Config()
 account_id = cfg.require("accountId")
@@ -50,6 +50,7 @@ store = Store(
     domain=cfg.require("domain"),
     d1_name=cfg.require("d1Name"),
     branch_aliases=tuple(BranchAlias(domain=a["domain"], branch=a["branch"]) for a in cfg.get_object("branchAliases") or []),
+    extra_domains=tuple(ExtraDomain(domain=x["domain"], branch=x.get("branch")) for x in cfg.get_object("extraDomains") or []),
     access=access_app(cfg.get_object("access")),
     kv_name=cfg.get("kvName"),
     r2_bucket=cfg.get("r2Bucket"),

@@ -50,6 +50,8 @@ def test_independent_resources_and_optional_scheduler(daily_enabled: bool):
             ("r2-job", "disky:gcp:JobAccount"),
             ("r2-job", "gcp:serviceaccount/account:Account"),
             ("r2-job-batch.agentReporter", "gcp:projects/iAMMember:IAMMember"),
+            ("r2-job-batch.jobsEditor", "gcp:projects/iAMMember:IAMMember"),
+            ("r2-job-actor-oa-r2-usage-job", "gcp:serviceaccount/iAMMember:IAMMember"),
             ("r2-job-logging.logWriter", "gcp:projects/iAMMember:IAMMember"),
             ("r2-data", "gcp:storage/bucket:Bucket"),
             ("r2-scratch", "gcp:storage/bucket:Bucket"),
@@ -63,9 +65,11 @@ def test_independent_resources_and_optional_scheduler(daily_enabled: bool):
             ("r2-secrets", "disky:gcp:Secrets"),
             *[(name, "gcp:secretmanager/secret:Secret") for name in (
                 "oa-r2-source-access-key-id", "oa-r2-source-secret-access-key", "oa-r2-index-access-key-id", "oa-r2-index-secret-access-key", "oa-r2-d1-token",
+                "oa-r2-slack-bot-token", "oa-r2-site-grant", "oa-r2-cf-pages-token",
             )],
             *[(name + "-accessor", "gcp:secretmanager/secretIamMember:SecretIamMember") for name in (
                 "oa-r2-source-access-key-id", "oa-r2-source-secret-access-key", "oa-r2-index-access-key-id", "oa-r2-index-secret-access-key", "oa-r2-d1-token",
+                "oa-r2-slack-bot-token", "oa-r2-site-grant", "oa-r2-cf-pages-token",
             )],
         ] + scheduler_resources)
         grants = sorted(
@@ -80,6 +84,7 @@ def test_independent_resources_and_optional_scheduler(daily_enabled: bool):
         ])
         assert sorted(value["inputs"]["secretId"] for value in resources.values() if value["type"] == "gcp:secretmanager/secret:Secret") == sorted([
             "oa-r2-source-access-key-id", "oa-r2-source-secret-access-key", "oa-r2-index-access-key-id", "oa-r2-index-secret-access-key", "oa-r2-d1-token",
+            "oa-r2-slack-bot-token", "oa-r2-site-grant", "oa-r2-cf-pages-token",
         ])
         if daily_enabled:
             from base64 import b64decode

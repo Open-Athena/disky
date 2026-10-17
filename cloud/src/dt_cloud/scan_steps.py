@@ -588,7 +588,7 @@ def path_index(ctx: Ctx) -> None:
         ctx.sh(["dt-cloud", "stage", "-o", stage, *lglobs, *[g.replace("*.parquet", "_SUCCESS.json") for g in lglobs], *attr, *xglobs])
         tmp = stage / ".duckdb-tmp"
         tmp.mkdir(parents=True, exist_ok=True)
-        ctx.sh(["dt-cloud", "path-index", "-d", ctx.date, *[a for g in lglobs for a in ("-l", local(g))],
+        ctx.sh(["dt-cloud", "path-index", "-d", ctx.scan, *[a for g in lglobs for a in ("-l", local(g))],
                 *[a for g in attr for a in ("-a", local(g))], *[a for g in xglobs for a in ("-x", local(g))],
                 "-o", snap, "-c", ctx.data_root / ctx.listing_key("dir-cache"), "-P", pi / "path-index.parquet",
                 *ctx.opt("index", "args", [])], env={"DUCKDB_TMP": str(tmp)})
