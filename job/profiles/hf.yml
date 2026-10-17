@@ -78,4 +78,6 @@ options:
   interval-store: {timeout: 60m, mem: 8GB}
   # The digest's live thread state and the earlier scans' snapshots are on R2 (publish-r2 lands this scan's before
   # `post`): the data store's root would find no state and post a second OP.
-  digest: {template: cw, config: /app/job/digest.yml, root: "r2://oa-hf-usage-index/{snapshots}"}
+  # `-i`: a step runs in its Nextflow work dir, not /app, so `icons_dir: job/icons-hf` (relative) found no dir to render
+  # the plot into (2026-10-17T0247)
+  digest: {template: cw, config: /app/job/digest.yml, root: "r2://oa-hf-usage-index/{snapshots}", args: [-i, /app/job/icons-hf]}
