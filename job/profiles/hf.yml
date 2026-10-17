@@ -52,7 +52,7 @@ env:
   R2_BUCKET: oa-hf-usage-index
   AWS_DEFAULT_REGION: auto                         # R2's region
   SLACK_CHANNEL: C0C9G547AP7                       # #hf-usage: the digest
-  SLACK_ALERT_CHANNEL: C0BTUNT3B5Z                 # failure alerts, shared with the gcs and cw-s3 jobs
+  SLACK_ALERT_CHANNEL: C0C9J9VDPV5                 # #hf-admin: every alert
 pass: [DT_RECORD, DT_ALERTS]
 labels: {deployment: hf}
 queue_size: 20

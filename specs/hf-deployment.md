@@ -16,12 +16,12 @@ A new OA deployment, modeled on cw-s3 (GCP Batch job → R2 + D1 → Cloudflare 
 | Pulumi stacks | `hf` in `infra/gcp` (project `gcs-usage-gcp`) and `infra/cf` (project `gcs-usage-cf`), backend `gs://oa-pulumi` |
 | Pages project / domains | `oa-hf-usage` / `hf.oa.dev`, dev stack `dev.hf.oa.dev` (branch alias `dev`; OA Cloudflare account, zone `oa.dev`) |
 | D1 / KV / R2 | `oa-hf-usage-db` (cw lineage) / `oa-hf-usage-cache` / `oa-hf-usage-index` |
-| Slack | the HF Usage Bot app (`job/slack/`): the digest thread in #hf-usage (`C0C9G547AP7`), failure alerts in #gcs-usage-alerts (shared); icons Pages project `oa-hf-usage-icons` |
+| Slack | the HF Usage Bot app (`job/slack/`): the digest thread in #hf-usage (`C0C9G547AP7`), every alert in #hf-admin (`C0C9J9VDPV5`); icons Pages project `oa-hf-usage-icons` |
 | cost labels | `app=disky,deployment=hf` (`$DISKY_LABELS`) |
 
 ## The daily job
 
-`job/hf-run.sh` under `dt-cloud scan-run supervise` (the image's entrypoint and the Batch command), with `specs/scan-job-wrapper.md`'s ERR / EXIT / TERM / INT traps, `scan-run start` / phases / `finish`, and the profile `job/hf-scan-runs.json` (alerts to #gcs-usage-alerts, the secrets redacted). Every step is a shared CLI:
+`job/hf-run.sh` under `dt-cloud scan-run supervise` (the image's entrypoint and the Batch command), with `specs/scan-job-wrapper.md`'s ERR / EXIT / TERM / INT traps, `scan-run start` / phases / `finish`, and the profile `job/hf-scan-runs.json` (alerts to #hf-admin, the secrets redacted). Every step is a shared CLI:
 
 1. `disk-tree bulk-list hf://open-athena` (Hub read token `HF_TOKEN`; per-file commit dates; 3 requests in flight). Rate-bound: ~2,000 requests at 1000 / 5 min, ~10 min.
 2. `disk-tree import -e duckdb -m -p storage_class_id -s hf -b open-athena`: the layer-2 with `sum_storage_class_id_{1,5,6}` (public, private, unbilled git).
@@ -92,7 +92,7 @@ export UV_PROJECT_ENVIRONMENT=$PWD/infra/.venv   # for pulumi; never the repo's 
    # a Hub token with read access to the open-athena org (sees its private repos and buckets); `-L` history would need write
    gcloud secrets versions access latest --secret cw-s3-slack-bot-token --project oa-internal-450019 \
      | gcloud secrets versions add hf-usage-slack-bot-token --project oa-internal-450019 --data-file=-
-   # (or another bot in #gcs-usage-alerts; with none, drop SLACK_BOT_TOKEN from job/hf-batch-submit.sh and the stack:
+   # (or another bot in #hf-admin; with none, drop SLACK_BOT_TOKEN from job/hf-batch-submit.sh and the stack:
    #  Batch refuses to start a job whose secret has no version)
    # Pages, production (-P) and the dev stack's preview env (-d): STORE_ENDPOINT/ACCESS_KEY_ID/SECRET_ACCESS_KEY,
    # SESSION_SECRET, RESEND_API_KEY, MAIL_FROM. RESEND_API_KEY is in $oa/.envrc; carry it under another name, since

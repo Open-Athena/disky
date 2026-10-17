@@ -188,7 +188,7 @@ def test_gcp_stack(monkeypatch: pytest.MonkeyPatch):
         }
         assert task["environment"]["variables"] == {
             "DISKY_LABELS": "app=disky,deployment=hf", "HF_URI": "hf://open-athena", "R2_BUCKET": "oa-hf-usage-index",
-            "WORK_DIR": "/work", "SLACK_CHANNEL": "C0C9G547AP7", "SLACK_ALERT_CHANNEL": "C0BTUNT3B5Z",
+            "WORK_DIR": "/work", "SLACK_CHANNEL": "C0C9G547AP7", "SLACK_ALERT_CHANNEL": "C0C9J9VDPV5",
         }
         refs = task["environment"]["secretVariables"]
         # Every secret the job reads is a container this stack creates (and grants), and the profile redacts it.

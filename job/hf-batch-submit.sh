@@ -49,8 +49,8 @@ v = {
     "WORK_DIR": g("WORK_DIR", "/work"),
     # the usage digest thread: #hf-usage
     "SLACK_CHANNEL": g("SLACK_CHANNEL", "C0C9G547AP7"),
-    # failure alerts: #gcs-usage-alerts (shared with the gcs and cw-s3 jobs)
-    "SLACK_ALERT_CHANNEL": g("SLACK_ALERT_CHANNEL", "C0BTUNT3B5Z"),
+    # alerts (pipeline errors, session logging): #hf-admin
+    "SLACK_ALERT_CHANNEL": g("SLACK_ALERT_CHANNEL", "C0C9J9VDPV5"),
 }
 if not pin:  # one-off overrides forwarded only for manual submits, never the cron spec
     for k in ["SNAP_ID", "GEN", "HF_THREADS", "MEM", "STORE_ROOT", "DT_RECORD", "DT_ALERTS"]:
