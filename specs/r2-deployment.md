@@ -69,6 +69,21 @@ Steps, each a go from Ryan:
 1. An OA **account-owned** API token with Workers Observability (read for the query, as the runtime `CF_OBSERVABILITY_TOKEN`); Ryan creates it, into Secret Manager.
 2. Measure marin-na first (`dt-cloud access r2-query`/calculation over a day: events/hour, `sampleInterval`) and size `PAGE_SIZE`/`MAX_PAGES`/`LOOKBACK_HOURS` from it; the RAC caps (50 × 500) are for a quiet bucket.
 3. `pulumi up -s oa` (cron off), `wrangler secret put CF_OBSERVABILITY_TOKEN -c wrangler.oa.json`, then `secretReady`/`enabled` → a second apply; verify one scheduled run's `_SUCCESS.json` and logs.
+Status 10/17 ~10:15Z: steps 1 and 3's first apply done. Ryan created the token (`oa-r2-access-observability-token` in Secret Manager) and added Workers Scripts Write to `marin-gcs-usage_iac`; `pulumi up -s oa` created the Worker, its private subdomain and the (empty) cron trigger beside the archive bucket, domain and lifecycle. `enabled: false`; the runtime secret isn't installed.
+
+**Step 2's measurement blocks enabling.** marin-na, weighted calculation counts per UTC hour (`tmp/r2-access-volume.py`):
+
+| hour | events | max `sampleInterval` |
+|---|---|---|
+| 04–09Z (each) | 78–84K | 1.02–1.04 |
+
+≈ 80K/h ≈ 1.9M/day: PutObject ~59%, GetObject ~36%, ListObjectsV2 ~4%, DeleteObjects ~0.5%. Every hour is `sampled` (the provider keeps ~96–98% of rows), so no hour can ever be `unsampled`. Against the collector as built for RAC's quiet bucket:
+- hourly run = 2 h window (1 h + `OVERLAP_HOURS`) ≈ 160K events = 320 pages at 500, 80 at the 2000 max; the hard ceiling is 100 × 2000 = 200K/run
+- the daily replay (`REPLAY_HOURS` 144) ≈ 11.5M events, ~58× that ceiling
+- each day aggregate keeps every event id (`events: {id: [ts, action]}`) — ~1.9M entries, tens of MB of JSON, re-read and rewritten each hour, near a Worker's 128 MB
+
+So the instance stays off until root's collector has a high-volume mode (aggregate counts without per-event ids, a bounded replay, per-hour paging): a generic gap, sent to root.
+
 4. A last-read overlay for the site is later work (derived summaries only; raw events stay in `oa-r2-access-logs`, never the serving bucket).
 
 [`r2-access-logging.md`]: r2-access-logging.md
