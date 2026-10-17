@@ -35,7 +35,7 @@ TABLES = ("scan_runs", "scan_run_phases", "scan_run_outputs", "scan_run_dags")
 STATUSES = ("running", "succeeded", "failed", "nop")
 #: What started the run, as GitHub Actions' `event_name`: the deployment's cron (its job body sets `DT_TRIGGER=schedule`)
 #: or a hand submit / resume (its submitter sets `manual`). Opt-in per deployment, with migration `scan-run-trigger`:
-#: unset, nothing is recorded or stamped (`scan head`'s `trigger.json`), and the digest goes by the clock.
+#: unset, nothing is recorded, and the digest goes by the clock. A scan's trigger is its first run's (`digest_cw.scan_triggers`).
 TRIGGER_ENV = "DT_TRIGGER"
 TRIGGERS = ("schedule", "manual")
 
