@@ -1,5 +1,5 @@
 """Specs for the `cw` digest template (`dt_cloud.digest_cw`, over the engine
-`dt_cloud.digest` and the plot's `dt_cloud.digest_plot`): the pure helpers, the
+`dt_cloud.digest`): the pure helpers, the
 framing-A content (OP + both reply variants, exact strings), the daily keying
 rule, and the monthly-thread converge against a fake Slack client over a local
 snapshot tree.
