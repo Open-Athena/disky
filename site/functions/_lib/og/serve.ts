@@ -115,7 +115,8 @@ export async function stampPage(env: OgEnv, url: URL, html: Response): Promise<R
   if (OWN_TITLES.has(pv.kind)) return uncachedHtml(stampMeta(html, { image, imageType: 'image/png', page: url.href }))
   if (cardTier(tier, anonymousPolicy(env)) === 'full' && pv.kind === 'map') {
     // the full card's own numbers in the preview text (`scan … · 263 TiB · 1.2M objects`)
-    const render = await mapCard(env, siteOf(env), pv.title, { ...pv.params, ...(scan ? { d: scan } : {}) }, 'full')
+    // Only its totals are stamped: the floor view, no deepening on the page's response.
+    const render = await mapCard(env, siteOf(env), pv.title, { ...pv.params, ...(scan ? { d: scan } : {}) }, 'full', { deepen: false })
     return uncachedHtml(stampMeta(html, { title: pv.title, desc: [render.subtitle, render.total].filter(Boolean).join(' · '), image, imageType: 'image/png', page: url.href }))
   }
   return uncachedHtml(stampMeta(html, {
@@ -236,7 +237,7 @@ export async function serveCard(ctx: { request: Request; env: OgEnv; waitUntil?:
   if (!data) return new Response('no such card', { status: 404 })
   const t1 = Date.now()
   const res = await renderCard(env, url, data)
-  res.headers.set('server-timing', `data;dur=${t1 - t0}, render;dur=${Date.now() - t1}`)
+  res.headers.set('server-timing', `data;dur=${t1 - t0}${data.depth ? `;desc="depth ${data.depth}"` : ''}, render;dur=${Date.now() - t1}`)
   const put = cache.put(cacheKey, new Response(res.clone().body, { headers: { ...Object.fromEntries(res.headers), 'cache-control': 'public, max-age=86400' } }))
   if (ctx.waitUntil) ctx.waitUntil(put)
   else await put

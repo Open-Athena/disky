@@ -165,7 +165,6 @@ export async function stagedCard(env: Env, site: Site, title: string, params: Re
     total: `${fmtN(items.length)} prefixes · ${fmtB(b)} · ${fmtN(o)} objects`,
     tiles,
     legend,
-    labelKids: true,
     ...(b ? {} : { empty: params.q ? 'no matches' : 'nothing left at this scan' }),
   }
 }

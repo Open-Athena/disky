@@ -101,6 +101,13 @@ Each phase lands on `cloud` with tests, and deployments adopt it by profile.
 - Whether gcs should split at all: decided by §6.0's numbers, not by locality (listing locality is measured and small).
 - The interval store: per source, or one over the union? It's the Map's path store, so it follows whatever the reader serves.
 - The static name index: per source (N small) or one union index fed by per-source listings? Search's latency budget decides.
+- Where a source's own data lives (its listings, index, `/meta`): a separate data bucket by default, or, as a per-source option, a reserved prefix in the source bucket itself (`meta: {bucket: <self>, prefix: .disky/}`, the prefix excluded from its own listing). From Ryan (2026-10-17): "why not just put "/meta" data in a specific ("hidden" / "reserved") key within each bkt (config'able by the source though, ofc)? that feels nicer than setting up a 2nd bkt, though i guess that should be allowed and easy too". Not the default, for four reasons:
+  - Most deployments can read their sources but not write them: Marin's GCS buckets, CoreWeave, HF repos, the demo's HCCS buckets.
+  - Owners' lifecycle rules and cleanup tools act on the reserved prefix too.
+  - Serving reads indexes from R2 beside Cloudflare, and the source may be in another cloud.
+  - A union of sources has no single bucket to live in.
+
+  It fits buckets the deployment owns outright (m3's R2, a user's own bucket).
 - Naming: "source" already means two things (a profile's bucket URI; a federation catalog entry). This spec makes them one: a pipeline source *is* a federation source once it's a store.
 
 [federated-scans.md]: federated-scans.md
