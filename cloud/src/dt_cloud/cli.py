@@ -2198,7 +2198,7 @@ def access() -> None:
 @option("-f", "--from", "start", required=True, help="Inclusive query start, ISO timestamp with timezone")
 @option("-l", "--limit", default=100, type=int, help="Bounded diagnostic sample size (1–2000)")
 @option("-o", "--output", type=Path, help="Save private provider response to this local file")
-@option("-t", "--to", "end", required=True, help="Query end, ISO timestamp with timezone")
+@option("-t", "--to", "end", required=True, help="Exclusive query end, ISO timestamp with timezone")
 def access_r2_query(
     account: str,
     bucket: str,
@@ -2236,11 +2236,11 @@ def access_r2_query(
 @access.command("r2-export")
 @option("-a", "--account", envvar="CLOUDFLARE_ACCOUNT_ID", required=True, help="Cloudflare account ID")
 @option("-b", "--bucket", required=True, help="Source R2 bucket")
-@option("-f", "--from", "start", required=True, help="Query start, ISO timestamp with timezone")
+@option("-f", "--from", "start", required=True, help="Inclusive query start, ISO timestamp with timezone")
 @option("-l", "--limit", default=2000, type=int, help="Events per cursor page (1–2000)")
 @option("-n", "--max-pages", default=20, type=int, help="Refuse export if this page cap is reached")
 @option("-o", "--output", type=Path, required=True, help="New private archive file; existing files refused")
-@option("-t", "--to", "end", required=True, help="Query end, ISO timestamp with timezone")
+@option("-t", "--to", "end", required=True, help="Exclusive query end, ISO timestamp with timezone")
 def access_r2_export(
     account: str,
     bucket: str,
@@ -2250,12 +2250,15 @@ def access_r2_export(
     output: Path,
     end: str,
 ) -> None:
-    """Drain a bounded window into a private archive; print only a summary.
+    """Drain `[from, to)` into a private archive; print only a summary.
 
-    Refuses sampled or incomplete queries. Query exhaustion does not prove
+    Refuses query-sampled or incomplete queries. After the drain, a weighted
+    count reports `capture_sampling`: `unsampled` (every row weight 1 and the
+    count equals the drained events), `sampled` (provider ingestion sampling)
+    or `inconsistent` (e.g. a late delivery). Query exhaustion does not prove
     complete provider delivery. No ingest watermark is advanced.
     """
-    from .r2_access import export_window, query_body, query_events
+    from .r2_access import calculation_body, capture_sampling, export_window, query_body, query_events
 
     token = os.environ.get("CF_OBSERVABILITY_TOKEN") or os.environ.get("CLOUDFLARE_API_TOKEN")
     if not token:
@@ -2268,8 +2271,11 @@ def access_r2_export(
             fetch=lambda body: query_events(account, token, body),
             max_pages=max_pages,
         )
+        calculation = query_events(account, token, calculation_body(bucket, start, end))
+        archive["summary"].update(capture_sampling(calculation, archive["summary"]["events"]))
     except (ValueError, RuntimeError) as exc:
         raise UsageError(str(exc)) from exc
+    archive["calculation"] = calculation
     archive["account"] = account
     # Exclusive create prevents overwriting a concurrent collector's output.
     # A later scheduled collector must publish this before its own watermark.

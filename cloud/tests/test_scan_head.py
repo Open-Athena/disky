@@ -51,6 +51,19 @@ def test_start_args_carry_the_run_and_the_store():
     )
 
 
+def test_head_image_pins_the_tasks():
+    """`$DT_SCAN_IMAGE` (the head's own image, by digest) replaces the profile's tag as every task's container, and the
+    run records it (`start -i`): a rebuild of the tag mid-run can't split the run across images."""
+    cw = load(FIX / "cw-s3.yml")
+    pinned = "us-central1-docker.pkg.dev/example-project/scans/scan@sha256:" + "ab" * 32
+    golden = (FIX / "cw-s3.executor.config").read_text()
+    assert H.executor_config(cw, pinned) == golden.replace(
+        "    container = 'us-central1-docker.pkg.dev/example-project/scans/scan:cw'\n", f"    container = '{pinned}'\n")
+    assert H.executor_config(cw, pinned) != golden
+    assert H.start_args(cw, "G", "2026-10-16T1200", "uid1", image=pinned) == [
+        "-r", "uid1", "-B", "-g", "G", "-i", pinned, "2026-10-16T1200"]
+
+
 def test_local_run_id():
     """A head that isn't a Batch job records under one run id of its own, which every task inherits (not a run each)."""
     assert (H.local_run_id(load(FIX / "cw-s3.yml"), "2026-10-17T0005"), H.local_run_id(load(FIX / "meta-store.yml"), "2026-10-17T0005")) == (
