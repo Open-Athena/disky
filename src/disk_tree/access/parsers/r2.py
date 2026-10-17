@@ -10,7 +10,8 @@ The R2 access collector (`infra/cf/r2-access`) publishes, per source bucket and 
      "rows": [{"key", "action", "n", "last_ts"}, …]}
 
 ``rows`` are per (object key, action) counts with the minute of the latest request (``last_ts``, epoch ms
-truncated to the minute; ``key`` null for bucket-level actions). The files carry no requester identity and no
+truncated to the minute): object reads only (GET, HEAD) since the collector's aggregate ``schema_version`` 4;
+earlier files also carry writes, listings and key-less bucket-level actions (``key`` null). The files carry no requester identity and no
 per-request events, so they can't become canonical rows (one per request) at volume; :func:`parse` emits
 :func:`~disk_tree.access.aggregate.aggregate_access_leaf`'s pre-aggregated leaf rows instead: ``n_requesters`` and
 the byte columns NULL (R2's ``response.bytes`` is not transferred bytes: a HEAD reports the object size), and

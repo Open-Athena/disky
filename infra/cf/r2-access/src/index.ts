@@ -206,6 +206,12 @@ const CLASSES: Record<string, string> = {
   DeleteObject: 'delete', DeleteObjects: 'delete',
 }
 
+/** The actions an hour keeps per-key rows for: object reads, what the read lens shows. Every other action (writes,
+ * deletes, listings) is only counted (`actions`, `classes`): a write's recency is the listing's `mtime`, and at a
+ * write-heavy bucket per-key write rows were 99.8% of the aggregate (marin-na, 10-17: 258,900 PutObject rows of
+ * 259,457 in 8 hours; specs/r2-access-compaction.md). */
+export const ROW_ACTIONS: ReadonlySet<string> = new Set(['GetObject', 'HeadObject'])
+
 /** Content reads are kept apart from metadata reads, listings, writes and deletes. */
 export function actionClass(action: string): string {
   return CLASSES[action] ?? 'other'
@@ -224,7 +230,7 @@ export type HourRow = [string | null, string, number, number, number]
 
 /** One drain of one UTC hour. Deterministic in its events: no run id, no drain time. */
 export interface HourAggregate {
-  schema_version: 3
+  schema_version: 4
   bucket: string
   /** ISO start of the UTC hour. */
   hour: string
@@ -235,11 +241,12 @@ export interface HourAggregate {
   actions: Record<string, number>
   classes: Record<string, number>
   sampling: Sampling
-  /** Per (key, action), own requests left out, sorted by key (null first) then action. */
+  /** Per (key, action) for `ROW_ACTIONS` only, own requests left out, sorted by key then action. */
   rows: HourRow[]
 }
 
-/** Accumulates one hour's drain: dedupes event ids within the drain only, keeps per-(key, action) counts. */
+/** Accumulates one hour's drain: dedupes event ids within the drain only, counts every action, keeps per-(key,
+ * action) rows for `ROW_ACTIONS`. */
 export class HourAccumulator {
   private readonly ids = new Set<string>()
   private readonly cells = new Map<string, HourRow>()
@@ -251,6 +258,7 @@ export class HourAccumulator {
     this.ids.add(event.id)
     this.actions[event.action] = (this.actions[event.action] ?? 0) + 1
     if (event.own) { this.own++; return }
+    if (!ROW_ACTIONS.has(event.action)) return
     // `\u0000` cannot occur in an R2 key or action name; it separates the two in the map key.
     const id = `${event.key ?? ''}\u0000${event.key === null ? 0 : 1}\u0000${event.action}`
     const row = this.cells.get(id)
@@ -272,7 +280,7 @@ export class HourAccumulator {
       a[0] === b[0] ? cmp(a[1], b[1]) : a[0] === null ? -1 : b[0] === null ? 1 : cmp(a[0], b[0]))
     const observed = this.ids.size
     return {
-      schema_version: 3, bucket, hour: new Date(hour).toISOString(), events: observed, own: this.own,
+      schema_version: 4, bucket, hour: new Date(hour).toISOString(), events: observed, own: this.own,
       actions: sorted(this.actions), classes: sorted(classes),
       sampling: { observed, estimated, max_sample_interval: maxInterval, capture: capture(observed, estimated, maxInterval) },
       rows,

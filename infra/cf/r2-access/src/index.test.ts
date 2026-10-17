@@ -111,7 +111,7 @@ const rows: Row[] = [
 const sampling = (observed: number, estimated = observed, max_sample_interval = 1, capture = 'unsampled') => ({ observed, estimated, max_sample_interval, capture })
 
 function hourAgg(hour: string, fields: Partial<HourAggregate> & Pick<HourAggregate, 'events' | 'rows'>) {
-  return { schema_version: 3, bucket: 'jc-taxes', hour: new Date(hr(hour)).toISOString(), own: 0, actions: {}, classes: {}, sampling: sampling(fields.events), ...fields }
+  return { schema_version: 4, bucket: 'jc-taxes', hour: new Date(hr(hour)).toISOString(), own: 0, actions: {}, classes: {}, sampling: sampling(fields.events), ...fields }
 }
 
 const quiet = (hour: string) => hourAgg(hour, { events: 0, rows: [] })
@@ -230,19 +230,19 @@ describe('sampling', () => {
 })
 
 describe('HourAccumulator', () => {
-  it('dedupes ids within the drain, truncates times to the minute, keeps own requests out of the rows', () => {
+  it('dedupes ids within the drain, truncates times to the minute, keeps own requests and non-read actions out of the rows', () => {
     const acc = new HourAccumulator()
     const ev = (id: string, ts: string, action: string, key: string | null, own = false) => ({ id, timestamp: at(`2026-10-12T03:${ts}Z`), action, key, own })
     for (const e of [
       ev('1', '10:59.999', 'GetObject', 'k'), ev('2', '40:00', 'GetObject', 'k'), ev('2', '40:00', 'GetObject', 'k'),
       ev('3', '05:00', 'ListObjectsV2', null), ev('4', '06:00', 'ListObjectsV2', null, true), ev('5', '07:00', 'HeadObject', 'a'),
+      ev('6', '08:00', 'PutObject', 'w'),
     ]) acc.add(e)
-    expect(acc.finish('jc-taxes', hr('03'), 5, 1)).toEqual({
-      schema_version: 3, bucket: 'jc-taxes', hour: '2026-10-12T03:00:00.000Z', events: 5, own: 1,
-      actions: { GetObject: 2, HeadObject: 1, ListObjectsV2: 2 }, classes: { content_read: 2, list: 2, metadata_read: 1 },
-      sampling: sampling(5),
+    expect(acc.finish('jc-taxes', hr('03'), 6, 1)).toEqual({
+      schema_version: 4, bucket: 'jc-taxes', hour: '2026-10-12T03:00:00.000Z', events: 6, own: 1,
+      actions: { GetObject: 2, HeadObject: 1, ListObjectsV2: 2, PutObject: 1 }, classes: { content_read: 2, list: 2, metadata_read: 1, write: 1 },
+      sampling: sampling(6),
       rows: [
-        [null, 'ListObjectsV2', 1, at('2026-10-12T03:05:00Z'), at('2026-10-12T03:05:00Z')],
         ['a', 'HeadObject', 1, at('2026-10-12T03:07:00Z'), at('2026-10-12T03:07:00Z')],
         ['k', 'GetObject', 2, at('2026-10-12T03:10:00Z'), at('2026-10-12T03:40:00Z')],
       ],
@@ -267,7 +267,7 @@ describe('collect', () => {
         rows: [['data/a', 'GetObject', 2, at('2026-10-12T03:30:00Z'), at('2026-10-12T03:45:00Z')], ['data/a', 'HeadObject', 1, from, from]],
       }),
       quiet('04'),
-      hourAgg('05', { events: 1, actions: { ListObjectsV2: 1 }, classes: { list: 1 }, rows: [[null, 'ListObjectsV2', 1, at('2026-10-12T05:59:00Z'), at('2026-10-12T05:59:00Z')]] }),
+      hourAgg('05', { events: 1, actions: { ListObjectsV2: 1 }, classes: { list: 1 }, rows: [] }),
       quiet('06'),
       hourAgg('07', { events: 1, actions: { GetObject: 1 }, classes: { content_read: 1 }, rows: [['data/b', 'GetObject', 1, at('2026-10-12T07:10:00Z'), at('2026-10-12T07:10:00Z')]] }),
       quiet('08'),
@@ -446,7 +446,7 @@ describe('collect', () => {
     const elapsed = performance.now() - started
     const a = read(agg('03', 'r1'))
     expect([a.events, a.actions, a.rows.length, a.rows.reduce((sum: number, r: [unknown, unknown, number]) => sum + r[2], 0), a.rows[0]]).toEqual([
-      n, { GetObject: 33_334, PutObject: 66_666 }, 40_000, n, ['shard/0', 'GetObject', 2, hr('03'), at('2026-10-12T03:36:00Z')],
+      n, { GetObject: 33_334, PutObject: 66_666 }, 20_000, 33_334, ['shard/0', 'GetObject', 2, hr('03'), at('2026-10-12T03:36:00Z')],
     ])
     // Sanity, not a benchmark: the mock provider's JSON dominates; the collector's own work is a small fraction.
     expect(elapsed).toBeLessThan(30_000)
@@ -517,13 +517,13 @@ function hourKeyOf(ms: number) {
 describe('publicHour', () => {
   it('carries per-key counts, minute last_ts and the capture status only', () => {
     const agg: HourAggregate = {
-      schema_version: 3, bucket: 'jc-taxes', hour: '2026-10-12T03:00:00.000Z', events: 3, own: 1,
+      schema_version: 4, bucket: 'jc-taxes', hour: '2026-10-12T03:00:00.000Z', events: 3, own: 1,
       actions: {}, classes: {}, sampling: { observed: 3, estimated: 3, max_sample_interval: 1, capture: 'unsampled' },
-      rows: [[null, 'ListObjectsV2', 1, 60_000, 120_000], ['k', 'GetObject', 1, 0, 0]],
+      rows: [['a', 'HeadObject', 1, 60_000, 120_000], ['k', 'GetObject', 1, 0, 0]],
     }
     expect(publicHour(agg)).toBe(
       '{"schema_version":1,"bucket":"jc-taxes","hour":"2026-10-12T03:00:00.000Z","capture":"unsampled","observed":3,"estimated":3,'
-      + '"max_sample_interval":1,"excluded":1,"rows":[{"key":null,"action":"ListObjectsV2","n":1,"last_ts":120000},{"key":"k","action":"GetObject","n":1,"last_ts":0}]}')
+      + '"max_sample_interval":1,"excluded":1,"rows":[{"key":"a","action":"HeadObject","n":1,"last_ts":120000},{"key":"k","action":"GetObject","n":1,"last_ts":0}]}')
   })
 })
 
