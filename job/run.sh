@@ -101,7 +101,7 @@ fi
 # since `$DT_JOB_START`), record the run's phases, outputs and exit in D1
 # (`scan_runs`, shown at /scans), and post failure alerts through `disk-tree
 # notify`'s slack channel (SLACK_BOT_TOKEN + SLACK_ALERT_CHANNEL, the
-# #gcs-usage-alerts channel, falling back to the digest's SLACK_CHANNEL). They
+# #gcs-admin channel, falling back to the digest's SLACK_CHANNEL). They
 # never fail the job for their own reasons, take no secret on argv, and redact
 # the profile's `secrets` from what they post or record. The profile
 # (`job/scan-runs.json`) says what each phase wrote, the alert label and the

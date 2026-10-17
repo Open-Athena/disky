@@ -88,8 +88,8 @@ v = {
     "STAGE_DIR": g("STAGE_DIR", "/tmp" if g("SPLIT_COMPUTE") == "1" else "/stage"),
     # Slack digest target: chat.postMessage (bot token) so per-message avatars apply
     "SLACK_CHANNEL": g("SLACK_CHANNEL", "C0BNWAASXFW"),  # #gcs-usage
-    # failure/healthcheck alerts go to #gcs-usage-alerts, not the digest channel
-    "SLACK_ALERT_CHANNEL": g("SLACK_ALERT_CHANNEL", "C0BTUNT3B5Z"),
+    # failure/healthcheck alerts go to #gcs-admin (with the staging threads), not the digest channel #gcs-usage
+    "SLACK_ALERT_CHANNEL": g("SLACK_ALERT_CHANNEL", "C0C579HNRFB"),
     # CF account for index-sync's `wrangler d1 execute` (token is a secretVariable)
     "CLOUDFLARE_ACCOUNT_ID": g("CLOUDFLARE_ACCOUNT_ID", "74981a43be0de7712369306c7b19133d"),
     # the stack's cost labels (PIN keeps them: `submitter_spec` passes them through), so the

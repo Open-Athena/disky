@@ -66,7 +66,7 @@ env:
   DUCKDB_MEM_ACCESS: 48GB
   DUCKDB_THREADS: "16"
   SLACK_CHANNEL: C0BNWAASXFW
-  SLACK_ALERT_CHANNEL: C0BTUNT3B5Z
+  SLACK_ALERT_CHANNEL: C0C579HNRFB  # #gcs-admin (alerts + staging threads; #gcs-usage is the digest)
   CLOUDFLARE_ACCOUNT_ID: 74981a43be0de7712369306c7b19133d
   R2_ENDPOINT: https://74981a43be0de7712369306c7b19133d.r2.cloudflarestorage.com
   R2_BUCKET: oa-gcs-usage-index
