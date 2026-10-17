@@ -8,7 +8,7 @@ const STATE_KEY = 'state.json'
 /** Workers' per-invocation subrequest limit (paid plan; fetches and binding calls alike). `settings` refuses a
  * configuration whose worst case (`subrequestBound`) could exceed it. */
 export const SUBREQUEST_LIMIT = 1000
-type Archive = Pick<Env['ARCHIVE'], 'put' | 'get'>
+type Archive = Pick<Env['ARCHIVE'], 'put' | 'get' | 'delete'>
 type CollectorEnv = Omit<Env, 'ARCHIVE' | 'PUBLIC' | 'PUBLIC_BUCKETS' | 'PUBLIC_PREFIX' | 'EXCLUDED_ACCESS_KEY_IDS'> & {
   ARCHIVE: Archive
   /** Optional: where the derived, public per-hour read files go (`PUBLIC_BUCKETS` names which sources). */
@@ -35,10 +35,11 @@ function integer(value: string, min: number, max: number): number {
   return n
 }
 
-/** Worst-case subrequests of one invocation: the state read and write and the manifest (3); per hour attempted,
- * its count query, aggregate write and public write (3); per event page, its query and raw write (2). */
+/** Worst-case subrequests of one invocation: the state read and write, the manifest and the one batched delete of
+ * superseded aggregates (4); per hour attempted, its count query, aggregate write and public write (3); per event
+ * page, its query and raw write (2). */
 export function subrequestBound(maxPages: number, maxHours: number): number {
-  return 3 + 3 * maxHours + 2 * maxPages
+  return 4 + 3 * maxHours + 2 * maxPages
 }
 
 export function settings(env: CollectorEnv, cron: string, scheduledTime: number) {
@@ -459,6 +460,7 @@ export async function collect(
     return boundedText(response, config.maxBytes)
   }
   let pagesLeft = config.maxPages
+  const superseded: string[] = []
   let hoursLeft = config.maxHours
 
   /** Drains one hour into `state.hours`, or returns 'wait' when it doesn't fit what's left of the budget. */
@@ -499,6 +501,7 @@ export async function collect(
     const changed = known?.digest !== digest
     let aggKey = known?.agg ?? ''
     if (changed) {
+      if (known?.agg) superseded.push(known.agg)
       aggKey = `agg/${bucket}/${agg.hour.slice(0, 10)}/${agg.hour.slice(11, 13)}/${runId}.json`
       await env.ARCHIVE.put(aggKey, text, { httpMetadata: { contentType: 'application/json' } })
       // Rewritten whenever the hour's aggregate is replaced, before the state publish.
@@ -589,6 +592,9 @@ export async function collect(
     })),
   }
   await env.ARCHIVE.put(`${prefix}/_SUCCESS.json`, JSON.stringify(manifest), { httpMetadata: { contentType: 'application/json' } })
+  // Replaced aggregates are unreachable once the state above names their successors: delete them in one batch
+  // (at marin-na's volume each version is ~5 MB/hour). A failure here leaves orphans, never a dangling state.
+  if (superseded.length) await env.ARCHIVE.delete(superseded)
   if (runs.some(run => run.error)) throw new CollectionError('hour_over_cap')
   const reports = runs.flatMap(run => run.reports)
   return {

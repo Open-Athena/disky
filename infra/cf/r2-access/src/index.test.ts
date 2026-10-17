@@ -80,10 +80,14 @@ function setup(vars: Partial<typeof config.vars> = {}) {
     const found = archive.get(key)
     return found ? { etag: found.etag, text: async () => found.text } as R2ObjectBody : null
   })
+  const del = vi.fn(async (keys: string | string[]) => {
+    for (const key of [keys].flat()) archive.delete(key)
+    order.push(`delete:${[keys].flat().join(',')}`)
+  })
   const PUBLIC = { put: vi.fn(async (key: string, value: unknown) => { pub.set(key, String(value)); order.push(`public:${key}`); return { key } as R2Object }) }
   // The deployed public publish is opted into per test (`PUBLIC_*`).
   const { PUBLIC_BUCKETS: _buckets, PUBLIC_PREFIX: _prefix, ...deployed } = config.vars
-  const env = { ...deployed, ...vars, CF_OBSERVABILITY_TOKEN: 'test-secret', ARCHIVE: { put, get } as unknown as R2Bucket, PUBLIC }
+  const env = { ...deployed, ...vars, CF_OBSERVABILITY_TOKEN: 'test-secret', ARCHIVE: { put, get, delete: del } as unknown as R2Bucket, PUBLIC }
   const read = (key: string) => JSON.parse(archive.get(key)!.text)
   return { archive, order, env, put, read, pub }
 }
@@ -124,7 +128,7 @@ describe('settings', () => {
   })
 
   it('bounds an invocation\'s subrequests under the Workers limit', () => {
-    expect([subrequestBound(50, 48), subrequestBound(450, 30), subrequestBound(450, 31)]).toEqual([247, 993, 996])
+    expect([subrequestBound(50, 48), subrequestBound(450, 30), subrequestBound(450, 31)]).toEqual([248, 994, 997])
   })
 
   it.each([
@@ -323,7 +327,7 @@ describe('collect', () => {
     expect(order).toEqual([
       page('r2', '09', 0, next), page('r2', '09', 1, next), agg('09', 'r2'),
       page('r2', '08', 0, next), page('r2', '08', 1, next), agg('08', 'r2'),
-      'state.json', `${prefix('r2', next)}/_SUCCESS.json`,
+      'state.json', `${prefix('r2', next)}/_SUCCESS.json`, `delete:${agg('08', 'r1')}`,
     ])
     expect(read(agg('08', 'r2'))).toEqual(hourAgg('08', {
       events: 1, actions: { HeadObject: 1 }, classes: { metadata_read: 1 }, rows: [['data/c', 'HeadObject', 1, at('2026-10-12T08:30:00Z'), at('2026-10-12T08:30:00Z')]],
