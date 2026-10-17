@@ -1,6 +1,6 @@
 # Rename the deployment: cw-s3 → cw
 
-Status: plan, 2026-10-17. Ryan: "should we rebrand this deploy as just "cw"?" … "I like row 2 too … branch name seems leaky, maybe deployment label too, esp."
+Status: phase 1 done 2026-10-17 (cw.oa.dev + dev.cw.oa.dev serve; the old hosts 301 GETs; sign-in, job links, Slack app URL + description, channels renamed); phase 2 next, coordinated with root (its cherry-pick notes name the branch). Ryan: "should we rebrand this deploy as just "cw"?" … "I like row 2 too … branch name seems leaky, maybe deployment label too, esp."
 
 "s3" names how we read CoreWeave's storage (its S3-compatible API, CAIOS), which nobody using the site or reading the digest needs. The display name is already "Marin CoreWeave".
 
