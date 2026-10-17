@@ -10,8 +10,8 @@ ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT))
 from cw_cf_isolation import prepare_isolation
 
-if pulumi.get_stack() != "cw-s3":
-    raise ValueError("CW entrypoint manages only the cw-s3 stack")
+if pulumi.get_stack() != "cw":
+    raise ValueError("CW entrypoint manages only the cw stack")
 runpy.run_path(str(ROOT / "stack" / "__main__.py"))
 config = pulumi.Config()
 if config.get_bool("prepareIsolation"):

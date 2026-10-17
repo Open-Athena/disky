@@ -34,7 +34,7 @@ if retain_shared_access is None:
 if not retain_shared_access and not cfg.get_bool("prepareIsolation"):
     raise ValueError("retainSharedAccess=false requires the isolated foundation")
 
-STACK = "cw-s3"
+STACK = "cw"
 if pulumi.get_stack() != STACK:
     raise ValueError(f"this branch's gcp/ manages only the {STACK!r} stack, not {pulumi.get_stack()!r}")
 
