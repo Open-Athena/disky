@@ -51,8 +51,7 @@ COPY cloud/pyproject.toml ./cloud/
 COPY cloud/src ./cloud/src
 # `--package dt-cloud` pulls the engine (`disk-tree[gcs,s3]`) as its dependency;
 # `--no-editable`: the members are copied in, not linked.
-# [plot]: matplotlib for the digest's OP mosaic (dt_cloud.digest_plot)
-RUN uv sync --frozen --no-dev --no-editable --package dt-cloud --extra plot
+RUN uv sync --frozen --no-dev --no-editable --package dt-cloud
 COPY --from=site /repo/site/dist ./dist
 COPY job ./job
 # `supervise` records a platform-terminated or OOM-killed run as failed (specs/scan-job-wrapper.md).

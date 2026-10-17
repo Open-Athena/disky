@@ -80,7 +80,7 @@ The daily job posts the same digest to Slack `#gcs-usage` and Discord `#gcs-usag
 
 ![August 2026 digest plot: total bytes over the month, and the storage-class mosaic beneath](docs/img/digest-2026-08-redacted.jpg)
 
-*The thread OP's plot for August 2026 (`python -m dt_cloud.digest_plot --redact`): the shape of the month and the class mix, with the sizes left off. The posted version carries the axis values and the running total.*
+*The thread OP's plot for August 2026, redacted: the shape of the month and the class mix, with the sizes left off. The posted version carries the axis values and the running total; since October the site renders it (`/api/digest-image`, `kind: 'tiers'`), not matplotlib.*
 
 ## Repo layout
 
