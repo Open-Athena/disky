@@ -1,6 +1,6 @@
 # R2 access aggregates: compaction
 
-Status: 2026-10-17, proposed. Follows [r2-access-logging.md] (the hourly collector, `infra/cf/r2-access`).
+Status: 2026-10-17, proposed; step 0 measured. Follows [r2-access-logging.md] (the hourly collector, `infra/cf/r2-access`).
 
 ## Why
 
@@ -23,20 +23,18 @@ What the consumer needs (`path-index -x`): per directory, the epoch **day** of t
 
 ## Plan
 
-### 0. Measure
+### 0. Measured (2026-10-17, marin-na 03–10Z, 8 final hours, via the r2 session)
 
-Pull one OA day of `agg/` (24 hour files, via the r2 session; the archive is private) and record, for that day:
+| form | 8 h | per day | per year |
+|---|---|---|---|
+| hourly JSON (today) | 42.9 MB | ~129 MB | ~47 GB |
+| hourly JSON, gzip -6 | 6.87 MB | ~21 MB | ~7.5 GB |
+| hourly JSON, zstd -3 | 6.68 MB | ~20 MB | ~7.3 GB |
+| one rolled-up parquet (zstd, dict, sorted by key) | 6.24 MB | ~19 MB | ~7 GB |
 
-- the raw JSON size, gzip -6 and zstd -3 of each hour;
-- one daily parquet (zstd, dictionary, sorted by key) with one row per `(key, action)`: sum `n`, min `first_ts`, max `last_ts`.
+The rollup barely helps: 259,457 hourly rows → 259,112 per `(key, action)` over 258,804 distinct keys. marin-na is write-dominated (Put / UploadPart), and each key appears about once. Parquet encodings (plain or delta keys, zstd -3 or -9) all land at 6.1–6.5 MB, no better than zstd'd JSON.
 
-Then fill in the table below before building steps 2–3. These are expected sizes, not measured ones:
-
-| form | per day | per year |
-|---|---|---|
-| hourly JSON (today) | ~126 MB | ~46 GB |
-| hourly JSON, gzip | ~15–25 MB? | ~5–9 GB? |
-| daily parquet, rolled up | ~2–5 MB? | ~1–2 GB? |
+So compression is a ~6× win and stops there; the next lever is **what** is stored, not how (step 5).
 
 ### 1. Raw pages: 7 days
 
@@ -63,6 +61,23 @@ A later step can roll closed months the same way, if per-day files ever add up.
 ### 4. Retire rolled hours
 
 After a day's parquet is written and read back, the job deletes that day's hour aggregates (private `agg/`) and public hour files. The collector's `state.json` `frozen` map stops growing past the rolled point (open question below).
+
+### 5. Rows for reads only (recommended first)
+
+The read lens uses GET/HEAD per key (6e62d37a), and a write's recency is already the listing's `mtime`. Measured at marin-na over the same 8 hours:
+
+| action | rows | share of rows |
+|---|---|---|
+| PutObject | 258,900 | 99.8% |
+| GetObject | 405 | |
+| HeadObject | 91 | |
+| everything else (Copy, DeleteObjects, List, multipart) | 61 | |
+
+GET/HEAD are 496 rows over 237 keys, ~0.01 MB zstd'd. GET is ~36% of *events*, but a few hot keys are read many times, while each Put names a new key.
+
+So the collector itself should aggregate per-key rows only for read actions (`ROW_ACTIONS`, default `GetObject,HeadObject`) and keep every other action as per-hour counts by action (no keys). That takes durable aggregates from ~129 MB/day to tens of KB/day, and the public files shrink the same way. Steps 2–3 then matter only for the O(new days) read, not for bytes.
+
+The cost: there's no per-prefix write activity ("who's writing where") from R2 logs. GCS's access pipeline keeps PUT ops per path, so that stays a possible feature there. If R2 write heat is ever wanted, a per-directory (not per-key) write rollup at a fixed depth would be the compact form.
 
 ## Open questions
 
