@@ -190,6 +190,7 @@ def test_gcp_stack(monkeypatch: pytest.MonkeyPatch):
         assert task["environment"]["variables"] == {
             "DISKY_LABELS": "app=disky,deployment=hf", "HF_URI": "hf://open-athena", "R2_BUCKET": "oa-hf-usage-index",
             "WORK_DIR": "/work", "SLACK_CHANNEL": "C0C9G547AP7", "SLACK_ALERT_CHANNEL": "C0C9J9VDPV5",
+            "DT_TRIGGER": "schedule",  # the cron's scans are the digest's reply scans
         }
         refs = task["environment"]["secretVariables"]
         # The head reads only its own: the run record's D1 token + account id and the alert's Slack token (each step
@@ -202,7 +203,7 @@ def test_gcp_stack(monkeypatch: pytest.MonkeyPatch):
         assert set(refs) <= set(profile["secrets"])
         policy = spec["allocationPolicy"]
         assert (policy["serviceAccount"]["email"], policy["instances"][0]["policy"]["machineType"], policy["instances"][0]["policy"]["provisioningModel"]) == (sa, "e2-standard-2", "STANDARD")
-        assert policy["labels"] == spec["labels"] == {"app": "disky", "deployment": "hf", "component": "scan"}
+        assert policy["labels"] == spec["labels"] == {"app": "disky", "deployment": "hf", "component": "scan", "trigger": "schedule"}
 
     return pulumi.Output.all(g["scan"].job.id, g["images_reader"].id, g["data_admin"].id).apply(check)
 

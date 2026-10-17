@@ -24,11 +24,14 @@ IMAGE=${IMAGE:-us-central1-docker.pkg.dev/$PROJECT/hf-usage/scan:hf}
 PROFILE=${PROFILE:-/app/job/profiles/hf.yml}
 JOB_ID=${JOB_ID:-hf-scan-$(date -u +%Y%m%d-%H%M%S)}
 
-labels() {  # cost labels (specs/done/cost-labels.md): $DISKY_LABELS + component $1, as JSON; {} when unset
+# What started the scan (`scan head`: the run record, the scan's `trigger.json`, the digest's reply scan): the cron body
+# (PIN) is the schedule; any other submit is by hand. In the job's env (`DT_TRIGGER`) and its labels.
+labels() {  # cost labels (specs/done/cost-labels.md): $DISKY_LABELS + component $1 + trigger, as JSON; {} when unset
   python3 - "$1" <<'PY'
 import json, os, sys
 d = dict(i.strip().split("=", 1) for i in os.environ.get("DISKY_LABELS", "").split(",") if i.strip())
-print(json.dumps({**d, "component": sys.argv[1]} if d else {}))
+trigger = "schedule" if os.environ.get("PIN") else "manual"
+print(json.dumps({**d, "component": sys.argv[1], "trigger": trigger} if d else {}))
 PY
 }
 
@@ -46,6 +49,7 @@ v = {
     "SLACK_CHANNEL": g("SLACK_CHANNEL", "C0C9G547AP7"),
     # alerts (pipeline errors, session logging): #hf-admin
     "SLACK_ALERT_CHANNEL": g("SLACK_ALERT_CHANNEL", "C0C9J9VDPV5"),
+    "DT_TRIGGER": "schedule" if pin else "manual",
 }
 if not pin:  # one-off overrides forwarded only for manual submits, never the cron spec
     for k in ["SNAP_ID", "GEN", "DT_RECORD", "DT_ALERTS"]:

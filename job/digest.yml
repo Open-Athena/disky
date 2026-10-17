@@ -22,8 +22,9 @@ plot_project: oa-hf-usage-icons
 plot_branch: plot
 plot_base: https://plot.oa-hf-usage-icons.pages.dev
 # sender: the headline as the reply's sender name + a trend-arrow avatar. hf scans once a day (the 08:00 UTC cron):
-# the reply is the day's first scan from 08Z on, so a manual scan earlier that day (2026-10-17's 02:47 re-run) doesn't
-# preempt the cron's; a day with none from 08Z on gets its last scan once a later day's lands, and no provisional reply
+# the reply is the day's first scan from 08Z on that wasn't started by hand (its `trigger.json`), so a manual scan
+# (2026-10-17's 02:47 re-run) never preempts the cron's; a day without one gets its last scan once a later day's
+# lands, and no provisional reply
 variant: sender
 reply_hour: 8
 provisional: false
