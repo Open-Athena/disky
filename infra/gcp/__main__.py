@@ -12,7 +12,7 @@ import pulumi
 import pulumi_gcp as gcp
 
 from gcp_jobs import Adopt, BatchCron, JobAccount, RunJobCron, Secrets, StorageBatchDelete, cost_labels, grant_bucket, labeled_provider
-from task_logs import TaskLogView
+from task_logs import TaskLogBucket, TaskLogView
 
 cfg = pulumi.Config()
 gcp_cfg = pulumi.Config("gcp")
@@ -54,6 +54,10 @@ task_logs = TaskLogView(
     reader=dispatch.member,
 )
 pulumi.export("task_log_view", task_logs.path)
+# Every Batch task's logs in the project (`log_id("batch_task_logs")`), kept 90 days beside `_Default`'s 30: Nextflow
+# task jobs are named `nf-…`, so no deployment prefix tells them apart, and the project's one copy lives in this stack
+task_log_bucket = TaskLogBucket("batch-task-logs", project=project, location="global", bucket_id="batch-task-logs", retention_days=90)
+pulumi.export("task_log_bucket", task_log_bucket.path)
 job = JobAccount(
     "gcs-usage-job",
     project=project,
