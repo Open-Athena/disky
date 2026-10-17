@@ -7,6 +7,8 @@ Exact-equality against a hand-built month (no Slack, no GCS): a lead-in scan
 unambiguous). Totals chosen so every derived string is checkable by hand."""
 from datetime import date
 
+import pytest
+
 from dt_cloud import digest as E
 from dt_cloud import digest_gcs as D
 
@@ -137,8 +139,45 @@ def test_sub_daily_op_body_spans_from_the_lead_scan():
     )
 
 
-def test_sub_daily_plot_rows_are_per_day():
-    assert D.plot_rows(SUB) == [{"date": "2026-08-03", "std": 310.0, "near": 600.0, "cold": 1500.0, "arch": 600.0}]
+def test_image_body():
+    # `POST /api/digest-image`'s tiers card: each scan's bytes per class, bottom → top (Archive … Standard)
+    assert D.image_body(ROWS, AUG, CFG) == {
+        "kind": "tiers",
+        "title": "GCS usage — August 2026",
+        "note": "site.example.org · TiB",
+        "month": "2026-08",
+        "units": "TiB",
+        "tiers": ["Archive", "Coldline", "Nearline", "Standard"],
+        "points": [
+            {"scan": "2026-08-03", "bytes": [600 * TIB, 1500 * TIB, 600 * TIB, 330 * TIB]},
+            {"scan": "2026-08-04", "bytes": [600 * TIB, 1500 * TIB, 600 * TIB, 310 * TIB]},
+        ],
+    }
+
+
+def test_image_body_sub_daily_is_per_day():
+    # a day's scans plot as its latest (8/3 18:01Z), under its own scan id
+    assert D.image_body(SUB, AUG, CFG)["points"] == [{"scan": "2026-08-03T1801", "bytes": [600 * TIB, 1500 * TIB, 600 * TIB, 310 * TIB]}]
+
+
+def test_render_plot_posts_to_site(monkeypatch, tmp_path):
+    from dt_cloud import site
+
+    calls = []
+    monkeypatch.setenv("SITE_TOKEN", "tok")
+    monkeypatch.setattr(site, "post_json", lambda url, token, path, body, timeout=120: calls.append((url, token, path, body)) or b"\x89PNG")
+    TPL.render_plot(ROWS, AUG, tmp_path / "op.png")
+    assert calls == [("https://site.example.org", "tok", "/api/digest-image", D.image_body(ROWS, AUG, CFG))]
+    assert (tmp_path / "op.png").read_bytes() == b"\x89PNG"
+
+
+def test_render_plot_without_site_token(monkeypatch, tmp_path):
+    monkeypatch.delenv("SITE_TOKEN", raising=False)
+    monkeypatch.delenv("GCS_USAGE_TOKEN", raising=False)
+    with pytest.raises(E.PlotUnavailable) as e:
+        TPL.render_plot(ROWS, AUG, tmp_path / "op.png")
+    assert str(e.value) == "digest image: no site token ($SITE_TOKEN)"
+    assert sorted(tmp_path.iterdir()) == []
 
 
 # ---- Discord twin ---------------------------------------------------------
@@ -280,21 +319,8 @@ def test_converge_discord_edit_replies():
     assert state["posted"] == {"2026-08-03": "m2", "2026-08-04": "m3"}
 
 
-def test_plot_takes_sub_daily_scan_ids(tmp_path) -> None:
-    """Two scans on one day (`2026-10-09` and `2026-10-09T1236`) plot as two
-    instants; a `T` id crashed `render_tiers` (`date.fromisoformat`) in the
-    2026-10-09T1236 job's digest steps."""
-    from dt_cloud.digest_plot import render_tiers
-
-    rows = [
-        {"date": "2026-10-08", "std": 30.0, "near": 1.0, "cold": 2900.0, "arch": 0.0},
-        {"date": "2026-10-09", "std": 30.0, "near": 1.0, "cold": 2910.0, "arch": 0.0},
-        {"date": "2026-10-09T1236", "std": 30.0, "near": 1.0, "cold": 2620.0, "arch": 0.0},
-    ]
-    out = tmp_path / "tiers.png"
-    render_tiers(rows, out, "marin GCS — October 2026", "gcs.oa.dev")
-    assert out.read_bytes()[:8] == b"\x89PNG\r\n\x1a\n"
-    assert E._md("2026-10-09T1236") == "10/9"
+def test_md_takes_sub_daily_scan_ids() -> None:
+    assert [E._md(s) for s in ("2026-10-09", "2026-10-09T1236")] == ["10/9", "10/9"]
 
 
 def test_links_use_each_scans_canonical_slug():
