@@ -2,6 +2,7 @@
 dispatcher's fake / fail / soft semantics."""
 from __future__ import annotations
 
+import os
 import subprocess
 from pathlib import Path
 
@@ -614,3 +615,26 @@ def test_path_index_age_pyramids_and_verify(tmp_path, env, monkeypatch):
     ]
     assert uploads == [(["age-pyramid-1h.parquet", "path-index-bysize.parquet", "verification.json", "path-index.parquet"],
                         "gs://dvx/meta-l2/2026-10-16T1200/index/G1")]
+
+
+def test_store_has_reads_with_the_steps_credentials(tmp_path, env, monkeypatch):
+    """An in-process store read sees the step's `AWS_*` (`r2_profile`'s credentials file) as `ctx.sh`'s subprocesses do,
+    and `os.environ` is restored after (r2, 2026-10-17T0311: `ProfileNotFound: … (r2)` from `static-names`)."""
+    monkeypatch.delenv("AWS_SHARED_CREDENTIALS_FILE", raising=False)
+    monkeypatch.setenv("AWS_PROFILE", "outer")
+    seen = []
+
+    class Store:
+        def __init__(self, root):
+            self.root = root
+
+        def exists(self, key):
+            seen.append((self.root, key, os.environ.get("AWS_SHARED_CREDENTIALS_FILE"), os.environ.get("AWS_PROFILE")))
+            return True
+
+    import dt_cloud.blobstore as B
+    monkeypatch.setattr(B, "Store", Store)
+    c = ctx(tmp_path, {**env, "AWS_SHARED_CREDENTIALS_FILE": "/t/r2-credentials", "AWS_PROFILE": "step"})
+    assert c.store_has("r2://idx", "static-names/G/scans.json") is True
+    assert seen == [("r2://idx", "static-names/G/scans.json", "/t/r2-credentials", "step")]
+    assert (os.environ.get("AWS_SHARED_CREDENTIALS_FILE"), os.environ.get("AWS_PROFILE")) == (None, "outer")
