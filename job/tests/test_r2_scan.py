@@ -545,6 +545,23 @@ def test_head_job_scratch_profile_drops_disk_and_secrets() -> None:
     }
 
 
+def test_plan_head_prints_the_head_job() -> None:
+    from json import loads
+
+    from click.testing import CliRunner
+
+    result = CliRunner().invoke(module["plan"], ["-H", "job/profiles/r2.yml", image])
+    assert result.exit_code == 0, result.output
+    expected = module["job_spec"](image, config)
+    module["head_job"](expected, "job/profiles/r2.yml")
+    assert loads(result.output) == expected
+    task = expected["taskGroups"][0]["taskSpec"]
+    assert (task["runnables"][0]["container"]["commands"], sorted(task["environment"]["secretVariables"])) == (
+        ["scan", "head", "/app/job/profiles/r2.yml"],
+        ["CLOUDFLARE_API_TOKEN", "SLACK_BOT_TOKEN"],
+    )
+
+
 def test_head_job_refuses_a_path_outside_profiles() -> None:
     from click import ClickException
 

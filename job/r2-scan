@@ -1,7 +1,7 @@
 #!/usr/bin/env -S uv run --script
 # /// script
 # requires-python = ">=3.12"
-# dependencies = ["click", "duckdb"]
+# dependencies = ["click", "duckdb", "pyyaml"]
 # ///
 """Plan, submit and run this deployment's metadata-only remote scan."""
 
@@ -329,9 +329,13 @@ def build(dry_run: bool, tag: str) -> None:
 
 
 @main.command()
+@option("-H", "--head", "head_profile", help="Plan a Nextflow head's job over this profile (a `job/profiles/` path) instead of the one-VM scan")
 @argument("image")
-def plan(image: str) -> None:
-    print(dumps(job_spec(image, profile()), indent=2))
+def plan(head_profile: str | None, image: str) -> None:
+    planned = job_spec(image, profile())
+    if head_profile:
+        head_job(planned, head_profile)
+    print(dumps(planned, indent=2))
 
 
 @main.command()

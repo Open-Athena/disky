@@ -119,8 +119,15 @@ pulumi.export("image_repository", repository.repository_id)
 daily_config = pulumi.Config("r2")
 daily_enabled = daily_config.get_bool("dailyEnabled") or False
 if daily_enabled:
-    planned = run([str(Path(__file__).resolve().parents[2] / "job/r2-scan"), "plan", daily_config.require("scanImage")], capture_output=True, text=True, check=True)
-    spec = loads(planned.stdout)
+    # `r2:heads` ([{profile, schedule}], `job/profiles/` names): one scheduler job per Nextflow head (each its own Batch
+    # job, so its own run record), the first keeping `r2-daily`; unset, `r2-daily` submits the one-VM scan.
+    heads = daily_config.get_object("heads") or [{"profile": None, "schedule": "15 7 * * *"}]
+
+    def plan(profile: str | None) -> dict:
+        head = ["-H", f"job/profiles/{profile}"] if profile else []
+        planned = run([str(Path(__file__).resolve().parents[2] / "job/r2-scan"), "plan", *head, daily_config.require("scanImage")],
+                      capture_output=True, text=True, check=True)
+        return loads(planned.stdout)
     scheduler = gcp.serviceaccount.Account(
         "r2-scheduler", project=project, account_id="oa-r2-usage-scheduler",
         display_name="OA R2 daily scan submitter",
@@ -140,18 +147,21 @@ if daily_enabled:
         role="roles/iam.serviceAccountUser",
         member=scheduler.email.apply(lambda email: f"serviceAccount:{email}"),
     )
-    daily = gcp.cloudscheduler.Job(
-        "r2-daily", project=project, region=region, name="oa-r2-usage-daily",
-        description="Metadata-only daily scan of the four approved OA R2 buckets",
-        schedule="15 7 * * *", time_zone="Etc/UTC", attempt_deadline="180s",
-        retry_config={"retry_count": 0, "max_retry_duration": "0s"},
-        http_target={
-            "uri": f"https://batch.googleapis.com/v1/projects/{project}/locations/{region}/jobs",
-            "http_method": "POST", "headers": {"Content-Type": "application/json"},
-            "body": b64encode(dumps(spec).encode()).decode(),
-            "oauth_token": {"service_account_email": scheduler.email, "scope": "https://www.googleapis.com/auth/cloud-platform"},
-        },
-        opts=pulumi.ResourceOptions(depends_on=[submit_grant, act_as]),
-    )
-    pulumi.export("daily_schedule", daily.schedule)
+    for i, head in enumerate(heads):
+        stem = (head["profile"] or "").removesuffix(".yml")
+        suffix = "" if i == 0 else f"-{stem.removeprefix('r2-')}"
+        daily = gcp.cloudscheduler.Job(
+            f"r2-daily{suffix}", project=project, region=region, name=f"oa-r2-usage-daily{suffix}",
+            description=f"Daily Nextflow head over job/profiles/{head['profile']}" if head["profile"] else "Metadata-only daily scan of the four approved OA R2 buckets",
+            schedule=head["schedule"], time_zone="Etc/UTC", attempt_deadline="180s",
+            retry_config={"retry_count": 0, "max_retry_duration": "0s"},
+            http_target={
+                "uri": f"https://batch.googleapis.com/v1/projects/{project}/locations/{region}/jobs",
+                "http_method": "POST", "headers": {"Content-Type": "application/json"},
+                "body": b64encode(dumps(plan(head["profile"])).encode()).decode(),
+                "oauth_token": {"service_account_email": scheduler.email, "scope": "https://www.googleapis.com/auth/cloud-platform"},
+            },
+            opts=pulumi.ResourceOptions(depends_on=[submit_grant, act_as]),
+        )
+        pulumi.export(f"daily_schedule{suffix}", daily.schedule)
 pulumi.export("scheduler_enabled", daily_enabled)

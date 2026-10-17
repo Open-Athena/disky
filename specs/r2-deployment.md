@@ -54,7 +54,7 @@ What changes against the one-VM job:
 Steps, in order (each a go from Ryan):
 1. `infra/gcp` `pulumi up -s r2`: the job account gets `roles/batch.jobsEditor` and acts as itself (a head submits its tasks' jobs as it).
 2. Scratch run; compare its `listing/<scan>/index/<gen>/` and `snapshots/r2/<scan>/` against the same day's one-VM scan.
-3. A prod run of both heads (primary, then meta) beside the cron, then the scheduler body → `dt-cloud scan head /app/job/profiles/r2.yml` (+ meta), the image pinned by digest in both profiles.
+3. A prod run of both heads (primary, then meta) beside the cron, then the scheduler: `r2:heads` in `Pulumi.r2.yaml` (`[{profile, schedule}]`) gives each head its own scheduler job (`r2-daily` keeps the first; each head is its own Batch job, so its own run record), its body `job/r2-scan plan -H job/profiles/<p> <r2:scanImage>`. The head is pinned by digest (`r2:scanImage`); its tasks run the profiles' `scan:nf` tag (a profile baked into the image can't name the image's own digest), so `scan:nf` moves only on a deliberate `job/r2-scan build nf`.
 4. `job/r2-scan run` and its helpers are deleted after a clean week.
 
 [`pipelines-everywhere.md`]: pipelines-everywhere.md

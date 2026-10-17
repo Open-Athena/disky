@@ -1,4 +1,5 @@
 from pathlib import Path
+from json import dumps, loads
 from runpy import run_path
 
 import pulumi
@@ -110,3 +111,32 @@ def test_independent_resources_and_optional_scheduler(daily_enabled: bool):
     if daily_enabled:
         outputs.append(program["daily"].id)
     return pulumi.Output.all(*outputs).apply(check)
+
+
+@pulumi.runtime.test
+def test_heads_get_one_scheduler_job_each():
+    mocks = Mocks()
+    pulumi.runtime.set_mocks(mocks, project="oa-r2-usage-gcp", stack="r2", preview=False)
+    image = "us-west1-docker.pkg.dev/oa-internal-450019/oa-r2-usage/scan@sha256:" + "a" * 64
+    heads = [{"profile": "r2.yml", "schedule": "15 7 * * *"}, {"profile": "r2-meta.yml", "schedule": "15 9 * * *"}]
+    pulumi.runtime.set_all_config({"gcp:project": "oa-internal-450019", "gcp:region": "us-west1", "r2:dailyEnabled": "true", "r2:scanImage": image, "r2:heads": dumps(heads)})
+    import sys
+
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "gcp"))
+    program = run_path(str(Path(__file__).resolve().parents[1] / "gcp/__main__.py"))
+
+    def check(_: object) -> None:
+        from base64 import b64decode
+
+        jobs = {name: value["inputs"] for (name, typ), value in mocks.resources.items() if typ == "gcp:cloudscheduler/job:Job"}
+        assert sorted((name, job["name"], job["schedule"]) for name, job in jobs.items()) == [
+            ("r2-daily", "oa-r2-usage-daily", "15 7 * * *"),
+            ("r2-daily-meta", "oa-r2-usage-daily-meta", "15 9 * * *"),
+        ]
+        runnables = {name: loads(b64decode(job["httpTarget"]["body"]))["taskGroups"][0]["taskSpec"]["runnables"] for name, job in jobs.items()}
+        assert runnables == {
+            name: [{"container": {"imageUri": image, "volumes": [], "entrypoint": "dt-cloud", "commands": ["scan", "head", f"/app/job/profiles/{profile}"]}}]
+            for name, profile in (("r2-daily", "r2.yml"), ("r2-daily-meta", "r2-meta.yml"))
+        }
+
+    return program["daily"].id.apply(check)
