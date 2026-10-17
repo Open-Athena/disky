@@ -8,7 +8,7 @@ params.scan = null           // SNAP_ID
 params.gen = null            // the index generation, stamped once by the head
 params.job_start = null      // DT_JOB_START (epoch s)
 params.run_id = ''           // DT_RUN_ID: the head job's uid, so every task records into one run
-params.buckets = 'marin-us-east-02a hero-checkpoints marin-us-east-06a rhoarnet-us-east-08a marin-us-west-04a'
+params.buckets = 'marin-us-east-02a hero-checkpoints marin-us-east-06a rhoarnet-us-east-08a marin-us-east-08a marin-us-west-04a'
 params.big = 'marin-us-east-02a'    // the buckets listed on the big machine (label `list_big`)
 params.secrets = ''          // `-s ENV=SECRET` bindings for `dt-cloud secrets exec`, space-separated
 params.env = [:]             // extra env for every step (DATA_BUCKET, R2_BUCKET, STATIC_NAMES, …)
