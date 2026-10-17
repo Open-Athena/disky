@@ -152,7 +152,7 @@ EOF
 # and of the secrets only what the head itself uses (the scan-run record's D1 token, the alert's Slack token).
 # The generic head reads the deployment's profile (`PROFILE`, a path in the image).
 if [ "${NF:-scan}" != 0 ]; then
-  NF=${NF:-scan} PROFILE=${PROFILE:-/app/job/profiles/cw-s3.yml} python3 - "$spec" <<'PY'
+  NF=${NF:-scan} PROFILE=${PROFILE:-/app/job/profiles/cw.yml} python3 - "$spec" <<'PY'
 import json, os, sys
 p = sys.argv[1]; j = json.load(open(p))
 t = j["taskGroups"][0]["taskSpec"]

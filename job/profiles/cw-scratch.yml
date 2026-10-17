@@ -2,8 +2,8 @@
 # the scratch bucket as the data store, and only the CAIOS keys, so every serving step (publish-r2, interval-store,
 # index-rows / index-sync, over-time, warm-cache, probe) skips for want of credentials, and nothing is recorded (no
 # `SCAN_RUNS_PROFILE`). Its own deployment name, so its Nextflow sessions never resume a prod scan's.
-#   NF=scan PROFILE=/app/job/profiles/cw-s3-scratch.yml IMAGE=…/scan:cw-scratch job/cw-batch-submit.sh
-deployment: cw-s3-scratch
+#   NF=scan PROFILE=/app/job/profiles/cw-scratch.yml IMAGE=…/scan:cw-scratch job/cw-batch-submit.sh
+deployment: cw-scratch
 executor:
   kind: google-batch
   project: oa-internal-450019
@@ -38,7 +38,7 @@ env:
   AWS_DEFAULT_REGION: us-east-1
   AWS_EC2_METADATA_DISABLED: "true"
   DT_S3_ADDRESSING_STYLE: virtual
-labels: {deployment: cw-s3, purpose: scratch}
+labels: {deployment: cw, purpose: scratch}
 queue_size: 20
 skip: [static-names, digest]
 options:

@@ -1,7 +1,7 @@
-# The cw scan on the generic pipeline (specs/pipelines-everywhere.md §6.2): `dt-cloud scan head job/profiles/cw-s3.yml`
+# The cw scan on the generic pipeline (specs/pipelines-everywhere.md §6.2): `dt-cloud scan head job/profiles/cw.yml`
 # runs `job/nf/scan.nf`, each step `dt-cloud scan step <name>` in its own Batch task. Replaces `job/nf/cw.nf` +
 # `cw-head.sh` + `cw-step.sh` (and `cw-env.sh`'s config, which is this file's `env`).
-deployment: cw-s3
+deployment: cw
 executor:
   kind: google-batch
   project: oa-internal-450019
@@ -64,7 +64,7 @@ env:
   DT_S3_ADDRESSING_STYLE: virtual
   STATIC_NAMES_IMAGE: us-central1-docker.pkg.dev/oa-internal-450019/cw-s3-usage/scan:cw
 pass: [DT_RECORD, DT_ALERTS]
-labels: {deployment: cw-s3}
+labels: {deployment: cw}
 queue_size: 20
 options:
   list:
