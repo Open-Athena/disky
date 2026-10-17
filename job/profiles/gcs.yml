@@ -1,5 +1,5 @@
 # gcs.oa.dev's scan as a Nextflow DAG (specs/pipelines-everywhere.md): `dt-cloud scan head job/profiles/gcs.yml`.
-# The one-VM job (`job/run.sh`, `job/batch-submit.sh`) stays the cron until this profile's scratch and prod runs pass.
+# The daily cron submits this head (`job/batch-submit.sh`); `NF=0` there is the one-VM `job/run.sh` fallback.
 deployment: gcs
 executor:
   kind: google-batch

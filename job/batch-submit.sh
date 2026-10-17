@@ -181,11 +181,11 @@ cat > "$spec" <<EOF
 }
 EOF
 
-# NF=scan: the generic Nextflow head (`dt-cloud scan head $PROFILE`, specs/pipelines-everywhere.md) instead of the
-# one-VM `job/run.sh`. The head only drives the DAG (each step is a Batch task of its own, sized by the profile, which
+# NF=scan (the default, and the daily's since 2026-10-17's prod run): the generic Nextflow head (`dt-cloud scan head
+# $PROFILE`, specs/pipelines-everywhere.md); NF=0 submits the one-VM `job/run.sh` instead. The head only drives the DAG (each step is a Batch task of its own, sized by the profile, which
 # fetches its own secrets), so: a small VM, no mounts or stage disk, and of the secrets only what the head itself uses
 # (the scan-run record's D1 token, the alert's Slack token). Its Batch job is the run every task records into.
-if [ "${NF:-0}" = scan ]; then
+if [ "${NF:-scan}" = scan ]; then
   PROFILE=${PROFILE:-/app/job/profiles/gcs.yml} python3 - "$spec" <<'PY'
 import json, os, sys
 p = sys.argv[1]; j = json.load(open(p))
