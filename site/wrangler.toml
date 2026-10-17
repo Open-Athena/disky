@@ -42,7 +42,7 @@ STAFF_DOMAIN = ""
 ADMIN_EMAILS = "1"
 DISKY_LABELS = "app=disky,deployment=oa-r2"
 GCP_PROJECT = "oa-internal-450019"
-REPO_URL = "https://github.com/Open-Athena/marin-gcs-usage"
+REPO_URL = "https://github.com/Open-Athena/disky"
 
 # `?f=` and /names read the static name index from INDEX_R2 (`static-names/<STATIC_GEN>/`; meta's own generation
 # in its STORES_JSON vars), and the primary's views read the interval store's current generation
