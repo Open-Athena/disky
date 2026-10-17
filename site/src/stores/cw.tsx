@@ -1,4 +1,5 @@
 // cw-s3.oa.dev's store (oa-decoupling step 6).
+import { OA_PEERS } from '../oaPeers'
 import type { Store } from '../stores'
 
 const store: Store = {
@@ -22,7 +23,7 @@ const store: Store = {
   executor: 'plan-sweep',
   lifecycle: { tracked: 'job/cw-lifecycle.json', rules: 's3', recordedFrom: '2026-09-17' },
   buckets: ['marin-us-east-02a', 'hero-checkpoints', 'marin-us-east-06a', 'rhoarnet-us-east-08a', 'marin-us-east-08a', 'marin-us-west-04a'],
-  peer: { label: 'GCS usage', href: 'https://gcs.oa.dev/' },
+  peers: OA_PEERS,
   // CoreWeave's own per-bucket totals and zone quotas, sampled more often than the 6-hourly scans.
   liveTotals: { label: 'Live bucket totals (Grafana)', href: 'https://grafana.oa.dev/d/marin-storage/storage?orgId=1&from=now-7d&to=now&timezone=utc' },
   rootLabel: 'all buckets',
