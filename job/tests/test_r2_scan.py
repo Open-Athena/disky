@@ -556,9 +556,10 @@ def test_plan_head_prints_the_head_job() -> None:
     module["head_job"](expected, "job/profiles/r2.yml")
     assert loads(result.output) == expected
     task = expected["taskGroups"][0]["taskSpec"]
-    assert (task["runnables"][0]["container"]["commands"], sorted(task["environment"]["secretVariables"])) == (
+    assert (task["runnables"][0]["container"]["commands"], sorted(task["environment"]["secretVariables"]), task["environment"]["variables"]["DT_SCAN_IMAGE"]) == (
         ["scan", "head", "/app/job/profiles/r2.yml"],
         ["CLOUDFLARE_API_TOKEN", "SLACK_BOT_TOKEN"],
+        image,
     )
 
 

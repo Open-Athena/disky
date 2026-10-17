@@ -407,6 +407,8 @@ def head_job(planned: dict, profile_path: str) -> None:
     task = planned["taskGroups"][0]["taskSpec"]
     container = task["runnables"][0]["container"]
     container.update(entrypoint="dt-cloud", commands=["scan", "head", f"/app/job/profiles/{path.name}"], volumes=[])
+    # the tasks run the head's own image (by digest), not the profile's `scan:nf` tag
+    task["environment"]["variables"]["DT_SCAN_IMAGE"] = container["imageUri"]
     task["volumes"] = []
     task["computeResource"] = {"cpuMilli": 2000, "memoryMib": 7000}
     task["maxRunDuration"] = "21600s"
