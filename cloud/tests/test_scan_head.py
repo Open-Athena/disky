@@ -40,11 +40,21 @@ def test_session_id_per_store():
     assert H.session_id("cw-s3", "2026-10-16T1200", "meta") == "43a92eb7-2c67-54bb-9a9a-4c56a2b389b0"
 
 
-def test_start_args_carry_the_store():
-    assert (H.start_args(load(FIX / "cw-s3.yml"), "G", "2026-10-16T1200"), H.start_args(load(FIX / "meta-store.yml"), "G", "2026-10-16T1200")) == (
-        ["-B", "-g", "G", "2026-10-16T1200"],
-        ["-B", "-g", "G", "-K", "meta", "2026-10-16T1200"],
+def test_start_args_carry_the_run_and_the_store():
+    """The run id every task records into (`-r`), the Batch job's facts only from one (`-B`), the store (`-K`)."""
+    cw, meta = load(FIX / "cw-s3.yml"), load(FIX / "meta-store.yml")
+    assert (H.start_args(cw, "G", "2026-10-16T1200", "uid1"), H.start_args(meta, "G", "2026-10-16T1200", "uid1"),
+            H.start_args(cw, "G", "2026-10-16T1200", "cw-s3-nf-2026-10-16t1200", batch=False)) == (
+        ["-r", "uid1", "-B", "-g", "G", "2026-10-16T1200"],
+        ["-r", "uid1", "-B", "-g", "G", "-K", "meta", "2026-10-16T1200"],
+        ["-r", "cw-s3-nf-2026-10-16t1200", "-g", "G", "2026-10-16T1200"],
     )
+
+
+def test_local_run_id():
+    """A head that isn't a Batch job records under one run id of its own, which every task inherits (not a run each)."""
+    assert (H.local_run_id(load(FIX / "cw-s3.yml"), "2026-10-17T0005"), H.local_run_id(load(FIX / "meta-store.yml"), "2026-10-17T0005")) == (
+        "cw-s3-nf-2026-10-17t0005", "example-meta-nf-2026-10-17t0005")
 
 
 def test_params_golden_per_call_secrets():
@@ -259,6 +269,6 @@ def test_publish_reports(tmp_path):
 def test_finish_args(tmp_path):
     """The DAG goes to `finish -D` only when Nextflow wrote it."""
     dag = tmp_path / "dag.mmd"
-    assert H.finish_args(1, "nextflow exit 1", ["-l", "nf-session=s"], dag) == ["-x", "1", "-e", "nextflow exit 1", "-l", "nf-session=s"]
+    assert H.finish_args(1, "nextflow exit 1", ["-l", "nf-session=s"], dag, "uid1") == ["-r", "uid1", "-x", "1", "-e", "nextflow exit 1", "-l", "nf-session=s"]
     dag.write_text("flowchart TB\n")
     assert H.finish_args(0, None, [], dag) == ["-x", "0", "-D", str(dag)]
