@@ -1,10 +1,10 @@
 """The `gcs` digest template: a reply per scan, cost by storage class.
 
-Each reply's SENDER is the scan's size headline (date · TB · Δ), its BODY the
+Each reply's SENDER is the scan's size headline (date · TiB · Δ), its BODY the
 $/mo (priced from the scan's storage-class bytes, ``cfg.prices``) + a linked
 arrow to the day's diff, its avatar the colour-coded trend arrow
 (`av_deg{N}.png?v=REV`). The OP: month-to-date headline, per-ISO-week bullets
-(TB + $/mo), and a storage-class image drawn by the site (`POST /api/digest-image`, `kind: tiers`).
+(TiB + $/mo), and a storage-class image drawn by the site (`POST /api/digest-image`, `kind: tiers`).
 Scan ids are `YYYY-MM-DD` or sub-daily `YYYY-MM-DDTHHMM` (UTC): a day may hold
 several scans, each its own reply, delta and link (specs/done/scan-ids-not-dates.md);
 meta.json carries `total_bytes` + `class_bytes`. Design + rationale: specs/done/slack-digest-shape-c.md; the
@@ -95,7 +95,7 @@ def op_body(rows: list[Scan], month: dt.date, plot_url: str | None, cfg: DigestC
     mdtb = rows[-1].tb - base_tb
     mweekly = (mdtb / base_tb * 100 * 7 / len(rows)) if base_tb else 0
     lines = [
-        f":arrow_deg{deg(mweekly)}: **{_tb(mdtb)} TB** month-to-date · [dashboard]({site_url}/)",
+        f":arrow_deg{deg(mweekly)}: **{_tb(mdtb)} TiB** month-to-date · [dashboard]({site_url}/)",
         "",
         "*Weekly summaries*",
     ]
@@ -121,7 +121,7 @@ def op_body(rows: list[Scan], month: dt.date, plot_url: str | None, cfg: DigestC
         # with the Diff section right below it
         lines.append(
             f":arrow_deg{deg(wpct)}: [wk of {mon.month}/{mon.day}]({site_url}/?d={_dlink(end.date, end.slug)}-{_span(b_at, scan_ts(end.date))}#over-time){partial} — "
-            f"**{end.tb:,.0f} TB** ({_tb(wdtb)}, {_pct(wdtb, end.tb)}%) · ${end.cost:,}/mo ({_usd(end.cost - b_cost)})"
+            f"**{end.tb:,.0f} TiB** ({_tb(wdtb)}, {_pct(wdtb, end.tb)}%) · ${end.cost:,}/mo ({_usd(end.cost - b_cost)})"
         )
         prev_end = end
     if plot_url is not None:
@@ -166,7 +166,7 @@ def reply(r: Scan, cfg: DigestConfig, platform: str = "slack") -> Reply:
     dcost = r.dcost or 0
     # A sub-daily scan names its UTC time: a day's scans are distinct replies.
     when = f"{d.month}/{d.day}" + (f" {r.date[11:13]}:{r.date[13:15]}Z" if "T" in r.date else "")
-    sender = f"{when} — {r.tb:,.0f} TB ({_tb(dtb)}, {_pct(dtb, r.tb)}%)"
+    sender = f"{when} — {r.tb:,.0f} TiB ({_tb(dtb)}, {_pct(dtb, r.tb)}%)"
     # ↗︎ = NE arrow + text-presentation selector: renders as a font
     # glyph in link colour (bare ↗ gets emoji-ized by Slack into the
     # cartoonish :arrow_upper_right:)
