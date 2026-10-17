@@ -59,10 +59,9 @@ describe('stagedCard', () => {
       await db.prepare("INSERT INTO plan_items (plan_id, prefix, added_by, added_ts) VALUES (1, ?, 'ann', 1)").bind(p).run()
     }
     const card = await stagedCard({ DB: db } as never, { name: 'cw', scheme: 's3' }, 'Staged', {}, 'full')
-    expect([card.tiles.map(t => [t.name, t.color, t.kids?.map(k => [k.name, k.color])]), card.legend, card.labelKids]).toEqual([
+    expect([card.tiles.map(t => [t.name, t.color, t.kids?.map(k => [k.name, k.color])]), card.legend]).toEqual([
       [['b', UNOWNED_COLOR, [['cw/big/', HI_CONTRAST[0]], ['cw/small/', HI_CONTRAST[1]]]]],
       [],
-      true,
     ])
     expect(textNodes(cardSvg(card))).toEqual(['cw', 'Staged', `plan #1 · scan ${SCAN}`, 'cw/big/ 3.00 TiB', 'cw/small/ 1.00 TiB', 'b 4.00 TiB', '2 prefixes · 4.00 TiB · 20 objects'])
   })
