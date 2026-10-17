@@ -20,7 +20,7 @@ import {
   type ScanRunPhase, type PhaseIssue, type PhaseRecovery, overlappingFailures, phaseFill, phaseOutcome, runOutcome, runTasks, type RunTask, taskLogsHref,
 } from './scanRunsModel'
 import { colorer, fmtDur, fmtRunTime, getJson, type Links, PhaseBar, runDay, RunWhen, scanRunsApi, scansHref, scansStore, Status, useScanRuns } from './scanRunsUi'
-import { dagNodes, type DagNode, type RunDagRow } from './runDag'
+import { dagNodes, processOf, type DagNode, type RunDagRow } from './runDag'
 import './scans.scss'
 
 type DetailResponse = Links & {
@@ -218,8 +218,22 @@ export function ScansPage() {
   )
 }
 
+/** Brushing between the pipeline DAG and the phase timeline: the highlighted DAG node (a phase's `task` process). */
+interface Brush { hl: string | null; onHover: (node: string | null) => void }
+
+/** A tooltip's pointer handlers, plus the brush: entering an element highlights `node`, leaving clears it. */
+function brushed(tipOn: ReturnType<ReturnType<typeof useSvgTip>['on']>, brush: Brush | undefined, node: string | null) {
+  if (!brush || !node) return tipOn
+  return {
+    onPointerMove: (e: ReactPointerEvent<SVGElement>) => { tipOn.onPointerMove(e); if (brush.hl !== node) brush.onHover(node) },
+    onPointerLeave: () => { tipOn.onPointerLeave(); brush.onHover(null) },
+  }
+}
+const brushClass = (brush: Brush | undefined, node: string | null): string =>
+  !brush?.hl || !node ? '' : brush.hl === node ? ' brushed' : ' dimmed'
+
 /** The run's phases on its clock: one row per phase. */
-function PhaseTimeline({ spans, secs, color }: { spans: PhaseSpan[]; secs: number | null; color: (p: string) => string }) {
+function PhaseTimeline({ spans, secs, color, brush }: { spans: PhaseSpan[]; secs: number | null; color: (p: string) => string; brush?: Brush }) {
   const tip = useSvgTip()
   const [ref, W] = useWidth<HTMLDivElement>()
   if (!spans.length || !secs) return <p className="dim">No phase markers for this run (the job records its phases; the backfill recovers them from the last 30 days of logs).</p>
@@ -239,7 +253,7 @@ function PhaseTimeline({ spans, secs, color }: { spans: PhaseSpan[]; secs: numbe
       <svg className="sr-gantt" width={W} height={H} viewBox={`0 0 ${W} ${H}`} role="img" aria-label="Phase timeline">
         {ticks.map(t => <g key={t}><line className="grid" x1={x(t)} x2={x(t)} y1={0} y2={H - 20} /><text className="tick" x={x(t)} y={H - 5} textAnchor="middle">{t ? fmtDur(t).replace(' 00m', '') : '0'}</text></g>)}
         {rows.map((s, i) => (
-          <g key={s.phase} className={s.tail ? 'tail' : s.status === 'running' ? 'active' : undefined} {...tip.on(<><div><b>{s.phase}</b>{s.lane ? ' — beside the main sequence' : ''}</div><div>{fmtDur(s.start)} → {s.status === 'running' ? 'now' : fmtDur(s.end)} · {fmtDur(s.end - s.start)}{s.status === 'running' ? ' elapsed · running' : ''}</div>{s.machine && <div className="dim">its own Batch task · {s.machine}</div>}{s.note && <div className="dim">{s.note}</div>}</>)}>
+          <g key={s.phase} className={`${s.tail ? 'tail' : s.status === 'running' ? 'active' : ''}${brushClass(brush, s.task ? processOf(s.task) : null)}` || undefined} {...brushed(tip.on(<><div><b>{s.phase}</b>{s.lane ? ' — beside the main sequence' : ''}</div><div>{fmtDur(s.start)} → {s.status === 'running' ? 'now' : fmtDur(s.end)} · {fmtDur(s.end - s.start)}{s.status === 'running' ? ' elapsed · running' : ''}</div>{s.task ? <div className="dim">in pipeline step <b>{s.task}</b>{s.machine ? ` · ${s.machine}` : ''}</div> : s.machine && <div className="dim">its own Batch task · {s.machine}</div>}{s.note && <div className="dim">{s.note}</div>}</>), brush, s.task ? processOf(s.task) : null)}>
             <rect className="sr-row-hit" x={0} y={i * rowH} width={W} height={rowH} />
             <text className={`lbl${s.status === 'failed' ? ' failed-label' : ''}`} x={L - 8} y={i * rowH + 16} textAnchor="end">{s.phase.length > cut ? `${s.phase.slice(0, cut - 1)}…` : s.phase}</text>
             <rect x={x(s.start)} y={i * rowH + 5} width={Math.max(2, x(s.end) - x(s.start))} height={rowH - 10} rx={2} style={{ fill: s.tail ? 'var(--other)' : phaseFill(s, color), stroke: s.status === 'running' ? color(s.phase) : undefined }} className={s.status === 'failed' ? 'failed' : undefined} />
@@ -254,7 +268,7 @@ function PhaseTimeline({ spans, secs, color }: { spans: PhaseSpan[]; secs: numbe
 
 /** The run's pipeline DAG: its processes in dependency columns, each coloured by its tasks' phases, a one-task
  * process linking that task's logs. */
-function RunDag({ dag, phases, run, project }: { dag: RunDagRow; phases: ScanRunPhase[]; run: ScanRun; project: string | null }) {
+function RunDag({ dag, phases, run, project, brush }: { dag: RunDagRow; phases: ScanRunPhase[]; run: ScanRun; project: string | null; brush?: Brush }) {
   const tip = useSvgTip()
   const nodes = useMemo(() => dagNodes(dag.dag, phases, run.status === 'running'), [dag, phases, run.status])
   const edges = dag.dag.edges
@@ -287,7 +301,7 @@ function RunDag({ dag, phases, run, project }: { dag: RunDagRow; phases: ScanRun
         {nodes.map(n => {
           const { x, y } = at.get(n.id)!
           const one = n.tasks.length === 1 && n.tasks[0].job_name && project ? taskLogsHref(project, n.tasks[0].job_name, n.tasks[0].start) : null
-          const body = <g className={`node ${n.status}`} {...tip.on(tipOf(n))}>
+          const body = <g className={`node ${n.status}${brushClass(brush, n.id)}`} {...brushed(tip.on(tipOf(n)), brush, n.id)}>
             <rect x={x} y={y} width={w} height={h} rx={6} />
             <text className="name" x={x + 10} y={y + 19}>{n.label}</text>
             <text className="sub" x={x + 10} y={y + 36}>{sub(n)}</text>
@@ -409,6 +423,8 @@ export function ScanRunPage() {
   const kinds = new Set(list.data?.runs.map(s => s.run.kind))
   const map = r && r.status === 'succeeded' ? mapHref(r.scan, store.path, slug) : null
   const tasks = useMemo(() => runTasks(d?.phases ?? []), [d])
+  const [hl, setHl] = useState<string | null>(null)
+  const brush: Brush = { hl, onHover: setHl }
   return (
     <main className="staged-page scans-page">
       <SiteNav />
@@ -440,11 +456,11 @@ export function ScanRunPage() {
         </dl>
         {d.dag && <>
           <h3>Pipeline</h3>
-          <RunDag dag={d.dag} phases={d.phases} run={r} project={d.project} />
+          <RunDag dag={d.dag} phases={d.phases} run={r} project={d.project} brush={brush} />
         </>}
         <h3>Phases</h3>
         {!!d.phase_issues?.length && <p className="dim">Original attempt: failed bars include time spent waiting until failure or timeout, not successful build time. Later recoveries are separate below.</p>}
-        <PhaseTimeline spans={d.spans} secs={d.secs} color={color} />
+        <PhaseTimeline spans={d.spans} secs={d.secs} color={color} brush={d.dag ? brush : undefined} />
         {!!tasks.length && <>
           <h3>Tasks</h3>
           <TasksTable tasks={tasks} run={r} project={d.project} />

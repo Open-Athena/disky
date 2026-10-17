@@ -124,7 +124,7 @@ export function withDeltas(run: ScanRun, outputs: readonly ScanRunOutput[], inde
 }
 
 /** A phase on the run's clock: seconds from the run's start. */
-export interface PhaseSpan { phase: string; start: number; end: number; status: ScanRunPhase['status']; note: string | null; lane: number; machine?: string | null }
+export interface PhaseSpan { phase: string; start: number; end: number; status: ScanRunPhase['status']; note: string | null; lane: number; machine?: string | null; task?: string | null }
 
 export function phaseStatus(p: Pick<ScanRunPhase, 'status' | 'note'>): ScanRunPhase['status'] {
   return /(?:^|,\s*)failed\b/i.test(p.note ?? '') ? 'failed' : p.status
@@ -194,7 +194,7 @@ export function phaseSpans(run: Pick<ScanRun, 'started_ts'> & Partial<Pick<ScanR
     const start = Math.max(0, p.started_ts - t0), end = Math.max(start, until - t0)
     let lane = laneEnds.findIndex(e => e <= start)
     if (lane < 0) { lane = laneEnds.length; laneEnds.push(end) } else laneEnds[lane] = end
-    return [{ phase: p.phase, start, end, status: phaseStatus(p), note: p.note, lane, ...(p.machine ? { machine: p.machine } : {}) }]
+    return [{ phase: p.phase, start, end, status: phaseStatus(p), note: p.note, lane, ...(p.machine ? { machine: p.machine } : {}), ...(p.task ? { task: p.task } : {}) }]
   })
 }
 
