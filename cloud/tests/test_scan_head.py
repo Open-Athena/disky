@@ -233,9 +233,10 @@ def test_head_records_into_the_profiles_database_and_store(tmp_path, monkeypatch
     from dt_cloud import index_footer, scan_runs
 
     for k in ("D1_DB_ID", "SCAN_RUNS_PROFILE", "DT_RECORD", "BATCH_JOB_UID", "DT_RUN_ID", "SNAP_ID", "GEN", "DT_JOB_START",
-              "REPROC", "DISKY_LABELS"):
+              "REPROC", "DISKY_LABELS", "DT_TRIGGER"):
         monkeypatch.delenv(k, raising=False)
     monkeypatch.setenv("TMPDIR", str(tmp_path / "t"))
+    monkeypatch.setenv("DT_TRIGGER", "schedule")
     monkeypatch.setenv("SNAP_ID", "2026-10-16T1200")
     monkeypatch.setenv("GEN", "G1")
     monkeypatch.setenv("DT_JOB_START", "100")
@@ -252,18 +253,36 @@ def test_head_records_into_the_profiles_database_and_store(tmp_path, monkeypatch
     dbs: list[str] = []
     monkeypatch.setattr(index_footer, "_d1_query", lambda sql, acct, tok, db: dbs.append(db) or [])
     monkeypatch.setattr(scan_runs, "lookup_job", lambda *a, **kw: None)
-    runs_written: list[tuple[str, str, str]] = []
+    runs_written: list[tuple[str, str, str, str | None]] = []
     record_sql = scan_runs.record_sql
 
     def spy(rec, now):
-        runs_written.append((rec.run.scan, rec.run.store, rec.run.status))
+        runs_written.append((rec.run.scan, rec.run.store, rec.run.status, rec.run.trigger))
         return record_sql(rec, now)
 
     monkeypatch.setattr(scan_runs, "record_sql", spy)
     monkeypatch.setattr(H.subprocess, "Popen", lambda argv, **kw: SimpleNamespace(pid=0, wait=lambda: 0))
     assert H.head(prof, tmp_path / "nf-dir", tmp_path / "launch") == 0
     assert (runs_written[0], runs_written[-1][:2], set(dbs)) == (
-        ("2026-10-16T1200", "meta", "running"), ("2026-10-16T1200", "meta"), {"db-from-profile"})
+        ("2026-10-16T1200", "meta", "running", "schedule"), ("2026-10-16T1200", "meta"), {"db-from-profile"})
+    # the scan's trigger, beside its snapshot JSONs (the digest reads it there)
+    stamp = tmp_path / "data/snapshots/meta/2026-10-16T1200/trigger.json"
+    assert stamp.read_text() == '{"trigger": "schedule"}\n'
+    # a resume by hand: its run is manual, the scan stays the cron's
+    monkeypatch.setenv("DT_TRIGGER", "manual")
+    monkeypatch.setenv("DT_RUN_ID", "run-2")
+    runs_written.clear()
+    assert H.head(prof, tmp_path / "nf-dir", tmp_path / "launch") == 0
+    assert runs_written[0] == ("2026-10-16T1200", "meta", "running", "manual")
+    assert stamp.read_text() == '{"trigger": "schedule"}\n'
+    # a deployment that doesn't state its triggers: none recorded, none stamped (the digest goes by the clock)
+    monkeypatch.delenv("DT_TRIGGER")
+    monkeypatch.setenv("DT_RUN_ID", "run-3")
+    monkeypatch.setenv("SNAP_ID", "2026-10-16T1300")
+    runs_written.clear()
+    assert H.head(prof, tmp_path / "nf-dir", tmp_path / "launch") == 0
+    assert runs_written[0] == ("2026-10-16T1300", "meta", "running", None)
+    assert sorted(p.name for p in (tmp_path / "data/snapshots/meta").iterdir()) == ["2026-10-16T1200"]
 
 
 def test_publish_reports(tmp_path):

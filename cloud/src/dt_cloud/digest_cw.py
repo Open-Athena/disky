@@ -165,10 +165,17 @@ class Scan:
     slug: str | None = field(default=None, compare=False)
     # the primary's per-storage-class sizes (`class_bytes`, unrounded, in the digest's units); None: the meta has none
     classes: dict[int, float] | None = field(default=None, compare=False)
+    # what started it (`trigger.json`: schedule | manual); None: a scan from before triggers were stamped
+    trigger: str | None = field(default=None, compare=False)
 
     @property
     def date(self) -> str:
         return self.scan[:10]
+
+    def replyable(self, reply_hour: int) -> bool:
+        """Can be its day's `sender` reply scan: from ``reply_hour`` UTC on, and not manual (a hand-run scan only
+        stands in, `day_rows`; one without a trigger predates them, and the clock alone decides)."""
+        return scan_ts(self.scan).hour >= reply_hour and self.trigger != "manual"
 
 
 def primary_totals(m: dict, primary: str, unit: int = TIB) -> tuple[int, int, dict[str, float]]:
@@ -211,6 +218,7 @@ def rows_from_meta(dated_meta: list[tuple[str, dict]], primary: str, now: dt.dat
                 extra={k: round(v, 1) for k, v in extra.items()},
                 slug=slugs[scan],
                 classes=primary_classes(m, primary, unit),
+                trigger=m.get("trigger"),
             )
         )
         ptb, pobjs, pts = tb, objs, ts
@@ -263,9 +271,9 @@ class DayRow:
 def day_rows(month: Month, variant: str, reply_hour: int, provisional: bool = False) -> list[DayRow]:
     """One ``DayRow`` per in-month UTC day that has its reply scan.
 
-    ``sender``: the day's first scan at/after ``reply_hour`` UTC (the morning
-    scan; posted once, never edited). A day whose morning scan hasn't landed
-    yet has no row — unless a later day has already started (or the month
+    ``sender``: the day's first scan at/after ``reply_hour`` UTC that wasn't
+    started by hand (`Scan.replyable`: the morning cron scan; posted once,
+    never edited). A day whose morning scan hasn't landed yet has no row — unless a later day has already started (or the month
     is ``closed``), in which case the day's LAST scan stands in, so a missed
     12:01Z scan still yields exactly one reply per day; ``provisional``
     gives that still-open day (only ever the last) a ``provisional`` row
@@ -283,7 +291,7 @@ def day_rows(month: Month, variant: str, reply_hour: int, provisional: bool = Fa
             s = rs[-1]
         else:
             later = i + 1 < len(days) or month.closed  # some scan of a later day exists
-            s = next((r for r in rs if scan_ts(r.scan).hour >= reply_hour), rs[-1] if later else None)
+            s = next((r for r in rs if r.replyable(reply_hour)), rs[-1] if later else None)
             if s is None:
                 if provisional and date >= month.rows[0].date:
                     # the day's morning scan is still to come: its numbers so far

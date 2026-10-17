@@ -38,7 +38,7 @@ from dataclasses import dataclass, field, fields, replace
 from pathlib import Path
 from typing import Any, Protocol
 
-from .scan_id import META_PATH, min_slug, scan_slug, scan_time, start_key, times_needed
+from .scan_id import META_PATH, TRIGGER_FILE, min_slug, scan_slug, scan_time, start_key, times_needed
 
 TIB = 1024**4
 GIB = 1024**3
@@ -514,7 +514,9 @@ def load_window(root: str, month: dt.date, scans: list[str] | None = None) -> tu
     """``(lead, in_month)`` ``(scan id, meta.json)`` pairs for ``month``: the
     month's scans, and ``lead`` = every scan of the last calendar day before it
     (the first delta's baseline; empty for the first month ever). None if the
-    month has no scans. ``scans``: ``list_scans(root)``, if already listed."""
+    month has no scans. ``scans``: ``list_scans(root)``, if already listed.
+    A scan's ``trigger.json`` (`scan head`'s ``stamp_trigger``), when it has
+    one, adds its ``trigger`` to the meta."""
     from disk_tree import blobfs
 
     scans = list_scans(root) if scans is None else scans
@@ -526,7 +528,11 @@ def load_window(root: str, month: dt.date, scans: list[str] | None = None) -> tu
     lead = [s for s in before if s[:10] == before[-1][:10]] if before else []
 
     def read(s: str) -> tuple[str, dict]:
-        return s, json.loads(blobfs.read_text(f"{root.rstrip('/')}/{s}/meta.json"))
+        d = f"{root.rstrip('/')}/{s}"
+        m = json.loads(blobfs.read_text(f"{d}/meta.json"))
+        if blobfs.exists(f"{d}/{TRIGGER_FILE}"):
+            m = {**m, "trigger": json.loads(blobfs.read_text(f"{d}/{TRIGGER_FILE}"))["trigger"]}
+        return s, m
 
     return [read(s) for s in lead], [read(s) for s in in_month]
 
