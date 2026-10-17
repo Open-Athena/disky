@@ -1,13 +1,13 @@
 # Every deployment's scan pipeline on one declared DAG
 
-Status: §6.1 (the generic layer on `cloud`) built, 2026-10-16, plus r2's gaps (§3.1–3.4: a second store, per-call credentials, the path-index extras, a dry index-gc); cw's switch (§6.2) is next. Phase 2 of [workflow-engine.md] (decided: Nextflow), which cw has proven on prod (§7 there). Ryan: "we need to prepare to move all deploys' pipelines to that or sthg similar. the ad hoc bash script 'WF mgmt' is not acceptable."
+Status: §6.1 (the generic layer on `cloud`) built, 2026-10-16, plus r2's gaps (§3.1–3.4: a second store, per-call credentials, the path-index extras, a dry index-gc). On prod: cw (its 2026-10-17 00:00 cron on `dt-cloud scan head`: 86 min, \$0.73, 25 phases) and gcs (its 07:00 daily on `scan head` since 2026-10-17; the first prod run, 2026-10-17T0010, took 144 min vs 146–225 for the last five one-VM runs; `NF=0` keeps the one-VM fallback). Scratch runs passed for r2.oa.dev and hf; their cutovers are next. Phase 2 of [workflow-engine.md] (decided: Nextflow), which cw has proven on prod (§7 there). Ryan: "we need to prepare to move all deploys' pipelines to that or sthg similar. the ad hoc bash script 'WF mgmt' is not acceptable."
 
 ## 1. Where things stand
 
 | deployment | runner today | lines | engine |
 |---|---|---|---|
-| cw-s3 | `job/nf/cw.nf` + `cw-head.sh` + `cw-step.sh` (cron on the head since 2026-10-16 18:00) | 101 + 74 + 308 | Nextflow, google-batch |
-| gcs | `job/run.sh` | 635 | bash on one Batch VM |
+| cw-s3 | `dt-cloud scan head` + `job/profiles/cw.yml` (cron since 2026-10-17 00:00; was `job/nf/cw.nf` + `cw-head.sh` + `cw-step.sh`) | profile | Nextflow, google-batch |
+| gcs | `dt-cloud scan head` + `job/profiles/gcs.yml` (07:00 cron since 2026-10-17; `job/run.sh` = the `NF=0` fallback) | profile | Nextflow, google-batch |
 | r2.oa.dev | `job/r2-scan` | 710 | bash on one Batch VM |
 | hf | `job/hf-run.sh` | 225 | bash on one Batch VM |
 | m3 | `infra/aws/ingest.sh` (per laptop capture) | 209 | bash on AWS |
