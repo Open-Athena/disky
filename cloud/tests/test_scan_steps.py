@@ -314,7 +314,7 @@ def test_path_index_stages_aggregates_uploads_and_publishes(tmp_path, env, monke
         f"dt-cloud stage -o {w}/stage /gcs/dvx/listing/2026-10-16T1200/east/*.parquet /gcs/dvx/listing/2026-10-16T1200/eu/*.parquet "
         "/gcs/dvx/listing/2026-10-16T1200/east/_SUCCESS.json /gcs/dvx/listing/2026-10-16T1200/eu/_SUCCESS.json "
         "/gcs/dvx/attr/a.parquet /gcs/dvx/access/agg/*/*.parquet",
-        f"dt-cloud path-index -d 2026-10-16 -l {st}/listing/2026-10-16T1200/east/*.parquet -l {st}/listing/2026-10-16T1200/eu/*.parquet "
+        f"dt-cloud path-index -d 2026-10-16T1200 -l {st}/listing/2026-10-16T1200/east/*.parquet -l {st}/listing/2026-10-16T1200/eu/*.parquet "
         f"-a {st}/attr/a.parquet -x {st}/access/agg/*/*.parquet -o {w}/snap -c <tmp>/mnt/dvx/listing/2026-10-16T1200/dir-cache "
         f"-P {w}/path-index/path-index.parquet -u bysize",
         "dt-cloud lifecycle pull -k -b gs://east -b gs://eu -o <tmp>/mnt/dvx/snapshots/2026-10-16T1200/lifecycle.json",
@@ -606,7 +606,7 @@ def test_path_index_age_pyramids_and_verify(tmp_path, env, monkeypatch):
     assert runner.calls == [
         f"dt-cloud stage -o {w}/stage /gcs/dvx/listing/2026-10-16T1200/east/*.parquet /gcs/dvx/listing/2026-10-16T1200/eu/*.parquet "
         "/gcs/dvx/listing/2026-10-16T1200/east/_SUCCESS.json /gcs/dvx/listing/2026-10-16T1200/eu/_SUCCESS.json",
-        f"dt-cloud path-index -d 2026-10-16 -l {st}/east/*.parquet -l {st}/eu/*.parquet -o {w}/snap "
+        f"dt-cloud path-index -d 2026-10-16T1200 -l {st}/east/*.parquet -l {st}/eu/*.parquet -o {w}/snap "
         f"-c <tmp>/mnt/dvx/listing/2026-10-16T1200/dir-cache -P {w}/path-index/path-index.parquet -U",
         f"dt-cloud age-pyramid -c -m 12GB -t 8 -o {w}/path-index {w}/path-index/path-index.parquet",
         f"dt-cloud index-verify -m 12GB -t 8 -d 2026-10-16T1200 -g G1 -b east -b eu -l {st}/east/*.parquet -l {st}/eu/*.parquet "
