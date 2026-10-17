@@ -1,4 +1,3 @@
-import { readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
 import { pageView } from './routes'
 
@@ -46,9 +45,15 @@ describe('pageView: page URL → card kind, view params, title', () => {
 
 describe('every page route of the app has its own card or none, never a folder card', () => {
   // `src/Root.tsx`'s routes: an app page the parser took for a folder unfurled as an empty map of `/scans`, `/meta`, …
-  const routes = [...readFileSync(new URL('../../../src/Root.tsx', import.meta.url), 'utf8').matchAll(/<Route path="([^"]+)"/g)]
-    .map(m => m[1]).filter(p => p !== '*')
-  it('Root.tsx routes → kinds', () => {
+  // `node:fs` loaded dynamically: the Functions' tsconfig has the Workers types only (as `functions/routes.test.ts`).
+  const rootRoutes = async (): Promise<string[]> => {
+    const fs = 'node:fs'
+    const { readFileSync } = (await import(/* @vite-ignore */ fs)) as { readFileSync(file: URL, enc: 'utf8'): string }
+    const src = readFileSync(new URL('../../../src/Root.tsx', (import.meta as ImportMeta & { url: string }).url), 'utf8')
+    return [...src.matchAll(/<Route path="([^"]+)"/g)].map(m => m[1]).filter(p => p !== '*')
+  }
+  it('Root.tsx routes → kinds', async () => {
+    const routes = await rootRoutes()
     const kinds = Object.fromEntries(routes.map(r => [r, pv(r.replace(/:\w+/g, 'x').replace(/\*$/, 'x'))?.kind ?? null]))
     expect(Object.entries(kinds).filter(([, k]) => k === 'map')).toEqual([])
     expect(kinds['/staged']).toBe('staged')

@@ -53,7 +53,7 @@ def test_unknown_keys_refused():
         "colour: unknown key",
         "executor.zone: unknown key",
         "sources[0].size: unknown key",
-        "options.list.turbo: unknown key (known: import, bulk_args, import_args, threads, weights)",
+        "options.list.turbo: unknown key (known: import, bulk_args, import_args, threads, weights, secrets)",
         "options.nope: unknown step",
     ]
 
@@ -112,7 +112,7 @@ def test_step_requirements():
         "layout.snapshots: required (\"\" for `snapshots/` itself)",
         "layout.listing: required unless options.list.import is true (index reads the listings from the data store)",
         "data: a gs:// bucket with options.index.mode path-index (its inputs are staged from GCS)",
-        "options.static-names.profile: required (the deployment's static-names profile; or env STATIC_NAMES_PROFILE, or skip: [static-names])",
+        "options.static-names.profile: required (the deployment's static-names profile; or env STATIC_NAMES_PROFILE, or gen: the one-machine path, or skip: [static-names])",
         "options.digest.template: required (or skip: [digest])",
         "options.digest.config: required (or skip: [digest])",
     ]
@@ -134,4 +134,114 @@ def test_machine_labels_are_groovy_identifiers():
     assert problems(minimal(machines={"over-time": "n2-standard-8", "Big": "n2-standard-8"})) == [
         "machines.over-time: a label of lowercase letters, digits and '_' (it is written bare into the Nextflow config)",
         "machines.Big: a label of lowercase letters, digits and '_' (it is written bare into the Nextflow config)",
+    ]
+
+
+GB = {"kind": "google-batch", "project": "p", "region": "r", "image": "i"}
+
+
+def gb(**machines) -> dict:
+    return minimal(executor=GB, work="gs://w/nf", data="gs://w", machines=machines)
+
+
+def test_machine_fallback():
+    """A label's `fallback` types + `queue_timeout` (spec §7): the types by submit attempt, the primary first."""
+    big = {"type": "n2-highmem-32", "disk": {"request": 1500, "type": "local-ssd"}, "fallback": ["n2d-highmem-32"], "queue_timeout": 10}
+    m = parse(gb(big=big)).machines["big"]
+    assert m == Machine("n2-highmem-32", Disk(1500, "local-ssd"), fallback=("n2d-highmem-32",), queue_timeout=10)
+    assert m.types == ("n2-highmem-32", "n2d-highmem-32")
+    assert parse(gb(big="n2-highmem-32")).machines["big"].types == ("n2-highmem-32",)
+
+
+def test_machine_fallback_refused():
+    assert problems(gb(
+        a={"type": "t", "fallback": ["u"]},
+        b={"type": "t", "queue_timeout": 10},
+        c={"type": "t", "fallback": [], "queue_timeout": 0},
+        d={"fallback": ["u"], "queue_timeout": 5},
+        e={"type": "t", "fallback": ["u", "t"], "queue_timeout": 5},
+        f={"type": "t", "fallback": "u", "queue_timeout": "10m"},
+        list={"type": "t", "fallback": ["u"], "queue_timeout": 5},
+    )) == [
+        "machines.a.fallback: needs `queue_timeout` (a queued task never fails, so nothing else moves it on)",
+        "machines.b.queue_timeout: only with `fallback` (a resubmit of the same type waits in the same pool)",
+        "machines.c.fallback: a non-empty list of machine types",
+        "machines.c.queue_timeout: a positive number of minutes",
+        "machines.d.fallback: needs the primary `type`",
+        "machines.e.fallback: each machine type once (with `type`)",
+        "machines.f.fallback: a list of strings",
+        "machines.f.queue_timeout: a positive number of minutes",
+        "machines.list.fallback: not on `list` (each source's machine is its own)",
+    ]
+    assert problems(minimal(machines={"big": {"type": "t", "fallback": ["u"], "queue_timeout": 5}})) == [
+        "machines.big.fallback: google-batch only (the only executor whose tasks take a machine type)",
+    ]
+
+
+META = Path(__file__).parent / "fixtures" / "scan_profiles" / "meta-store.yml"
+
+
+def test_store():
+    """`store` (default the primary) names the site store; a store other than the primary runs only the steps that can
+    serve it (no interval store, warm-up or probe: they read the primary's)."""
+    assert (parse(minimal()).store, parse(minimal()).primary) == ("primary", True)
+    p = load(META)
+    assert (p.store, p.primary, p.enabled()) == ("meta", False, ("list", "index", "static-names", "publish-r2", "index-rows", "index-sync", "index-gc"))
+    assert problems(minimal(store="Meta")) == ["store: a `STORES_JSON` key: lowercase letters, digits and '-' (got 'Meta')"]
+    assert problems(minimal(store="meta")) == [
+        "store meta: skip interval-store (the site serves another store's scans per scan, and the interval store's "
+        "`interval-store/CURRENT.json` is the primary's)",
+        "store meta: skip warm-cache (its requests carry no `store=`: it would warm the primary's views)",
+        "store meta: skip probe (its requests carry no `store=`: it would probe the primary's views)",
+    ]
+
+
+def test_secrets_overlay():
+    """Each call's bindings: the profile's, then `options.<step>.secrets`, then (a list call) its source's; the most
+    specific binding of an ENV wins."""
+    p = load(META)
+    assert p.sources[1] == Source("r2://example-serving", endpoint="https://example-account.r2.example.org",
+                                  secrets={"AWS_ACCESS_KEY_ID": "example-serving-key-id", "AWS_SECRET_ACCESS_KEY": "example-serving-secret"})
+    base = {"CLOUDFLARE_API_TOKEN": "example-cf-token", "R2_ACCESS_KEY_ID": "example-serving-key-id",
+            "R2_SECRET_ACCESS_KEY": "example-serving-secret"}
+    assert [p.secrets_for("index"), p.secrets_for("list"), p.secrets_for("list", "gcs://example-data"),
+            p.secrets_for("list", "r2://example-serving")] == [
+        base,
+        {**base, "AWS_ACCESS_KEY_ID": "example-source-key-id", "AWS_SECRET_ACCESS_KEY": "example-source-secret"},
+        {**base, "AWS_ACCESS_KEY_ID": "example-source-key-id", "AWS_SECRET_ACCESS_KEY": "example-source-secret"},
+        {**base, "AWS_ACCESS_KEY_ID": "example-serving-key-id", "AWS_SECRET_ACCESS_KEY": "example-serving-secret"},
+    ]
+    assert sorted(p.secret_names()) == ["AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "CLOUDFLARE_API_TOKEN",
+                                        "R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY"]
+
+
+def test_secrets_refused():
+    d = minimal(sources=[{"uri": "s3://a", "secrets": {"bad-name": "s", "OK": ["x"]}}, {"uri": "s3://b", "secrets": "s"}],
+                options={"list": {"import": True, "secrets": {"K": {"x": 1}}}, "static-names": {"profile": "s.json", "secrets": []},
+                         "digest": {"template": "t", "config": "c"}})
+    assert problems(d) == [
+        "sources[0].secrets.bad-name: not an env var name",
+        "sources[0].secrets.OK: a scalar",
+        "sources[1].secrets: a mapping",
+        "options.list.secrets.K: a scalar",
+        "options.static-names.secrets: a mapping",
+    ]
+
+
+def test_index_extras_options():
+    """The path-index extras (`age_pyramids`, `verify`) only under that mode; `index-sync.variants` are index variants;
+    `index-gc.dry` a flag."""
+    p = load(META)
+    assert ({k: p.opts("index")[k] for k in ("age_pyramids", "verify", "mem")}, p.opts("index-gc")) == (
+        {"age_pyramids": True, "verify": True, "mem": "12GB"}, {"dry": True})
+    d = minimal(options={"list": {"import": True}, "static-names": {"profile": "s.json"}, "digest": {"template": "t", "config": "c"},
+                         "index": {"age_pyramids": True, "verify": "yes"}, "index-sync": {"variants": ["path", "nope"]},
+                         "index-gc": {"dry": "no"}})
+    assert problems(d) == [
+        "options.index.verify: true or false",
+        "options.index-gc.dry: true or false",
+        "options.index.age_pyramids: only with mode path-index (index-write writes the age pyramids itself)",
+        "options.index.verify: only with mode path-index",
+        "options.index-sync.variants: 'nope' is not an index variant (one of path, bysize, user, bysize-user, age-pyramid-1h, "
+        "age-pyramid-3h, age-pyramid-6h, age-pyramid-12h, age-pyramid-1d, age-pyramid-2d, age-pyramid-4d, age-pyramid-8d, over-time)",
     ]

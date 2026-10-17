@@ -752,6 +752,56 @@ def index_write(age_only: bool, bucket: str | None, mem: str, out_dir: Path, row
     print(json.dumps(s))
 
 
+@main.command("age-pyramid")
+@option("-c", "--check", is_flag=True, help="Then check each tier against the path sort's dated files (depth-1 totals above the tier's floor, the root's); exit 1 on a mismatch")
+@option("-m", "--mem", default=None, help="DuckDB memory limit (default DuckDB's)")
+@option("-o", "--out", "out_dir", type=Path, required=True, help="Output dir: `age-pyramid-<bin>.parquet` per bin")
+@option("-t", "--threads", default=None, type=int, help="DuckDB threads (default DuckDB's)")
+@argument("path_sort", type=Path)
+def age_pyramid(check: bool, mem: str | None, out_dir: Path, threads: int | None, path_sort: Path) -> None:
+    """The age chart's tiers (`age-pyramid-<bin>.parquet`, specs/done/age-index.md) from a scan's `path` sort
+    (`path-index.parquet`: what `path-index -P` writes, which has none), for `index-sync` to publish beside it (`index-write`
+    writes them itself, from the layer-2s). Prints the summary as JSON."""
+    from .index_verify import Mismatch, build_age_pyramid
+
+    try:
+        s = build_age_pyramid(path_sort, out_dir, mem=mem, threads=threads, check=check)
+    except Mismatch as e:
+        err(f"age-pyramid: {e}")
+        raise SystemExit(1) from None
+    err(f"age-pyramid: floor {s['floor']}, {len(s['bins'])} tiers → {out_dir}{' (checked)' if check else ''}")
+    print(json.dumps(s))
+
+
+@main.command("index-verify")
+@option("-b", "--bucket", "buckets", multiple=True, required=True, help="A bucket of the scan (repeatable): every listed bucket must be one, and each one's totals are reported (0 when empty)")
+@option("-d", "--date", "scan", required=True, callback=scan_id_option, help="The scan id (recorded in the report)")
+@option("-g", "--gen", default=None, help="The index generation (recorded in the report)")
+@option("-l", "--listing", "listings", multiple=True, required=True, help="The scan's listing parquet glob(s) (repeatable): `bucket, size_bytes, created`")
+@option("-m", "--mem", default=None, help="DuckDB memory limit (default DuckDB's)")
+@option("-o", "--out", type=Path, default=None, help="Write the report here (`verification.json`); always printed")
+@option("-s", "--snapshots", type=Path, required=True, help="The scan's snapshot dir (`path-index -o`): `meta.json`, `age.json`")
+@option("-t", "--threads", default=None, type=int, help="DuckDB threads (default DuckDB's)")
+@argument("path_sort", type=Path)
+def index_verify(buckets: tuple[str, ...], scan: str, gen: str | None, listings: tuple[str, ...], mem: str | None, out: Path | None,
+                 snapshots: Path, threads: int | None, path_sort: Path) -> None:
+    """Check a scan's index against the listings it was built from (`index_verify.verify_index`): per-bucket and total
+    bytes / objects in the `path` sort and the snapshot's `meta.json`, the `age.json` histogram, and (where written
+    beside the sort) the age pyramids and the `bysize` sort. Exit 1 on the first mismatch, writing nothing."""
+    from .index_verify import Mismatch, verify_index
+
+    try:
+        report = verify_index(path_sort, listings, snapshots, buckets, scan=scan, gen=gen, mem=mem, threads=threads)
+    except Mismatch as e:
+        err(f"index-verify {scan}: {e}")
+        raise SystemExit(1) from None
+    text = json.dumps(report, indent=2) + "\n"
+    if out:
+        out.write_text(text)
+    err(f"index-verify {scan}: {report['totals']['objects']:,} objects, {report['totals']['bytes']:,} B over {len(buckets)} buckets: ok")
+    print(text, end="")
+
+
 @main.command("index-recut")
 @option("-c", "--check", is_flag=True, help="Then check the re-cut `bysize`'s root and depth-1 views against per-path sums over the `path` sort (`bysize_check`), printed as `check` in the JSON; exit 1 unless every view is exact")
 @option("-m", "--mem", default="8GB", help="DuckDB memory limit")
@@ -1414,9 +1464,10 @@ def lifecycle() -> None:
     bucket, the per-scan snapshot shape."""
 
 
-def _lifecycle_clients(buckets: tuple[str, ...]):
+def _lifecycle_clients(buckets: tuple[str, ...], endpoint: str | None = None):
     """The S3 and/or GCS client the given bucket URIs need (`None` for a cloud
-    none of them name), so one `pull` can snapshot a mixed set."""
+    none of them name), so one `pull` can snapshot a mixed set. `endpoint`: the S3
+    buckets' (default `$SWEEP_S3_ENDPOINT`)."""
     from .lifecycle import is_gcs
 
     gcs = s3 = None
@@ -1427,7 +1478,7 @@ def _lifecycle_clients(buckets: tuple[str, ...]):
     if any(not is_gcs(b) for b in buckets):
         from .sweep import s3_client
 
-        s3 = s3_client()
+        s3 = s3_client(endpoint)
     return s3, gcs
 
 
@@ -1444,14 +1495,15 @@ def _lc_buckets(buckets: tuple[str, ...]) -> tuple[str, ...]:
 
 @lifecycle.command("pull")
 @_LC_BUCKET
+@option("-E", "--endpoint", help="The S3 buckets' endpoint (default $SWEEP_S3_ENDPOINT)")
 @option("-k", "--keep-going", is_flag=True, help="A bucket whose rules can't be read (e.g. no `storage.buckets.get`) is reported and left out, instead of failing the whole pull — for the job's fleet snapshot")
 @option("-o", "--out", type=Path, help="Write here instead of stdout")
-def lifecycle_pull(buckets: tuple[str, ...], keep_going: bool, out: Path | None) -> None:
+def lifecycle_pull(buckets: tuple[str, ...], endpoint: str | None, keep_going: bool, out: Path | None) -> None:
     """One bucket → the bare rule list; several → `{<bucket>: rules}` in this order."""
     from .lifecycle import dump, dump_map, pull_any, pull_many
 
     buckets = _lc_buckets(buckets)
-    s3, gcs = _lifecycle_clients(buckets)
+    s3, gcs = _lifecycle_clients(buckets, endpoint)
     if len(buckets) == 1:
         text = dump(pull_any(buckets[0], s3=s3, gcs=gcs), bucket=buckets[0])
     else:
