@@ -1,6 +1,6 @@
 # Rename the deployment: cw-s3 → cw
 
-Status: phase 1 done 2026-10-17 (cw.oa.dev + dev.cw.oa.dev serve; the old hosts 301 GETs; sign-in, job links, Slack app URL + description, channels renamed); phase 2 next, coordinated with root (its cherry-pick notes name the branch). Ryan: "should we rebrand this deploy as just "cw"?" … "I like row 2 too … branch name seems leaky, maybe deployment label too, esp."
+Status: phase 1 done 2026-10-17 (cw.oa.dev + dev.cw.oa.dev serve; the old hosts 301 GETs; sign-in, job links, Slack app URL + description, channels renamed). Phase 2 done 2026-10-17 except the worktree dir: deployment label `cw` (profiles, cost labels), Pulumi stacks `cw` (cf component pinned `cw-s3`), branch `cw` / `cw-prod` / `cw-dev` (old `o` branches kept a week). Left: `wt/cw-s3` → `wt/cw` (Ryan, between sessions: `cmv`, then `git worktree repair`).
 
 "s3" names how we read CoreWeave's storage (its S3-compatible API, CAIOS), which nobody using the site or reading the digest needs. The display name is already "Marin CoreWeave".
 

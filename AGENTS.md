@@ -32,7 +32,7 @@ Three engines, byte-identical output: `pandas` (in memory), `duckdb` (out of cor
 **Output** (`storage/`, `sqla/model.py`): each imported bucket's layer-2 is adopted into the write
 dir (`<DISK_TREE_ROOT>/scans/<uuid>.parquet`, or `--to <dir|url>`) and recorded as a `Scan` row
 (`path`, `time`, `blob`, root `size`/`n_children`/`n_desc`/`mtime`) in `<DISK_TREE_ROOT>/disk-tree.db`.
-cw-s3's jobs read that blob back (`ls $DISK_TREE_ROOT/scans/*.parquet`) as `dt-cloud index-write`'s input.
+cw's jobs read that blob back (`ls $DISK_TREE_ROOT/scans/*.parquet`) as `dt-cloud index-write`'s input.
 
 **CLI** (`cli/`):
 ```bash
@@ -222,7 +222,7 @@ Tests build their listing fixtures inline (`tmp_path` parquets). CI and the job 
 
 ## Deployments: parity by default
 
-Every deployment (gcs, cw-s3, r2, hf, the r2 demo, …) ships the current full feature set. A new deployment, or a feature landing on `cloud`, reaches each of them without being asked; only a store that can't support a feature skips it, and its deployment spec says which and why. The baseline today:
+Every deployment (gcs, cw, r2, hf, the r2 demo, …) ships the current full feature set. A new deployment, or a feature landing on `cloud`, reaches each of them without being asked; only a store that can't support a feature skips it, and its deployment spec says which and why. The baseline today:
 - **Hosts:** prod and a dev stack: `dev.<host>` (a `branchAliases` CNAME onto the Pages branch `dev`), wrangler's `[env.preview]` with prod's bindings, preview-env secrets, every origin + callback (prod, dev, the `pages.dev` alias, localhost) on the Google OAuth client.
 - **Auth:** app sign-in (Google OIDC + emailed codes), staff domain, admin console, personal agent tokens.
 - **Serving:** the interval store as the Map's path store (`PATH_STORE = "intervals"`, following `interval-store/CURRENT.json`, once `interval-store verify` / a `ps=iv` parity check passes on the first scans); search from the prebuilt static name index only (`FILTER_STATIC`, `NAME_SUMMARY_STATIC`, `FILTER_STATIC_HEAVY`, `FILTER_INDEXED_ONLY = "1"`), no per-scan search sidecars. Per-scan `path`/`bysize` sorts are on their way out (`specs/lean-scans.md`).
@@ -231,30 +231,30 @@ Every deployment (gcs, cw-s3, r2, hf, the r2 demo, …) ships the current full f
 
 A deployment's spec lists the baseline items it doesn't have yet as gaps, and those gaps are open work, not follow-ups to propose.
 
-## cw-s3
+## cw
 
-This branch is the cw-s3.oa.dev deployment: the shared `cloud` base (everything above) plus the CoreWeave store. This section covers what is cw-s3's own.
+This branch is the cw.oa.dev deployment (renamed from cw-s3 on 2026-10-17, specs/rename-cw.md: cw-s3.oa.dev redirects; cloud resource ids keep `cw-s3`): the shared `cloud` base (everything above) plus the CoreWeave store. This section covers what is cw's own.
 
 The repo is **public**: no emails or other PII in tracked files or commit messages (name + GitHub handle at most). Sizes stay behind the site's auth.
 
 ### Branches
 
-- `cw-s3` merges the local `cloud` branch (`git merge refs/heads/cloud`; bare `cloud` is ambiguous with the `cloud/` dir). Never rebase onto it.
-- Changes that belong in the shared base are tagged `[cloud]` (or `[local]`, for the `local` branch the m3/app deployments merge) and cherry-picked up by the root session; this branch keeps only what the cw-s3 deployment runs.
+- `cw` merges the local `cloud` branch (`git merge refs/heads/cloud`; bare `cloud` is ambiguous with the `cloud/` dir). Never rebase onto it.
+- Changes that belong in the shared base are tagged `[cloud]` (or `[local]`, for the `local` branch the m3/app deployments merge) and cherry-picked up by the root session; this branch keeps only what the cw deployment runs.
 - D1 schema: `site/schema.sql`, one current-state file (specs/done/d1-migrations.md). A change is a pending recipe `site/migrations/<slug>.sql`, folded in with `dt-cloud d1-schema dump site/schema.sql site/migrations/<slug>.sql -o site/schema.sql`, applied to cw's D1, then `git rm`'d; a recipe `cloud` deletes that cw's D1 hasn't applied is restored in the merge. `dt-cloud d1-schema check -d oa-cw-s3-usage-db` compares (read-only).
 
-### Layout (cw-s3's own)
+### Layout (cw's own)
 
 - `job/cw-*`: the scan job (`cw-run.sh`, submitted by `cw-batch-submit.sh`; `PIN=1 DRY=1` prints the cron body) and its one-shots (`cw-reindex*`, `cw-overtime*`, `cw-meta-*`, `cw-publish-submit.sh`, `cw-recompress-submit.sh`, `cw-interval-submit.sh`: the interval store's base `build`, catch-up `add` and parity `verify` on Batch). `job/build.sh` builds the `:cw` image (`JOB=cw-run.sh`). `job/batch-submit.sh` is gcs's submitter, kept until the ops scheduler program takes a checkout per cron.
 - `job/icons/arrows/` + `gen-{arrow-avatars,delta-arrows}.py`: the digest's trend-arrow avatars (hosted on `oa-cw-s3-usage-icons.pages.dev`); `job/icons-cw/` is where `cw-digest` renders OP plots before deploying them to that project's `cw` branch. `job/slack/`: the CoreWeave Usage Bot manifest.
 - `job/digest.yml`: the monthly Slack thread's config (`dt-cloud digest -T cw -C job/digest.yml -m YYYY-MM -c <channel>`, `-n` dry run; `cw-digest` = `digest -T cw`); the engine + `cw` template are `cloud`'s `digest.py` / `digest_cw.py`. `cloud/tests/test_digest_cw_config.py` pins the file to the `cw` preset.
 - `site/wrangler.toml`: the cw store's config (`STORE = "cw"`, `AUTH_MODE = "app"`, `STORE_BUCKETS`, `SNAPSHOTS_SUBDIR = "cw"`, the meta store, the plan-sweep executor). `[env.preview]` is the dev stack.
-- `cf/`: Pulumi for the `oa-cw-s3-usage` Pages project, domain, D1, KV and R2 (stack `cw-s3`).
+- `cf/`: Pulumi for the `oa-cw-s3-usage` Pages project, domain, D1, KV and R2 (stack `cw`; its component keeps the name `cw-s3`). `infra/gcp/`: the Batch side (stack `cw`).
 
 ### Dev workflow
 
 - `site/dev`: Vite on **:3263** + `wrangler pages dev` on **:3264** (`devPort` in `site/package.json`; `./dev --refresh` seeds a local D1 from a prod export).
-- `site/deploy` (run from `site/`): manual deploy to cw-s3.oa.dev, then pushes the branch + `cw-s3-prod` to `o` (`-P` skips the push). `--dev` deploys the preview branch (dev.cw-s3.oa.dev; prod D1). `--status` compares deployed vs HEAD.
+- `site/deploy` (run from `site/`): manual deploy to cw.oa.dev, then pushes the branch + `cw-prod` to `o` (`-P` skips the push). `--dev` deploys the preview branch (dev.cw.oa.dev; prod D1). `--status` compares deployed vs HEAD.
 - D1: a pending recipe applies with `wrangler d1 execute oa-cw-s3-usage-db --remote --file site/migrations/<slug>.sql` (separate from deploy; needs `CLOUDFLARE_ACCOUNT_ID`); a new database starts from `--file site/schema.sql`.
 - Tests: `PYTHONPATH=$PWD/src:$PWD/cloud/src pytest tests cloud/tests`; `cd site && pnpm build && pnpm vitest run`.
-- Serving health: `dt-cloud healthcheck -u https://cw-s3.oa.dev -s cw/` with a `cw`-scoped token (Secret Manager `cw-s3-job-grant`).
+- Serving health: `dt-cloud healthcheck -u https://cw.oa.dev -s cw/` with a `cw`-scoped token (Secret Manager `cw-s3-job-grant`).
