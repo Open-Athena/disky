@@ -377,5 +377,5 @@ describe('mutations: each reader rule, broken, makes the views wrong', () => {
       baseBound: await wrong({ ...DRILL_RULES, bound: metas => metas[0].dispatch_rows }),
     }
     expect(got).toEqual({ rules: 0, maxVt: 2075, noStop: 107, newestCanon: 139, baseCanon: 38, baseBound: 20 })
-  }, 120_000)
+  }, 300_000)  // mutation runs: past 120 s under a busy laptop's full parallel suite (r2 and the mosaic port, 10-17); the file alone runs 18 tests in ~50 s
 })
