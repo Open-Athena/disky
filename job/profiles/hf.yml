@@ -76,4 +76,6 @@ options:
     barrier: true
     require: ["{index}/path-index.parquet", "{snapshots}/{scan}/meta.json"]
   interval-store: {timeout: 60m, mem: 8GB}
-  digest: {template: cw, config: /app/job/digest.yml}
+  # The digest's live thread state and the earlier scans' snapshots are on R2 (publish-r2 lands this scan's before
+  # `post`): the data store's root would find no state and post a second OP.
+  digest: {template: cw, config: /app/job/digest.yml, root: "r2://oa-hf-usage-index/{snapshots}"}

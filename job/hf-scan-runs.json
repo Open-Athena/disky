@@ -1,22 +1,25 @@
 {
   "name": "hf",
-  "comment": "The hf deployment's scan-run profile (specs/scan-runs-ui.md, specs/scan-job-wrapper.md): `dt-cloud scan-run -c job/hf-scan-runs.json`. Prices: list $/h, us-central1, compute only.",
+  "comment": "The hf deployment's scan-run profile (specs/scan-runs-ui.md, specs/scan-job-wrapper.md): `dt-cloud scan-run -c job/hf-scan-runs.json`. Prices: list $/h, us-central1, compute only; a Nextflow run is its head plus its step tasks (`finish -l nf-session=…`).",
   "project": "oa-internal-450019",
   "regions": ["us-central1"],
+  "run_id_env": ["DT_RUN_ID", "BATCH_JOB_UID"],
+  "overlapped": ["static-names"],
   "jobs": [
-    {"kind": "scan", "where": {"commands": "job/hf-run\\.sh"},
-     "scan": [{"env": "SNAP_ID"}, {"log": "^HF-SCAN-JOB-DONE (\\S+)"}, {"started": "%Y-%m-%d"}]}
+    {"kind": "scan", "where": {"commands": "^(job/hf-run\\.sh|scan head )"},
+     "scan": [{"env": "SNAP_ID"}, {"log": "^(?:HF-)?SCAN-JOB-DONE (\\S+)"}, {"started": "%Y-%m-%dT%H%M"}]}
   ],
-  "error_marker": ["^\\+\\+ scan_err (?P<rc>\\d+) (?P<line>\\d+) (?P<cmd>.*)"],
+  "error_marker": ["^\\+\\+ scan_err (?P<rc>\\d+) (?P<line>\\d+) (?P<cmd>.*)", "^\\+\\+ on_err (?P<rc>\\d+) (?P<line>\\d+) (?P<cmd>.*)"],
   "alerts": {"label": "Hugging Face scan", "logs_url": "https://console.cloud.google.com/logs/query;query=labels.job_uid%3D%22{job_uid}%22?project={project}"},
   "secrets": ["HF_TOKEN", "CLOUDFLARE_API_TOKEN", "CF_PAGES_TOKEN", "CLOUDFLARE_ACCOUNT_ID", "R2_ENDPOINT", "R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY", "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "SLACK_BOT_TOKEN", "SITE_TOKEN"],
   "outputs": [
-    {"key": "layer-2", "uri": "r2://oa-hf-usage-index/listing/{scan}/", "exclude": ["index/"], "split": "stem", "after": "upload"},
-    {"key": "path-index", "uri": "r2://oa-hf-usage-index/listing/{scan}/index/{gen}/", "split": "stem", "rows": "groups", "after": "upload"},
-    {"key": "snapshot", "uri": "r2://oa-hf-usage-index/snapshots/hf/{scan}/", "after": "upload"},
+    {"key": "layer-2", "uri": "gs://oa-hf-usage-data/listing/{scan}/", "exclude": ["index/"], "split": "stem", "after": "layer-2"},
+    {"key": "path-index", "uri": "gs://oa-hf-usage-data/listing/{scan}/index/{gen}/", "split": "stem", "rows": "groups", "after": "index-write"},
+    {"key": "snapshot", "uri": "gs://oa-hf-usage-data/snapshots/hf/{scan}/", "after": "publish"},
     {"key": "static", "uri": "r2://oa-hf-usage-index/static-names/*/manifests/{scan}.json", "manifest": true},
-    {"key": "intervals", "uri": "r2://oa-hf-usage-index/interval-store/*/manifests/{scan}.json", "manifest": true}
+    {"key": "intervals", "uri": "r2://oa-hf-usage-index/interval-store/*/manifests/{scan}.json", "manifest": true},
+    {"key": "nf-dag", "uri": "gs://oa-hf-usage-data/nf/runs/{scan}/dag.mmd"}
   ],
-  "prices": {"e2-standard-4": 0.134, "n2-standard-4": 0.1942},
+  "prices": {"e2-standard-2": 0.067, "e2-standard-4": 0.134, "n2-standard-4": 0.1942},
   "log_days": 30
 }

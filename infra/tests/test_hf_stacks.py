@@ -184,19 +184,24 @@ def test_gcp_stack(monkeypatch: pytest.MonkeyPatch):
         assert task["runnables"][0]["container"] == {
             "imageUri": f"us-central1-docker.pkg.dev/{project}/hf-usage/scan:hf",
             "entrypoint": "dt-cloud",
-            "commands": ["scan-run", "supervise", "--", "bash", "job/hf-run.sh"],
+            "commands": ["scan", "head", "/app/job/profiles/hf.yml"],
         }
+        assert (task["computeResource"], task["maxRunDuration"]) == ({"cpuMilli": 2000, "memoryMib": 7000}, "21600s")
         assert task["environment"]["variables"] == {
             "DISKY_LABELS": "app=disky,deployment=hf", "HF_URI": "hf://open-athena", "R2_BUCKET": "oa-hf-usage-index",
             "WORK_DIR": "/work", "SLACK_CHANNEL": "C0C9G547AP7", "SLACK_ALERT_CHANNEL": "C0C9J9VDPV5",
         }
         refs = task["environment"]["secretVariables"]
-        # Every secret the job reads is a container this stack creates (and grants), and the profile redacts it.
-        assert sorted(r.split("/")[3] for r in refs.values()) == sorted(secrets)
+        # The head reads only its own: the run record's D1 token + account id and the alert's Slack token (each step
+        # task fetches the profile's); each a container this stack creates (and grants), and the profile redacts it.
+        assert {k: r.split("/")[3] for k, r in refs.items()} == {
+            "CLOUDFLARE_API_TOKEN": "hf-usage-cf-token", "CLOUDFLARE_ACCOUNT_ID": "hf-usage-cf-account-id", "SLACK_BOT_TOKEN": "hf-usage-slack-bot-token",
+        }
+        assert set(refs.values()) <= {f"projects/{project}/secrets/{s}/versions/latest" for s in secrets}
         profile = json.loads((REPO / "job" / "hf-scan-runs.json").read_text())
         assert set(refs) <= set(profile["secrets"])
         policy = spec["allocationPolicy"]
-        assert (policy["serviceAccount"]["email"], policy["instances"][0]["policy"]["machineType"], policy["instances"][0]["policy"]["provisioningModel"]) == (sa, "e2-standard-4", "STANDARD")
+        assert (policy["serviceAccount"]["email"], policy["instances"][0]["policy"]["machineType"], policy["instances"][0]["policy"]["provisioningModel"]) == (sa, "e2-standard-2", "STANDARD")
         assert policy["labels"] == spec["labels"] == {"app": "disky", "deployment": "hf", "component": "scan"}
 
     return pulumi.Output.all(g["scan"].job.id, g["images_reader"].id, g["data_admin"].id).apply(check)

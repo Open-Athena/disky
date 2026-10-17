@@ -1,14 +1,12 @@
 #!/usr/bin/env bash
-# Submit the hf scan (job/hf-run.sh) to GCP Batch.
+# Submit the hf scan to GCP Batch: the Nextflow head (`dt-cloud scan head $PROFILE`, default job/profiles/hf.yml;
+# specs/pipelines-everywhere.md), each step a Batch task of its own.
 #
 #   job/hf-batch-submit.sh              # submit, print the job id
 #   DRY=1 job/hf-batch-submit.sh        # print the spec
 #   PIN=1 DRY=1 job/hf-batch-submit.sh  # the canonical spec: the Cloud Scheduler body (infra/gcp generates it)
-#   NF=scan job/hf-batch-submit.sh      # the Nextflow head (`dt-cloud scan head $PROFILE`, default job/profiles/hf.yml)
-#                                       # instead of the one-VM job; `SNAP_ID=… GEN=…` resumes that scan's session
-#
-# One small on-demand VM: the listing is bound by the Hub's rate limit, not by the machine (job/hf-run.sh's sizing
-# note). No GCS: the job writes R2 only, and scratches on the VM's boot disk.
+#   SNAP_ID=… GEN=… job/hf-batch-submit.sh  # resume that scan's session
+#   NF=0 job/hf-batch-submit.sh         # the old one-VM job (job/hf-run.sh), until it is retired
 #
 # Secrets (Secret Manager containers from infra/gcp, values added by hand — specs/hf-deployment.md): the Hub read
 # token, the job's D1 token and the CF account id, the R2 endpoint + read/write key pair, the alert bot's token.
@@ -114,7 +112,7 @@ EOF
 # The Nextflow head (specs/pipelines-everywhere.md) only drives the DAG: each step is a Batch task of its own, which
 # fetches its own secrets (the profile's `secrets`), so the head gets a small VM and only what it uses itself: the
 # scan-run record's D1 token + account id, and the failure alert's Slack token.
-if [ "${NF:-0}" != 0 ]; then
+if [ "${NF:-scan}" != 0 ]; then
   PROFILE=${PROFILE:-/app/job/profiles/hf.yml} python3 - "$spec" <<'PY'
 import json, os, sys
 p = sys.argv[1]; j = json.load(open(p))

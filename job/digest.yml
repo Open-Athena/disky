@@ -4,7 +4,7 @@
 template: cw
 title: Hugging Face usage
 site_url: https://hf.oa.dev
-# R2, no GCS: the job passes `-r "$STORE_ROOT/snapshots/hf"` anyway
+# R2 (the step passes it as `-r`: job/profiles/hf.yml `options.digest.root`)
 root: r2://oa-hf-usage-index/snapshots/hf
 # beside `snapshots/`: r2://oa-hf-usage-index/digest/hf/<channel>/<variant>/<YYYY-MM>.json, keyed by channel (a
 # staging converge never masquerades as prod) and variant
