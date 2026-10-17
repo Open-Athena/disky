@@ -24,6 +24,7 @@ import os
 from datetime import datetime
 from functools import lru_cache
 from os.path import exists as _local_exists, getmtime, getsize, join as _local_join
+from pathlib import Path
 from typing import TYPE_CHECKING
 from urllib.parse import urlparse
 
@@ -407,15 +408,13 @@ def read_text(path: str) -> str:
 
 
 def write_text(path: str, text: str) -> None:
-    if not is_url(path):
-        with open(path, 'w') as f:
-            f.write(text)
-        return
     write_bytes(path, text.encode())
 
 
 def write_bytes(path: str, data: bytes) -> None:
+    """Write ``data`` to ``path``; a local path's missing parent dirs are created, as an object store has none."""
     if not is_url(path):
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
         with open(path, 'wb') as f:
             f.write(data)
         return
