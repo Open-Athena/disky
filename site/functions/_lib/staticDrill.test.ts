@@ -13,6 +13,9 @@ import { searchKey } from './search'
 import { resetUpgrades } from './edgeCache'
 import { warmSubtree } from '../api/subtree'
 
+// Every test in this file: tests take seconds alone but past 30 s under the full parallel suite (gcs, cw: 10-17).
+vi.setConfig({ testTimeout: 120_000 })
+
 vi.mock('@rdub/file-tree/stores/s3', async () => ({ S3Store: (await import('./testStore')).S3Store }))
 
 // The heavy terms' drilldown (`staticDrill.ts`) over `fixtures/static-drill/` (`gen.py`): the `drill/` files
