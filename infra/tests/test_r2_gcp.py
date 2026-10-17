@@ -107,7 +107,9 @@ def test_independent_resources_and_optional_scheduler(daily_enabled: bool):
             assert planned["taskGroups"][0]["taskSpec"]["runnables"] == [{"container": {"imageUri": image, "volumes": ["/mnt/disks/r2-stage:/stage"]}}]
 
     outputs = [resource.id for resource in program["resources"]]
-    outputs += [program["image_reader"].id, *[resource.id for resource in program["secrets"].secrets.values()]]
+    # every registration the check asserts on: the component and its accessor grants too, or `check` can run before they land
+    secrets = program["secrets"]
+    outputs += [program["image_reader"].id, secrets.urn, *[resource.id for resource in (*secrets.secrets.values(), *secrets.grants.values())]]
     if daily_enabled:
         outputs.append(program["daily"].id)
     return pulumi.Output.all(*outputs).apply(check)

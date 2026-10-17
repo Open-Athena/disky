@@ -4,27 +4,48 @@
   "account_id": "74981a43be0de7712369306c7b19133d",
   "main": "src/index.ts",
   "compatibility_date": "2026-10-11",
-  "compatibility_flags": ["nodejs_compat"],
+  "compatibility_flags": [
+    "nodejs_compat"
+  ],
   "workers_dev": false,
   "preview_urls": false,
-  "dev": {"port": 3277},
-  "observability": {"enabled": true, "head_sampling_rate": 1},
-  "limits": {"cpu_ms": 10000},
-  "r2_buckets": [{"binding": "ARCHIVE", "bucket_name": "oa-r2-access-logs"}],
-  "secrets": {"required": ["CF_OBSERVABILITY_TOKEN"]},
+  "dev": {
+    "port": 3277
+  },
+  "observability": {
+    "enabled": true,
+    "head_sampling_rate": 1
+  },
+  "limits": {
+    "cpu_ms": 60000
+  },
+  "r2_buckets": [
+    {
+      "binding": "ARCHIVE",
+      "bucket_name": "oa-r2-access-logs"
+    }
+  ],
+  "secrets": {
+    "required": [
+      "CF_OBSERVABILITY_TOKEN"
+    ]
+  },
   "vars": {
     "ACCOUNT_ID": "74981a43be0de7712369306c7b19133d",
     "ARCHIVE_BUCKET_NAME": "oa-r2-access-logs",
     "SOURCE_BUCKETS": "[\"marin-na\"]",
     "HOURLY_CRON": "13 * * * *",
-    "DAILY_CRON": "17 7 * * *",
     "LAG_HOURS": "2",
+    "OVERLAP_HOURS": "2",
     "LOOKBACK_HOURS": "6",
-    "OVERLAP_HOURS": "1",
-    "REPLAY_HOURS": "144",
-    "PAGE_SIZE": "500",
-    "MAX_PAGES": "50",
-    "MAX_PAGE_BYTES": "4194304"
+    "RETENTION_HOURS": "144",
+    "PAGE_SIZE": "2000",
+    "MAX_PAGES": "200",
+    "MAX_HOURS": "8",
+    "VERIFY_HOURS": "1",
+    "MAX_PAGE_BYTES": "8388608"
   },
-  "triggers": {"crons": []}
+  "triggers": {
+    "crons": []
+  }
 }

@@ -84,6 +84,8 @@ Status 10/17 ~10:15Z: steps 1 and 3's first apply done. Ryan created the token (
 
 So the instance stays off until root's collector has a high-volume mode (aggregate counts without per-event ids, a bounded replay, per-hour paging): a generic gap, sent to root. Root (10/17) is building one mode for both buckets on `cloud`: per-hour aggregates per (key, action) with `n` and first/last ts, no ids persisted, dedup within one hour's drain; a re-drain replaces that hour's aggregate; a page budget per invocation (new settled hours → early-drained hours again → round-robin re-verify) instead of the 144 h replay; `sampled` recorded as normal. OA's cron stays off and the token uninstalled until it lands with the `wrangler.oa.json` knobs.
 
+Landed 10/17 as cloud c564bb68, merged. `wrangler.oa.json` now has root's knobs: no DAILY_CRON/REPLAY_HOURS; RETENTION_HOURS 144, PAGE_SIZE 2000, MAX_PAGES 200, MAX_HOURS 8, VERIFY_HOURS 1, MAX_PAGE_BYTES 8 MiB, LAG_HOURS 2, OVERLAP_HOURS 2, `cpu_ms` 60000, no PUBLIC_*. That is ≤ 427 subrequests per run. Preview: 1 update (the Worker), 6 unchanged (`tmp/r2-access-oa-preview2.txt`). Root's open points: an hour over ≈896K events fails `hour_over_cap`; the 1,000-subrequest budget is unverified; `agg/` has no lifecycle rule (≈70 GB/yr); measure raw-page bytes per event on the first runs. Next, each a go: apply; `wrangler secret put`; `secretReady` + `enabled` → apply; verify the first runs.
+
 4. A last-read overlay for the site is later work (derived summaries only; raw events stay in `oa-r2-access-logs`, never the serving bucket).
 
 [`r2-access-logging.md`]: r2-access-logging.md
