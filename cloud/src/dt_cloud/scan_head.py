@@ -12,10 +12,9 @@ A TERM / INT (a cancelled or preempted head job) stops Nextflow's process group 
 child), waits `NF_SWEEP_DELAY` (30 s: a submit in flight lands after Nextflow exits), cancels whatever Batch job still
 carries the session's `nf-session` label, and finishes the record.
 
-What started the scan (`$DT_TRIGGER`: `schedule` from the deployment's cron body, `manual` from its hand submits; unset:
-neither) goes on its run record and, once per scan, into `<data>/<snapshots>/<scan>/trigger.json` (`stamp_trigger`)
-beside its `meta.json`, where the digest reads it. Not into the steps' params: a resume of a cron scan by hand must hit
-the same Nextflow cache.
+What started the run (`$DT_TRIGGER`: `schedule` from the deployment's cron body, `manual` from its hand submits; unset:
+not recorded) goes on its run record; a scan's trigger is its first run's (the digest's `scan_triggers`). Not into the
+steps' params: a resume of a cron scan by hand must hit the same Nextflow cache.
 """
 from __future__ import annotations
 
@@ -32,7 +31,6 @@ from collections.abc import Mapping
 from pathlib import Path
 from urllib.parse import urlparse
 
-from .scan_id import TRIGGER_FILE
 from .scan_profile import PRIMARY_STORE, Disk, Machine, ScanProfile
 from .scan_steps import DATA_MOUNT_ENV, PROFILE_JSON_ENV, STEPS
 
@@ -243,21 +241,6 @@ def first_failed(trace: Path) -> str | None:
     return None
 
 
-def stamp_trigger(profile: ScanProfile, scan: str, trigger: str) -> str:
-    """Write `{"trigger": …}` to `<data>/<snapshots>/<scan>/trigger.json` unless the scan has one: the first start's
-    stands (a resume, by hand, of a cron scan stays `schedule`). Returns the scan's trigger."""
-    from disk_tree import blobfs
-
-    path = f"{profile.data.rstrip('/')}/{profile.layout.snapshots_dir()}/{scan}/{TRIGGER_FILE}"
-    if blobfs.exists(path):
-        kept = json.loads(blobfs.read_text(path))["trigger"]
-        err(f"scan head: {scan} keeps its trigger {kept} ({path})")
-        return kept
-    blobfs.write_text(path, json.dumps({"trigger": trigger}) + "\n")
-    err(f"scan head: {scan} trigger {trigger} → {path}")
-    return trigger
-
-
 def _record(cmd, args: list[str]) -> None:
     """A `scan-run` subcommand, in-process (they never fail the job)."""
     try:
@@ -371,8 +354,6 @@ def head(profile_path: Path, nf_dir: Path, launch: Path | None, *, reproc: bool 
     err("+ " + " ".join(argv))
     if dry_run:
         return 0
-    if trigger and not reproc:  # a reprocessed scan keeps what started it, or stays without one
-        stamp_trigger(profile, scan, trigger)
     recording = bool(env.get(PROFILE_ENV))
     cost = ["-l", f"nf-session={session}"] if profile.executor.kind == "google-batch" else []
     if recording:

@@ -52,6 +52,7 @@ LEAD = [("2026-08-31T0000", _meta(700)), ("2026-08-31T1200", _meta(705))]
 SEPT = [("2026-09-01T0000", _meta(710)), ("2026-09-01T1200", _meta(713)), ("2026-09-02T0000", _meta(712)), ("2026-09-02T1200", _meta(715))]
 _all = D.rows_from_meta(LEAD + SEPT, P)
 MONTH = D.Month(lead=_all[:2], rows=_all[2:])
+SITE_TRIGGERS = D.site_triggers  # the real one: conftest stubs the module's attribute per test
 
 
 def test_quota_config():
@@ -317,11 +318,8 @@ def test_day_rows_variants():
 def test_day_rows_sender_skips_manual_scans():
     # 9/1: a hand-run scan at 12:30Z lands before the 13:00Z cron scan; the cron's is the reply
     rows = D.rows_from_meta([
-        *[(s, {**m, "trigger": "schedule"}) for s, m in LEAD],
-        ("2026-09-01T1230", {**_meta(711), "trigger": "manual"}),
-        ("2026-09-01T1300", {**_meta(713), "trigger": "schedule"}),
-        ("2026-09-02T0000", {**_meta(712), "trigger": "schedule"}),
-    ], P)
+        *LEAD, ("2026-09-01T1230", _meta(711)), ("2026-09-01T1300", _meta(713)), ("2026-09-02T0000", _meta(712)),
+    ], P, triggers={"2026-09-01T1230": "manual", "2026-09-01T1300": "schedule", "2026-09-02T0000": "schedule"})
     month = D.Month(lead=rows[:2], rows=rows[2:])
     assert [r.trigger for r in month.rows] == ["manual", "schedule", "schedule"]
     assert D.day_rows(month, "sender", 12) == [
@@ -337,14 +335,30 @@ def test_day_rows_sender_skips_manual_scans():
     assert D.day_rows(MONTH, "sender", 12)[0].scan == "2026-09-01T1200"
 
 
-def test_load_window_reads_triggers(tmp_path: Path):
-    for s, m in [*LEAD, *SEPT]:
-        (tmp_path / s).mkdir()
-        (tmp_path / s / "meta.json").write_text(json.dumps(m))
-    (tmp_path / "2026-09-01T1200" / "trigger.json").write_text('{"trigger": "manual"}\n')
-    lead, in_month = E.load_window(str(tmp_path), SEP)
-    assert lead == LEAD
-    assert in_month == [SEPT[0], ("2026-09-01T1200", {**SEPT[1][1], "trigger": "manual"}), *SEPT[2:]]
+def test_scan_triggers():
+    # a scan's trigger is its first run's: a hand resume of a cron scan stays `schedule`; an unrecorded first run, none
+    runs = [
+        {"scan": "2026-09-01T1300", "started_ts": 200, "trigger": "manual"},
+        {"scan": "2026-09-01T1300", "started_ts": 100, "trigger": "schedule"},
+        {"scan": "2026-09-01T1230", "started_ts": 90, "trigger": "manual"},
+        {"scan": "2026-08-31T1200", "started_ts": 10, "trigger": None},
+        {"scan": "2026-08-31T1200", "started_ts": 20, "trigger": "schedule"},
+    ]
+    assert D.scan_triggers(runs) == {"2026-09-01T1300": "schedule", "2026-09-01T1230": "manual"}
+
+
+def test_site_triggers(monkeypatch):
+    from dt_cloud import site
+
+    calls = []
+    res = {"configured": True, "runs": [{"run": {"scan": "2026-09-01T1300", "started_ts": 1, "trigger": "schedule"}}]}
+    monkeypatch.setattr(site, "get_json", lambda url, token, path, params=None, timeout=30: calls.append((url, token, path)) or res)
+    monkeypatch.setenv("SITE_TOKEN", "tok")
+    assert (SITE_TRIGGERS(CFG), calls) == ({"2026-09-01T1300": "schedule"}, [(SITE, "tok", "/api/scan-runs")])
+    monkeypatch.setattr(site, "get_json", lambda *a, **kw: {"configured": False, "runs": []})
+    assert SITE_TRIGGERS(CFG) == {}
+    monkeypatch.delenv("SITE_TOKEN")
+    assert SITE_TRIGGERS(CFG) == {}
 
 
 def test_day_rows_provisional():

@@ -40,12 +40,13 @@ from __future__ import annotations
 import datetime as dt
 import json
 from collections import OrderedDict
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from .digest import (
     AVATAR_REV, HOURS_PER_WEEK, TIB, UNITS, DigestConfig, PlotUnavailable, Quota, Reply, Unit, Units,
-    _dlink, _md, _pct, _pct_val, _span, _tb, deg, list_scans, load_window, scan_slugs, scan_ts,
+    _dlink, _err, _md, _pct, _pct_val, _span, _tb, deg, list_scans, load_window, scan_slugs, scan_ts,
 )
 
 VARIANTS = ("sender", "body")
@@ -165,7 +166,7 @@ class Scan:
     slug: str | None = field(default=None, compare=False)
     # the primary's per-storage-class sizes (`class_bytes`, unrounded, in the digest's units); None: the meta has none
     classes: dict[int, float] | None = field(default=None, compare=False)
-    # what started it (`trigger.json`: schedule | manual); None: a scan from before triggers were stamped
+    # what started it (its first run's `scan_runs.trigger`, `scan_triggers`); None: unrecorded
     trigger: str | None = field(default=None, compare=False)
 
     @property
@@ -174,7 +175,7 @@ class Scan:
 
     def replyable(self, reply_hour: int) -> bool:
         """Can be its day's `sender` reply scan: from ``reply_hour`` UTC on, and not manual (a hand-run scan only
-        stands in, `day_rows`; one without a trigger predates them, and the clock alone decides)."""
+        stands in, `day_rows`; for one without a recorded trigger the clock alone decides)."""
         return scan_ts(self.scan).hour >= reply_hour and self.trigger != "manual"
 
 
@@ -197,9 +198,10 @@ def primary_classes(m: dict, primary: str, unit: int = TIB) -> dict[int, float] 
     return None if cb is None else {int(c): b / unit for c, b in cb.items()}
 
 
-def rows_from_meta(dated_meta: list[tuple[str, dict]], primary: str, now: dt.datetime | None = None, unit: int = TIB) -> list[Scan]:
+def rows_from_meta(dated_meta: list[tuple[str, dict]], primary: str, now: dt.datetime | None = None, unit: int = TIB,
+                   triggers: Mapping[str, str] | None = None) -> list[Scan]:
     """Build ``Scan`` rows from ``(scan_id, meta.json)`` pairs in scan order, each with its canonical slug
-    (`scan_slugs`, as of ``now``); sizes in ``unit`` bytes (TiB)."""
+    (`scan_slugs`, as of ``now``) and its trigger (``triggers``, `scan_triggers`); sizes in ``unit`` bytes (TiB)."""
     out: list[Scan] = []
     slugs = scan_slugs(dated_meta, now)
     ptb = pobjs = pts = None
@@ -218,7 +220,7 @@ def rows_from_meta(dated_meta: list[tuple[str, dict]], primary: str, now: dt.dat
                 extra={k: round(v, 1) for k, v in extra.items()},
                 slug=slugs[scan],
                 classes=primary_classes(m, primary, unit),
-                trigger=m.get("trigger"),
+                trigger=(triggers or {}).get(scan),
             )
         )
         ptb, pobjs, pts = tb, objs, ts
@@ -394,16 +396,39 @@ def reply(day: DayRow, variant: str, cfg: DigestConfig) -> Reply:
     raise ValueError(f"variant must be one of {VARIANTS}, not {variant!r}")
 
 
-def load_month(root: str, month: dt.date, primary: str, unit: int = TIB) -> Month | None:
-    """The month's scans from ``root`` (``gs://<bucket>/snapshots/cw``), sizes in ``unit`` bytes, with
-    ``lead`` = every scan of the last calendar day before it, ``closed`` once
+def scan_triggers(runs: Iterable[Mapping]) -> dict[str, str]:
+    """Each scan's trigger: its first run's (by start; a hand resume of a cron scan doesn't make it manual), from
+    `scan_runs` rows. A scan whose first run recorded none is absent."""
+    first: dict[str, Mapping] = {}
+    for r in sorted(runs, key=lambda r: (r.get("started_ts") is None, r.get("started_ts") or 0)):
+        first.setdefault(r["scan"], r)
+    return {s: r["trigger"] for s, r in first.items() if r.get("trigger")}
+
+
+def site_triggers(cfg: DigestConfig) -> dict[str, str]:
+    """`scan_triggers` over the site's `/api/scan-runs` (the primary store's runs), as the job (`$SITE_TOKEN`); {} with
+    no token (a note on stderr: replies go by the clock) or a site without run records."""
+    from .deploy import site_token
+    from .site import get_json
+
+    token = site_token()
+    if not token:
+        _err("digest: no site token ($SITE_TOKEN): no scan triggers, replies go by the clock")
+        return {}
+    res = get_json(cfg.site_url, token, "/api/scan-runs")
+    return scan_triggers(s["run"] for s in res["runs"]) if res.get("configured") else {}
+
+
+def load_month(root: str, month: dt.date, primary: str, unit: int = TIB, triggers: Mapping[str, str] | None = None) -> Month | None:
+    """The month's scans from ``root`` (``gs://<bucket>/snapshots/cw``), sizes in ``unit`` bytes, each with its trigger
+    (``triggers``), with ``lead`` = every scan of the last calendar day before it, ``closed`` once
     a later month's scan exists. None if the month has no scans."""
     scans = list_scans(root)
     w = load_window(root, month, scans)
     if w is None:
         return None
     lead, in_month = w
-    rows = rows_from_meta(lead + in_month, primary, unit=unit)
+    rows = rows_from_meta(lead + in_month, primary, unit=unit, triggers=triggers)
     return Month(lead=rows[: len(lead)], rows=rows[len(lead) :], closed=scans[-1] > in_month[-1][0])
 
 
@@ -457,7 +482,7 @@ class Cw:
         self.cfg = cfg
 
     def load(self, root: str, month: dt.date) -> Month | None:
-        return load_month(root, month, self.cfg.primary, self.cfg.unit.bytes)
+        return load_month(root, month, self.cfg.primary, self.cfg.unit.bytes, site_triggers(self.cfg))
 
     def n_scans(self, month: Month) -> int:
         return len(month.rows)
