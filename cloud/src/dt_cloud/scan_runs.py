@@ -24,6 +24,7 @@ from functools import partial
 from pathlib import Path
 from typing import Protocol
 
+from . import run_dag
 from .d1_schema import table_ddl
 from .scan_id import check_scan_id
 
@@ -96,8 +97,8 @@ class Record:
     run: Run
     phases: tuple[Phase, ...] = ()
     outputs: tuple[Output, ...] = ()
-    #: The run's pipeline DAG (Nextflow's `-with-dag` Mermaid), written by its head's `finish --dag`
-    dag: str | None = None
+    #: The run's pipeline DAG: (engine, the engine-neutral graph's JSON, `run_dag`), written by its head's `finish -D`
+    dag: tuple[str, str] | None = None
 
 
 def lit(v: object) -> str:
@@ -157,17 +158,16 @@ def output_sql(run_id: str, o: Output) -> str:
             "objects = excluded.objects, rows = excluded.rows, gen = COALESCE(excluded.gen, scan_run_outputs.gen)")
 
 
-def dag_sql(run_id: str, mermaid: str) -> str:
-    return (f"INSERT INTO scan_run_dags (run_id, mermaid) VALUES ({lit(run_id)}, {lit(mermaid)}) "
-            "ON CONFLICT(run_id) DO UPDATE SET mermaid = excluded.mermaid")
+def dag_sql(run_id: str, engine: str, dag: str) -> str:
+    return (f"INSERT INTO scan_run_dags (run_id, engine, dag) VALUES ({lit(run_id)}, {lit(engine)}, {lit(dag)}) "
+            "ON CONFLICT(run_id) DO UPDATE SET engine = excluded.engine, dag = excluded.dag")
 
 
 def record_sql(rec: Record, now: int) -> list[str]:
     """The statements writing `rec`: the run first (its children reference it)."""
     return ([run_sql(rec.run, now)]
             + [phase_sql(rec.run.run_id, p) for p in rec.phases]
-            + [output_sql(rec.run.run_id, o) for o in rec.outputs]
-            + ([dag_sql(rec.run.run_id, rec.dag)] if rec.dag is not None else []))
+            + [output_sql(rec.run.run_id, o) for o in rec.outputs])
 
 
 # ── Sinks: D1 (the job, the backfill), a local SQLite file (dry runs, tests), stdout (`-n`) ──────────────────
@@ -186,7 +186,9 @@ class D1Sink:
     def __init__(self, db_id: str | None = None):
         from . import index_footer as f
 
-        self.db_id = db_id or f.D1_DB_ID
+        # the env now, not `index_footer.D1_DB_ID` (read at its import): `scan head` sets `$D1_DB_ID` from the profile
+        # after the CLI has imported it, and its own start / finish found no database
+        self.db_id = db_id or os.environ.get("D1_DB_ID") or f.D1_DB_ID
         if not self.db_id:
             raise SystemExit("scan-run: no D1 database: set $D1_DB_ID to this deployment's D1 (or pass --sqlite / -n)")
         self._tok, self._acct = f._creds()
@@ -665,7 +667,7 @@ def record(
     facts: Mapping[str, object] | None = None,
     extra_cost: float | None = None,
     task: Mapping[str, str] | None = None,
-    dag: str | None = None,
+    dag: tuple[str, str] | None = None,
 ) -> Record:
     """One incremental write of run `run_id` (scan `scan`): start it, start/close a phase (measuring completed outputs tied to
     it), measure named outputs, finish it (`exit_code`, or `nop`). The run row is upserted every time, so any call
@@ -676,7 +678,7 @@ def record(
     plus `extra_cost` (the jobs it ran apart from its own: `labelled_cost`).
 
     `task`: where phase `phase` ran: its Batch job when not the run's own (`job_name`, `machine`) and its pipeline node
-    (`task`; `JobRun.task`). `dag`: the run's pipeline DAG (Mermaid)."""
+    (`task`; `JobRun.task`). `dag`: the run's pipeline DAG, (engine, graph JSON)."""
     check_scan_id(scan)
     if phase_start and not phase:
         raise ValueError("scan-run: a phase start needs a phase name")
@@ -739,6 +741,13 @@ def record(
         outs += measure(OutputSpec(key=key, uri=uri, split=None), scan, gen_now, store)
     rec = Record(run, tuple(new_phases), tuple(outs), dag)
     sink.execute(record_sql(rec, now))
+    if dag is not None:
+        # apart from the run's own write: the DAG is a view, and its failure (a database without `scan_run_dags` in
+        # this shape) must never leave the run unfinished
+        try:
+            sink.execute([dag_sql(run_id, *dag)])
+        except Exception as e:  # noqa: BLE001
+            report_failure(e)
     return rec
 
 
@@ -1285,7 +1294,7 @@ class JobRun:
         except Exception as e:  # noqa: BLE001
             err(self.redact(f"alert failed (the job continues): {type(e).__name__}: {e}"))
 
-    def finish(self, rc: int, error: str | None = None, extra_cost: float | None = None, dag: str | None = None) -> None:
+    def finish(self, rc: int, error: str | None = None, extra_cost: float | None = None, dag: tuple[str, str] | None = None) -> None:
         """Record the run finished with `rc` (`error` its one-line reason), and on a failure post the `fail` alert
         unless one was already posted (a phase's, or an earlier `finish`'s)."""
         error = self.redact(error) if error else None
@@ -1615,6 +1624,23 @@ def phase_cmd(msg, no_measure, outputs, note, resume, warn, gen, grace, timeout,
                    ran.signal if ran.rc else None))
 
 
+@cli.command("dag")
+@option("-c", "--profile", "profile_path", default=None, help=f"The deployment's profile JSON (default ${PROFILE_ENV})")
+@option("-d", "--d1", default=None, help="D1 database id (default $D1_DB_ID)")
+@option("-E", "--engine", default="nextflow", help="The engine whose DAG FILE is (default nextflow)")
+@option("-n", "--dry-run", is_flag=True, help="Print the SQL instead of writing it")
+@option("-s", "--sqlite", default=None, help="Write to this local SQLite file instead of D1")
+@argument("run_id")
+@argument("file")
+def dag_cmd(profile_path, d1, engine, dry_run, sqlite, run_id, file) -> None:
+    """Store RUN_ID's pipeline DAG from FILE (its engine's own format, e.g. a run's archived `dag.mmd`), as
+    `finish -D` does: a run recorded before its head stored one, or a re-reduction."""
+    load_profile(profile_path)
+    dag = run_dag.read(engine, Path(file).read_text())
+    sink_for(dry_run, sqlite, d1).execute([dag_sql(run_id, engine, dag.to_json())])
+    err(f"scan-run dag: {run_id} · {engine} · {len(dag.nodes)} nodes, {len(dag.edges)} edges")
+
+
 @cli.command("nop")
 @_wrapper_opts
 def nop_cmd(profile_path, d1, dry_run, run_id, sqlite) -> None:
@@ -1624,12 +1650,13 @@ def nop_cmd(profile_path, d1, dry_run, run_id, sqlite) -> None:
 
 
 @cli.command("finish")
-@option("-D", "--dag", "dag_path", default=None, help="The run's pipeline DAG (Nextflow's `-with-dag` Mermaid file), stored with the run for /scans")
+@option("-D", "--dag", "dag_path", default=None, help="The run's pipeline DAG in its engine's own format (`-E`; Nextflow's `-with-dag` Mermaid), stored with the run for /scans as the engine-neutral graph")
+@option("-E", "--dag-engine", default="nextflow", help="The engine whose DAG -D is (default nextflow)")
 @option("-e", "--error", default=None, help="With a non-zero -x: the failure's one-line reason (the ERR trap's)")
 @option("-l", "--cost-of", "cost_labels", multiple=True, help="KEY=VALUE (repeatable): add the estimated cost of the Batch jobs carrying all these labels (a Nextflow head's step tasks: `nf-session=<id>`)")
 @option("-x", "--exit", "rc", type=IntRange(0, 255), required=True, help="The job's exit code (0 = succeeded)")
 @_wrapper_opts
-def finish_cmd(dag_path, error, cost_labels, rc, profile_path, d1, dry_run, run_id, sqlite) -> None:
+def finish_cmd(dag_path, dag_engine, error, cost_labels, rc, profile_path, d1, dry_run, run_id, sqlite) -> None:
     """The job's EXIT trap: record the run finished (`record -x`; ERR as `scan_runs.error`), and on a non-zero RC
     post the `fail` alert unless a phase already did. Never fails the job. Under `supervise`, the state and the
     alerted marker are left for it."""
@@ -1646,8 +1673,8 @@ def finish_cmd(dag_path, error, cost_labels, rc, profile_path, d1, dry_run, run_
     dag = None
     if dag_path:
         try:
-            dag = Path(dag_path).read_text()
-        except OSError as e:  # the DAG is a view; the record must still finish
+            dag = (dag_engine, run_dag.read(dag_engine, Path(dag_path).read_text()).to_json())
+        except (OSError, ValueError) as e:  # the DAG is a view; the record must still finish
             report_failure(e)
     j.finish(rc, error, extra, dag)
     if j.supervised:

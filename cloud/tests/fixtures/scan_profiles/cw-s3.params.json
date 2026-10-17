@@ -68,6 +68,7 @@
   "CLOUDFLARE_API_TOKEN=example-cf-token",
   "SITE_TOKEN=example-job-grant"
  ],
+ "step_secrets": {},
  "secrets_project": "example-project",
  "env": {
   "SCAN_RUNS_PROFILE": "/app/job/scan-runs.json",

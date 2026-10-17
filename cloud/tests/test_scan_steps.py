@@ -499,3 +499,118 @@ def test_digest_uploads_with_the_pages_token(tmp_path, env):
         ("dt-cloud digest -T cw -C d.yml -P slack -r <tmp>/data/snapshots/hf", "pages"),
         ("dt-cloud digest -T cw -C d.yml -P slack -r <tmp>/data/snapshots/hf", "d1"),
     ]
+
+
+def test_digest_root_from_the_profile(tmp_path, env):
+    """`options.digest.root` (`{snapshots}` filled) is the snapshots root the digest reads and keeps its thread state
+    beside (r2's live state is on R2, its data store on GCS); unset, the data store's."""
+    env.update(SLACK_BOT_TOKEN="x", SLACK_CHANNEL="C1")
+    hf = hf_profile()
+    c = ctx(tmp_path, env, **{**hf, "options": {**hf["options"], "digest": {**hf["options"]["digest"], "root": "r2://idx/{snapshots}"}}})
+    S.digest(c, None)
+    assert c.sh_impl.calls == ["dt-cloud digest -T cw -C d.yml -P slack -r r2://idx/snapshots/hf"]
+
+
+def meta_ctx(tmp_path, env, **opts):
+    """A second store's profile (`store: meta`): the steps that serve it, and the ones that can't skipped."""
+    return ctx(tmp_path, env, store="meta", skip=["interval-store", "warm-cache", "probe"],
+               options={"list": {"import": True}, "static-names": {"profile": "sn.json"}, "digest": {"template": "t", "config": "c.yml"}, **opts})
+
+
+def test_store_passes_through(tmp_path, env):
+    """`store: meta`: every command that files rows per store gets `-s meta` (both index-sync halves, the per-scan and
+    the files index-gc, the over-time groups); `index-sync.variants` reach both halves; `index-gc.dry` lists only."""
+    env.update(CLOUDFLARE_API_TOKEN="tok", CLOUDFLARE_ACCOUNT_ID="acct", R2_ENDPOINT="https://r2.example.org", R2_BUCKET="r2b",
+               R2_ACCESS_KEY_ID="k", R2_SECRET_ACCESS_KEY="s")
+    c = meta_ctx(tmp_path, env, **{"index-sync": {"variants": ["path", "age-pyramid-1h"], "retain": 7}, "index-gc": {"dry": True, "grace": "36h"}})
+    for f in (S.index_rows, S.index_sync, S.over_time, S.index_gc):
+        f(c, None)
+    k = "l2/2026-10-16T1200/index/G1"
+    assert c.sh_impl.calls == [
+        f"dt-cloud index-sync -r -s meta -d <tmp>/data/{k} -g G1 -k {k} -v path -v age-pyramid-1h 2026-10-16T1200",
+        f"dt-cloud index-sync -p -s meta -d <tmp>/data/{k} -g G1 -k {k} -v path -v age-pyramid-1h -M <tmp>/data/snapshots/sub 2026-10-16T1200",
+        "dt-cloud index-gc -s meta -r 7 2026-10-16T1200",
+        "dt-cloud over-time-groups -s meta -g G1 -o <tmp>/t/dt-scan/2026-10-16T1200/over-time -p r2://r2b",
+        "dt-cloud index-gc -s meta -R -n -m 36h -F <tmp>/data -F r2",
+    ]
+
+
+def test_index_gc_dry_on_the_primary(tmp_path, env):
+    env.update(CLOUDFLARE_API_TOKEN="tok", CLOUDFLARE_ACCOUNT_ID="acct")
+    c = ctx(tmp_path, env, options={"list": {"import": True}, "static-names": {"profile": "sn.json"},
+                                    "digest": {"template": "t", "config": "c.yml"}, "index-gc": {"dry": True}})
+    S.index_gc(c, None)
+    assert c.sh_impl.calls == ["dt-cloud index-gc -R -n -m 2d -F <tmp>/data"]
+
+
+def test_the_run_records_into_the_profiles_store(tmp_path, env, monkeypatch):
+    """A task's phases upsert the head's run row, store included: a second store's profile names it, over the scan-runs
+    profile's default; the primary's leaves that profile's as is."""
+    runs = tmp_path / "scan-runs.json"
+    runs.write_text('{"store": "primary"}')
+    monkeypatch.setenv("SCAN_RUNS_PROFILE", str(runs))
+    env.update(SCAN_RUNS_PROFILE=str(runs), DT_RUN_ID="run-1")
+    assert (meta_ctx(tmp_path, dict(env)).run.profile.store, ctx(tmp_path, dict(env)).run.profile.store) == ("meta", "primary")
+
+
+def test_every_bound_secret_is_stripped(tmp_path, env):
+    """A step's env strips each ENV any call binds (profile, step, source), not only the profile-wide ones."""
+    env.update(AWS_ACCESS_KEY_ID=" src\n", PAGES="p\n", OTHER=" kept\n")
+    c = ctx(tmp_path, env, secrets={"CLOUDFLARE_API_TOKEN": "cf"},
+            sources=[{"uri": "s3://a", "secrets": {"AWS_ACCESS_KEY_ID": "src-key"}}, "s3://b"],
+            options={"list": {"import": True}, "static-names": {"profile": "sn.json"},
+                     "digest": {"template": "t", "config": "c.yml", "secrets": {"PAGES": "pages-token"}}})
+    assert {k: c.env[k] for k in ("AWS_ACCESS_KEY_ID", "PAGES", "OTHER")} == {"AWS_ACCESS_KEY_ID": "src", "PAGES": "p", "OTHER": " kept\n"}
+
+
+def test_path_index_age_pyramids_and_verify(tmp_path, env, monkeypatch):
+    """`options.index.age_pyramids` + `verify` under path-index: the age tiers from the `path` sort (checked), then the
+    index checked against the staged listings, `verification.json` beside the tiers; all uploaded with
+    `path-index.parquet` last."""
+    monkeypatch.setattr(S.Ctx, "nproc", property(lambda self: 8))
+    (tmp_path / "t").mkdir(exist_ok=True)
+    mnt = tmp_path / "mnt/dvx"
+    for b in ("east", "eu"):
+        (mnt / f"listing/2026-10-16T1200/{b}").mkdir(parents=True)
+        (mnt / f"listing/2026-10-16T1200/{b}/_SUCCESS.json").write_text("{}")
+    uploads = []
+    monkeypatch.setattr(S, "upload", lambda files, dest: uploads.append(([f.name for f in files], dest)))
+    p = parse({"deployment": "fix", "executor": {"kind": "google-batch", "project": "p", "region": "r", "image": "i"},
+               "work": "gs://dvx/nf", "data": "gs://dvx", "store": "meta", "skip": ["interval-store", "warm-cache", "probe"],
+               "layout": {"layer2": "meta-l2/{scan}/", "snapshots": "meta", "listing": "listing/{scan}/"},
+               "sources": ["gcs://east", "gcs://eu"],
+               "options": {"index": {"mode": "path-index", "args": ["-U"], "mem": "12GB", "age_pyramids": True, "verify": True},
+                           "static-names": {"profile": "sn.json"}, "digest": {"template": "t", "config": "d.yml"}}})
+    c = S.make_ctx(p, {**env, "DT_DATA_MOUNT": str(tmp_path / "mnt")})
+    runner = Runner(tmp_path)
+
+    def run(argv, env, stdout=None, text=True):
+        r = runner(argv, env, stdout, text)
+        if argv[:2] == ["dt-cloud", "path-index"]:
+            pi = Path(argv[argv.index("-P") + 1]).parent
+            for n in ("path-index.parquet", "path-index-bysize.parquet"):
+                (pi / n).write_text(n)
+            out = Path(argv[argv.index("-o") + 1])
+            out.mkdir(parents=True)
+            (out / "meta.json").write_text("{}")
+        if argv[:2] == ["dt-cloud", "age-pyramid"]:
+            (Path(argv[argv.index("-o") + 1]) / "age-pyramid-1h.parquet").write_text("1h")
+        if argv[:2] == ["dt-cloud", "index-verify"]:
+            Path(argv[argv.index("-o") + 1]).write_text("{}")
+        return r
+
+    c.sh_impl = run
+    S.index(c, None)
+    w = "<tmp>/t/dt-scan/2026-10-16T1200"
+    st = f"{w}/stage/dvx/listing/2026-10-16T1200"
+    assert runner.calls == [
+        f"dt-cloud stage -o {w}/stage /gcs/dvx/listing/2026-10-16T1200/east/*.parquet /gcs/dvx/listing/2026-10-16T1200/eu/*.parquet "
+        "/gcs/dvx/listing/2026-10-16T1200/east/_SUCCESS.json /gcs/dvx/listing/2026-10-16T1200/eu/_SUCCESS.json",
+        f"dt-cloud path-index -d 2026-10-16 -l {st}/east/*.parquet -l {st}/eu/*.parquet -o {w}/snap "
+        f"-c <tmp>/mnt/dvx/listing/2026-10-16T1200/dir-cache -P {w}/path-index/path-index.parquet -U",
+        f"dt-cloud age-pyramid -c -m 12GB -t 8 -o {w}/path-index {w}/path-index/path-index.parquet",
+        f"dt-cloud index-verify -m 12GB -t 8 -d 2026-10-16T1200 -g G1 -b east -b eu -l {st}/east/*.parquet -l {st}/eu/*.parquet "
+        f"-s {w}/snap -o {w}/path-index/verification.json {w}/path-index/path-index.parquet",
+    ]
+    assert uploads == [(["age-pyramid-1h.parquet", "path-index-bysize.parquet", "verification.json", "path-index.parquet"],
+                        "gs://dvx/meta-l2/2026-10-16T1200/index/G1")]

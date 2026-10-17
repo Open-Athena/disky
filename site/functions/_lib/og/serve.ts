@@ -14,7 +14,7 @@ import { imagePath, ogKey, resolveImage, type OgTier } from './sign.js'
 import { credLive, pageTier } from './tier.js'
 import { imageParams, splitImageParams } from './cred.js'
 import { warmUrls } from './warm.js'
-import { anonymousPolicy, genericCard, genericImagePath, genericMeta, RENDER_VERSION, type PolicyEnv } from './policy.js'
+import { anonymousPolicy, cardTier, genericCard, genericImagePath, genericMeta, RENDER_VERSION, type PolicyEnv } from './policy.js'
 
 import { canonId, loadRegistry } from '../identity.js'
 import { Memo, reqOf, withReq } from '../shared.js'
@@ -109,10 +109,15 @@ export async function stampPage(env: OgEnv, url: URL, html: Response): Promise<R
   const params = { ...imageParams(pv.params, v, cred), ...(scan ? { s: scan } : {}), ...(pair?.from ? { b: pair.from } : {}), policy: anonymousPolicy(env), r: RENDER_VERSION }
   const image = url.origin + await imagePath(key, pv.kind, params, tier, day)
   if (pv.kind === 'diff') {
-    const render = await diffCard(env, siteOf(env), pv.title, { ...pv.params, ...(pair?.from ? { d: `${encodeScan(pair.to)}-${encodeScan(pair.from)}` } : {}) }, tier, true)
+    const render = await diffCard(env, siteOf(env), pv.title, { ...pv.params, ...(pair?.from ? { d: `${encodeScan(pair.to)}-${encodeScan(pair.from)}` } : {}) }, cardTier(tier, anonymousPolicy(env)), true)
     return uncachedHtml(stampMeta(html, { title: render.title, desc: `${render.subtitle} · ${render.total}`, image, imageType: 'image/png', page: url.href }))
   }
   if (OWN_TITLES.has(pv.kind)) return uncachedHtml(stampMeta(html, { image, imageType: 'image/png', page: url.href }))
+  if (cardTier(tier, anonymousPolicy(env)) === 'full' && pv.kind === 'map') {
+    // the full card's own numbers in the preview text (`scan … · 263 TiB · 1.2M objects`)
+    const render = await mapCard(env, siteOf(env), pv.title, { ...pv.params, ...(scan ? { d: scan } : {}) }, 'full')
+    return uncachedHtml(stampMeta(html, { title: pv.title, desc: [render.subtitle, render.total].filter(Boolean).join(' · '), image, imageType: 'image/png', page: url.href }))
+  }
   return uncachedHtml(stampMeta(html, {
     title: pv.title,
     desc: env.PUBLIC_READ
@@ -222,7 +227,7 @@ export async function serveCard(ctx: { request: Request; env: OgEnv; waitUntil?:
   const t0 = Date.now()
   let data: CardData | null
   try {
-    data = await cardData(env, r.kind, renderView, r.tier, url)
+    data = await cardData(env, r.kind, renderView, cardTier(r.tier, policy), url)
   } catch (e) {
     // `?d=` names no scan: a 404, never a card of another scan.
     if (e instanceof NoScanMatch) return json({ error: e.message }, 404)
