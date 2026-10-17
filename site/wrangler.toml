@@ -1,4 +1,4 @@
-# CF Pages project config (oa-cw-s3-usage → cw-s3.oa.dev). `wrangler pages
+# CF Pages project config (oa-cw-s3-usage → cw.oa.dev; cw-s3.oa.dev redirects, specs/rename-cw.md). `wrangler pages
 # deploy` reads this, so bindings + vars declared here apply to the deployment
 # it creates. The deployment's own sign-in (Google OIDC + emailed codes, the
 # `@open-athena/auth` session model) gates the whole host; D1's schema is
@@ -34,8 +34,10 @@ ROOT_LABEL = "Marin CoreWeave"  # the store root's crumb label (`_lib/view.ts`)
 # this file at build time; `src/stores.ts` registry key + client whoami source):
 STORE = "cw"                    # the store this build serves (`src/stores.ts`)
 MARK = "cw"                     # favicon/badge: the CoreWeave mark (`public/icons/cw*`; the build injects the links)
-PROD_HOST = "cw-s3.oa.dev"      # `g d` toggles with DEV_HOST (src/hosts.ts)
-DEV_HOST = "dev.cw-s3.oa.dev"
+PROD_HOST = "cw.oa.dev"         # `g d` toggles with DEV_HOST (src/hosts.ts)
+DEV_HOST = "dev.cw.oa.dev"
+# The rename (specs/rename-cw.md): the old hosts stay attached and 301 GETs here (`_lib/hostRedirect.ts`)
+HOST_REDIRECTS = "cw-s3.oa.dev=cw.oa.dev,dev.cw-s3.oa.dev=dev.cw.oa.dev"
 AUTH_MODE = "app"                # own sign-in: Google OIDC + emailed codes (specs/done/oidc-cutover-cw.md P4, 2026-09-28)
 OG_CARDS = "1"
 OG_ANONYMOUS = "full"            # Link previews show the full card (labelled tiles, sizes, owners): the site stays behind
@@ -64,7 +66,7 @@ ADMIN_EMAILS = "1"
 # GCP project, image and CoreWeave S3 endpoint.
 DATA_BUCKET = "oa-cw-s3-usage-data"
 GCP_PROJECT = "oa-internal-450019"
-META_TREE_URL = "https://cw-s3.oa.dev/meta"  # /scans outputs link into the meta tree
+META_TREE_URL = "https://cw.oa.dev/meta"  # /scans outputs link into the meta tree
 SWEEP_IMAGE = "us-central1-docker.pkg.dev/oa-internal-450019/cw-s3-usage/scan:cw"
 DISKY_LABELS = "app=disky,deployment=cw-s3"  # cost labels on executor jobs (specs/cost-labels.md)
 SWEEP_S3_ENDPOINT = "https://cwobject.com"
@@ -147,7 +149,7 @@ id = "1dbc4c60884c4f3ba61aa1aa79f494bc"
 # Secrets (set with `wrangler pages secret put <NAME> --project-name oa-cw-s3-usage`):
 #   SESSION_SECRET   — HMAC key for session cookies + IP hashing (the app
 #     session model, specs/done/oidc-cutover-cw.md; absent = sign-in 503s)
-#   GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET — the "cw-s3.oa.dev" OAuth Web client
+#   GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET — the "cw-s3.oa.dev" OAuth Web client (its origins include cw.oa.dev)
 #   RESEND_API_KEY / MAIL_FROM — emailed-code sign-in (noreply@oa.dev)
 #   GCS_HMAC_KEY_ID / GCS_HMAC_SECRET — read-only GCS proxy creds (data + /files)
 #   GCP_SA_KEY — JSON key for `gcs-usage-dispatch@oa-internal-450019` (Batch
@@ -158,7 +160,7 @@ id = "1dbc4c60884c4f3ba61aa1aa79f494bc"
 
 # ---------------------------------------------------------------------------
 # Preview environment — the dev stack (`site/deploy --dev` → `--branch dev` →
-# https://dev.cw-s3.oa.dev, a CNAME onto the branch alias
+# https://dev.cw.oa.dev (dev.cw-s3.oa.dev redirects), a CNAME onto the branch alias
 # dev.oa-cw-s3-usage.pages.dev; `cf/` owns the record). Same sign-in as
 # production (Google OIDC + emailed codes). Real prod data, unmerged code:
 # where the R2 / KV flips and a new base get their real numbers before prod.
@@ -174,6 +176,7 @@ database_name = "oa-cw-s3-usage-db"   # the SAME ledger as prod (marks made on d
 database_id = "7f1e1326-b879-4ecd-8621-846621c24f36"
 
 [env.preview.vars]
+HOST_REDIRECTS = "cw-s3.oa.dev=cw.oa.dev,dev.cw-s3.oa.dev=dev.cw.oa.dev"
 ROOT_LABEL = "Marin CoreWeave (dev)"
 # Response-cache namespace (`_lib/edgeCache.ts`): this stack shares prod's KV, so its keys carry their own tag;
 # pinned so dev.cw-s3.oa.dev and the `pages.dev` alias share one.
@@ -196,7 +199,7 @@ ADMIN_EMAILS = "1"
 # GCP project, image and CoreWeave S3 endpoint.
 DATA_BUCKET = "oa-cw-s3-usage-data"
 GCP_PROJECT = "oa-internal-450019"
-META_TREE_URL = "https://cw-s3.oa.dev/meta"  # /scans outputs link into the meta tree
+META_TREE_URL = "https://cw.oa.dev/meta"  # /scans outputs link into the meta tree
 SWEEP_IMAGE = "us-central1-docker.pkg.dev/oa-internal-450019/cw-s3-usage/scan:cw"
 DISKY_LABELS = "app=disky,deployment=cw-s3"  # cost labels on executor jobs (specs/cost-labels.md)
 SWEEP_S3_ENDPOINT = "https://cwobject.com"
