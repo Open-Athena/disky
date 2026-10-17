@@ -55,6 +55,27 @@ describe('D1', () => {
         { name: 'b', b: 30, color: slotColor(1) },
       ])
     })
+    it('tree mode under one top-level dir: its children take the slots, the lone ancestor a neutral frame', () => {
+      // hf: the org's one bucket over models / buckets / datasets — keyed at the root, the whole card is one hue.
+      const lone: TreeNode = {
+        n: 'root', b: 100, o: 10,
+        c: [{ n: 'org', b: 100, o: 10, c: [
+          { n: 'models', b: 70, o: 7, c: [{ n: 'm1', b: 50, o: 5 }, { n: 'm2', b: 20, o: 2 }] },
+          { n: 'datasets', b: 30, o: 3 },
+        ] }],
+      }
+      expect(tilesOf(lone, color, 'tree')).toEqual([
+        { name: 'org', b: 100, color: '#232322', kids: [
+          { name: 'models', b: 70, color: slotColor(0), kids: [
+            { name: 'm1', b: 50, color: slotColor(0, 0, 2) },
+            { name: 'm2', b: 20, color: slotColor(0, 1, 2) },
+          ] },
+          { name: 'datasets', b: 30, color: slotColor(1) },
+        ] },
+      ])
+      // owner mode keeps the view's own children as they are
+      expect(tilesOf(lone, color)[0].color).toBe(UNOWNED_COLOR)
+    })
     it('date mode: containers neutral at every depth; the scale spans the drawn leaves', () => {
       const deep: TreeNode = {
         n: 'root', b: 100, o: 10, d: 5,

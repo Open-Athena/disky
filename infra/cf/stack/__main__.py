@@ -57,7 +57,9 @@ store = Store(
     r2_location=cfg.get("r2Location") or "enam",
     service_token=cfg.get("serviceToken"),
 )
-dash = CfnDashboard(pulumi.get_stack(), account_id=account_id, zone_id=zone_id, store=store, import_ids=cfg.get_object("importIds") or None)
+# The component's name prefixes every resource's logical name (`<name>-pages`, `<name>-d1`, …): pinned by
+# `componentName` when the stack is renamed, else a rename would replace them all (the D1 with its data).
+dash = CfnDashboard(cfg.get("componentName") or pulumi.get_stack(), account_id=account_id, zone_id=zone_id, store=store, import_ids=cfg.get_object("importIds") or None)
 
 pulumi.export("pages_project", dash.pages.name)
 pulumi.export("custom_domain", dash.domain.name)
