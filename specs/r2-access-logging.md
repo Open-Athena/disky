@@ -62,7 +62,7 @@ RAC enables and collects RAC bucket logs with RAC credentials into RAC private s
 
 1. Complete: RAC token and dashboard/API/pagination pilot verified.
 2. Complete (2026-10-17): boundary, latency and sampling semantics measured (above); overlap/replay with event-id dedupe, per-hour sampling and a conditional `state.json` publish implemented in the Worker; `r2-export` uses `[from, to)` and reports capture sampling.
-3. Apply the [RAC collector stack] with cron off, install its runtime secret from `wt/m3` (the replacement token), then preview/apply cron enablement. Verify one scheduled run's `state.json`, `_SUCCESS.json` and sanitized logs. The public demo's serving bucket is not a raw-log destination.
+3. [RAC collector stack] applied 2026-10-17 with cron off (6 resources + stack created; re-preview unchanged). Remaining: install its runtime secret from `wt/m3` (the replacement token), then preview/apply cron enablement. Verify one scheduled run's `state.json`, `_SUCCESS.json` and sanitized logs. The public demo's serving bucket is not a raw-log destination.
 4. Hand the same contract to HCCS. OA: Data Access Logs were enabled on `marin-na` around 03:15Z on 2026-10-17 (dashboard, by Ryan). No OA collector exists yet; build it after reviewing OA's pricing, sampling and permissions, and measure `marin-na`'s volume before reusing the pilot's limits.
 
 [Data Access Logs][logs], [Observability pricing][pricing], [query API][query], [datasets][datasets].

@@ -20,7 +20,7 @@ WRANGLER_LOG_PATH="$PWD/tmp/r2-access-wrangler.log" pnpm --dir infra/cf/r2-acces
 infra/.venv/bin/python -m pytest -q --disable-warnings infra/tests/test_r2_access_stack.py infra/tests/test_cf_stack.py
 ```
 
-The preview performed on October 12 succeeded: six new Cloudflare resources plus the stack, no updates/deletes, and `schedules: []`. The detailed preview and saved plan are in ignored `tmp/r2-access-preview.txt` and `tmp/r2-access-preview-plan.json`. Provider warnings say certain configuration resources cannot be removed by destroy alone: explicitly disable cron through an apply before decommissioning the Worker/stack; do not assume destroy stops collection.
+Applied 2026-10-17 with cron **off**: the previewed plan (six Cloudflare resources plus the stack, creates only, `schedules: []`) went through `up --plan`, and a follow-up preview showed 7 unchanged. The Worker exists without its runtime secret, so it cannot query anything yet, and no schedule invokes it. Preview/apply logs are in ignored `tmp/r2-access-{preview,up}.txt`. Provider warnings say certain configuration resources cannot be removed by destroy alone: explicitly disable cron through an apply before decommissioning the Worker/stack; do not assume destroy stops collection.
 
 ## Preview/apply handoff
 
