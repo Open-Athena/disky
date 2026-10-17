@@ -195,5 +195,5 @@ done
 - **Explain yourself:** the `note` on a stage batch is what the reviewing admin reads on `/staged`; the `memo` on an assignment is what the ledger shows.
 - There is no client CLI for staging; the surviving `dt-cloud` verbs are the pipeline's and the executor's (`healthcheck`, `sweep manifest --plan`, …).
 
-[API.md]: https://github.com/Open-Athena/marin-gcs-usage/blob/gcs/API.md
+[API.md]: https://github.com/Open-Athena/disky/blob/gcs/API.md
 [operations]: specs/gcs-operations.md

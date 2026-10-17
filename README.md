@@ -1,4 +1,4 @@
-# marin-gcs-usage
+# disky: Marin GCS usage
 
 ![Treemap of the six marin-* buckets, coloured by top-level prefix](site/public/og.jpg)
 
@@ -7,6 +7,8 @@
 Storage-usage attribution and cleanup for the Marin GCS buckets: **who is using
 what**, and a **staged-deletion** workflow to reclaim space. Browse it at
 **[gcs.oa.dev]** (Open-Athena-gated).
+
+This repo carries one branch per [disky] deployment: `gcs` (the default, this README), `cw-s3`, `hf` and `r2`, each merging the shared `cloud` base.
 
 The identity map (`cloud/src/dt_cloud/identities.yaml`: handles, teams, login
 aliases) is curated in-repo; it maps already-public GitHub / W&B handles to a
@@ -128,6 +130,7 @@ For the web app (`site/`), see [`site/`](site) — `./dev` runs the full local
 stack (Vite UI + `wrangler pages dev` for the Functions).
 
 [gcs.oa.dev]: https://gcs.oa.dev
+[disky]: https://github.com/runsascoded/disky
 [marin]: https://github.com/marin-community/marin
 [marin#6790]: https://github.com/marin-community/marin/issues/6790
 [disk-tree]: https://github.com/runsascoded/disk-tree

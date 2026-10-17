@@ -49,7 +49,7 @@ const store: Store = {
     <p>
       Storage across the six <code>marin-*</code> GCS buckets — a full per-object listing
       (deduped), snapshotted daily by the{' '}
-      <a href="https://github.com/Open-Athena/marin-gcs-usage/blob/gcs/AGENTS.md#data-flow" target="_blank" rel="noreferrer"><code>marin-gcs-usage</code></a>{' '}
+      <a href="https://github.com/Open-Athena/disky/blob/gcs/AGENTS.md#data-flow" target="_blank" rel="noreferrer"><code>disky</code></a>{' '}
       pipeline, which also ingests the buckets’ access logs and joins ownership onto every prefix
       (W&amp;B run/config matching, executor sidecars, manual curation). Owner assignments apply live on
       top of the latest snapshot. Access logging began 8/13, so “never read” means “not since then”.
