@@ -34,15 +34,16 @@ PROFILE_ENV = "SCAN_RUNS_PROFILE"
 TABLES = ("scan_runs", "scan_run_phases", "scan_run_outputs", "scan_run_dags")
 STATUSES = ("running", "succeeded", "failed", "nop")
 #: What started the run, as GitHub Actions' `event_name`: the deployment's cron (its job body sets `DT_TRIGGER=schedule`)
-#: or anything else (a hand submit, a resume). `scan head` stamps it on the scan too (`scan_head.TRIGGER_FILE`).
+#: or a hand submit / resume (its submitter sets `manual`). Opt-in per deployment, with migration `scan-run-trigger`:
+#: unset, nothing is recorded or stamped (`scan head`'s `trigger.json`), and the digest goes by the clock.
 TRIGGER_ENV = "DT_TRIGGER"
 TRIGGERS = ("schedule", "manual")
 
 
-def trigger_of(env: Mapping[str, str]) -> str:
-    """`$DT_TRIGGER` (one of `TRIGGERS`), `manual` when unset: only a cron body sets it."""
-    t = (env.get(TRIGGER_ENV) or "").strip() or "manual"
-    if t not in TRIGGERS:
+def trigger_of(env: Mapping[str, str]) -> str | None:
+    """`$DT_TRIGGER` (one of `TRIGGERS`); None when unset (a deployment that doesn't state its triggers)."""
+    t = (env.get(TRIGGER_ENV) or "").strip() or None
+    if t is not None and t not in TRIGGERS:
         raise ValueError(f"${TRIGGER_ENV}={t!r}: not one of {TRIGGERS}")
     return t
 
@@ -1560,7 +1561,7 @@ def _phase_end_opts(f):
 @option("-k", "--kind", default="scan", help="The run's kind: scan | reproc | compute | access | … (default scan)")
 @option("-K", "--store", "store_key", default=None, help="The store the run belongs to (default the profile's `store`)")
 @option("-m", "--machine", default=None, help="Job fact: the machine (a key of the profile's `prices` gets a cost)")
-@option("-o", "--trigger", type=Choice(TRIGGERS), default=None, help=f"What started the run (default ${TRIGGER_ENV}, else manual)")
+@option("-o", "--trigger", type=Choice(TRIGGERS), default=None, help=f"What started the run (default ${TRIGGER_ENV}; unset: not recorded)")
 @option("-p", "--parent", default=None, help="The orchestrating run's id")
 @option("-R", "--region", default=None, help="Job fact: the region (or with -J / -B where to look the job up)")
 @option("--spot/--no-spot", default=None, help="Job fact: the run ran on spot capacity")
