@@ -287,7 +287,10 @@ export async function collect(
   const query = async (body: object) => {
     const response = await fetchImpl(`https://api.cloudflare.com/client/v4/accounts/${env.ACCOUNT_ID}/workers/observability/telemetry/query`, {
       method: 'POST', headers: { authorization: `Bearer ${env.CF_OBSERVABILITY_TOKEN}`, 'content-type': 'application/json' },
-      body: JSON.stringify(body), signal: AbortSignal.timeout(30_000), redirect: 'error',
+      body: JSON.stringify(body), signal: AbortSignal.timeout(30_000),
+      // Workers' fetch takes only `follow` / `manual` (`error` throws a TypeError: the first scheduled run, 10-17 04:13Z,
+      // failed on it in 151 ms); a manual 3xx isn't `ok`, so it fails the run as `provider_http_3xx`.
+      redirect: 'manual',
     })
     if (!response.ok) {
       await response.body?.cancel()

@@ -279,6 +279,13 @@ describe('collect', () => {
     expect(order).toEqual([`${prefix('r2', time + H)}/jc-taxes/0000.json`, `${prefix('r2', time + H)}/jc-taxes/0001.json`, 'agg/jc-taxes/2026-10-12/r2.json'])
   })
 
+  it("never follows a redirect (Workers' fetch has no `redirect: 'error'`): a 3xx fails the run before archiving", async () => {
+    const { env, order } = setup()
+    const fetcher = vi.fn<typeof fetch>(async () => new Response(null, { status: 302, headers: { location: 'https://example.org/' } }))
+    await expect(collect(time, env.HOURLY_CRON, env, fetcher, 'r3')).rejects.toThrow('r2-access: provider_http_302')
+    expect([fetcher.mock.calls.map(([, init]) => init?.redirect), order]).toEqual([['manual'], []])
+  })
+
   it('rejects repeated cursors before archiving the repeated page', async () => {
     const { env, order } = setup()
     const page = eventsPage([rows[1]])
