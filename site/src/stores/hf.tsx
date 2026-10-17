@@ -1,5 +1,6 @@
 // hf.oa.dev's store: the Hugging Face org `open-athena` (its Storage Buckets and model, dataset and space repos) as
 // one bucket, listed daily by the scan's `list` step (`disk-tree bulk-list hf://open-athena`).
+import { OA_PEERS } from '../oaPeers'
 import type { ExternalLink, Store } from '../stores'
 
 /** The org's storage allowances, as declared values: the Hub has no API for them. Source: the org's billing page
@@ -69,6 +70,7 @@ const store: Store = {
   buckets: ['open-athena'],
   rootLabel: 'the whole org',
   externalLink: hubLink,
+  peers: OA_PEERS,
   allowances: {
     rows: [
       { label: 'Public storage', bytes: HF_ALLOWANCES.publicStorage, name: '253 TB', classes: [1] },
