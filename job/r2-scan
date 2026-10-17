@@ -335,6 +335,7 @@ def plan(head_profile: str | None, image: str) -> None:
     planned = job_spec(image, profile())
     if head_profile:
         head_job(planned, head_profile)
+    set_trigger(planned, "schedule")
     print(dumps(planned, indent=2))
 
 
@@ -386,11 +387,18 @@ def submit(
         task["runnables"][0]["container"].update(entrypoint="python", commands=["job/r2-scan", "backfill-age", scan, generation])
         for secret in ("SOURCE_ACCESS_KEY_ID", "SOURCE_SECRET_ACCESS_KEY"):
             del task["environment"]["secretVariables"][secret]
+    set_trigger(planned, "manual")
     spec.write_text(dumps(planned, indent=2) + "\n")
     run([
         "gcloud", "batch", "jobs", "submit", name,
         "--project", config["project"], "--location", config["region"], "--config", str(spec),
     ], check=True)
+
+
+def set_trigger(planned: dict, trigger: str) -> None:
+    """What started the run (`$DT_TRIGGER`, recorded on its `scan_runs` row): `plan` is the scheduler's body, so
+    `schedule`; `submit` is by hand, so `manual`."""
+    planned["taskGroups"][0]["taskSpec"]["environment"]["variables"]["DT_TRIGGER"] = trigger
 
 
 def head_job(planned: dict, profile_path: str) -> None:

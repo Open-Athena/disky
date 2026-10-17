@@ -554,13 +554,42 @@ def test_plan_head_prints_the_head_job() -> None:
     assert result.exit_code == 0, result.output
     expected = module["job_spec"](image, config)
     module["head_job"](expected, "job/profiles/r2.yml")
+    module["set_trigger"](expected, "schedule")
     assert loads(result.output) == expected
     task = expected["taskGroups"][0]["taskSpec"]
-    assert (task["runnables"][0]["container"]["commands"], sorted(task["environment"]["secretVariables"]), task["environment"]["variables"]["DT_SCAN_IMAGE"]) == (
+    variables = task["environment"]["variables"]
+    assert (task["runnables"][0]["container"]["commands"], sorted(task["environment"]["secretVariables"]), variables["DT_SCAN_IMAGE"], variables["DT_TRIGGER"]) == (
         ["scan", "head", "/app/job/profiles/r2.yml"],
         ["CLOUDFLARE_API_TOKEN", "SLACK_BOT_TOKEN"],
         image,
+        "schedule",
     )
+
+
+def test_submit_head_is_manual(monkeypatch: pytest.MonkeyPatch) -> None:
+    from json import loads
+
+    from click.testing import CliRunner
+
+    submitted = []
+    monkeypatch.setitem(module["submit"].callback.__globals__, "run", lambda command, check: submitted.append(command))
+    name = "oa-r2-scan-test-trigger"
+    result = CliRunner().invoke(module["submit"], ["-H", "job/profiles/r2.yml", "-n", name, image])
+    assert result.exit_code == 0, result.output
+    spec = Path(module["HERE"]).parent / "tmp" / f"{name}.json"
+    try:
+        expected = module["job_spec"](image, config)
+        expected["taskGroups"][0]["taskSpec"]["environment"]["variables"]["OA_R2_JOB_NAME"] = name
+        module["head_job"](expected, "job/profiles/r2.yml")
+        module["set_trigger"](expected, "manual")
+        assert loads(spec.read_text()) == expected
+        assert expected["taskGroups"][0]["taskSpec"]["environment"]["variables"]["DT_TRIGGER"] == "manual"
+        assert submitted == [[
+            "gcloud", "batch", "jobs", "submit", name,
+            "--project", config["project"], "--location", config["region"], "--config", str(spec),
+        ]]
+    finally:
+        spec.unlink()
 
 
 def test_head_job_refuses_a_path_outside_profiles() -> None:
