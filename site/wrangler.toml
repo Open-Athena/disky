@@ -1,4 +1,4 @@
-# CF Pages project config (oa-cw-s3-usage → cw.oa.dev; cw-s3.oa.dev redirects, specs/rename-cw.md). `wrangler pages
+# CF Pages project config (oa-cw-s3-usage → cw.oa.dev; cw-s3.oa.dev redirects, specs/done/rename-cw.md). `wrangler pages
 # deploy` reads this, so bindings + vars declared here apply to the deployment
 # it creates. The deployment's own sign-in (Google OIDC + emailed codes, the
 # `@open-athena/auth` session model) gates the whole host; D1's schema is
@@ -36,7 +36,7 @@ STORE = "cw"                    # the store this build serves (`src/stores.ts`)
 MARK = "cw"                     # favicon/badge: the CoreWeave mark (`public/icons/cw*`; the build injects the links)
 PROD_HOST = "cw.oa.dev"         # `g d` toggles with DEV_HOST (src/hosts.ts)
 DEV_HOST = "dev.cw.oa.dev"
-# The rename (specs/rename-cw.md): the old hosts stay attached and 301 GETs here (`_lib/hostRedirect.ts`)
+# The rename (specs/done/rename-cw.md): the old hosts stay attached and 301 GETs here (`_lib/hostRedirect.ts`)
 HOST_REDIRECTS = "cw-s3.oa.dev=cw.oa.dev,dev.cw-s3.oa.dev=dev.cw.oa.dev"
 AUTH_MODE = "app"                # own sign-in: Google OIDC + emailed codes (specs/done/oidc-cutover-cw.md P4, 2026-09-28)
 OG_CARDS = "1"

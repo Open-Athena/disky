@@ -5,13 +5,13 @@ config:
   gcs-usage-cf:accountId: 74981a43be0de7712369306c7b19133d
   gcs-usage-cf:zoneId: 169959d6aafcbfd77764b8efafa3a509
   gcs-usage-cf:pagesProject: oa-cw-s3-usage
-  # the stack was renamed cw-s3 → cw (specs/rename-cw.md); its resources keep their logical names
+  # the stack was renamed cw-s3 → cw (specs/done/rename-cw.md); its resources keep their logical names
   gcs-usage-cf:componentName: cw-s3
   gcs-usage-cf:domain: cw-s3.oa.dev
   gcs-usage-cf:d1Name: oa-cw-s3-usage-db
   gcs-usage-cf:branchAliases:
     - {domain: dev.cw-s3.oa.dev, branch: dev}
-  # the rename to cw (specs/rename-cw.md): the new names beside the old, which stay attached and redirect (site)
+  # the rename to cw (specs/done/rename-cw.md): the new names beside the old, which stay attached and redirect (site)
   gcs-usage-cf:extraDomains:
     - {domain: cw.oa.dev}
     - {domain: dev.cw.oa.dev, branch: dev}

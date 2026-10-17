@@ -233,7 +233,7 @@ A deployment's spec lists the baseline items it doesn't have yet as gaps, and th
 
 ## cw
 
-This branch is the cw.oa.dev deployment (renamed from cw-s3 on 2026-10-17, specs/rename-cw.md: cw-s3.oa.dev redirects; cloud resource ids keep `cw-s3`): the shared `cloud` base (everything above) plus the CoreWeave store. This section covers what is cw's own.
+This branch is the cw.oa.dev deployment (renamed from cw-s3 on 2026-10-17, specs/done/rename-cw.md: cw-s3.oa.dev redirects; cloud resource ids keep `cw-s3`): the shared `cloud` base (everything above) plus the CoreWeave store. This section covers what is cw's own.
 
 The repo is **public**: no emails or other PII in tracked files or commit messages (name + GitHub handle at most). Sizes stay behind the site's auth.
 
