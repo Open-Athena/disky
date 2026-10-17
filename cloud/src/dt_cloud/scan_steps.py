@@ -282,11 +282,29 @@ class Ctx:
             return True
         return False
 
+    @contextmanager
+    def creds(self) -> Iterator[None]:
+        """The step's credentials (`AWS_*` from `ctx.env`: `r2_profile`'s `AWS_SHARED_CREDENTIALS_FILE`, a source's keys)
+        in `os.environ` for an in-process store read, as `ctx.sh` gives them to a subprocess: else boto, finding the
+        `profile: r2` that `buckets.yml` names, looks in a credentials file that lacks it (r2, 2026-10-17T0311)."""
+        keys = [k for k in self.env if k.startswith("AWS_")]
+        saved = {k: os.environ.get(k) for k in keys}
+        os.environ.update({k: self.env[k] for k in keys})
+        try:
+            yield
+        finally:
+            for k, v in saved.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
+
     def store_has(self, root: str, key: str) -> bool:
-        """Whether the store at `root` (a dir or URL, `blobstore.Store`) holds `key`."""
+        """Whether the store at `root` (a dir or URL, `blobstore.Store`) holds `key`, read with the step's credentials."""
         from .blobstore import Store
 
-        return Store(root).exists(key)
+        with self.creds():
+            return Store(root).exists(key)
 
     def need(self, path: Path, step: str) -> Path:
         if not path.exists():

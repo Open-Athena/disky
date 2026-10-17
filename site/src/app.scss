@@ -846,6 +846,42 @@ h2 { font-size: 17px; font-weight: 650; margin: 0 0 4px; }
       gap: 12px;
       text-align: left;
       .signin { display: block; text-align: center; }
+      // A remembered Google account ("Continue as <it>", up to five, newest first): an outlined row, not the
+      // filled primary button — Google's mark, the address, "Last used" on the first row only, an arrow.
+      .signin:has(.remembered-account) {
+        background: transparent;
+        color: var(--ink);
+        border: 1px solid var(--line);
+        font-weight: 400;
+        padding: 12px 14px;
+        transition: border-color 120ms ease, background 120ms ease;
+        &:hover { filter: none; border-color: var(--ink-3); background: var(--surface); }
+      }
+      .signin:has(.remembered-account) ~ .signin .account-last-used { display: none; }
+      .remembered-account {
+        display: grid;
+        grid-template-columns: 18px minmax(0, 1fr) auto 16px;
+        align-items: center;
+        gap: 10px;
+        text-align: left;
+        font-size: 14px;
+        svg { display: block; }
+        .account-email { overflow-wrap: anywhere; }
+        .account-last-used {
+          padding: 3px 7px;
+          border-radius: 4px;
+          background: color-mix(in srgb, var(--s1) 14%, transparent);
+          color: var(--s1);
+          font-size: 11px;
+          white-space: nowrap;
+        }
+        .account-arrow { color: var(--ink-3); grid-column: 4; }
+        @media (max-width: 440px) {
+          grid-template-columns: 18px minmax(0, 1fr) 16px;
+          .account-last-used { display: none; }
+          .account-arrow { grid-column: 3; }
+        }
+      }
       // Google's own rendered button (`oneTap`): GSI sizes it to its content,
       // so centre it; the box reserves the button's height while GSI loads.
       .signin-onetap { display: flex; justify-content: center; min-height: 40px; }
