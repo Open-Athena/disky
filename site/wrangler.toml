@@ -31,7 +31,7 @@ PROD_HOST = "hf.oa.dev"
 DEV_HOST = "dev.hf.oa.dev"
 REPO_URL = "https://github.com/Open-Athena/marin-gcs-usage"
 OG_CARDS = "1"
-OG_ANONYMOUS = "generic"         # no sizes, counts, paths or people in ordinary unfurls
+OG_ANONYMOUS = "full"            # an anonymous unfurl gets the full card (labelled tiles, sizes; OA-owned data, as cw)
 # Who may see it (_lib/auth.ts): Open Athena staff by email domain; `admin_emails` rows (migrations/cw/0001) on top.
 BASE_SCOPE = "hf"
 STAFF_DOMAIN = "openathena.ai"
@@ -97,7 +97,7 @@ PROD_HOST = "hf.oa.dev"
 DEV_HOST = "dev.hf.oa.dev"
 REPO_URL = "https://github.com/Open-Athena/marin-gcs-usage"
 OG_CARDS = "1"
-OG_ANONYMOUS = "generic"
+OG_ANONYMOUS = "full"
 BASE_SCOPE = "hf"
 STAFF_DOMAIN = "openathena.ai"
 ADMIN_EMAILS = "1"
