@@ -1,0 +1,5 @@
+config:
+  disky-r2-access:workerConfig: wrangler.oa.json
+  disky-r2-access:enabled: "false"
+  disky-r2-access:retentionDays: "30"
+encryptionsalt: v1:/HQ90NrdSBc=:v1:hkeSZhK0ld27sr+w:Nz1+GUi19OOfW+VNw6qodM7LksSVrg==

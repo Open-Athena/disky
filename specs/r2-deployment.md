@@ -58,3 +58,15 @@ Steps, in order (each a go from Ryan):
 4. `job/r2-scan run` and its helpers are deleted after a clean week.
 
 [`pipelines-everywhere.md`]: pipelines-everywhere.md
+
+## Access logs (the R2 access-log collector, [`r2-access-logging.md`])
+
+OA's instance of root's collector (`infra/cf/r2-access`, live on RAC since 10/17): `wrangler.oa.json` (Worker `oa-r2-access`, private archive `oa-r2-access-logs`, sources `["marin-na"]`, the bucket whose Data Access Logs Ryan enabled 10/17 ~03:15Z) and stack `oa` (`Pulumi.oa.yaml`: `workerConfig`, cron off; local state in `infra/cf/r2-access/state`, OA's IaC token `CF_IAC_TOKEN`, r2's passphrase). Preview: 7 creates, nothing else (`tmp/r2-access-oa-preview.txt`).
+
+Steps, each a go from Ryan:
+1. An OA **account-owned** API token with Workers Observability (read for the query, as the runtime `CF_OBSERVABILITY_TOKEN`); Ryan creates it, into Secret Manager.
+2. Measure marin-na first (`dt-cloud access r2-query`/calculation over a day: events/hour, `sampleInterval`) and size `PAGE_SIZE`/`MAX_PAGES`/`LOOKBACK_HOURS` from it; the RAC caps (50 × 500) are for a quiet bucket.
+3. `pulumi up -s oa` (cron off), `wrangler secret put CF_OBSERVABILITY_TOKEN -c wrangler.oa.json`, then `secretReady`/`enabled` → a second apply; verify one scheduled run's `_SUCCESS.json` and logs.
+4. A last-read overlay for the site is later work (derived summaries only; raw events stay in `oa-r2-access-logs`, never the serving bucket).
+
+[`r2-access-logging.md`]: r2-access-logging.md
