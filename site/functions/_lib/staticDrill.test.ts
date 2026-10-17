@@ -693,7 +693,7 @@ describe('D1', () => {
       }
       expect(got).toEqual(want)
       expect([got.length, nestedAny]).toEqual([52, 44])
-    })
+    }, 120_000)  // past 30 s under the full parallel suite (cw, 10-17); the file alone runs 40 tests in ~37 s
 
     it('a drawn match root\'s inside is the unfiltered view of its path (every descendant matches), `FILTER_SUBDIV_LEVELS` deep', async () => {
       /** Every node under `n` but its `(other)` folds: `[path below n, bytes, objects, kind]`, depth first. */
