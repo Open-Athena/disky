@@ -134,7 +134,7 @@ meta = BatchCron(
     schedule="0 9 * * *",
     submitter=job_dir / "cw-meta-submit.sh",
     sa_email=job.email,
-    description="Daily meta self-scan (job/cw-meta-submit.sh PIN=1 DRY=1 body) -> cw-s3.oa.dev/meta",
+    description="Daily meta self-scan (job/cw-meta-submit.sh PIN=1 DRY=1 body) -> cw.oa.dev/meta",
     adopt=adopt,
     existing=True,
     depends_on=ready,

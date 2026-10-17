@@ -17,7 +17,7 @@ from click import Choice, ClickException, Path as ClickPath, argument, group, op
 from requests import RequestException, Response, Session
 
 ROOT = Path(__file__).resolve().parents[1]
-HOSTS = {"preview": "https://dev.cw-s3.oa.dev", "production": "https://cw-s3.oa.dev"}
+HOSTS = {"preview": "https://dev.cw.oa.dev", "production": "https://cw.oa.dev"}
 
 
 class SafeSession(Session):

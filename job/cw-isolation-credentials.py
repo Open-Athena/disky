@@ -345,7 +345,7 @@ def verify_site(
             raise ClickException(f"Job viewer grant access failed: HTTP {response.status_code}")
         token = access_payload(response.json()).decode().strip()
     output.mkdir(mode=0o700, parents=True, exist_ok=False)
-    hosts = {"preview": "https://dev.cw-s3.oa.dev", "production": "https://cw-s3.oa.dev"}
+    hosts = {"preview": "https://dev.cw.oa.dev", "production": "https://cw.oa.dev"}
     if deployment_url:
         if re.fullmatch(r"https://[a-f0-9]{8}\.oa-cw-s3-usage\.pages\.dev", deployment_url) is None:
             raise ClickException("Deployment URL is outside the immutable CW Pages allowlist")

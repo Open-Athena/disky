@@ -5,7 +5,7 @@
 template: cw
 title: CoreWeave usage
 units: TiB                 # binary sizes (the default; `TB` for a store billed in decimal TB)
-site_url: https://cw-s3.oa.dev
+site_url: https://cw.oa.dev
 # `{DATA_BUCKET}` reads the env; the job passes `-r` anyway
 root: gs://{DATA_BUCKET}/snapshots/cw
 # keyed by channel (a staging converge never masquerades as prod) and variant

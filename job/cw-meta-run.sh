@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # The "meta" self-scan (GCP Batch, daily): the storage the deployments write,
 # as the cw-s3 deployment's secondary store `meta` (specs/multi-store.md
-# phase 3 — served at cw-s3.oa.dev/meta once `STORES_JSON` / `STORES_EXTRA`
+# phase 3 — served at cw.oa.dev/meta once `STORES_JSON` / `STORES_EXTRA`
 # name it; its D1 rows need the meta columns in `site/schema.sql`). The chain is cw-run.sh's, over
 # different roots and into the store's own prefixes:
 #   1. bulk-list  each root: the GCS data bucket (`gcs://`, ADC as the job SA)
@@ -54,7 +54,7 @@ STORE=meta
 export D1_DB_ID=${D1_DB_ID:-7f1e1326-b879-4ecd-8621-846621c24f36}   # oa-cw-s3-usage-db (site/wrangler.toml)
 export D1_DB_NAME=${D1_DB_NAME:-oa-cw-s3-usage-db}
 export INDEX_VARIANTS=${INDEX_VARIANTS:-path}
-export SITE_URL=${SITE_URL:-https://cw-s3.oa.dev}
+export SITE_URL=${SITE_URL:-https://cw.oa.dev}
 export SNAPSHOTS_SUBDIR=${SNAPSHOTS_SUBDIR:-$STORE}                  # snapshots/meta/ (`STORES_JSON` says the same)
 export LAYER2_PREFIX=${LAYER2_PREFIX:-"$STORE-l2/{scan}/"}          # this store's layer-2 dir (`dt-cloud publish-r2 -l`)
 
