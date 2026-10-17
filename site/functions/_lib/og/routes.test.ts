@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
 import { pageView } from './routes'
 
@@ -40,6 +41,18 @@ describe('pageView: page URL → card kind, view params, title', () => {
   it('no card: API, assets, other pages; `..` is resolved by the URL parser first', () => {
     expect(['/api/subtree', '/og/map.png', '/files/listing', '/admin', '/og.jpg', '/assets/index.js', '/a/../b', '/a/%2E%2E/b'].map(pv))
       .toEqual([null, null, null, null, null, null, { kind: 'map', params: { path: 'b' }, title: 'b' }, { kind: 'map', params: { path: 'b' }, title: 'b' }])
+  })
+})
+
+describe('every page route of the app has its own card or none, never a folder card', () => {
+  // `src/Root.tsx`'s routes: an app page the parser took for a folder unfurled as an empty map of `/scans`, `/meta`, …
+  const routes = [...readFileSync(new URL('../../../src/Root.tsx', import.meta.url), 'utf8').matchAll(/<Route path="([^"]+)"/g)]
+    .map(m => m[1]).filter(p => p !== '*')
+  it('Root.tsx routes → kinds', () => {
+    const kinds = Object.fromEntries(routes.map(r => [r, pv(r.replace(/:\w+/g, 'x').replace(/\*$/, 'x'))?.kind ?? null]))
+    expect(Object.entries(kinds).filter(([, k]) => k === 'map')).toEqual([])
+    expect(kinds['/staged']).toBe('staged')
+    expect([kinds['/scans'], kinds['/scans/*'], kinds['/meta/*'], kinds['/names']]).toEqual([null, null, null, null])
   })
 })
 
