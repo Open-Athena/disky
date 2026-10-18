@@ -607,7 +607,7 @@ def _ts(rec: str | dict) -> str:
     return rec["ts"] if isinstance(rec, dict) else rec
 
 
-def converge_slack(tpl: Template, root: str, month: dt.date, client, channel: str, variant: str | None = None, *, icons_dir=None, deploy_plot=None, reply_delay: float = 0.0) -> dict:
+def converge_slack(tpl: Template, root: str, month: dt.date, client, channel: str, variant: str | None = None, *, icons_dir=None, deploy_plot=None, reply_delay: float = 0.0, edit_replies: bool = False) -> dict:
     """Converge the month's Slack thread: render+host the plot, post/edit the
     OP, then per reply unit post it if none exists — or, on an edited variant,
     edit it when a later scan has landed. Then the provisional reply
@@ -621,8 +621,10 @@ def converge_slack(tpl: Template, root: str, month: dt.date, client, channel: st
     ``icons_dir`` is where to write the PNG; ``deploy_plot(local, basename)``
     publishes it and returns the host serving it (None → ``cfg.plot_base``).
     ``reply_delay`` sleeps between new replies (>0 for a spaced backfill, so
-    Slack doesn't collapse same-sender chrome). ``client`` is a thrds
-    ``SlackClient`` (or a fake)."""
+    Slack doesn't collapse same-sender chrome). ``edit_replies`` re-edits every
+    already-posted reply to its current body (a format change's backfill; the
+    sender variant's name and avatar are fixed at post time, so only its body
+    changes). ``client`` is a thrds ``SlackClient`` (or a fake)."""
     import time
 
     cfg = tpl.cfg
@@ -678,9 +680,10 @@ def converge_slack(tpl: Template, root: str, month: dt.date, client, channel: st
             new += 1
             save_state(path, state)   # persist after each → a spaced backfill is resumable
             _err(f"digest: reply {u.key} ({u.scan}) -> {rm.id}")
-        elif variant in tpl.edited_variants and have["scan"] != u.scan:
-            client.edit(have["ts"], r.body)
-            have["scan"] = u.scan
+        elif edit_replies or (variant in tpl.edited_variants and have["scan"] != u.scan):
+            client.edit(_ts(have), r.body)
+            if isinstance(have, dict):
+                have["scan"] = u.scan
             save_state(path, state)
             _err(f"digest: edited reply {u.key} -> {u.scan}")
 
