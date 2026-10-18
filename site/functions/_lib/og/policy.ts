@@ -23,7 +23,13 @@ export const genericCard = (env: PolicyEnv): CardData => ({
   subtitle: '', total: '', tiles: [], empty: 'Sign in to explore storage',
 })
 
+/** The generic page title: `disky — <label>`, or the label alone when it names disky already ("m3 disky metadata"). */
+export const genericTitle = (label: string | undefined): string => {
+  const l = label ?? 'storage'
+  return /\bdisky\b/i.test(l) ? l : `disky — ${l}`
+}
+
 export const genericMeta = (env: PolicyEnv, url: URL) => ({
-  title: `disky — ${env.ROOT_LABEL ?? 'storage'}`, desc: 'Private storage dashboard. Sign in to explore storage.',
+  title: genericTitle(env.ROOT_LABEL), desc: 'Private storage dashboard. Sign in to explore storage.',
   image: url.origin + genericImagePath, imageType: 'image/png', page: url.origin + url.pathname,
 })

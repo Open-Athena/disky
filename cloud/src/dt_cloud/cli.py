@@ -3295,6 +3295,14 @@ from .non_live import non_live_cmd as _non_live  # noqa: E402
 
 main.add_command(_non_live)
 
+from .l2_listing import l2_listing_cmd as _l2_listing  # noqa: E402
+
+main.add_command(_l2_listing)
+
+from .store_gen_gc import store_gc_cmd as _store_gc  # noqa: E402
+
+main.add_command(_store_gc)
+
 
 @main.group("secrets")
 def _secrets() -> None:

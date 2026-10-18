@@ -677,28 +677,38 @@ def path_index(ctx: Ctx) -> None:
     `options.index.annotate`: a command run on the snapshot after the aggregation, before the checks and the publish
     (`{snap}`: its dir; `{listing}`: the first source's listing dir)."""
     key_dir = ctx.data_root / ctx.index_key
+    # A reprocessed scan whose listing is gone but whose layer-2 is kept (a meta store's scans from before it kept
+    # listings) is re-cut from a listing rebuilt from that layer-2 (`dt-cloud l2-listing`: exact but for `generation`)
+    rebuilt = {s.bucket for s in ctx.profile.sources
+               if ctx.reproc and not (ctx.listing_dir(s.bucket) / "_SUCCESS.json").exists() and ctx.l2_path(s.bucket).exists()}
     for s in ctx.profile.sources:
-        ctx.need(ctx.listing_dir(s.bucket) / "_SUCCESS.json", "list")
+        if s.bucket not in rebuilt:
+            ctx.need(ctx.listing_dir(s.bucket) / "_SUCCESS.json", "list")
     if ctx.done(key_dir / "path-index.parquet", "index tiers") and ctx.done(ctx.data_root / ctx.snapshots / ctx.scan / "meta.json", "snapshot"):
         return
     # A local data dir (the local executor's: one machine, no FUSE) is read in place; a GCS one is staged first.
     on_disk = not urlparse(ctx.profile.data).scheme
     store = ctx.data_uri.split("://", 1)[-1]  # `<bucket>[/<prefix>]`, or the dir
     src = (lambda key: str(ctx.data_root / key)) if on_disk else (lambda key: f"/gcs/{store}/{key}")  # `dt-cloud stage`'s glob form
-    lglobs = [src(f"{ctx.listing_key(s.bucket)}/*.parquet") for s in ctx.profile.sources]
+    lglobs = [str(ctx.work / "l2-listing" / s.bucket / "*.parquet") if s.bucket in rebuilt else src(f"{ctx.listing_key(s.bucket)}/*.parquet")
+              for s in ctx.profile.sources]
     attr = [src(a) for a in ctx.opt("index", "attribution", [])]
     access = ctx.opt("index", "access")
     xglobs = [src(access)] if access and next(iter(ctx.data_root.glob(access)), None) else []
     if access and not xglobs:
         err(f"no access shards at {access}: the index runs without read recency")
     stage = ctx.work / "stage"
-    local = (lambda g: g) if on_disk else (lambda g: str(stage / g.removeprefix("/gcs/")))
+    local = (lambda g: g) if on_disk else (lambda g: str(stage / g.removeprefix("/gcs/")) if g.startswith("/gcs/") else g)
     pi = ctx.work / "path-index"
     snap = ctx.work / "snap"
     pi.mkdir(parents=True, exist_ok=True)
     with ctx.phase("path-index"):
-        if not on_disk:
-            ctx.sh(["dt-cloud", "stage", "-o", stage, *lglobs, *[g.replace("*.parquet", "_SUCCESS.json") for g in lglobs], *attr, *xglobs])
+        for b in sorted(rebuilt):
+            err(f"REPROC: {b} has no listing: rebuilding one from its layer-2 (`generation` not kept)")
+            ctx.sh(["dt-cloud", "l2-listing", "-b", b, ctx.l2_path(b), ctx.work / "l2-listing" / b / "shard-00000.parquet"])
+        staged = [g for g in lglobs if g.startswith("/gcs/")]
+        if not on_disk and (staged or attr or xglobs):
+            ctx.sh(["dt-cloud", "stage", "-o", stage, *staged, *[g.replace("*.parquet", "_SUCCESS.json") for g in staged], *attr, *xglobs])
         tmp = stage / ".duckdb-tmp"
         tmp.mkdir(parents=True, exist_ok=True)
         ctx.sh(["dt-cloud", "path-index", "-d", ctx.scan, *[a for g in lglobs for a in ("-l", local(g))],
@@ -946,7 +956,8 @@ def retire(ctx: Ctx, arg: str | None) -> None:
     listing shards under `layout.listing`) of every scan but the
     newest `keep` that both stores hold and a parity marker vouches for (`dt-cloud scan retire`; specs/lean-scans.md §2).
     Off unless the profile lists it in `steps`; a dry run (the plan in the log) unless `execute: true`. The data store
-    first, then each of `copies` (a root, or `r2` for `$R2_ARCHIVE`; D1 left to the first). `store` / `static_store`: the
+    first (`$R2_ARCHIVE` when the data store is a local dir), then each of `copies` (a root, or `r2` for `$R2_ARCHIVE`; D1 left
+    to the first). `store` / `static_store`: the
     stores (default the interval-store / static-names steps', else `$R2_ARCHIVE`); `static_gen` (default
     `options.static-names.gen`); `backup`: copy what goes there first; `markers_only`: never verify in the task. Never
     fatal: a failure warns, the files stay, the next run retries."""
@@ -971,13 +982,37 @@ def retire(ctx: Ctx, arg: str | None) -> None:
     common = ["-G", static_gen, "-k", o["keep"], "-L", l2 + "index/{gen}/path-index.parquet", *(["-l", l2 + "*.parquet"] if o.get("layer2") else []), *l1,
               *(["-m"] if o.get("markers_only") else []), "-o", store, "-S", static_store, *store_args_t(ctx), "-w", ctx.work / "retire",
               *(["-x"] if o.get("execute") else [])]
-    roots = [ctx.data_uri, *(archive if c == "r2" else c for c in o.get("copies", []))]
+    # A local data store is the task's scratch (only this scan's files): the scans' files and D1 rows are the archive's.
+    first = archive if ctx.profile.data_bucket is None and archive else ctx.data_uri
+    roots = [r for r in dict.fromkeys([first, *(archive if c == "r2" else c for c in o.get("copies", []))]) if r]
     with ctx.phase("retire", note=None if o.get("execute") else "dry run"):
-        for i, root in enumerate(r for r in roots if r):
+        for i, root in enumerate(roots):
             d1 = [] if i == 0 and ctx.has(*CF) else ["-R"]
             backup = ["-b", o["backup"]] if i == 0 and o.get("backup") else []
             ctx.sh(["dt-cloud", "scan", "retire", *backup, *common, *d1, "-s", root], fatal=False, fails_phase=True,
                    warn=f"retire failed on {root} (its per-scan files stay; the next run retries)")
+
+
+@step("store-gc", core=False, soft=True, options={"execute": bool, "grace": int, "store": str})
+def store_gc(ctx: Ctx, arg: str | None) -> None:
+    """Superseded interval-store generations (`dt-cloud store-gc -l`): what the current generation was compacted or
+    backfilled from, past the grace (`grace` seconds, default 3 days), its parity markers moved first; on the interval
+    store (`store`, default the interval-store step's, else `$R2_ARCHIVE`) and on `$R2_ARCHIVE` when that's another
+    copy. Off unless the profile lists it in `steps`; a dry run unless `execute: true`. Static-names generations aren't
+    in it: which one each site reads isn't the job's to know (`store-gc -t static-names -k …` by hand)."""
+    if ctx.reproc:
+        err("store-gc off under REPROC")
+        return
+    archive = ctx.env.get("R2_ARCHIVE")
+    store = ctx.opt("store-gc", "store") or ctx.opt("interval-store", "store") or archive
+    if not store:
+        err("store-gc: no interval store (options.store-gc.store, options.interval-store.store or R2): nothing collected")
+        return
+    args = ["-t", "interval-store", "-l", *(["-G", ctx.opt("store-gc", "grace")] if ctx.opt("store-gc", "grace") is not None else []),
+            *(["-x"] if ctx.opt("store-gc", "execute") else [])]
+    with ctx.phase("store-gc", note=None if ctx.opt("store-gc", "execute") else "dry run"):
+        for root in dict.fromkeys(r for r in (store, archive) if r):
+            ctx.sh(["dt-cloud", "store-gc", *args, "-o", root], fatal=False, warn=f"store-gc failed on {root} (the generations stay)")
 
 
 def store_args_t(ctx: Ctx) -> list[str]:
