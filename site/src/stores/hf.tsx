@@ -58,7 +58,7 @@ const store: Store = {
     </>
   ),
   path: '/',
-  // the org is the store's one bucket: the map opens there, and the crumbs start there (no `/ open-athena` crumb)
+  // the org is the store's one bucket, mounted at `/` (`/models/…`, no `/open-athena` segment or crumb); `STORE_ROOT` in wrangler.toml
   root: ['open-athena'],
   scheme: 'hf://',
   base: '/data/hf',
