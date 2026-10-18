@@ -32,6 +32,7 @@ import { SectionAnchor } from './SectionAnchor'
 import { barControls } from './pageBar'
 import { LifecycleFold } from './LifecycleFold'
 import { ClassMixTip, Tooltip } from './Tooltip'
+import { ScanRunLink } from './scanRunsUi'
 import { ReadThroughBanner } from './ReadThroughLi'
 import { readDay, readLogged, readThrough, readThroughText, unloggedOf } from './readLens'
 import { useReadTint } from './readTint'
@@ -1136,6 +1137,7 @@ function AppContent() {
         <div>published {fmtTimestamp(meta.published)}</div>
       )}
       <div><b>{fmtBytes(meta.total_bytes)}</b> · <b>{fmtN(meta.total_objects)}</b> objects across {store.rootLabel}</div>
+      {asof && <ScanRunLink store={store} scan={asof} />}
       {estCost && (
         <div>
           est. <b>${Math.round(estCost.list).toLocaleString()}/mo</b> at list price
@@ -1235,7 +1237,7 @@ function AppContent() {
         {/* How fresh the page's scan is, at a glance (the picker shows only
             its date); the tip carries the exact publish time + totals. */}
         {recordedAt && (
-          <Tooltip content={scanTip}>
+          <Tooltip content={scanTip} pinnable>
             <span className="tb-scan-ago" tabIndex={0}>scanned {ago(Date.parse(recordedAt) / 1000)} ago</span>
           </Tooltip>
         )}
