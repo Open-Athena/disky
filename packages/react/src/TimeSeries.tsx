@@ -684,7 +684,7 @@ export function TimeSeries<T>({
                 {drawn.map((d, i) => d.dashed && <path key={`d${i}`} d={d.dashed} fill="none" stroke={color} strokeWidth={s.strokeWidth ?? 1.75} strokeDasharray="4 4" />)}
                 {drawn.map((d, i) => <path key={`s${i}`} className="dt-ts-line" d={d.solid} fill="none" stroke={color} strokeWidth={s.strokeWidth ?? 1.75} />)}
                 {(s.dots ?? true) && sortedPts.map((p, i) => hollow.has(getX(p))
-                  ? <circle key={i} className="dt-ts-dot-hollow" cx={xToPx(getX(p))} cy={yToPx(getY(p))} r={2.75} fill="var(--dt-ts-bg, #0d1117)" stroke={color} strokeWidth={1.5} />
+                  ? <circle key={i} className="dt-ts-dot-hollow" cx={xToPx(getX(p))} cy={yToPx(getY(p))} r={3.5} fill="var(--dt-ts-bg, #0d1117)" stroke={color} strokeWidth={2} />
                   : <circle key={i} cx={xToPx(getX(p))} cy={yToPx(getY(p))} r={2.5} fill={color} />)}
               </g>
             )
