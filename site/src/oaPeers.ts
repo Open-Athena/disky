@@ -5,6 +5,6 @@ import type { Peer } from './hosts'
 export const OA_PEERS: Peer[] = [
   { label: 'GCS usage', prod: 'gcs.oa.dev', dev: 'dev.gcs.oa.dev', owners: true, staging: true, meta: true },
   { label: 'CoreWeave usage', prod: 'cw.oa.dev', dev: 'dev.cw.oa.dev', staging: true, meta: true },
-  { label: 'Hugging Face usage', prod: 'hf.oa.dev', dev: 'dev.hf.oa.dev' },
+  { label: 'Hugging Face usage', prod: 'hf.oa.dev', dev: 'dev.hf.oa.dev', meta: true },
   { label: 'R2 usage', prod: 'r2.oa.dev', dev: 'dev.r2.oa.dev', meta: true },
 ]
