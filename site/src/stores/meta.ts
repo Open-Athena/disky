@@ -12,7 +12,7 @@ const store: Store = {
   key: 'meta',
   scope: 'admin',
   label: 'Meta',
-  title: 'Marin usage — meta',
+  title: 'Marin CW disky metadata',
   desc: 'The data behind the Marin usage sites: scans, indexes and listings in oa-cw-s3-usage-data (GCS) and oa-cw-s3-usage-index (R2) — treemap, sizes over time, and diffs.',
   path: '/meta',
   scheme: 'gs://',
@@ -24,7 +24,7 @@ const store: Store = {
   owners: false,
   executor: 'plan-sweep',
   buckets: ['oa-cw-s3-usage-data', 'oa-cw-s3-usage-index'],
-  rootLabel: 'Marin usage — meta',
+  rootLabel: 'Marin CW disky metadata',
   objectsNote: 'Scan outputs are written once per job run and never rewritten in place, so created is the object’s publish time.',
   wall: {
     restrict: 'The meta store is limited to Open Athena staff.',
