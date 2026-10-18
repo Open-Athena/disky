@@ -57,7 +57,7 @@ options:
     mem: 12GB
     age_pyramids: true
     verify: true
-  static-names: {gen: 2026-10-18meta, build_args: [-x, "16,8"]}
+  static-names: {gen: 2026-10-18metab, build_args: [-x, "16,8"]}
   index-sync:
     variants: [path, bysize, age-pyramid-1h, age-pyramid-3h, age-pyramid-6h, age-pyramid-12h, age-pyramid-1d,
                age-pyramid-2d, age-pyramid-4d, age-pyramid-8d]
