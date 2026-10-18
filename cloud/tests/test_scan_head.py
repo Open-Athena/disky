@@ -7,6 +7,7 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
 from click.testing import CliRunner
 
 from dt_cloud import scan_head as H
@@ -117,6 +118,26 @@ def test_params_reproc_fresh_and_extras():
         "work_bucket": "",
         "secrets_project": "",
     }
+
+
+@pytest.mark.parametrize("poller, steps, pre", [
+    (False, ["bucket-check", "access-ingest", "list", "index", "index-rows", "index-sync"], ["access-ingest"]),
+    (True, ["bucket-check", "list", "index", "index-rows", "index-sync"], []),
+])
+def test_access_ingest_poller_leaves_the_scan(poller: bool, steps: list[str], pre: list[str]):
+    """`options.access-ingest.poller` (specs/access-log-freshness.md, Order 2): the deployment's hourly poller runs the
+    ingest, so the scan has no `pre` task and `index` waits on the lists only, reading `options.index.access` as it
+    stands. Off (the default), the step runs in `pre` as before."""
+    from dt_cloud.scan_profile import parse
+
+    p = parse({"deployment": "fix", "executor": {"kind": "local"}, "work": "/w", "data": "gs://d",
+               "layout": {"layer2": "l2/{scan}/", "snapshots": "", "listing": "l2/{scan}/"}, "sources": ["gs://a"],
+               "steps": ["access-ingest"],
+               "skip": ["static-names", "publish-r2", "interval-store", "over-time", "index-gc", "warm-cache", "probe", "digest"],
+               "options": {"access-ingest": {"args": ["-P", "4"], "poller": poller},
+                           "index": {"mode": "path-index", "access": "access/agg/*/*.parquet"}}})
+    got = H.params(p, "{}", "2026-10-18T0700", "G", "1", "", "S", {})
+    assert (got["steps"], got["pre"], p.opts("index")["access"]) == (steps, pre, "access/agg/*/*.parquet")
 
 
 def test_local_executor_config():

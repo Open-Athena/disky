@@ -28,11 +28,13 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 from urllib.parse import urlparse
 
+from disk_tree.env import get as env_get, name as env_name
+
 if TYPE_CHECKING:
     import pandas as pd
     import pyarrow as pa
 
-R2_ENDPOINT_VAR = 'DISK_TREE_R2_ENDPOINT_URL'
+R2_ENDPOINT_VAR = env_name('R2_ENDPOINT_URL')
 
 # gcsfs ≥ 2026.8.1 reads through an "adaptive prefetcher" by default
 # (`USE_EXPERIMENTAL_ADAPTIVE_PREFETCHING`, formerly opt-in): every read handle
@@ -105,9 +107,9 @@ def _bucket_field(bucket: str, field: str) -> str | None:
 
 
 def r2_endpoint(bucket: str) -> str | None:
-    """Cloudflare R2's S3 endpoint for `bucket`: `DISK_TREE_R2_ENDPOINT_URL`, else
+    """Cloudflare R2's S3 endpoint for `bucket`: `DISKY_R2_ENDPOINT_URL` (or `DISK_TREE_…`), else
     the bucket's (or `defaults`) `endpoint_url` in `~/.config/disk-tree/buckets.yml`."""
-    ep = os.environ.get(R2_ENDPOINT_VAR)
+    ep = env_get('R2_ENDPOINT_URL')
     if ep:
         return ep
     return _bucket_field(bucket, 'endpoint_url')

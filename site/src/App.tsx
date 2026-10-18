@@ -32,7 +32,9 @@ import { SectionAnchor } from './SectionAnchor'
 import { barControls } from './pageBar'
 import { LifecycleFold } from './LifecycleFold'
 import { ClassMixTip, Tooltip } from './Tooltip'
-import { readLogged, unloggedOf } from './readLens'
+import { ReadThroughBanner } from './ReadThroughLi'
+import { readDay, readLogged, readThrough, readThroughText, unloggedOf } from './readLens'
+import { useReadTint } from './readTint'
 import { Treemap } from './Treemap'
 import type { DateRange, Highlight, ShadeMode } from './Treemap'
 import { dateAxis, useDateScale } from './dateScale'
@@ -754,9 +756,12 @@ function AppContent() {
   const openObject = (segs: string[]) => navigate(openHref(store.path, segs, search))
   // Read-recency lens domain: the access-log observation window (meta), not
   // the tree's own min/max — "no reads" is only meaningful vs when logging began.
+  // Where the scan's read data ends (`access.through`, spec `access-log-freshness.md`): the lens is then
+  // "last touch" and the window runs to that day; provisional when the scan postdates it.
+  const readThru = useMemo(() => readThrough(meta?.access, meta?.captured_at ?? meta?.disk_space?.captured_at ?? meta?.published ?? meta?.generated), [meta])
   const readRange = useMemo((): DateRange | null =>
-    meta?.access ? { min: meta.access.from, max: meta.access.to } : null,
-  [meta])
+    meta?.access ? { min: meta.access.from, max: Math.max(meta.access.to, readThru?.day ?? meta.access.to) } : null,
+  [meta, readThru])
   // Which top-level cells (source buckets) the access logs cover: in a union, the rest are unlogged.
   const readLoggedOf = useMemo(() => readLogged(meta?.access), [meta])
   // No explicit `?c=` → a scope-appropriate default; an explicit pick always
@@ -1039,13 +1044,15 @@ function AppContent() {
   // — under the page's scale (`?ts=`; `rank` weighs each by its bytes). The
   // read lens keeps the access-log window as its domain, the same scale over it.
   const [dateScale] = useDateScale()
+  const [readTint] = useReadTint()
   const { dateRange, readAxis } = useMemo(() => {
     const ds: [number, number][] = []
     const as: [number, number][] = []
     const walk = (n: TreeNode) => {
       if (!n.c) {
         if (n.d != null) ds.push([n.d, n.b])
-        if (n.a != null) as.push([n.a, n.b])
+        const t = readRange ? readDay(n.a, true, readRange.min, { d: n.d, dir: n.k !== 'file', tint: readTint }) : null
+        if (t != null) as.push([t, n.b])
       }
       n.c?.forEach(walk)
     }
@@ -1060,7 +1067,7 @@ function AppContent() {
       dateRange: min < max ? dateAxis({ min, max }, dateScale, ds) : null,
       readAxis: readRange ? dateAxis(readRange, dateScale, as) : null,
     }
-  }, [mapTree, dateScale, readRange])
+  }, [mapTree, dateScale, readRange, readThru, readTint])
 
   const catOrder = useMemo(() => {
     if (!mapTree) return []
@@ -1237,7 +1244,11 @@ function AppContent() {
             <span className="lbl">color</span>
             <Explain text={
               effMode === 'date' ? <>Object <b>{time.description}</b>, from the bucket listings (a folder’s cell = its newest object). {store.objectsNote}</>
-              : effMode === 'read' ? <><b>Last observed read</b> — the most recent logged GET/HEAD/LIST anywhere under each cell (logging began {readRange ? epochDaysToDate(readRange.min) : '—'}). Brick-red = <b>no observed reads</b> since then.{readUnlogged.length > 0 && <> Gray = <b>not logged</b>: no access logs are collected for {readUnlogged.join(', ')}.</>} Logs may omit events; absence is not proof of no access.</>
+              : effMode === 'read' ? <>{readTint === 'touch'
+                  ? <><b>Last touch</b> — the newer of the most recent logged GET/HEAD/LIST anywhere under each cell and its newest write since logging began</>
+                  : <><b>Last observed read</b> — the most recent logged GET/HEAD/LIST anywhere under each cell</>} (logging began {readRange ? epochDaysToDate(readRange.min) : '—'}{readThru && <>; {readThroughText(readThru).through}{readThroughText(readThru).gap && <>, {readThroughText(readThru).gap}</>}</>}).{readTint === 'touch'
+                  ? <> Brick-red = <b>not touched</b>: no observed reads, and last written before logging began.</>
+                  : <> <b>Cross-hatched</b> = written since logging began and not read since, colored by the write’s age: an object not read since its last write, or a folder with nothing under it read (a folder with any read takes its newest read’s color). Brick-red = <b>no observed reads</b>, last written before logging began.</>}{readUnlogged.length > 0 && <> Gray = <b>not logged</b>: no access logs are collected for {readUnlogged.join(', ')}.</>} Logs may omit events; absence is not proof of no access. The legend’s <b>hatch | touch</b> pills switch between the two colorings.</>
               : effMode === 'user' ? <>Dominant <b>owner</b> of each cell; the legend lists the top users of the current view.</>
               : <>Top-level directory each cell belongs to.</>
             }>
@@ -1348,6 +1359,7 @@ function AppContent() {
               squarify into a non-terminating loop on degenerate aspect ratios
               once they land. A scan that lists objects always has something
               to draw under a directory. */}
+          {effMode === 'read' && readThru && <ReadThroughBanner through={readThru} />}
           <div id="tree-map" className={[
             'busy-host',
             !objects && mapPath && mapPath.length > 1 && !mapPath[mapPath.length - 1].c?.length && subtreeQs[subtreeQs.length - 1]?.data ? 'leaf' : '',
@@ -1361,6 +1373,7 @@ function AppContent() {
             userIdx={userIdx}
             dateRange={dateRange}
             readRange={readAxis}
+            readThrough={readThru}
             readLogged={readLoggedOf}
             readUnlogged={readUnlogged}
             hl={effHl}
@@ -1434,6 +1447,7 @@ function AppContent() {
               brush={brush}
               onBrush={setBrush}
               readLogged={meta?.access?.buckets ? readLoggedOf : undefined}
+              access={meta?.access}
             /></div>
           )}
         </>
@@ -1636,7 +1650,7 @@ function AppContent() {
         </h2>
         {ageQ.isPending && !!asof && <Skeleton height={220} label="loading ages…" />}
         {age.length > 0 && (
-          <AgeChart rows={age} baseRows={diffPrev ? ageBase : undefined} diffLabels={diffPrev && asof ? { from: fmtS(diffPrev), to: fmtS(asof) } : undefined} catOrder={catOrder} mode={ageMode} onMode={m => setAgeModeP(m)} modes={ageModes} userIdx={userIdx} readRange={ageReadRange} readUnlogged={readUnlogged} scheme={store.scheme} band={band} onBand={setBand} />
+          <AgeChart rows={age} baseRows={diffPrev ? ageBase : undefined} diffLabels={diffPrev && asof ? { from: fmtS(diffPrev), to: fmtS(asof) } : undefined} catOrder={catOrder} mode={ageMode} onMode={m => setAgeModeP(m)} modes={ageModes} userIdx={userIdx} readRange={ageReadRange} readThrough={ageReadRange ? readThru : null} readTint={readTint} readUnlogged={readUnlogged} scheme={store.scheme} band={band} onBand={setBand} />
         )}
       </section>
       )}
