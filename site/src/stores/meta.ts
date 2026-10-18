@@ -10,6 +10,7 @@ const store: Store = {
   // Staff-only server-side (the store's `scope`); no ownership ledger, no
   // trash gesture, no storage-class prices.
   key: 'meta',
+  scope: 'admin',
   label: 'Meta',
   title: 'Marin usage — meta',
   desc: 'The data behind the Marin usage sites: scans, indexes and listings in oa-cw-s3-usage-data (GCS) and oa-cw-s3-usage-index (R2) — treemap, sizes over time, and diffs.',
