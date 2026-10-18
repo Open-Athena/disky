@@ -30,6 +30,8 @@ machines:
 # r2 scans four approved buckets of an account that holds many more (specs/r2-deployment.md): an unscanned-bucket
 # alert would fire every run, and r2 holds no account-wide key to list the account's buckets with (by design)
 skip: [bucket-check]
+# `retire` (specs/lean-scans.md §2): a dry run (its plan in the log) until Ryan reviews the totals and runs the deletes
+steps: [retire]
 secrets:
   R2_ACCESS_KEY_ID: oa-r2-index-access-key-id
   R2_SECRET_ACCESS_KEY: oa-r2-index-secret-access-key
@@ -61,6 +63,9 @@ options:
   interval-store: {mem: 12GB}
   # R2 has no soft delete: superseded generation dirs are listed only until Ryan reviews a list
   index-gc: {dry: true}
+  # the data store's per-scan sorts, then the R2 copy (`$R2_ARCHIVE`); D1 with the first. R2 has no soft delete: `execute`
+  # stays false until Ryan runs the reviewed deletes himself
+  retire: {keep: 2, execute: false, copies: [r2]}
   digest:
     template: cw
     # the thread state (`digest/r2/…`) and every earlier scan's snapshots are on R2, as the one-VM job reads them
