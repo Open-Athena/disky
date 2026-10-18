@@ -129,7 +129,7 @@ export UV_PROJECT_ENVIRONMENT=$PWD/infra/.venv   # for pulumi; never the repo's 
   4. The avatars on the icons project's production branch, once: `wrangler pages deploy job/icons-hf --project-name oa-hf-usage-icons --branch main`.
   5. The image (`job/build.sh`: now with wrangler, `job/digest.yml`, `job/icons-hf/`), then the cron (resumed after 8b).
   The site grant (8b) is needed too: the OP's plot is drawn by the site (`POST /api/digest-image`). Check a month's thread without posting: `dt-cloud digest -T cw -C job/digest.yml -n -r r2://oa-hf-usage-index/snapshots/hf` (with the R2 keys).
-- The meta store ("data behind this site"): waits on the shared self-scan + index step the root session is building on `cloud`.
+- ~~The meta store ("data behind this site")~~: done 2026-10-18, as `r2`'s. `job/profiles/hf-meta.yml` (`store: meta`) scans the data bucket `oa-hf-usage-data` (GCS) and the serving bucket `oa-hf-usage-index` (R2; listed through `$R2_ENDPOINT`, `[cloud]` 718f4555) into `meta-l2/` / `snapshots/meta/` and its own static-names generation `2026-10-18hfmeta`, served at `/meta` (`site/src/stores/meta.ts`, `STORES_EXTRA` / `STORES_JSON`; `/scans` links outputs there via `META_TREE_URL`). A secondary store is served per scan: no interval store, warm-up, probe or digest. Daily as its own head, the `hf-usage-meta` cron (09:15 UTC, `job/hf-meta-submit.sh`; applied 2026-10-18, +2); first run `hf-meta-scan-20261018-135304` by hand.
 - ~~Share card~~: `site/public/og.jpg` is hf's generic card (`site/scripts/render-og-fallback.mjs`), with `OG_CARDS` / `OG_ANONYMOUS = "generic"` as cw.
 - Not applicable: staging / executor / sweeps (the site deletes nothing on the Hub), lifecycle pull (no lifecycle rules on the Hub).
 
