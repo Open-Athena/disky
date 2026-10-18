@@ -2329,25 +2329,38 @@ def access_r2_agg(
 @option("-b", "--bucket", "buckets", multiple=True, help="Source buckets (default: $ACCESS_BUCKETS, space-separated)")
 @option("-c", "--max-chunk-gb", default=32.0, help="Max staged CSV bytes per processing chunk")
 @option("-d", "--data-bucket", envvar="DATA_BUCKET", required=True, help="Output/state bucket; default $DATA_BUCKET")
+@option("-j", "--json", "as_json", is_flag=True, help="Print the run's summary as JSON on stdout: `lease` (taken | held), `buckets` (per-bucket stats, `newest_delivery`), `stalled`")
 @option("-l", "--log-bucket", default=None, help="Usage-log delivery bucket (default: $ACCESS_LOG_BUCKET)")
-@option("-M", "--memory-limit", default=None, help="DuckDB memory limit (default: $DUCKDB_MEM or 8GB)")
+@option("-M", "--memory-limit", default=None, help="DuckDB memory limit, per bucket in flight (default: $DUCKDB_MEM or 8GB)")
 @option("-n", "--max-chunks", default=None, type=int, help="Stop after N chunks per bucket (smoke runs)")
+@option("-P", "--parallel", default=1, help="Buckets ingested at once (the fan-out when a backlog builds; memory is N × -M)")
 @option("-s", "--stage-dir", type=Path, default=None, help="Local staging dir (default: $STAGE_DIR or /tmp, + /access-stage)")
+@option("-t", "--stall-hours", default=24.0, help="A bucket with no CSV delivered for this long is reported stalled")
 @option("-w", "--workers", default=16, help="Concurrent CSV downloads")
+@option("-x", "--stall-exit", is_flag=True, help="Exit 3 when any bucket is stalled (after the ingest; for an alerting caller)")
 def access_ingest(
     buckets: tuple[str, ...],
     max_chunk_gb: float,
     data_bucket: str,
+    as_json: bool,
     log_bucket: str | None,
     memory_limit: str | None,
     max_chunks: int | None,
+    parallel: int,
     stage_dir: Path | None,
+    stall_hours: float,
     workers: int,
+    stall_exit: bool,
 ) -> None:
-    """Incrementally ingest new usage CSVs → layer-1a/2a parquet in the data bucket."""
+    """Incrementally ingest new usage CSVs → layer-1a/2a parquet in the data bucket.
+
+    Safe to run hourly (specs/access-log-freshness.md §A): one run at a time per deployment (the lease
+    `access/state/.lease`; a held lease logs its holder and exits 0), and nothing pending past the watermarks
+    exits after a listing per bucket. Every run reports stalled buckets (no CSV delivered in `-t` hours: logging off,
+    or delivery stopped); `-x` turns one into exit 3."""
     from .access import access_buckets, access_log_bucket, ingest
 
-    ingest(
+    summary = ingest(
         buckets=buckets or access_buckets(),
         log_bucket=log_bucket or access_log_bucket(),
         data_bucket=data_bucket,
@@ -2356,7 +2369,13 @@ def access_ingest(
         max_chunk_gb=max_chunk_gb,
         workers=workers,
         max_chunks=max_chunks,
+        parallel=parallel,
+        stall_hours=stall_hours,
     )
+    if as_json:
+        print(json.dumps(summary, indent=2))
+    if stall_exit and summary["stalled"]:
+        sys.exit(3)
 
 
 @access.command("sweep")
