@@ -277,6 +277,63 @@ def test_r2_agg_cli_feeds_the_read_lens(tmp_path: Path, listing: str, attributio
     assert pd.isna(a_by_path["b1/datasets"])
 
 
+def _r2_agg_file(archive: Path, ts: dt.datetime, capture: str, rows: list[tuple], run: str = "r1") -> str:
+    """One private collector aggregate (`agg/b1/<YYYY-MM-DD>/<HH>/<run>.json`, schema 4), ``rows`` as ``(key, action,
+    n)`` at ``ts``'s minute; its archive key."""
+    key = f"agg/b1/{ts:%Y-%m-%d}/{ts:%H}/{run}.json"
+    path = archive / key
+    path.parent.mkdir(parents=True, exist_ok=True)
+    minute = int(ts.timestamp() * 1000)
+    path.write_text(json.dumps({
+        "schema_version": 4, "bucket": "b1", "hour": ts.strftime("%Y-%m-%dT%H:00:00.000Z"), "events": 0, "own": 0,
+        "actions": {}, "classes": {}, "sampling": {"observed": 0, "estimated": 0, "max_sample_interval": 1, "capture": capture},
+        "rows": [[k, a, n, minute, minute] for k, a, n in rows],
+    }))
+    return key
+
+
+def test_r2_agg_cli_reads_the_hours_the_state_names(tmp_path: Path, monkeypatch):
+    """`r2-agg -s state.json`: the current aggregate of each hour the state names (`hours` and `frozen`), never a
+    superseded one left beside it; hours from the scan's instant on aren't read, and the instant is UTC whatever the
+    process's timezone (a read at 02:30Z on the scan date precedes a 07:00Z scan, though New York's clock says the
+    day before)."""
+    archive = tmp_path / "archive"
+    ts = lambda d, h, m=0: dt.datetime(2026, 7, d, h, m, tzinfo=dt.timezone.utc)  # noqa: E731
+    frozen = _r2_agg_file(archive, ts(2, 9, 41), "unsampled", [("users/rw/ckpt/x", "GetObject", 2)])
+    _r2_agg_file(archive, ts(19, 23, 10), "sampled", [("users/rw/ckpt/x", "GetObject", 9)], run="old")  # superseded
+    current = _r2_agg_file(archive, ts(19, 23, 10), "sampled", [("datasets/y", "HeadObject", 1)], run="new")
+    early = _r2_agg_file(archive, ts(20, 2, 30), "unsampled", [("datasets/z", "GetObject", 4)])
+    after = _r2_agg_file(archive, ts(20, 8, 5), "unsampled", [("datasets/w", "GetObject", 1)])
+    entry = lambda key: {"agg": key, "digest": "d", "final": True}  # noqa: E731
+    (archive / "state.json").write_text(json.dumps({"schema_version": 2, "account": "a", "scheduled_time": 0, "run_id": "r", "buckets": {"b1": {
+        "collected_through": 0, "first_from": 0, "gaps": [], "verify_cursor": None, "frozen": {"2026-07-02T09": frozen},
+        "hours": {"2026-07-19T23": entry(current), "2026-07-20T02": entry(early), "2026-07-20T08": entry(after)},
+    }}}))
+    agg = tmp_path / "agg.parquet"
+    monkeypatch.setenv("TZ", "America/New_York")
+    time.tzset()
+    try:
+        result = CliRunner().invoke(main, ["access", "r2-agg", "-d", "2026-07-20T0700", "-o", str(agg), "-s", str(archive / "state.json")])
+    finally:
+        monkeypatch.delenv("TZ")
+        time.tzset()
+    assert (result.exit_code, json.loads(result.stdout)) == (0, {
+        "captures": {"sampled": 1, "unsampled": 2}, "hours": 3, "paths_out": 8, "rows_in": 7, "total_bytes_out": 0,
+    })
+    df = pd.read_parquet(agg)
+    assert sorted((r.path, r.op, r.n_ops, r.sampled) for r in df.itertuples()) == [
+        (".", "GET", 2, False), (".", "GET", 4, False), (".", "HEAD", 1, True),
+        ("datasets", "GET", 4, False), ("datasets", "HEAD", 1, True), ("datasets/y", "HEAD", 1, True), ("datasets/z", "GET", 4, False),
+        ("users", "GET", 2, False), ("users/rw", "GET", 2, False), ("users/rw/ckpt", "GET", 2, False), ("users/rw/ckpt/x", "GET", 2, False),
+    ]
+
+
+def test_r2_agg_cli_takes_the_state_or_inputs(tmp_path: Path):
+    for args in ([], ["-s", str(tmp_path / "state.json"), str(tmp_path / "x.json")]):
+        result = CliRunner().invoke(main, ["access", "r2-agg", "-d", "2026-07-20", "-o", str(tmp_path / "agg.parquet"), *args])
+        assert (result.exit_code, result.output.splitlines()[-1]) == (2, "Error: pass exactly one of -s/--state and INPUTS")
+
+
 def test_r2_agg_cli_writes_nothing_without_reads_before_the_scan(tmp_path: Path):
     hour = _r2_hour_file(tmp_path, TS["d0720"], "unsampled", [("k", "HeadObject", 1)])
     agg = tmp_path / "agg.parquet"
@@ -671,3 +728,30 @@ def test_home_capture_object_depth(tmp_path: Path):
         ("Users/ryan/c", "dir", 3), ("Users/ryan/top.txt", "file", 3),
         ("Users/ryan/c/a.bin", "file", 4),
     ]
+
+
+def test_generation_is_opt_in(tmp_path: Path, listing: str):
+    """`path-index -G` (gcs): each object row carries the listing's `generation` as the store's last column, NULL on
+    every dir row, in both sorts. Off (every other deployment), the same listing's sorts have no such column."""
+    df = pd.read_parquet(listing)
+    df["generation"] = [1001, 1002, 1003, 1004]
+    gl = tmp_path / "listing-gen.parquet"
+    df.to_parquet(gl)
+    on, off = tmp_path / "on" / "path-index.parquet", tmp_path / "off" / "path-index.parquet"
+    write_path_index((str(gl),), tmp_path / "o1", "2026-07-20", path_index=on, generation=True)
+    write_path_index((str(gl),), tmp_path / "o2", "2026-07-20", path_index=off)
+    want = [
+        ("b1", "dir", None),
+        ("b1/datasets", "dir", None), ("b1/top.bin", "file", 1004), ("b1/users", "dir", None),
+        ("b1/datasets/raw", "dir", None), ("b1/users/rw", "dir", None),
+        ("b1/datasets/raw/part0", "file", 1003), ("b1/users/rw/ckpt", "dir", None),
+        ("b1/users/rw/ckpt/model.bin", "file", 1001), ("b1/users/rw/ckpt/opt.bin", "file", 1002),
+    ]
+    path = pd.read_parquet(on)
+    assert list(path.columns) == [*STORE_COLS, "generation"]
+    assert _rows(path, ["path", "kind", "generation"]) == want
+    bysize = pd.read_parquet(on.with_name("path-index-bysize.parquet"))
+    assert list(bysize.columns) == [*STORE_COLS, "generation", "tot"]
+    assert sorted(_rows(bysize, ["path", "kind", "generation"]), key=str) == sorted(want, key=str)
+    assert list(pd.read_parquet(off).columns) == STORE_COLS
+    assert list(pd.read_parquet(off.with_name("path-index-bysize.parquet")).columns) == [*STORE_COLS, "tot"]

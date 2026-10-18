@@ -1245,7 +1245,7 @@ function AppContent() {
         {bar.color.length > 1 && (
           <label className="tb-ctl">
             <span className="lbl">color</span>
-            <Explain text={
+            <Explain label={bar.color.length === 2 ? MODE_LABELS[effMode] : undefined} text={
               effMode === 'date' ? <>Object <b>{time.description}</b>, from the bucket listings (a folder’s cell = its newest object). {store.objectsNote}</>
               : effMode === 'read' ? <>{readTint === 'touch'
                   ? <><b>Last touch</b> — the newer of the most recent logged GET/HEAD/LIST anywhere under each cell and its newest write since logging began</>
@@ -1255,9 +1255,14 @@ function AppContent() {
               : effMode === 'user' ? <>Dominant <b>owner</b> of each cell; the legend lists the top users of the current view.</>
               : <>Top-level directory each cell belongs to.</>
             }>
-              <FitSelect className="tb-select" value={effMode} ariaLabel="Color plots by" onChange={e => setMode(e.target.value as ColorMode)}>
-                {bar.color.map(m => <option key={m} value={m}>{MODE_LABELS[m]}</option>)}
-              </FitSelect>
+              {/* two modes: a segmented toggle (one click to switch); more: a select */}
+              {bar.color.length === 2
+                ? <span className="tb-seg" role="radiogroup" aria-label="Color plots by">
+                    {bar.color.map(m => <button key={m} type="button" role="radio" aria-checked={effMode === m} className={effMode === m ? 'on' : ''} onClick={() => setMode(m)}>{MODE_LABELS[m]}</button>)}
+                  </span>
+                : <FitSelect className="tb-select" value={effMode} ariaLabel="Color plots by" onChange={e => setMode(e.target.value as ColorMode)}>
+                    {bar.color.map(m => <option key={m} value={m}>{MODE_LABELS[m]}</option>)}
+                  </FitSelect>}
             </Explain>
           </label>
         )}
@@ -1654,7 +1659,7 @@ function AppContent() {
         </h2>
         {ageQ.isPending && !!asof && <Skeleton height={220} label="loading ages…" />}
         {age.length > 0 && (
-          <AgeChart rows={age} baseRows={diffPrev ? ageBase : undefined} diffLabels={diffPrev && asof ? { from: fmtS(diffPrev), to: fmtS(asof) } : undefined} catOrder={catOrder} mode={ageMode} onMode={m => setAgeModeP(m)} modes={ageModes} userIdx={userIdx} readRange={ageReadRange} readThrough={ageReadRange ? readThru : null} readTint={readTint} readUnlogged={readUnlogged} scheme={store.scheme} band={band} onBand={setBand} />
+          <AgeChart rows={age} baseRows={diffPrev ? ageBase : undefined} diffLabels={diffPrev && asof ? { from: fmtS(diffPrev), to: fmtS(asof) } : undefined} catOrder={catOrder} mode={ageMode} mapMode={effMode} picked={ageModeP === ageMode} dateAxis={dateRange} onMode={m => setAgeModeP(m)} modes={ageModes} userIdx={userIdx} readRange={ageReadRange} readThrough={ageReadRange ? readThru : null} readTint={readTint} readUnlogged={readUnlogged} scheme={store.scheme} band={band} onBand={setBand} />
         )}
       </section>
       )}

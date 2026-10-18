@@ -22,6 +22,7 @@ import csv
 import datetime as dt
 import json
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -33,7 +34,7 @@ from urllib.parse import urlparse
 
 from .cost_labels import check_label
 from .scan_profile import PRIMARY_STORE, Disk, Machine, ScanProfile
-from .scan_steps import DATA_MOUNT_ENV, PROFILE_JSON_ENV, STEPS
+from .scan_steps import DATA_MOUNT_ENV, PROFILE_JSON_ENV, STEPS, profile_env_value
 
 
 def err(*a: object) -> None:
@@ -109,8 +110,11 @@ def params(profile: ScanProfile, profile_json: str, scan: str, gen: str, job_sta
     return {
         "scan": scan, "gen": gen, "job_start": job_start, "run_id": run_id, "session": session,
         # a source's `secrets`: its list call's whole binding list (else the list step's), when it has its own
+        # REPROC runs from `index`, but an adopted listing (`sources[].listing`) is still fetched: its shards have no
+        # other copy on a local data dir
         "sources": [{"uri": s.uri, "machine": s.machine, "disk": _disk(s.disk),
-                     **({"secrets": _bindings(profile.secrets_for("list", s.uri))} if s.secrets else {})} for s in profile.sources],
+                     **({"secrets": _bindings(profile.secrets_for("list", s.uri))} if s.secrets else {})}
+                    for s in profile.sources if not reproc or s.listing],
         "list_default": {"machine": lst.type if lst else None, "disk": _disk(lst.disk) if lst else None},
         "steps": list(enabled),
         "pre": [n for n in enabled if STEPS[n].stage == "pre" and n != "bucket-check"],
@@ -120,7 +124,7 @@ def params(profile: ScanProfile, profile_json: str, scan: str, gen: str, job_sta
         "over_time": "over-time" in enabled,
         "over_time_label": "over_time" if "over_time" in profile.machines else "post",
         "fold": list(profile.fold),
-        "skip_list": reproc,
+        "skip_list": reproc and not any(s.listing for s in profile.sources),
         "secrets": _bindings(profile.secrets),
         "step_secrets": step_secrets(profile),
         "secrets_project": profile.executor.project or "",
@@ -128,6 +132,7 @@ def params(profile: ScanProfile, profile_json: str, scan: str, gen: str, job_sta
         "profile_json": profile_json,
         "labels": labels(profile, env, scan),
         "cache": not fresh,
+        "static_after_publish": not urlparse(profile.data).scheme and "publish-r2" in enabled,
         "queue_size": profile.queue_size,
         "work_bucket": urlparse(profile.work).netloc if profile.executor.kind == "google-batch" else "",
     }
@@ -285,12 +290,34 @@ def publish_reports(profile: ScanProfile, scan: str, launch: Path) -> list[str]:
     return keys
 
 
-def start_args(profile: ScanProfile, gen: str, scan: str, run_id: str, batch: bool = True, image: str | None = None) -> list[str]:
+#: `scan-run start` facts a head that isn't a GCP Batch job takes from its env (its launcher's: m3's AWS Batch wrapper),
+#: env name → the option.
+RUN_FACTS = {"DT_RUN_KIND": "-k", "DT_RUN_MACHINE": "-m", "DT_RUN_REGION": "-R", "DT_RUN_AT": "-t", "DT_RUN_TASKS": "-T"}
+
+
+def start_args(profile: ScanProfile, gen: str, scan: str, run_id: str, batch: bool = True, image: str | None = None,
+               env: Mapping[str, str] | None = None) -> list[str]:
     """`scan-run start`'s arguments: the run id (`-r`, the one every task records into), the head's Batch job's facts
-    (`-B`, when the head is one), the generation, a store other than the primary (`-K`: the run's `store`, which
-    `finish` and every task's phase keep), and the image the tasks run (`-i`, when the head pins one)."""
-    return ["-r", run_id, *(["-B"] if batch else []), "-g", gen, *([] if profile.primary else ["-K", profile.store]),
+    (`-B`, when the head is one; else `RUN_FACTS` and `DT_RUN_SPOT=1` from `env`), the generation, a store other than
+    the primary (`-K`: the run's `store`, which `finish` and every task's phase keep), and the image the tasks run (`-i`,
+    when the head pins one)."""
+    env = env or {}
+    facts = [] if batch else [a for k, o in RUN_FACTS.items() if (env.get(k) or "").strip() for a in (o, env[k].strip())]
+    if not batch and env.get("DT_RUN_SPOT", "").strip() == "1":
+        facts.append("--spot")
+    return ["-r", run_id, *(["-B"] if batch else []), *facts, "-g", gen, *([] if profile.primary else ["-K", profile.store]),
             *(["-i", image] if image else []), scan]
+
+
+def pre_phases(env: Mapping[str, str]) -> list[tuple[str, list[str]]]:
+    """`DT_PRE_PHASES` (JSON `[{"name", "began", "ended", "outputs": ["k=v", …]}]`): phases that ran before the head, e.g.
+    a laptop's capture and the job's queue wait, as `(phase-begin args, phase-end args)` pairs for the record."""
+    raw = (env.get("DT_PRE_PHASES") or "").strip()
+    out = []
+    for ph in json.loads(raw) if raw else []:
+        out.append((["-b", str(int(ph["began"])), ph["name"]],
+                    ["-t", str(int(ph["ended"])), *[a for o in ph.get("outputs", []) for a in ("-o", o)], ph["name"]]))
+    return out
 
 
 def local_run_id(profile: ScanProfile, scan: str) -> str:
@@ -314,7 +341,9 @@ def run_config(run_id: str, profile_json: str) -> str:
     """The run's own task env, as a Nextflow `env` scope: this head's run id and the profile JSON. Nextflow's task hash
     leaves the `env` scope out (unlike anything in a task's script), so a resume from a new head job (a new
     `BATCH_JOB_UID`), or after a profile edit, still finds the finished tasks in the cache."""
-    return f"env {{\n    DT_RUN_ID = {_groovy(run_id)}\n    DT_SCAN_PROFILE_JSON = {_groovy(profile_json)}\n}}\n"
+    if not re.fullmatch(r"[A-Za-z0-9._-]*", run_id):  # empty: a local run that isn't recorded
+        raise ValueError(f"run id {run_id!r}: Nextflow exports it into each task's script unescaped")
+    return f"env {{\n    DT_RUN_ID = {_groovy(run_id)}\n    DT_SCAN_PROFILE_JSON = {_groovy(profile_env_value(profile_json))}\n}}\n"
 
 
 def nextflow_argv(nf_dir: Path, launch: Path, session: str) -> list[str]:
@@ -329,7 +358,7 @@ def nextflow_argv(nf_dir: Path, launch: Path, session: str) -> list[str]:
 def head(profile_path: Path, nf_dir: Path, launch: Path | None, *, reproc: bool = False, fresh: bool = False,
          dry_run: bool = False, env: dict[str, str] | None = None) -> int:
     from . import scan_profile
-    from .scan_runs import PROFILE_ENV, TRIGGER_ENV, finish_cmd, start_cmd, trigger_of
+    from .scan_runs import PROFILE_ENV, TRIGGER_ENV, finish_cmd, phase_begin_cmd, phase_end_cmd, start_cmd, trigger_of
 
     env = os.environ if env is None else env
     profile = scan_profile.load(profile_path)
@@ -375,7 +404,10 @@ def head(profile_path: Path, nf_dir: Path, launch: Path | None, *, reproc: bool 
     recording = bool(env.get(PROFILE_ENV))
     cost = ["-l", f"nf-session={session}"] if profile.executor.kind == "google-batch" else []
     if recording:
-        _record(start_cmd, start_args(profile, gen, scan, run_id, batch, image))
+        _record(start_cmd, start_args(profile, gen, scan, run_id, batch, image, env))
+        for began, ended in pre_phases(env):
+            _record(phase_begin_cmd, began)
+            _record(phase_end_cmd, ended)
 
     proc = subprocess.Popen(argv, cwd=launch, env=nf_env, start_new_session=True)
     stopped: list[int] = []

@@ -406,6 +406,7 @@ def wandb_mine(
 @option("-a", "--attribution", "attributions", multiple=True, help="Attribution parquet(s); adds per-node user overlays")
 @option("-c", "--dir-cache", "dir_cache", type=Path, default=None, help="Layer-2 cache dir (dir-stats/age-days parquet): attribution-independent rollups reused by re-attribution runs — see gcs:specs/dir-agg-cache.md")
 @option("-d", "--asof", required=True, callback=scan_id_option, help="Scan id the listing came from (YYYY-MM-DD or YYYY-MM-DDTHHMM)")
+@option("-G", "--generation", is_flag=True, envvar="PATH_INDEX_GENERATION", show_envvar=True, help="Carry each object's native version (the listing's `generation`, GCS) as the store's last column, NULL on dirs; opt-in per deployment (gcs), absent otherwise. The interval store built over such sorts carries it per object version (`interval-store backfill-generation`, specs/lean-scans.md §3.1)")
 @option("-i", "--identities", "identities_path", envvar=IDENTITIES_ENV, default=None, help=f"identities.yaml path or URL, needed with -a (${IDENTITIES_ENV}): the deployment's roster, kept outside the repo")
 @option("-l", "--listing", "listings", required=True, multiple=True, help="Listing parquet glob(s): scan_gcs or SII inventory schema; repeatable — earlier sources win per bucket")
 @option("-o", "--out", "out_dir", type=Path, default=None, help="Output dir for JSON files [default: site/public/data/<asof>]")
@@ -419,6 +420,7 @@ def build_path_index(
     attributions: tuple[str, ...],
     dir_cache: Path | None,
     asof: str,
+    generation: bool,
     identities_path: str | None,
     listings: tuple[str, ...],
     out_dir: Path | None,
@@ -442,7 +444,7 @@ def build_path_index(
         out_dir = Path("site/public/data") / asof
     meta = write_path_index(
         listings, out_dir, asof, attributions, identities_path, access=access, dir_cache=dir_cache, path_index=path_index,
-        user_sorts=user_sorts, row_group_rows=row_group_rows, search=search,
+        user_sorts=user_sorts, row_group_rows=row_group_rows, search=search, generation=generation,
         user_sort_tiers=tuple(t for t in user_sort_tiers.split(",") if t) if user_sort_tiers else None,
     )
     err(f"wrote {out_dir}/: age.json meta.json ({meta['total_bytes']/1e12:.0f} TB, {meta['total_objects']:,} objects)")
@@ -1668,11 +1670,15 @@ def sweep_sync_progress(interval: int, sql_output: str | None, job_name: str) ->
 @sweep.command("manifest")
 @option("-b", "--bucket", "only_buckets", multiple=True, help="Only these buckets (default: every bucket the plan names)")
 @option("-d", "--date", required=True, help="Scan date whose listing to plan from (pinned)")
+@option("-g", "--iv-gen", default=None, help="The interval store's generation an `as_of` hold reads (default its current)")
+@option("-H", "--holds", type=Choice(["auto", "listing", "store"]), default="auto", show_default=True, help="Where an `as_of` scan's object identities come from: its raw listing, the interval store (-i), or the listing when it is there and the store otherwise")
+@option("-i", "--interval-store", default=None, help="The interval store (a dir or URL, the readers' INDEX_R2 root) that answers for an `as_of` scan whose listing is gone (specs/lean-scans.md §3.1)")
 @option("-j", "--workers", default=0, type=int, help="Concurrent listing shards (default 2 × CPUs, ≤ 64)")
 @option("-o", "--out", default=None, help="Output dir (default gs://$DATA_BUCKET/sweep/<date>-p<plan_id>)")
 @option("-p", "--plan", "plan_path", required=True, help="The dispatched plan.json (path or gs:// URL): its items are the delete set, and the buckets are the plan's (∩ -b)")
 @option("-r", "--root", default=None, help="Listing root (gs:// or local mount; default gs://$DATA_BUCKET)")
-def sweep_manifest(only_buckets: tuple[str, ...], date: str, workers: int, out: str | None, plan_path: str, root: str | None) -> None:
+def sweep_manifest(only_buckets: tuple[str, ...], date: str, iv_gen: str | None, holds: str, interval_store: str | None, workers: int, out: str | None,
+                   plan_path: str, root: str | None) -> None:
     """Object-level manifest of a staged plan (specs/done/staged-delete.md): scan
     the pinned listing (every shard in parallel, row groups outside the staged
     prefixes pruned — `sweep_manifest.py`) and write per-bucket parquets of the
@@ -1680,14 +1686,18 @@ def sweep_manifest(only_buckets: tuple[str, ...], date: str, workers: int, out: 
     The plan is the whole intent: nothing carves out. An item staged as of
     another scan (plan.json `as_of`) keeps only the keys that scan's listing
     has with the same generation (else `created`); the rest are counted as
-    `skipped_after_as_of`. Pure read + artifact write — deletes nothing."""
+    `skipped_after_as_of`. A scan whose listing is gone answers from the
+    interval store (`-i`: the versions live at it, with their `generation`).
+    Pure read + artifact write — deletes nothing."""
     import time
 
     import fsspec
 
     from .staged_plan import CATEGORIES, load_plan
-    from .sweep_manifest import build_manifests
+    from .sweep_manifest import HoldSource, build_manifests
 
+    if holds == "store" and interval_store is None:
+        raise SystemExit("-H store needs the interval store (-i)")
     sp = load_plan(plan_path)
     buckets = [b for b in sp.buckets if not only_buckets or b in only_buckets]
     if not buckets:
@@ -1717,6 +1727,7 @@ def sweep_manifest(only_buckets: tuple[str, ...], date: str, workers: int, out: 
     summary["buckets"] = build_manifests(
         root, date, {b: sp.sweep.get(b, ()) for b in buckets}, out, workers=workers or None, as_of=sp.as_of,
         objects_by_bucket={b: sp.objects[b] for b in buckets if b in sp.objects},
+        hold_source=HoldSource(holds, interval_store, iv_gen),
     )
     err(f"manifest: {time.monotonic() - t0:.0f}s")
 
@@ -2286,16 +2297,42 @@ def access_r2_export(
     print(json.dumps(archive["summary"], sort_keys=True))
 
 
+def r2_state_inputs(state: str, before: dt.datetime, stage: Path) -> list[str]:
+    """The current aggregates `state` (the collector archive's `state.json`, a path or URL) names for the hours before
+    `before` (`parsers.r2.state_aggs`), copied from beside it into `stage`; their local paths."""
+    from disk_tree import blobfs
+    from disk_tree.access.parsers.r2 import state_aggs
+
+    def read(path: str) -> bytes:
+        with blobfs.open_read(path) if blobfs.is_url(path) else open(path, "rb") as f:
+            return f.read()
+
+    doc = json.loads(read(state))
+    root = state.rsplit("/", 1)[0] if blobfs.is_url(state) else str(Path(state).parent)
+    out = []
+    for key in state_aggs(doc, before):
+        local = stage / key
+        local.parent.mkdir(parents=True, exist_ok=True)
+        local.write_bytes(read(blobfs.join(root, key)))
+        out.append(str(local))
+    err(f"r2-agg: {len(out)} hour aggregate(s) from {state}")
+    return out
+
+
 @access.command("r2-agg")
 @option("-d", "--asof", required=True, callback=scan_id_option, help="Scan id: requests at or after its instant are cut (the scan sees reads before it)")
 @option("-o", "--out", "out", type=Path, required=True, help="Layer-2a agg parquet to write (`path-index -x`'s input)")
-@argument("inputs", nargs=-1, required=True)
+@option("-s", "--state", help="The collector archive's `state.json` (a path or URL, e.g. `r2://<archive>/state.json`): read the current aggregate of every hour it names before the scan, fetched from beside it, instead of INPUTS")
+@argument("inputs", nargs=-1)
 def access_r2_agg(
     asof: str,
     out: Path,
+    state: str | None,
     inputs: tuple[str, ...],
 ) -> None:
-    """Aggregate the R2 collector's public per-hour files (`<bucket>/<YYYY-MM-DD>/<HH>.json` globs) into layer-2a.
+    """Aggregate the R2 collector's hour files into layer-2a: the private per-hour aggregates the archive's
+    `state.json` names (`-s`), or INPUTS, globs of either those or the public per-hour files
+    (`<bucket>/<YYYY-MM-DD>/<HH>.json`).
 
     The files carry per-(object key, action) counts and minute-truncated last-request times per UTC hour (no
     requester identity, no per-request events); see `disk_tree.access.parsers.r2`, whose as-of rule keeps a row
@@ -2310,8 +2347,19 @@ def access_r2_agg(
 
     from .scan_id import scan_time
 
-    con = duckdb.connect()
+    if bool(state) == bool(inputs):
+        raise UsageError("pass exactly one of -s/--state and INPUTS")
     cut = scan_time(asof)
+    if state:
+        from tempfile import TemporaryDirectory
+
+        stage = TemporaryDirectory(prefix="r2-agg-")
+        inputs = tuple(r2_state_inputs(state, cut, Path(stage.name)))
+        if not inputs:
+            err(f"r2-agg: {state} names no hour before {cut.isoformat()}; {out} not written")
+            print(json.dumps({"captures": {}, "hours": 0, "paths_out": 0, "rows_in": 0, "total_bytes_out": 0}, sort_keys=True))
+            return
+    con = duckdb.connect()
     con.register("r2_leaf", parse(list(inputs), con=con, as_of=cut))
     captures = dict(hours(list(inputs), con).filter(f"hour < TIMESTAMP '{cut.replace(tzinfo=None).isoformat()}'").aggregate("capture, count(*)").fetchall())
     before = con.execute("SELECT COALESCE(sum(n_ops), 0) FROM r2_leaf").fetchone()[0]
@@ -3097,9 +3145,26 @@ def discord_webhook(bot_token: str | None, channel: str, guild: str | None, name
     print(api.webhook_url(hook))
 
 
+@main.command("fetch-listing")
+@option("-o", "--out", required=True, type=Path, help="Local dir to copy the listing into")
+@argument("src")
+def fetch_listing_cmd(out: Path, src: str) -> None:
+    """Copy an existing listing (SRC: a URL or dir of `*.parquet` shards + `_SUCCESS.json`) into OUT, the marker last.
+
+    The scan pipeline's `list` for a source that adopts its listing (`sources[].listing`, e.g. a laptop capture) instead
+    of listing a bucket. `r2://` reads through `$DISKY_R2_ENDPOINT_URL`. Refuses SRC without `_SUCCESS.json`."""
+    from .listing_fetch import fetch_listing
+
+    try:
+        names = fetch_listing(src, out)
+    except FileNotFoundError as e:
+        raise UsageError(str(e)) from e
+    err(f"fetch-listing: {len(names)} shards {src} → {out}")
+
+
 @main.command("publish-r2")
 @option("-a", "--all-gens", is_flag=True, help="Copy every `index/<gen>/` under the scan, pointed or not (no D1 read); default: only the generations a D1 `index_schema` row names")
-@option("-b", "--bucket", "src_bucket", default=None, help="Source GCS scan store (default $DATA_BUCKET)")
+@option("-b", "--bucket", "src_bucket", default=None, help="Source scan store: a GCS bucket, or an absolute local dir (the local executor's data store) (default $DATA_BUCKET)")
 @option("-l", "--layer2", default=None, help="Layer-2 dir template, `{scan}` = the scan id (default $LAYER2_PREFIX; one of the two is required)")
 @option("-L", "--no-listings", is_flag=True, help="Leave the canonical per-bucket listings (`<layer-2 dir>/<bucket>.parquet`) in GCS only; copy the tiers + snapshot JSONs")
 @option("-n", "--dry-run", is_flag=True, help="List the keys that would be copied; copy nothing")
@@ -3190,11 +3255,13 @@ from .interval_store import cli as _interval_store  # noqa: E402
 from .interval_append import append_cmd as _interval_append, cli as _interval_runs, merge_cmd as _interval_merge  # noqa: E402
 from .interval_local import add_cmd as _interval_local_add, build_cmd as _interval_local_build, current_cmd as _interval_local_current  # noqa: E402
 from .interval_export import export_cmd as _interval_export  # noqa: E402
+from .interval_backfill import backfill_cmd as _interval_backfill  # noqa: E402
 
 _interval_store.add_command(_interval_local_build)
 _interval_store.add_command(_interval_local_add)
 _interval_store.add_command(_interval_local_current)
 _interval_store.add_command(_interval_export)
+_interval_store.add_command(_interval_backfill)
 _interval_store.add_command(_interval_append)
 _interval_store.add_command(_interval_merge)
 _interval_store.add_command(_interval_runs)
