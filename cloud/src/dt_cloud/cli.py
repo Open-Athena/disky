@@ -2366,25 +2366,38 @@ def access_r2_agg(
 @option("-b", "--bucket", "buckets", multiple=True, help="Source buckets (default: $ACCESS_BUCKETS, space-separated)")
 @option("-c", "--max-chunk-gb", default=32.0, help="Max staged CSV bytes per processing chunk")
 @option("-d", "--data-bucket", envvar="DATA_BUCKET", required=True, help="Output/state bucket; default $DATA_BUCKET")
+@option("-j", "--json", "as_json", is_flag=True, help="Print the run's summary as JSON on stdout: `lease` (taken | held), `buckets` (per-bucket stats, `newest_delivery`), `stalled`")
 @option("-l", "--log-bucket", default=None, help="Usage-log delivery bucket (default: $ACCESS_LOG_BUCKET)")
-@option("-M", "--memory-limit", default=None, help="DuckDB memory limit (default: $DUCKDB_MEM or 8GB)")
+@option("-M", "--memory-limit", default=None, help="DuckDB memory limit, per bucket in flight (default: $DUCKDB_MEM or 8GB)")
 @option("-n", "--max-chunks", default=None, type=int, help="Stop after N chunks per bucket (smoke runs)")
+@option("-P", "--parallel", default=1, help="Buckets ingested at once (the fan-out when a backlog builds; memory is N × -M)")
 @option("-s", "--stage-dir", type=Path, default=None, help="Local staging dir (default: $STAGE_DIR or /tmp, + /access-stage)")
+@option("-t", "--stall-hours", default=24.0, help="A bucket with no CSV delivered for this long is reported stalled")
 @option("-w", "--workers", default=16, help="Concurrent CSV downloads")
+@option("-x", "--stall-exit", is_flag=True, help="Exit 3 when any bucket is stalled (after the ingest; for an alerting caller)")
 def access_ingest(
     buckets: tuple[str, ...],
     max_chunk_gb: float,
     data_bucket: str,
+    as_json: bool,
     log_bucket: str | None,
     memory_limit: str | None,
     max_chunks: int | None,
+    parallel: int,
     stage_dir: Path | None,
+    stall_hours: float,
     workers: int,
+    stall_exit: bool,
 ) -> None:
-    """Incrementally ingest new usage CSVs → layer-1a/2a parquet in the data bucket."""
+    """Incrementally ingest new usage CSVs → layer-1a/2a parquet in the data bucket.
+
+    Safe to run hourly (specs/access-log-freshness.md §A): one run at a time per deployment (the lease
+    `access/state/.lease`; a held lease logs its holder and exits 0), and nothing pending past the watermarks
+    exits after a listing per bucket. Every run reports stalled buckets (no CSV delivered in `-t` hours: logging off,
+    or delivery stopped); `-x` turns one into exit 3."""
     from .access import access_buckets, access_log_bucket, ingest
 
-    ingest(
+    summary = ingest(
         buckets=buckets or access_buckets(),
         log_bucket=log_bucket or access_log_bucket(),
         data_bucket=data_bucket,
@@ -2393,7 +2406,13 @@ def access_ingest(
         max_chunk_gb=max_chunk_gb,
         workers=workers,
         max_chunks=max_chunks,
+        parallel=parallel,
+        stall_hours=stall_hours,
     )
+    if as_json:
+        print(json.dumps(summary, indent=2))
+    if stall_exit and summary["stalled"]:
+        sys.exit(3)
 
 
 @access.command("sweep")
@@ -2906,7 +2925,7 @@ def _digest_options(template_default: str):
         option("-c", "--channel", help="Slack channel id (default $SLACK_CHANNEL)"),
         option("-C", "--config", "config_path", type=Path, help="YAML/JSON DigestConfig overlaid on the template's preset (title, site, root, state, plot host, buckets/quotas, prices…; see specs/done/digest-unification.md)"),
         option("-D", "--reply-delay", "reply_delay", default=0.0, type=float, help="Seconds to sleep between replies (e.g. 305 for a spaced Slack backfill so per-reply sender chrome survives; Discord needs none)"),
-        option("-E", "--edit-replies", is_flag=True, help="Re-edit every already-posted reply to its current body (backfill after a format change; -P discord only)"),
+        option("-E", "--edit-replies", is_flag=True, help="Re-edit every already-posted reply to its current body (backfill after a format change; a Slack sender-variant reply keeps its name + avatar)"),
         option("-F", "--for-real", is_flag=True, help="With --redo-replies: actually post the new replies and delete the old ones (default: print the plan)"),
         option("-H", "--reply-hour", type=int, default=None, help="cw template: UTC hour the sender variant's daily reply is taken from — the day's first scan at/after it (default 12 → the 12:01Z morning scan, 8:01 am ET; the day's other scans still feed the OP + plot, and with the config's `provisional: true` its earlier ones post a provisional reply)"),
         option("-i", "--icons-dir", type=Path, default=None, help="Where the plot PNG is written + deployed from (default the config's `icons_dir`: job/icons, job/icons-cw)"),
@@ -2980,8 +2999,6 @@ def _digest(
         dg.post_digest_discord(tpl, root, m, webhook, bot_token, edit_replies=edit_replies)
         err(f"digest: converged {m:%Y-%m} (discord)")
         return
-    if edit_replies:
-        raise SystemExit("digest: -E/--edit-replies is Discord-only (Slack replies are re-posted with -R/--redo-replies)")
     channel = channel or os.environ.get("SLACK_CHANNEL")
     token = secret(token, "SLACK_BOT_TOKEN")
     if not (channel and token):
@@ -3015,7 +3032,7 @@ def _digest(
         return
     # the scheduled run (no -m) also closes the previous month's thread if its last day's provisional reply is still up
     converge = dg.converge_slack if month else dg.converge_slack_now
-    converge(tpl, root, m, client, channel, variant, icons_dir=icons, deploy_plot=deploy, reply_delay=reply_delay)
+    converge(tpl, root, m, client, channel, variant, icons_dir=icons, deploy_plot=deploy, reply_delay=reply_delay, edit_replies=edit_replies)
     err(f"digest: converged {m:%Y-%m} ({cfg.template}, {variant})")
 
 
@@ -3209,10 +3226,12 @@ main.add_command(_static_names)
 from .interval_store import cli as _interval_store  # noqa: E402
 from .interval_append import append_cmd as _interval_append, cli as _interval_runs, merge_cmd as _interval_merge  # noqa: E402
 from .interval_local import add_cmd as _interval_local_add, build_cmd as _interval_local_build, current_cmd as _interval_local_current  # noqa: E402
+from .interval_export import export_cmd as _interval_export  # noqa: E402
 
 _interval_store.add_command(_interval_local_build)
 _interval_store.add_command(_interval_local_add)
 _interval_store.add_command(_interval_local_current)
+_interval_store.add_command(_interval_export)
 _interval_store.add_command(_interval_append)
 _interval_store.add_command(_interval_merge)
 _interval_store.add_command(_interval_runs)
@@ -3315,6 +3334,11 @@ def _scan_head(fresh: bool, dry_run: bool, nf_dir: Path | None, reproc: bool, la
 
     nf = nf_dir or Path(os.environ.get("DT_NF_DIR") or "job/nf")
     sys.exit(head(profile_path, nf.absolute(), launch_dir, reproc=reproc, fresh=fresh, dry_run=dry_run))
+
+
+from .scan_retire import retire_cmd as _scan_retire  # noqa: E402
+
+_scan.add_command(_scan_retire)
 
 
 if __name__ == "__main__":

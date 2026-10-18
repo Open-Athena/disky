@@ -101,6 +101,15 @@ describe('peerUrl', () => {
     expect(go('https://gcs.oa.dev/marin-us-east5/checkpoints?d=26101707&c=read&f=grug,llama&o=calvin-xu&iec=1&open=x%2Fy#h'))
       .toBe('https://cw.oa.dev/?c=read&f=grug,llama&iec=1')
   })
+  it("the meta store is every deployment's: its root and any drill into it → the peer's meta root", () => {
+    expect([
+      go('https://gcs.oa.dev/meta?d=26101707&c=tree'),
+      go('https://gcs.oa.dev/meta/cw-l2/2026-10-17?c=tree#h'),
+    ]).toEqual([
+      'https://cw.oa.dev/meta?c=tree',
+      'https://cw.oa.dev/meta?c=tree',
+    ])
+  })
   it('dev → the peer\'s dev host; a peer without one, or from prod or localhost → its prod', () => {
     expect([
       go('https://dev.gcs.oa.dev/scans', true),

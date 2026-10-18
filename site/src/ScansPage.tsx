@@ -3,17 +3,19 @@
 // previous scan — from the D1 rows `dt-cloud scan-run record | backfill`
 // writes. DIY SVG: a duration strip over all runs, a phase bar per row, and a
 // phase timeline per run.
-import { useEffect, useLayoutEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent, type ReactNode, type RefObject } from 'react'
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent, type ReactNode, type RefObject } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { Link, useLocation, useNavigate, useParams } from 'react-router-dom'
+import { useUrlState } from 'use-prms'
 import { SiteNav } from './SiteNav'
 import { useDocTitle } from './title'
 import { SiteKbd } from './SiteKbd'
 import { Tooltip } from './Tooltip'
-import { axisTicks } from './runChart'
+import { axisTicks, inSpan, type RunSpan, runSpanParam } from './runChart'
 import { fmtBytesPrecise, fmtN } from './types'
 import { useUnits } from './units'
-import { STORES, type Store } from './stores'
+import { useStores } from './auth'
+import { type Store } from './stores'
 import { useMinSlug } from './scan'
 import {
   batchHref, logsHref, mapHref, metaHref, type OutputDelta, phaseOrder, type PhaseSpan, type RunSummary, type ScanRun,
@@ -85,10 +87,33 @@ const usd = (x: number | null | undefined) => (x == null ? '—' : `$${x < 10 ? 
 
 const deltaClass = (d: number | null | undefined) => (d == null || d === 0 ? 'dim' : d > 0 ? 'grew' : 'shrank')
 
-/** Duration per run over time, stacked by phase; a failed run in the danger ink. */
-function DurationStrip({ runs, color, onPick }: { runs: RunSummary[]; color: (p: string) => string; onPick: (id: string) => void }) {
-  const tip = useSvgTip()
+/** Brushing between the strip's bars and the table's rows: the hovered run, kept `LINGER_MS` past the pointer leaving
+ * its mark (the gaps between bars don't flash every other bar back on). */
+function useHoverRun() {
+  const [id, setId] = useState<string | null>(null)
+  const timer = useRef<number | undefined>(undefined)
+  const cancel = () => { window.clearTimeout(timer.current); timer.current = undefined }
+  useEffect(() => cancel, [])
+  return {
+    id,
+    enter: (run: string) => { cancel(); setId(run) },
+    leave: () => { cancel(); timer.current = window.setTimeout(() => { timer.current = undefined; setId(null) }, LINGER_MS) },
+  }
+}
+type HoverRun = ReturnType<typeof useHoverRun>
+
+/** Below this many px a press is a click (opens the run), not a drag. */
+const DRAG_PX = 4
+
+/** Duration per run over time, stacked by phase; a failed run in the danger ink. Dragging across it picks a window
+ * (`win`; the runs outside it dim); hovering a bar brushes its table row (`hover`). */
+function DurationStrip({ runs, color, onPick, win, onWin, hover }: {
+  runs: RunSummary[]; color: (p: string) => string; onPick: (id: string) => void
+  win: RunSpan | null; onWin: (w: RunSpan | null) => void; hover: HoverRun
+}) {
   const [ref, W] = useWidth<HTMLDivElement>()
+  const [drag, setDrag] = useState<[number, number] | null>(null)
+  const dragged = useRef(false)
   const pts = runs.filter(r => r.secs != null && r.run.started_ts != null)
   if (pts.length < 2) return null
   const H = W < 500 ? 150 : 190, L = 36, R = 6, T = 8, B = 20
@@ -100,25 +125,71 @@ function DurationStrip({ runs, color, onPick }: { runs: RunSummary[]; color: (p:
   const x = (t: number) => L + ((t - t0) / span) * (W - L - R)
   const y = (h: number) => H - B - (h / top) * (H - T - B)
   const bw = Math.max(1.5, Math.min(14, ((W - L - R) / pts.length) * 0.7))
+  // Runs aren't evenly spaced (a daily cadence, then 6-hourly, plus hand submits), so each bar narrows to fit between
+  // its neighbors, and its hover target runs from the midpoint with the one before to the midpoint with the one after:
+  // fixed-width targets overlapped where runs are dense, and the later-drawn bar took its neighbor's edge.
+  const byX = [...pts].sort((a, b) => a.run.started_ts! - b.run.started_ts!), xs = byX.map(p => x(p.run.started_ts!))
+  const cols = new Map(byX.map((p, i) => {
+    const c = xs[i]
+    const prev = i > 0 ? xs[i - 1] : -Infinity, next = i < xs.length - 1 ? xs[i + 1] : Infinity
+    const w = Math.max(1.5, Math.min(bw, 0.8 * Math.min(c - prev, next - c)))
+    const lo = Math.max(c - bw / 2 - 2, (prev + c) / 2), hi = Math.min(c + bw / 2 + 2, (c + next) / 2)
+    return [p.run.run_id, { cx: c - w / 2, w, lo, hi }]
+  }))
   const days = [...new Set(pts.map(p => runDay(p.run.started_ts!)))]
   const labelEvery = Math.max(1, Math.ceil(days.length / Math.max(2, Math.floor(W / 90))))
+  const px = (e: { clientX: number }, svg: SVGSVGElement) => Math.min(W - R, Math.max(L, e.clientX - svg.getBoundingClientRect().left))
+  // a window's ends are whole minutes, as `?w=` holds them
+  const ts = (v: number) => Math.floor((t0 + ((v - L) / (W - L - R)) * span) / 60) * 60
+  // Pointer events, so a finger drags like a mouse (`touch-action: pan-y` leaves vertical swipes to the page). The
+  // release commits wherever it lands; a press that never moved `DRAG_PX` falls through to the bar's click.
+  const onDown = (e: ReactPointerEvent<SVGSVGElement>) => {
+    if (e.button !== 0) return
+    const svg = e.currentTarget, a = px(e, svg)
+    dragged.current = false
+    const move = (ev: PointerEvent) => {
+      const b = px(ev, svg)
+      if (!dragged.current && Math.abs(b - a) < DRAG_PX) return
+      dragged.current = true
+      setDrag([a, b])
+    }
+    const up = (ev: PointerEvent) => {
+      off()
+      setDrag(null)
+      if (!dragged.current) return
+      const b = px(ev, svg)
+      onWin([ts(Math.min(a, b)), ts(Math.max(a, b))])
+      // the click this release fires (on a bar it ended over) is the drag's, not a pick
+      window.setTimeout(() => { dragged.current = false })
+    }
+    const cancel = () => { off(); setDrag(null); dragged.current = false }
+    const off = () => { window.removeEventListener('pointermove', move); window.removeEventListener('pointerup', up); window.removeEventListener('pointercancel', cancel) }
+    window.addEventListener('pointermove', move)
+    window.addEventListener('pointerup', up)
+    window.addEventListener('pointercancel', cancel)
+  }
+  const band = drag ? [Math.min(...drag), Math.max(...drag)] : win ? [x(win[0]), x(win[1])] : null
   return (
     <div className="sr-svgwrap" ref={ref}>
-      <svg className="sr-strip" width={W} height={H} viewBox={`0 0 ${W} ${H}`} role="img" aria-label="Run duration over time, by phase">
+      <svg className={`sr-strip${drag ? ' dragging' : ''}`} width={W} height={H} viewBox={`0 0 ${W} ${H}`} role="img" aria-label="Run duration over time, by phase; drag to pick a window"
+        onPointerDown={onDown} style={{ touchAction: 'pan-y', userSelect: 'none' }}>
+        {band && <rect className="sr-band" x={Math.max(L, band[0])} y={T} width={Math.max(1, Math.min(W - R, band[1]) - Math.max(L, band[0]))} height={H - T - B} />}
         {ticks.map(h => <g key={h}><line className="grid" x1={L} x2={W - R} y1={y(h)} y2={y(h)} /><text className="tick" x={L - 6} y={y(h) + 4} textAnchor="end">{h}h</text></g>)}
         {days.filter((_, i) => i % labelEvery === 0).map(d => {
           const t = Date.parse(`${d}T00:00:00`) / 1000
           return <text key={d} className="tick" x={Math.min(W - R - 16, Math.max(L + 16, x(t)))} y={H - 6} textAnchor="middle">{d.slice(5)}</text>
         })}
         {pts.map(p => {
-          const cx = x(p.run.started_ts!) - bw / 2
+          const { cx, w: bw, lo, hi } = cols.get(p.run.run_id)!
           const failed = p.run.status === 'failed'
           const main = p.spans.filter(s => s.lane === 0)
-          const where = p.failed_at ? ` · failed ${p.failed_at.startsWith('after') ? p.failed_at : `in ${p.failed_at}`}` : ''
+          const id = p.run.run_id
+          const out = !drag && !inSpan(win, p.run.started_ts)
           return (
-            <g key={p.run.run_id} className={`sr-col${failed ? ' failed' : ''}`} onClick={() => onPick(p.run.run_id)} role="link" aria-label={`${p.run.scan} ${p.run.kind} run`}
-              {...tip.on(<><div><b>{p.run.scan}</b> · {p.run.kind} · {runOutcome(p.run, p.phase_issues)}</div><div>{fmtDur(p.secs!)}{where}</div>{p.spans.map(s => <div key={s.phase}><i className="sw" style={{ background: phaseFill(s, color) }} />{s.phase} {fmtDur(s.end - s.start)}{s.lane ? ' (beside)' : ''}{s.status === 'failed' ? ` · ${phaseOutcome(s)}` : ''}</div>)}</>)}>
-              <rect className="sr-col-hit" x={cx - 2} y={T} width={bw + 4} height={H - T - B} />
+            <g key={id} className={`sr-col${failed ? ' failed' : ''}${hover.id === id ? ' brushed' : hover.id || out ? ' dimmed' : ''}`}
+              onClick={() => { if (!dragged.current) onPick(id) }} role="link" aria-label={`${p.run.scan} ${p.run.kind} run`}
+              onPointerMove={() => { if (!drag) hover.enter(id) }} onPointerLeave={hover.leave}>
+              <rect className="sr-col-hit" x={lo} y={T} width={Math.max(0, hi - lo)} height={H - T - B} />
               <rect className="sr-col-total" x={cx} y={y(p.secs! / 3600)} width={bw} height={Math.max(1, y(0) - y(p.secs! / 3600))} />
               {!failed && main.map(s => (
                 <rect key={s.phase} x={cx} y={y(s.end / 3600)} width={bw} height={Math.max(0.5, y(s.start / 3600) - y(s.end / 3600))} style={{ fill: phaseFill(s, color) }} />
@@ -129,14 +200,46 @@ function DurationStrip({ runs, color, onPick }: { runs: RunSummary[]; color: (p:
         })}
         <line className="axis" x1={L} x2={W - R} y1={y(0)} y2={y(0)} />
       </svg>
-      {tip.el}
     </div>
   )
 }
 
-function Legend({ order, color }: { order: string[]; color: (p: string) => string }) {
+/** The phase legend, and the hovered run's readout (a bar's or a table row's): each phase's time in it, beside its
+ * swatch (the phases it didn't run fade), with the run's summary on the line above. The grid's cells are fixed, so a
+ * hover never reflows the page. */
+function Legend({ order, color, run }: { order: string[]; color: (p: string) => string; run?: RunSummary }) {
   if (!order.length) return null
-  return <div className="sr-legend">{order.map(p => <span key={p}><i className="sw" style={{ background: color(p) }} />{p}</span>)}<span><i className="sw" style={{ background: 'var(--other)' }} />unrecorded work (not necessarily idle)</span><span><i className="sw failed" />failed</span></div>
+  const by = new Map<string, { secs: number; beside: boolean; failed: boolean }>()
+  for (const s of run?.spans ?? []) {
+    const e = by.get(s.phase) ?? { secs: 0, beside: false, failed: false }
+    e.secs += s.end - s.start
+    if (s.lane) e.beside = true
+    if (s.status === 'failed') e.failed = true
+    by.set(s.phase, e)
+  }
+  // the run's time no main-lane phase accounts for
+  const other = run?.secs == null ? null : run.secs - run.spans.filter(s => !s.lane).reduce((t, s) => t + s.end - s.start, 0)
+  const where = run?.failed_at ? ` · failed ${run.failed_at.startsWith('after') ? run.failed_at : `in ${run.failed_at}`}` : ''
+  // a cell's fill: its phase's share of the run's duration
+  const fill = (fill: string, secs: number | null | undefined) =>
+    run?.secs && secs ? { '--fill': fill, '--pct': `${Math.min(100, (100 * secs) / run.secs).toFixed(1)}%` } as CSSProperties : undefined
+  const cell = (key: string, sw: ReactNode, label: string, dur: ReactNode, cls = '', style?: CSSProperties) =>
+    <span key={key} className={cls || undefined} style={style}>{sw}<span className="lbl">{label}</span><span className="dur">{dur}</span></span>
+  return <div className={`sr-phases${run ? ' readout' : ''}`}>
+    <div className="sr-phases-head">{run
+      ? <><b>{fmtRunTime(run.run.started_ts!)}</b> · {run.run.kind} · {runOutcome(run.run, run.phase_issues)}{run.secs != null && <> · {fmtDur(run.secs)}</>}{where}{[...by.values()].some(e => e.beside) && <span className="dim"> · ∥ beside the main sequence</span>}</>
+      : <span className="dim">Hover a bar or a row for its phases.</span>}</div>
+    <div className="sr-phases-grid">
+      {order.map(p => {
+        const e = by.get(p)
+        return cell(p, <i className="sw" style={{ background: color(p) }} />, p,
+          e && <>{e.beside && '∥ '}{fmtDur(e.secs)}</>,
+          run ? (e ? (e.failed ? 'failed' : '') : 'absent') : '', fill(color(p), e?.secs))
+      })}
+      {cell('other', <i className="sw" style={{ background: 'var(--other)' }} />, 'unrecorded work (not necessarily idle)', other != null && other >= 1 && fmtDur(other), run && !(other != null && other >= 1) ? 'absent' : '', fill('var(--other)', other))}
+      {cell('failed', <i className="sw failed" />, 'failed', null, run && run.run.status !== 'failed' ? 'absent' : '')}
+    </div>
+  </div>
 }
 
 function Links({ run, links }: { run: ScanRun; links: Links }) {
@@ -154,18 +257,30 @@ export function ScansPage() {
   const { bytes, delta } = useBytes()
   const [kind, setKind] = useState('')
   const [status, setStatus] = useState('')
+  const [span, setSpan] = useUrlState('w', runSpanParam)
+  const hover = useHoverRun()
+  const stores = useStores()
+  useEffect(() => {
+    if (!span) return
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setSpan(null) }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [span, setSpan])
   useDocTitle('Scans')
   const runs = q.data?.runs ?? []
   const order = useMemo(() => phaseOrder(runs.flatMap(r => r.spans.map((s, i) => ({ phase: s.phase, seq: i })))), [runs])
   const color = colorer(order)
   const kinds = [...new Set(runs.map(r => r.run.kind))].sort()
-  const shown = runs.filter(r => (!kind || r.run.kind === kind) && (!status || runOutcome(r.run, r.phase_issues) === status))
+  const filtered = runs.filter(r => (!kind || r.run.kind === kind) && (!status || runOutcome(r.run, r.phase_issues) === status))
+  const shown = filtered.filter(r => inSpan(span, r.run.started_ts))
   return (
     <main className="staged-page scans-page">
       <SiteNav />
       <h1>Scan runs</h1>
-      {STORES.length > 1 && <div className="run-filters">
-        <select aria-label="Store" value={store.key} onChange={e => nav(scansHref(STORES.find(s => s.key === e.target.value) ?? STORES[0]))}>{STORES.map(s => <option key={s.key} value={s.key}>{s.label}</option>)}</select>
+      {stores.length > 1 && <div className="run-filters">
+        {stores.length <= 3
+          ? <span className="gran" role="radiogroup" aria-label="Store">{stores.map(s => <button key={s.key} type="button" role="radio" aria-checked={s === store} className={s === store ? 'on' : ''} onClick={() => nav(scansHref(s))}>{s.label}</button>)}</span>
+          : <select aria-label="Store" value={store.key} onChange={e => nav(scansHref(stores.find(s => s.key === e.target.value) ?? stores[0]))}>{stores.map(s => <option key={s.key} value={s.key}>{s.label}</option>)}</select>}
       </div>}
       <p className="sub">Each scan job's run: when it ran, how long each phase took, what it wrote, and how each structure changed against the previous scan. The stores they append to are on <Link to="/health">Health</Link>.</p>
       {q.isLoading ? <p>Loading runs…</p> : q.error ? <p className="err">{q.error.message}</p> : !q.data?.configured ? (
@@ -173,13 +288,16 @@ export function ScansPage() {
       ) : (<>
         <section className="sr-chart">
           <h3>Duration by run</h3>
-          <DurationStrip runs={shown} color={color} onPick={id => nav(scanHref(id))} />
-          <Legend order={order} color={color} />
+          <DurationStrip runs={filtered} color={color} onPick={id => nav(scanHref(id))} win={span} onWin={setSpan} hover={hover} />
+          <Legend order={order} color={color} run={hover.id ? runs.find(r => r.run.run_id === hover.id) : undefined} />
         </section>
         <div className="run-filters">
           {kinds.length > 1 && <select aria-label="Filter by kind" value={kind} onChange={e => setKind(e.target.value)}><option value="">all kinds</option>{kinds.map(k => <option key={k}>{k}</option>)}</select>}
           <select aria-label="Filter by status" value={status} onChange={e => setStatus(e.target.value)}><option value="">all statuses</option>{['succeeded', 'partial', 'recovered', 'failed', 'running', 'no-op'].map(s => <option key={s} value={s}>{s}</option>)}</select>
           <span className="dim">{shown.length} / {runs.length} runs</span>
+          {span
+            ? <Tooltip content="The runs that started in the window dragged on the chart. Esc clears it."><button type="button" className="sr-span" onClick={() => setSpan(null)}>{fmtRunTime(span[0])} → {fmtRunTime(span[1])} ✕</button></Tooltip>
+            : <span className="dim hide-md">Drag across the chart to pick a window.</span>}
         </div>
         <div className="runs-wrap">
           <table className="runs sr-runs">
@@ -196,7 +314,8 @@ export function ScansPage() {
                 const r = s.run
                 const map = r.status === 'succeeded' ? mapHref(r.scan, store.path, slug) : null
                 return (
-                  <tr key={r.run_id} className={r.status === 'failed' ? 'failed' : undefined}>
+                  <tr key={r.run_id} className={[r.status === 'failed' && 'failed', hover.id === r.run_id && 'brushed'].filter(Boolean).join(' ') || undefined}
+                    onPointerEnter={() => hover.enter(r.run_id)} onPointerLeave={hover.leave}>
                     <td className="nb"><RunWhen ts={r.started_ts} scan={r.scan} href={scanHref(r.run_id)} />
                       {r.trigger === 'manual' && <> <Tooltip content="Started by hand (a submit or a resume), not by the schedule."><span className="dim">manual</span></Tooltip></>}
                       {(kinds.length > 1 || s.downstream > 0) && <div className="sr-kind">{kinds.length > 1 && r.kind}{s.downstream > 0 && <Tooltip content={`${s.downstream} downstream job${s.downstream > 1 ? 's' : ''} (listing fan-out, …)`}><span>{kinds.length > 1 ? ' + ' : '+ '}{s.downstream} job{s.downstream > 1 ? 's' : ''}</span></Tooltip>}</div>}</td>

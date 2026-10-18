@@ -186,10 +186,53 @@ def test_access_rows_on_or_after_scan_date_are_excluded(tmp_path: Path, listing:
     pidx = tmp_path / "path-index.parquet"
     meta = write_path_index((listing,), out, asof, (attribution,), identities_path, access=(access,), path_index=pidx)
     rd = epoch_day(TS["d0703"])
-    assert (meta["asof"], meta["access"]) == (asof, {"from": rd, "to": rd, "buckets": ["b1"]})
+    assert (meta["asof"], meta["access"]) == (asof, {"from": rd, "to": rd, "through": "2026-07-03T00:00Z", "buckets": ["b1"]})
     a_by_path = pd.read_parquet(pidx).groupby("path")["last_read"].max().to_dict()
     assert pd.isna(a_by_path["b1/datasets"])
     assert a_by_path["b1"] == rd
+
+
+def test_access_through_is_the_newest_log_hour_before_the_scan(tmp_path: Path, listing: str, attribution: str):
+    """`meta.access.through` (specs/access-log-freshness.md §B): the hour of the newest request the read data holds,
+    as `YYYY-MM-DDTHH:00Z`, over every op (a PUT is a logged hour too), after the as-of cut (the scan date's own
+    hours are left out, as for `to`)."""
+    agg = tmp_path / "agg.parquet"
+    ts = lambda d, h, m: dt.datetime(2026, 7, d, h, m, 17, tzinfo=dt.timezone.utc)  # noqa: E731
+    pd.DataFrame({
+        "bucket": ["b1"] * 3, "path": ["users", "datasets", "top.bin"],
+        "hour": [ts(18, 9, 0), ts(19, 9, 0), ts(20, 12, 0)], "op": ["GET", "PUT", "GET"],
+        "last_ts": [ts(18, 9, 41), ts(19, 9, 59), ts(20, 12, 5)], "n_ops": [1, 1, 1], "bytes_out": [1, 1, 1],
+    }).to_parquet(agg)
+    identities_path = tmp_path / "identities.yaml"
+    identities_path.write_text(IDENTITIES_YAML)
+    meta = write_path_index((listing,), tmp_path / "out", "2026-07-20T0700", (attribution,), identities_path, access=(str(agg),))
+    assert meta["access"] == {
+        "from": epoch_day(ts(18, 9, 41)), "to": epoch_day(ts(19, 9, 59)), "through": "2026-07-19T09:00Z", "buckets": ["b1"],
+    }
+    assert json.loads((tmp_path / "out" / "meta.json").read_text())["access"]["through"] == "2026-07-19T09:00Z"
+
+
+def test_access_as_of_cut_is_utc_in_any_session_timezone(tmp_path: Path, listing: str, attribution: str, monkeypatch):
+    """The as-of cut (`day < D`) is in UTC whatever the process's timezone: a read at 02:00 UTC on the scan date is on
+    the scan date, so it's out, even where local time still says the day before (DuckDB casts a TIMESTAMPTZ to a DATE
+    in its session `TimeZone`, which defaults to the OS's)."""
+    monkeypatch.setenv("TZ", "America/New_York")
+    time.tzset()
+    try:
+        agg = tmp_path / "agg.parquet"
+        ts = lambda d, h: dt.datetime(2026, 7, d, h, 30, tzinfo=dt.timezone.utc)  # noqa: E731
+        pd.DataFrame({
+            "bucket": ["b1"] * 2, "path": ["users", "datasets"],
+            "hour": [ts(19, 23).replace(minute=0), ts(20, 2).replace(minute=0)], "op": ["GET", "GET"],
+            "last_ts": [ts(19, 23), ts(20, 2)], "n_ops": [1, 1], "bytes_out": [1, 1],
+        }).to_parquet(agg)
+        identities_path = tmp_path / "identities.yaml"
+        identities_path.write_text(IDENTITIES_YAML)
+        meta = write_path_index((listing,), tmp_path / "out", "2026-07-20T0700", (attribution,), identities_path, access=(str(agg),))
+    finally:
+        monkeypatch.delenv("TZ")
+        time.tzset()
+    assert meta["access"] == {"from": epoch_day(ts(19, 23)), "to": epoch_day(ts(19, 23)), "through": "2026-07-19T23:00Z", "buckets": ["b1"]}
 
 
 def _r2_hour_file(root: Path, ts: dt.datetime, capture: str, rows: list[tuple]) -> Path:
@@ -226,7 +269,7 @@ def test_r2_agg_cli_feeds_the_read_lens(tmp_path: Path, listing: str, attributio
     identities_path.write_text(IDENTITIES_YAML)
     pidx = tmp_path / "path-index.parquet"
     meta = write_path_index((listing,), tmp_path / "out", "2026-07-20", (attribution,), identities_path, access=(str(agg),), path_index=pidx)
-    assert meta["access"] == {"from": epoch_day(TS["d0702"]), "to": epoch_day(TS["d0703"]), "buckets": ["b1"]}
+    assert meta["access"] == {"from": epoch_day(TS["d0702"]), "to": epoch_day(TS["d0703"]), "through": "2026-07-03T00:00Z", "buckets": ["b1"]}
     a_by_path = pd.read_parquet(pidx).groupby("path")["last_read"].max().to_dict()
     assert {p: a_by_path[p] for p in ("b1", "b1/users", "b1/users/rw/ckpt")} == {
         "b1": epoch_day(TS["d0702"]), "b1/users": epoch_day(TS["d0702"]), "b1/users/rw/ckpt": epoch_day(TS["d0702"]),
@@ -306,7 +349,7 @@ def test_age_rows_carry_last_read(tmp_path: Path, listing: str, attribution: str
     out = tmp_path / "out"
     meta = write_path_index((listing,), out, "2026-07-20", (attribution,), identities_path, access=(access,))
     rd = epoch_day(TS["d0703"])
-    assert meta["access"] == {"from": rd, "to": rd, "buckets": ["b1"]}
+    assert meta["access"] == {"from": rd, "to": rd, "through": "2026-07-03T00:00Z", "buckets": ["b1"]}
     # Strata whose dir was read carry `a` (its last-read epoch day); the rest
     # omit it — the site's read axis colors those "never read".
     age = json.loads((out / "age.json").read_text())
@@ -614,7 +657,7 @@ def test_access_aggregates_mix_day_and_hour_grain(tmp_path: Path, listing: str, 
     identities_path.write_text(IDENTITIES_YAML)
     pidx = tmp_path / "path-index.parquet"
     meta = write_path_index((listing,), tmp_path / "out", "2026-07-20", (attribution,), identities_path, access=(str(parts / "*.parquet"),), path_index=pidx)
-    assert meta["access"] == {"from": epoch_day(TS["d0702"]), "to": epoch_day(TS["d0703"]), "buckets": ["b1"]}
+    assert meta["access"] == {"from": epoch_day(TS["d0702"]), "to": epoch_day(TS["d0703"]), "through": "2026-07-03T00:00Z", "buckets": ["b1"]}
     a_by_path = pd.read_parquet(pidx).groupby("path")["last_read"].max().to_dict()
     assert (a_by_path["b1/users/rw/ckpt"], a_by_path["b1/datasets/raw"], a_by_path["b1/datasets"], a_by_path["b1"]) == (
         epoch_day(TS["d0703"]), epoch_day(TS["d0702"]), epoch_day(TS["d0702"]), epoch_day(TS["d0703"]),
