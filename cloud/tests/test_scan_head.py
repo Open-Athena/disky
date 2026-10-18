@@ -357,3 +357,25 @@ def test_profile_json_survives_nextflows_task_export(tmp_path):
     assert exported[1] == run_id
     assert S.profile_env_json({S.PROFILE_JSON_ENV: exported[0]}) == profile_json
     assert S.profile_env_json({S.PROFILE_JSON_ENV: profile_json}) == profile_json  # a hand-set raw JSON still reads
+
+
+def test_reproc_still_fetches_an_adopted_listing():
+    """REPROC runs from `index`, but a source adopting its listing (`sources[].listing`) keeps its `list` task: on a
+    local data dir the shards have no other copy. Without one, `list` is skipped as before."""
+    from dt_cloud.scan_profile import parse
+
+    def prof(sources):
+        return parse({"deployment": "fix", "executor": {"kind": "local"}, "work": "/w", "data": "/d",
+                      "layout": {"layer2": "l2/{scan}/", "snapshots": "", "listing": "cap/{scan}/"}, "sources": sources,
+                      "skip": ["digest", "static-names"]})
+
+    adopted = prof([{"uri": "r2://disk-tree", "listing": "{env:DT_CAPTURE}"}, "r2://other"])
+    listed = prof(["r2://disk-tree"])
+    got = [{k: H.params(p, "{}", "2026-10-16", "G", "1", "", "S", {}, reproc=r)[k] for k in ("sources", "skip_list")}
+           for p, r in ((adopted, True), (adopted, False), (listed, True))]
+    assert got == [
+        {"sources": [{"uri": "r2://disk-tree", "machine": None, "disk": None}], "skip_list": False},
+        {"sources": [{"uri": "r2://disk-tree", "machine": None, "disk": None}, {"uri": "r2://other", "machine": None, "disk": None}],
+         "skip_list": False},
+        {"sources": [], "skip_list": True},
+    ]
