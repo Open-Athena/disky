@@ -161,6 +161,7 @@ def test_dry_run_reports_and_deletes_nothing(fx, d1):
         for d in retired
         for v, g, n in rows(d)
     ]
+    assert rep["d1_rows"] == {"footer_cache": 3, "index_row_groups": 17, "index_schema": 4}
     assert (_files(fx["root"]), _files(fx["store"]), d1.state()) == (before, store_before, db_before)
 
 
@@ -178,7 +179,10 @@ def test_no_d1_reports_the_rows_its_scans_still_have(fx, d1):
     assert (rep["d1"], rep["d1_left"], sorted({d["date"] for d in plan})) == (None, plan, ["2026-07-30", "2026-08-04", "2026-08-04T1236"])
 
 
-def test_execute_backs_up_verifies_and_deletes(fx, d1, tmp_path):
+@pytest.mark.parametrize("rows", [F.D1_DELETE_ROWS, 1])
+def test_execute_backs_up_verifies_and_deletes(fx, d1, tmp_path, monkeypatch, rows):
+    """With D1 deletes of any batch size (`rows` a statement, until one deletes none): the same rows go."""
+    monkeypatch.setattr(F, "D1_DELETE_ROWS", rows)
     before = _files(fx["root"])
     backup = tmp_path / "backup"
     rep = _run(fx, "-x", "-b", str(backup), "-w", str(tmp_path / "work"))
@@ -191,7 +195,7 @@ def test_execute_backs_up_verifies_and_deletes(fx, d1, tmp_path):
             or k in ("idx/2026-07-30/b1.parquet", "idx/2026-08-04T1236/b1.parquet")}
     assert _files(fx["root"]) == {k: n for k, n in before.items() if k not in gone}
     assert _files(backup) == gone
-    assert rep["backup"] == {"objects": len(gone), "bytes": sum(gone.values()), "server_side": False}
+    assert rep["backup"] == {"objects": len(gone), "bytes": sum(gone.values()), "server_side": False, "present": 0}
     assert rep["deleted"] == {"objects": len(gone), "bytes": sum(gone.values())}
     seeded = [(d, v, g, n) for d, vs in SEEDED.items() for v, g, n in vs]
     assert d1.state() == [
@@ -262,8 +266,14 @@ def test_backup_within_one_store_copies_server_side(monkeypatch, tmp_path):
         raise AssertionError("copied through the host")
     monkeypatch.setattr(Store, "get", refuse)
     monkeypatch.setattr(Store, "put", refuse)
-    rep = sr.backup(src, dst, {"a/x.parquet": 10, "a/y.parquet": 20}, tmp_path)
-    assert (rep, dst.listing("a")) == ({"objects": 2, "bytes": 30, "server_side": True}, {"a/x.parquet": 10, "a/y.parquet": 20})
+    objs = {"a/x.parquet": 10, "a/y.parquet": 20}
+    rep = sr.backup(src, dst, objs, tmp_path)
+    assert (rep, dst.listing("a")) == ({"objects": 2, "bytes": 30, "server_side": True, "present": 0}, objs)
+    # A rerun (its first run stopped after the backup, e.g. on a D1 failure) copies only what isn't there at its size.
+    dst.write_bytes("a/y.parquet", b"y" * 5)
+    monkeypatch.setattr(src.fs, "copy", lambda a, b: (_ for _ in ()).throw(AssertionError(f"copied {a}")) if a.endswith("x.parquet") else
+                        dst.write_bytes("a/y.parquet", b"y" * 20))
+    assert (sr.backup(src, dst, objs, tmp_path), dst.listing("a")) == ({"objects": 2, "bytes": 30, "server_side": True, "present": 1}, objs)
 
 
 @pytest.mark.parametrize("name,cls", [

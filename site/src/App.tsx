@@ -1445,6 +1445,7 @@ function AppContent() {
               node={mapPath[mapPath.length - 1]}
               segs={tblSegs}
               scheme={store.scheme}
+              bucketSchemes={store.bucketSchemes}
               scan={asof}
               flatOk={objects && !scopeQs}
               ownerIdx={ownersMode ? ownerIdx : undefined}

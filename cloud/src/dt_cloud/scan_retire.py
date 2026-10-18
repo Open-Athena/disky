@@ -26,7 +26,7 @@ second: its D1 rows are gone). Deletion is a whitelist: a file no class names st
 1. listed by the IS's newest manifest (the generation `-g`, default `interval-store/CURRENT.json`, followed to its
    newest successor; the base's `scans.json` when no manifest) **and** by the static index's (`-G`), else skipped;
 2. a passing parity marker `interval-store/<gen>/verify/<id>.json` (`interval_verify.marker`), in the generation or one
-   it was compacted from; else, executing without `-m`, `interval-store verify` runs for it now (against its newest
+   it was compacted or backfilled from; else, executing without `-m`, `interval-store verify` runs for it now (against its newest
    per-scan `path` sort) and writes one. A dry run never verifies: such a scan is `needs-verify`.
 
 A scan's raw listing shards carrying a (non-null) `generation` go only when its marker compared the objects' generations
@@ -178,14 +178,16 @@ def listed(store: Store, prefix: str) -> list[str]:
 
 
 def lineage(store: Store, gen: str) -> list[str]:
-    """`gen`, then each generation it was compacted from (`compaction.json` `from`), newest first."""
+    """`gen`, then each generation it was compacted or backfilled from (`compaction.json` / `backfill.json` `from`: the
+    same versions, so their parity markers hold), newest first."""
+    from .interval_backfill import BACKFILL
+
     out = [gen]
-    while store.exists(key := f"{PREFIX}/{out[-1]}/{ic.COMPACTION}"):
-        frm = store.read_json(key)["from"]
-        if frm in out:
-            break
+    while True:
+        key = next((k for k in (f"{PREFIX}/{out[-1]}/{ic.COMPACTION}", f"{PREFIX}/{out[-1]}/{BACKFILL}") if store.exists(k)), None)
+        if key is None or (frm := store.read_json(key)["from"]) in out:
+            return out
         out.append(frm)
-    return out
 
 
 def has_generation(store: Store, keys: Iterable[str], *, workers: int = 16) -> bool:
@@ -267,8 +269,9 @@ def d1_plan(dates: list[str], store: str, drop_path: bool) -> list[dict]:
     return out
 
 
-def d1_delete(dates: list[str], store: str, drop_path: bool) -> int:
-    """Delete `d1_plan`'s rows, table by table in its order; returns rows deleted."""
+def d1_delete(dates: list[str], store: str, drop_path: bool, *, batch: int | None = None) -> int:
+    """Delete `d1_plan`'s rows, table by table in its order, through `index_footer.d1_delete` (`batch` rows a
+    statement); returns rows deleted."""
     if not dates:
         return 0
     tok, acct = F._creds()
@@ -278,8 +281,16 @@ def d1_delete(dates: list[str], store: str, drop_path: bool) -> int:
             where = f"date IN ({', '.join(F._q(d) for d in ch)}) AND {_variant_pred(store, path or drop_path)}"
             if table == "index_schema" and store != F.PRIMARY_STORE:
                 where = f"store = {F._q(store)} AND {where}"
-            n += len(F._d1_query(f"DELETE FROM {table} WHERE {where} RETURNING 1 AS n;", acct, tok))
+            n += F.d1_delete(table, where, acct, tok, batch=batch)
     return n
+
+
+def d1_totals(plan: list[dict]) -> dict[str, int]:
+    """`d1_plan`'s rows per table."""
+    out: dict[str, int] = {}
+    for d in plan:
+        out[d["table"]] = out.get(d["table"], 0) + d["rows"]
+    return out
 
 
 # ── Retire ─────────────────────────────────────────────────────────────────
@@ -287,14 +298,21 @@ def d1_delete(dates: list[str], store: str, drop_path: bool) -> int:
 
 def backup(src: Store, dst: Store, objects: dict[str, int], tmp: Path, *, workers: int = 8) -> dict:
     """Every object of `objects` (`{key: size}`) copied from `src` to `dst` under the same key, each size checked; raises
-    on a mismatch (nothing is deleted then). Server side when both are buckets of one filesystem (one GCS project's
+    on a mismatch (nothing is deleted then). A key already at `dst` at its size (an earlier run's, stopped after its backup)
+    isn't copied again (`present`). Server side when both are buckets of one filesystem (one GCS project's
     credentials, one S3/R2 endpoint and profile): gcsfs rewrites, s3fs `CopyObject` (`UploadPartCopy` past 5 GB);
     else through `tmp`."""
     tmp.mkdir(parents=True, exist_ok=True)
     server = src.url and dst.url and src.fs is dst.fs
 
-    def one(i_key: tuple[int, str]) -> None:
+    def one(i_key: tuple[int, str]) -> bool:
+        """Copies `key` (False: already at `dst` at its size, from an earlier run)."""
         i, key = i_key
+        try:
+            if dst.size(key) == objects[key]:
+                return False
+        except FileNotFoundError:
+            pass
         if server:
             src.fs.copy(src._p(key), dst._p(key))
         else:
@@ -305,10 +323,11 @@ def backup(src: Store, dst: Store, objects: dict[str, int], tmp: Path, *, worker
         got, size = dst.size(key), objects[key]
         if got != size:
             raise SystemExit(f"backup {key}: {got:,} B at {dst.uri(key)}, {size:,} B at {src.uri(key)}; nothing deleted")
+        return True
 
     with ThreadPoolExecutor(workers) as ex:
-        list(ex.map(one, enumerate(sorted(objects))))
-    return {"objects": len(objects), "bytes": sum(objects.values()), "server_side": bool(server)}
+        copied = list(ex.map(one, enumerate(sorted(objects))))
+    return {"objects": len(objects), "bytes": sum(objects.values()), "server_side": bool(server), "present": copied.count(False)}
 
 
 def _totals(entries: Iterable[dict[str, list[int]]]) -> dict[str, list[int]]:
@@ -401,7 +420,8 @@ def retire(scans_root: str, layouts: list[str], *, iv_root: str, static_gen: str
             "gen": iv_gen, "static_gen": static_gen, "keep": keep, "execute": execute, "scans": rows,
             "totals": {"delete": _totals(r["delete"] for r in rows), "keep": _totals(r["keep"] for r in rows),
                        "pending": _totals(scans[r["id"]].by_class(DELETE) for r in pending)},
-            "d1": d1_plan(retiring, d1_store, drop_path) if d1 else None,
+            "d1": (plan := d1_plan(retiring, d1_store, drop_path) if d1 else None),
+            "d1_rows": d1_totals(plan) if plan is not None else None,
             # `-R` (another copy of the files): the pointer rows the retiring scans still have, which this pass won't
             # delete; a scan only this copy holds needs a pass with D1, or its rows outlive its files
             "d1_left": d1_plan(retiring, d1_store, drop_path) if not d1 and _has_d1() else None,
@@ -452,6 +472,8 @@ def render(report: dict) -> list[str]:
     if report["d1"] is not None:
         for d in report["d1"]:
             out.append(f"d1 {d['table']} {d['date']} {d['variant']} {d['gen']}: {d['rows']} rows")
+        for t, n in report["d1_rows"].items():
+            out.append(f"d1 total {t}: {n:,} rows")
     for d in report.get("d1_left") or []:
         out.append(f"d1 left (-R) {d['table']} {d['date']} {d['variant']} {d['gen']}: {d['rows']} rows")
     return out
