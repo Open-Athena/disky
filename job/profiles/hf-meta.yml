@@ -31,6 +31,8 @@ machines:
   list: e2-standard-4
   post: e2-standard-2
 skip: [bucket-check, interval-store, over-time, warm-cache, probe, digest]
+# the data bucket's soft-deleted bytes (7 d retention): what the listing of current objects misses (specs/non-live-bytes.md)
+steps: [non-live]
 secrets:
   CLOUDFLARE_API_TOKEN: hf-usage-cf-token
   CLOUDFLARE_ACCOUNT_ID: hf-usage-cf-account-id
@@ -51,3 +53,4 @@ options:
   index: {mode: path-index, args: [-U], mem: 8GB, age_pyramids: true, verify: true}
   static-names: {gen: 2026-10-18hfmetab, mem: 8GB, build_args: [-x, "16,8"]}   # site/wrangler.toml STORES_JSON meta STATIC_GEN
   index-gc: {dry: true}
+  non-live: {classes: [soft-deleted]}   # GCS only: R2 has no soft delete (skipped)
