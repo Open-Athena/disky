@@ -88,7 +88,7 @@ def gen_index(con, root: Store, template: str, scans: list[dict], work: Path) ->
             shutil.rmtree(tmp, ignore_errors=True)
             continue
         t0 = monotonic()
-        src = prepare_listing(con, tuple(files))
+        src = prepare_listing(con, (files,))  # one source: per-file sources would keep each bucket's first shard only
         n = con.execute(f"""INSERT INTO lg SELECT DISTINCT bucket || '/' || name, {ist.GENERATION}, {int(s['ts'])}
             FROM {src} WHERE {ist.GENERATION} IS NOT NULL""").fetchone()[0]
         err(f"backfill: {s['id']}: {n:,} objects with a generation ({len(files)} shards, {monotonic() - t0:.1f}s)")
