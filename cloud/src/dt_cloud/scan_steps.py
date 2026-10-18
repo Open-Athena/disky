@@ -853,8 +853,10 @@ def interval_store(ctx: Ctx, arg: str | None) -> None:
 
 def _sync_args(ctx: Ctx) -> list[str]:
     """Both halves' arguments: the generation, the store, and `options.index-sync.variants` (`-v` each; default every
-    variant the generation holds)."""
-    return [*store_args(ctx), "-d", str(ctx.data_root / ctx.index_key), "-g", ctx.gen, "-k", ctx.index_key,
+    variant the generation holds). A local `data:` dir (the local executor's) is not what the site reads: `-b` names
+    the R2 bucket (`publish-r2` filled it first), where the pointer flip checks the generation is uploaded."""
+    site = ["-b", f"r2://{ctx.env['R2_BUCKET']}"] if ctx.profile.data_bucket is None and ctx.has(*R2) else []
+    return [*store_args(ctx), *site, "-d", str(ctx.data_root / ctx.index_key), "-g", ctx.gen, "-k", ctx.index_key,
             *[a for v in ctx.opt("index-sync", "variants", []) for a in ("-v", v)]]
 
 
@@ -937,10 +939,11 @@ def _retire_check(p: ScanProfile) -> list[str]:
 
 
 @step("retire", core=False, soft=True, options={"keep": int, "execute": bool, "static_gen": str, "static_store": str, "store": str,
-                                                "layer2": bool, "copies": list, "backup": str, "markers_only": bool},
+                                                "layer2": bool, "layer1": bool, "copies": list, "backup": str, "markers_only": bool},
       requires=_retire_check)
 def retire(ctx: Ctx, arg: str | None) -> None:
-    """Retire the per-scan sorts, footers, search sidecars (and, `layer2: true`, layer-2 listings) of every scan but the
+    """Retire the per-scan sorts, footers, search sidecars (and, `layer2: true`, layer-2 listings; `layer1: true`, the raw
+    listing shards under `layout.listing`) of every scan but the
     newest `keep` that both stores hold and a parity marker vouches for (`dt-cloud scan retire`; specs/lean-scans.md §2).
     Off unless the profile lists it in `steps`; a dry run (the plan in the log) unless `execute: true`. The data store
     first, then each of `copies` (a root, or `r2` for `$R2_ARCHIVE`; D1 left to the first). `store` / `static_store`: the
@@ -959,7 +962,13 @@ def retire(ctx: Ctx, arg: str | None) -> None:
         err("retire: no interval store (options.retire.store, options.interval-store.store or R2): nothing retired")
         return
     l2 = ctx.profile.layout.layer2.replace("{scan}", "{id}")
-    common = ["-G", static_gen, "-k", o["keep"], "-L", l2 + "index/{gen}/path-index.parquet", *(["-l", l2 + "*.parquet"] if o.get("layer2") else []),
+    l1 = []
+    if o.get("layer1"):
+        if ctx.profile.layout.listing is None:
+            err("retire: options.retire.layer1 without layout.listing: raw listings kept")
+        else:
+            l1 = ["-1", ctx.profile.layout.listing.replace("{scan}", "{id}") + "*/shard-*.parquet"]
+    common = ["-G", static_gen, "-k", o["keep"], "-L", l2 + "index/{gen}/path-index.parquet", *(["-l", l2 + "*.parquet"] if o.get("layer2") else []), *l1,
               *(["-m"] if o.get("markers_only") else []), "-o", store, "-S", static_store, *store_args_t(ctx), "-w", ctx.work / "retire",
               *(["-x"] if o.get("execute") else [])]
     roots = [ctx.data_uri, *(archive if c == "r2" else c for c in o.get("copies", []))]

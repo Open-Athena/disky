@@ -151,8 +151,8 @@ def test_serving_steps_commands(tmp_path, env):
     assert c.sh_impl.calls == [
         "dt-cloud static-names runs add -c 2026-10-16T1200",
         "dt-cloud publish-r2 -b <tmp>/data -a 2026-10-16T1200",
-        f"dt-cloud index-sync -r -d <tmp>/data/{k} -g G1 -k {k} 2026-10-16T1200",
-        f"dt-cloud index-sync -p -d <tmp>/data/{k} -g G1 -k {k} -M <tmp>/data/snapshots/sub 2026-10-16T1200",
+        f"dt-cloud index-sync -r -b r2://r2b -d <tmp>/data/{k} -g G1 -k {k} 2026-10-16T1200",
+        f"dt-cloud index-sync -p -b r2://r2b -d <tmp>/data/{k} -g G1 -k {k} -M <tmp>/data/snapshots/sub 2026-10-16T1200",
         "dt-cloud index-gc 2026-10-16T1200",
         "dt-cloud over-time-groups -g G1 -o <tmp>/t/dt-scan/2026-10-16T1200/over-time -p r2://r2b",
         "dt-cloud index-gc -R -m 2d -F <tmp>/data -F r2",
@@ -564,8 +564,8 @@ def test_store_passes_through(tmp_path, env):
         f(c, None)
     k = "l2/2026-10-16T1200/index/G1"
     assert c.sh_impl.calls == [
-        f"dt-cloud index-sync -r -s meta -d <tmp>/data/{k} -g G1 -k {k} -v path -v age-pyramid-1h 2026-10-16T1200",
-        f"dt-cloud index-sync -p -s meta -d <tmp>/data/{k} -g G1 -k {k} -v path -v age-pyramid-1h -M <tmp>/data/snapshots/sub 2026-10-16T1200",
+        f"dt-cloud index-sync -r -s meta -b r2://r2b -d <tmp>/data/{k} -g G1 -k {k} -v path -v age-pyramid-1h 2026-10-16T1200",
+        f"dt-cloud index-sync -p -s meta -b r2://r2b -d <tmp>/data/{k} -g G1 -k {k} -v path -v age-pyramid-1h -M <tmp>/data/snapshots/sub 2026-10-16T1200",
         "dt-cloud index-gc -s meta -r 7 2026-10-16T1200",
         "dt-cloud over-time-groups -s meta -g G1 -o <tmp>/t/dt-scan/2026-10-16T1200/over-time -p r2://r2b",
         "dt-cloud index-gc -s meta -R -n -m 36h -F <tmp>/data -F r2",
@@ -708,6 +708,19 @@ def test_retire_dry_run_by_default_then_each_copy(tmp_path, env):
     x = ctx(tmp_path, env, steps=["retire"], options={**opts, "retire": {"keep": 2, "execute": True, "markers_only": True, "store": "gs://iv"}})
     S.retire(x, None)
     assert x.sh_impl.calls == [f"dt-cloud scan retire -G s1 -k 2 -L l2/{{id}}/index/{{gen}}/path-index.parquet -m -o gs://iv -S r2://idx -w {w} -x -s <tmp>/data"]
+
+
+def test_retire_layer1_passes_the_listing_layouts_shards(tmp_path, env):
+    """`layer1: true`: the raw listing shards under `layout.listing` (`-1`); without a `layout.listing`, none (warned)."""
+    opts = {"static-names": {"gen": "s1"}, "digest": {"template": "t", "config": "c.yml"}, "retire": {"keep": 2, "layer1": True, "store": "gs://iv"}}
+    c = ctx(tmp_path, env, steps=["retire"], layout={"layer2": "l2/{scan}/", "snapshots": "sub", "listing": "listing/{scan}/"}, options=opts)
+    S.retire(c, None)
+    w = "<tmp>/t/dt-scan/2026-10-16T1200/retire"
+    assert c.sh_impl.calls == [f"dt-cloud scan retire -G s1 -k 2 -L l2/{{id}}/index/{{gen}}/path-index.parquet -1 listing/{{id}}/*/shard-*.parquet "
+                               f"-o gs://iv -S gs://iv -w {w} -R -s <tmp>/data"]
+    n = ctx(tmp_path, env, steps=["retire"], options={**opts, "list": {"import": True}})
+    S.retire(n, None)
+    assert n.sh_impl.calls == [f"dt-cloud scan retire -G s1 -k 2 -L l2/{{id}}/index/{{gen}}/path-index.parquet -o gs://iv -S gs://iv -w {w} -R -s <tmp>/data"]
 
 
 def test_retire_failure_warns_and_needs_its_keep(tmp_path, env):

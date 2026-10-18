@@ -79,3 +79,15 @@ describe('the card view keys the scan by the canonical ?d= (legacy and ISO spell
     expect(pv(path)?.params.d).toBe(d)
   })
 })
+
+describe('pageView: a mounted store (`STORE_ROOT`)', () => {
+  const pvm = (p: string) => pageView(new URL(`https://site.example.org${p}`), 'Open Athena Hugging Face', ['open-athena'])
+  it('reads its URLs below the root, titled without it; a link from before the mount reads the same', () => {
+    expect([pvm('/'), pvm('/models/m?d=261018'), pvm('/open-athena/models/m?d=261018')]).toEqual([
+      { kind: 'map', params: { path: 'open-athena' }, title: 'Open Athena Hugging Face' },
+      { kind: 'map', params: { path: 'open-athena/models/m', d: '261018' }, title: 'models/m' },
+      { kind: 'map', params: { path: 'open-athena/models/m', d: '261018' }, title: 'models/m' },
+    ])
+  })
+})
+

@@ -34,10 +34,10 @@ export interface Mint {
 
 /** Mint a token for `pageUrl`'s view and record it, good for `days` (`tokenDays`;
  * 0 = never expires). Null when the URL has no card of its own. */
-export async function mint(db: D1Database, site: string, pageUrl: URL, by: string, now: number, days = TOKEN_DAYS_DEFAULT, token = randomToken(TOKEN_CHARS)): Promise<Mint | null> {
+export async function mint(db: D1Database, site: string, pageUrl: URL, by: string, now: number, days = TOKEN_DAYS_DEFAULT, token = randomToken(TOKEN_CHARS), root: readonly string[] = []): Promise<Mint | null> {
   const u = shareSection(pageUrl)
   u.searchParams.delete('og')
-  const pv = pageView(u, site)
+  const pv = pageView(u, site, root)
   if (!pv) return null
   const day = tokenExpDay(now, tokenDays(days))
   await db.prepare('INSERT INTO og_tokens (token, kind, view, page, minted_by, minted_ts, exp_day) VALUES (?, ?, ?, ?, ?, ?, ?)')

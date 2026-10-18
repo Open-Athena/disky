@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { fromUrlPath, isFold, pathCopy, pathCrumbs, pathLead, pathText, pathUri, toUrlPath } from './pathCrumbs'
+import { fromUrlPath, isFold, mountedSegs, pathCopy, pathCrumbs, pathLead, pathText, pathUri, toUrlPath, urlSegsOf } from './pathCrumbs'
 import type { Crumb } from './pathCrumbs'
 
 describe('pathCrumbs', () => {
@@ -58,5 +58,19 @@ describe('browser path encoding', () => {
   })
   it('a hand-written literal `%` stays a name; empty segments drop', () => {
     expect(fromUrlPath('/bucket//100%/')).toEqual(['bucket', '100%'])
+  })
+})
+
+describe('a store’s mount (`Store.root`)', () => {
+  const root = ['open-athena']
+  it('leads every path read off a URL; a URL from before the mount (the root spelled out) reads the same', () => {
+    expect([[], ['models'], ['open-athena'], ['open-athena', 'models']].map(u => mountedSegs(root, u))).toEqual([
+      ['open-athena'], ['open-athena', 'models'], ['open-athena'], ['open-athena', 'models'],
+    ])
+    expect(mountedSegs(undefined, ['bk', 'x'])).toEqual(['bk', 'x'])
+  })
+  it('is left out of a path’s URL segments', () => {
+    expect([['open-athena'], ['open-athena', 'models'], ['other']].map(s => urlSegsOf(root, s))).toEqual([[], ['models'], ['other']])
+    expect(urlSegsOf([], ['bk'])).toEqual(['bk'])
   })
 })
