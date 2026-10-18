@@ -16,6 +16,7 @@ const store: Store = {
   desc: 'The data behind the Marin usage sites: scans, indexes and listings in oa-cw-s3-usage-data (GCS) and oa-cw-s3-usage-index (R2) — treemap, sizes over time, and diffs.',
   path: '/meta',
   scheme: 'gs://',
+  bucketSchemes: { 'oa-cw-s3-usage-data': 'gs://', 'oa-cw-s3-usage-index': 'r2://' },
   base: '/data/meta',
   ogImage: '/og.jpg',
   prices: false,
