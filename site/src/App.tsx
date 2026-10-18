@@ -8,7 +8,7 @@ import { stringParam, useUrlState } from 'use-prms'
 import { bareEmpty, legacyOwner, ownerParam } from './ownerParam'
 import { AGE_MODES, AgeChart } from './AgeChart'
 import { canonId, shortName, shortUserKey } from './UserChip'
-import { signInUrl, useCanAssign, useCanStage, useIdent as useIdentity } from './auth'
+import { signInUrl, useCanAssign, useCanStage, useIdent as useIdentity, useIsAdmin } from './auth'
 import { AttributionRules } from './AttributionRules'
 import { DiffTreemap, DiffHeader, useDiffModel } from './DiffTreemap'
 import { DiffTable } from './DiffTable'
@@ -32,6 +32,7 @@ import { SectionAnchor } from './SectionAnchor'
 import { barControls } from './pageBar'
 import { LifecycleFold } from './LifecycleFold'
 import { ClassMixTip, Tooltip } from './Tooltip'
+import { ScanRunLink } from './scanRunsUi'
 import { ReadThroughBanner } from './ReadThroughLi'
 import { readDay, readLogged, readThrough, readThroughText, unloggedOf } from './readLens'
 import { useReadTint } from './readTint'
@@ -171,6 +172,7 @@ function AppContent() {
     navigate({ pathname: legacy ? `${base}/${legacy.replace(/^\/+|\/+$/g, '')}` : store.path, search: rest ? `?${rest}` : '', hash: window.location.hash }, { replace: true })
   }, [search, navigate, store])
   const canAssign = useCanAssign()
+  const isAdmin = useIsAdmin()
   const canStage = useCanStage()
   const ident = useIdentity()
   // The owner axis (`Store.owners`): the ownership ledger overlays the map
@@ -1136,6 +1138,7 @@ function AppContent() {
         <div>published {fmtTimestamp(meta.published)}</div>
       )}
       <div><b>{fmtBytes(meta.total_bytes)}</b> · <b>{fmtN(meta.total_objects)}</b> objects across {store.rootLabel}</div>
+      {asof && <ScanRunLink store={store} scan={asof} />}
       {estCost && (
         <div>
           est. <b>${Math.round(estCost.list).toLocaleString()}/mo</b> at list price
@@ -1235,7 +1238,7 @@ function AppContent() {
         {/* How fresh the page's scan is, at a glance (the picker shows only
             its date); the tip carries the exact publish time + totals. */}
         {recordedAt && (
-          <Tooltip content={scanTip}>
+          <Tooltip content={scanTip} pinnable>
             <span className="tb-scan-ago" tabIndex={0}>scanned {ago(Date.parse(recordedAt) / 1000)} ago</span>
           </Tooltip>
         )}
@@ -1496,6 +1499,7 @@ function AppContent() {
         onPickDate={setDP}
         onBrush={brushRange}
         window={diffWindow}
+        admin={isAdmin}
       />
 
       {startMiss && (
