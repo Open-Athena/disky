@@ -3,7 +3,7 @@ import { SectionAnchor } from './SectionAnchor'
 import { Explain } from './Help'
 import { TimeSeries } from '@disk-tree/react'
 import type { Annotation, Series as TsSeries } from '@disk-tree/react'
-import { DEFAULT_PALETTE } from '@rdub/treemap'
+import { slotColor } from './colors'
 import { useQuery } from '@tanstack/react-query'
 import { type ReactNode, useMemo, useRef, useState } from 'react'
 import { boolParam, useUrlState } from 'use-prms'
@@ -266,15 +266,16 @@ export function SizeOverTime({ scans, times, fmt = fmtScan, prefix, user, pool, 
     const m = new Map((seriesQ.data?.points ?? []).map(p => [xOfScan(p.date, times), p.date]))
     return (x: number) => m.get(x) ?? dateOfX(x)
   }, [seriesQ.data, times])
-  // The roots' traces (split mode), keyed by bucket, coloured by slot (largest
-  // at the latest scan = slot 0, as the map colours the root's children).
+  // The roots' traces (split mode), keyed by bucket, in the map's colours: slot by size at the latest scan (largest =
+  // slot 0; a root that scan doesn't hold ranks last), each slot's `slotColor`, as the map colours the root's children.
   const roots = useMemo(() => {
     const rs = seriesQ.data?.roots ?? []
     if (rs.length < 2) return []
-    const latest = (r: { points: { date: string; b: number }[] }) => r.points[r.points.length - 1]?.b ?? 0
+    const end = rs.reduce((m, r) => { const d = r.points[r.points.length - 1]?.date; return d && d > m ? d : m }, '')
+    const latest = (r: { points: { date: string; b: number }[] }) => { const p = r.points[r.points.length - 1]; return p?.date === end ? p.b : -1 }
     const bySize = [...rs].sort((a, b) => latest(b) - latest(a))
     const slot = new Map(bySize.map((r, i) => [r.path, i]))
-    return rs.map(r => ({ key: r.path, color: DEFAULT_PALETTE[slot.get(r.path)! % DEFAULT_PALETTE.length], points: toPts(r.points) }))
+    return rs.map(r => ({ key: r.path, color: slotColor(slot.get(r.path)!), points: toPts(r.points) }))
   }, [seriesQ.data, xFrom, times])
   // The x before which the total lacks a root — the total is dashed there.
   const genesis = useMemo(() => youngestGenesis(roots), [roots])
