@@ -20,7 +20,7 @@ import { joinOf, shared } from './shared.js'
 import { addAgg, computeOwners, foldLatest, idxKey, newAgg, type AssignmentRow, type OwnerRow, type OwnerTotals, type PathAgg } from './ownerBands.js'
 
 /** The `Row` fields a total needs; `columnsFor` names them per generation. */
-const FIELDS: (keyof Row)[] = ['path', 'depth', 'usr', 'size', 'n_files', 'cls2', 'cls3', 'cls4']
+const FIELDS: (keyof Row)[] = ['path', 'depth', 'usr', 'size', 'n_files', 'private_bytes', 'git_bytes']
 /** Row groups a totals read may decode: each point lookup needs at most two
  * (its row on a group boundary), so the bound scales with the assignment count —
  * gcs's ~1,260 prefixes on 8k-row store groups need more than a flat 400. */

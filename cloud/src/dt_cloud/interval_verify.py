@@ -34,11 +34,10 @@ def agg_sql(version: int) -> str:
         return """count(*) AS n, sum(size)::BIGINT AS b, sum(n_files)::BIGINT AS o, bool_or(kind <> 'file') AS is_dir, max(n_children) AS nc,
             sum(CASE WHEN mtime_mean IS NOT NULL THEN mtime_mean * size ELSE 0 END) AS wts,
             sum(CASE WHEN mtime_mean IS NOT NULL THEN size ELSE 0 END)::BIGINT AS wb, max(mtime)::BIGINT AS m, max(last_read) AS a,
-            sum(coalesce(sum_storage_class_id_2, 0))::BIGINT AS c2, sum(coalesce(sum_storage_class_id_3, 0))::BIGINT AS c3,
-            sum(coalesce(sum_storage_class_id_4, 0))::BIGINT AS c4"""
+            sum(coalesce(sum_storage_class_id_5, 0))::BIGINT AS private_bytes, sum(coalesce(sum_storage_class_id_6, 0))::BIGINT AS git_bytes"""
     return """count(*) AS n, sum(b)::BIGINT AS b, sum(o)::BIGINT AS o, true AS is_dir, NULL::BIGINT AS nc,
         sum(CASE WHEN wb > 0 THEN (wts / wb) * wb ELSE 0 END) AS wts, sum(coalesce(wb, 0))::BIGINT AS wb, NULL::BIGINT AS m, max(a) AS a,
-        sum(coalesce(c2, 0))::BIGINT AS c2, sum(coalesce(c3, 0))::BIGINT AS c3, sum(coalesce(c4, 0))::BIGINT AS c4"""
+        0::BIGINT AS private_bytes, 0::BIGINT AS git_bytes"""
 
 
 def size_col(version: int) -> str:
@@ -53,7 +52,7 @@ class Scan:
         self.src = f"read_parquet({q(file)})"
         have = {r[0] for r in con.execute(f"DESCRIBE SELECT * FROM {self.src}").fetchall()}
         # Columns the scan lacks read as NULL, as the builder reads them (`static_names.V2_OPTIONAL`): no owner
-        # axis names no owner, and an absent storage-class pivot holds no bytes (cw's sorts carry only class 1).
+        # axis names no owner, and an absent storage-class pivot holds no bytes (a scan without private or git files).
         missing = ["NULL::VARCHAR AS usr"] if "usr" not in have else []
         if version == 2:
             missing += [f"NULL::BIGINT AS {c}" for c in V2_OPTIONAL.values() if c not in have and c != "usr"]
@@ -72,10 +71,10 @@ class Scan:
             return {}
         self.con.execute("CREATE OR REPLACE TEMP TABLE want (depth INTEGER, path VARCHAR)")
         self.con.executemany("INSERT INTO want VALUES (?, ?)", paths)
-        return {p: (b, o, wts, wb, m, c2, c3, c4) for p, b, o, wts, wb, m, c2, c3, c4 in self.con.execute(
+        return {p: (b, o, wts, wb, m, pv, gt) for p, b, o, wts, wb, m, pv, gt in self.con.execute(
             f"""SELECT s.path, sum(size)::BIGINT, sum(n_files)::BIGINT, sum(CASE WHEN mtime_mean IS NOT NULL THEN mtime_mean * size ELSE 0 END),
-                sum(CASE WHEN mtime_mean IS NOT NULL THEN size ELSE 0 END)::BIGINT, max(mtime)::BIGINT, sum(coalesce(sum_storage_class_id_2, 0))::BIGINT,
-                sum(coalesce(sum_storage_class_id_3, 0))::BIGINT, sum(coalesce(sum_storage_class_id_4, 0))::BIGINT
+                sum(CASE WHEN mtime_mean IS NOT NULL THEN size ELSE 0 END)::BIGINT, max(mtime)::BIGINT, sum(coalesce(sum_storage_class_id_5, 0))::BIGINT,
+                sum(coalesce(sum_storage_class_id_6, 0))::BIGINT
                 FROM {self.src} s JOIN want w ON s.depth = w.depth AND s.path = w.path WHERE s.kind = 'file' AND s.size < {thr_min!r}
                 GROUP BY s.path""").fetchall()}
 
@@ -95,9 +94,9 @@ class Scan:
         a = ir.Agg(b=r["b"], o=r["o"], kind="dir" if r["is_dir"] else "file", nc=r["nc"], a=r["a"], m=r["m"])
         if r["wb"] > 0:
             a.wts, a.wb = r["wts"], r["wb"]
-        for k in ("c2", "c3", "c4"):
+        for k, c in ir.CLASS_BYTES.items():
             if r[k]:
-                a.cb[k[1]] = r[k]
+                a.cb[c] = r[k]
         a.ub = ub
         return a
 
@@ -144,10 +143,10 @@ class Scan:
             extra = self._same_path_objects([(r["depth"], r["path"]) for r in rows if r["is_dir"]], thr_min)
             for r in rows:
                 if r["path"] in extra:
-                    b, o, wts, wb, m, c2, c3, c4 = extra[r["path"]]
+                    b, o, wts, wb, m, pv, gt = extra[r["path"]]
                     if m is not None:
                         r["m"] = m if r["m"] is None else max(r["m"], m)
-                    r["b"] += b; r["o"] += o; r["wts"] += wts; r["wb"] += wb; r["c2"] += c2; r["c3"] += c3; r["c4"] += c4
+                    r["b"] += b; r["o"] += o; r["wts"] += wts; r["wb"] += wb; r["private_bytes"] += pv; r["git_bytes"] += gt
         # SQL's float threshold vs the reader's: re-test in Python so the boundary is the same arithmetic.
         rows = [r for r in rows if r["b"] >= thr_at(r["depth"])]
         users = self._users([(r["depth"], r["path"]) for r in rows])
@@ -176,8 +175,8 @@ class Scan:
 # ── The per-scan read the Worker would make (cost only, from the scan's footer index) ──
 
 V2_COLS = ["path", "depth", "usr", "kind", "size", "n_files", "n_children", "n_desc", "mtime", "mtime_mean", "last_read",
-           "sum_storage_class_id_2", "sum_storage_class_id_3", "sum_storage_class_id_4"]
-V1_COLS = ["path", "depth", "usr", "b", "o", "wts", "wb", "c2", "c3", "c4", "a"]
+           "sum_storage_class_id_5", "sum_storage_class_id_6"]
+V1_COLS = ["path", "depth", "usr", "b", "o", "wts", "wb", "a"]
 
 
 class Footer:

@@ -97,7 +97,7 @@ async function price(env: Env, tag: string, rows: Map<string, Hist>, keys: Map<s
   return shared(pricing, id, async () => {
     const asks: Ask[] = [...keys].map(([path, depth]) => ({ depth, path }))
     if (roots) asks.push({ depth: 1, under: '' })
-    const fields: (keyof Row)[] = ['path', 'depth', 'usr', 'size', 'n_files', 'cls2', 'cls3', 'cls4']
+    const fields: (keyof Row)[] = ['path', 'depth', 'usr', 'size', 'n_files', 'private_bytes', 'git_bytes']
     const got = await readAsksHistory(env, await ivHeldDates(env), 'path', asks, r => keys.get(r.path) === r.depth || (roots && r.depth === 1),
       { fields, maxGroups: Math.max(400, 2 * asks.length) })
     if (!got || got.index !== tag) return null

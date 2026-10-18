@@ -151,8 +151,8 @@ describe('D1', () => {
   })
 
   it('the root refuses one store’s scope axes; a drill takes them', async () => {
-    expect(await get(`date=${A}&path=&o=unowned&cl=s`)).toEqual({ status: 400, text: 'a union view\'s root is unscoped (o, cl: drill into one store)' })
-    expect((await get(`date=${A}&path=bk&cl=s`)).text).toBe((await get(`date=${A}&path=bk&cl=s&store=primary`)).text)
+    expect(await get(`date=${A}&path=&o=unowned&cl=p`)).toEqual({ status: 400, text: 'a union view\'s root is unscoped (o, cl: drill into one store)' })
+    expect((await get(`date=${A}&path=bk&cl=p`)).text).toBe((await get(`date=${A}&path=bk&cl=p&store=primary`)).text)
   })
 
   it('each member’s cache key carries its resolved scan, and the union root’s reads the shared threshold', async () => {

@@ -48,7 +48,7 @@ export interface SchemaElement { type: string; name: string; repetition_type: st
 /** One index row, named by the layer-2's columns (specs/done/path-store.md §1.1) —
  * the shape both generations decode to (`toRow`). A version-2 store sort
  * carries these names on disk, objects and dirs alike; a version-1 index
- * (dir rows only, the wire names `b, o, wts, wb, c2..c4, a`) is mapped onto
+ * (dir rows only, the wire names `b, o, wts, wb, a`) is mapped onto
  * them at decode: `kind` is always `dir`, and the structural counts and
  * stamps it never had are null. */
 export interface Row {
@@ -72,10 +72,10 @@ export interface Row {
   mtime_w: number
   /** Last-read epoch day (the wire's `a`); null = never read / not tracked. */
   last_read: number | null
-  /** `sum_storage_class_id_<k>` — bytes in classes 2..4 (Standard = the rest). */
-  cls2: number
-  cls3: number
-  cls4: number
+  /** Bytes in private storage (`sum_storage_class_id_5`); public is the rest of `size`, less `git_bytes`. */
+  private_bytes: number
+  /** Bytes in plain git files (`sum_storage_class_id_6`), which Hugging Face doesn't bill. */
+  git_bytes: number
   /** An interval-store row (one per path): its owner slices' bytes by user (`usr` is null there). */
   us?: Record<string, number> | null
   /** An interval-store row's validity `[vf, vt)` (epoch seconds of scans). */
@@ -980,9 +980,9 @@ export async function ivLastRead(env: Env, date: string, paths: string[], maxGro
 /** The physical columns a `Row` decodes from, per generation — the wire
  * names on a v1 index, the layer-2's on a store sort (§1.1). `usr` and the
  * class pivots only where the file has them (cw has neither). */
-export const V1_ROW_COLUMNS = ['path', 'depth', 'usr', 'b', 'o', 'wts', 'wb', 'c2', 'c3', 'c4', 'a']
-export const IV_ROW_COLUMNS = ['depth', 'path', 'usr', 'vf', 'vt', 'kind', 'size', 'n_files', 'n_children', 'n_desc', 'mtime', 'wts', 'wb', 'c2', 'c3', 'c4', 'us', 'last_read']
-export const V2_ROW_COLUMNS = ['path', 'depth', 'usr', 'kind', 'size', 'n_files', 'n_children', 'n_desc', 'mtime', 'mtime_mean', 'last_read', 'sum_storage_class_id_2', 'sum_storage_class_id_3', 'sum_storage_class_id_4']
+export const V1_ROW_COLUMNS = ['path', 'depth', 'usr', 'b', 'o', 'wts', 'wb', 'a']
+export const IV_ROW_COLUMNS = ['depth', 'path', 'usr', 'vf', 'vt', 'kind', 'size', 'n_files', 'n_children', 'n_desc', 'mtime', 'wts', 'wb', 'private_bytes', 'git_bytes', 'us', 'last_read']
+export const V2_ROW_COLUMNS = ['path', 'depth', 'usr', 'kind', 'size', 'n_files', 'n_children', 'n_desc', 'mtime', 'mtime_mean', 'last_read', 'sum_storage_class_id_5', 'sum_storage_class_id_6']
 
 /** What a shaped read projects: a v1 index reads every column (its columns
  * are the row); a store sort reads the `Row` columns it has, so a bridge
@@ -1000,9 +1000,9 @@ export function rowColumns(version: number, schema: SchemaElement[]): string[] |
 /** The columns a caller's projection must name on this handle's generation,
  * for reads that pick a subset (the owner totals): the `Row` field → column. */
 export function columnsFor(h: IndexHandle, fields: (keyof Row)[]): string[] {
-  const v2: Partial<Record<keyof Row, string[]>> = { size: ['size'], n_files: ['n_files'], last_read: ['last_read'], cls2: ['sum_storage_class_id_2'], cls3: ['sum_storage_class_id_3'], cls4: ['sum_storage_class_id_4'], mtime_mean: ['mtime_mean', 'size'], mtime_w: ['mtime_mean', 'size'] }
-  const v1: Partial<Record<keyof Row, string[]>> = { size: ['b'], n_files: ['o'], last_read: ['a'], cls2: ['c2'], cls3: ['c3'], cls4: ['c4'], mtime_mean: ['wts', 'wb'], mtime_w: ['wb'] }
-  const v3: Partial<Record<keyof Row, string[]>> = { size: ['size'], n_files: ['n_files'], last_read: ['last_read'], cls2: ['c2'], cls3: ['c3'], cls4: ['c4'], mtime_mean: ['wts', 'wb'], mtime_w: ['wb'], us: ['us', 'size'] }
+  const v2: Partial<Record<keyof Row, string[]>> = { size: ['size'], n_files: ['n_files'], last_read: ['last_read'], private_bytes: ['sum_storage_class_id_5'], git_bytes: ['sum_storage_class_id_6'], mtime_mean: ['mtime_mean', 'size'], mtime_w: ['mtime_mean', 'size'] }
+  const v1: Partial<Record<keyof Row, string[]>> = { size: ['b'], n_files: ['o'], last_read: ['a'], private_bytes: [], git_bytes: [], mtime_mean: ['wts', 'wb'], mtime_w: ['wb'] }
+  const v3: Partial<Record<keyof Row, string[]>> = { size: ['size'], n_files: ['n_files'], last_read: ['last_read'], private_bytes: ['private_bytes'], git_bytes: ['git_bytes'], mtime_mean: ['wts', 'wb'], mtime_w: ['wb'], us: ['us', 'size'] }
   const map = h.version >= 3 ? v3 : isStore(h) ? v2 : v1
   const have = new Set(h.schema.slice(1).map(l => l.name))
   const out = new Set<string>()
@@ -1389,9 +1389,8 @@ const toRowV1 = (r: Record<string, unknown>): Row => {
     mtime_mean: wb > 0 ? num(r.wts) / wb : null,
     mtime_w: wb,
     last_read: r.a == null ? null : num(r.a),
-    cls2: num(r.c2),
-    cls3: num(r.c3),
-    cls4: num(r.c4),
+    private_bytes: 0,
+    git_bytes: 0,
   }
 }
 
@@ -1412,9 +1411,8 @@ const toRowV2 = (r: Record<string, unknown>): Row => {
     mtime_mean: mean,
     mtime_w: mean == null ? 0 : size,
     last_read: r.last_read == null ? null : num(r.last_read),
-    cls2: num(r.sum_storage_class_id_2),
-    cls3: num(r.sum_storage_class_id_3),
-    cls4: num(r.sum_storage_class_id_4),
+    private_bytes: num(r.sum_storage_class_id_5),
+    git_bytes: num(r.sum_storage_class_id_6),
   }
 }
 
@@ -1438,9 +1436,8 @@ const toRowV3 = (r: Record<string, unknown>): Row => {
     mtime_mean: wb > 0 ? num(r.wts) / wb : null,
     mtime_w: wb,
     last_read: r.last_read == null ? null : opt(r.last_read),
-    cls2: num(r.c2),
-    cls3: num(r.c3),
-    cls4: num(r.c4),
+    private_bytes: num(r.private_bytes),
+    git_bytes: num(r.git_bytes),
     us: r.us == null ? null : usMap(str(r.us), size),
     vf: num(r.vf),
     vt: num(r.vt),

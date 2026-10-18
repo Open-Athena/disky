@@ -73,7 +73,7 @@ def _write(rows: list[dict], path: Path, v: int, owners: bool = True) -> None:
             "n_files": [r["n_files"] for r in rows], "n_children": [1 for _ in rows], "n_desc": [2 for _ in rows],
             "mtime": [7 for _ in rows], "mtime_mean": [r["mtime_mean"] for r in rows], "created": [0 for _ in rows],
             "last_read": pa.array([r["last_read"] for r in rows], pa.int32()),
-            "sum_storage_class_id_2": [0 for _ in rows], "sum_storage_class_id_3": [None for _ in rows], "sum_storage_class_id_4": [0 for _ in rows],
+            "sum_storage_class_id_5": [None for _ in rows], "sum_storage_class_id_6": [0 for _ in rows],
         })
         if not owners:
             t = t.drop_columns(["usr"])
@@ -82,7 +82,7 @@ def _write(rows: list[dict], path: Path, v: int, owners: bool = True) -> None:
             "path": [r["path"] for r in rows], "depth": [r["depth"] for r in rows], "usr": [r["usr"] for r in rows],
             "b": [r["size"] for r in rows], "o": [r["n_files"] for r in rows],
             "wts": [r["mtime_mean"] * r["size"] for r in rows], "wb": [r["size"] for r in rows],
-            "c2": [0 for _ in rows], "c3": [0 for _ in rows], "c4": [0 for _ in rows], "a": pa.array([r["last_read"] for r in rows], pa.int32()),
+            "a": pa.array([r["last_read"] for r in rows], pa.int32()),
         })
     pq.write_table(t, path, row_group_size=7)
 
@@ -95,15 +95,15 @@ def _merged(rows: list[dict], v: int) -> dict:
     out = {}
     for k, rs in groups.items():
         if v == 2:
-            vals = [("file" if r["kind"] == "file" else "dir", r["size"], r["n_files"], 1, 2, 7, r["mtime_mean"], r["size"], r["last_read"], 0, 0, 0) for r in rs]
+            vals = [("file" if r["kind"] == "file" else "dir", r["size"], r["n_files"], 1, 2, 7, r["mtime_mean"], r["size"], r["last_read"], 0, 0) for r in rs]
         else:
-            vals = [("dir", r["size"], r["n_files"], -1, -1, -1, (r["mtime_mean"] * r["size"] / r["size"]) if r["size"] > 0 else 0.0, r["size"], r["last_read"], 0, 0, 0) for r in rs]
+            vals = [("dir", r["size"], r["n_files"], -1, -1, -1, (r["mtime_mean"] * r["size"] / r["size"]) if r["size"] > 0 else 0.0, r["size"], r["last_read"], 0, 0) for r in rs]
         if len(vals) == 1:
             mean = vals[0][6]
         else:
             mean = sum(x[6] * x[7] for x in vals) / max(sum(x[7] for x in vals), 1)
         out[k] = (vals[0][0], sum(x[1] for x in vals), sum(x[2] for x in vals), max(x[3] for x in vals), max(x[4] for x in vals),
-                  max(x[5] for x in vals), float(round(mean)), sum(x[7] for x in vals), max(x[8] for x in vals), 0, 0, 0)
+                  max(x[5] for x in vals), float(round(mean)), sum(x[7] for x in vals), max(x[8] for x in vals), 0, 0)
     return out
 
 

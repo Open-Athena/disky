@@ -36,31 +36,31 @@ export const ownerOk = (usr: string | null, o: OwnerScope | undefined): boolean 
   return usr != null && !o.not.includes(usr) // owned, excluding o.not
 }
 
-/** `cl=` ⊆ `snca` (Standard / Nearline / Coldline / Archive): the storage-
- * class axis. Unlike the owner pools it doesn't pick rows — every index row
- * is a (path, owner) slice carrying its own class split (`size` with
- * `cls2..cls4`, Standard = the rest) — it *scales* each row down to the
- * allowed classes' bytes. Objects aren't tracked per class, so `n_files`
- * (and the written-time weight) scale with the byte share. All/none/absent
- * = no scope. */
-export type ClassScope = ReadonlySet<'1' | '2' | '3' | '4'>
-const CLASS_LETTERS: Record<string, '1' | '2' | '3' | '4'> = { s: '1', n: '2', c: '3', a: '4' }
+/** `cl=` ⊆ `prg` (public / private / git): the storage-class axis, Hugging
+ * Face's storage classes 1, 5 and 6. Unlike the owner pools it doesn't pick
+ * rows — every index row is a (path, owner) slice carrying its own class split
+ * (`size` with `private_bytes` and `git_bytes`, public = the rest) — it
+ * *scales* each row down to the allowed classes' bytes. Objects aren't tracked
+ * per class, so `n_files` (and the written-time weight) scale with the byte
+ * share. All/none/absent = no scope. */
+export type ClassScope = ReadonlySet<'1' | '5' | '6'>
+const CLASS_LETTERS: Record<string, '1' | '5' | '6'> = { p: '1', r: '5', g: '6' }
 export function parseClasses(raw: string | null): ClassScope | undefined {
   if (!raw) return undefined
-  const out = new Set<'1' | '2' | '3' | '4'>()
+  const out = new Set<'1' | '5' | '6'>()
   for (const ch of raw) if (CLASS_LETTERS[ch]) out.add(CLASS_LETTERS[ch])
-  return out.size === 0 || out.size === 4 ? undefined : out
+  return out.size === 0 || out.size === 3 ? undefined : out
 }
 /** The canonical letters for a scope (cache keys). */
 export const classKey = (cl: ClassScope | undefined): string =>
-  cl ? ['1', '2', '3', '4'].filter(c => cl.has(c as '1')).map(c => ({ 1: 's', 2: 'n', 3: 'c', 4: 'a' })[c as '1' | '2' | '3' | '4']).join('') : ''
+  cl ? Object.entries(CLASS_LETTERS).filter(([, c]) => cl.has(c)).map(([l]) => l).join('') : ''
 /** A row cut down to its allowed classes' bytes (a copy; `r` untouched). */
-export function classRow<R extends { size: number; n_files: number; mtime_w: number; cls2: number; cls3: number; cls4: number }>(r: R, cl: ClassScope | undefined): R {
+export function classRow<R extends { size: number; n_files: number; mtime_w: number; private_bytes: number; git_bytes: number }>(r: R, cl: ClassScope | undefined): R {
   if (!cl) return r
-  const c1 = Math.max(0, r.size - r.cls2 - r.cls3 - r.cls4)
-  const size = (cl.has('1') ? c1 : 0) + (cl.has('2') ? r.cls2 : 0) + (cl.has('3') ? r.cls3 : 0) + (cl.has('4') ? r.cls4 : 0)
+  const pub = Math.max(0, r.size - r.private_bytes - r.git_bytes)
+  const size = (cl.has('1') ? pub : 0) + (cl.has('5') ? r.private_bytes : 0) + (cl.has('6') ? r.git_bytes : 0)
   const f = r.size > 0 ? size / r.size : 0
-  return { ...r, size, n_files: Math.round(r.n_files * f), mtime_w: r.mtime_w * f, cls2: cl.has('2') ? r.cls2 : 0, cls3: cl.has('3') ? r.cls3 : 0, cls4: cl.has('4') ? r.cls4 : 0 }
+  return { ...r, size, n_files: Math.round(r.n_files * f), mtime_w: r.mtime_w * f, private_bytes: cl.has('5') ? r.private_bytes : 0, git_bytes: cl.has('6') ? r.git_bytes : 0 }
 }
 
 /** `q=`: the path filter's predicate lives in `pathQuery.ts`, its syntaxes in

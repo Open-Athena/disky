@@ -71,9 +71,9 @@ beforeAll(async () => {
 
 /** The dir rows of the v2 fixture as `Row`s (objects have their own shape). */
 const dir = (path: string, size: number, n_files: number, n_children: number, n_desc: number): Row =>
-  ({ path, depth: path.split('/').length, usr: null, kind: 'dir', size, n_files, n_children, n_desc, mtime: 1788220800, mtime_mean: 1788220800, mtime_w: size, last_read: null, cls2: 0, cls3: 0, cls4: 0 })
+  ({ path, depth: path.split('/').length, usr: null, kind: 'dir', size, n_files, n_children, n_desc, mtime: 1788220800, mtime_mean: 1788220800, mtime_w: size, last_read: null, private_bytes: 0, git_bytes: 0 })
 const file = (path: string, size: number): Row =>
-  ({ path, depth: path.split('/').length, usr: null, kind: 'file', size, n_files: 1, n_children: 0, n_desc: 1, mtime: 1788220800, mtime_mean: 1788220800, mtime_w: size, last_read: null, cls2: 0, cls3: 0, cls4: 0 })
+  ({ path, depth: path.split('/').length, usr: null, kind: 'file', size, n_files: 1, n_children: 0, n_desc: 1, mtime: 1788220800, mtime_mean: 1788220800, mtime_w: size, last_read: null, private_bytes: 0, git_bytes: 0 })
 const byPath = (rows: Row[]): Row[] => [...rows].sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0))
 /** `flat/`'s objects at bucket `2^e`: `f<i>` for `i ≡ e (mod 16)`. */
 /** A footer group's `[offset, length]` reads: its bounds columns (every chunk before `rg_json`), and `rg_json`'s chunk. */
@@ -106,19 +106,19 @@ describe('generations', () => {
     expect([hb.mode, hb.version, hb.columns]).toEqual(['blob', 2, v2cols])
     expect([hp.mode, hp.version, hp.columns, hp.schema]).toEqual(['pq', 2, v2cols, h2.schema])
     expect([hs.mode, hs.version, hs.variant]).toEqual(['d1', 2, 'bysize'])
-    // A cw store has no `usr` and no class pivots; a gcs one would project them too.
-    expect(rowColumns(2, [{ name: 'schema' }, { name: 'path' }, { name: 'usr' }, { name: 'size' }, { name: 'sum_storage_class_id_3' }, { name: 'created' }] as never)).toEqual(['path', 'usr', 'size', 'sum_storage_class_id_3'])
-    expect(columnsFor(h2, ['path', 'depth', 'usr', 'size', 'n_files', 'cls2', 'cls3', 'cls4'])).toEqual(['path', 'depth', 'size', 'n_files'])
-    expect(columnsFor(h1, ['path', 'depth', 'usr', 'size', 'n_files', 'cls2', 'cls3', 'cls4'])).toEqual(['path', 'depth', 'usr', 'b', 'o', 'c2', 'c3', 'c4'])
+    // The fixture has no `usr` and no class pivots; a sort with private bytes projects their pivot too (git's is absent).
+    expect(rowColumns(2, [{ name: 'schema' }, { name: 'path' }, { name: 'usr' }, { name: 'size' }, { name: 'sum_storage_class_id_5' }, { name: 'created' }] as never)).toEqual(['path', 'usr', 'size', 'sum_storage_class_id_5'])
+    expect(columnsFor(h2, ['path', 'depth', 'usr', 'size', 'n_files', 'private_bytes', 'git_bytes'])).toEqual(['path', 'depth', 'size', 'n_files'])
+    expect(columnsFor(h1, ['path', 'depth', 'usr', 'size', 'n_files', 'private_bytes', 'git_bytes'])).toEqual(['path', 'depth', 'usr', 'b', 'o'])
   })
 
   it('serves a v1 and a v2 generation side by side, and a store-scoped copy through its own env', async () => {
     const want = (r: Row) => r.depth <= 2
     const v1 = await readRects(await openIndex(env, V1), [{ dLo: 1, dHi: 2, pLo: '', pHi: '￿' }])
     expect(v1).toEqual([
-      { path: 'bk', depth: 1, usr: null, kind: 'dir', size: 700, n_files: 3, n_children: null, n_desc: null, mtime: null, mtime_mean: 1788220800, mtime_w: 700, last_read: null, cls2: 0, cls3: 0, cls4: 0 },
-      { path: 'bk/a', depth: 2, usr: null, kind: 'dir', size: 300, n_files: 2, n_children: null, n_desc: null, mtime: null, mtime_mean: 1788220800, mtime_w: 300, last_read: null, cls2: 0, cls3: 0, cls4: 0 },
-      { path: 'bk/b', depth: 2, usr: null, kind: 'dir', size: 400, n_files: 1, n_children: null, n_desc: null, mtime: null, mtime_mean: 1788220800, mtime_w: 400, last_read: null, cls2: 0, cls3: 0, cls4: 0 },
+      { path: 'bk', depth: 1, usr: null, kind: 'dir', size: 700, n_files: 3, n_children: null, n_desc: null, mtime: null, mtime_mean: 1788220800, mtime_w: 700, last_read: null, private_bytes: 0, git_bytes: 0 },
+      { path: 'bk/a', depth: 2, usr: null, kind: 'dir', size: 300, n_files: 2, n_children: null, n_desc: null, mtime: null, mtime_mean: 1788220800, mtime_w: 300, last_read: null, private_bytes: 0, git_bytes: 0 },
+      { path: 'bk/b', depth: 2, usr: null, kind: 'dir', size: 400, n_files: 1, n_children: null, n_desc: null, mtime: null, mtime_mean: 1788220800, mtime_w: 400, last_read: null, private_bytes: 0, git_bytes: 0 },
     ])
     const top = [dir('bk', 37229948, 8009, 4, 8015), file('bk/empty.bin', 0), dir('bk/flat', 32767500, 8000, 8000, 8001), dir('bk/nest', 4456448, 5, 1, 8), dir('bk/small', 6000, 3, 3, 4)]
     for (const h of [await openIndex(env, V2), await openIndex(env, V2_BLOB), await openIndex(env, V2_PQ), await openIndex(meta, V2)]) {

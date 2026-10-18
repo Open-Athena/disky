@@ -59,14 +59,14 @@ def _write(rows: list[dict], path: Path, v: int) -> None:
             "n_files": [r["n_files"] for r in rows], "n_children": [1 for _ in rows], "n_desc": [2 for _ in rows],
             "mtime": [7 for _ in rows], "mtime_mean": [r["mtime_mean"] for r in rows], "created": [0 for _ in rows],
             "last_read": pa.array([r["last_read"] for r in rows], pa.int32()),
-            "sum_storage_class_id_2": [0 for _ in rows], "sum_storage_class_id_3": [None for _ in rows], "sum_storage_class_id_4": [r["size"] // 10 for r in rows],
+            "sum_storage_class_id_5": [r["size"] // 5 for r in rows], "sum_storage_class_id_6": [r["size"] // 10 for r in rows],
         })
     else:
         t = pa.table({
             "path": [r["path"] for r in rows], "depth": [r["depth"] for r in rows], "usr": [r["usr"] for r in rows],
             "b": [r["size"] for r in rows], "o": [r["n_files"] for r in rows],
             "wts": [r["mtime_mean"] * r["size"] for r in rows], "wb": [r["size"] for r in rows],
-            "c2": [0 for _ in rows], "c3": [0 for _ in rows], "c4": [0 for _ in rows], "a": pa.array([r["last_read"] for r in rows], pa.int32()),
+            "a": pa.array([r["last_read"] for r in rows], pa.int32()),
         })
     pq.write_table(t, path, row_group_size=7)
 
@@ -76,14 +76,15 @@ def _oracle(rows: list[dict], v: int) -> dict[tuple[int, str], dict]:
     out: dict[tuple[int, str], dict] = {}
     for r in rows:
         a = out.setdefault((r["depth"], r["path"]), {"dir": False, "size": 0, "n_files": 0, "n_children": -1, "n_desc": -1, "mtime": -1,
-                                                     "wts": 0.0, "wb": 0, "last_read": -1, "c2": 0, "c3": 0, "c4": 0, "ub": {}, "rows": 0})
+                                                     "wts": 0.0, "wb": 0, "last_read": -1, "private_bytes": 0, "git_bytes": 0, "ub": {}, "rows": 0})
         a["rows"] += 1
         a["dir"] |= v == 1 or r["kind"] != "file"
         a["size"] += r["size"]
         a["n_files"] += r["n_files"]
         if v == 2:
             a["n_children"], a["n_desc"], a["mtime"] = 1, 2, 7
-            a["c4"] += r["size"] // 10
+            a["private_bytes"] += r["size"] // 5
+            a["git_bytes"] += r["size"] // 10
             mw, wt = r["size"], r["mtime_mean"] * r["size"]
         else:
             wb = r["size"]
@@ -105,7 +106,7 @@ def _oracle(rows: list[dict], v: int) -> dict[tuple[int, str], dict]:
             us = json.dumps(named, separators=(",", ":"))
         res[k] = {"kind": "dir" if a["dir"] else "file", "size": a["size"], "n_files": a["n_files"], "n_children": a["n_children"],
                   "n_desc": a["n_desc"], "mtime": a["mtime"], "dr": round(a["wts"] / a["wb"]) if a["wb"] > 0 else 0, "wb": a["wb"],
-                  "c2": a["c2"], "c3": a["c3"], "c4": a["c4"], "us": us, "last_read": a["last_read"]}
+                  "private_bytes": a["private_bytes"], "git_bytes": a["git_bytes"], "us": us, "last_read": a["last_read"]}
     return res
 
 
@@ -167,7 +168,7 @@ def test_slice_versions_reconstruct_every_scan(built):
         for r in _live(out, "sv", s["ts"]):
             got[(r["depth"], r["path"], r["usr"])] = {"kind": r["kind"], "size": r["size"], "n_files": r["n_files"], "n_children": r["n_children"],
                                                       "n_desc": r["n_desc"], "mtime": r["mtime"], "dr": round(r["wts"] / r["wb"]) if r["wb"] > 0 else 0,
-                                                      "wb": r["wb"], "c2": r["c2"], "c3": r["c3"], "c4": r["c4"], "last_read": r["last_read"]}
+                                                      "wb": r["wb"], "private_bytes": r["private_bytes"], "git_bytes": r["git_bytes"], "last_read": r["last_read"]}
         want = _slice_oracle(root, s)
         assert got == want, s["id"]
         n += len(want)
@@ -196,7 +197,7 @@ def test_path_versions_reconstruct_every_scan(built):
         for r in _live(out, "pv", s["ts"]):
             got[(r["depth"], r["path"])] = {"kind": r["kind"], "size": r["size"], "n_files": r["n_files"], "n_children": r["n_children"],
                                             "n_desc": r["n_desc"], "mtime": r["mtime"], "dr": round(r["wts"] / r["wb"]) if r["wb"] > 0 else 0,
-                                            "wb": r["wb"], "c2": r["c2"], "c3": r["c3"], "c4": r["c4"], "us": r["us"]}
+                                            "wb": r["wb"], "private_bytes": r["private_bytes"], "git_bytes": r["git_bytes"], "us": r["us"]}
         assert got == {k: {c: v for c, v in a.items() if c != "last_read"} for k, a in want.items()}, s["id"]
 
 
@@ -216,10 +217,10 @@ def test_fold_equals_versioning_with_read_days(built):
         for r in _live(out, "pvl", s["ts"]):
             got[(r["depth"], r["path"])] = {"kind": r["kind"], "size": r["size"], "n_files": r["n_files"], "n_children": r["n_children"],
                                             "n_desc": r["n_desc"], "mtime": r["mtime"], "dr": round(r["wts"] / r["wb"]) if r["wb"] > 0 else 0,
-                                            "wb": r["wb"], "c2": r["c2"], "c3": r["c3"], "c4": r["c4"], "us": r["us"], "last_read": r["last_read"]}
+                                            "wb": r["wb"], "private_bytes": r["private_bytes"], "git_bytes": r["git_bytes"], "us": r["us"], "last_read": r["last_read"]}
         assert got == want, s["id"]
     t = pa.concat_tables([pq.read_table(p) for p in sorted((out / "pvl").glob("r*.parquet"))]).to_pylist()
-    key = lambda r: tuple(r[c] for c in ("kind", "size", "n_files", "n_children", "n_desc", "mtime", "wb", "c2", "c3", "c4", "us", "last_read")) + (round(r["wts"] / r["wb"]) if r["wb"] > 0 else 0,)
+    key = lambda r: tuple(r[c] for c in ("kind", "size", "n_files", "n_children", "n_desc", "mtime", "wb", "private_bytes", "git_bytes", "us", "last_read")) + (round(r["wts"] / r["wb"]) if r["wb"] > 0 else 0,)
     assert [(a["path"], a["vt"]) for a, b in zip(t, t[1:]) if (a["depth"], a["path"]) == (b["depth"], b["path"]) and a["vt"] == b["vf"] and key(a) == key(b)] == []
     assert (len(t), sum(1 for p in sorted((out / "pv").glob("r*.parquet")) for _ in pq.read_table(p).to_pylist())) == (116, 113)
 
@@ -229,7 +230,7 @@ def test_versions_are_runs_of_change(built):
     out = built[0]
     t = pa.concat_tables([pq.read_table(p) for p in sorted((out / "pv").glob("r*.parquet"))]).to_pylist()
     key = lambda r: (r["kind"], r["size"], r["n_files"], r["n_children"], r["n_desc"], r["mtime"],
-                     round(r["wts"] / r["wb"]) if r["wb"] > 0 else 0, r["wb"], r["c2"], r["c3"], r["c4"], r["us"])
+                     round(r["wts"] / r["wb"]) if r["wb"] > 0 else 0, r["wb"], r["private_bytes"], r["git_bytes"], r["us"])
     adjacent_equal = [(a["path"], a["vt"]) for a, b in zip(t, t[1:]) if (a["depth"], a["path"]) == (b["depth"], b["path"]) and a["vt"] == b["vf"] and key(a) == key(b)]
     assert adjacent_equal == []
 

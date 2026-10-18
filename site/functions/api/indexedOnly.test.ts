@@ -97,7 +97,7 @@ describe('D1', () => {
   const FORMS: [string, string, FilterRejectCode][] = [
     ['`is:file`', `q=${encodeURIComponent('tomat is:file')}`, 'unsupported-kind'],
     ['a user lens', 'q=tomat&lens=user:alice', 'unsupported-scope'],
-    ['a class scope', 'q=tomat&cl=s', 'unsupported-scope'],
+    ['a class scope', 'q=tomat&cl=p', 'unsupported-scope'],
   ]
 
   describe('rejectQuery: what an indexed-only deployment refuses', () => {

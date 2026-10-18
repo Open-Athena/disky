@@ -51,7 +51,7 @@ PREFIX = "static-names"
 OPEN = 4291747200  # 2106-01-01 00:00:00 UTC: a version's `vt` while open
 U64 = 1 << 64
 #: The values whose change opens a version; `mtime_mean` is stored rounded.
-VALUE_COLS = ["kind", "size", "n_files", "n_children", "n_desc", "mtime", "mtime_mean", "mtime_w", "last_read", "c2", "c3", "c4"]
+VALUE_COLS = ["kind", "size", "n_files", "n_children", "n_desc", "mtime", "mtime_mean", "mtime_w", "last_read", "private_bytes", "git_bytes"]
 KEY_COLS = ["depth", "path", "usr"]
 INTERVAL_RG = 65536
 SX_RG = 8192
@@ -72,9 +72,8 @@ INTERVAL_SCHEMA = pa.schema([
     pa.field("mtime_mean", pa.float64(), nullable=False),
     pa.field("mtime_w", pa.int64(), nullable=False),
     pa.field("last_read", pa.int32(), nullable=False),
-    pa.field("c2", pa.int64(), nullable=False),
-    pa.field("c3", pa.int64(), nullable=False),
-    pa.field("c4", pa.int64(), nullable=False),
+    pa.field("private_bytes", pa.int64(), nullable=False),
+    pa.field("git_bytes", pa.int64(), nullable=False),
 ])
 SX_SCHEMA = pa.schema([
     pa.field("s", pa.string(), nullable=False),
@@ -232,20 +231,20 @@ V2_SELECT = """depth::UTINYINT AS depth, path, coalesce({usr}, '') AS usr,
     CASE WHEN kind = 'file' THEN 'file' ELSE 'dir' END AS kind, size::BIGINT AS size, n_files::BIGINT AS n_files,
     coalesce({n_children}, -1)::BIGINT AS n_children, coalesce({n_desc}, -1)::BIGINT AS n_desc, coalesce({mtime}, -1)::BIGINT AS mtime,
     coalesce({mtime_mean}, 0)::DOUBLE AS mtime_mean, CASE WHEN {mtime_mean} IS NULL THEN 0 ELSE size END::BIGINT AS mtime_w,
-    coalesce({last_read}, -1)::INTEGER AS last_read, coalesce({c2}, 0)::BIGINT AS c2, coalesce({c3}, 0)::BIGINT AS c3, coalesce({c4}, 0)::BIGINT AS c4"""
-#: Columns a v2 sort may lack (read as NULL): cw's carry no owner (`usr`) and a single storage-class pivot.
+    coalesce({last_read}, -1)::INTEGER AS last_read, coalesce({private_bytes}, 0)::BIGINT AS private_bytes, coalesce({git_bytes}, 0)::BIGINT AS git_bytes"""
+#: Columns a v2 sort may lack (read as NULL): no owner (`usr`), and a scan without private or git bytes has no pivot for them.
 V2_OPTIONAL = {"usr": "usr", "n_children": "n_children", "n_desc": "n_desc", "mtime": "mtime", "mtime_mean": "mtime_mean", "last_read": "last_read",
-               "c2": "sum_storage_class_id_2", "c3": "sum_storage_class_id_3", "c4": "sum_storage_class_id_4"}
+               "private_bytes": "sum_storage_class_id_5", "git_bytes": "sum_storage_class_id_6"}
 V1_SELECT = """depth::UTINYINT AS depth, path, coalesce(usr, '') AS usr, 'dir' AS kind, b::BIGINT AS size, o::BIGINT AS n_files,
     -1::BIGINT AS n_children, -1::BIGINT AS n_desc, -1::BIGINT AS mtime,
     CASE WHEN coalesce(wb, 0) > 0 THEN coalesce(wts, 0) / wb ELSE 0 END::DOUBLE AS mtime_mean, coalesce(wb, 0)::BIGINT AS mtime_w,
-    coalesce(a, -1)::INTEGER AS last_read, coalesce(c2, 0)::BIGINT AS c2, coalesce(c3, 0)::BIGINT AS c3, coalesce(c4, 0)::BIGINT AS c4"""
+    coalesce(a, -1)::INTEGER AS last_read, 0::BIGINT AS private_bytes, 0::BIGINT AS git_bytes"""
 #: A scan's rows for one key merged into one, the mean stamp then rounded to the second (half to even) — the
 #: value the change test compares.
 MERGED = """any_value(kind) AS kind, sum(size)::BIGINT AS size, sum(n_files)::BIGINT AS n_files, max(n_children) AS n_children,
     max(n_desc) AS n_desc, max(mtime) AS mtime,
     round_even(CASE WHEN count(*) = 1 THEN any_value(mtime_mean) ELSE sum(mtime_mean * mtime_w) / greatest(sum(mtime_w), 1) END, 0) AS mtime_mean,
-    sum(mtime_w)::BIGINT AS mtime_w, max(last_read) AS last_read, sum(c2)::BIGINT AS c2, sum(c3)::BIGINT AS c3, sum(c4)::BIGINT AS c4"""
+    sum(mtime_w)::BIGINT AS mtime_w, max(last_read) AS last_read, sum(private_bytes)::BIGINT AS private_bytes, sum(git_bytes)::BIGINT AS git_bytes"""
 
 
 def source_version(con, path: str) -> int:

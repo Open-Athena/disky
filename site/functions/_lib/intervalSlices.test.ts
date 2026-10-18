@@ -220,7 +220,7 @@ describe('owner prefix history', () => {
   it('versions a path by its live slices, merging equal neighbours and leaving gaps', async () => {
     const { versionsOf } = await import('./ownerHist')
     const row = (usr: string | null, size: number, vf: number, vt: number) =>
-      ({ depth: 2, path: 'bk/a', usr, size, n_files: 1, cls2: 0, cls3: 0, cls4: 0, vf, vt }) as unknown as import('./index').Row
+      ({ depth: 2, path: 'bk/a', usr, size, n_files: 1, private_bytes: 0, git_bytes: 0, vf, vt }) as unknown as import('./index').Row
     const vs = versionsOf([row('al', 5, 0, 2), row('bo', 3, 0, 4), row('al', 5, 2, 4), row('bo', 7, 6, 9)])
     expect([...vs]).toEqual([['2:bk/a', [
       [0, 4, { b: 8, o: 2, us: { al: 5, bo: 3 }, uo: { al: 1, bo: 1 }, cb: {} }],

@@ -121,9 +121,9 @@ function useCanonicalParams(codecs: [string, { encode: (v: string | undefined) =
 }
 
 // The storage-class axis (`?cl=`): one letter per class, in class order.
-type ClassAxis = 's' | 'n' | 'c' | 'a'
-const CLASS_AXES: ClassAxis[] = ['s', 'n', 'c', 'a']
-const CLASS_OF: Record<ClassAxis, string> = { s: '1', n: '2', c: '3', a: '4' }
+type ClassAxis = 'p' | 'r' | 'g'
+const CLASS_AXES: ClassAxis[] = ['p', 'r', 'g']
+const CLASS_OF: Record<ClassAxis, string> = { p: '1', r: '5', g: '6' }
 
 // Diff-section span presets (days back from the "after" scan).
 const SPANS: [string, number][] = [['1d', 1], ['3d', 3], ['7d', 7], ['14d', 14], ['30d', 30]]

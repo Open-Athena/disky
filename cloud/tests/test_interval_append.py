@@ -188,8 +188,8 @@ def test_slices_live_at_each_scan_are_the_scans_owner_slices(world):
         stack = [p for _, p in world["stacks"][s["id"]]]
         D = s["ts"]
         sv = [r for r in versions(world["base"], stack, "sv") if r["vf"] <= D < r["vt"]]
-        got = {(r["depth"], r["path"], r["usr"] or None): {c: r[c] for c in ("kind", "size", "n_files", "wb", "c4", "last_read")} for r in sv}
-        want = {k: {c: a[c] for c in ("kind", "size", "n_files", "wb", "c4", "last_read")} for k, a in _slice_oracle(root, s).items()}
+        got = {(r["depth"], r["path"], r["usr"] or None): {c: r[c] for c in ("kind", "size", "n_files", "wb", "private_bytes", "git_bytes", "last_read")} for r in sv}
+        want = {k: {c: a[c] for c in ("kind", "size", "n_files", "wb", "private_bytes", "git_bytes", "last_read")} for k, a in _slice_oracle(root, s).items()}
         assert got == want, s["id"]
         pv = {(r["depth"], r["path"]): r["size"] for r in versions(world["base"], stack, "pvl") if r["vf"] <= D < r["vt"]}
         svt = [r for r in versions(world["base"], stack, "svt") if r["vf"] <= D < r["vt"]]

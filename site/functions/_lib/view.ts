@@ -285,9 +285,8 @@ function merge(a: Agg, r: Row): void {
   }
   if (r.mtime != null) a.m = a.m == null ? r.mtime : Math.max(a.m, r.mtime)
   if (r.last_read != null) a.a = a.a == null ? r.last_read : Math.max(a.a, r.last_read)
-  if (r.cls2) a.cb['2'] = (a.cb['2'] ?? 0) + r.cls2
-  if (r.cls3) a.cb['3'] = (a.cb['3'] ?? 0) + r.cls3
-  if (r.cls4) a.cb['4'] = (a.cb['4'] ?? 0) + r.cls4
+  if (r.private_bytes) a.cb['5'] = (a.cb['5'] ?? 0) + r.private_bytes
+  if (r.git_bytes) a.cb['6'] = (a.cb['6'] ?? 0) + r.git_bytes
   if (r.usr) a.ub[r.usr] = (a.ub[r.usr] ?? 0) + r.size
   if (r.us) for (const u in r.us) a.ub[u] = (a.ub[u] ?? 0) + r.us[u]
   a.kind = r.kind

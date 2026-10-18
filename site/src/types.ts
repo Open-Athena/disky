@@ -113,10 +113,10 @@ export interface Meta {
 
 // GCS list prices, $/GiB·mo, US regions, by storage_class_id
 export const CLASS_PRICE_US: Record<string, number> = { 1: 0.02, 2: 0.01, 3: 0.004, 4: 0.0012 }
-export const CLASS_NAMES: Record<string, string> = { 1: 'Standard', 2: 'Nearline', 3: 'Coldline', 4: 'Archive' }
-// Class swatches: warm→cold as blue → teal → lavender → pale slate; every
-// step legible on the dark ground (a darkness ramp wasn't).
-export const CLASS_COLORS: Record<string, string> = { 1: '#4c9aff', 2: '#31c4b3', 3: '#a78bfa', 4: '#cbd5e1' }
+/** Hugging Face's storage classes (`storage_class_id`): public 1, private 5, and plain git files 6 (not billed). */
+export const CLASS_NAMES: Record<string, string> = { 1: 'Public', 5: 'Private', 6: 'Git' }
+// Class swatches: blue → lavender → pale slate, each legible on the dark ground.
+export const CLASS_COLORS: Record<string, string> = { 1: '#4c9aff', 5: '#a78bfa', 6: '#cbd5e1' }
 
 // blended $/byte·mo for a storage-class byte mix
 export const ratePerByte = (classBytes: Record<string, number>): number => {

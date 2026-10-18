@@ -10,10 +10,11 @@ range files, so an export works from any copy of the store (R2 holds the served 
 Written in the scan's own source format (`scans.json` `version`):
 - **v2** (objects + dirs): the layer-2 columns the stores and the per-scan readers read (`path`, `usr` where the
   generation is sliced, `size`, `mtime`, `kind`, `depth`, `n_files`, `n_children`, `n_desc`, `mtime_mean`,
-  `last_read`, `sum_storage_class_id_{2,3,4}`), cut by the engine's `write_tiers` into `path-index.parquet`
+  `last_read`, `sum_storage_class_id_{5,6}`: private and git bytes), cut by the engine's `write_tiers` into `path-index.parquet`
   (+ `path-index-bysize.parquet`), as `path-index` / `index-write` cut them: the same rows in the same orders, 8K-row
-  groups. Columns no store carries are not reproduced (`created`, `uri`, classes other than 2–4: B5).
-- **v1** (dirs only): `path`, `depth`, `usr`, `b`, `o`, `wts`, `wb`, `c2`, `c3`, `c4`, `a`, sorted
+  groups. Columns no store carries are not reproduced (`created`, `uri`, and `sum_storage_class_id_1`: public is the rest of
+  `size`).
+- **v1** (dirs only): `path`, `depth`, `usr`, `b`, `o`, `wts`, `wb`, `a`, sorted
   `(depth, path, usr)`: `path-index.parquet` only (a v1 index had coarse tiers, not `bysize`).
 
 Exact in the store's terms: the export's rows, read back as the store reads a scan (`interval_store.slice_rows_sql` /
@@ -50,13 +51,12 @@ V2_COLS = [
     ("n_desc", "nullif(n_desc, -1)"),
     ("mtime_mean", "CASE WHEN wb > 0 THEN wts / wb END"),
     ("last_read", "nullif(last_read, -1)"),
-    ("sum_storage_class_id_2", "c2"),
-    ("sum_storage_class_id_3", "c3"),
-    ("sum_storage_class_id_4", "c4"),
+    ("sum_storage_class_id_5", "private_bytes"),
+    ("sum_storage_class_id_6", "git_bytes"),
 ]
 V1_COLS = [
     ("depth", "depth::INTEGER"), ("usr", "usr"), ("b", "size"), ("o", "n_files"), ("wts", "wts"), ("wb", "wb"),
-    ("c2", "c2"), ("c3", "c3"), ("c4", "c4"), ("a", "nullif(last_read, -1)"),
+    ("a", "nullif(last_read, -1)"),
 ]
 TIERS = ("path", "bysize")
 #: Each tier's file in a scan's index dir (`index_footer.STORE_SORTS`).

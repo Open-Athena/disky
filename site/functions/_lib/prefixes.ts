@@ -18,8 +18,8 @@ export interface PrefixStat {
   cb?: Record<string, number>
 }
 
-const FIELDS: (keyof Row)[] = ['path', 'depth', 'usr', 'size', 'n_files', 'mtime', 'last_read', 'cls2', 'cls3', 'cls4']
-type StatRow = Pick<Row, 'path' | 'depth' | 'usr' | 'size' | 'n_files' | 'mtime' | 'last_read'> & Partial<Pick<Row, 'cls2' | 'cls3' | 'cls4'>>
+const FIELDS: (keyof Row)[] = ['path', 'depth', 'usr', 'size', 'n_files', 'mtime', 'last_read', 'private_bytes', 'git_bytes']
+type StatRow = Pick<Row, 'path' | 'depth' | 'usr' | 'size' | 'n_files' | 'mtime' | 'last_read'> & Partial<Pick<Row, 'private_bytes' | 'git_bytes'>>
 
 /** The most prefixes one request sizes. */
 export const MAX_PREFIXES = 1000
@@ -44,7 +44,7 @@ export function foldPrefixes(prefixes: string[], rows: StatRow[]): Record<string
     if (r.mtime != null) a.m = a.m == null ? r.mtime : Math.max(a.m, r.mtime)
     if (r.last_read != null) a.a = a.a == null ? r.last_read : Math.max(a.a, r.last_read)
     if (r.usr) a.ub.set(r.usr, (a.ub.get(r.usr) ?? 0) + r.size)
-    for (const [c, v] of [['2', r.cls2], ['3', r.cls3], ['4', r.cls4]] as [string, number | undefined][]) if (v) a.cb.set(c, (a.cb.get(c) ?? 0) + v)
+    for (const [c, v] of [['5', r.private_bytes], ['6', r.git_bytes]] as [string, number | undefined][]) if (v) a.cb.set(c, (a.cb.get(c) ?? 0) + v)
   }
   const out: Record<string, PrefixStat> = {}
   for (const [k, a] of acc) {

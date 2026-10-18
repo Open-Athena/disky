@@ -110,7 +110,7 @@ SVT_STATE = [*ist.SV_CHANGE, "tot", "pvf", "wts"]
 DR = "CASE WHEN wb > 0 THEN round(wts / wb, 0) ELSE 0 END::DOUBLE"
 #: What a reconstruction check hashes per table (`interval_store`'s hashes, `last_read` in the path's).
 HASH = {
-    "pvl": "hash(depth, path, kind, size, n_files, n_children, n_desc, mtime, dr, wb, c2, c3, c4, us, last_read)",
+    "pvl": "hash(depth, path, kind, size, n_files, n_children, n_desc, mtime, dr, wb, private_bytes, git_bytes, us, last_read)",
     "sv": ist.SV_HASH,
     "svt": f"hash({ist.SV_HASH[5:-1]}, tot)",
 }

@@ -63,7 +63,7 @@ KEY_COLS = ["depth", "path"]
 #: The values whose change opens a version. `dr` is the size-weighted mean stamp rounded to the second
 #: (the change test; the exact `wts` is carried from the version's first scan), `us` the owner slices.
 #: `last_read` is not here: it moves from scan to scan on read paths and lives in its own intervals (`rd/`).
-CHANGE_COLS = ["kind", "size", "n_files", "n_children", "n_desc", "mtime", "dr", "wb", "c2", "c3", "c4", "us"]
+CHANGE_COLS = ["kind", "size", "n_files", "n_children", "n_desc", "mtime", "dr", "wb", "private_bytes", "git_bytes", "us"]
 CARRIED = {"wts": "first"}
 STATE_COLS = [*CHANGE_COLS, "wts"]
 
@@ -80,9 +80,8 @@ PV_SCHEMA = pa.schema([
     pa.field("mtime", pa.int64(), nullable=False),
     pa.field("wts", pa.float64(), nullable=False),  # Σ mtime_mean·mtime_w over the path's rows
     pa.field("wb", pa.int64(), nullable=False),  # Σ mtime_w
-    pa.field("c2", pa.int64(), nullable=False),
-    pa.field("c3", pa.int64(), nullable=False),
-    pa.field("c4", pa.int64(), nullable=False),
+    pa.field("private_bytes", pa.int64(), nullable=False),  # storage class 5 (public = size − private − git)
+    pa.field("git_bytes", pa.int64(), nullable=False),  # storage class 6: plain git files, unbilled
     pa.field("us", pa.string(), nullable=False),  # owner slices (`us_sql_from_raw`)
 ])
 RD_SCHEMA = pa.schema([
@@ -110,7 +109,7 @@ SVT_SCHEMA = SV_SCHEMA.append(pa.field("tot", pa.int64(), nullable=False))
 SV_KEY = ["depth", "path", "usr"]
 SV_CHANGE = [c for c in CHANGE_COLS if c != "us"] + ["last_read"]
 SV_STATE = [*SV_CHANGE, "wts"]
-SV_HASH = "hash(depth, path, usr, kind, size, n_files, n_children, n_desc, mtime, dr, wb, c2, c3, c4, last_read)"
+SV_HASH = "hash(depth, path, usr, kind, size, n_files, n_children, n_desc, mtime, dr, wb, private_bytes, git_bytes, last_read)"
 
 # ── Per-scan rows → one row per path ───────────────────────────────────────
 
@@ -120,11 +119,11 @@ V2_ROW = """depth::UTINYINT AS depth, path, coalesce({usr}, '') AS usr, kind = '
     n_files::BIGINT AS n_files, coalesce({n_children}, -1)::BIGINT AS n_children, coalesce({n_desc}, -1)::BIGINT AS n_desc,
     coalesce({mtime}, -1)::BIGINT AS mtime, CASE WHEN {mtime_mean} IS NULL THEN 0 ELSE size END::BIGINT AS mw,
     CASE WHEN {mtime_mean} IS NULL THEN 0 ELSE {mtime_mean}::DOUBLE * size::DOUBLE END AS wt,
-    coalesce({last_read}, -1)::INTEGER AS last_read, coalesce({c2}, 0)::BIGINT AS c2, coalesce({c3}, 0)::BIGINT AS c3, coalesce({c4}, 0)::BIGINT AS c4"""
+    coalesce({last_read}, -1)::INTEGER AS last_read, coalesce({private_bytes}, 0)::BIGINT AS private_bytes, coalesce({git_bytes}, 0)::BIGINT AS git_bytes"""
 V1_ROW = """depth::UTINYINT AS depth, path, coalesce(usr, '') AS usr, false AS is_file, b::BIGINT AS size, o::BIGINT AS n_files,
     -1::BIGINT AS n_children, -1::BIGINT AS n_desc, -1::BIGINT AS mtime, coalesce(wb, 0)::BIGINT AS mw,
     CASE WHEN coalesce(wb, 0) > 0 THEN (coalesce(wts, 0)::DOUBLE / wb::DOUBLE) * wb::DOUBLE ELSE 0 END AS wt,
-    coalesce(a, -1)::INTEGER AS last_read, coalesce(c2, 0)::BIGINT AS c2, coalesce(c3, 0)::BIGINT AS c3, coalesce(c4, 0)::BIGINT AS c4"""
+    coalesce(a, -1)::INTEGER AS last_read, 0::BIGINT AS private_bytes, 0::BIGINT AS git_bytes"""
 
 
 def path_rows_sql(con, src: str, preds: list[str], version: int | None = None) -> str:
@@ -141,11 +140,11 @@ def path_rows_sql(con, src: str, preds: list[str], version: int | None = None) -
     one = """SELECT depth, path, CASE WHEN bool_and(is_file) THEN 'file' ELSE 'dir' END AS kind, sum(size)::BIGINT AS size,
         sum(n_files)::BIGINT AS n_files, max(n_children) AS n_children, max(n_desc) AS n_desc, max(mtime) AS mtime,
         sum(wt)::DOUBLE AS wts, sum(mw)::BIGINT AS wb, max(last_read) AS last_read,
-        sum(c2)::BIGINT AS c2, sum(c3)::BIGINT AS c3, sum(c4)::BIGINT AS c4
+        sum(private_bytes)::BIGINT AS private_bytes, sum(git_bytes)::BIGINT AS git_bytes
         FROM raw GROUP BY depth, path"""
     return f"""WITH raw AS ({raw}), one AS ({one}), sl AS ({us_sql_from_raw()})
         SELECT one.depth, one.path, kind, size, n_files, n_children, n_desc, mtime,
-            CASE WHEN wb > 0 THEN round(wts / wb, 0) ELSE 0 END::DOUBLE AS dr, wb, c2, c3, c4, sl.us, wts, last_read
+            CASE WHEN wb > 0 THEN round(wts / wb, 0) ELSE 0 END::DOUBLE AS dr, wb, private_bytes, git_bytes, sl.us, wts, last_read
         FROM one JOIN sl USING (depth, path)"""
 
 
@@ -177,12 +176,12 @@ def slice_rows_sql(con, src: str, preds: list[str], version: int | None = None) 
         SELECT depth, path, usr, CASE WHEN bool_and(is_file) THEN 'file' ELSE 'dir' END AS kind, sum(size)::BIGINT AS size,
             sum(n_files)::BIGINT AS n_files, max(n_children) AS n_children, max(n_desc) AS n_desc, max(mtime) AS mtime,
             CASE WHEN sum(mw) > 0 THEN round(sum(wt) / sum(mw), 0) ELSE 0 END::DOUBLE AS dr, sum(mw)::BIGINT AS wb,
-            sum(c2)::BIGINT AS c2, sum(c3)::BIGINT AS c3, sum(c4)::BIGINT AS c4, sum(wt)::DOUBLE AS wts, max(last_read) AS last_read
+            sum(private_bytes)::BIGINT AS private_bytes, sum(git_bytes)::BIGINT AS git_bytes, sum(wt)::DOUBLE AS wts, max(last_read) AS last_read
         FROM raw GROUP BY depth, path, usr"""
 
 
 #: Per-version hash of the change columns: what a version and a scan's row are compared by.
-ROW_HASH = "hash(depth, path, kind, size, n_files, n_children, n_desc, mtime, dr, wb, c2, c3, c4, us)"
+ROW_HASH = "hash(depth, path, kind, size, n_files, n_children, n_desc, mtime, dr, wb, private_bytes, git_bytes, us)"
 RD_HASH = "hash(depth, path, last_read)"
 
 
