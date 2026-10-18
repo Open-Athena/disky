@@ -2286,16 +2286,42 @@ def access_r2_export(
     print(json.dumps(archive["summary"], sort_keys=True))
 
 
+def r2_state_inputs(state: str, before: dt.datetime, stage: Path) -> list[str]:
+    """The current aggregates `state` (the collector archive's `state.json`, a path or URL) names for the hours before
+    `before` (`parsers.r2.state_aggs`), copied from beside it into `stage`; their local paths."""
+    from disk_tree import blobfs
+    from disk_tree.access.parsers.r2 import state_aggs
+
+    def read(path: str) -> bytes:
+        with blobfs.open_read(path) if blobfs.is_url(path) else open(path, "rb") as f:
+            return f.read()
+
+    doc = json.loads(read(state))
+    root = state.rsplit("/", 1)[0] if blobfs.is_url(state) else str(Path(state).parent)
+    out = []
+    for key in state_aggs(doc, before):
+        local = stage / key
+        local.parent.mkdir(parents=True, exist_ok=True)
+        local.write_bytes(read(blobfs.join(root, key)))
+        out.append(str(local))
+    err(f"r2-agg: {len(out)} hour aggregate(s) from {state}")
+    return out
+
+
 @access.command("r2-agg")
 @option("-d", "--asof", required=True, callback=scan_id_option, help="Scan id: requests at or after its instant are cut (the scan sees reads before it)")
 @option("-o", "--out", "out", type=Path, required=True, help="Layer-2a agg parquet to write (`path-index -x`'s input)")
-@argument("inputs", nargs=-1, required=True)
+@option("-s", "--state", help="The collector archive's `state.json` (a path or URL, e.g. `r2://<archive>/state.json`): read the current aggregate of every hour it names before the scan, fetched from beside it, instead of INPUTS")
+@argument("inputs", nargs=-1)
 def access_r2_agg(
     asof: str,
     out: Path,
+    state: str | None,
     inputs: tuple[str, ...],
 ) -> None:
-    """Aggregate the R2 collector's public per-hour files (`<bucket>/<YYYY-MM-DD>/<HH>.json` globs) into layer-2a.
+    """Aggregate the R2 collector's hour files into layer-2a: the private per-hour aggregates the archive's
+    `state.json` names (`-s`), or INPUTS, globs of either those or the public per-hour files
+    (`<bucket>/<YYYY-MM-DD>/<HH>.json`).
 
     The files carry per-(object key, action) counts and minute-truncated last-request times per UTC hour (no
     requester identity, no per-request events); see `disk_tree.access.parsers.r2`, whose as-of rule keeps a row
@@ -2310,8 +2336,19 @@ def access_r2_agg(
 
     from .scan_id import scan_time
 
-    con = duckdb.connect()
+    if bool(state) == bool(inputs):
+        raise UsageError("pass exactly one of -s/--state and INPUTS")
     cut = scan_time(asof)
+    if state:
+        from tempfile import TemporaryDirectory
+
+        stage = TemporaryDirectory(prefix="r2-agg-")
+        inputs = tuple(r2_state_inputs(state, cut, Path(stage.name)))
+        if not inputs:
+            err(f"r2-agg: {state} names no hour before {cut.isoformat()}; {out} not written")
+            print(json.dumps({"captures": {}, "hours": 0, "paths_out": 0, "rows_in": 0, "total_bytes_out": 0}, sort_keys=True))
+            return
+    con = duckdb.connect()
     con.register("r2_leaf", parse(list(inputs), con=con, as_of=cut))
     captures = dict(hours(list(inputs), con).filter(f"hour < TIMESTAMP '{cut.replace(tzinfo=None).isoformat()}'").aggregate("capture, count(*)").fetchall())
     before = con.execute("SELECT COALESCE(sum(n_ops), 0) FROM r2_leaf").fetchone()[0]
