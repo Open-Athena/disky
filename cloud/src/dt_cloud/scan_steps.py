@@ -993,6 +993,28 @@ def retire(ctx: Ctx, arg: str | None) -> None:
                    warn=f"retire failed on {root} (its per-scan files stay; the next run retries)")
 
 
+@step("store-gc", core=False, soft=True, options={"execute": bool, "grace": int, "store": str})
+def store_gc(ctx: Ctx, arg: str | None) -> None:
+    """Superseded interval-store generations (`dt-cloud store-gc -l`): what the current generation was compacted or
+    backfilled from, past the grace (`grace` seconds, default 3 days), its parity markers moved first; on the interval
+    store (`store`, default the interval-store step's, else `$R2_ARCHIVE`) and on `$R2_ARCHIVE` when that's another
+    copy. Off unless the profile lists it in `steps`; a dry run unless `execute: true`. Static-names generations aren't
+    in it: which one each site reads isn't the job's to know (`store-gc -t static-names -k …` by hand)."""
+    if ctx.reproc:
+        err("store-gc off under REPROC")
+        return
+    archive = ctx.env.get("R2_ARCHIVE")
+    store = ctx.opt("store-gc", "store") or ctx.opt("interval-store", "store") or archive
+    if not store:
+        err("store-gc: no interval store (options.store-gc.store, options.interval-store.store or R2): nothing collected")
+        return
+    args = ["-t", "interval-store", "-l", *(["-G", ctx.opt("store-gc", "grace")] if ctx.opt("store-gc", "grace") is not None else []),
+            *(["-x"] if ctx.opt("store-gc", "execute") else [])]
+    with ctx.phase("store-gc", note=None if ctx.opt("store-gc", "execute") else "dry run"):
+        for root in dict.fromkeys(r for r in (store, archive) if r):
+            ctx.sh(["dt-cloud", "store-gc", *args, "-o", root], fatal=False, warn=f"store-gc failed on {root} (the generations stay)")
+
+
 def store_args_t(ctx: Ctx) -> list[str]:
     """`-t <store>` for `scan retire` (its `-s` is the scans root): nothing for the primary."""
     return [] if ctx.profile.primary else ["-t", ctx.profile.store]

@@ -772,6 +772,18 @@ def test_retire_layer1_passes_the_listing_layouts_shards(tmp_path, env):
     assert n.sh_impl.calls == [f"dt-cloud scan retire -G s1 -k 2 -L l2/{{id}}/index/{{gen}}/path-index.parquet -o gs://iv -S gs://iv -w {w} -R -s <tmp>/data"]
 
 
+def test_store_gc_collects_the_interval_stores_lineage_on_each_copy(tmp_path, env):
+    """`store-gc` (listed in `steps`): `store-gc -t interval-store -l` on the interval store and on `$R2_ARCHIVE` when
+    that's another copy; a dry run unless `execute`."""
+    opts = {**NL_OPTS, "interval-store": {"store": "gs://iv"}}
+    c = ctx(tmp_path, {**env, "R2_ARCHIVE": "r2://idx"}, steps=["store-gc"], options={**opts, "store-gc": {"grace": 60}})
+    S.store_gc(c, None)
+    assert c.sh_impl.calls == ["dt-cloud store-gc -t interval-store -l -G 60 -o gs://iv", "dt-cloud store-gc -t interval-store -l -G 60 -o r2://idx"]
+    x = ctx(tmp_path, env, steps=["store-gc"], options={**opts, "store-gc": {"execute": True}})
+    S.store_gc(x, None)
+    assert x.sh_impl.calls == ["dt-cloud store-gc -t interval-store -l -x -o gs://iv"]
+
+
 def test_retire_failure_warns_and_needs_its_keep(tmp_path, env):
     c = ctx(tmp_path, env, runner=Runner(tmp_path, fail=("dt-cloud scan retire",)), steps=["retire"],
             options={"list": {"import": True}, "static-names": {"gen": "s1", "store": "r2://idx"}, "digest": {"template": "t", "config": "c.yml"},
