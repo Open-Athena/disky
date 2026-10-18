@@ -1000,12 +1000,17 @@ def non_live(ctx: Ctx, arg: str | None) -> None:
     if not classes:
         err("non-live: no options.non-live.classes: nothing measured")
         return
+    from .non_live import PROVIDER_CLASSES, split_uri
+
     with ctx.phase("non-live"):
         for src in ctx.profile.sources:
-            if src.kind == "hf":
-                continue  # the Hub's held bytes are in the listing (`@history`)
+            # each source measures the classes its provider has (an hf:// source none: the Hub's held bytes are in
+            # its listing, `@history`); a deployment of mixed providers lists the union
+            has = [] if src.kind == "hf" else [c for c in classes if c in PROVIDER_CLASSES[split_uri(src.uri)[0]]]
+            if not has:
+                continue
             endpoint = src.endpoint or (ctx.env.get("R2_ENDPOINT") if src.kind == "r2" else None)
-            ctx.sh(["dt-cloud", "non-live", "-c", ",".join(classes), *(["-E", endpoint] if endpoint else []),
+            ctx.sh(["dt-cloud", "non-live", "-c", ",".join(has), *(["-E", endpoint] if endpoint else []),
                     "-o", ctx.data_root / ctx.layer2 / "non-live" / f"{src.bucket}.parquet", src.uri],
                    fatal=False, warn=f"non-live failed on {src.uri} (the scan's other outputs stand)")
 
