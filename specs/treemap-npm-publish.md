@@ -2,7 +2,17 @@
 
 From the disky deep-dive deck (`~/c/oa/disky-deep-dive`), 2026-10-18. Ryan OK'd publishing ("tell US to do it"). The talk's treemap slide demos the package live, and would rather say `pnpm add @rdub/treemap` than "pin a dist-branch SHA".
 
-## State
+## Status (2026-10-18, controller)
+
+Steps 1–3 and 5 done; **step 4 (publish) waits on Ryan's explicit go** (publishing is public and permanent).
+- `tsup.config.ts`: ESM + `.d.ts` + sourcemaps per subpath (`index`, `squarify`, `parseColor`, `divergingColor`, `svg`, `voronoi/index`), peers external, JSX automatic, `styles.css` copied to `dist/`. `build` and `prepack` run it; `typecheck` stays `tsc -b --noEmit`.
+- `publishConfig` points `main`/`module`/`types`/`exports` at `dist/` (`./styles.css` included); `files: ["dist", "README.md"]`; the workspace's `main`/`exports` stay on `src/`.
+- Checked: the packed tarball's `package.json` points at `dist/`, no `.tsx`, 720 KB; a scratch Vite 7 + React 19 app (`tmp/treemap-consumer`, its own workspace) installs the tarball, typechecks with `skipLibCheck: false`, builds, and renders the README's `<Treemap>` in Chrome with no JSX config and no errors. Package tests (191), typecheck, the site build and `@disk-tree/react`'s tests pass.
+- README: `pnpm add @rdub/treemap` first, the dist-branch SHA pin as the alternative. `build-dist.yml` now also fires on `cloud` (it only fired on `main`, why the last dist is 10/14) and its dist branch carries the same compiled build.
+
+To publish: `pnpm -C packages/treemap publish --access public`, then `git tag treemap-v0.1.0`.
+
+## State (as found)
 
 - `packages/treemap` is `0.1.0`. `main` / `types` / `exports` point at `./src/*.ts(x)`, and `build` is only `tsc --noEmit`.
 - It ships on the npm-dist `dist/treemap` branch, which is the same raw TS/TSX source. The newest dist is `ed136b03` (from `5b6a9b7`, 10/14).
