@@ -14,7 +14,8 @@
   .shrank { color: var(--shrank); }
   td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
   .nb { white-space: nowrap; }
-  .run-filters { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin: 12px 0 0; font-size: 13px; select { font: inherit; } }
+  .run-filters { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin: 12px 0 0; font-size: 13px; select { font: inherit; }
+    .gran button { font-size: 13px; padding: 2px 10px; } }
   .sw { display: inline-block; width: 9px; height: 9px; border-radius: 2px; margin-right: 5px; vertical-align: baseline;
     &.failed { background: color-mix(in srgb, var(--danger) 70%, transparent); } }
   .sr-legend { display: flex; flex-wrap: wrap; gap: 4px 14px; font-size: 12px; color: var(--ink-2); margin-top: 4px; }
