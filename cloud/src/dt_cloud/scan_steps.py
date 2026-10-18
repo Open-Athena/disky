@@ -468,6 +468,8 @@ def list_source(ctx: Ctx, uri: str | None) -> None:
         return
     _raise_nofile()
     threads = src.threads or ctx.opt("list", "threads")
+    # an `r2://` source without its own endpoint is the deployment's R2 (`$R2_ENDPOINT`, a secret where the profile is public)
+    endpoint = src.endpoint or (ctx.env.get("R2_ENDPOINT") if src.kind == "r2" else None)
     weights: list[str] = []
     if ctx.opt("list", "weights", False):
         prior = ctx.prior_listing(b)
@@ -477,7 +479,7 @@ def list_source(ctx: Ctx, uri: str | None) -> None:
             weights = ["-W", f"{prior}/*.parquet"]
     with ctx.phase(f"list {b}"):
         ctx.sh(["disk-tree", "bulk-list", *ctx.opt("list", "bulk_args", []), uri,
-                *(["-E", src.endpoint] if src.endpoint else []), "-o", ctx.listing_out(b),
+                *(["-E", endpoint] if endpoint else []), "-o", ctx.listing_out(b),
                 # the Hub lister is one rate-limited process (`-w` requests in flight); it refuses `-P`
                 *(["-P", src.procs or ctx.nproc] if src.kind != "hf" else []),
                 *(["-w", threads] if threads else []), "-x", "clear", *weights, *src.args])
