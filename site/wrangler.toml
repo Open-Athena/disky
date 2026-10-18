@@ -108,7 +108,14 @@ STATIC_GEN = "2026-10-08c"   # the static name index generation on INDEX_R2 (req
 # 400 `scan-not-indexed` for later scans, never a 500 (static-robust).
 FILTER_STATIC_HEAVY = "1"
 FILTER_INDEXED_ONLY = "1"
-META_TREE_URL = "https://cw.oa.dev/meta"   # /scans outputs link into the /meta tree
+META_TREE_URL = "https://gcs.oa.dev/meta"   # /scans outputs link into this site's own /meta tree
+# Secondary store `meta` (specs/multi-store.md phase 3): the data behind this site (`oa-gcs-usage-dvx` + the R2 serving
+# bucket), scanned by `job/profiles/gcs-meta.yml` (`job/meta-submit.sh`) into `snapshots/meta/` + `meta-l2/` and the
+# `store = 'meta'` D1 rows; staff-only (`scope`). Its index tiers are read from `oa-gcs-usage-dvx` with the primary's
+# GCS HMAC key (`secrets` names it), its JSONs from INDEX_R2 (`SERVED_R2`), its search from its own static index
+# generation (`STATIC_GEN`, built by the profile's `static-names` step).
+STORES_EXTRA = "meta"
+STORES_JSON = '{"meta":{"scope":"admin","vars":{"ROOT_LABEL":"Marin GCS \u2014 meta","SNAPSHOTS_SUBDIR":"meta","STORE_SCHEME":"gs://","STORE_BUCKETS":"oa-gcs-usage-dvx,oa-gcs-usage-index","STORE_PREFIXES":"meta-l2/,snapshots/meta/","STORE_BUCKET":"oa-gcs-usage-dvx","SERVED_R2":"1","ROOT_TITLE":"Data behind this site: scans, indexes and listings in oa-gcs-usage-dvx (GCS) and oa-gcs-usage-index (R2)","STATIC_GEN":"2026-10-18meta","FILTER_STATIC_HEAVY":"1"},"secrets":{"STORE_ACCESS_KEY_ID":"GCS_HMAC_KEY_ID","STORE_SECRET_ACCESS_KEY":"GCS_HMAC_SECRET"}}}'
 
 # Secrets (set with `wrangler pages secret put <NAME> --project-name oa-gcs-usage`):
 #   SESSION_SECRET   — HMAC key for session cookies + IP hashing
@@ -151,7 +158,14 @@ FILTER_DETAILS_MS = "300"   # a static filter view waits this long past phase 2 
 NAME_SUMMARY_STATIC = "1"   # /api/name-summary(-registry): every dated request from the static name index on R2 (INDEX_R2: suffix shards + catalog); unset = the query box (fallback)
 STATIC_GEN = "2026-10-08c"   # the static name index generation on INDEX_R2 (required: no default)
 FILTER_INDEXED_ONLY = "1"   # as production: only the indexed plain-substring filter
-META_TREE_URL = "https://cw.oa.dev/meta"
+META_TREE_URL = "https://dev.gcs.oa.dev/meta"   # /scans outputs link into this site's own /meta tree
+# Secondary store `meta` (specs/multi-store.md phase 3): the data behind this site (`oa-gcs-usage-dvx` + the R2 serving
+# bucket), scanned by `job/profiles/gcs-meta.yml` (`job/meta-submit.sh`) into `snapshots/meta/` + `meta-l2/` and the
+# `store = 'meta'` D1 rows; staff-only (`scope`). Its index tiers are read from `oa-gcs-usage-dvx` with the primary's
+# GCS HMAC key (`secrets` names it), its JSONs from INDEX_R2 (`SERVED_R2`), its search from its own static index
+# generation (`STATIC_GEN`, built by the profile's `static-names` step).
+STORES_EXTRA = "meta"
+STORES_JSON = '{"meta":{"scope":"admin","vars":{"ROOT_LABEL":"Marin GCS \u2014 meta","SNAPSHOTS_SUBDIR":"meta","STORE_SCHEME":"gs://","STORE_BUCKETS":"oa-gcs-usage-dvx,oa-gcs-usage-index","STORE_PREFIXES":"meta-l2/,snapshots/meta/","STORE_BUCKET":"oa-gcs-usage-dvx","SERVED_R2":"1","ROOT_TITLE":"Data behind this site: scans, indexes and listings in oa-gcs-usage-dvx (GCS) and oa-gcs-usage-index (R2)","STATIC_GEN":"2026-10-18meta","FILTER_STATIC_HEAVY":"1"},"secrets":{"STORE_ACCESS_KEY_ID":"GCS_HMAC_KEY_ID","STORE_SECRET_ACCESS_KEY":"GCS_HMAC_SECRET"}}}'
 STORE = "gcs"
 AUTH_MODE = "app"
 ROOT_LABEL = "Marin GCS (dev)"
