@@ -105,7 +105,7 @@ STORE_BUCKET = "oa-cw-s3-usage-index"   # `r2_bucket` output; R2 ignores the reg
 STORE_REGION = "auto"
 # Secondary store `meta` (specs/multi-store.md phase 3): the deploy's own
 # storage — the GCS data bucket + this R2 bucket — scanned daily by
-# job/cw-meta-run.sh and served at /meta to staff. ENABLED 2026-09-30 in this
+# job/profiles/cw-meta.yml (scan.nf) and served at /meta to staff. ENABLED 2026-09-30 in this
 # order (Ryan's go for each): (1) prod D1 gets the store-scoped index tables (now in
 # `site/schema.sql`); (2) a first
 # `job/cw-meta-submit.sh` run lands `snapshots/meta/<scan>/` + `meta-l2/` and
@@ -114,7 +114,7 @@ STORE_REGION = "auto"
 # Functions its data. The store reuses the primary's R2 secrets (same bucket,
 # named by binding in `secrets`), so no new Pages secret is needed.
 # Its own static name index (`?f=` on /meta): `STATIC_GEN` names its generation in INDEX_R2, built and
-# appended by job/cw-meta-run.sh (4b'); without one its search is `scan-not-indexed`, never the primary's.
+# appended by job/profiles/cw-meta.yml's `static-names` step; without one its search is `scan-not-indexed`, never the primary's.
 STORES_EXTRA = "meta"
 STORES_JSON = '{"meta":{"scope":"admin","vars":{"ROOT_LABEL":"Marin usage — meta","SNAPSHOTS_SUBDIR":"meta","STORE_SCHEME":"gs://","STORE_BUCKETS":"oa-cw-s3-usage-data,oa-cw-s3-usage-index","STORE_PREFIXES":"meta-l2/,snapshots/meta/","STORE_BUCKET":"oa-cw-s3-usage-index","STORE_REGION":"auto","ROOT_TITLE":"Data behind this site: scans, indexes and listings in oa-cw-s3-usage-data (GCS) and oa-cw-s3-usage-index (R2)","STATIC_GEN":"2026-10-14meta","FILTER_STATIC_HEAVY":"1"},"secrets":{"STORE_ENDPOINT":"STORE_ENDPOINT","STORE_ACCESS_KEY_ID":"STORE_ACCESS_KEY_ID","STORE_SECRET_ACCESS_KEY":"STORE_SECRET_ACCESS_KEY"}}}'
 
@@ -221,7 +221,7 @@ STORE_BUCKET = "oa-cw-s3-usage-index"
 STORE_REGION = "auto"
 # Secondary store `meta` (specs/multi-store.md phase 3): the deploy's own
 # storage — the GCS data bucket + this R2 bucket — scanned daily by
-# job/cw-meta-run.sh and served at /meta to staff. OFF until enabled (flip here first, on the dev stack), in this
+# job/profiles/cw-meta.yml (scan.nf) and served at /meta to staff. OFF until enabled (flip here first, on the dev stack), in this
 # order (Ryan's go for each): (1) prod D1 gets the store-scoped index tables (now in
 # `site/schema.sql`); (2) a first
 # `job/cw-meta-submit.sh` run lands `snapshots/meta/<scan>/` + `meta-l2/` and
@@ -230,7 +230,7 @@ STORE_REGION = "auto"
 # Functions its data. The store reuses the primary's R2 secrets (same bucket,
 # named by binding in `secrets`), so no new Pages secret is needed.
 # Its own static name index (`?f=` on /meta): `STATIC_GEN` names its generation in INDEX_R2, built and
-# appended by job/cw-meta-run.sh (4b'); without one its search is `scan-not-indexed`, never the primary's.
+# appended by job/profiles/cw-meta.yml's `static-names` step; without one its search is `scan-not-indexed`, never the primary's.
 STORES_EXTRA = "meta"
 STORES_JSON = '{"meta":{"scope":"admin","vars":{"ROOT_LABEL":"Marin usage — meta","SNAPSHOTS_SUBDIR":"meta","STORE_SCHEME":"gs://","STORE_BUCKETS":"oa-cw-s3-usage-data,oa-cw-s3-usage-index","STORE_PREFIXES":"meta-l2/,snapshots/meta/","STORE_BUCKET":"oa-cw-s3-usage-index","STORE_REGION":"auto","ROOT_TITLE":"Data behind this site: scans, indexes and listings in oa-cw-s3-usage-data (GCS) and oa-cw-s3-usage-index (R2)","STATIC_GEN":"2026-10-14meta","FILTER_STATIC_HEAVY":"1"},"secrets":{"STORE_ENDPOINT":"STORE_ENDPOINT","STORE_ACCESS_KEY_ID":"STORE_ACCESS_KEY_ID","STORE_SECRET_ACCESS_KEY":"STORE_SECRET_ACCESS_KEY"}}}'
 
