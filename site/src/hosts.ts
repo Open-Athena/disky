@@ -25,11 +25,14 @@ export interface Peer { label: string; prod: string; dev?: string }
 
 /** Routes whose path means the same thing on every deployment; any other path is a drill into this one's buckets. */
 const PAGES = new Set(['admin', 'assignments', 'health', 'names', 'privacy', 'runs', 'scans', 'signin', 'staged', 'user', 'users'])
+/** Secondary stores every deployment mounts under the same path (the "data behind this site" tree): a drill into one
+ * becomes the peer's own store root, not the peer's main map. */
+const STORE_PATHS = new Set(['meta'])
 /** Query params naming this deployment's own things: a scan (`d`), an owner (`o`), an object (`open`), a bucket. */
 const LOCAL_PARAMS = ['bucket', 'd', 'o', 'open']
 
 /** The page a peer serves for this one, on the peer's dev host from this deployment's dev host, else its prod.
- * A page keeps its route up to the first id of this deployment's (a scan run, a deletion run, a session), and its
+ * A secondary store (`STORE_PATHS`) maps to the peer's root of it. A page keeps its route up to the first id of this deployment's (a scan run, a deletion run, a session), and its
  * hash; a drill path becomes the peer's root, since no two deployments share a bucket. Either keeps its query,
  * less `LOCAL_PARAMS`: the axes, units and filters mean the same everywhere. */
 export function peerUrl(href: string, peer: Peer, fromDev: boolean): string {
@@ -37,7 +40,8 @@ export function peerUrl(href: string, peer: Peer, fromDev: boolean): string {
   const url = new URL(`https://${fromDev && peer.dev ? peer.dev : peer.prod}/`)
   const segs = from.pathname.split('/').filter(Boolean)
   const page = segs.length > 0 && PAGES.has(segs[0])
-  if (page) {
+  if (segs.length > 0 && STORE_PATHS.has(segs[0])) url.pathname = `/${segs[0]}`
+  else if (page) {
     const [root, sub] = segs
     url.pathname = root === 'runs' ? '/staged'
       : root === 'user' || (root === 'admin' && sub === 'db') ? `/${segs.join('/')}`

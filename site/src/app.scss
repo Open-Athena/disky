@@ -1095,14 +1095,15 @@ body:has(.og) :is(.help-chip, .help-card) { display: none; }
     font-variant-numeric: tabular-nums;
     font-weight: 600;
   }
-  .date-scale {
-    display: inline-flex; border: 1px solid var(--line); border-radius: 4px; overflow: hidden;
-    button {
-      font: inherit; font-size: 10px; padding: 0 5px; cursor: pointer;
-      background: transparent; color: var(--ink-3); border: none;
-      &.on { background: var(--line); color: var(--ink); }
-      & + button { border-left: 1px solid var(--line); }
-    }
+}
+// The legend's pill toggles: the date scale (`log | lin | rank`) and the read lens's tint (`hatch | touch`).
+.legend :is(.date-scale, .read-tint) {
+  display: inline-flex; border: 1px solid var(--line); border-radius: 4px; overflow: hidden;
+  button {
+    font: inherit; font-size: 10px; padding: 0 5px; cursor: pointer;
+    background: transparent; color: var(--ink-3); border: none;
+    &.on { background: var(--line); color: var(--ink); }
+    & + button { border-left: 1px solid var(--line); }
   }
 }
 

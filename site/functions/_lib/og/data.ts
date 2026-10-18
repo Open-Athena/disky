@@ -167,8 +167,8 @@ export function tilesOf(tree: TreeNode, color: (u: string | null) => string, mod
     // The app's read lens (`readLens.ts`); its window runs to `access.through`'s day when the scan has it.
     if (!access) return '#6e332b'
     const thru = readThrough(access)
-    // A card has no hatch: a `written` cell (not read since a write since logging began) takes its write's age.
-    const rs = readState(n.a, true, { min: access.from, max: Math.max(access.to, thru?.day ?? access.to) }, n.d)
+    // A card has no hatch and no `?rt=` (always the default tint): a `written` cell takes its write's age.
+    const rs = readState(n.a, true, { min: access.from, max: Math.max(access.to, thru?.day ?? access.to) }, { d: n.d, dir: n.k !== 'file' })
     return rs.kind === 'read' || rs.kind === 'written' ? dateColor(rs.t) : '#6e332b'
   }
   /** `depth` 1 is the view's child; `slot`/`i`/`count` its tree-mode colour key. */

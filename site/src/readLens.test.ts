@@ -1,8 +1,9 @@
 import { describe, expect, it } from 'vitest'
 import {
-  idleLabel, idleness, idleSortKey, lastTouch, prefixBucket, readLogged, readState, readThrough,
+  idleLabel, idleness, idleSortKey, lastTouch, prefixBucket, readDay, readLogged, readState, readThrough,
   readThroughText, unloggedOf, unreadSinceWrite, writtenAfter,
 } from './readLens'
+import { readTintParam } from './readTint'
 
 const access = { from: 100, to: 110, buckets: ['jc-taxes'] }
 // Epoch day 110 = 1970-04-21; the logs run through its 15:00 hour.
@@ -82,6 +83,14 @@ describe('writtenAfter / unreadSinceWrite / lastTouch', () => {
     ]).toEqual([true, true, false, false, false, false])
   })
 
+  it('a directory qualifies only with no read anywhere under it', () => {
+    expect([
+      unreadSinceWrite(null, 105, 100, true),
+      unreadSinceWrite(103, 105, 100, true),
+      unreadSinceWrite(null, 95, 100, true),
+    ]).toEqual([true, false, false])
+  })
+
   it('is max(read, write), a write before logging began not counting', () => {
     expect([lastTouch(103, 107, 100), lastTouch(107, 103, 100), lastTouch(null, 105, 100), lastTouch(null, 90, 100), lastTouch(103, 90, 100)])
       .toEqual([107, 107, 105, null, 103])
@@ -107,21 +116,21 @@ describe('readState', () => {
       .toEqual([{ kind: 'never' }, { kind: 'unlogged' }, { kind: 'unlogged' }])
   })
 
-  it('with the write day: each state transition', () => {
+  it('with the write day, an object: each state transition', () => {
     expect([
       // read since its last write: the read's age
-      readState(108, true, range, 90),
-      readState(106, true, range, 106),
+      readState(108, true, range, { d: 90 }),
+      readState(106, true, range, { d: 106 }),
       // written since logging began, not read since that write: the write's age (hatched)
-      readState(102, true, range, 106),
-      readState(null, true, range, 104),
+      readState(102, true, range, { d: 106 }),
+      readState(null, true, range, { d: 104 }),
       // written on or after the logs' end (the window's new end): the newest write color
-      readState(108, true, range, 112),
+      readState(108, true, range, { d: 112 }),
       // never read, last written before logging began
-      readState(null, true, range, 95),
+      readState(null, true, range, { d: 95 }),
       // no logs cover it: the write says nothing about reads
-      readState(null, false, range, 104),
-      readState(104, false, range, 108),
+      readState(null, false, range, { d: 104 }),
+      readState(104, false, range, { d: 108 }),
     ]).toEqual([
       { kind: 'read', t: 0.8 },
       { kind: 'read', t: 0.6 },
@@ -132,6 +141,84 @@ describe('readState', () => {
       { kind: 'unlogged' },
       { kind: 'read', t: 0.4 },
     ])
+  })
+
+  it('a directory (`hatch`) is `written` only with nothing under it read; any read gives it the read color', () => {
+    const dir = (a: number | null, d: number) => readState(a, true, range, { d, dir: true })
+    expect([
+      // a read on 102 and a newer write on 106 (one new file in a well-read folder): the read's age
+      dir(102, 106),
+      // written since logging began, nothing under it read: the write's age (hatched)
+      dir(null, 104),
+      // nothing read, last written before logging began
+      dir(null, 95),
+      // the same read + newer write as an object: hatched by the write
+      readState(102, true, range, { d: 106, dir: false }),
+    ]).toEqual([
+      { kind: 'read', t: 0.2 },
+      { kind: 'written', t: 0.4 },
+      { kind: 'never' },
+      { kind: 'written', t: 0.6 },
+    ])
+  })
+
+  it('`touch`: by max(read, write since logging began), no `written` state, files and folders alike', () => {
+    const touch = (a: number | null, logged: boolean, d: number | null, dir = false) =>
+      readState(a, logged, range, { d, dir, tint: 'touch' })
+    expect([
+      // read before the newest write: the write's age, unhatched
+      touch(102, true, 106),
+      touch(102, true, 106, true),
+      // read after the newest write: the read's age
+      touch(108, true, 104, true),
+      // read, last written before logging began: the read's age
+      touch(103, true, 90),
+      // written since logging began, never read: the write's age
+      touch(null, true, 104, true),
+      // neither a read nor a write since logging began
+      touch(null, true, 95, true),
+      touch(null, true, null),
+      // not logged: reads alone (a write says nothing about reads nobody logs)
+      touch(null, false, 104),
+      touch(103, false, 108),
+    ]).toEqual([
+      { kind: 'read', t: 0.6 },
+      { kind: 'read', t: 0.6 },
+      { kind: 'read', t: 0.8 },
+      { kind: 'read', t: 0.3 },
+      { kind: 'read', t: 0.4 },
+      { kind: 'never' },
+      { kind: 'never' },
+      { kind: 'unlogged' },
+      { kind: 'read', t: 0.3 },
+    ])
+  })
+})
+
+describe('readDay', () => {
+  it('is the day a cell sits at: `hatch` the write when `written`, else the read; `touch` the last touch; unlogged the read', () => {
+    expect([
+      readDay(102, true, 100, { d: 106 }),
+      readDay(102, true, 100, { d: 106, dir: true }),
+      readDay(null, true, 100, { d: 104, dir: true }),
+      readDay(102, true, 100, { d: 106, dir: true, tint: 'touch' }),
+      readDay(null, true, 100, { d: 95, tint: 'touch' }),
+      readDay(null, false, 100, { d: 104 }),
+      readDay(103, false, 100, { d: 108, tint: 'touch' }),
+    ]).toEqual([106, 102, 104, 106, null, null, 103])
+  })
+})
+
+describe('readTintParam (`?rt=`)', () => {
+  it('omits the default `hatch` from the URL; decodes `touch`, and an absent or unknown value to `hatch`', () => {
+    expect([
+      readTintParam.encode('hatch'),
+      readTintParam.encode('touch'),
+      readTintParam.decode(undefined),
+      readTintParam.decode('touch'),
+      readTintParam.decode('hatch'),
+      readTintParam.decode('bogus'),
+    ]).toEqual([undefined, 'touch', 'hatch', 'touch', 'hatch', 'hatch'])
   })
 })
 
