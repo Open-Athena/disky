@@ -1,6 +1,6 @@
 """The objects' native version (GCS `generation`) in the interval store (specs/lean-scans.md §3.1): from raw listings
 through `path-index -G` into a generation's object versions — build, append, carries, compaction — out again by
-`export`.
+`export`, checked by `verify`; and added to a generation built without it by `backfill-generation`.
 
 The world: one bucket, seven scans. The lister records `generation` from the third scan on (GCS's, since 2026-10-07).
 Objects: one never changed; one deleted before the first generation; one rewritten (a new generation, created later);
@@ -19,6 +19,7 @@ import pyarrow.parquet as pq
 import pytest
 from click.testing import CliRunner
 
+from dt_cloud import interval_backfill as ib
 from dt_cloud import interval_compact as ic
 from dt_cloud import interval_export as ie
 from dt_cloud import interval_local as il
@@ -57,6 +58,7 @@ VERSIONS = [
     ("b/d/sub/deep.bin", 0, None, 71),
 ]
 ON, OFF = "index/{id}/path-index.parquet", "index-off/{id}/path-index.parquet"
+LISTING = "listing/{id}/*/*.parquet"
 RG = 4
 
 
@@ -227,3 +229,73 @@ def test_off_has_no_generation_anywhere(world, off, tmp_path):
     assert with_col == []
     assert "generation" not in _columns(world / OFF.replace("{id}", SCANS[3]))
     assert "generation" not in _export(off["store"], SCANS[4], tmp_path / "x").column_names
+
+
+def _backfill(store: Path, work: Path, world: Path, to: str = "g2", *extra: str) -> dict:
+    args = ["-o", str(store), "-O", to, "-s", str(world), "-l", LISTING, "-w", str(work), "-r", str(RG), "-p", "2", "-M", "1GB", *extra]
+    res = CliRunner().invoke(ib.backfill_cmd, args, catch_exceptions=False)
+    assert res.exit_code == 0, res.output
+    return json.loads(res.stdout)
+
+
+@pytest.fixture(scope="module")
+def backfilled(world, off, tmp_path_factory):
+    tmp = tmp_path_factory.mktemp("ivg-bf")
+    store = tmp / "store"
+    shutil.copytree(off["store"], store)
+    before = _parquets(store / ist.PREFIX / "g")
+    out = _backfill(store, tmp / "w", world)
+    return {"tmp": tmp, "store": store, "out": out, "before": before}
+
+
+def test_backfill_fills_versions_live_since_the_first_generation(world, backfilled):
+    store, out = backfilled["store"], backfilled["out"]
+    g2 = store / ist.PREFIX / "g2"
+    # Exactly the versions live at or after the first listing with generations; earlier ones stay NULL.
+    assert _versions(g2) == _through(5)
+    assert json.loads((g2 / "scans.json").read_text())["generation"] is True
+    assert json.loads((g2 / ib.BACKFILL).read_text()) == {
+        "from": "g", "manifest": f"manifests/{SCANS[5]}.m001.json", "runs": [f"deltas/{SCANS[4]}_{SCANS[5]}"], "scans": 6, "listings": SCANS[GEN_FROM:6], "listed": 7, "filled": 8}
+    assert (out["listings"], out["skipped"], out["filled"]) == (SCANS[GEN_FROM:6], SCANS[:GEN_FROM], 8)
+    # The source and the pointer are untouched.
+    assert _parquets(store / ist.PREFIX / "g") == backfilled["before"]
+    assert json.loads((store / ic.CURRENT).read_text()) == {"gen": "g"}
+    # Served as a build over generation-bearing sorts serves it (its versions are that build's: `_through(5)` above).
+    assert _columns(g2 / "served" / "path.parquet") == [*ist.PVL_SCHEMA.names, "generation"]
+
+
+def test_backfill_refuses_an_existing_generation_or_one_that_has_it(world, backfilled, tmp_path):
+    args = ["-o", str(backfilled["store"]), "-O", "g2", "-s", str(world), "-l", LISTING, "-w", str(tmp_path)]
+    res = CliRunner().invoke(ib.backfill_cmd, args)
+    assert (res.exit_code, res.output.strip().splitlines()[-1]) == (1, f"{backfilled['store']}/{ist.PREFIX}/g2/ exists: a generation is never rewritten")
+    res = CliRunner().invoke(ib.backfill_cmd, [*args[:2], "-g", "g2", "-O", "g3", *args[4:]])
+    assert (res.exit_code, res.output.strip().splitlines()[-1]) == (1, f"{backfilled['store']}/{ist.PREFIX}/g2: already carries `generation`")
+
+
+def test_a_backfilled_generation_takes_appends_and_verifies(world, backfilled, tmp_path):
+    store = tmp_path / "store"
+    shutil.copytree(backfilled["store"], store)
+    _add(world, store, tmp_path / "w", ON, 6, gen="g2")
+    g2 = store / ist.PREFIX / "g2"
+    assert _versions(g2) == _through(6)
+    m = _verify(store, "g2", world, 5, tmp_path / "verify")
+    assert (m["pass"], m["generation"]) == (True, {"objects": 6, "equal": 6})
+
+
+def _rename_classes(d: Path) -> None:
+    """Every version file under `d` with its class columns renamed (`x2`…), as a generation written before a rename."""
+    for p in sorted(d.rglob("*.parquet")):
+        if p.name.endswith(".groups.parquet"):
+            continue
+        t = pq.read_table(p)
+        if "wb" not in t.column_names:
+            continue
+        pq.write_table(t.rename_columns([f"x{c[1:]}" if c in ist.CLS else c for c in t.column_names]), p)
+
+
+def test_backfill_reads_renamed_class_columns_by_position(world, off, backfilled, tmp_path):
+    store = tmp_path / "store"
+    shutil.copytree(off["store"], store)
+    _rename_classes(store / ist.PREFIX / "g")
+    _backfill(store, tmp_path / "w", world)
+    assert _parquets(store / ist.PREFIX / "g2") == _parquets(backfilled["store"] / ist.PREFIX / "g2")
