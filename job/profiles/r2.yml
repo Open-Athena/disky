@@ -31,7 +31,7 @@ machines:
 # alert would fire every run, and r2 holds no account-wide key to list the account's buckets with (by design)
 skip: [bucket-check]
 # `access-r2`: marin-na's read recency from the access collector (infra/cf/r2-access) for the read lens; `retire`
-# (specs/lean-scans.md §2): a dry run (its plan in the log) until Ryan reviews the totals and runs the deletes
+# (specs/lean-scans.md §2): each run deletes the per-scan files of every scan but the newest 2
 steps: [access-r2, retire]
 secrets:
   R2_ACCESS_KEY_ID: oa-r2-index-access-key-id
@@ -69,9 +69,10 @@ options:
   interval-store: {mem: 12GB}
   # R2 has no soft delete: superseded generation dirs are listed only until Ryan reviews a list
   index-gc: {dry: true}
-  # the data store's per-scan sorts, then the R2 copy (`$R2_ARCHIVE`); D1 with the first. R2 has no soft delete: `execute`
-  # stays false until Ryan runs the reviewed deletes himself
-  retire: {keep: 2, execute: false, copies: [r2]}
+  # the data store's per-scan sorts, then the R2 copy (`$R2_ARCHIVE`); D1 with the first. A scan without a verify marker
+  # is verified in the task first (`interval-store verify`, its marker written); one that fails keeps its files.
+  # Executing since 2026-10-18, after the reviewed backlog deletes (backup: gs://oa-r2-usage-data/retire-backup/2026-10-18)
+  retire: {keep: 2, execute: true, copies: [r2]}
   digest:
     template: cw
     # the thread state (`digest/r2/…`) and every earlier scan's snapshots are on R2, as the one-VM job reads them
