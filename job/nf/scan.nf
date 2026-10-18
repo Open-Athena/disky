@@ -9,6 +9,9 @@
 //                                ├→ publish-r2 → interval-store ──┼→ index-sync → post (over-time, index-gc, …)
 //                                └→ index-rows ───────────────────┘
 //
+// `post` runs the enabled post steps in registry order (`scan_steps.STEPS`), e.g. `retire` (opt-in via the profile's
+// `steps`): after both stores and the pointers, so a scan is retired only once the stores serve it.
+//
 // `params.fold`: bucket-check runs in the first source's list task, index-sync in the post task (a task's VM boots in
 // ~1.5–2 min; the local executor can't take a cloud work dir, so tiny steps can't run in the head).
 nextflow.enable.dsl = 2

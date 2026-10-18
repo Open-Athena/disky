@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { knownBucket, resolveStores, storeDefaultColor, storeEmailAuth, storeFetch, storeForPath, storeQuery, storeUrl, type Store } from './stores'
+import { canRead, knownBucket, resolveStores, storeDefaultColor, storeEmailAuth, storeFetch, storeForPath, storeQuery, storeUrl, type Store } from './stores'
 import { TEST_REGISTRY } from './testStores'
 
 // The build-time store resolution (specs/done/multi-store.md phase 2): `VITE_STORE`
@@ -119,5 +119,19 @@ describe('storeForPath', () => {
   })
   it('a single-store build is always the primary', () => {
     expect(['/', '/meta', '/meta/x'].map(p => storeForPath(p, resolveStores('cw', '', TEST_REGISTRY)).key)).toEqual(['cw', 'cw', 'cw'])
+  })
+})
+
+describe('canRead', () => {
+  it("a store's scope (or `*`) reads it, as `requireViewer` demands; a store without one needs nothing", () => {
+    const meta = { scope: 'admin' }, primary = {}
+    expect([
+      canRead(meta, ['cw', 'admin']),
+      canRead(meta, ['*']),
+      canRead(meta, ['cw', 'cw:assign']),
+      canRead(meta, null),
+      canRead(primary, ['cw:read']),
+      canRead(primary, null),
+    ]).toEqual([true, true, false, false, true, true])
   })
 })

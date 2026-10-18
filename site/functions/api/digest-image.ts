@@ -8,7 +8,7 @@
  *
  * Viewer-gated (the job's grant); nothing cached — one render a run. */
 import { type Env, requireViewer } from '../_lib/auth.js'
-import { ivRetry, storeReady, withPathStore } from '../_lib/index.js'
+import { ivRefusal, ivRetry, storeReady, withPathStore } from '../_lib/index.js'
 import { ATTEN_DEFAULT, buildDiff, MIN_AREA_DEFAULT } from '../_lib/view.js'
 import { digestSvg, DIGEST_W, tiersSvg } from '../_lib/og/digestCard.js'
 import { parseDigestRequest } from '../_lib/og/digestRequest.js'
@@ -31,7 +31,15 @@ export const onRequestPost = async (ctx0: { request: Request; env: OgEnv }): Pro
   if (req.diff) {
     const { from: f, to: t, path, title } = req.diff
     if (!storeReady(ctx.env)) return new Response('diff not configured (missing index store creds)', { status: 503 })
-    const data = await ivRetry(() => buildDiff(ctx.env, { from: f, to: t, path, w: MAP_W, h: MAP_H, minArea: MIN_AREA_DEFAULT, atten: ATTEN_DEFAULT, top: 500 }))
+    let data
+    try {
+      data = await ivRetry(() => buildDiff(ctx.env, { from: f, to: t, path, w: MAP_W, h: MAP_H, minArea: MIN_AREA_DEFAULT, atten: ATTEN_DEFAULT, top: 500 }))
+    } catch (e) {
+      // A scan a broken interval-store run cut out: 503 + `Retry-After`, the job retries.
+      const r = ivRefusal(e)
+      if (r) return r
+      throw e
+    }
     const built = diffRoot({ ...data, prev: f, curr: t }, 'delta', true, !path, path || 'all')
     diff = built ? { root: built.root, title } : null
   }
