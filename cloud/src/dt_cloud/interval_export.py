@@ -12,7 +12,10 @@ Written in the scan's own source format (`scans.json` `version`):
   generation is sliced, `size`, `mtime`, `kind`, `depth`, `n_files`, `n_children`, `n_desc`, `mtime_mean`,
   `last_read`, `sum_storage_class_id_{2,3,4}`), cut by the engine's `write_tiers` into `path-index.parquet`
   (+ `path-index-bysize.parquet`), as `path-index` / `index-write` cut them: the same rows in the same orders, 8K-row
-  groups. Columns no store carries are not reproduced (`created`, `uri`, classes other than 2–4: B5).
+  groups. Columns no store carries are not reproduced (`created`, `uri`, classes other than 2–4: B5). A generation
+  that carries the objects' `generation` (`scans.json` `"generation": true`, gcs) exports it as the last column, from
+  the `path` sort's version live at the scan (on a sliced generation, joined to the slices by path): the version's,
+  so a scan from before the lister recorded it gets the one listed later within the same version.
 - **v1** (dirs only): `path`, `depth`, `usr`, `b`, `o`, `wts`, `wb`, `c2`, `c3`, `c4`, `a`, sorted
   `(depth, path, usr)`: `path-index.parquet` only (a v1 index had coarse tiers, not `bysize`).
 
@@ -50,13 +53,11 @@ V2_COLS = [
     ("n_desc", "nullif(n_desc, -1)"),
     ("mtime_mean", "CASE WHEN wb > 0 THEN wts / wb END"),
     ("last_read", "nullif(last_read, -1)"),
-    ("sum_storage_class_id_2", "c2"),
-    ("sum_storage_class_id_3", "c3"),
-    ("sum_storage_class_id_4", "c4"),
+    *((f"sum_storage_class_id_{k}", c) for k, c in ist.CLASS_COLS.items()),
 ]
 V1_COLS = [
     ("depth", "depth::INTEGER"), ("usr", "usr"), ("b", "size"), ("o", "n_files"), ("wts", "wts"), ("wb", "wb"),
-    ("c2", "c2"), ("c3", "c3"), ("c4", "c4"), ("a", "nullif(last_read, -1)"),
+    *((f"c{k}", c) for k, c in ist.CLASS_COLS.items()), ("a", "nullif(last_read, -1)"),
 ]
 TIERS = ("path", "bysize")
 #: Each tier's file in a scan's index dir (`index_footer.STORE_SORTS`).
@@ -119,15 +120,23 @@ def export_scan(store_root: str, scan: str, dest: str, *, gen: str | None = None
     gen = ic.chain(store, gen)[-1]
     prefix = f"{PREFIX}/{gen}"
     entry, runs = scan_entry(store, prefix, scan)
-    sliced = ist.sliced(store.read_json(f"{prefix}/scans.json"))
+    base = store.read_json(f"{prefix}/scans.json")
+    sliced = ist.sliced(base)
+    # The objects' native version (a v2 scan of a generation that carries it): from the path sort's live versions.
+    generation = ist.has_generation(base) and entry["version"] == 2
     sort = "slices" if sliced else "path"
     own = work is None
     work = Path(tempfile.mkdtemp(prefix="iv-export-")) if own else work
     try:
-        keys = [f"{prefix}/served/{sort}.parquet", *(f"{prefix}/{r['key']}/served/{sort}.parquet" for r in runs)]
-        files = local_files(store, keys, work / "store")
+        def served(sort: str) -> list[str]:
+            keys = [f"{prefix}/served/{sort}.parquet", *(f"{prefix}/{r['key']}/served/{sort}.parquet" for r in runs)]
+            return local_files(store, keys, work / "store")
+
         con = connect(threads, mem, work / "duckdb")
-        con.execute(f"CREATE TABLE live AS {live_sql(files, sliced, entry['ts'])}")
+        con.execute(f"CREATE TABLE live AS {live_sql(served(sort), sliced, entry['ts'])}")
+        if generation and sliced:
+            gen_of = f"SELECT depth, path, {ist.GENERATION} FROM ({live_sql(served(ist.GENERATION_SORT), False, entry['ts'])})"
+            con.execute(f"CREATE OR REPLACE TABLE live AS SELECT l.*, g.{ist.GENERATION} FROM live l LEFT JOIN ({gen_of}) g USING (depth, path)")
         usr = ["nullif(usr, '') AS usr"] if sliced else []
         out = work / "out"
         out.mkdir(parents=True, exist_ok=True)
@@ -135,7 +144,7 @@ def export_scan(store_root: str, scan: str, dest: str, *, gen: str | None = None
             bad = con.execute("SELECT count(*) FROM live WHERE wb <> 0 AND wb <> size").fetchone()[0]
             if bad:
                 raise SystemExit(f"export {scan}: {bad} versions weigh their mean stamp over part of their size; not a v2 scan's rows")
-            sel = ", ".join(["path", *usr, *(f"{e} AS {c}" for c, e in V2_COLS)])
+            sel = ", ".join(["path", *usr, *(f"{e} AS {c}" for c, e in V2_COLS), *([ist.GENERATION] if generation else [])])
             raw = work / "raw.parquet"
             con.execute(f"COPY (SELECT {sel} FROM live ORDER BY depth, path{', usr' if sliced else ''}) TO {q(str(raw))} (FORMAT PARQUET)")
             wanted = tuple(t for t in TIERS if t in tiers)

@@ -1,0 +1,229 @@
+"""The objects' native version (GCS `generation`) in the interval store (specs/lean-scans.md §3.1): from raw listings
+through `path-index -G` into a generation's object versions — build, append, carries, compaction — out again by
+`export`.
+
+The world: one bucket, seven scans. The lister records `generation` from the third scan on (GCS's, since 2026-10-07).
+Objects: one never changed; one deleted before the first generation; one rewritten (a new generation, created later);
+two rewritten before the first generation, one of which lives on; one whose metadata changed (`updated`, the version's
+`mtime`, moved; same generation); objects appearing later."""
+from __future__ import annotations
+
+import datetime as dt
+import json
+import shutil
+from pathlib import Path
+
+import duckdb
+import pyarrow as pa
+import pyarrow.parquet as pq
+import pytest
+from click.testing import CliRunner
+
+from dt_cloud import interval_compact as ic
+from dt_cloud import interval_export as ie
+from dt_cloud import interval_local as il
+from dt_cloud import interval_store as ist
+from dt_cloud import interval_verify as iv
+from dt_cloud import static_names as sn
+from dt_cloud.append_runner import latest_key
+from dt_cloud.blobstore import Store
+from dt_cloud.viz import write_path_index
+
+B = "b"
+SCANS = ["2026-10-05", "2026-10-06", "2026-10-08", "2026-10-09", "2026-10-10", "2026-10-11", "2026-10-12"]
+#: The first scan whose listing has `generation`.
+GEN_FROM = 2
+T0 = 1_760_000_000
+#: Per object, per scan: `(size, created, updated, generation)` (seconds past T0), or None while absent.
+OBJ = {
+    "d/keep.bin": [(10, 100, 100, 11)] * 7,
+    "d/old.bin": [(10, 100, 100, 31)] * 2 + [None] * 5,
+    "d/rew.bin": [(10, 100, 100, 21)] * 3 + [(20, 300, 300, 22)] * 4,
+    "d/rw2.bin": [(10, 50, 50, 50)] + [(10, 60, 60, 51)] * 6,
+    "d/meta.bin": [(10, 100, 100, 61)] * 4 + [(10, 100, 400, 61)] * 3,
+    "d/new.bin": [None] * 4 + [(10, 500, 500, 41)] * 3,
+    "d/sub/deep.bin": [(10, 100, 100, 71)] * 7,
+    "d/new2.bin": [None] * 6 + [(10, 600, 600, 81)],
+}
+#: Every object version: `(path, first scan, scan it closed at or None, generation)`.
+VERSIONS = [
+    ("b/d/keep.bin", 0, None, 11),
+    ("b/d/meta.bin", 0, 4, 61), ("b/d/meta.bin", 4, None, 61),
+    ("b/d/new.bin", 4, None, 41),
+    ("b/d/new2.bin", 6, None, 81),
+    ("b/d/old.bin", 0, 2, None),
+    ("b/d/rew.bin", 0, 3, 21), ("b/d/rew.bin", 3, None, 22),
+    ("b/d/rw2.bin", 0, 1, None), ("b/d/rw2.bin", 1, None, 51),
+    ("b/d/sub/deep.bin", 0, None, 71),
+]
+ON, OFF = "index/{id}/path-index.parquet", "index-off/{id}/path-index.parquet"
+RG = 4
+
+
+def _through(n: int) -> list[tuple]:
+    """`VERSIONS` as a generation through scan `n` holds them."""
+    return [(p, a, b if b is not None and b <= n else None, g) for p, a, b, g in VERSIONS if a <= n]
+
+
+def _ts(sec: int) -> dt.datetime:
+    return dt.datetime.fromtimestamp(T0 + sec, dt.timezone.utc)
+
+
+@pytest.fixture(scope="module")
+def world(tmp_path_factory):
+    root = tmp_path_factory.mktemp("ivg")
+    for j, d in enumerate(SCANS):
+        rows = sorted((name, *v[j]) for name, v in OBJ.items() if v[j] is not None)
+        cols = {
+            "bucket": pa.array([B] * len(rows)), "name": pa.array([r[0] for r in rows]),
+            "size_bytes": pa.array([r[1] for r in rows], pa.int64()),
+            "created": pa.array([_ts(r[2]) for r in rows], pa.timestamp("us", tz="UTC")),
+            "storage_class_id": pa.array([1] * len(rows), pa.int64()),
+            "updated": pa.array([_ts(r[3]) for r in rows], pa.timestamp("us", tz="UTC")),
+        }
+        if j >= GEN_FROM:
+            cols["generation"] = pa.array([r[4] for r in rows], pa.int64())
+        shard = root / "listing" / d / B / "shard-00.parquet"
+        shard.parent.mkdir(parents=True)
+        pq.write_table(pa.table(cols), shard)
+        for layout, gen in ((ON, True), (OFF, False)):
+            write_path_index((str(shard),), root / "snap" / layout.split("/")[0] / d, d, path_index=root / layout.replace("{id}", d), generation=gen)
+    return root
+
+
+def _build(world: Path, store: Path, work: Path, layout: str, through: int, gen: str = "g") -> dict:
+    args = ["-g", gen, "-L", layout, "-s", str(world), "-o", str(store), "-w", str(work), "-k", "2", "-r", str(RG), "-p", "2", "-M", "1GB",
+            "-t", SCANS[through]]
+    res = CliRunner().invoke(il.build_cmd, args, catch_exceptions=False)
+    assert res.exit_code == 0, res.output
+    return json.loads(res.stdout)
+
+
+def _add(world: Path, store: Path, work: Path, layout: str, through: int, gen: str = "g") -> dict:
+    args = ["-g", gen, "-L", layout, "-s", str(world), "-o", str(store), "-w", str(work), "-r", str(RG), "-p", "2", "-M", "1GB", "-t", SCANS[through]]
+    res = CliRunner().invoke(il.add_cmd, args, catch_exceptions=False)
+    assert res.exit_code == 0, res.output
+    return json.loads(res.stdout)
+
+
+def _newest_runs(gen_dir: Path) -> list[Path]:
+    ms = sorted((gen_dir / "manifests").glob("*.json")) if (gen_dir / "manifests").is_dir() else []
+    if not ms:
+        return []
+    key = latest_key([p.relative_to(gen_dir).as_posix() for p in ms])
+    return [gen_dir / r["key"] for r in json.loads((gen_dir / key).read_text())["runs"]]
+
+
+def _versions(gen_dir: Path) -> list[tuple]:
+    """The generation's object versions (base `pvl/` and the newest manifest's runs' deltas, one row per version, the
+    smallest `vt`): `(path, first scan, closing scan or None, generation)`."""
+    files = [str(p) for p in sorted((gen_dir / "pvl").glob("r*.parquet"))]
+    files += [str(p) for r in _newest_runs(gen_dir) for p in sorted((r / "pvl").glob("r*.parquet"))]
+    idx = {sn.scan_epoch(d): j for j, d in enumerate(SCANS)}
+    con = duckdb.connect()
+    union = " UNION ALL ".join(f"SELECT depth, path, vf, vt, kind, {ist.GENERATION} FROM read_parquet('{f}')" for f in files)
+    rows = con.execute(f"""SELECT path, vf, vt, {ist.GENERATION} FROM (SELECT * FROM ({union})
+        QUALIFY row_number() OVER (PARTITION BY depth, path, vf ORDER BY vt) = 1) WHERE kind = 'file' ORDER BY path, vf""").fetchall()
+    return [(p, idx[vf], idx.get(vt), g) for p, vf, vt, g in rows]
+
+
+def _columns(path: Path) -> list[str]:
+    return pq.read_schema(path).names
+
+
+def _parquets(d: Path) -> dict[str, bytes]:
+    return {p.relative_to(d).as_posix(): p.read_bytes() for p in sorted(d.rglob("*.parquet"))}
+
+
+@pytest.fixture(scope="module")
+def on(world, tmp_path_factory):
+    """A store over sorts that carry `generation`: the base built over the first three scans, three more added."""
+    tmp = tmp_path_factory.mktemp("ivg-on")
+    store = tmp / "store"
+    _build(world, store, tmp / "w-build", ON, 2)
+    _add(world, store, tmp / "w-add", ON, 5)
+    return {"tmp": tmp, "store": store, "gen": store / ist.PREFIX / "g"}
+
+
+@pytest.fixture(scope="module")
+def off(world, tmp_path_factory):
+    """A store over sorts without it (today's every deployment): base over four scans, two added."""
+    tmp = tmp_path_factory.mktemp("ivg-off")
+    store = tmp / "store"
+    _build(world, store, tmp / "w-build", OFF, 3)
+    _add(world, store, tmp / "w-add", OFF, 5)
+    return {"tmp": tmp, "store": store, "gen": store / ist.PREFIX / "g"}
+
+
+def test_versions_carry_generation_through_build_append_and_carries(world, on, tmp_path):
+    gen = on["gen"]
+    assert json.loads((gen / "scans.json").read_text())["generation"] is True
+    assert _versions(gen) == _through(5)
+    # A merged run (the carry of the first two appends) holds them as the level-0 runs did.
+    assert [r.name for r in _newest_runs(gen)] == [f"{SCANS[3]}_{SCANS[4]}", SCANS[5]]
+    # A rebuild over every scan versions them the same.
+    full = tmp_path / "full"
+    _build(world, full, tmp_path / "w", ON, 5)
+    assert _versions(full / ist.PREFIX / "g") == _through(5)
+    # Served: the `path` sort carries it, last; `bysize` and the slice sorts never do.
+    for served in [gen / "served", *(r / "served" for r in _newest_runs(gen))]:
+        assert _columns(served / "path.parquet") == [*ist.PVL_SCHEMA.names, "generation"]
+        assert _columns(served / "bysize.parquet") == ist.PVL_SCHEMA.names
+    assert _columns(gen / "pv" / "r0000.parquet") == [*ist.PV_SCHEMA.names, "generation"]
+
+
+def test_compaction_keeps_generation(on, tmp_path):
+    out = tmp_path / "g.c001"
+    shutil.copytree(on["gen"], tmp_path / "g")
+    ic.compact_gen(tmp_path / "g", out, tmp_path / "w", gen="g", new_gen="g.c001", level=None, rg_rows=RG, threads=2, mem="1GB")
+    assert _versions(out) == _through(5)
+    assert json.loads((out / "scans.json").read_text())["generation"] is True
+    assert _columns(out / "served" / "path.parquet") == [*ist.PVL_SCHEMA.names, "generation"]
+    assert _columns(out / "pv" / "r0000.parquet") == [*ist.PV_SCHEMA.names, "generation"]
+
+
+def _export(store: Path, scan: str, dest: Path, gen: str | None = None) -> pa.Table:
+    args = ["-o", str(store), "-w", str(dest.parent / f"w-{dest.name}"), "-t", "path", *(["-g", gen] if gen else []), scan, str(dest)]
+    res = CliRunner().invoke(ie.export_cmd, args, catch_exceptions=False)
+    assert res.exit_code == 0, res.output
+    return pq.read_table(dest / "path-index.parquet")
+
+
+def _objects(t: pa.Table) -> list[tuple]:
+    return sorted((r["path"], r["generation"]) for r in t.to_pylist() if r["kind"] == "file")
+
+
+def test_export_reproduces_generation(world, on, tmp_path):
+    for j in range(GEN_FROM, 6):
+        d = SCANS[j]
+        got = _export(on["store"], d, tmp_path / d)
+        assert got.column_names[-1] == "generation"
+        assert _objects(got) == _objects(pq.read_table(world / ON.replace("{id}", d))), d
+    # A scan before the lister recorded it: its versions' generation (listed later within the same version).
+    assert _objects(_export(on["store"], SCANS[0], tmp_path / SCANS[0])) == [
+        ("b/d/keep.bin", 11), ("b/d/meta.bin", 61), ("b/d/old.bin", None), ("b/d/rew.bin", 21), ("b/d/rw2.bin", None), ("b/d/sub/deep.bin", 71)]
+
+
+def _verify(store: Path, gen: str, world: Path, j: int, tmp: Path) -> dict:
+    s = {"id": SCANS[j], "src": ON.replace("{id}", SCANS[j]), "ts": sn.scan_epoch(SCANS[j]), "version": 2}
+    return iv.verify_scans(Store(str(store)), gen, str(world), [s], tmp)[SCANS[j]]
+
+
+def test_verify_compares_generation(world, on, off, tmp_path):
+    """Each sampled scan's objects with a generation against the store's live version: in the marker, and required for
+    `pass`; a store or scan without the column has no such check."""
+    m = _verify(on["store"], "g", world, 5, tmp_path / "on")
+    # Objects with a generation at the scan: keep, meta, new, rew, rw2, deep.
+    assert (m["pass"], m["generation"]) == (True, {"objects": 6, "equal": 6})
+    m = _verify(off["store"], "g", world, 5, tmp_path / "off")
+    assert (m["pass"], sorted(m)) == (True, ["diff_eq", "diffs", "gen", "pass", "scan", "view_eq", "views"])
+
+
+def test_off_has_no_generation_anywhere(world, off, tmp_path):
+    """Without the opt-in no file carries the column, not even NULL: sorts, range files, deltas, served, exports."""
+    gen = off["gen"]
+    assert "generation" not in json.loads((gen / "scans.json").read_text())
+    with_col = [k for k in _parquets(off["store"]) if "generation" in _columns(off["store"] / k)]
+    assert with_col == []
+    assert "generation" not in _columns(world / OFF.replace("{id}", SCANS[3]))
+    assert "generation" not in _export(off["store"], SCANS[4], tmp_path / "x").column_names

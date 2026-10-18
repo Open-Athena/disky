@@ -406,6 +406,7 @@ def wandb_mine(
 @option("-a", "--attribution", "attributions", multiple=True, help="Attribution parquet(s); adds per-node user overlays")
 @option("-c", "--dir-cache", "dir_cache", type=Path, default=None, help="Layer-2 cache dir (dir-stats/age-days parquet): attribution-independent rollups reused by re-attribution runs — see gcs:specs/dir-agg-cache.md")
 @option("-d", "--asof", required=True, callback=scan_id_option, help="Scan id the listing came from (YYYY-MM-DD or YYYY-MM-DDTHHMM)")
+@option("-G", "--generation", is_flag=True, envvar="PATH_INDEX_GENERATION", show_envvar=True, help="Carry each object's native version (the listing's `generation`, GCS) as the store's last column, NULL on dirs; opt-in per deployment (gcs), absent otherwise. The interval store built over such sorts carries it per object version (`interval-store backfill-generation`, specs/lean-scans.md §3.1)")
 @option("-i", "--identities", "identities_path", envvar=IDENTITIES_ENV, default=None, help=f"identities.yaml path or URL, needed with -a (${IDENTITIES_ENV}): the deployment's roster, kept outside the repo")
 @option("-l", "--listing", "listings", required=True, multiple=True, help="Listing parquet glob(s): scan_gcs or SII inventory schema; repeatable — earlier sources win per bucket")
 @option("-o", "--out", "out_dir", type=Path, default=None, help="Output dir for JSON files [default: site/public/data/<asof>]")
@@ -419,6 +420,7 @@ def build_path_index(
     attributions: tuple[str, ...],
     dir_cache: Path | None,
     asof: str,
+    generation: bool,
     identities_path: str | None,
     listings: tuple[str, ...],
     out_dir: Path | None,
@@ -442,7 +444,7 @@ def build_path_index(
         out_dir = Path("site/public/data") / asof
     meta = write_path_index(
         listings, out_dir, asof, attributions, identities_path, access=access, dir_cache=dir_cache, path_index=path_index,
-        user_sorts=user_sorts, row_group_rows=row_group_rows, search=search,
+        user_sorts=user_sorts, row_group_rows=row_group_rows, search=search, generation=generation,
         user_sort_tiers=tuple(t for t in user_sort_tiers.split(",") if t) if user_sort_tiers else None,
     )
     err(f"wrote {out_dir}/: age.json meta.json ({meta['total_bytes']/1e12:.0f} TB, {meta['total_objects']:,} objects)")
