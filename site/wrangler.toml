@@ -63,7 +63,7 @@ PATH_STORE = "intervals"
 # bucket (GCS) and this R2 bucket, its layer-2s under `meta-l2/`, its snapshots under `snapshots/meta/`, its own static
 # name index generation; read through the primary's R2 secrets. The /scans page links its outputs into it.
 STORES_EXTRA = "meta"
-STORES_JSON = '{"meta":{"path":"/meta","vars":{"ROOT_LABEL":"OA Hugging Face metadata","SNAPSHOTS_SUBDIR":"meta","STORE_SCHEME":"r2://","STORE_BUCKETS":"oa-hf-usage-data,oa-hf-usage-index","STORE_PREFIXES":"meta-l2/,snapshots/meta/","STORE_BUCKET":"oa-hf-usage-index","STORE_REGION":"auto","ROOT_TITLE":"The data behind this site: scans, indexes and listings in oa-hf-usage-data (GCS) and oa-hf-usage-index (R2)","STATIC_GEN":"2026-10-18hfmetab","FILTER_STATIC_HEAVY":"1"},"secrets":{"STORE_ENDPOINT":"STORE_ENDPOINT","STORE_ACCESS_KEY_ID":"STORE_ACCESS_KEY_ID","STORE_SECRET_ACCESS_KEY":"STORE_SECRET_ACCESS_KEY"}}}'
+STORES_JSON = '{"meta":{"path":"/meta","vars":{"ROOT_LABEL":"OA Hugging Face disky metadata","SNAPSHOTS_SUBDIR":"meta","STORE_SCHEME":"r2://","STORE_BUCKETS":"oa-hf-usage-data,oa-hf-usage-index","STORE_PREFIXES":"meta-l2/,snapshots/meta/","STORE_BUCKET":"oa-hf-usage-index","STORE_REGION":"auto","ROOT_TITLE":"The data behind this site: scans, indexes and listings in oa-hf-usage-data (GCS) and oa-hf-usage-index (R2)","STATIC_GEN":"2026-10-18hfmetab","FILTER_STATIC_HEAVY":"1"},"secrets":{"STORE_ENDPOINT":"STORE_ENDPOINT","STORE_ACCESS_KEY_ID":"STORE_ACCESS_KEY_ID","STORE_SECRET_ACCESS_KEY":"STORE_SECRET_ACCESS_KEY"}}}'
 META_TREE_URL = "https://hf.oa.dev/meta"
 
 # The static name index and the snapshot JSONs, read through a native binding (the S3 seam's keys are for the path
@@ -122,7 +122,7 @@ FILTER_STATIC_HEAVY = "1"
 STATIC_GEN = "2026-10-18hfb"
 PATH_STORE = "intervals"
 STORES_EXTRA = "meta"
-STORES_JSON = '{"meta":{"path":"/meta","vars":{"ROOT_LABEL":"OA Hugging Face metadata","SNAPSHOTS_SUBDIR":"meta","STORE_SCHEME":"r2://","STORE_BUCKETS":"oa-hf-usage-data,oa-hf-usage-index","STORE_PREFIXES":"meta-l2/,snapshots/meta/","STORE_BUCKET":"oa-hf-usage-index","STORE_REGION":"auto","ROOT_TITLE":"The data behind this site: scans, indexes and listings in oa-hf-usage-data (GCS) and oa-hf-usage-index (R2)","STATIC_GEN":"2026-10-18hfmetab","FILTER_STATIC_HEAVY":"1"},"secrets":{"STORE_ENDPOINT":"STORE_ENDPOINT","STORE_ACCESS_KEY_ID":"STORE_ACCESS_KEY_ID","STORE_SECRET_ACCESS_KEY":"STORE_SECRET_ACCESS_KEY"}}}'
+STORES_JSON = '{"meta":{"path":"/meta","vars":{"ROOT_LABEL":"OA Hugging Face disky metadata","SNAPSHOTS_SUBDIR":"meta","STORE_SCHEME":"r2://","STORE_BUCKETS":"oa-hf-usage-data,oa-hf-usage-index","STORE_PREFIXES":"meta-l2/,snapshots/meta/","STORE_BUCKET":"oa-hf-usage-index","STORE_REGION":"auto","ROOT_TITLE":"The data behind this site: scans, indexes and listings in oa-hf-usage-data (GCS) and oa-hf-usage-index (R2)","STATIC_GEN":"2026-10-18hfmetab","FILTER_STATIC_HEAVY":"1"},"secrets":{"STORE_ENDPOINT":"STORE_ENDPOINT","STORE_ACCESS_KEY_ID":"STORE_ACCESS_KEY_ID","STORE_SECRET_ACCESS_KEY":"STORE_SECRET_ACCESS_KEY"}}}'
 META_TREE_URL = "https://dev.hf.oa.dev/meta"
 
 [[env.preview.r2_buckets]]
