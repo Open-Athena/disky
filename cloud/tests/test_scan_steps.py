@@ -862,6 +862,41 @@ def test_nproc_is_capped_by_the_cgroup_quota(tmp_path, monkeypatch) -> None:
     assert [capped.nproc, free.nproc] == [2, 8]
 
 
+def test_path_index_reproc_rebuilds_a_missing_listing_from_the_layer_2(tmp_path, env, monkeypatch):
+    """REPROC (`scan head -R`) of a scan whose listing is gone but whose layer-2 is kept (a meta store's older scans):
+    that bucket's listing is rebuilt from the layer-2 (`dt-cloud l2-listing`) on local disk and read from there, not
+    staged; a bucket with its listing reads it as always. Not under REPROC, a missing listing still fails."""
+    mnt = tmp_path / "mnt/dvx"
+    (mnt / "listing/2026-10-16T1200/east").mkdir(parents=True)
+    (mnt / "listing/2026-10-16T1200/east/_SUCCESS.json").write_text("{}")
+    (mnt / "listing/2026-10-16T1200/eu.parquet").write_text("l2 of eu")
+    monkeypatch.setattr(S, "upload", lambda files, dest: None)
+    c = gcs_ctx(tmp_path, {**env, "REPROC": "1"}, monkeypatch, index={"mode": "path-index"})
+    runner = c.sh_impl
+
+    def run(argv, env, stdout=None, text=True):
+        r = runner(argv, env, stdout, text)
+        if argv[:2] == ["dt-cloud", "path-index"]:
+            (Path(argv[argv.index("-P") + 1]).parent / "path-index.parquet").write_text("")
+            out = Path(argv[argv.index("-o") + 1])
+            out.mkdir(parents=True)
+            (out / "meta.json").write_text("{}")
+        return r
+
+    c.sh_impl = run
+    S.index(c, None)
+    w = "<tmp>/t/dt-scan/2026-10-16T1200"
+    assert runner.calls == [
+        f"dt-cloud l2-listing -b eu <tmp>/mnt/dvx/listing/2026-10-16T1200/eu.parquet {w}/l2-listing/eu/shard-00000.parquet",
+        f"dt-cloud stage -o {w}/stage /gcs/dvx/listing/2026-10-16T1200/east/*.parquet /gcs/dvx/listing/2026-10-16T1200/east/_SUCCESS.json",
+        f"dt-cloud path-index -d 2026-10-16T1200 -l {w}/stage/dvx/listing/2026-10-16T1200/east/*.parquet -l {w}/l2-listing/eu/*.parquet "
+        f"-o {w}/snap -c <tmp>/mnt/dvx/listing/2026-10-16T1200/dir-cache -P {w}/path-index/path-index.parquet",
+    ]
+    fresh = gcs_ctx(tmp_path, env, monkeypatch, index={"mode": "path-index"})
+    with pytest.raises(S.StepFailed):
+        S.index(fresh, None)
+
+
 def test_path_index_on_a_local_data_dir_reads_in_place_and_copies_out(tmp_path, env, monkeypatch):
     """The local executor's shape (one machine, no FUSE): `data:` a dir, read in place (no `stage`), the snapshot
     annotated (`options.index.annotate`), the tiers copied into it, `path-index.parquet` last."""

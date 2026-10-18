@@ -677,28 +677,38 @@ def path_index(ctx: Ctx) -> None:
     `options.index.annotate`: a command run on the snapshot after the aggregation, before the checks and the publish
     (`{snap}`: its dir; `{listing}`: the first source's listing dir)."""
     key_dir = ctx.data_root / ctx.index_key
+    # A reprocessed scan whose listing is gone but whose layer-2 is kept (a meta store's scans from before it kept
+    # listings) is re-cut from a listing rebuilt from that layer-2 (`dt-cloud l2-listing`: exact but for `generation`)
+    rebuilt = {s.bucket for s in ctx.profile.sources
+               if ctx.reproc and not (ctx.listing_dir(s.bucket) / "_SUCCESS.json").exists() and ctx.l2_path(s.bucket).exists()}
     for s in ctx.profile.sources:
-        ctx.need(ctx.listing_dir(s.bucket) / "_SUCCESS.json", "list")
+        if s.bucket not in rebuilt:
+            ctx.need(ctx.listing_dir(s.bucket) / "_SUCCESS.json", "list")
     if ctx.done(key_dir / "path-index.parquet", "index tiers") and ctx.done(ctx.data_root / ctx.snapshots / ctx.scan / "meta.json", "snapshot"):
         return
     # A local data dir (the local executor's: one machine, no FUSE) is read in place; a GCS one is staged first.
     on_disk = not urlparse(ctx.profile.data).scheme
     store = ctx.data_uri.split("://", 1)[-1]  # `<bucket>[/<prefix>]`, or the dir
     src = (lambda key: str(ctx.data_root / key)) if on_disk else (lambda key: f"/gcs/{store}/{key}")  # `dt-cloud stage`'s glob form
-    lglobs = [src(f"{ctx.listing_key(s.bucket)}/*.parquet") for s in ctx.profile.sources]
+    lglobs = [str(ctx.work / "l2-listing" / s.bucket / "*.parquet") if s.bucket in rebuilt else src(f"{ctx.listing_key(s.bucket)}/*.parquet")
+              for s in ctx.profile.sources]
     attr = [src(a) for a in ctx.opt("index", "attribution", [])]
     access = ctx.opt("index", "access")
     xglobs = [src(access)] if access and next(iter(ctx.data_root.glob(access)), None) else []
     if access and not xglobs:
         err(f"no access shards at {access}: the index runs without read recency")
     stage = ctx.work / "stage"
-    local = (lambda g: g) if on_disk else (lambda g: str(stage / g.removeprefix("/gcs/")))
+    local = (lambda g: g) if on_disk else (lambda g: str(stage / g.removeprefix("/gcs/")) if g.startswith("/gcs/") else g)
     pi = ctx.work / "path-index"
     snap = ctx.work / "snap"
     pi.mkdir(parents=True, exist_ok=True)
     with ctx.phase("path-index"):
-        if not on_disk:
-            ctx.sh(["dt-cloud", "stage", "-o", stage, *lglobs, *[g.replace("*.parquet", "_SUCCESS.json") for g in lglobs], *attr, *xglobs])
+        for b in sorted(rebuilt):
+            err(f"REPROC: {b} has no listing: rebuilding one from its layer-2 (`generation` not kept)")
+            ctx.sh(["dt-cloud", "l2-listing", "-b", b, ctx.l2_path(b), ctx.work / "l2-listing" / b / "shard-00000.parquet"])
+        staged = [g for g in lglobs if g.startswith("/gcs/")]
+        if not on_disk and (staged or attr or xglobs):
+            ctx.sh(["dt-cloud", "stage", "-o", stage, *staged, *[g.replace("*.parquet", "_SUCCESS.json") for g in staged], *attr, *xglobs])
         tmp = stage / ".duckdb-tmp"
         tmp.mkdir(parents=True, exist_ok=True)
         ctx.sh(["dt-cloud", "path-index", "-d", ctx.scan, *[a for g in lglobs for a in ("-l", local(g))],
