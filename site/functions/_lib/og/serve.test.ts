@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { cardSvg, type CardData } from './card'
 import { expDay, imagePath, ogKey } from './sign'
 import { anonymousPage, pageOf, serveCard, siteOf, stampPage, type OgEnv } from './serve'
-import { anonymousPolicy } from './policy'
+import { anonymousPolicy, genericTitle } from './policy'
 import { fullTier, mint } from './tokens'
 import { EPOCH } from './sign'
 import { sqliteD1 } from '../testD1'
@@ -261,6 +261,13 @@ describe('restricted anonymous OG responses', () => {
       const image = new URL(call[1].image)
       return [image.origin, image.pathname, Object.fromEntries(image.searchParams)]
     })]).toEqual(['private, no-store', [['https://public.example', '/og/map.png', { c: 't', policy: 'shape', r: '8', s: '2026-10-12T1201' }]]])
+  })
+})
+
+describe('genericTitle', () => {
+  it('prefixes disky unless the label names it already', () => {
+    expect([genericTitle('CW storage'), genericTitle(undefined), genericTitle('m3 disky metadata'), genericTitle('Disky demo'), genericTitle('diskyard')])
+      .toEqual(['disky — CW storage', 'disky — storage', 'm3 disky metadata', 'Disky demo', 'disky — diskyard'])
   })
 })
 
