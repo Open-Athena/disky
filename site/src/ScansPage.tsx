@@ -276,7 +276,9 @@ export function ScansPage() {
       <SiteNav />
       <h1>Scan runs</h1>
       {STORES.length > 1 && <div className="run-filters">
-        <select aria-label="Store" value={store.key} onChange={e => nav(scansHref(STORES.find(s => s.key === e.target.value) ?? STORES[0]))}>{STORES.map(s => <option key={s.key} value={s.key}>{s.label}</option>)}</select>
+        {STORES.length <= 3
+          ? <span className="gran" role="radiogroup" aria-label="Store">{STORES.map(s => <button key={s.key} type="button" role="radio" aria-checked={s === store} className={s === store ? 'on' : ''} onClick={() => nav(scansHref(s))}>{s.label}</button>)}</span>
+          : <select aria-label="Store" value={store.key} onChange={e => nav(scansHref(STORES.find(s => s.key === e.target.value) ?? STORES[0]))}>{STORES.map(s => <option key={s.key} value={s.key}>{s.label}</option>)}</select>}
       </div>}
       <p className="sub">Each scan job's run: when it ran, how long each phase took, what it wrote, and how each structure changed against the previous scan. The stores they append to are on <Link to="/health">Health</Link>.</p>
       {q.isLoading ? <p>Loading runs…</p> : q.error ? <p className="err">{q.error.message}</p> : !q.data?.configured ? (
