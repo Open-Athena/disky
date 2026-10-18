@@ -68,7 +68,7 @@ options:
     mem: 8GB
     args: [-T, "{work}/duckdb-tmp"]
   static-names:
-    gen: 2026-10-15hf   # site/wrangler.toml STATIC_GEN
+    gen: 2026-10-18hfb   # site/wrangler.toml STATIC_GEN
     mem: 8GB
     build_args: [-x, "16,8"]
   # The site reads the path store and the snapshot JSONs from R2 only: a failed copy keeps the previous scan listed.

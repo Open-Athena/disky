@@ -38,7 +38,7 @@ options:
     webdata: [dt-cloud, path-index, -d, "{scan}", -l, "{data}/raw/{scan}/open-athena/*.parquet", -o, "{web}"]
     mem: 2GB
     args: [-T, "{work}/duckdb-tmp"]
-  static-names: {gen: 2026-10-15hf, mem: 2GB}
+  static-names: {gen: 2026-10-18hfb, mem: 2GB}
   publish-r2: {barrier: false}   # no R2 credentials here: the barrier would stop the run on purpose
   interval-store: {timeout: 60m, mem: 2GB}
   digest: {template: cw, config: /app/job/digest.yml}
