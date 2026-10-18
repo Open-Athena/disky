@@ -29,8 +29,9 @@ machines:
   # path-index: DuckDB at 100GB (+ ~40GB it doesn't account for), its inputs staged to local SSD (n2 32-vCPU
   # machines take 4, 8, 16 or 24 local SSDs)
   # n2d (AMD): path-index 36.7 min vs 41.7 on n2-highmem-32 (2026-10-16 scratch, same outputs), ~10% cheaper; the
-  # other is the fallback after 10 min queued (a us-central1 stockout of one shape held a scratch index ~30 min)
-  big: {type: n2d-highmem-32, disk: {request: 1500, type: local-ssd}, fallback: [n2-highmem-32], queue_timeout: 10}
+  # other is the fallback after 3 min queued (a us-central1 stockout of one shape held a scratch index ~30 min; a normal
+  # start takes ~1 min, and 10 min queued cost the 2026-10-18 scan more than n2d saves)
+  big: {type: n2d-highmem-32, disk: {request: 1500, type: local-ssd}, fallback: [n2-highmem-32], queue_timeout: 3}
   pre: n2-highmem-8
   # the staged interval-store append only orchestrates its own Batch jobs (run.sh ran it on the scan VM)
   interval: n2-standard-8
