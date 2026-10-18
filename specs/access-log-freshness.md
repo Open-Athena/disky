@@ -2,7 +2,7 @@
 
 From the gcs session (2026-10-18), after the `2026-10-18T0701` scan's 158-min `pre`. Ryan approved the plan ("yes plan sg go"). Shared code is `[cloud]`; the deployment schedules (Scheduler, profiles) belong to each deployment's session.
 
-**Status:** Order 1 landed on `cloud`: `dt-cloud access ingest` is poller-safe (lease `access/state/.lease`, 8 h TTL: a held one logs and exits 0, an expired one is taken over; nothing pending = a listing or two per bucket, no DuckDB), `-P N` ingests N buckets at once under the one lease, every run reports stalled buckets (no CSV delivered in `-t` hours, default 24; `-j` JSON summary `{lease, buckets: [{…, newest_delivery}], stalled}`, `-x` exit 3), and `meta.access.through` (`YYYY-MM-DDTHH:00Z`, the hour of the newest `last_ts` after the as-of cut).
+**Status:** Order 1 landed on `cloud`: `dt-cloud access ingest` is poller-safe (lease `access/state/.lease`, 8 h TTL: a held one logs and exits 0, an expired one is taken over; nothing pending = a listing or two per bucket, no DuckDB), `-P N` ingests N buckets at once under the one lease, every run reports stalled buckets (no CSV delivered in `-t` hours, default 24; `-j` JSON summary `{lease, buckets: [{…, newest_delivery}], stalled}`, `-x` exit 3), and `meta.access.through` (`YYYY-MM-DDTHH:00Z`, the hour of the newest `last_ts` after the as-of cut). Order 2 landed too: `options.access-ingest.poller: true` leaves the step out of the scan (`ScanProfile.enabled`; no `pre` task, `index` waits on the lists only and reads `options.index.access` as it stands). Off by default; each deployment flips it with its poller (Order 4). Next: Order 3 (C).
 
 ## Measurements (2026-10-18)
 

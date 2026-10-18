@@ -373,10 +373,14 @@ def bucket_check(ctx: Ctx, arg: str | None) -> None:
                 f"non-empty bucket(s) not in the profile's sources: `{text}`"], fatal=False, warn="unscanned-bucket alert not sent")
 
 
-@step("access-ingest", core=False, stage="pre", soft=True, options={"args": list})
+@step("access-ingest", core=False, stage="pre", soft=True, options={"args": list, "poller": bool})
 def access_ingest(ctx: Ctx, arg: str | None) -> None:
     """The buckets' access logs → the read-recency shards (`dt-cloud access ingest`, incremental and watermarked: its
-    settings in the env), beside `list`. Soft: `index` runs without the newest shards, and the next run catches up."""
+    settings in the env), beside `list`. Soft: `index` runs without the newest shards, and the next run catches up.
+
+    `options.access-ingest.poller: true`: the deployment runs `access ingest` as its own scheduled job (the hourly
+    poller, specs/access-log-freshness.md §A), so the scan leaves this step out (`ScanProfile.enabled`) and `index`
+    reads `access/agg` as it stands, its `meta.access.through` saying how far that reaches."""
     if ctx.reproc:
         err("access-ingest off under REPROC")
         return
