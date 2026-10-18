@@ -179,10 +179,10 @@ def test_no_d1_reports_the_rows_its_scans_still_have(fx, d1):
     assert (rep["d1"], rep["d1_left"], sorted({d["date"] for d in plan})) == (None, plan, ["2026-07-30", "2026-08-04", "2026-08-04T1236"])
 
 
-@pytest.mark.parametrize("rows", [sr.D1_DELETE_ROWS, 1])
+@pytest.mark.parametrize("rows", [F.D1_DELETE_ROWS, 1])
 def test_execute_backs_up_verifies_and_deletes(fx, d1, tmp_path, monkeypatch, rows):
     """With D1 deletes of any batch size (`rows` a statement, until one deletes none): the same rows go."""
-    monkeypatch.setattr(sr, "D1_DELETE_ROWS", rows)
+    monkeypatch.setattr(F, "D1_DELETE_ROWS", rows)
     before = _files(fx["root"])
     backup = tmp_path / "backup"
     rep = _run(fx, "-x", "-b", str(backup), "-w", str(tmp_path / "work"))
