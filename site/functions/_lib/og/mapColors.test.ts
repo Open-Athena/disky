@@ -59,10 +59,12 @@ describe('map cards honor the dashboard color axis', () => {
     ])
   })
 
-  it.each(['r', 'read'])('c=%s uses the logging window, distinguishing missing observations', async c => {
+  // a1 read on its write day (read since: the read's age); a2 and b written since logging began and not read
+  // since (`readLens.ts` `written`: the write's age; a card draws no hatch).
+  it.each(['r', 'read'])('c=%s uses the logging window: read since the write by the read, else by the write', async c => {
     expect(colors(await card(c))).toEqual([
-      { name: 'a', color: '#232322', kids: [{ name: 'a1', color: 'rgb(68,1,84)' }, { name: 'a2', color: '#6e332b' }] },
-      { name: 'b', color: 'rgb(61,66,128)' },
+      { name: 'a', color: '#232322', kids: [{ name: 'a1', color: 'rgb(68,1,84)' }, { name: 'a2', color: 'rgb(33,145,140)' }] },
+      { name: 'b', color: 'rgb(253,231,37)' },
       { name: '(other)', color: '#2b2e35' },
     ])
   })

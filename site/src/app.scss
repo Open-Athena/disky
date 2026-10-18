@@ -2037,6 +2037,13 @@ input::placeholder, textarea::placeholder { color: var(--ink-3); opacity: 1; }
 
 // "no reads since …" callout in treemap tooltips (dark tip bg → soft red tint)
 .dt-treemap-tip .never-read { color: #e0917f; }
+.dt-treemap-tip .written-unread { color: var(--ink-2); font-style: italic; }
+.li.read-through { color: var(--ink-2); .provisional { color: var(--ink-3); font-style: italic; } }
+.read-through-banner {
+  display: inline-block; margin: 0 0 6px; padding: 3px 10px; border: 1px solid var(--line); border-radius: 4px;
+  background: var(--panel); color: var(--ink-2); font-size: 12.5px;
+  .provisional { color: var(--ink-3); font-style: italic; }
+}
 
 .typed-modal {
   .sub { margin: 0 0 10px; font-size: 13px; }

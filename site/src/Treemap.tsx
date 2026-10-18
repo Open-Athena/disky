@@ -27,7 +27,7 @@ import { gradientBand } from './dayBand'
 import { DATE_SCALES, type DateAxis, useDateScale } from './dateScale'
 import type { DayBand } from './dayBand'
 import { RootSourceLine } from './UnionNotes'
-import { readState } from './readLens'
+import { lastTouch, type ReadThrough, readState, readThroughText, unreadSinceWrite, WRITTEN_HATCH, writtenAfter } from './readLens'
 
 const allLogged = () => true
 
@@ -175,7 +175,7 @@ const scaleMix = (mix: Record<string, number>, b: number): Record<string, number
   return tot ? Object.fromEntries(Object.entries(mix).map(([c, x]) => [c, (x * b) / tot])) : mix
 }
 
-export function Treemap({ root, mode, shade = 'none', userIdx, dateRange, readRange, readLogged = allLogged, readUnlogged = [], hl, onPickUser, onPickUnowned, onClearHl, pricing, lens, ownerLensed, scheme = 'gs://', redact, ownerIdx, initialPath, path, onPathChange, objects = false, onOpen, brush, onBrush, band, onBand }: {
+export function Treemap({ root, mode, shade = 'none', userIdx, dateRange, readRange, readThrough, readLogged = allLogged, readUnlogged = [], hl, onPickUser, onPickUnowned, onClearHl, pricing, lens, ownerLensed, scheme = 'gs://', redact, ownerIdx, initialPath, path, onPathChange, objects = false, onOpen, brush, onBrush, band, onBand }: {
   root: TreeNode
   mode: ColorMode
   /** Secondary color axis — see `ShadeMode`. Default `none`. */
@@ -185,6 +185,9 @@ export function Treemap({ root, mode, shade = 'none', userIdx, dateRange, readRa
   dateRange: DateAxis | null
   // Access-log observation window (epoch days) — domain of the read lens.
   readRange?: DateAxis | null
+  /** Where the scan's read data ends (`meta.access.through`): the lens is then "last touch",
+   *  `max(read, write)`, and a cell written after it is "written after reads were logged". */
+  readThrough?: ReadThrough | null
   /** Whether the access logs cover a top-level cell (`readLens.ts`); uncovered cells show "not logged". */
   readLogged?: (bucket: string | undefined) => boolean
   /** The view's top-level cells the logs don't cover, for the legend. */
@@ -313,6 +316,7 @@ export function Treemap({ root, mode, shade = 'none', userIdx, dateRange, readRa
       let bg: string
       let ink: string
       let segments: CellStyle['segments']
+      let writtenHatch = false
       // Cold-class share of the cell (NL/CL/AR bytes over all bytes) — the
       // "shade by" micro axis, applied to whichever base color the primary
       // axis picks. Ink is chosen from the base so labels stay legible.
@@ -335,10 +339,15 @@ export function Treemap({ root, mode, shade = 'none', userIdx, dateRange, readRa
           ink = 'var(--ink)'
         }
       } else if (mode === 'read') {
-        const rs = readState(kid.a, readLogged(kidPath[1]?.n), readRange)
+        const rs = readState(kid.a, readLogged(kidPath[1]?.n), readRange, kid.d)
         if (rs.kind === 'read') {
           bg = dateColor(rs.t)
           ink = inkFor(bg)
+        } else if (rs.kind === 'written') {
+          // Written since logging began, not read since: the write's age, cross-hatched.
+          bg = dateColor(rs.t)
+          ink = inkFor(bg)
+          writtenHatch = true
         } else if (rs.kind === 'never') {
           // Never read since logging began — the sweep-interesting bucket.
           bg = 'var(--never-read)'
@@ -382,9 +391,10 @@ export function Treemap({ root, mode, shade = 'none', userIdx, dateRange, readRa
       // cells only (cells are semi-transparent, so a parent hatch would bleed
       // through all-STANDARD children)
       const coldFrac = lens && !ctx.hasKids ? Object.values(kid.cb ?? {}).reduce((a, b) => a + b, 0) / kid.b : 0
-      const hatch = coldFrac > 0.01
+      const coldHatch = coldFrac > 0.01
         ? `repeating-linear-gradient(135deg, rgb(120 170 255 / ${(0.18 + 0.5 * coldFrac).toFixed(2)}) 0 4px, transparent 4px 9px)`
         : undefined
+      const hatch = [writtenHatch ? WRITTEN_HATCH : undefined, coldHatch].filter(Boolean).join(', ') || undefined
       // highlight mode: leaf cells not majority-owned by the selected user
       // (or, for the unowned pin, not majority-unowned) fade back
       let dim = false
@@ -393,7 +403,9 @@ export function Treemap({ root, mode, shade = 'none', userIdx, dateRange, readRa
         else if (effHl.unowned) dim = unownedBytes(kid) < 0.5 * kid.b
       }
       if (effBand && !ctx.hasKids && !dim) {
-        const v = effBand.axis === 'a' ? kid.a : kid.d
+        const v = effBand.axis === 'a'
+          ? (readRange && readLogged(kidPath[1]?.n) ? lastTouch(kid.a, kid.d, readRange.min) : kid.a)
+          : kid.d
         dim = v == null || v < effBand.lo || v > effBand.hi
       }
       // Shared-edge stroke, per cell: each neighbor paints its own half of a
@@ -411,7 +423,7 @@ export function Treemap({ root, mode, shade = 'none', userIdx, dateRange, readRa
           : `color-mix(in oklab, ${bg} ${depth === 1 ? 40 : 62}%, var(--surface))`
       return { bg, ink, hatch, segments, edge, opacity: dim ? 0.22 : undefined }
     },
-    [mode, shade, slotOf, userIdx, dateRange, readRange, readLogged, effHl, effBand, lens],
+    [mode, shade, slotOf, userIdx, dateRange, readRange, readThrough, readLogged, effHl, effBand, lens],
   )
 
   // owner roll-up for the current view (user coloring only): everyone ≥1% of
@@ -586,8 +598,11 @@ export function Treemap({ root, mode, shade = 'none', userIdx, dateRange, readRa
         <>
           {mode === 'read' && readRange ? (
             <>
-              <Tooltip content={`No reads observed since access logging began (${epochDaysToDate(readRange.min)}). Logs may omit events; this is not proof of no access.`}>
+              <Tooltip content={`No reads observed since access logging began (${epochDaysToDate(readRange.min)}), and last written before it. Logs may omit events; this is not proof of no access.`}>
                 <span className="li has-tt"><span className="sw" style={{ background: 'var(--never-read)' }} />no observed reads</span>
+              </Tooltip>
+              <Tooltip content={`Written since access logging began (${epochDaysToDate(readRange.min)}) and not read since that write: colored by the write's age on the same scale, cross-hatched.${readThrough ? ` Reads after ${readThrough.label} aren't delivered yet.` : ''}`}>
+                <span className="li has-tt"><span className="sw" style={{ background: `${WRITTEN_HATCH}, ${dateGradientCss()}` }} />written, not read since</span>
               </Tooltip>
               {readUnlogged.length > 0 && (
                 <Tooltip content={`No access logs are collected for ${readUnlogged.join(', ')}: reads there are unknown, not absent.`}>
@@ -667,6 +682,8 @@ export function Treemap({ root, mode, shade = 'none', userIdx, dateRange, readRa
             : readRange && !n.n.startsWith('(') && (readLogged(path[1]?.n)
               ? <> · <span className="never-read">no observed reads since {epochDaysToDate(readRange.min)}</span></>
               : <> · reads not logged</>)}
+          {readRange && !n.n.startsWith('(') && readLogged(path[1]?.n) && unreadSinceWrite(n.a, n.d, readRange.min)
+            && <> · <span className="written-unread">not read since its last write{readThrough && writtenAfter(n.d, readThrough.day) ? ` (${readThroughText(readThrough).through})` : ''}</span></>}
         </div>
         {classes}
         {users}

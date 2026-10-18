@@ -66,6 +66,12 @@ From the gcs session (2026-10-18), after the `2026-10-18T0701` scan's 158-min `p
   - "Idle N days" is measured from `access.through`, not from the scan time.
   - Wherever the sweep / staging threshold is computed, it should use this rule.
 
+- **As built (step 3, refined by Ryan 2026-10-18):** `site/src/readLens.ts`.
+  - Lens states: `read` (read since its last write: read-age color), `written` (written since logging began and not read since that write: cross-hatched, filled by the write's age on the same scale), `never` (no read, last written before logging began: brick red), `unlogged` (gray). This replaces the neutral "written after reads were logged" color: a write after `through` is a `written` cell at the scale's new end.
+  - Read mode shows a banner over the map: "last access data: <through>", plus "reads after <through> not yet delivered" when the scan postdates it. The window's new end is `max(to, through's day)`.
+  - Idle rule (`idleness`): no verdict without `through` or on an unlogged path; a write on or after `through`'s day is not idle (a write on that day may follow its hour); otherwise idle `through − max(a ?? from, d ?? from)` days, a lower bound. Shown on `/staged` (sortable `idle` column) and in the map table's read cell. No automatic sweep/staging threshold exists on `cloud` or the deployment branches; staging is a reviewer's choice, so the rule is surfaced, not enforced.
+  - The OG card draws no hatch: a `written` tile takes its write's age color.
+
 ### D. Machine fallback: try both shapes at once (optional, after the timeout cut)
 
 - **Today:** gcs's `index` falls back from n2d-highmem-32 to n2-highmem-32 after 3 min queued. That's `queue_timeout`, cut from 10 in gcs `54486e24`; a normal start takes ~1 min.
