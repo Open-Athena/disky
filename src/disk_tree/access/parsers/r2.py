@@ -37,6 +37,7 @@ latest request is at or after it — its earlier requests drop with it.
 
 from __future__ import annotations
 
+import os
 from datetime import datetime
 from typing import TYPE_CHECKING
 
@@ -71,6 +72,18 @@ def _sql_literal(s: str) -> str:
     return "'" + s.replace("'", "''") + "'"
 
 
+def _max_object_size(globs: list[str]) -> int:
+    """`read_json`'s per-file buffer bound: the largest local input (≥ 1 MiB), else 1 GiB for a URL glob. DuckDB
+    allocates buffers from the bound, not the file, so 1 GiB over a dozen small files ran a laptop out of memory
+    (18 GB for ~30 MB of aggregates)."""
+    from glob import glob
+
+    if any('://' in g for g in globs):
+        return 1 << 30
+    sizes = [os.path.getsize(f) for g in globs for f in glob(g)]
+    return max([1 << 20, *(size + 1024 for size in sizes)])
+
+
 def hours(inputs: "str | list[str]", con: "duckdb.DuckDBPyConnection") -> "duckdb.DuckDBPyRelation":
     """One row per (bucket, hour) file: ``bucket, hour (TIMESTAMP, UTC), capture, rows``. Refuses an unknown
     ``schema_version`` and two different versions of one hour."""
@@ -79,7 +92,7 @@ def hours(inputs: "str | list[str]", con: "duckdb.DuckDBPyConnection") -> "duckd
     rel = con.sql(f"""
         SELECT DISTINCT schema_version, bucket, (hour::TIMESTAMPTZ AT TIME ZONE 'UTC') AS hour,
             COALESCE(capture, sampling->>'capture') AS capture, rows
-        FROM read_json({files}, format = 'unstructured', maximum_object_size = 1073741824, columns = {_COLUMNS})
+        FROM read_json({files}, format = 'unstructured', maximum_object_size = {_max_object_size(globs)}, columns = {_COLUMNS})
     """)
     versions = {r[0] for r in rel.project('schema_version').distinct().fetchall()}
     if versions - set(VERSIONS):
