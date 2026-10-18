@@ -360,6 +360,7 @@ def test_run_config_is_a_groovy_env_scope():
         f"    DT_SCAN_PROFILE_JSON = 'base64:{base64.b64encode(profile_json.encode()).decode()}'\n"
         "}\n"
     )
+    assert H.run_config("", profile_json).split("\n")[1] == "    DT_RUN_ID = ''"  # a local run that isn't recorded
     with pytest.raises(ValueError) as e:
         H.run_config('run "1"', profile_json)
     assert str(e.value) == "run id 'run \"1\"': Nextflow exports it into each task's script unescaped"
