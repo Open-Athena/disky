@@ -673,3 +673,19 @@ def test_store_has_reads_with_the_steps_credentials(tmp_path, env, monkeypatch):
     assert c.store_has("r2://idx", "static-names/G/scans.json") is True
     assert seen == [("r2://idx", "static-names/G/scans.json", "/t/r2-credentials", "step")]
     assert (os.environ.get("AWS_SHARED_CREDENTIALS_FILE"), os.environ.get("AWS_PROFILE")) == (None, "outer")
+
+
+def test_list_r2_source_defaults_to_the_deployments_endpoint(tmp_path, env, monkeypatch):
+    """An `r2://` source without `endpoint` lists through `$R2_ENDPOINT` (the deployment's own R2, a secret where the
+    profile is public: hf's meta store lists its serving bucket); an explicit `endpoint` wins."""
+    monkeypatch.setattr(S.Ctx, "nproc", property(lambda self: 2))
+    sources = [{"uri": "r2://idx"}, {"uri": "r2://other", "endpoint": "https://other.example"}]
+    c = ctx(tmp_path, {**env, "R2_ENDPOINT": "https://r2.example"}, sources=sources)
+    S.list_source(c, "r2://idx")
+    S.list_source(c, "r2://other")
+    assert c.sh_impl.calls == [
+        "disk-tree bulk-list -a r2://idx -E https://r2.example -o <tmp>/t/dt-scan/2026-10-16T1200/listing/idx -P 2 -w 8 -x clear",
+        "disk-tree import -e stream -j 2 -m -s r2 -t 2026-10-16T00:00:00+00:00 -l <tmp>/t/dt-scan/2026-10-16T1200/listing/idx/shard-*.parquet -b idx",
+        "disk-tree bulk-list -a r2://other -E https://other.example -o <tmp>/t/dt-scan/2026-10-16T1200/listing/other -P 2 -w 8 -x clear",
+        "disk-tree import -e stream -j 2 -m -s r2 -t 2026-10-16T00:00:00+00:00 -l <tmp>/t/dt-scan/2026-10-16T1200/listing/other/shard-*.parquet -b other",
+    ]
