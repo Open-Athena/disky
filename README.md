@@ -4,6 +4,15 @@
 
 [disky] maps where storage goes: scheduled scans of a store's buckets, then a treemap site with sizes over time, diffs between scans, owners and read recency. Open Athena runs four deployments, one per storage provider. Each has its own branch in this repo, and each branch merges the shared base, [`runsascoded/disky@cloud`][cloud].
 
+<p>
+<a href="https://gcs.oa.dev"><img alt="gcs.oa.dev: the public preview (names and sizes omitted)" src="https://github.com/Open-Athena/disky/raw/gcs/site/public/og.jpg" width="49%"></a>
+<a href="https://cw.oa.dev"><img alt="cw.oa.dev: the latest scan's card" src="https://cw.oa.dev/og/map.png?policy=full&amp;r=8" width="49%"></a>
+<a href="https://hf.oa.dev"><img alt="hf.oa.dev: the latest scan's card" src="https://hf.oa.dev/og/map.png?policy=full&amp;r=8" width="49%"></a>
+<a href="https://r2.oa.dev"><img alt="r2.oa.dev: the latest scan's card" src="https://r2.oa.dev/og/map.png?policy=full&amp;r=8" width="49%"></a>
+</p>
+
+*Each card is the site's own link preview, drawn from its latest scan (gcs shows its static public preview: its cards are for signed-in viewers).*
+
 | branch | site | scans |
 |---|---|---|
 | [`gcs`] | [gcs.oa.dev] | Marin's GCS buckets (`marin-*`), with per-user ownership, read recency from access logs, and staged deletion |
