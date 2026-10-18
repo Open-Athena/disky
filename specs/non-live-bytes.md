@@ -66,6 +66,10 @@ The interval store doesn't carry it (phase 3 decides if over-time should).
 
 A "pending reclaim" line: soft-deleted plus noncurrent bytes and the date the bulk expires. This is cw's digest framing C, second half.
 
+## Status
+
+**Phase 1 built (2026-10-18):** `dt-cloud non-live -c CLASSES [-E ENDPOINT] [-o OUT.parquet] URI` (`cloud/src/dt_cloud/non_live.py`) and the scan step `non-live` (`options.non-live.classes`, off unless listed in `steps`), writing `<layer2>non-live/<bucket>.parquet` per bucket source (per bucket, like the layer-2, not one file per scan). A class the source's provider can't have is refused. Expiry is filled for GCS soft-deleted (`hardDeleteTime`); S3 classes' expiry from lifecycle rules is phase 2. GCS `mpu` goes through the XML API and needs HMAC credentials. Checked live: `gs://oa-hf-usage-data` held 90.5 MB soft-deleted in 131 objects, expiring 2026-10-24 → 10-25. Not yet: the site's meters and the digest's "pending reclaim" line.
+
 ## Phasing
 
 1. **Totals per bucket**, `prefix = ""`. It's cheap where the classes are small (GCS soft delete, MPUs) and puts a number on the root meters and in the digest. hf (data bucket) and gcs first.
