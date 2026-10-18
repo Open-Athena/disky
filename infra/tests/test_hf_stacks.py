@@ -155,6 +155,8 @@ def test_gcp_stack(monkeypatch: pytest.MonkeyPatch):
             *[("gcp:secretmanager/secretIamMember:SecretIamMember", f"{s}-accessor") for s in secrets],
             ("disky:gcp:BatchCron", "hf-usage-snapshot"),
             ("gcp:cloudscheduler/job:Job", "hf-usage-snapshot"),
+            ("disky:gcp:BatchCron", "hf-usage-meta"),
+            ("gcp:cloudscheduler/job:Job", "hf-usage-meta"),
         ])
         assert m.inputs("hf-usage-images")["repositoryId"] == "hf-usage"
         # the cron's caller may only create jobs, and act as the job account (which submits its step tasks as itself)
@@ -204,8 +206,15 @@ def test_gcp_stack(monkeypatch: pytest.MonkeyPatch):
         policy = spec["allocationPolicy"]
         assert (policy["serviceAccount"]["email"], policy["instances"][0]["policy"]["machineType"], policy["instances"][0]["policy"]["provisioningModel"]) == (sa, "e2-standard-2", "STANDARD")
         assert policy["labels"] == spec["labels"] == {"app": "disky", "deployment": "hf", "component": "scan", "trigger": "schedule"}
+        # the meta store's head: the same spec over its own profile, an hour after the scan
+        meta = m.inputs("hf-usage-meta")
+        assert (meta["schedule"], meta["timeZone"], meta["httpTarget"]["oauthToken"]["serviceAccountEmail"]) == ("15 9 * * *", "Etc/UTC", submitter)
+        meta_spec = json.loads(base64.b64decode(meta["httpTarget"]["body"]))
+        assert meta_spec["taskGroups"][0]["taskSpec"]["runnables"][0]["container"]["commands"] == ["scan", "head", "/app/job/profiles/hf-meta.yml"]
+        meta_spec["taskGroups"][0]["taskSpec"]["runnables"][0]["container"]["commands"][2] = "/app/job/profiles/hf.yml"
+        assert meta_spec == spec
 
-    return pulumi.Output.all(g["scan"].job.id, g["images_reader"].id, g["data_admin"].id).apply(check)
+    return pulumi.Output.all(g["scan"].job.id, g["meta"].job.id, g["images_reader"].id, g["data_admin"].id).apply(check)
 
 
 def test_scan_profile_matches_the_site_and_the_stack():
@@ -226,5 +235,33 @@ def test_scan_profile_matches_the_site_and_the_stack():
     assert set(p.secrets.values()) <= set(stack_secrets)
     redacted = json.loads((REPO / "job" / "hf-scan-runs.json").read_text())["secrets"]
     assert set(p.secrets) <= set(redacted)
+    assert (p.data, p.work, p.executor.service_account) == (
+        "gs://oa-hf-usage-data", "gs://oa-hf-usage-data/nf", "hf-usage-job@oa-internal-450019.iam.gserviceaccount.com")
+
+
+def test_meta_profile_matches_the_site_and_the_stack():
+    """The meta store's profile (job/profiles/hf-meta.yml) scans the stack's own data bucket and the site's R2 bucket
+    into the store `STORES_JSON` names (its static-names generation, both envs), with the site's D1 and only secrets
+    this stack creates, each (source secrets too) redacted by the scan-run profile."""
+    import tomllib
+
+    from dt_cloud.scan_profile import load
+
+    p = load(str(REPO / "job" / "profiles" / "hf-meta.yml"))
+    w = tomllib.loads((REPO / "site" / "wrangler.toml").read_text())
+    [db] = w["d1_databases"]
+    assert (p.store, p.env["D1_DB_ID"], p.env["D1_DB_NAME"]) == ("meta", db["database_id"], db["database_name"])
+    for env in (w["vars"], w["env"]["preview"]["vars"]):
+        assert env["STORES_EXTRA"] == "meta"
+        meta = json.loads(env["STORES_JSON"])["meta"]["vars"]
+        assert (meta["STATIC_GEN"], meta["SNAPSHOTS_SUBDIR"], meta["STORE_BUCKETS"], meta["STORE_PREFIXES"]) == (
+            p.opts("static-names")["gen"], "meta", "oa-hf-usage-data,oa-hf-usage-index", "meta-l2/,snapshots/meta/")
+    assert [s.uri for s in p.sources] == ["gcs://oa-hf-usage-data", "r2://oa-hf-usage-index"]
+    block = re.search(r"^HF_SECRETS = \[\n(.*?)^\]", (INFRA / "gcp" / "__main__.py").read_text(), re.M | re.S).group(1)
+    stack_secrets = set(re.findall(r'^    "([a-z0-9-]+)",', block, re.M))
+    source_secrets = {k: v for s in p.sources for k, v in s.secrets.items()}
+    assert set(p.secrets.values()) | set(source_secrets.values()) <= stack_secrets
+    redacted = json.loads((REPO / "job" / "hf-scan-runs.json").read_text())["secrets"]
+    assert set(p.secrets) | set(source_secrets) <= set(redacted)
     assert (p.data, p.work, p.executor.service_account) == (
         "gs://oa-hf-usage-data", "gs://oa-hf-usage-data/nf", "hf-usage-job@oa-internal-450019.iam.gserviceaccount.com")

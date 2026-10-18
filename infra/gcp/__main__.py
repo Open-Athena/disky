@@ -160,9 +160,23 @@ scan = BatchCron(
     depends_on=[job, secrets, images_reader, submit_grant, data_admin],
 )
 
+# The "data behind this site" store's head (job/profiles/hf-meta.yml): after the day's scan has written its outputs
+meta = BatchCron(
+    "hf-usage-meta",
+    project=project,
+    region=region,
+    schedule="15 9 * * *",
+    submitter=job_dir / "hf-meta-submit.sh",
+    sa_email=scheduler.email,
+    description="Daily scan of hf.oa.dev's own data + index buckets (job/hf-meta-submit.sh PIN=1 DRY=1 body) -> hf.oa.dev/meta",
+    adopt=adopt,
+    depends_on=[job, secrets, images_reader, submit_grant, data_admin],
+)
+
 pulumi.export("job_account", job.email)
 pulumi.export("scheduler_account", scheduler.email)
 pulumi.export("image_repository", images.repository_id)
 pulumi.export("data_bucket", data.name)
 pulumi.export("secrets", HF_SECRETS)
 pulumi.export("cron", scan.job.name)
+pulumi.export("meta_cron", meta.job.name)

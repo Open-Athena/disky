@@ -3,6 +3,7 @@
 # specs/pipelines-everywhere.md), each step a Batch task of its own.
 #
 #   job/hf-batch-submit.sh              # submit, print the job id
+#   job/hf-batch-submit.sh /app/job/profiles/hf-meta.yml  # another head (the meta store: job/hf-meta-submit.sh)
 #   DRY=1 job/hf-batch-submit.sh        # print the spec
 #   PIN=1 DRY=1 job/hf-batch-submit.sh  # the canonical spec: the Cloud Scheduler body (infra/gcp generates it)
 #   SNAP_ID=… GEN=… job/hf-batch-submit.sh  # resume that scan's session
@@ -15,14 +16,16 @@ set -euo pipefail
 
 # PIN=1: drop every ambient override so the body is byte-identical whatever the caller's shell (`submitter_spec`
 # runs this under a scrubbed env). Must precede the ${VAR:-default} knobs below; the python vars() honors PIN too.
+# A profile argument is not ambient: a pinned body may name its head's (job/hf-meta-submit.sh).
 if [ -n "${PIN:-}" ]; then unset IMAGE PROFILE; fi
 
 PROJECT=oa-internal-450019
 REGION=us-central1
 SA=hf-usage-job@$PROJECT.iam.gserviceaccount.com
 IMAGE=${IMAGE:-us-central1-docker.pkg.dev/$PROJECT/hf-usage/scan:hf}
-PROFILE=${PROFILE:-/app/job/profiles/hf.yml}
-JOB_ID=${JOB_ID:-hf-scan-$(date -u +%Y%m%d-%H%M%S)}
+PROFILE=${1:-${PROFILE:-/app/job/profiles/hf.yml}}
+stem=$(basename "$PROFILE" .yml)
+JOB_ID=${JOB_ID:-$stem-scan-$(date -u +%Y%m%d-%H%M%S)}
 
 # What started the run (`scan_runs.trigger`: /scans, and a scan's first run's picks the digest's reply scan): the cron body
 # (PIN) is the schedule; any other submit is by hand. In the job's env (`DT_TRIGGER`) and its labels.

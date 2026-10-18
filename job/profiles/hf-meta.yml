@@ -1,0 +1,53 @@
+# hf.oa.dev's "data behind this site" store (`store: meta`, specs/pipelines-everywhere.md §3.1, as `r2`'s `r2-meta.yml`):
+# its own data and serving buckets through the same `scan.nf`, a second head beside `hf.yml`'s (`job/hf-meta-submit.sh`,
+# the `hf-usage-meta` cron). A secondary store is served per scan: no interval store, and warm-cache / probe carry no
+# `store=` yet. The R2 source lists through `$R2_ENDPOINT` (a secret: the repo is public), with the job's R2 key.
+deployment: hf
+store: meta
+executor:
+  kind: google-batch
+  project: oa-internal-450019
+  region: us-central1
+  service_account: hf-usage-job@oa-internal-450019.iam.gserviceaccount.com
+  image: us-central1-docker.pkg.dev/oa-internal-450019/hf-usage/scan:hf
+  boot_disk: 50
+  spot: false
+work: gs://oa-hf-usage-data/nf
+data: gs://oa-hf-usage-data
+layout:
+  layer2: meta-l2/{scan}/
+  snapshots: meta
+  listing: meta-listing/{scan}/
+sources:
+  - {uri: gcs://oa-hf-usage-data, procs: 4, threads: 4}
+  - uri: r2://oa-hf-usage-index
+    procs: 4
+    threads: 4
+    secrets: {AWS_ACCESS_KEY_ID: hf-usage-r2-access-key-id, AWS_SECRET_ACCESS_KEY: hf-usage-r2-secret-access-key}
+machines:
+  small: e2-standard-2
+  medium: e2-standard-4
+  big: e2-standard-4
+  list: e2-standard-4
+  post: e2-standard-2
+skip: [bucket-check, interval-store, over-time, warm-cache, probe, digest]
+secrets:
+  CLOUDFLARE_API_TOKEN: hf-usage-cf-token
+  CLOUDFLARE_ACCOUNT_ID: hf-usage-cf-account-id
+  R2_ENDPOINT: hf-usage-r2-endpoint
+  R2_ACCESS_KEY_ID: hf-usage-r2-access-key-id
+  R2_SECRET_ACCESS_KEY: hf-usage-r2-secret-access-key
+  SLACK_BOT_TOKEN: hf-usage-slack-bot-token
+env:
+  SCAN_RUNS_PROFILE: /app/job/hf-scan-runs.json
+  D1_DB_ID: 2f83fdf9-509f-491c-9664-04bef9944988   # oa-hf-usage-db (site/wrangler.toml)
+  D1_DB_NAME: oa-hf-usage-db
+  R2_BUCKET: oa-hf-usage-index
+  AWS_DEFAULT_REGION: auto                         # R2's region
+  SLACK_ALERT_CHANNEL: C0C9J9VDPV5                 # #hf-admin: every alert
+pass: [DT_RECORD, DT_ALERTS]
+labels: {deployment: hf}
+options:
+  index: {mode: path-index, args: [-U], mem: 8GB, age_pyramids: true, verify: true}
+  static-names: {gen: 2026-10-18hfmeta, mem: 8GB, build_args: [-x, "16,8"]}   # site/wrangler.toml STORES_JSON meta STATIC_GEN
+  index-gc: {dry: true}
