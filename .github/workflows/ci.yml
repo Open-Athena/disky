@@ -1,0 +1,13 @@
+name: CI
+
+# Stub: the real workflow is .github/workflows/ci.yml on each deploy branch
+# (gcs, cw, hf, r2), where it runs on push. This file only makes it
+# dispatchable from the Actions UI; dispatch it with the deploy branch as ref.
+on:
+  workflow_dispatch:
+
+jobs:
+  stub:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "The real 'CI' workflow is on the deploy branches, e.g. https://github.com/Open-Athena/disky/blob/gcs/.github/workflows/ci.yml"
