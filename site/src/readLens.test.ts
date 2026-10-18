@@ -1,7 +1,12 @@
 import { describe, expect, it } from 'vitest'
-import { readLogged, readState, unloggedOf } from './readLens'
+import {
+  idleLabel, idleness, idleSortKey, lastTouch, prefixBucket, readLogged, readState, readThrough,
+  readThroughText, unloggedOf, unreadSinceWrite, writtenAfter,
+} from './readLens'
 
 const access = { from: 100, to: 110, buckets: ['jc-taxes'] }
+// Epoch day 110 = 1970-04-21; the logs run through its 15:00 hour.
+const thru = { from: 100, to: 110, through: '1970-04-21T15:00Z' }
 
 describe('readLogged', () => {
   it('covers only the listed buckets; a folded cell or a missing segment is uncovered', () => {
@@ -11,6 +16,65 @@ describe('readLogged', () => {
 
   it('covers everything when the scan predates `buckets`, and when there is no access window', () => {
     expect([readLogged({ from: 100, to: 110 })('ctbk'), readLogged(undefined)('ctbk')]).toEqual([true, true])
+  })
+})
+
+describe('readThrough', () => {
+  it('is the hour\'s day and label; provisional only when the scan was taken after that hour ended', () => {
+    expect([
+      readThrough(thru, '1970-04-22T07:01:00Z'),
+      readThrough(thru, '1970-04-21T16:00:00Z'),
+      readThrough(thru, '1970-04-21T15:30:00Z'),
+      readThrough(thru),
+    ]).toEqual([
+      { day: 110, label: '1970-04-21 15:00Z', provisional: true },
+      { day: 110, label: '1970-04-21 15:00Z', provisional: false },
+      { day: 110, label: '1970-04-21 15:00Z', provisional: false },
+      { day: 110, label: '1970-04-21 15:00Z', provisional: false },
+    ])
+  })
+
+  it('is null on a scan published before the field, and on no access window', () => {
+    expect([readThrough({ from: 100, to: 110 }, '1970-04-22T07:00:00Z'), readThrough(undefined)]).toEqual([null, null])
+  })
+
+  it('refuses a malformed value', () => {
+    expect(() => readThrough({ from: 100, to: 110, through: 'yesterday' })).toThrow('access.through: not a time: yesterday')
+  })
+})
+
+describe('readThroughText', () => {
+  it('says where the reads end, and the gap when the scan postdates it', () => {
+    expect([
+      readThroughText({ day: 110, label: '1970-04-21 15:00Z', provisional: true }),
+      readThroughText({ day: 110, label: '1970-04-21 15:00Z', provisional: false }),
+    ]).toEqual([
+      { through: 'last access data: 1970-04-21 15:00Z', gap: 'reads after 1970-04-21 15:00Z not yet delivered' },
+      { through: 'last access data: 1970-04-21 15:00Z', gap: null },
+    ])
+  })
+})
+
+describe('writtenAfter / unreadSinceWrite / lastTouch', () => {
+  it('counts a write on `through`\'s own day as after (its hour is unknown)', () => {
+    expect([writtenAfter(109, 110), writtenAfter(110, 110), writtenAfter(111, 110), writtenAfter(111, null), writtenAfter(null, 110)])
+      .toEqual([false, true, true, false, false])
+  })
+
+  it('is "not read since a write since logging began": a same-day read counts as after the write', () => {
+    expect([
+      unreadSinceWrite(null, 105, 100),
+      unreadSinceWrite(103, 105, 100),
+      unreadSinceWrite(105, 105, 100),
+      unreadSinceWrite(107, 105, 100),
+      unreadSinceWrite(null, 95, 100),
+      unreadSinceWrite(null, null, 100),
+    ]).toEqual([true, true, false, false, false, false])
+  })
+
+  it('is max(read, write), a write before logging began not counting', () => {
+    expect([lastTouch(103, 107, 100), lastTouch(107, 103, 100), lastTouch(null, 105, 100), lastTouch(null, 90, 100), lastTouch(103, 90, 100)])
+      .toEqual([107, 107, 105, null, 103])
   })
 })
 
@@ -31,6 +95,78 @@ describe('readState', () => {
   it('tells a logged cell with no read from an unlogged one', () => {
     expect([readState(null, true, range), readState(undefined, false, range), readState(null, false, null)])
       .toEqual([{ kind: 'never' }, { kind: 'unlogged' }, { kind: 'unlogged' }])
+  })
+
+  it('with the write day: each state transition', () => {
+    expect([
+      // read since its last write: the read's age
+      readState(108, true, range, 90),
+      readState(106, true, range, 106),
+      // written since logging began, not read since that write: the write's age (hatched)
+      readState(102, true, range, 106),
+      readState(null, true, range, 104),
+      // written on or after the logs' end (the window's new end): the newest write color
+      readState(108, true, range, 112),
+      // never read, last written before logging began
+      readState(null, true, range, 95),
+      // no logs cover it: the write says nothing about reads
+      readState(null, false, range, 104),
+      readState(104, false, range, 108),
+    ]).toEqual([
+      { kind: 'read', t: 0.8 },
+      { kind: 'read', t: 0.6 },
+      { kind: 'written', t: 0.6 },
+      { kind: 'written', t: 0.4 },
+      { kind: 'written', t: 1 },
+      { kind: 'never' },
+      { kind: 'unlogged' },
+      { kind: 'read', t: 0.4 },
+    ])
+  })
+})
+
+describe('idleness', () => {
+  it('is idle only when read and write both precede the logs\' end, counted from it', () => {
+    expect([
+      // read on 104, written on 95: idle since the read
+      idleness(104, 95, thru),
+      // read on 101, written on 107: idle since the write
+      idleness(101, 107, thru),
+      // never read, written before logging began: at least since logging began
+      idleness(null, 95, thru),
+      // never read, written since logging began: since the write
+      idleness(null, 103, thru),
+      // read on the logs' last day: idle 0 days (every read in the data precedes `through`)
+      idleness(110, 95, thru),
+      // written on the logs' last day, or after: not idle
+      idleness(101, 110, thru),
+      idleness(null, 111, thru),
+    ]).toEqual([
+      { idle: true, days: 6 },
+      { idle: true, days: 3 },
+      { idle: true, days: 10 },
+      { idle: true, days: 7 },
+      { idle: true, days: 0 },
+      { idle: false },
+      { idle: false },
+    ])
+  })
+
+  it('has no verdict without `through` (an older scan) or on an unlogged path', () => {
+    expect([idleness(104, 95, { from: 100, to: 110 }), idleness(104, 95, undefined), idleness(104, 95, thru, false)])
+      .toEqual([null, null, null])
+  })
+
+  it('labels and sorts: idle by days, not-idle below every idle, no verdict undefined', () => {
+    const is = [{ idle: true, days: 6 } as const, { idle: true, days: 0 } as const, { idle: false } as const]
+    expect([is.map(idleLabel), [...is, null].map(idleSortKey)])
+      .toEqual([['idle 6d', 'idle 0d', 'written after logs'], [6, 0, -1, undefined]])
+  })
+})
+
+describe('prefixBucket', () => {
+  it('is the bucket segment of a scheme prefix', () => {
+    expect(['gs://marin-us/a/b/', 's3:///ctbk/x', 'r2://jc-taxes/'].map(prefixBucket)).toEqual(['marin-us', 'ctbk', 'jc-taxes'])
   })
 })
 
