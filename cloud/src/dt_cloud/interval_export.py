@@ -32,6 +32,8 @@ import shutil
 import tempfile
 from pathlib import Path
 
+import pyarrow as pa
+import pyarrow.parquet as pq
 from click import IntRange, argument, command, option
 
 from . import interval_compact as ic
@@ -103,6 +105,66 @@ def live_sql(files: list[str], sliced: bool, ts: int) -> str:
     union = " UNION ALL ".join(f"SELECT * FROM read_parquet({q(f)})" for f in files)
     return f"""SELECT * FROM (SELECT * FROM ({union}) QUALIFY row_number() OVER (PARTITION BY {ident} ORDER BY vt) = 1)
         WHERE vf <= {ts} AND {ts} < vt"""
+
+
+def store_gen(store: Store, gen: str | None) -> str:
+    """The generation a read names: `gen`, else the store's current; followed to its newest successor."""
+    if gen is None:
+        gen, how = ic.resolve(store)
+        if gen is None:
+            raise SystemExit(f"{store.root}/{PREFIX}: no current generation ({how}): name one with -g")
+    return ic.chain(store, gen)[-1]
+
+
+#: An object identity row (`object_identities`): what a sweep's hold compares (`sweep_manifest.AsOfHold.ref`).
+IDENTITY_COLS = ["depth", "path", "vf", "vt", "kind", "mtime", "wts", "wb"]
+
+
+def _groups(store: Store, key: str, spans: list[tuple[str, str]], ts: int) -> list[int]:
+    """The row groups of the served sort `key` (from its `.groups.parquet`) whose paths may meet a `[lo, hi]` span and
+    whose versions may be live at `ts`."""
+    g = pq.read_table(store.open(key.removesuffix(".parquet") + ".groups.parquet"),
+                      columns=["rg", "p_min", "p_max", "vf_min", "vt_max"]).to_pylist()
+    return [r["rg"] for r in g if r["vf_min"] <= ts < r["vt_max"] and any(r["p_max"] >= lo and r["p_min"] <= hi for lo, hi in spans)]
+
+
+def object_identities(store_root: str, scan: str, bucket: str, bands: list[str] | tuple[str, ...], exact: list[str] | tuple[str, ...] = (),
+                      *, gen: str | None = None) -> pa.Table:
+    """The objects of `bucket` under `bands` (name prefixes) or named by `exact` as scan `scan` saw them, from the
+    interval store at `store_root` (generation `gen`, default the current): `(name, generation, created)` sorted by
+    name — the versions live at the scan in the `path` sort (base and the newest manifest's runs, the smallest `vt`),
+    objects only (a key that is also a folder's prefix is folded into the folder: never listed). `generation` is the
+    version's (NULL without one, or where the generation doesn't carry it); `created` the object's created second (its
+    mean stamp: one object, `wts / wb`), else its `mtime`. Reads only the row groups whose paths meet the items (each
+    sort's `.groups.parquet`): what a sweep's hold needs once the scan's raw listing is gone."""
+    import duckdb
+
+    store = Store(store_root)
+    gen = store_gen(store, gen)
+    prefix = f"{PREFIX}/{gen}"
+    entry, runs = scan_entry(store, prefix, scan)
+    base = store.read_json(f"{prefix}/scans.json")
+    has_gen = ist.has_generation(base)
+    ts = int(entry["ts"])
+    spans = [(f"{bucket}/{b}", f"{bucket}/{b}\U0010ffff") for b in bands] + [(f"{bucket}/{k}", f"{bucket}/{k}") for k in exact]
+    cols = [*IDENTITY_COLS, *([ist.GENERATION] if has_gen else [])]
+    parts = []
+    for key in [f"{prefix}/served/{ist.GENERATION_SORT}.parquet", *(f"{prefix}/{r['key']}/served/{ist.GENERATION_SORT}.parquet" for r in runs)]:
+        if rgs := _groups(store, key, spans, ts):
+            parts.append(pq.ParquetFile(store.open(key)).read_row_groups(rgs, columns=cols))
+    out_schema = pa.schema([("name", pa.string()), ("generation", pa.int64()), ("created", pa.timestamp("us", tz="UTC"))])
+    if not parts:
+        return out_schema.empty_table()
+    con = duckdb.connect()
+    con.register("rows", pa.concat_tables(parts))
+    gcol = ist.GENERATION if has_gen else "NULL::BIGINT"
+    under = " OR ".join([*(f"starts_with(path, {q(lo)})" for lo, _ in spans[:len(bands)]), *(f"path = {q(lo)}" for lo, _ in spans[len(bands):])])
+    t = con.execute(f"""SELECT substr(path, {len(bucket) + 2}) AS name, {gcol} AS generation,
+            make_timestamp((CASE WHEN wb > 0 THEN round(wts / wb, 0) ELSE mtime END)::BIGINT * 1000000) AS created
+        FROM (SELECT * FROM rows QUALIFY row_number() OVER (PARTITION BY depth, path, vf ORDER BY vt) = 1)
+        WHERE vf <= {ts} AND {ts} < vt AND kind = 'file' AND ({under or 'false'})
+        ORDER BY name""").to_arrow_table()
+    return t.cast(out_schema)
 
 
 def export_scan(store_root: str, scan: str, dest: str, *, gen: str | None = None, tiers: tuple[str, ...] = TIERS,

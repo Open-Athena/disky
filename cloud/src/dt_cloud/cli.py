@@ -1670,11 +1670,15 @@ def sweep_sync_progress(interval: int, sql_output: str | None, job_name: str) ->
 @sweep.command("manifest")
 @option("-b", "--bucket", "only_buckets", multiple=True, help="Only these buckets (default: every bucket the plan names)")
 @option("-d", "--date", required=True, help="Scan date whose listing to plan from (pinned)")
+@option("-g", "--iv-gen", default=None, help="The interval store's generation an `as_of` hold reads (default its current)")
+@option("-H", "--holds", type=Choice(["auto", "listing", "store"]), default="auto", show_default=True, help="Where an `as_of` scan's object identities come from: its raw listing, the interval store (-i), or the listing when it is there and the store otherwise")
+@option("-i", "--interval-store", default=None, help="The interval store (a dir or URL, the readers' INDEX_R2 root) that answers for an `as_of` scan whose listing is gone (specs/lean-scans.md §3.1)")
 @option("-j", "--workers", default=0, type=int, help="Concurrent listing shards (default 2 × CPUs, ≤ 64)")
 @option("-o", "--out", default=None, help="Output dir (default gs://$DATA_BUCKET/sweep/<date>-p<plan_id>)")
 @option("-p", "--plan", "plan_path", required=True, help="The dispatched plan.json (path or gs:// URL): its items are the delete set, and the buckets are the plan's (∩ -b)")
 @option("-r", "--root", default=None, help="Listing root (gs:// or local mount; default gs://$DATA_BUCKET)")
-def sweep_manifest(only_buckets: tuple[str, ...], date: str, workers: int, out: str | None, plan_path: str, root: str | None) -> None:
+def sweep_manifest(only_buckets: tuple[str, ...], date: str, iv_gen: str | None, holds: str, interval_store: str | None, workers: int, out: str | None,
+                   plan_path: str, root: str | None) -> None:
     """Object-level manifest of a staged plan (specs/done/staged-delete.md): scan
     the pinned listing (every shard in parallel, row groups outside the staged
     prefixes pruned — `sweep_manifest.py`) and write per-bucket parquets of the
@@ -1682,14 +1686,18 @@ def sweep_manifest(only_buckets: tuple[str, ...], date: str, workers: int, out: 
     The plan is the whole intent: nothing carves out. An item staged as of
     another scan (plan.json `as_of`) keeps only the keys that scan's listing
     has with the same generation (else `created`); the rest are counted as
-    `skipped_after_as_of`. Pure read + artifact write — deletes nothing."""
+    `skipped_after_as_of`. A scan whose listing is gone answers from the
+    interval store (`-i`: the versions live at it, with their `generation`).
+    Pure read + artifact write — deletes nothing."""
     import time
 
     import fsspec
 
     from .staged_plan import CATEGORIES, load_plan
-    from .sweep_manifest import build_manifests
+    from .sweep_manifest import HoldSource, build_manifests
 
+    if holds == "store" and interval_store is None:
+        raise SystemExit("-H store needs the interval store (-i)")
     sp = load_plan(plan_path)
     buckets = [b for b in sp.buckets if not only_buckets or b in only_buckets]
     if not buckets:
@@ -1719,6 +1727,7 @@ def sweep_manifest(only_buckets: tuple[str, ...], date: str, workers: int, out: 
     summary["buckets"] = build_manifests(
         root, date, {b: sp.sweep.get(b, ()) for b in buckets}, out, workers=workers or None, as_of=sp.as_of,
         objects_by_bucket={b: sp.objects[b] for b in buckets if b in sp.objects},
+        hold_source=HoldSource(holds, interval_store, iv_gen),
     )
     err(f"manifest: {time.monotonic() - t0:.0f}s")
 

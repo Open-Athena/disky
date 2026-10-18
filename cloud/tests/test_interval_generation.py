@@ -1,6 +1,7 @@
 """The objects' native version (GCS `generation`) in the interval store (specs/lean-scans.md §3.1): from raw listings
 through `path-index -G` into a generation's object versions — build, append, carries, compaction — out again by
-`export`, checked by `verify`; and added to a generation built without it by `backfill-generation`.
+`export`, checked by `verify`; added to a generation built without it by `backfill-generation`; and read back by a
+sweep's `as_of` hold once the scan's listing is gone.
 
 The world: one bucket, seven scans. The lister records `generation` from the third scan on (GCS's, since 2026-10-07).
 Objects: one never changed; one deleted before the first generation; one rewritten (a new generation, created later);
@@ -28,6 +29,8 @@ from dt_cloud import interval_verify as iv
 from dt_cloud import static_names as sn
 from dt_cloud.append_runner import latest_key
 from dt_cloud.blobstore import Store
+from dt_cloud.staged_plan import parse_plan
+from dt_cloud.sweep_manifest import HoldSource, build_manifests
 from dt_cloud.viz import write_path_index
 
 B = "b"
@@ -299,3 +302,64 @@ def test_backfill_reads_renamed_class_columns_by_position(world, off, backfilled
     _rename_classes(store / ist.PREFIX / "g")
     _backfill(store, tmp_path / "w", world)
     assert _parquets(store / ist.PREFIX / "g2") == _parquets(backfilled["store"] / ist.PREFIX / "g2")
+
+
+# ── A sweep's `as_of` hold from the store ──────────────────────────────────
+
+
+PLAN = {"plan_id": 9, "name": "Staged", "sweep": [f"gs://{B}/d/"], "as_of": {f"gs://{B}/d/": SCANS[2]}}
+
+
+def _manifest(world: Path, out: Path, source: HoldSource) -> tuple[dict, list[tuple]]:
+    sp = parse_plan(PLAN)
+    summary = build_manifests(str(world), SCANS[5], dict(sp.sweep), str(out), workers=1, window=1, as_of=sp.as_of, hold_source=source)
+    return summary, [(r["name"], r["generation"]) for r in pq.read_table(out / "manifest" / f"{B}.parquet").to_pylist()]
+
+
+def test_object_identities_at_a_scan(on, off):
+    t = ie.object_identities(str(on["store"]), SCANS[2], B, ["d/"])
+    assert t.to_pylist() == [
+        {"name": "d/keep.bin", "generation": 11, "created": _ts(100)}, {"name": "d/meta.bin", "generation": 61, "created": _ts(100)},
+        {"name": "d/rew.bin", "generation": 21, "created": _ts(100)}, {"name": "d/rw2.bin", "generation": 51, "created": _ts(60)},
+        {"name": "d/sub/deep.bin", "generation": 71, "created": _ts(100)}]
+    assert ie.object_identities(str(on["store"]), SCANS[2], B, [], ["d/rew.bin"]).to_pylist() == [
+        {"name": "d/rew.bin", "generation": 21, "created": _ts(100)}]
+    # Without the column: no generation, the created second all the same.
+    assert [(r["name"], r["generation"]) for r in ie.object_identities(str(off["store"]), SCANS[2], B, ["d/"]).to_pylist()] == [
+        ("d/keep.bin", None), ("d/meta.bin", None), ("d/rew.bin", None), ("d/rw2.bin", None), ("d/sub/deep.bin", None)]
+
+
+def test_a_held_item_resolves_from_the_store_as_from_the_listing(world, on, off, tmp_path):
+    """The as_of scan's listing and the store vouch for the same objects: kept the unchanged (a metadata update keeps
+    its generation), refused the replaced (`rew`: a new generation) and the new. With the listing gone, `auto` reads
+    the store; a store without generations falls back to `created` and refuses the same."""
+    want_rows = [("d/keep.bin", 11), ("d/meta.bin", 61), ("d/rw2.bin", 51), ("d/sub/deep.bin", 71)]
+    want = {B: {"objects": 6, "dirs": 2, "eligible": {"bytes": 40, "objects": 4},
+                "skipped_after_as_of": {"bytes": 30, "objects": 2}}}
+    listing = _manifest(world, tmp_path / "listing", HoldSource("listing"))
+    assert listing == (want, want_rows)
+    assert _manifest(world, tmp_path / "store", HoldSource("store", str(on["store"]))) == listing
+    assert _manifest(world, tmp_path / "store-off", HoldSource("store", str(off["store"]))) == listing
+    gone = tmp_path / "world"
+    shutil.copytree(world / "listing", gone / "listing")
+    shutil.rmtree(gone / "listing" / SCANS[2])
+    assert _manifest(gone, tmp_path / "auto", HoldSource("auto", str(on["store"]))) == listing
+    with pytest.raises(SystemExit) as e:
+        _manifest(gone, tmp_path / "none", HoldSource("auto"))
+    assert str(e.value) == f"no listing shards for {B} under {gone}/listing/{SCANS[2]}/"
+
+
+def test_sweep_manifest_cli_reads_the_store(world, on, tmp_path, monkeypatch):
+    from dt_cloud import cli
+
+    monkeypatch.setattr(cli, "_hard_exit", lambda: None)  # the command ends the process (`os._exit`) after its writes
+    main = cli.main
+    plan = tmp_path / "plan.json"
+    plan.write_text(json.dumps(PLAN))
+    args = ["sweep", "manifest", "-d", SCANS[5], "-p", str(plan), "-r", str(world)]
+    res = CliRunner().invoke(main, [*args, "-H", "store", "-o", str(tmp_path / "x")])
+    assert (res.exit_code, res.output.strip().splitlines()[-1]) == (1, "-H store needs the interval store (-i)")
+    res = CliRunner().invoke(main, [*args, "-H", "store", "-i", str(on["store"]), "-o", str(tmp_path / "out")], catch_exceptions=False)
+    assert res.exit_code == 0, res.output
+    rows = [(r["name"], r["generation"]) for r in pq.read_table(tmp_path / "out" / "manifest" / f"{B}.parquet").to_pylist()]
+    assert rows == [("d/keep.bin", 11), ("d/meta.bin", 61), ("d/rw2.bin", 51), ("d/sub/deep.bin", 71)]
