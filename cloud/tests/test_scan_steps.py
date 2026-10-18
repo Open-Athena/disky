@@ -710,6 +710,44 @@ def test_retire_dry_run_by_default_then_each_copy(tmp_path, env):
     assert x.sh_impl.calls == [f"dt-cloud scan retire -G s1 -k 2 -L l2/{{id}}/index/{{gen}}/path-index.parquet -m -o gs://iv -S r2://idx -w {w} -x -s <tmp>/data"]
 
 
+NL_OPTS = {"list": {"import": True}, "static-names": {"gen": "s1"}, "digest": {"template": "t", "config": "c.yml"}}
+
+
+def test_non_live_measures_each_bucket_source(tmp_path, env):
+    """`non-live` (listed in `steps`): `dt-cloud non-live` per bucket source with the profile's classes, into
+    `<layer2>non-live/<bucket>.parquet`; an `r2://` source through `$R2_ENDPOINT`; an `hf://` one skipped (its held bytes
+    are in its listing); no classes, nothing run."""
+    sources = [{"uri": "s3://a", "endpoint": "https://s3.example.org"}, "r2://b", "hf://ns"]
+    c = ctx(tmp_path, {**env, "R2_ENDPOINT": "https://r2.example"}, steps=["non-live"], sources=sources,
+            options={"non-live": {"classes": ["mpu"]}, **NL_OPTS})
+    S.non_live(c, None)
+    out = "<tmp>/data/l2/2026-10-16T1200/non-live"
+    snap = "<tmp>/data/snapshots/sub/2026-10-16T1200/non-live.json"
+    assert c.sh_impl.calls == [
+        f"dt-cloud non-live -c mpu -E https://s3.example.org -j {snap} -o {out}/a.parquet s3://a",
+        f"dt-cloud non-live -c mpu -E https://r2.example -j {snap} -o {out}/b.parquet r2://b",
+    ]
+    n = ctx(tmp_path, env, steps=["non-live"], options={"non-live": {"classes": []}, **NL_OPTS})
+    S.non_live(n, None)
+    assert n.sh_impl.calls == []
+
+
+def test_non_live_passes_each_source_its_providers_classes(tmp_path, env):
+    """A mixed deployment (hf's meta: a GCS data bucket + an R2 bucket) lists the union: each source measures only the
+    classes its provider has, and one with none (R2 asked for `soft-deleted` only) is skipped, never refused per run."""
+    sources = ["gcs://data", "r2://idx", {"uri": "s3://v", "endpoint": "https://s3.example.org"}]
+    c = ctx(tmp_path, {**env, "R2_ENDPOINT": "https://r2.example"}, steps=["non-live"], sources=sources,
+            options={"non-live": {"classes": ["soft-deleted", "delete-marker"]}, **NL_OPTS})
+    S.non_live(c, None)
+    out = "<tmp>/data/l2/2026-10-16T1200/non-live"
+    snap = "<tmp>/data/snapshots/sub/2026-10-16T1200/non-live.json"
+    snap = "<tmp>/data/snapshots/sub/2026-10-16T1200/non-live.json"
+    assert c.sh_impl.calls == [
+        f"dt-cloud non-live -c soft-deleted -j {snap} -o {out}/data.parquet gcs://data",
+        f"dt-cloud non-live -c delete-marker -E https://s3.example.org -j {snap} -o {out}/v.parquet s3://v",
+    ]
+
+
 def test_retire_layer1_passes_the_listing_layouts_shards(tmp_path, env):
     """`layer1: true`: the raw listing shards under `layout.listing` (`-1`); without a `layout.listing`, none (warned)."""
     opts = {"static-names": {"gen": "s1"}, "digest": {"template": "t", "config": "c.yml"}, "retire": {"keep": 2, "layer1": True, "store": "gs://iv"}}
