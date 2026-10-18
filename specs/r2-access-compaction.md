@@ -1,6 +1,6 @@
 # R2 access aggregates: compaction
 
-Status: 2026-10-17, proposed; step 0 measured. Follows [r2-access-logging.md] (the hourly collector, `infra/cf/r2-access`).
+Status: 2026-10-17. Step 0 measured; step 5 implemented on `cloud` (applies pending); step 1 committed on the OA stack (apply pending); steps 2–4 proposed. Follows [r2-access-logging.md] (the hourly collector, `infra/cf/r2-access`).
 
 ## Why
 
@@ -75,7 +75,7 @@ The read lens uses GET/HEAD per key (6e62d37a), and a write's recency is already
 
 GET/HEAD are 496 rows over 237 keys, ~0.01 MB zstd'd. GET is ~36% of *events*, but a few hot keys are read many times, while each Put names a new key.
 
-So the collector itself should aggregate per-key rows only for read actions (`ROW_ACTIONS`, default `GetObject,HeadObject`) and keep every other action as per-hour counts by action (no keys). That takes durable aggregates from ~129 MB/day to tens of KB/day, and the public files shrink the same way. Steps 2–3 then matter only for the O(new days) read, not for bytes.
+Done (aggregate `schema_version` 4): the collector aggregates per-key rows only for read actions (`ROW_ACTIONS`: `GetObject`, `HeadObject`, a constant) and keeps every other action as per-hour counts by action (no keys). That takes durable aggregates from ~129 MB/day to tens of KB/day, and the public files shrink the same way. Steps 2–3 then matter only for the O(new days) read, not for bytes.
 
 The cost: there's no per-prefix write activity ("who's writing where") from R2 logs. GCS's access pipeline keeps PUT ops per path, so that stays a possible feature there. If R2 write heat is ever wanted, a per-directory (not per-key) write rollup at a fixed depth would be the compact form.
 

@@ -2869,7 +2869,7 @@ def _digest_options(template_default: str):
         option("-c", "--channel", help="Slack channel id (default $SLACK_CHANNEL)"),
         option("-C", "--config", "config_path", type=Path, help="YAML/JSON DigestConfig overlaid on the template's preset (title, site, root, state, plot host, buckets/quotas, prices…; see specs/done/digest-unification.md)"),
         option("-D", "--reply-delay", "reply_delay", default=0.0, type=float, help="Seconds to sleep between replies (e.g. 305 for a spaced Slack backfill so per-reply sender chrome survives; Discord needs none)"),
-        option("-E", "--edit-replies", is_flag=True, help="Re-edit every already-posted reply to its current body (backfill after a format change; -P discord only)"),
+        option("-E", "--edit-replies", is_flag=True, help="Re-edit every already-posted reply to its current body (backfill after a format change; a Slack sender-variant reply keeps its name + avatar)"),
         option("-F", "--for-real", is_flag=True, help="With --redo-replies: actually post the new replies and delete the old ones (default: print the plan)"),
         option("-H", "--reply-hour", type=int, default=None, help="cw template: UTC hour the sender variant's daily reply is taken from — the day's first scan at/after it (default 12 → the 12:01Z morning scan, 8:01 am ET; the day's other scans still feed the OP + plot, and with the config's `provisional: true` its earlier ones post a provisional reply)"),
         option("-i", "--icons-dir", type=Path, default=None, help="Where the plot PNG is written + deployed from (default the config's `icons_dir`: job/icons, job/icons-cw)"),
@@ -2943,8 +2943,6 @@ def _digest(
         dg.post_digest_discord(tpl, root, m, webhook, bot_token, edit_replies=edit_replies)
         err(f"digest: converged {m:%Y-%m} (discord)")
         return
-    if edit_replies:
-        raise SystemExit("digest: -E/--edit-replies is Discord-only (Slack replies are re-posted with -R/--redo-replies)")
     channel = channel or os.environ.get("SLACK_CHANNEL")
     token = secret(token, "SLACK_BOT_TOKEN")
     if not (channel and token):
@@ -2978,7 +2976,7 @@ def _digest(
         return
     # the scheduled run (no -m) also closes the previous month's thread if its last day's provisional reply is still up
     converge = dg.converge_slack if month else dg.converge_slack_now
-    converge(tpl, root, m, client, channel, variant, icons_dir=icons, deploy_plot=deploy, reply_delay=reply_delay)
+    converge(tpl, root, m, client, channel, variant, icons_dir=icons, deploy_plot=deploy, reply_delay=reply_delay, edit_replies=edit_replies)
     err(f"digest: converged {m:%Y-%m} ({cfg.template}, {variant})")
 
 
