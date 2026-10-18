@@ -59,6 +59,6 @@ options:
   index:
     webdata: [python, /app/job/cw-webdata.py, "{web}", "{sources}", -l, our storage, -a, "{date}"]
     mem: 8GB
-  # the store's `STATIC_GEN` in `site/wrangler.toml`'s `STORES_JSON`, built by the one-VM job before it over the same layout:
-  # this appends to it
-  static-names: {gen: 2026-10-14meta, build_args: [-x, "16,8"]}
+  # the store's `STATIC_GEN` in `site/wrangler.toml`'s `STORES_JSON`, rebuilt over every scan once the pre-isolation scans
+  # held only cw's slice of `oa-gcs-usage-dvx` (2026-10-18): this appends to it
+  static-names: {gen: 2026-10-18meta, build_args: [-x, "16,8"]}
