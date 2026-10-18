@@ -50,14 +50,6 @@ export function useScanRunOf(store: Store, scan: string | null | undefined): Sca
   return (data && scan && scanRunOf(data.runs, scan)) || null
 }
 
-/** A link to the run that produced `scan` (its /scans page), for a tip about the scan: nothing until the store's runs
- *  load, or when none recorded it (a scan from before run records, or a viewer without access). */
-export function ScanRunLink({ store, scan }: { store: Store; scan: string }) {
-  const r = useScanRunOf(store, scan)
-  if (!r) return null
-  return <div><Link to={scansHref(store, r.run_id)}>scan run</Link>{r.status !== 'succeeded' && <> ({r.status})</>}{r.trigger && <> · {r.trigger}</>}</div>
-}
-
 /** `fmtDur`, with seconds under a minute (a 3 s publish isn't `0m`). */
 export const fmtDur = (s: number): string => (s < 60 ? `${Math.round(s)}s` : fmtDurM(s))
 

@@ -33,7 +33,7 @@ import { SectionAnchor } from './SectionAnchor'
 import { barControls } from './pageBar'
 import { LifecycleFold } from './LifecycleFold'
 import { ClassMixTip, Tooltip } from './Tooltip'
-import { ScanRunLink, scansHref, useScanRunOf } from './scanRunsUi'
+import { scansHref, useScanRunOf } from './scanRunsUi'
 import { ReadThroughBanner } from './ReadThroughLi'
 import { readDay, readLogged, readThrough, readThroughText, unloggedOf } from './readLens'
 import { useReadTint } from './readTint'
@@ -1142,7 +1142,8 @@ function AppContent() {
         <div>published {fmtTimestamp(meta.published)}</div>
       )}
       <div><b>{fmtBytes(meta.total_bytes)}</b> · <b>{fmtN(meta.total_objects)}</b> objects across {store.rootLabel}</div>
-      {asof && <ScanRunLink store={store} scan={asof} />}
+      {/* the run itself is the chip's link; the tip says how it went and what started it */}
+      {scanRun && <div>{scanRun.status !== 'succeeded' ? `run ${scanRun.status}` : 'run succeeded'}{scanRun.trigger && <> · {scanRun.trigger}</>}</div>}
       {estCost && (
         <div>
           est. <b>${Math.round(estCost.list).toLocaleString()}/mo</b> at list price
