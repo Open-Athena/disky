@@ -34,8 +34,18 @@ describe('readThrough', () => {
     ])
   })
 
-  it('is null on a scan published before the field, and on no access window', () => {
-    expect([readThrough({ from: 100, to: 110 }, '1970-04-22T07:00:00Z'), readThrough(undefined)]).toEqual([null, null])
+  it('falls back to the window\'s last day on a scan published before the field (day precision), and is null with no window', () => {
+    expect([
+      readThrough({ from: 100, to: 110 }, '1970-04-22T07:00:00Z'),
+      readThrough({ from: 100, to: 110 }, '1970-04-21T20:00:00Z'),
+      readThrough({ from: 100, to: 110 }),
+      readThrough(undefined),
+    ]).toEqual([
+      { day: 110, label: '1970-04-21', provisional: true },
+      { day: 110, label: '1970-04-21', provisional: false },
+      { day: 110, label: '1970-04-21', provisional: false },
+      null,
+    ])
   })
 
   it('refuses a malformed value', () => {
@@ -152,9 +162,9 @@ describe('idleness', () => {
     ])
   })
 
-  it('has no verdict without `through` (an older scan) or on an unlogged path', () => {
+  it('counts an older scan (no `through`) from its window\'s last day; no verdict with no window or on an unlogged path', () => {
     expect([idleness(104, 95, { from: 100, to: 110 }), idleness(104, 95, undefined), idleness(104, 95, thru, false)])
-      .toEqual([null, null, null])
+      .toEqual([{ idle: true, days: 6 }, null, null])
   })
 
   it('labels and sorts: idle by days, not-idle below every idle, no verdict undefined', () => {

@@ -23,14 +23,23 @@ const HOUR_MS = 3600_000
  *  when the scan was taken after that hour ended (reads in the gap weren't delivered yet). */
 export interface ReadThrough { day: number, label: string, provisional: boolean }
 
-/** `access.through` on the lens's terms; `scanTime` (ISO) is when the scan was taken, if known. Null for
- *  a scan published before the field: the lens and the idle rule then keep reads alone. */
+/** `access.through` on the lens's terms; `scanTime` (ISO) is when the scan was taken, if known. A scan
+ *  published before the field falls back to its window's last day (`to`, the newest read's day), at day
+ *  precision: its logs end no earlier. Null with no access window. */
 export function readThrough(access: Meta['access'] | undefined, scanTime?: string | null): ReadThrough | null {
   const through = access?.through
-  if (!through) return null
+  const scanMs = scanTime ? Date.parse(scanTime) : NaN
+  if (!through) {
+    if (access?.to == null) return null
+    const end = (access.to + 1) * DAY_MS
+    return {
+      day: access.to,
+      label: new Date(access.to * DAY_MS).toISOString().slice(0, 10),
+      provisional: !Number.isNaN(scanMs) && end < scanMs,
+    }
+  }
   const ms = Date.parse(through)
   if (Number.isNaN(ms)) throw new Error(`access.through: not a time: ${through}`)
-  const scanMs = scanTime ? Date.parse(scanTime) : NaN
   return {
     day: Math.floor(ms / DAY_MS),
     label: `${new Date(ms).toISOString().slice(0, 16).replace('T', ' ')}Z`,
