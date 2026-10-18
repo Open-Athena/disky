@@ -2,6 +2,7 @@
 listing of current objects misses, from fake provider clients (the calls each class makes, paged as the APIs page)."""
 from __future__ import annotations
 
+import json
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
@@ -91,3 +92,18 @@ def test_cli_writes_one_row_per_class_with_the_prefix(monkeypatch, tmp_path):
         {"bucket": "bk", "class": "mpu", "prefix": "a/b/", "bytes": 0, "objects": 0, "oldest": None, "newest": None,
          "expires_min": None, "expires_max": None},
     ]
+
+
+def test_json_merges_each_buckets_rows_replacing_its_own(tmp_path):
+    """`-j`: the scan's `non-live.json` holds every bucket measured; a bucket measured again replaces only its rows."""
+    path = tmp_path / "snap" / "non-live.json"
+    nl.merge_json(path, [nl.Total("b2", "mpu", bytes=1, objects=1)])
+    nl.merge_json(path, [nl.Total("a1", "soft-deleted", bytes=40, objects=2, oldest=T(15), newest=T(18, 3), expires_min=T(22), expires_max=T(25))])
+    nl.merge_json(path, [nl.Total("b2", "mpu", bytes=7, objects=2)])
+    row = lambda b, c, n, o, **t: {"bucket": b, "class": c, "prefix": "", "bytes": n, "objects": o,  # noqa: E731
+                                   **{k: None for k in ("oldest", "newest", "expires_min", "expires_max")}, **t}
+    assert json.loads(path.read_text()) == {"rows": [
+        row("a1", "soft-deleted", 40, 2, oldest="2026-10-15T00:00:00Z", newest="2026-10-18T03:00:00Z",
+            expires_min="2026-10-22T00:00:00Z", expires_max="2026-10-25T00:00:00Z"),
+        row("b2", "mpu", 7, 2),
+    ]}

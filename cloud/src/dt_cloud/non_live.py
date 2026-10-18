@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import asdict, dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -152,6 +152,23 @@ def measure(uri: str, classes: list[str], endpoint: str | None = None) -> list[T
     return out
 
 
+def json_row(t: Total) -> dict:
+    """A row as the site reads it (`non-live.json`): times as ISO 8601 UTC seconds."""
+    return {k: (v.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ") if isinstance(v, datetime) else v) for k, v in t.row().items()}
+
+
+def merge_json(path: Path, totals: list[Total]) -> None:
+    """`path`'s rows (`{"rows": [...]}`, every bucket measured this scan) with these totals' bucket(s) replaced, sorted by
+    bucket then class; written whole (a temp file, then a rename)."""
+    buckets = {t.bucket for t in totals}
+    rows = [r for r in (json.loads(path.read_text())["rows"] if path.exists() else []) if r["bucket"] not in buckets]
+    rows = sorted([*rows, *(json_row(t) for t in totals)], key=lambda r: (r["bucket"], CLASSES.index(r["class"])))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps({"rows": rows}, indent=1) + "\n")
+    tmp.replace(path)
+
+
 def table(totals: list[Total]) -> pa.Table:
     return pa.Table.from_pylist([t.row() for t in totals], schema=SCHEMA)
 
@@ -159,9 +176,10 @@ def table(totals: list[Total]) -> pa.Table:
 @command("non-live")
 @option("-c", "--classes", required=True, help=f"Comma-separated classes to measure ({', '.join(CLASSES)}); each must be one the source's provider has")
 @option("-E", "--endpoint", help="S3 API endpoint (CAIOS, R2; GCS's XML API by default for its multipart uploads)")
-@option("-o", "--out", help="Write the totals here as parquet (a local path); else print them as JSON lines")
+@option("-j", "--json", "json_out", help="Merge the totals into this JSON file (a scan's `non-live.json`: every bucket's rows, this one's replaced)")
+@option("-o", "--out", help="Write the totals here as parquet (a local path); else (and no -j) print them as JSON lines")
 @argument("uri")
-def non_live_cmd(classes, endpoint, out, uri) -> None:
+def non_live_cmd(classes, endpoint, json_out, out, uri) -> None:
     """Total the non-live bytes of one bucket (URI: `gs://`, `s3://`, `r2://`, optionally with a prefix): per class, its
     bytes, objects, oldest/newest and expiry where known (specs/non-live-bytes.md, phase 1). Read-only."""
     want = [c.strip() for c in classes.split(",") if c.strip()]
@@ -170,9 +188,12 @@ def non_live_cmd(classes, endpoint, out, uri) -> None:
     totals = measure(uri, want, endpoint)
     for t in totals:
         err(f"non-live {t.bucket} {t.cls}: {t.bytes:,} B in {t.objects:,}" + (f", expiring by {t.expires_max:%Y-%m-%d}" if t.expires_max else ""))
+    if json_out:
+        merge_json(Path(json_out), totals)
     if out is None:
-        for t in totals:
-            print(json.dumps(t.row(), default=str))
+        if not json_out:
+            for t in totals:
+                print(json.dumps(t.row(), default=str))
         return
     Path(out).parent.mkdir(parents=True, exist_ok=True)
     pq.write_table(table(totals), out)
