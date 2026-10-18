@@ -69,6 +69,15 @@ Per-scan labels and the read-only resource/cost CLI shipped with user approval o
 
 Order: the `scan retire` deletes (per-scan sorts, ≈1.61 TB once verify markers pass; Ryan runs `-x -b`), then the raw listings' retirement (2.59 TB; they stay, with no interim TTL, until the interval store carries GCS `generation` and the sweep resolves held objects from it, a backfill that also renames `c2`/`c3`/`c4` → `nearline_bytes`/`coldline_bytes`/`archive_bytes`), then the two items below, while little data is left.
 
+### GCS `generation` in the interval store (cloud `2ca8fb9f`, `7f83edc5`, `de3da8c4`)
+
+After verify + retire, each run and the CURRENT move on Ryan's go:
+
+1. Backfill on Batch (never the laptop): `dt-cloud interval-store backfill-generation -o gs://oa-gcs-usage-dvx -O 2026-10-09b.g -s /mnt/disks/oa-gcs-usage-dvx -l 'listing/{id}/*/*.parquet' -w /stage/work -M 100GB -p 16` writes a new generation (the source and `CURRENT.json` untouched).
+2. In the same change, gcs's class-column rename (`interval_store.CLASS_COLS`, site `IV_CLASS_COLS` → `nearline_bytes` / `coldline_bytes` / `archive_bytes`). It can't ship before the switch: the site reads the current generation's columns by name.
+3. `r2-copy -g <new>` → `interval-store verify` → `interval-store current -s <new>` + `INTERVAL_STORE_GEN` → `PATH_INDEX_GENERATION=1` in the job (`path-index -G`) → `add -g <new>` for scans that landed on the old generation meanwhile. Switch soon after the backfill.
+4. Then the sweep resolves held items from the store (`sweep manifest -H auto -i …`) and the raw listings can retire.
+
 ### Move off `oa-gcs-usage-dvx`
 
 The data bucket's "dvx" name is wrong; the target is `oa-gcs-usage-data`, named like cw's / hf's / r2's. GCS can't rename a bucket, so:
