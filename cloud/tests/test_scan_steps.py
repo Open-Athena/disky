@@ -731,6 +731,20 @@ def test_non_live_measures_each_bucket_source(tmp_path, env):
     assert n.sh_impl.calls == []
 
 
+def test_non_live_passes_each_source_its_providers_classes(tmp_path, env):
+    """A mixed deployment (hf's meta: a GCS data bucket + an R2 bucket) lists the union: each source measures only the
+    classes its provider has, and one with none (R2 asked for `soft-deleted` only) is skipped, never refused per run."""
+    sources = ["gcs://data", "r2://idx", {"uri": "s3://v", "endpoint": "https://s3.example.org"}]
+    c = ctx(tmp_path, {**env, "R2_ENDPOINT": "https://r2.example"}, steps=["non-live"], sources=sources,
+            options={"non-live": {"classes": ["soft-deleted", "delete-marker"]}, **NL_OPTS})
+    S.non_live(c, None)
+    out = "<tmp>/data/l2/2026-10-16T1200/non-live"
+    assert c.sh_impl.calls == [
+        f"dt-cloud non-live -c soft-deleted -o {out}/data.parquet gcs://data",
+        f"dt-cloud non-live -c delete-marker -E https://s3.example.org -o {out}/v.parquet s3://v",
+    ]
+
+
 def test_retire_layer1_passes_the_listing_layouts_shards(tmp_path, env):
     """`layer1: true`: the raw listing shards under `layout.listing` (`-1`); without a `layout.listing`, none (warned)."""
     opts = {"static-names": {"gen": "s1"}, "digest": {"template": "t", "config": "c.yml"}, "retire": {"keep": 2, "layer1": True, "store": "gs://iv"}}
