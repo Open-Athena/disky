@@ -989,6 +989,27 @@ def _snap_root(ctx: Ctx) -> str:
     return f"{ctx.env.get('R2_ARCHIVE') or ctx.data_uri}/{ctx.snapshots}"
 
 
+@step("non-live", core=False, soft=True, options={"classes": list})
+def non_live(ctx: Ctx, arg: str | None) -> None:
+    """Each source's non-live bytes (`dt-cloud non-live`, specs/non-live-bytes.md phase 1): per class of
+    `options.non-live.classes` (each one the sources' provider has: `soft-deleted` on GCS, `noncurrent` /
+    `delete-marker` on S3, `mpu`), the bytes the listing of current objects misses, totaled per bucket into
+    `<layer2>non-live/<bucket>.parquet` (a few rows: kept per scan, the totals' history). Read-only; off unless the
+    profile lists it in `steps`. Never fatal: a failure warns, the scan's other outputs stand."""
+    classes = ctx.opt("non-live", "classes", [])
+    if not classes:
+        err("non-live: no options.non-live.classes: nothing measured")
+        return
+    with ctx.phase("non-live"):
+        for src in ctx.profile.sources:
+            if src.kind == "hf":
+                continue  # the Hub's held bytes are in the listing (`@history`)
+            endpoint = src.endpoint or (ctx.env.get("R2_ENDPOINT") if src.kind == "r2" else None)
+            ctx.sh(["dt-cloud", "non-live", "-c", ",".join(classes), *(["-E", endpoint] if endpoint else []),
+                    "-o", ctx.data_root / ctx.layer2 / "non-live" / f"{src.bucket}.parquet", src.uri],
+                   fatal=False, warn=f"non-live failed on {src.uri} (the scan's other outputs stand)")
+
+
 @step("healthcheck", core=False, soft=True)
 def healthcheck(ctx: Ctx, arg: str | None) -> None:
     """Is the site serving the scan (`dt-cloud healthcheck -d`: fresh, subtree + the data JSONs serve)? A failure

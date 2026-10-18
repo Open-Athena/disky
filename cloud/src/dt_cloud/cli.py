@@ -3295,6 +3295,10 @@ from .d1_schema import cli as _d1_schema  # noqa: E402
 
 main.add_command(_d1_schema)
 
+from .non_live import non_live_cmd as _non_live  # noqa: E402
+
+main.add_command(_non_live)
+
 
 @main.group("secrets")
 def _secrets() -> None:
