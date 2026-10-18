@@ -55,3 +55,15 @@ export function fromUrlPath(path: string): string[] {
 
 /** Each actual dir name encoded, URL delimiters and literal `%` included. */
 export const toUrlPath = (segs: string[]): string => segs.map(encodeURIComponent).join('/')
+
+const leads = (segs: readonly string[], head: readonly string[]): boolean => head.every((h, i) => segs[i] === h)
+
+/** A store path (segments from the store's data root) from a URL path's segments below the store's route: a store's
+ * `root` (`Store.root`) is its mount, left out of its URLs, so it leads every path. A URL that still spells the root
+ * out (a link from before the mount) reads as the same path. */
+export const mountedSegs = (root: readonly string[] | undefined, urlSegs: string[]): string[] =>
+  !root?.length || leads(urlSegs, root) ? urlSegs : [...root, ...urlSegs]
+
+/** `mountedSegs`' inverse: a store path's URL segments, its root left out. */
+export const urlSegsOf = (root: readonly string[] | undefined, segs: string[]): string[] =>
+  root?.length && leads(segs, root) ? segs.slice(root.length) : segs
