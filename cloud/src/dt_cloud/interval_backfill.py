@@ -78,8 +78,14 @@ def gen_index(con, root: Store, template: str, scans: list[dict], work: Path) ->
     for s in scans:
         tmp = work / "listings" / s["id"]
         files = listing_files(root, template, s["id"], tmp)
-        if not files or ist.GENERATION not in pq.read_schema(files[0]).names:
+        without = [f for f in files if ist.GENERATION not in pq.read_schema(f).names]
+        if without and len(without) < len(files):
+            raise SystemExit(f"{s['id']}: {template!r} matches {len(files)} files, {len(without)} without a `{ist.GENERATION}` column "
+                             f"({', '.join(without[:3])}): narrow it to the listing shards")
+        if without or not files:
+            err(f"backfill: {s['id']}: skipped, " + (f"no `{ist.GENERATION}` in its {len(files)} shards" if files else f"nothing matches {template!r}"))
             skipped.append(s["id"])
+            shutil.rmtree(tmp, ignore_errors=True)
             continue
         t0 = monotonic()
         src = prepare_listing(con, tuple(files))

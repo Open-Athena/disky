@@ -275,6 +275,22 @@ def test_backfill_refuses_an_existing_generation_or_one_that_has_it(world, backf
     assert (res.exit_code, res.output.strip().splitlines()[-1]) == (1, f"{backfilled['store']}/{ist.PREFIX}/g2: already carries `generation`")
 
 
+def test_backfill_refuses_a_template_matching_files_with_and_without_generation(world, off, tmp_path):
+    """A template that also matches a non-listing parquet sorting first (gcs's `listing/{id}/dir-cache/age-days.parquet`
+    under `listing/{id}/*/*.parquet`) is refused, naming it, instead of skipping every scan."""
+    root = tmp_path / "world"
+    shutil.copytree(world, root)
+    stray = root / "listing" / SCANS[GEN_FROM] / "dir-cache" / "age-days.parquet"
+    stray.parent.mkdir(parents=True)
+    pq.write_table(pa.table({"age_days": [1]}), stray)
+    store = tmp_path / "store"
+    shutil.copytree(off["store"], store)
+    args = ["-o", str(store), "-O", "g2", "-s", str(root), "-l", LISTING, "-w", str(tmp_path / "w")]
+    res = CliRunner().invoke(ib.backfill_cmd, args)
+    assert (res.exit_code, res.output.strip().splitlines()[-1]) == (
+        1, f"{SCANS[GEN_FROM]}: {LISTING!r} matches 2 files, 1 without a `generation` column ({stray}): narrow it to the listing shards")
+
+
 def test_a_backfilled_generation_takes_appends_and_verifies(world, backfilled, tmp_path):
     store = tmp_path / "store"
     shutil.copytree(backfilled["store"], store)

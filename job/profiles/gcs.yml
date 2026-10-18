@@ -93,6 +93,9 @@ options:
   interval-store: {profile: /app/job/interval-store.json, merge_wait: 1800, timeout: 60m}
   index-sync: {retain: 30}
   digest: {template: gcs, config: /app/job/digest.yml, platforms: [slack, discord]}
+  # the hourly poller (`gcs-access-ingest-hourly`, job/access-submit.sh) ingests the usage logs as they land; the scan
+  # leaves `access-ingest` out and `index` reads `access/agg` as it stands (`meta.access.through`)
+  access-ingest: {poller: true}
   # the per-scan sorts the interval store + static index make redundant (specs/lean-scans.md §2): a dry run (the plan
   # in the log) until Ryan runs the first deletes by hand (`scan retire -x -b`); only scans with a passing verify marker
   retire: {keep: 2, execute: false, markers_only: true, store: gs://oa-gcs-usage-dvx, static_gen: 2026-10-08c,

@@ -43,6 +43,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -136,6 +137,22 @@ class _Printer:
             note = f"failed (exit {rc})" + (f", {note}" if note else "")
         err(phase_line(name, self._clock(), note))
         return 0 if warn else rc
+
+
+def cpu_quota(cgroup: Path) -> int | None:
+    """The CPUs a cgroup's quota allows, rounded up (v2 `cpu.max`, else v1 `cpu.cfs_quota_us` / `cpu.cfs_period_us`);
+    None without one. A container's affinity can list the host's CPUs (Fargate: 4 on a 1-vCPU task), and threads past
+    the quota only add contention."""
+    try:
+        quota, period = (cgroup / "cpu.max").read_text().split()
+        return None if quota == "max" else -(-int(quota) // int(period))
+    except (OSError, ValueError):
+        pass
+    try:
+        q, p = int((cgroup / "cpu/cpu.cfs_quota_us").read_text()), int((cgroup / "cpu/cpu.cfs_period_us").read_text())
+    except (OSError, ValueError):
+        return None
+    return -(-q // p) if q > 0 else None
 
 
 @dataclass
@@ -232,7 +249,18 @@ class Ctx:
 
     @property
     def nproc(self) -> int:
-        return len(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity") else os.cpu_count() or 1
+        cpus = len(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity") else os.cpu_count() or 1
+        quota = cpu_quota(Path(self.env.get("DT_CGROUP") or "/sys/fs/cgroup"))
+        return min(cpus, quota) if quota else cpus
+
+    def fill_env(self, template: str) -> str:
+        """`template` with each `{env:NAME}` filled from the task's env (a step fails on an unset one)."""
+        def var(m: re.Match[str]) -> str:
+            v = (self.env.get(m[1]) or "").strip()
+            if not v:
+                raise StepFailed(2, f"{template}: ${m[1]} unset")
+            return v
+        return re.sub(r"\{env:([A-Za-z_][A-Za-z0-9_]*)\}", var, template)
 
     def expand(self, args: Sequence[str], **extra: object) -> list[str]:
         """`args` with `{nproc}`, `{scan}`, `{date}`, `{gen}`, `{work}`, `{data}` (the data store's local root,
@@ -389,6 +417,42 @@ def access_ingest(ctx: Ctx, arg: str | None) -> None:
                warn="access ingest failed (read recency lags until the next run's ingest)")
 
 
+#: Where `access-r2` keeps the read aggregate in the data store (`options.index.access` names it).
+ACCESS_R2_KEY = "access/r2/agg.parquet"
+
+
+def _access_r2_check(p: ScanProfile) -> list[str]:
+    if p.opts("access-r2").get("state"):
+        return []
+    return ["options.access-r2.state: required (the collector archive's `state.json`, e.g. `r2://<archive>/state.json`)"]
+
+
+@step("access-r2", core=False, stage="pre", soft=True, options={"state": str, "out": str, "endpoint": str}, requires=_access_r2_check)
+def access_r2(ctx: Ctx, arg: str | None) -> None:
+    """The R2 access collector's read aggregates → one layer-2a parquet for `index` (`options.index.access`), beside
+    `list`: `dt-cloud access r2-agg -s <state>`, every hour the collector's `state.json` names, cut at the scan's
+    instant. Cumulative (all reads before the scan), so it replaces the data store's one key (`out`, default
+    `access/r2/agg.parquet`) rather than adding a shard. No reads yet, or a failure: the earlier aggregate stays (valid as
+    of its scan) and `index` runs with it. The collector archive's key goes in `options.access-r2.secrets`, its endpoint
+    in `endpoint` (default `$R2_ENDPOINT`), set for this one command only."""
+    if ctx.reproc:
+        err("access-r2 off under REPROC")
+        return
+    local = ctx.work / "access-r2" / "agg.parquet"
+    endpoint = ctx.opt("access-r2", "endpoint") or ctx.env.get("R2_ENDPOINT")
+    env = {"DISK_TREE_R2_ENDPOINT_URL": str(endpoint)} if endpoint else {}
+    with ctx.phase("access-r2"):
+        ran = ctx.sh(["dt-cloud", "access", "r2-agg", "-d", ctx.scan, "-o", local, "-s", ctx.opt("access-r2", "state")], fatal=False,
+                     env=env, warn="r2 read aggregate failed (the index reads the previous one)")
+        if ran is None or not local.exists():
+            return
+        key = ctx.data_root / str(ctx.opt("access-r2", "out", ACCESS_R2_KEY))
+        key.parent.mkdir(parents=True, exist_ok=True)
+        tmp = key.with_name(key.name + ".tmp")
+        shutil.copyfile(local, tmp)
+        tmp.replace(key)
+
+
 def s3_client(endpoint: str | None):
     """A virtual-hosted client (CAIOS rejects path-style object calls, `PathStyleRequestNotAllowed`)."""
     import boto3
@@ -466,10 +530,15 @@ def list_source(ctx: Ctx, uri: str | None) -> None:
         return
     if not imports and ctx.done(listing / "_SUCCESS.json", "listing"):
         return
-    _raise_nofile()
-    threads = src.threads or ctx.opt("list", "threads")
     # an `r2://` source without its own endpoint is the deployment's R2 (`$R2_ENDPOINT`, a secret where the profile is public)
     endpoint = src.endpoint or (ctx.env.get("R2_ENDPOINT") if src.kind == "r2" else None)
+    if src.listing:
+        url = ctx.fill_env(src.listing)
+        with ctx.phase(f"list {b}"):
+            ctx.sh(["dt-cloud", "fetch-listing", "-o", listing, url], env={env_name("R2_ENDPOINT_URL"): endpoint} if endpoint else None)
+        return
+    _raise_nofile()
+    threads = src.threads or ctx.opt("list", "threads")
     weights: list[str] = []
     if ctx.opt("list", "weights", False):
         prior = ctx.prior_listing(b)
@@ -497,16 +566,16 @@ def _index_check(p: ScanProfile) -> list[str]:
         problems = [f"options.index.{k}: only with mode layer2" for k in ("webdata", "threads") if k in o]
         if p.opts("list").get("import"):
             problems.append("options.list.import: path-index reads the listings themselves (no per-source layer-2)")
-        if urlparse(p.data).scheme not in ("gs", "gcs"):
-            problems.append("data: a gs:// bucket with options.index.mode path-index (its inputs are staged from GCS)")
+        if urlparse(p.data).scheme not in ("gs", "gcs", ""):
+            problems.append("data: a gs:// bucket or a local dir with options.index.mode path-index (its inputs are staged from GCS or read in place)")
         return problems
     return [f"options.index.{k}: only with mode path-index" + (" (index-write writes the age pyramids itself)" if k == "age_pyramids" else "")
-            for k in ("attribution", "access", "rules", "age_pyramids", "verify") if k in o]
+            for k in ("attribution", "access", "rules", "age_pyramids", "verify", "annotate") if k in o]
 
 
 @step("index", skippable=False, stage="index", requires=_index_check,
       options={"mode": str, "webdata": list, "lifecycle": bool, "mem": str, "threads": int, "args": list,
-               "attribution": list, "access": str, "rules": bool, "age_pyramids": bool, "verify": bool})
+               "attribution": list, "access": str, "rules": bool, "age_pyramids": bool, "verify": bool, "annotate": list})
 def index(ctx: Ctx, arg: str | None) -> None:
     """Every source's layer-2 (imported here from the listings unless `list` did), the snapshot JSONs
     (`options.index.webdata`: the deployment's command, `{web}` its out dir, `{sources}` the `<bucket>=<layer-2>` args),
@@ -604,33 +673,44 @@ def path_index(ctx: Ctx) -> None:
     `options.index.age_pyramids`: the age chart's tiers from the `path` sort (`dt-cloud age-pyramid -c`, checked against
     it), beside the sorts. `options.index.verify`: `dt-cloud index-verify` checks the index against the listings it was
     built from (per-bucket and total bytes / objects, the snapshot totals and age histogram, the age pyramids and the
-    `bysize` sort, where written) and writes `verification.json` beside the tiers; a mismatch fails the step."""
-    store = ctx.data_uri.split("://", 1)[1]  # `<bucket>[/<prefix>]`
+    `bysize` sort, where written) and writes `verification.json` beside the tiers; a mismatch fails the step.
+    `options.index.annotate`: a command run on the snapshot after the aggregation, before the checks and the publish
+    (`{snap}`: its dir; `{listing}`: the first source's listing dir)."""
     key_dir = ctx.data_root / ctx.index_key
     for s in ctx.profile.sources:
         ctx.need(ctx.listing_dir(s.bucket) / "_SUCCESS.json", "list")
     if ctx.done(key_dir / "path-index.parquet", "index tiers") and ctx.done(ctx.data_root / ctx.snapshots / ctx.scan / "meta.json", "snapshot"):
         return
-    gcs = lambda key: f"/gcs/{store}/{key}"  # noqa: E731 — `dt-cloud stage`'s glob form
-    lglobs = [gcs(f"{ctx.listing_key(s.bucket)}/*.parquet") for s in ctx.profile.sources]
-    attr = [gcs(a) for a in ctx.opt("index", "attribution", [])]
+    # A local data dir (the local executor's: one machine, no FUSE) is read in place; a GCS one is staged first.
+    on_disk = not urlparse(ctx.profile.data).scheme
+    store = ctx.data_uri.split("://", 1)[-1]  # `<bucket>[/<prefix>]`, or the dir
+    src = (lambda key: str(ctx.data_root / key)) if on_disk else (lambda key: f"/gcs/{store}/{key}")  # `dt-cloud stage`'s glob form
+    lglobs = [src(f"{ctx.listing_key(s.bucket)}/*.parquet") for s in ctx.profile.sources]
+    attr = [src(a) for a in ctx.opt("index", "attribution", [])]
     access = ctx.opt("index", "access")
-    xglobs = [gcs(access)] if access and next(iter(ctx.data_root.glob(access)), None) else []
+    xglobs = [src(access)] if access and next(iter(ctx.data_root.glob(access)), None) else []
     if access and not xglobs:
         err(f"no access shards at {access}: the index runs without read recency")
     stage = ctx.work / "stage"
-    local = lambda g: str(stage / g.removeprefix("/gcs/"))  # noqa: E731
+    local = (lambda g: g) if on_disk else (lambda g: str(stage / g.removeprefix("/gcs/")))
     pi = ctx.work / "path-index"
     snap = ctx.work / "snap"
     pi.mkdir(parents=True, exist_ok=True)
     with ctx.phase("path-index"):
-        ctx.sh(["dt-cloud", "stage", "-o", stage, *lglobs, *[g.replace("*.parquet", "_SUCCESS.json") for g in lglobs], *attr, *xglobs])
+        if not on_disk:
+            ctx.sh(["dt-cloud", "stage", "-o", stage, *lglobs, *[g.replace("*.parquet", "_SUCCESS.json") for g in lglobs], *attr, *xglobs])
         tmp = stage / ".duckdb-tmp"
         tmp.mkdir(parents=True, exist_ok=True)
         ctx.sh(["dt-cloud", "path-index", "-d", ctx.scan, *[a for g in lglobs for a in ("-l", local(g))],
                 *[a for g in attr for a in ("-a", local(g))], *[a for g in xglobs for a in ("-x", local(g))],
                 "-o", snap, "-c", ctx.data_root / ctx.listing_key("dir-cache"), "-P", pi / "path-index.parquet",
                 *ctx.opt("index", "args", [])], env={"DUCKDB_TMP": str(tmp)})
+    annotate = ctx.opt("index", "annotate")
+    if annotate:
+        # the deployment's own stamp on the snapshot before it's checked and published (m3: `disk-tree capture-meta`,
+        # the capture's physical disk/VM bytes); `{snap}` the snapshot dir, `{listing}` the first source's listing dir
+        with ctx.phase("annotate"):
+            ctx.sh(ctx.expand(annotate, snap=snap, listing=ctx.listing_dir(ctx.profile.sources[0].bucket)))
     duck = [*(["-m", ctx.opt("index", "mem")] if ctx.opt("index", "mem") else []), "-t", ctx.nproc]
     if ctx.opt("index", "age_pyramids", False):
         with ctx.phase("age-index"):
@@ -644,7 +724,11 @@ def path_index(ctx: Ctx) -> None:
         files = sorted((f for f in pi.iterdir() if f.is_file() and not f.name.startswith(".")),
                        key=lambda f: (f.name == "path-index.parquet", f.name))
         err(f"uploading {len(files)} files ({sum(f.stat().st_size for f in files) / 1e9:.1f} GB) to {ctx.data_uri}/{ctx.index_key}/")
-        upload(files, f"{ctx.data_uri}/{ctx.index_key}")
+        if on_disk:
+            for f in files:
+                copy_atomic(f, key_dir / f.name)
+        else:
+            upload(files, f"{ctx.data_uri}/{ctx.index_key}")
     _publish(ctx, snap)
 
 
@@ -679,7 +763,9 @@ def static_names(ctx: Ctx, arg: str | None) -> None:
             err(f"static-names: not appending {ctx.scan} (no store: options.static-names.store or R2)")
             return
         layout = ctx.profile.layout.layer2.replace("{scan}", "{id}") + "index/{gen}/path-index.parquet"
-        args = ["-g", gen, "-L", layout, "-s", ctx.data_uri, "-o", store, "-w", ctx.work / "static-names", "-p", ctx.nproc,
+        # a local data dir holds only this scan, so the store (where publish-r2 put it, before this step) is the source
+        source = ctx.data_uri if urlparse(ctx.profile.data).scheme else store
+        args = ["-g", gen, "-L", layout, "-s", source, "-o", store, "-w", ctx.work / "static-names", "-p", ctx.nproc,
                 *(["-M", ctx.opt("static-names", "mem")] if ctx.opt("static-names", "mem") else [])]
         with ctx.phase("static-names", note="overlapped"):
             sub = (["add", *args] if ctx.store_has(store, f"static-names/{gen}/scans.json")
@@ -708,8 +794,10 @@ def publish_r2(ctx: Ctx, arg: str | None) -> None:
             return
         fill = dict(snapshots=ctx.snapshots, scan=ctx.scan, index=ctx.index_key)
         req = [a for k in ctx.opt("publish-r2", "require", []) for a in ("-R", k.format(**fill))]
-        runs = [["dt-cloud", "publish-r2", *ctx.opt("publish-r2", "args", []), "-a", *req, ctx.scan]]
-        runs += [["dt-cloud", "publish-r2", "-a", "-p", k, "-R", k, ctx.scan] for k in ctx.opt("publish-r2", "keys", [])]
+        # A local data dir is its own source; a GCS one is the env's `$DATA_BUCKET`.
+        src = [] if urlparse(ctx.profile.data).scheme else ["-b", str(ctx.data_root.resolve())]
+        runs = [["dt-cloud", "publish-r2", *src, *ctx.opt("publish-r2", "args", []), "-a", *req, ctx.scan]]
+        runs += [["dt-cloud", "publish-r2", *src, "-a", "-p", k, "-R", k, ctx.scan] for k in ctx.opt("publish-r2", "keys", [])]
         for argv in runs:
             if ctx.sh(argv, fatal=False, warn=f"publish-r2 failed for {ctx.scan} (the site keeps serving the data store)") is None and barrier:
                 raise StepFailed(1, f"publish-r2 failed for {ctx.scan}: D1 pointers were not advanced, so the previous scan "
@@ -765,8 +853,10 @@ def interval_store(ctx: Ctx, arg: str | None) -> None:
 
 def _sync_args(ctx: Ctx) -> list[str]:
     """Both halves' arguments: the generation, the store, and `options.index-sync.variants` (`-v` each; default every
-    variant the generation holds)."""
-    return [*store_args(ctx), "-d", str(ctx.data_root / ctx.index_key), "-g", ctx.gen, "-k", ctx.index_key,
+    variant the generation holds). A local `data:` dir (the local executor's) is not what the site reads: `-b` names
+    the R2 bucket (`publish-r2` filled it first), where the pointer flip checks the generation is uploaded."""
+    site = ["-b", f"r2://{ctx.env['R2_BUCKET']}"] if ctx.profile.data_bucket is None and ctx.has(*R2) else []
+    return [*store_args(ctx), *site, "-d", str(ctx.data_root / ctx.index_key), "-g", ctx.gen, "-k", ctx.index_key,
             *[a for v in ctx.opt("index-sync", "variants", []) for a in ("-v", v)]]
 
 
@@ -849,10 +939,11 @@ def _retire_check(p: ScanProfile) -> list[str]:
 
 
 @step("retire", core=False, soft=True, options={"keep": int, "execute": bool, "static_gen": str, "static_store": str, "store": str,
-                                                "layer2": bool, "copies": list, "backup": str, "markers_only": bool},
+                                                "layer2": bool, "layer1": bool, "copies": list, "backup": str, "markers_only": bool},
       requires=_retire_check)
 def retire(ctx: Ctx, arg: str | None) -> None:
-    """Retire the per-scan sorts, footers, search sidecars (and, `layer2: true`, layer-2 listings) of every scan but the
+    """Retire the per-scan sorts, footers, search sidecars (and, `layer2: true`, layer-2 listings; `layer1: true`, the raw
+    listing shards under `layout.listing`) of every scan but the
     newest `keep` that both stores hold and a parity marker vouches for (`dt-cloud scan retire`; specs/lean-scans.md §2).
     Off unless the profile lists it in `steps`; a dry run (the plan in the log) unless `execute: true`. The data store
     first, then each of `copies` (a root, or `r2` for `$R2_ARCHIVE`; D1 left to the first). `store` / `static_store`: the
@@ -871,7 +962,13 @@ def retire(ctx: Ctx, arg: str | None) -> None:
         err("retire: no interval store (options.retire.store, options.interval-store.store or R2): nothing retired")
         return
     l2 = ctx.profile.layout.layer2.replace("{scan}", "{id}")
-    common = ["-G", static_gen, "-k", o["keep"], "-L", l2 + "index/{gen}/path-index.parquet", *(["-l", l2 + "*.parquet"] if o.get("layer2") else []),
+    l1 = []
+    if o.get("layer1"):
+        if ctx.profile.layout.listing is None:
+            err("retire: options.retire.layer1 without layout.listing: raw listings kept")
+        else:
+            l1 = ["-1", ctx.profile.layout.listing.replace("{scan}", "{id}") + "*/shard-*.parquet"]
+    common = ["-G", static_gen, "-k", o["keep"], "-L", l2 + "index/{gen}/path-index.parquet", *(["-l", l2 + "*.parquet"] if o.get("layer2") else []), *l1,
               *(["-m"] if o.get("markers_only") else []), "-o", store, "-S", static_store, *store_args_t(ctx), "-w", ctx.work / "retire",
               *(["-x"] if o.get("execute") else [])]
     roots = [ctx.data_uri, *(archive if c == "r2" else c for c in o.get("copies", []))]
@@ -1009,13 +1106,34 @@ def r2_profile(env: dict[str, str], home: Path | None = None) -> None:
     env["R2_ARCHIVE"] = f"r2://{env['R2_BUCKET']}"
 
 
+#: The prefix of a base64-encoded `$DT_SCAN_PROFILE_JSON` (`profile_env_value`).
+PROFILE_B64 = "base64:"
+
+
+def profile_env_value(profile_json: str) -> str:
+    """The head's `$DT_SCAN_PROFILE_JSON` for its tasks: base64, since Nextflow writes an `env` scope value into each
+    task's script as `export NAME="<value>"` with inner double quotes unescaped (raw JSON reached the task as
+    `{data:…}`); base64's alphabet means the same inside double quotes."""
+    import base64
+
+    return PROFILE_B64 + base64.b64encode(profile_json.encode()).decode()
+
+
+def profile_env_json(env: Mapping[str, str]) -> str:
+    """`$DT_SCAN_PROFILE_JSON` as JSON: decoded when the head encoded it (`profile_env_value`), as is when set by hand."""
+    import base64
+
+    v = env[PROFILE_JSON_ENV]
+    return base64.b64decode(v.removeprefix(PROFILE_B64), validate=True).decode() if v.startswith(PROFILE_B64) else v
+
+
 def load_profile_env(env: Mapping[str, str], path: str | None = None) -> ScanProfile:
     from . import scan_profile
 
     if path:
         return scan_profile.load(path)
     if env.get(PROFILE_JSON_ENV):
-        return scan_profile.parse(json.loads(env[PROFILE_JSON_ENV]), where=f"${PROFILE_JSON_ENV}")
+        return scan_profile.parse(json.loads(profile_env_json(env)), where=f"${PROFILE_JSON_ENV}")
     if env.get(PROFILE_PATH_ENV):
         return scan_profile.load(env[PROFILE_PATH_ENV])
     raise StepFailed(2, f"no profile: pass -p FILE, or set ${PROFILE_JSON_ENV} (the head does) or ${PROFILE_PATH_ENV}")
