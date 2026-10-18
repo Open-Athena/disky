@@ -9,7 +9,7 @@ const store: Store = {
   // (the store's `scope`); no ownership ledger, no trash gesture, no storage-class prices.
   key: 'meta',
   label: 'Meta',
-  title: 'Marin GCS — meta',
+  title: 'Marin GCS disky metadata',
   desc: 'The data behind gcs.oa.dev: scans, indexes and listings in oa-gcs-usage-dvx (GCS) and oa-gcs-usage-index (R2) — treemap, sizes over time, and diffs.',
   path: '/meta',
   scheme: 'gs://',
@@ -20,7 +20,7 @@ const store: Store = {
   owners: false,
   executor: 'plan-sweep',
   buckets: ['oa-gcs-usage-dvx', 'oa-gcs-usage-index'],
-  rootLabel: 'Marin GCS — meta',
+  rootLabel: 'Marin GCS disky metadata',
   objectsNote: 'Scan outputs are written once per job run and never rewritten in place, so created is the object’s publish time.',
   wall: {
     restrict: 'The meta store is limited to Open Athena staff.',
