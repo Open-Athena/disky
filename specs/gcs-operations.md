@@ -65,4 +65,24 @@ Per-scan labels and the read-only resource/cost CLI shipped with user approval o
 - Compaction, retention, long-tail fleet expansion, account-wide R2 token retirement and billing-export administration remain separate gates.
 - Changes are uncommitted/unpushed. Pages shipped with `-P`; its Git convenience pointer names HEAD, not complete dirty-source identity. Preserve build/deploy logs; shared fixes must follow the normal `cloud` workflow when commits are authorized.
 
+## After constant-size (2026-10-18; each infra step on Ryan's go)
+
+Order: the `scan retire` deletes (per-scan sorts, ≈1.61 TB once verify markers pass; Ryan runs `-x -b`), then the raw listings' retirement (2.59 TB; they stay, with no interim TTL, until the interval store carries GCS `generation` and the sweep resolves held objects from it, a backfill that also renames `c2`/`c3`/`c4` → `nearline_bytes`/`coldline_bytes`/`archive_bytes`), then the two items below, while little data is left.
+
+### Move off `oa-gcs-usage-dvx`
+
+The data bucket's "dvx" name is wrong; the target is `oa-gcs-usage-data`, named like cw's / hf's / r2's. GCS can't rename a bucket, so:
+
+1. Create the new bucket in `infra/gcp` (same location `US-EAST1`, soft-delete and lifecycle rules, `deployment`/`component` labels), the job SA's IAM on it. Note the old bucket is labelled `deployment: shared` (cw's `cw-l2/` and static names lived there before cw's 10/13 isolation): confirm nothing of cw's still reads it.
+2. Copy (Storage Transfer or `gcloud storage rsync`), then verify object counts and bytes per prefix.
+3. Repoint, in one change: `job/profiles/gcs.yml` + `gcs-meta.yml` (`work`, `data`, the meta store's source and the retire step's stores), `job/static-names.json`, `job/interval-store.json`, `job/batch-submit.sh` / `job/access-submit.sh` (`DATA_BUCKET`, the FUSE mounts), `site/wrangler.toml` (`STORE_BUCKET`, `STORES_JSON`), the Nextflow work dir (`gs://…/nf`, its resume cache stays behind: an in-flight scan can't resume across the move), the HMAC key's bucket access, and the Scheduler bodies via `pulumi up`.
+4. Run one scan end to end on the new bucket, then the site against it (dev, then prod).
+5. Delete the old bucket (a real delete: its own go, after a soak).
+
+Size today: ~9.5 TB, of which `listing/` 4.3 TB and `access/` 3.8 TB; after the two retirements above and an `access/raw/` retention, little is left.
+
+### Access-log retention (open question)
+
+`access/` is 3.84 TB of `access/raw/` (layer-1a: every parsed request row, 1,400 files) against 0.02 TB of `access/agg/` (layer-2a, what the read-recency lens reads) and a few MB of `sizes/` and `state/` (2026-10-18). The CSVs themselves already expire: the ingest moves them to `ingested/` in `marin-usage-logs`, 7-day TTL. Decide what still needs the raw rows (a re-aggregation after an `agg` format change, per-requester questions) and set a retention for `access/raw/` before the copy, so the move doesn't carry it.
+
 [duckdb-oom]: https://duckdb.org/docs/current/guides/performance/oom
