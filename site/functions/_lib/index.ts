@@ -981,7 +981,10 @@ export async function ivLastRead(env: Env, date: string, paths: string[], maxGro
  * names on a v1 index, the layer-2's on a store sort (§1.1). `usr` and the
  * class pivots only where the file has them (cw has neither). */
 export const V1_ROW_COLUMNS = ['path', 'depth', 'usr', 'b', 'o', 'wts', 'wb', 'a']
-export const IV_ROW_COLUMNS = ['depth', 'path', 'usr', 'vf', 'vt', 'kind', 'size', 'n_files', 'n_children', 'n_desc', 'mtime', 'wts', 'wb', 'private_bytes', 'git_bytes', 'us', 'last_read']
+/** The interval store's storage-class byte columns, by class (`interval_store.CLASS_COLS`): their one definition on
+ * the site, so a deployment that names its classes renames them here and there only. */
+export const IV_CLASS_COLS = { 5: 'private_bytes', 6: 'git_bytes' } as const
+export const IV_ROW_COLUMNS = ['depth', 'path', 'usr', 'vf', 'vt', 'kind', 'size', 'n_files', 'n_children', 'n_desc', 'mtime', 'wts', 'wb', IV_CLASS_COLS[5], IV_CLASS_COLS[6], 'us', 'last_read']
 export const V2_ROW_COLUMNS = ['path', 'depth', 'usr', 'kind', 'size', 'n_files', 'n_children', 'n_desc', 'mtime', 'mtime_mean', 'last_read', 'sum_storage_class_id_5', 'sum_storage_class_id_6']
 
 /** What a shaped read projects: a v1 index reads every column (its columns
@@ -1002,7 +1005,7 @@ export function rowColumns(version: number, schema: SchemaElement[]): string[] |
 export function columnsFor(h: IndexHandle, fields: (keyof Row)[]): string[] {
   const v2: Partial<Record<keyof Row, string[]>> = { size: ['size'], n_files: ['n_files'], last_read: ['last_read'], private_bytes: ['sum_storage_class_id_5'], git_bytes: ['sum_storage_class_id_6'], mtime_mean: ['mtime_mean', 'size'], mtime_w: ['mtime_mean', 'size'] }
   const v1: Partial<Record<keyof Row, string[]>> = { size: ['b'], n_files: ['o'], last_read: ['a'], private_bytes: [], git_bytes: [], mtime_mean: ['wts', 'wb'], mtime_w: ['wb'] }
-  const v3: Partial<Record<keyof Row, string[]>> = { size: ['size'], n_files: ['n_files'], last_read: ['last_read'], private_bytes: ['private_bytes'], git_bytes: ['git_bytes'], mtime_mean: ['wts', 'wb'], mtime_w: ['wb'], us: ['us', 'size'] }
+  const v3: Partial<Record<keyof Row, string[]>> = { size: ['size'], n_files: ['n_files'], last_read: ['last_read'], private_bytes: [IV_CLASS_COLS[5]], git_bytes: [IV_CLASS_COLS[6]], mtime_mean: ['wts', 'wb'], mtime_w: ['wb'], us: ['us', 'size'] }
   const map = h.version >= 3 ? v3 : isStore(h) ? v2 : v1
   const have = new Set(h.schema.slice(1).map(l => l.name))
   const out = new Set<string>()
@@ -1436,8 +1439,8 @@ const toRowV3 = (r: Record<string, unknown>): Row => {
     mtime_mean: wb > 0 ? num(r.wts) / wb : null,
     mtime_w: wb,
     last_read: r.last_read == null ? null : opt(r.last_read),
-    private_bytes: num(r.private_bytes),
-    git_bytes: num(r.git_bytes),
+    private_bytes: num(r[IV_CLASS_COLS[5]]),
+    git_bytes: num(r[IV_CLASS_COLS[6]]),
     us: r.us == null ? null : usMap(str(r.us), size),
     vf: num(r.vf),
     vt: num(r.vt),

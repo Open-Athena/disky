@@ -231,10 +231,10 @@ V2_SELECT = """depth::UTINYINT AS depth, path, coalesce({usr}, '') AS usr,
     CASE WHEN kind = 'file' THEN 'file' ELSE 'dir' END AS kind, size::BIGINT AS size, n_files::BIGINT AS n_files,
     coalesce({n_children}, -1)::BIGINT AS n_children, coalesce({n_desc}, -1)::BIGINT AS n_desc, coalesce({mtime}, -1)::BIGINT AS mtime,
     coalesce({mtime_mean}, 0)::DOUBLE AS mtime_mean, CASE WHEN {mtime_mean} IS NULL THEN 0 ELSE size END::BIGINT AS mtime_w,
-    coalesce({last_read}, -1)::INTEGER AS last_read, coalesce({private_bytes}, 0)::BIGINT AS private_bytes, coalesce({git_bytes}, 0)::BIGINT AS git_bytes"""
+    coalesce({last_read}, -1)::INTEGER AS last_read, coalesce({c5}, 0)::BIGINT AS private_bytes, coalesce({c6}, 0)::BIGINT AS git_bytes"""
 #: Columns a v2 sort may lack (read as NULL): no owner (`usr`), and a scan without private or git bytes has no pivot for them.
 V2_OPTIONAL = {"usr": "usr", "n_children": "n_children", "n_desc": "n_desc", "mtime": "mtime", "mtime_mean": "mtime_mean", "last_read": "last_read",
-               "private_bytes": "sum_storage_class_id_5", "git_bytes": "sum_storage_class_id_6"}
+               "c5": "sum_storage_class_id_5", "c6": "sum_storage_class_id_6"}
 V1_SELECT = """depth::UTINYINT AS depth, path, coalesce(usr, '') AS usr, 'dir' AS kind, b::BIGINT AS size, o::BIGINT AS n_files,
     -1::BIGINT AS n_children, -1::BIGINT AS n_desc, -1::BIGINT AS mtime,
     CASE WHEN coalesce(wb, 0) > 0 THEN coalesce(wts, 0) / wb ELSE 0 END::DOUBLE AS mtime_mean, coalesce(wb, 0)::BIGINT AS mtime_w,

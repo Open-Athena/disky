@@ -150,7 +150,7 @@ def test_serving_steps_commands(tmp_path, env):
     k = "l2/2026-10-16T1200/index/G1"
     assert c.sh_impl.calls == [
         "dt-cloud static-names runs add -c 2026-10-16T1200",
-        "dt-cloud publish-r2 -a 2026-10-16T1200",
+        "dt-cloud publish-r2 -b <tmp>/data -a 2026-10-16T1200",
         f"dt-cloud index-sync -r -d <tmp>/data/{k} -g G1 -k {k} 2026-10-16T1200",
         f"dt-cloud index-sync -p -d <tmp>/data/{k} -g G1 -k {k} -M <tmp>/data/snapshots/sub 2026-10-16T1200",
         "dt-cloud index-gc 2026-10-16T1200",
@@ -455,8 +455,9 @@ def test_hf_list_then_index(tmp_path, env, monkeypatch):
     (False, ["build"]),
 ])
 def test_static_names_one_machine(tmp_path, env, monkeypatch, has_gen, sub):
-    """`options.static-names.gen`: `static-names add` in the task, the data store's scans into R2's generation; `build`
-    (+ `build_args`) when R2 has none."""
+    """`options.static-names.gen`: `static-names add` in the task, the scans into R2's generation; `build` (+
+    `build_args`) when R2 has none. On a local data dir (this one's), which holds only this scan, the scans are read
+    from R2 itself, where publish-r2 put this one first."""
     monkeypatch.setattr(S.Ctx, "nproc", property(lambda self: 4))
     asked = []
     monkeypatch.setattr(S.Ctx, "store_has", lambda self, root, key: asked.append((root, key)) or has_gen)
@@ -466,7 +467,7 @@ def test_static_names_one_machine(tmp_path, env, monkeypatch, has_gen, sub):
     w = "<tmp>/t/dt-scan/2026-10-16T1200"
     tail = [] if has_gen else ["-x", "16,8"]
     assert (asked, c.sh_impl.calls) == ([("r2://r2b", "static-names/2026-10-15hf/scans.json")], [" ".join([
-        "dt-cloud static-names", *sub, "-g 2026-10-15hf -L listing/{id}/index/{gen}/path-index.parquet -s <tmp>/data",
+        "dt-cloud static-names", *sub, "-g 2026-10-15hf -L listing/{id}/index/{gen}/path-index.parquet -s r2://r2b",
         f"-o r2://r2b -w {w}/static-names -p 4 -M 8GB", *tail])])
 
 
@@ -722,3 +723,161 @@ def test_retire_failure_warns_and_needs_its_keep(tmp_path, env):
         "  options.retire.keep: required, ≥ 1 (the newest scans never retired)",
         "  options.retire.static_gen: required unless options.static-names.gen names the static index's generation",
     ]
+
+
+class AggRunner(Runner):
+    """`Runner`, and `access r2-agg` writes its `-o` (unless `empty`: a collector with no reads before the scan)."""
+
+    def __init__(self, tmp: Path, empty: bool = False, **kw):
+        super().__init__(tmp, **kw)
+        self.empty = empty
+
+    def __call__(self, argv, env, stdout=None, text=True):
+        if argv[:3] == ["dt-cloud", "access", "r2-agg"] and not self.empty:
+            out = Path(argv[argv.index("-o") + 1])
+            out.parent.mkdir(parents=True, exist_ok=True)
+            out.write_text(f"agg as of {argv[argv.index('-d') + 1]}")
+        return super().__call__(argv, env, stdout, text)
+
+
+R2_BASE = {"list": {"import": True}, "static-names": {"profile": "sn.json"}, "digest": {"template": "t", "config": "c.yml"}}
+
+
+def r2_ctx(tmp_path, env, runner=None):
+    c = ctx(tmp_path, env, runner or AggRunner(tmp_path), steps=["access-r2"], options={
+        **R2_BASE, "access-r2": {"state": "r2://logs/state.json"}})
+    c.env["R2_ENDPOINT"] = "https://acct.r2.example.org"
+    return c
+
+
+def test_access_r2_aggregates_the_collectors_hours_to_the_scan_into_one_key(tmp_path, env):
+    """`r2-agg -s` (the collector's state names each hour's current aggregate) cut at the scan, written to the task's
+    work dir and then over the data store's one key (the aggregate is cumulative: every read before the scan)."""
+    c = r2_ctx(tmp_path, env)
+    S.access_r2(c, None)
+    assert c.sh_impl.calls == ["dt-cloud access r2-agg -d 2026-10-16T1200 -o <tmp>/t/dt-scan/2026-10-16T1200/access-r2/agg.parquet -s r2://logs/state.json"]
+    assert c.sh_impl.envs[0]["DISK_TREE_R2_ENDPOINT_URL"] == "https://acct.r2.example.org"
+    assert sorted(p.relative_to(tmp_path / "data").as_posix() for p in (tmp_path / "data").rglob("*") if p.is_file()) == ["access/r2/agg.parquet"]
+    assert (tmp_path / "data/access/r2/agg.parquet").read_text() == "agg as of 2026-10-16T1200"
+
+
+def test_access_r2_keeps_the_last_aggregate_when_there_is_nothing_new_or_it_fails(tmp_path, env):
+    """No reads before the scan (nothing written), or a failure: the earlier aggregate stays (valid as of its scan), and
+    the step never fails the run."""
+    key = tmp_path / "data/access/r2/agg.parquet"
+    key.parent.mkdir(parents=True)
+    key.write_text("agg as of 2026-10-15T1200")
+    S.access_r2(r2_ctx(tmp_path, env, AggRunner(tmp_path, empty=True)), None)
+    S.access_r2(r2_ctx(tmp_path, env, AggRunner(tmp_path, fail=("dt-cloud access r2-agg",))), None)
+    assert key.read_text() == "agg as of 2026-10-15T1200"
+
+
+def test_access_r2_needs_the_state(tmp_path):
+    with pytest.raises(ValueError) as e:
+        profile(tmp_path, steps=["access-r2"], options={**R2_BASE, "access-r2": {}})
+    assert str(e.value) == "profile: options.access-r2.state: required (the collector archive's `state.json`, e.g. `r2://<archive>/state.json`)"
+
+
+def test_cpu_quota_reads_cgroup_v2_then_v1(tmp_path) -> None:
+    v2, v1, none, unlimited = (tmp_path / d for d in ("v2", "v1", "none", "max"))
+    (v1 / "cpu").mkdir(parents=True)
+    for d in (v2, none, unlimited):
+        d.mkdir()
+    (v2 / "cpu.max").write_text("150000 100000\n")
+    (unlimited / "cpu.max").write_text("max 100000\n")
+    (v1 / "cpu/cpu.cfs_quota_us").write_text("200000\n")
+    (v1 / "cpu/cpu.cfs_period_us").write_text("100000\n")
+    assert [S.cpu_quota(d) for d in (v2, v1, none, unlimited)] == [2, 2, None, None]
+
+
+def test_nproc_is_capped_by_the_cgroup_quota(tmp_path, monkeypatch) -> None:
+    (tmp_path / "cpu.max").write_text("200000 100000\n")
+    monkeypatch.setattr(S.os, "sched_getaffinity", lambda _: set(range(8)), raising=False)
+    capped = S.Ctx.__new__(S.Ctx)
+    capped.env = {"DT_CGROUP": str(tmp_path)}
+    free = S.Ctx.__new__(S.Ctx)
+    free.env = {"DT_CGROUP": str(tmp_path / "absent")}
+    assert [capped.nproc, free.nproc] == [2, 8]
+
+
+def test_path_index_on_a_local_data_dir_reads_in_place_and_copies_out(tmp_path, env, monkeypatch):
+    """The local executor's shape (one machine, no FUSE): `data:` a dir, read in place (no `stage`), the snapshot
+    annotated (`options.index.annotate`), the tiers copied into it, `path-index.parquet` last."""
+    monkeypatch.setattr(S.Ctx, "nproc", property(lambda self: 2))
+    (tmp_path / "t").mkdir(exist_ok=True)
+    data = tmp_path / "data"
+    p = parse({"deployment": "fix", "executor": {"kind": "local"}, "work": str(tmp_path / "work"), "data": str(data),
+               "layout": {"layer2": "listing/laptop/{scan}/", "snapshots": "laptop", "listing": "capture/{scan}/"},
+               "sources": ["r2://disk-tree"], "skip": ["static-names", "digest"],
+               "options": {"index": {"mode": "path-index", "args": ["-g"], "age_pyramids": True,
+                                     "annotate": ["disk-tree", "capture-meta", "-c", "r2://disk-tree/snapshots/laptop/{scan}/meta.json",
+                                                  "{listing}/_SUCCESS.json", "{snap}/meta.json"]}}})
+    (data / "capture/2026-10-16T1200/disk-tree").mkdir(parents=True)
+    (data / "capture/2026-10-16T1200/disk-tree/_SUCCESS.json").write_text("{}")
+    c = S.make_ctx(p, env)
+    runner = Runner(tmp_path)
+    copied = []
+    real_copy = S.copy_atomic
+    monkeypatch.setattr(S, "copy_atomic", lambda src, dst: (copied.append(dst.relative_to(data).as_posix()), real_copy(src, dst)))
+
+    def run(argv, env, stdout=None, text=True):
+        r = runner(argv, env, stdout, text)
+        if argv[:2] == ["dt-cloud", "path-index"]:
+            pi = Path(argv[argv.index("-P") + 1]).parent
+            for n in ("path-index.parquet", "path-index-bysize.parquet"):
+                (pi / n).write_text(n)
+            out = Path(argv[argv.index("-o") + 1])
+            out.mkdir(parents=True)
+            (out / "meta.json").write_text("{}")
+        if argv[:2] == ["dt-cloud", "age-pyramid"]:
+            (Path(argv[argv.index("-o") + 1]) / "age-pyramid-1d.parquet").write_text("")
+        return r
+
+    c.sh_impl = run
+    S.index(c, None)
+    w = "<tmp>/t/dt-scan/2026-10-16T1200"
+    assert runner.calls == [
+        f"dt-cloud path-index -d 2026-10-16T1200 -l <tmp>/data/capture/2026-10-16T1200/disk-tree/*.parquet -o {w}/snap "
+        f"-c <tmp>/data/capture/2026-10-16T1200/dir-cache -P {w}/path-index/path-index.parquet -g",
+        f"disk-tree capture-meta -c r2://disk-tree/snapshots/laptop/2026-10-16T1200/meta.json "
+        f"<tmp>/data/capture/2026-10-16T1200/disk-tree/_SUCCESS.json {w}/snap/meta.json",
+        f"dt-cloud age-pyramid -c -t 2 -o {w}/path-index {w}/path-index/path-index.parquet",
+    ]
+    assert copied == [
+        "listing/laptop/2026-10-16T1200/index/G1/age-pyramid-1d.parquet",
+        "listing/laptop/2026-10-16T1200/index/G1/path-index-bysize.parquet",
+        "listing/laptop/2026-10-16T1200/index/G1/path-index.parquet",
+        "snapshots/laptop/2026-10-16T1200/meta.json",
+    ]
+    runner.calls.clear()
+    S.index(c, None)
+    assert runner.calls == []
+
+
+def test_list_adopts_a_sources_listing_from_the_env(tmp_path, env, monkeypatch):
+    """`sources[].listing`: `list` fetches that listing (`{env:…}` filled) instead of listing the bucket, the deployment's
+    R2 endpoint handed to the reader; an unset variable fails the step."""
+    (tmp_path / "t").mkdir(exist_ok=True)
+    p = parse({"deployment": "fix", "executor": {"kind": "local"}, "work": str(tmp_path / "work"), "data": str(tmp_path / "data"),
+               "layout": {"layer2": "listing/laptop/{scan}/", "snapshots": "laptop", "listing": "capture/{scan}/"},
+               "sources": [{"uri": "r2://disk-tree", "listing": "{env:DT_CAPTURE}"}], "skip": ["static-names", "digest"],
+               "options": {"index": {"mode": "path-index"}}})
+    seen = []
+    runner = Runner(tmp_path)
+
+    def run(argv, env, stdout=None, text=True):
+        seen.append(env.get("DISKY_R2_ENDPOINT_URL"))
+        return runner(argv, env, stdout, text)
+
+    c = S.make_ctx(p, {**env, "DT_CAPTURE": "r2://disk-tree/captures/m3/root/2026-10-16T12-00-01Z", "R2_ENDPOINT": "https://r2.example"})
+    c.sh_impl = run
+    S.list_source(c, "r2://disk-tree")
+    assert (runner.calls, seen) == (
+        ["dt-cloud fetch-listing -o <tmp>/data/capture/2026-10-16T1200/disk-tree r2://disk-tree/captures/m3/root/2026-10-16T12-00-01Z"],
+        ["https://r2.example"],
+    )
+    unset = S.make_ctx(p, env)
+    unset.sh_impl = run
+    with pytest.raises(S.StepFailed) as e:
+        S.list_source(unset, "r2://disk-tree")
+    assert str(e.value) == "{env:DT_CAPTURE}: $DT_CAPTURE unset"
