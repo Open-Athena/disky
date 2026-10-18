@@ -65,6 +65,9 @@ env:
   DT_S3_ADDRESSING_STYLE: virtual
   STATIC_NAMES_IMAGE: us-central1-docker.pkg.dev/oa-internal-450019/cw-s3-usage/scan:cw
 pass: [DT_RECORD, DT_ALERTS]
+# after each scan, the per-scan files the interval store + static index hold (specs/lean-scans.md §2): a dry run (the plan
+# in the log) until a reviewed `scan retire -x -b` has run by hand
+steps: [retire]
 labels: {deployment: cw}
 queue_size: 20
 options:
@@ -81,3 +84,6 @@ options:
   interval-store: {timeout: 90m, mem: 12GB}
   over-time: {mem: 16GB}
   digest: {template: cw, config: /app/job/digest.yml}
+  # the data bucket, then the R2 copy; only scans an `interval-store verify` marker vouches for (verify runs on its own
+  # Batch job, not in this task)
+  retire: {keep: 2, execute: false, static_gen: 2026-10-15cw, layer2: true, copies: [r2], markers_only: true}
