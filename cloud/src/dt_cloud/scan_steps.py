@@ -1045,13 +1045,34 @@ def r2_profile(env: dict[str, str], home: Path | None = None) -> None:
     env["R2_ARCHIVE"] = f"r2://{env['R2_BUCKET']}"
 
 
+#: The prefix of a base64-encoded `$DT_SCAN_PROFILE_JSON` (`profile_env_value`).
+PROFILE_B64 = "base64:"
+
+
+def profile_env_value(profile_json: str) -> str:
+    """The head's `$DT_SCAN_PROFILE_JSON` for its tasks: base64, since Nextflow writes an `env` scope value into each
+    task's script as `export NAME="<value>"` with inner double quotes unescaped (raw JSON reached the task as
+    `{data:…}`); base64's alphabet means the same inside double quotes."""
+    import base64
+
+    return PROFILE_B64 + base64.b64encode(profile_json.encode()).decode()
+
+
+def profile_env_json(env: Mapping[str, str]) -> str:
+    """`$DT_SCAN_PROFILE_JSON` as JSON: decoded when the head encoded it (`profile_env_value`), as is when set by hand."""
+    import base64
+
+    v = env[PROFILE_JSON_ENV]
+    return base64.b64decode(v.removeprefix(PROFILE_B64), validate=True).decode() if v.startswith(PROFILE_B64) else v
+
+
 def load_profile_env(env: Mapping[str, str], path: str | None = None) -> ScanProfile:
     from . import scan_profile
 
     if path:
         return scan_profile.load(path)
     if env.get(PROFILE_JSON_ENV):
-        return scan_profile.parse(json.loads(env[PROFILE_JSON_ENV]), where=f"${PROFILE_JSON_ENV}")
+        return scan_profile.parse(json.loads(profile_env_json(env)), where=f"${PROFILE_JSON_ENV}")
     if env.get(PROFILE_PATH_ENV):
         return scan_profile.load(env[PROFILE_PATH_ENV])
     raise StepFailed(2, f"no profile: pass -p FILE, or set ${PROFILE_JSON_ENV} (the head does) or ${PROFILE_PATH_ENV}")
