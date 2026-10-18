@@ -72,8 +72,6 @@ SEARCH_SUFFIXES = (".rows", ".trigrams", ".rows-search")
 D1_VARIANTS = ("path", "bysize", "user", "bysize-user")
 #: D1 statements name this many scans at most (a statement stays far under D1's 100 KB).
 D1_CHUNK = 50
-#: Rows one D1 `DELETE` removes at most: gcs's 50 scans' `index_row_groups` (2M+ rows) in one statement failed (7500).
-D1_DELETE_ROWS = 5000
 
 
 def classify(name: str) -> str:
@@ -272,11 +270,10 @@ def d1_plan(dates: list[str], store: str, drop_path: bool) -> list[dict]:
 
 
 def d1_delete(dates: list[str], store: str, drop_path: bool, *, batch: int | None = None) -> int:
-    """Delete `d1_plan`'s rows, table by table in its order, at most `batch` rows a statement (until one deletes
-    none); returns rows deleted. A failure part way leaves the rows not yet deleted, and a rerun deletes those."""
+    """Delete `d1_plan`'s rows, table by table in its order, through `index_footer.d1_delete` (`batch` rows a
+    statement); returns rows deleted."""
     if not dates:
         return 0
-    batch = batch or D1_DELETE_ROWS
     tok, acct = F._creds()
     n = 0
     for table, path in _tables(acct, tok):
@@ -284,8 +281,7 @@ def d1_delete(dates: list[str], store: str, drop_path: bool, *, batch: int | Non
             where = f"date IN ({', '.join(F._q(d) for d in ch)}) AND {_variant_pred(store, path or drop_path)}"
             if table == "index_schema" and store != F.PRIMARY_STORE:
                 where = f"store = {F._q(store)} AND {where}"
-            while k := len(F._d1_query(f"DELETE FROM {table} WHERE rowid IN (SELECT rowid FROM {table} WHERE {where} LIMIT {batch}) RETURNING 1 AS n;", acct, tok)):
-                n += k
+            n += F.d1_delete(table, where, acct, tok, batch=batch)
     return n
 
 

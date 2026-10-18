@@ -11,6 +11,7 @@ import { loadLedger } from '../ledger.js'
 import { scanTimes } from '../scanTimes.js'
 import { parseOwner, queryParam, QueryError } from '../scope.js'
 import { snapshotsPrefix } from '../shared.js'
+import { isPrimary } from '../stores.js'
 import { decodeSel, fmtScanUtc, resolveAfter } from '../../../src/scanSlug.js'
 import { ATTEN_DEFAULT, buildView, MIN_AREA_DEFAULT, NotFound, type View } from '../view.js'
 import { hexQuery } from '../staticFilter.js'
@@ -251,7 +252,8 @@ export async function mapCard(env: Env, site: Site, title: string, params: Recor
     return { ...base, subtitle, total: '', empty: 'view unavailable' }
   }
   // The live assignments over the scan's attribution, as the map draws them.
-  if (!lens && env.DB) {
+  // The ledger is the primary store's (`stores.ts` `primaryOnly`): a secondary store's map draws its scan as is.
+  if (!lens && env.DB && isPrimary(env)) {
     const { ownerRows } = await loadLedger(env).catch(() => ({ ownerRows: [] }))
     const idx = ownerIndex({ owners: ownerRows.map(r => ({ ...r, who: r.who ?? '', memo: null })) })
     if (idx.count) tree = applyLedger(tree, idx, site.scheme + (path ? `${path}/` : ''), u => canonId(u, reg))
