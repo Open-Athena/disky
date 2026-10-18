@@ -291,6 +291,25 @@ def test_backfill_refuses_a_template_matching_files_with_and_without_generation(
         1, f"{SCANS[GEN_FROM]}: {LISTING!r} matches 2 files, 1 without a `generation` column ({stray}): narrow it to the listing shards")
 
 
+def test_gen_index_reads_every_shard_of_a_bucket(tmp_path):
+    """A scan's listing in several shards per bucket (every real lister's): each shard's objects are indexed, not only
+    the first's."""
+    root = tmp_path / "root"
+    for i, names in enumerate((["d/a.bin", "d/b.bin"], ["d/c.bin"])):
+        shard = root / "listing" / SCANS[0] / B / f"shard-{i:02d}.parquet"
+        shard.parent.mkdir(parents=True, exist_ok=True)
+        n = len(names)
+        pq.write_table(pa.table({"bucket": [B] * n, "name": names, "size_bytes": [1] * n, "created": pa.array([None] * n, pa.timestamp("us", "UTC")),
+                                 "storage_class_id": [1] * n, "generation": pa.array([10 + i * 10 + j for j in range(n)], pa.int64())}), shard)
+    con = duckdb.connect()
+    work = tmp_path / "w"
+    work.mkdir()
+    out = ib.gen_index(con, Store(str(root)), LISTING, [{"id": SCANS[0], "ts": T0}], work)
+    assert (out, con.execute(f"SELECT depth, path, generation FROM read_parquet('{work / ib.GEN_INDEX}')").fetchall()) == (
+        {"scans": [SCANS[0]], "skipped": [], "rows": 3},
+        [(3, "b/d/a.bin", 10), (3, "b/d/b.bin", 11), (3, "b/d/c.bin", 20)])
+
+
 def test_a_backfilled_generation_takes_appends_and_verifies(world, backfilled, tmp_path):
     store = tmp_path / "store"
     shutil.copytree(backfilled["store"], store)
