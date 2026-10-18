@@ -45,7 +45,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from .digest import (
-    AVATAR_REV, HOURS_PER_WEEK, TIB, UNITS, DigestConfig, PlotUnavailable, Quota, Reply, Unit, Units,
+    AVATAR_REV, HOURS_PER_WEEK, LINK_ARROW, TIB, UNITS, DigestConfig, PlotUnavailable, Quota, Reply, Unit, Units,
     _dlink, _err, _md, _pct, _pct_val, _span, _tb, deg, list_scans, load_window, scan_slugs, scan_ts,
 )
 
@@ -138,13 +138,13 @@ def _tail(day: DayRow, cfg: DigestConfig) -> str:
     a linked `% of quota (free)` clause, ` · `-joined. Buckets sharing a
     ``zone`` collapse into one clause at the first one's position. A store of
     one configured bucket (hf: the whole org) drops the label, which would only
-    repeat the store: its clause, then a trailing `[↗]` over-time link."""
+    repeat the store: its clause, then a trailing `[↗︎]` over-time link (`LINK_ARROW`)."""
     if len(cfg.buckets) <= 1 and not day.extra:
         b = cfg.buckets.get(cfg.primary)
         qs = b.quotas if b else ()
         link = _diff_url(day.scan, day.since, cfg.site_url, cfg.primary if b is None or b.path is None else b.path, day.slug)
         body = ", ".join(_quota_clause(_scoped(day.tb, day.classes, q), q, cfg.unit) for q in qs) if qs else f"{day.tb:,.0f} {cfg.unit.short}"
-        return f"{body} [↗]({link})"
+        return f"{body} [{LINK_ARROW}]({link})"
     groups: dict[str, list[tuple[str, float]]] = {}
     for b, tb in [(cfg.primary, day.tb), *day.extra.items()]:
         z = cfg.buckets[b].zone if b in cfg.buckets else None

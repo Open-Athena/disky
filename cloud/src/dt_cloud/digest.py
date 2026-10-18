@@ -45,6 +45,9 @@ GIB = 1024**3
 # Weekly-halving arrow buckets: |dpct| >= THRESH[i] -> deg (i+1)*10 (capped 80).
 THRESH = [0.39, 0.78, 1.5, 3.1, 6.25, 12.5, 25, 50]
 MINUS = "−"  # matches the site's unicode minus
+# A Slack link's ↗: the NE arrow + the text-presentation selector (U+FE0E) renders as a font glyph in link colour; a
+# bare ↗ is emoji-ized by Slack into :arrow_upper_right:, which a link can't wrap
+LINK_ARROW = "\u2197\ufe0e"
 HOURS_PER_WEEK = 168.0
 # bump when the av_deg glyphs change: Slack caches avatars per-URL at post
 # time, so a stable URL serves MIXED generations after a redesign.

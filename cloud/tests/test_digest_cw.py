@@ -138,8 +138,8 @@ def test_units_tb():
         f":arrow_deg30: [wk of 9/28]({SITE}/?d=261002-2d#over-time) _(partial)_: **+0.4 TB** → 15 TB · 6.1% of 253 TB public",
     ]
     assert [D.reply(d, "sender", cfg) for d in D.day_rows(month, "sender", 0)] == [
-        E.Reply("10/1 — 16 TB (+0.5, 3.3%)", f"6.1% of 253T (237.5 T free) [↗]({SITE}/?d=261001-1d#over-time)", icon_url="https://icons.example.org/arrows/av_deg60.png?v=4"),
-        E.Reply("10/2 — 15 TB (−0.1, 0.6%)", f"6.1% of 253T (237.6 T free) [↗]({SITE}/?d=261002-1d#over-time)", icon_url="https://icons.example.org/arrows/av_deg-40.png?v=4"),
+        E.Reply("10/1 — 16 TB (+0.5, 3.3%)", f"6.1% of 253T (237.5 T free) [↗︎]({SITE}/?d=261001-1d#over-time)", icon_url="https://icons.example.org/arrows/av_deg60.png?v=4"),
+        E.Reply("10/2 — 15 TB (−0.1, 0.6%)", f"6.1% of 253T (237.6 T free) [↗︎]({SITE}/?d=261002-1d#over-time)", icon_url="https://icons.example.org/arrows/av_deg-40.png?v=4"),
     ]
     assert D.image_body(month, oct1, cfg) == {
         "title": "HF usage — October 2026",
@@ -186,7 +186,7 @@ def test_class_scoped_quotas():
         f":arrow_deg50: [wk of 9/28]({SITE}/?d=261001-1d#over-time) _(partial)_: **+1.0 TB** → 16 TB · 6.1% of 253 TB public · 9.8% of 5.1 TB private",
     ]
     assert [D.reply(d, "sender", cfg) for d in D.day_rows(month, "sender", 0)] == [
-        E.Reply("10/1 — 16 TB (+1.0, 6.7%)", f"6.1% of 253T public (237.5 T free), 9.8% of 5.1T private (4.6 T free) [↗]({SITE}/?d=261001-1d#over-time)",
+        E.Reply("10/1 — 16 TB (+1.0, 6.7%)", f"6.1% of 253T public (237.5 T free), 9.8% of 5.1T private (4.6 T free) [↗︎]({SITE}/?d=261001-1d#over-time)",
                 icon_url="https://icons.example.org/arrows/av_deg70.png?v=4"),
     ]
     assert D.image_body(month, oct1, cfg)["points"] == [{"scan": "2026-09-30T0800", "bytes": 15 * TB}, {"scan": "2026-10-01T0800", "bytes": 15_500_000_000_000}]
@@ -475,7 +475,7 @@ def test_no_quota():
         "*Weekly summaries*",
         f":arrow_deg20: [wk of 8/31]({SITE}/?d=26090212-2d#over-time) _(partial)_: **+10.0 TiB** → 715 TiB",
     ]
-    assert D.reply(D.day_rows(MONTH, "sender", 12)[0], "sender", cfg).body == f"713 Ti [↗]({SITE}/main-data?d=26090112-1d#over-time)"
+    assert D.reply(D.day_rows(MONTH, "sender", 12)[0], "sender", cfg).body == f"713 Ti [↗︎]({SITE}/main-data?d=26090112-1d#over-time)"
 
 
 def test_op_body():
