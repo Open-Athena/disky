@@ -18,9 +18,10 @@ R2_SECRETS = {
 CF = {"CLOUDFLARE_API_TOKEN": "cw-s3-cf-pages-token"}
 
 
+HEAD = {**CF, "SLACK_BOT_TOKEN": "cw-s3-slack-bot-token"}
+
+
 @pytest.mark.parametrize("script, args, expected_secrets", [
-    ("cw-batch-submit.sh", [], {**CF, **R2_SECRETS, "AWS_ACCESS_KEY_ID": "cw-s3-access-key-id", "AWS_SECRET_ACCESS_KEY": "cw-s3-secret-access-key", "SLACK_BOT_TOKEN": "cw-s3-slack-bot-token", "SITE_TOKEN": "cw-s3-job-grant"}),
-    ("cw-meta-submit.sh", [], {**CF, **R2_SECRETS, "AWS_ACCESS_KEY_ID": "cw-s3-isolated-r2-access-key-id", "AWS_SECRET_ACCESS_KEY": "cw-s3-isolated-r2-secret-access-key", "SLACK_BOT_TOKEN": "cw-s3-slack-bot-token", "SITE_TOKEN": "cw-s3-job-grant"}),
     ("cw-reindex-submit.sh", [], CF),
     ("cw-overtime-submit.sh", [], {**CF, **R2_SECRETS}),
     ("cw-publish-submit.sh", ["2026-10-10T1201"], {**CF, **R2_SECRETS}),
@@ -44,18 +45,50 @@ def test_submitters_use_only_reviewed_isolated_targets(
         "sa": {"email": f"cw-s3-job@{PROJECT}.iam.gserviceaccount.com"},
         "secrets": {var: f"projects/{PROJECT}/secrets/{sid}/versions/latest" for var, sid in expected_secrets.items()},
     }
-    if script in ("cw-batch-submit.sh", "cw-meta-submit.sh", "cw-reindex-submit.sh", "cw-overtime-submit.sh"):
+    if script in ("cw-reindex-submit.sh", "cw-overtime-submit.sh"):
         assert task["volumes"][0] == {"gcs": {"remotePath": DATA}, "mountPath": f"/mnt/disks/gcs/{DATA}", "mountOptions": ["--implicit-dirs"]}
-    if script == "cw-meta-submit.sh":
-        assert task["environment"]["variables"]["META_ROOTS"] == f"gcs://{DATA} r2://oa-cw-s3-usage-index"
-    if script == "cw-batch-submit.sh":
-        assert task["environment"]["variables"]["STATIC_NAMES_IMAGE"] == IMAGE
+
+
+@pytest.mark.parametrize("script, profile", [("cw-batch-submit.sh", "cw.yml"), ("cw-meta-submit.sh", "cw-meta.yml")])
+def test_scan_crons_run_the_head_on_cw_profiles(script: str, profile: str, tmp_path: Path) -> None:
+    """The cron bodies submit the Nextflow head on a cw profile: no mounts, and only the secrets the head itself uses
+    (each step's own are the profile's)."""
+    result = run(["bash", str(ROOT / "job" / script)], capture_output=True, text=True, check=True,
+                 cwd=ROOT, env={"PATH": os.environ["PATH"], "DRY": "1", "PIN": "1", "TMPDIR": str(tmp_path)})
+    spec = json.loads(result.stdout)
+    task = spec["taskGroups"][0]["taskSpec"]
+    container = task["runnables"][0]["container"]
+    assert {"image": container["imageUri"], "command": [container["entrypoint"], *container["commands"]],
+            "sa": spec["allocationPolicy"]["serviceAccount"], "volumes": task["volumes"],
+            "trigger": task["environment"]["variables"]["DT_TRIGGER"],
+            "secrets": task["environment"]["secretVariables"]} == {
+        "image": IMAGE, "command": ["dt-cloud", "scan", "head", f"/app/job/profiles/{profile}"],
+        "sa": {"email": f"cw-s3-job@{PROJECT}.iam.gserviceaccount.com"}, "volumes": [], "trigger": "schedule",
+        "secrets": {var: f"projects/{PROJECT}/secrets/{sid}/versions/latest" for var, sid in HEAD.items()},
+    }
+
+
+@pytest.mark.parametrize("profile, store, sources", [
+    ("cw.yml", "primary", [f"s3://{b}" for b in ("marin-us-east-02a", "hero-checkpoints", "marin-us-east-06a",
+                                                 "rhoarnet-us-east-08a", "marin-us-east-08a", "marin-us-west-04a")]),
+    ("cw-meta.yml", "meta", [f"gcs://{DATA}", "r2://oa-cw-s3-usage-index"]),
+])
+def test_scan_profiles_use_only_isolated_targets(profile: str, store: str, sources: list[str]) -> None:
+    from dt_cloud.scan_profile import load
+    p = load(ROOT / "job/profiles" / profile)
+    assert {"store": p.store, "image": p.executor.image, "sa": p.executor.service_account, "data": p.data,
+            "work": p.work, "sources": [s.uri for s in p.sources], "r2": p.env["R2_BUCKET"],
+            "r2_keys": {k: v for k, v in p.secrets.items() if k.startswith("R2_")}} == {
+        "store": store, "image": IMAGE, "sa": f"cw-s3-job@{PROJECT}.iam.gserviceaccount.com", "data": f"gs://{DATA}",
+        "work": f"gs://{DATA}/nf", "sources": sources, "r2": "oa-cw-s3-usage-index",
+        "r2_keys": {k: v for k, v in R2_SECRETS.items() if k != "R2_ENDPOINT" or profile == "cw.yml"},
+    }
 
 
 def test_static_profile_uses_isolated_data_scratch_image_and_publisher() -> None:
     profile = json.loads((ROOT / "job/static-names.json").read_text())
     assert {name: profile[name] for name in ("bucket", "scratch", "image", "r2_secrets", "gen")} == {
-        "bucket": DATA, "scratch": "oa-cw-s3-usage-scratch", "image": IMAGE, "gen": "2026-10-10cw",
+        "bucket": DATA, "scratch": "oa-cw-s3-usage-scratch", "image": IMAGE, "gen": "2026-10-15cw",
         "r2_secrets": {"endpoint": "cw-s3-r2-endpoint", "key_id": "cw-s3-isolated-r2-access-key-id", "secret": "cw-s3-isolated-r2-secret-access-key"},
     }
 
@@ -75,11 +108,11 @@ def test_both_site_environments_dispatch_and_describe_cw_only(environment: str) 
 
 
 @pytest.mark.parametrize("environment", ["production", "preview"])
-def test_both_site_environments_keep_anonymous_cards_generic(environment: str) -> None:
+def test_both_site_environments_show_anonymous_full_cards_behind_sign_in(environment: str) -> None:
     config = tomllib.loads((ROOT / "site/wrangler.toml").read_text())
     variables = config["vars"] if environment == "production" else config["env"]["preview"]["vars"]
     assert {key: variables.get(key) for key in ("OG_CARDS", "OG_ANONYMOUS", "OG_DEFAULT_COLOR", "AUTH_MODE", "PUBLIC_READ")} == {
-        "OG_CARDS": "1", "OG_ANONYMOUS": "generic", "OG_DEFAULT_COLOR": "t", "AUTH_MODE": "app", "PUBLIC_READ": None,
+        "OG_CARDS": "1", "OG_ANONYMOUS": "full", "OG_DEFAULT_COLOR": "t", "AUTH_MODE": "app", "PUBLIC_READ": None,
     }
 
 

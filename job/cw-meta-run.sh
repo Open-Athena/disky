@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# RETIRING: `job/profiles/cw-meta.yml` (scan.nf) replaces this; it stays in the image until the `cw-meta-snapshot` cron's
+# body (`cw-meta-submit.sh`, via infra/gcp) is the head's, then goes.
 # The "meta" self-scan (GCP Batch, daily): the storage the deployments write,
 # as the cw-s3 deployment's secondary store `meta` (specs/multi-store.md
 # phase 3 — served at cw.oa.dev/meta once `STORES_JSON` / `STORES_EXTRA`

@@ -1,0 +1,64 @@
+# cw.oa.dev's "data behind this site" store (`STORES_JSON` `meta`, served at /meta): the deployment's own derived
+# storage — its GCS data bucket (layer-2s, path indexes, snapshots, Nextflow work) and its R2 serving bucket — scanned
+# through the same scan.nf as `job/profiles/cw.yml` (`dt-cloud scan head job/profiles/cw-meta.yml`; upstream's example:
+# `cloud/tests/fixtures/scan_profiles/meta-store.yml`). Replaces the one-VM `job/cw-meta-run.sh`, into the same
+# layout and static-names generation, so the store's earlier scans and its search carry on.
+deployment: cw
+store: meta
+executor:
+  kind: google-batch
+  project: oa-internal-450019
+  region: us-central1
+  service_account: cw-s3-job@oa-internal-450019.iam.gserviceaccount.com
+  image: us-central1-docker.pkg.dev/oa-internal-450019/cw-s3-usage/scan:cw
+  boot_disk: 50
+work: gs://oa-cw-s3-usage-data/nf
+data: gs://oa-cw-s3-usage-data
+layout:
+  layer2: meta-l2/{scan}/
+  snapshots: meta
+  listing: meta-listing/{scan}/
+# The CW artifacts are few and large (parquet shards and JSONs), a sliver of the CoreWeave buckets' key count: small
+# machines throughout. The GCS bucket lists via ADC (the job SA); the R2 bucket with its own key, given only to its list.
+sources:
+  - gcs://oa-cw-s3-usage-data
+  - uri: r2://oa-cw-s3-usage-index
+    endpoint: https://74981a43be0de7712369306c7b19133d.r2.cloudflarestorage.com
+    secrets: {AWS_ACCESS_KEY_ID: cw-s3-isolated-r2-access-key-id, AWS_SECRET_ACCESS_KEY: cw-s3-isolated-r2-secret-access-key}
+machines:
+  small: e2-standard-2
+  medium: e2-standard-4
+  big: {type: e2-standard-8, disk: 100}
+  list: e2-standard-4
+  post: e2-standard-4
+# No CoreWeave bucket to check, no interval store or over-time groups (the site reads this store per scan), no digest,
+# and the cache warm-up / probe requests carry no `store=`
+skip: [bucket-check, interval-store, over-time, warm-cache, probe, digest]
+secrets:
+  SLACK_BOT_TOKEN: cw-s3-slack-bot-token
+  CLOUDFLARE_API_TOKEN: cw-s3-cf-pages-token
+  SITE_TOKEN: cw-s3-job-grant
+  R2_ACCESS_KEY_ID: cw-s3-isolated-r2-access-key-id
+  R2_SECRET_ACCESS_KEY: cw-s3-isolated-r2-secret-access-key
+env:
+  SCAN_RUNS_PROFILE: /app/job/scan-runs.json
+  D1_DB_ID: 7f1e1326-b879-4ecd-8621-846621c24f36   # oa-cw-s3-usage-db (site/wrangler.toml)
+  D1_DB_NAME: oa-cw-s3-usage-db
+  INDEX_VARIANTS: path
+  SITE_URL: https://cw.oa.dev
+  GCP_PROJECT: oa-internal-450019
+  SLACK_ALERT_CHANNEL: C0C53CPM886    # #cw-s3-admin
+  CLOUDFLARE_ACCOUNT_ID: 74981a43be0de7712369306c7b19133d
+  R2_ENDPOINT: https://74981a43be0de7712369306c7b19133d.r2.cloudflarestorage.com
+  R2_BUCKET: oa-cw-s3-usage-index
+  AWS_DEFAULT_REGION: auto
+  AWS_EC2_METADATA_DISABLED: "true"
+pass: [DT_RECORD, DT_ALERTS, DISKY_LABELS]
+labels: {deployment: cw}
+options:
+  index:
+    webdata: [python, /app/job/cw-webdata.py, "{web}", "{sources}", -l, our storage, -a, "{date}"]
+    mem: 8GB
+  # the store's `STATIC_GEN` in `site/wrangler.toml`'s `STORES_JSON`, built by `cw-meta-run.sh` over the same layout:
+  # this appends to it
+  static-names: {gen: 2026-10-14meta, build_args: [-x, "16,8"]}
