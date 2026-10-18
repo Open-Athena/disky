@@ -27,9 +27,16 @@
     .sw { flex: none; align-self: center; }
     .lbl { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .dur { margin-left: auto; padding-left: 8px; font-variant-numeric: tabular-nums; color: var(--ink); white-space: nowrap; }
-    &.readout { .sr-phases-grid > span:not(.absent) { background: color-mix(in srgb, var(--ink) 6%, transparent); }
+    // each phase's share of the run fills its cell from the left, in its own color
+    &.readout { .sr-phases-grid > span:not(.absent) { background: linear-gradient(to right, color-mix(in srgb, var(--fill, transparent) 40%, transparent) var(--pct, 0%), color-mix(in srgb, var(--ink) 6%, transparent) var(--pct, 0%)); }
       .absent { opacity: 0.35; } .failed .dur { color: var(--danger); } } }
   .sr-chart { margin-top: 8px; }
+  // the chart and its readout stay in view while the table scrolls under them (hovering a row far down still shows
+  // its phases), where the viewport is tall enough to spare them
+  @media (min-width: 641px) and (min-height: 760px) {
+    .sr-chart { position: sticky; top: var(--topbar-h, 48px); z-index: var(--z-sticky); background: var(--surface); padding-bottom: 8px; border-bottom: 1px solid var(--line);
+      h3 { margin-top: 0; padding-top: 10px; } }
+  }
   .sr-svgwrap { position: relative; }
   .sr-svgtip { position: absolute; transform: translate(-50%, calc(-100% - 12px)); pointer-events: none; white-space: nowrap; z-index: var(--z-float); }
   svg { display: block; text { fill: var(--ink-3); font-size: 11.5px; } .grid { stroke: var(--line); } .axis { stroke: var(--ink-3); } }
