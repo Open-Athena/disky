@@ -31,6 +31,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from urllib.parse import urlparse
 
+from .cost_labels import check_label
 from .scan_profile import PRIMARY_STORE, Disk, Machine, ScanProfile
 from .scan_steps import DATA_MOUNT_ENV, PROFILE_JSON_ENV, STEPS
 
@@ -65,15 +66,18 @@ def history_line(now: dt.datetime, scan: str, session: str) -> str:
     return f"{now.strftime('%Y-%m-%d %H:%M:%S')}\t-\t{run_name}\tOK\t-\t{session}\tnextflow run scan.nf\n"
 
 
-def labels(profile: ScanProfile, env: Mapping[str, str]) -> dict[str, str]:
-    """The tasks' Batch labels: the profile's, the stack's (`$DISKY_LABELS`, `k=v,…`), `component: scan`; scan.nf
-    adds `nf-session`."""
+def labels(profile: ScanProfile, env: Mapping[str, str], scan: str) -> dict[str, str]:
+    """The tasks' Batch labels: the profile's, the stack's (`$DISKY_LABELS`, `k=v,…`), `component: scan`, `scan_id`
+    (lowercased, as `cost_labels` writes it); scan.nf adds `nf-session` and each task's `step`, so a billing export
+    groups a scan's spend by scan and step."""
     out = dict(profile.labels)
     for i in (env.get("DISKY_LABELS") or "").split(","):
         if i.strip():
             k, _, v = i.strip().partition("=")
             out[k] = v
     out["component"] = "scan"
+    out["scan_id"] = scan.lower()
+    check_label("scan_id", out["scan_id"])
     return out
 
 
@@ -122,7 +126,7 @@ def params(profile: ScanProfile, profile_json: str, scan: str, gen: str, job_sta
         "secrets_project": profile.executor.project or "",
         "env": step_env,
         "profile_json": profile_json,
-        "labels": labels(profile, env),
+        "labels": labels(profile, env, scan),
         "cache": not fresh,
         "queue_size": profile.queue_size,
         "work_bucket": urlparse(profile.work).netloc if profile.executor.kind == "google-batch" else "",

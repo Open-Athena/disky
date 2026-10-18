@@ -2,7 +2,7 @@
 
 **Status:** draft, 2026-10-15. A proposal. Nothing here has been built, deleted or deployed. It extends [interval-store.md] §4–§5 (retention, migration) from gcs to every deployment.
 
-**Goal (Ryan):** lean, harmonized deployments (gcs, cw-s3, m3, r2, hf, the r2.rbw.sh demo). Each scan keeps only what can't be derived elsewhere. Every deployment runs the same search: the prebuilt static name index only (`FILTER_INDEXED_ONLY=1`), with no per-scan search sidecars. And a deployment can be left alone for months or years.
+**Goal (Ryan):** lean, harmonized deployments (gcs, cw-s3, m3, r2, hf, the r2.rbw.sh demo). Each deployment keeps one full-history copy of each index its site serves (the interval store's sorts and slices, the static name index), denormalized for fast serving at any scan, plus the raw listings (§3). A scan adds only its delta to those; it leaves no full per-scan copies behind. Every deployment runs the same search: the prebuilt static name index only (`FILTER_INDEXED_ONLY=1`), with no per-scan search sidecars. And a deployment can be left alone for months or years.
 
 **Short version:**
 - The per-scan `path`/`bysize` sorts, their `.groups.*` footers, the D1 footer rows and the search sidecars all become **transient**. The job writes them to a work dir (or a `pending/` key, so a failed append can catch up), the two stores append from there, a parity check runs, and they are deleted. §1 lists the blockers. None is fundamental, but five need code first: catch-up, verify's source, an export from the store, the site's per-scan-only readers, and the scan list in D1.

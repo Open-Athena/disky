@@ -16,7 +16,7 @@ from collections import OrderedDict
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from .digest import AVATAR_REV, GIB, MINUS, TIB, DigestConfig, PlotUnavailable, Reply, Unit, _dlink, _pct, _pct_val, _span, _tb, deg, load_window, scan_slugs, scan_ts
+from .digest import AVATAR_REV, GIB, LINK_ARROW, MINUS, TIB, DigestConfig, PlotUnavailable, Reply, Unit, _dlink, _pct, _pct_val, _span, _tb, deg, load_window, scan_slugs, scan_ts
 
 
 def _usd(v: float) -> str:
@@ -167,11 +167,8 @@ def reply(r: Scan, cfg: DigestConfig, platform: str = "slack") -> Reply:
     # A sub-daily scan names its UTC time: a day's scans are distinct replies.
     when = f"{d.month}/{d.day}" + (f" {r.date[11:13]}:{r.date[13:15]}Z" if "T" in r.date else "")
     sender = f"{when} — {r.tb:,.0f} TiB ({_tb(dtb)}, {_pct(dtb, r.tb)}%)"
-    # ↗︎ = NE arrow + text-presentation selector: renders as a font
-    # glyph in link colour (bare ↗ gets emoji-ized by Slack into the
-    # cartoonish :arrow_upper_right:)
     url = f"{cfg.site_url}/?d={_dlink(r.date, r.slug)}#diff"
-    link = f"· [view →]({url})" if platform == "discord" else f"[↗︎]({url})"
+    link = f"· [view →]({url})" if platform == "discord" else f"[{LINK_ARROW}]({url})"
     body = f"${r.cost:,}/mo ({_usd(dcost)}) {link}"
     # project the scan's Δ% over its real interval to a weekly rate (a day: ×7)
     # (a daily scan keeps the fixed ×7 even across a missed day)
