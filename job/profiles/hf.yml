@@ -34,6 +34,8 @@ machines:
   post: e2-standard-4
 # bucket-check is the S3 sources' unscanned-bucket alert; over-time groups aren't served here
 skip: [bucket-check, over-time]
+# constant size (specs/lean-scans.md §2): each scan retires the per-scan files of the scans before the newest 2
+steps: [retire]
 secrets:
   HF_TOKEN: hf-usage-hf-token
   CLOUDFLARE_API_TOKEN: hf-usage-cf-token
@@ -76,6 +78,10 @@ options:
     barrier: true
     require: ["{index}/path-index.parquet", "{snapshots}/{scan}/meta.json"]
   interval-store: {timeout: 60m, mem: 8GB}
+  # The per-scan sorts, footers and layer-2s of every scan but the newest 2 that the interval store and the static names
+  # hold (verified in the task when unmarked): the data bucket with D1, then the R2 copy. A dry run (the plan in the
+  # log) until `execute: true`; first `-x` by hand 2026-10-18 (Batch `hf-retire-x-20261018-191046`).
+  retire: {keep: 2, layer2: true, store: "r2://oa-hf-usage-index", static_store: "r2://oa-hf-usage-index", copies: ["r2://oa-hf-usage-index"]}
   # The digest's live thread state and the earlier scans' snapshots are on R2 (publish-r2 lands this scan's before
   # `post`): the data store's root would find no state and post a second OP.
   digest: {template: cw, config: /app/job/digest.yml, root: "r2://oa-hf-usage-index/{snapshots}"}
