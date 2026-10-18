@@ -35,7 +35,8 @@ export const onRequest = async (ctx: Ctx & { env: OgEnv }): Promise<Response> =>
     }
     if (page.origin !== url.origin) return json({ error: 'url must be on this site' }, 400)
     try {
-      const m = await mint(env.DB, siteOf(env).name, page, id.email ?? id.name ?? 'unknown', now(), tokenDays(body?.days))
+      const site = siteOf(env)
+      const m = await mint(env.DB, site.name, page, id.email ?? id.name ?? 'unknown', now(), tokenDays(body?.days), undefined, site.root)
       if (!m) return json({ error: 'this page has no card' }, 400)
       return json({ url: m.url, token: m.token, exp_day: m.expDay }, 201)
     } catch (e) {

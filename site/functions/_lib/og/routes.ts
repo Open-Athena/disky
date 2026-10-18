@@ -1,6 +1,7 @@
 /** Which card a page URL gets (specs/done/dogi.md): its kind, the canonical view
  * params the card is drawn from (and that a view token is minted over), and
  * the unfurl's title. Pure: no env, no I/O. */
+import { mountedSegs, urlSegsOf } from '../../../src/pathCrumbs.js'
 import { canonicalSel } from '../../../src/scanSlug.js'
 
 export type OgKind = 'map' | 'diff' | 'staged' | 'users' | 'user' | 'assignments'
@@ -40,8 +41,9 @@ const pick = (sp: URLSearchParams, keys: readonly string[]): Record<string, stri
 }
 
 /** The page's view, or null for pages with no card of their own (API routes,
- * `/files`, `/admin`, unknown asset-looking paths). `site` names the root. */
-export function pageView(url: URL, site: string): PageView | null {
+ * `/files`, `/admin`, unknown asset-looking paths). `site` names the root; `root` is the store's mount
+ * (`Store.root`), which leads every map path and which its URLs leave out. */
+export function pageView(url: URL, site: string, root: readonly string[] = []): PageView | null {
   const segs = url.pathname.split('/').filter(Boolean).map(s => { try { return decodeURIComponent(s) } catch { return s } })
   const sp = url.searchParams
   const head = segs[0] ?? ''
@@ -57,9 +59,10 @@ export function pageView(url: URL, site: string): PageView | null {
   if (NOT_MAP.has(head) || segs.some(s => s.includes('..'))) return null
   // A file-looking single segment at the root (`/og.jpg`, `/favicon.svg`) is an asset.
   if (segs.length === 1 && /\.(?:png|jpe?g|svg|ico|txt|json|js|css|webmanifest|wasm|ttf)$/i.test(head)) return null
-  const path = segs.join('/')
+  const tree = mountedSegs(root, segs)
+  const path = tree.join('/')
   const params: Record<string, string> = { ...(path ? { path } : {}), ...pick(sp, MAP_KEYS) }
-  const where = path || site
+  const where = urlSegsOf(root, tree).join('/') || site
   const extras = [params.f ? `filter: ${params.f}` : null, params.o !== undefined ? `owner: ${params.o === '' ? 'unowned' : params.o === '*' ? 'owned' : params.o}` : null].filter(Boolean)
   if (sp.get('section') === 'diff') {
     const dm = sp.get('dm')

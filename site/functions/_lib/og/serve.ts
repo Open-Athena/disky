@@ -34,6 +34,8 @@ export type OgEnv = Env & PolicyEnv & {
   /** Match the frontend Store.defaultColor when configured; otherwise infer
    * owner vs tree from the scan's attribution, as the dashboard does. */
   OG_DEFAULT_COLOR?: string
+  /** The store's mount (`Store.root`), `/`-separated: the segments its page URLs leave out. */
+  STORE_ROOT?: string
 }
 
 const uncachedHtml = (response: Response): Response => {
@@ -47,7 +49,8 @@ const uncachedHtml = (response: Response): Response => {
  * preview/share credentials are checked; browser sessions do not grant previews. */
 export async function anonymousPage(env: OgEnv, url: URL): Promise<Response | null> {
   if (anonymousPolicy(env) !== 'generic') return null
-  const pv = pageView(url, siteOf(env).name)
+  const site = siteOf(env)
+  const pv = pageView(url, site.name, site.root)
   if (!pv || !DRAWN.has(pv.kind)) return null
   if ((await pageTier(env, pv.kind, pv.params, url, now())).tier === 'full') return null
   const shell = await env.ASSETS.fetch(new Request(new URL('/', url)))
@@ -66,6 +69,7 @@ export const siteOf = (env: OgEnv): Site => {
   const c = colorModeCodec.decode(env.OG_DEFAULT_COLOR)
   return {
     name: env.ROOT_LABEL ?? 'storage', scheme: env.STORE_SCHEME ?? 'gs://',
+    ...(env.STORE_ROOT ? { root: env.STORE_ROOT.split('/').filter(Boolean) } : {}),
     ...(c && ['tree', 'date', 'read', 'user'].includes(c) ? { defaultColor: c as ColorMode } : {}),
   }
 }
@@ -93,7 +97,8 @@ async function stagedVersion(env: OgEnv): Promise<string | null> {
 
 /** Stamp a page's HTML with its card when it has one. */
 export async function stampPage(env: OgEnv, url: URL, html: Response): Promise<Response> {
-  const pv = pageView(url, siteOf(env).name)
+  const site = siteOf(env)
+  const pv = pageView(url, site.name, site.root)
   if (!pv || !DRAWN.has(pv.kind)) return html
   const { tier, day, cred } = await pageTier(env, pv.kind, pv.params, url, now())
   if (tier === 'anon' && anonymousPolicy(env) === 'generic') return uncachedHtml(stampMeta(html, genericMeta(env, url)))
@@ -147,7 +152,7 @@ async function cardData(env: OgEnv, kind: string, params: Record<string, string>
   const pu = new URL(page, url.origin)
   if (kind === 'diff') pu.searchParams.set('section', 'diff')
   for (const [k, v] of Object.entries(params)) if (k !== 'path' && k !== 'id') pu.searchParams.set(k, v)
-  const title = pageView(pu, site.name)?.title ?? site.name
+  const title = pageView(pu, site.name, site.root)?.title ?? site.name
   switch (kind) {
     case 'map': return mapCard(env, site, title, params, tier)
     case 'diff': return diffCard(env, site, title, params, tier)
