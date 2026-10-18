@@ -42,9 +42,10 @@ def folded(String s) { on(s) && s in params.fold }
 
 def stepEnv(task) {
     // NF_PROCESS / NF_TAG: the task's process and tag, so a step's scan-run phases name the DAG node that ran them;
-    // NF_MACHINE: the machine type it asked for (a fallback label's: its submit attempt's, spec §7)
+    // NF_MACHINE: the machine type it asked for (a fallback label's: its submit attempt's, spec §7). `DT_RUN_ID` and
+    // `DT_SCAN_PROFILE_JSON` come from the head's `run.config` `env` scope instead: in the script they'd be in every
+    // task's hash, so a resume from a new head job (or after a profile edit) would miss the whole cache.
     def e = [SNAP_ID: params.scan, SCAN_ID: params.scan, GEN: params.gen, DT_JOB_START: params.job_start,
-             DT_RUN_ID: params.run_id, DT_SCAN_PROFILE_JSON: params.profile_json,
              NF_PROCESS: task.process, NF_TAG: task.tag ?: '', NF_MACHINE: task.machineType ?: ''] + params.env
     e.collect { k, v -> "export ${k}=${q(v)}" }.join('\n')
 }
