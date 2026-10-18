@@ -14,7 +14,8 @@ import { Tooltip } from './Tooltip'
 import { axisTicks, inSpan, type RunSpan, runSpanParam } from './runChart'
 import { fmtBytesPrecise, fmtN } from './types'
 import { useUnits } from './units'
-import { STORES, type Store } from './stores'
+import { useStores } from './auth'
+import { type Store } from './stores'
 import { useMinSlug } from './scan'
 import {
   batchHref, logsHref, mapHref, metaHref, type OutputDelta, phaseOrder, type PhaseSpan, type RunSummary, type ScanRun,
@@ -258,6 +259,7 @@ export function ScansPage() {
   const [status, setStatus] = useState('')
   const [span, setSpan] = useUrlState('w', runSpanParam)
   const hover = useHoverRun()
+  const stores = useStores()
   useEffect(() => {
     if (!span) return
     const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setSpan(null) }
@@ -275,8 +277,10 @@ export function ScansPage() {
     <main className="staged-page scans-page">
       <SiteNav />
       <h1>Scan runs</h1>
-      {STORES.length > 1 && <div className="run-filters">
-        <select aria-label="Store" value={store.key} onChange={e => nav(scansHref(STORES.find(s => s.key === e.target.value) ?? STORES[0]))}>{STORES.map(s => <option key={s.key} value={s.key}>{s.label}</option>)}</select>
+      {stores.length > 1 && <div className="run-filters">
+        {stores.length <= 3
+          ? <span className="gran" role="radiogroup" aria-label="Store">{stores.map(s => <button key={s.key} type="button" role="radio" aria-checked={s === store} className={s === store ? 'on' : ''} onClick={() => nav(scansHref(s))}>{s.label}</button>)}</span>
+          : <select aria-label="Store" value={store.key} onChange={e => nav(scansHref(stores.find(s => s.key === e.target.value) ?? stores[0]))}>{stores.map(s => <option key={s.key} value={s.key}>{s.label}</option>)}</select>}
       </div>}
       <p className="sub">Each scan job's run: when it ran, how long each phase took, what it wrote, and how each structure changed against the previous scan. The stores they append to are on <Link to="/health">Health</Link>.</p>
       {q.isLoading ? <p>Loading runs…</p> : q.error ? <p className="err">{q.error.message}</p> : !q.data?.configured ? (
