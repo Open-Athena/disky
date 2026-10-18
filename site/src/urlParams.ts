@@ -191,6 +191,11 @@ export const URL_PARAMS: Record<string, UrlParamDoc> = {
     examples: ['rate', 'objects', 'bytes', 'byteRate'],
     pages: ['/staged', '/runs'],
   },
+  mm: {
+    label: 'Manual scans',
+    description: 'How the size-over-time chart sets scans a hand submit started apart from scheduled ones: `t` puts a tick under the x-axis at each, `0` draws them like the rest. When absent, their dots are hollow. The tooltip names them in every style.',
+    examples: ['t', '0'],
+  },
   mt: {
     hidden: true,
     label: 'Lens (legacy)',
