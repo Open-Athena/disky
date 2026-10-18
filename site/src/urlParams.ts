@@ -193,8 +193,8 @@ export const URL_PARAMS: Record<string, UrlParamDoc> = {
   },
   mm: {
     label: 'Manual scans',
-    description: 'How the size-over-time chart sets scans a hand submit started apart from scheduled ones: `t` puts a tick under the x-axis at each, `0` draws them like the rest. When absent, their dots are hollow. The tooltip names them in every style.',
-    examples: ['t', '0'],
+    description: 'How the size-over-time chart sets scans a hand submit started apart from scheduled ones: `h` draws their dots hollow, `0` draws them like the rest. When absent, a tick under the x-axis marks each (named in the legend). The tooltip names them in every style.',
+    examples: ['h', '0'],
   },
   mt: {
     hidden: true,

@@ -54,12 +54,12 @@ const X_RANGES: [XRange, number | null][] = [['1w', 7], ['1m', 30], ['all', null
 // The x-range (`?xr=1w|1m`; all = default): the last N days before the
 // latest scan. A phone's chart is too narrow to read a month of 12-hourly
 // scans at the right edge.
-// Scans a hand submit started (`manualScans`), drawn apart from the schedule's (`?mm`): hollow dots (default), a tick
-// under the x-axis (`t`), or not at all (`0`). The tooltip names them in every style.
+// Scans a hand submit started (`manualScans`), drawn apart from the schedule's (`?mm`): a tick under the x-axis
+// (default), hollow dots (`h`), or not at all (`0`). The tooltip names them in every style, and the legend the mark.
 type ManualMark = 'hollow' | 'tick' | 'off'
 const MANUAL_MARKS: [ManualMark, string][] = [
-  ['hollow', 'Manual scans’ dots drawn hollow'],
   ['tick', 'A tick under the x-axis at each manual scan'],
+  ['hollow', 'Manual scans’ dots drawn hollow'],
   ['off', 'Manual scans drawn like the schedule’s'],
 ]
 
@@ -153,6 +153,9 @@ export const dateOfX = (x: number) => {
   return iso.slice(11, 16) === '00:00' ? iso.slice(0, 10) : `${iso.slice(0, 10)}T${iso.slice(11, 13)}${iso.slice(14, 16)}`
 }
 const fmtX = (x: number) => new Date(x).toLocaleDateString(undefined, { month: 'short', day: 'numeric', timeZone: 'UTC' })
+// The x-axis over a span under two days (a new store's first scans): times of day, local as the scan picker's, since
+// every tick would otherwise read the same date.
+const fmtXTime = (x: number) => new Date(x).toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' })
 // A scan's instant: `YYYY-MM-DDTHHMM` = that UTC time, `YYYY-MM-DD` = its
 // start when known (`times`), else UTC midnight. Two scans a day must not share
 // an x (the bands key by x, and a shared x drew the total as a vertical step
@@ -241,8 +244,8 @@ export function SizeOverTime({ scans, times, fmt = fmtScan, prefix, user, pool, 
   const setFloorPct = (p: number) => setExpP(p === DEFAULT_FLOOR_PCT ? undefined : String(p))
   const [gearOpen, setGearOpen] = useState(false)
   const [mmP, setMmP] = useUrlState('mm', stringParam())
-  const manualMark: ManualMark = mmP === 't' ? 'tick' : mmP === '0' ? 'off' : 'hollow'
-  const setManualMark = (m: ManualMark) => setMmP(m === 'tick' ? 't' : m === 'off' ? '0' : undefined)
+  const manualMark: ManualMark = mmP === 'h' ? 'hollow' : mmP === '0' ? 'off' : 'tick'
+  const setManualMark = (m: ManualMark) => setMmP(m === 'hollow' ? 'h' : m === 'off' ? '0' : undefined)
   useActions(Object.fromEntries(MANUAL_MARKS.map(([m, text]) => [`over-time:manual-${m}`, {
     label: `Size over time: ${text.charAt(0).toLowerCase()}${text.slice(1)}`, group: 'Size over time', keywords: ['manual', 'scan', 'trigger'], handler: () => setManualMark(m),
   }])))
@@ -303,6 +306,8 @@ export function SizeOverTime({ scans, times, fmt = fmtScan, prefix, user, pool, 
     () => (seriesQ.data?.points ?? []).filter(p => manual.has(p.date)).map(p => xOfScan(p.date, times)),
     [seriesQ.data, manual, times],
   )
+  // the legend names the mark while one is drawn in view
+  const manualLegend = manualMark !== 'off' && manualXs.some(x => x >= xFrom)
   // The roots' traces (split mode), keyed by bucket, in the map's colours: slot by size at the latest scan (largest =
   // slot 0; a root that scan doesn't hold ranks last), each slot's `slotColor`, as the map colours the root's children.
   const roots = useMemo(() => {
@@ -519,7 +524,7 @@ export function SizeOverTime({ scans, times, fmt = fmtScan, prefix, user, pool, 
           getY={p => p.y}
           getY0={stacked ? p => p.y0 ?? 0 : undefined}
           formatY={fmtY}
-          formatX={fmtX}
+          formatX={total.length > 1 && total[total.length - 1].x - total[0].x < 2 * DAY ? fmtXTime : fmtX}
           formatTipX={x => fmt(idOfX(x)) + (manual.has(idOfX(x)) ? ' · manual' : '')}
           hollowXs={manualMark === 'hollow' ? manualXs : undefined}
           tickXs={manualMark === 'tick' ? manualXs : undefined}
@@ -542,7 +547,7 @@ export function SizeOverTime({ scans, times, fmt = fmtScan, prefix, user, pool, 
       {gaps.note && !tooMany && <p className="gap-note">{gaps.note}</p>}
       {/* A union's points before some member's first scan: partial totals, named — never a zero for it. */}
       {!tooMany && <SeriesMissingNote points={seriesQ.data?.points} />}
-      {roots.length > 0 && (
+      {(roots.length > 0 || manualLegend) && (
         <div className="legend roots-legend">
           {roots.map(r => (
             <span className="li" key={r.key}>
@@ -551,6 +556,18 @@ export function SizeOverTime({ scans, times, fmt = fmtScan, prefix, user, pool, 
               {r.points[0] && firstX != null && r.points[0].x > firstX && <span className="since"> · since {fmtX(r.points[0].x)}</span>}
             </span>
           ))}
+          {manualLegend && (
+            <Explain text="Started by hand, not by the schedule (⚙ changes the mark)">
+              <span className="li manual">
+                <svg width="10" height="10" aria-hidden="true">
+                  {manualMark === 'tick'
+                    ? <path d="M5,2l4,7h-8z" fill="var(--dt-ts-tick, rgba(139,148,158,0.9))" />
+                    : <circle cx="5" cy="5" r="3.5" fill="none" stroke="currentColor" strokeWidth="1.5" />}
+                </svg>
+                manual scan
+              </span>
+            </Explain>
+          )}
         </div>
       )}
     </section>
