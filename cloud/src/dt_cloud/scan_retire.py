@@ -26,7 +26,7 @@ second: its D1 rows are gone). Deletion is a whitelist: a file no class names st
 1. listed by the IS's newest manifest (the generation `-g`, default `interval-store/CURRENT.json`, followed to its
    newest successor; the base's `scans.json` when no manifest) **and** by the static index's (`-G`), else skipped;
 2. a passing parity marker `interval-store/<gen>/verify/<id>.json` (`interval_verify.marker`), in the generation or one
-   it was compacted from; else, executing without `-m`, `interval-store verify` runs for it now (against its newest
+   it was compacted or backfilled from; else, executing without `-m`, `interval-store verify` runs for it now (against its newest
    per-scan `path` sort) and writes one. A dry run never verifies: such a scan is `needs-verify`.
 
 A scan's raw listing shards carrying a (non-null) `generation` go only when its marker compared the objects' generations
@@ -178,14 +178,16 @@ def listed(store: Store, prefix: str) -> list[str]:
 
 
 def lineage(store: Store, gen: str) -> list[str]:
-    """`gen`, then each generation it was compacted from (`compaction.json` `from`), newest first."""
+    """`gen`, then each generation it was compacted or backfilled from (`compaction.json` / `backfill.json` `from`: the
+    same versions, so their parity markers hold), newest first."""
+    from .interval_backfill import BACKFILL
+
     out = [gen]
-    while store.exists(key := f"{PREFIX}/{out[-1]}/{ic.COMPACTION}"):
-        frm = store.read_json(key)["from"]
-        if frm in out:
-            break
+    while True:
+        key = next((k for k in (f"{PREFIX}/{out[-1]}/{ic.COMPACTION}", f"{PREFIX}/{out[-1]}/{BACKFILL}") if store.exists(k)), None)
+        if key is None or (frm := store.read_json(key)["from"]) in out:
+            return out
         out.append(frm)
-    return out
 
 
 def has_generation(store: Store, keys: Iterable[str], *, workers: int = 16) -> bool:
