@@ -8,6 +8,7 @@
 #   job/cw-interval-submit.sh build -t <scan>   # … through one scan (extra args go to the command)
 #   job/cw-interval-submit.sh add               # append every scan after the generation's newest
 #   job/cw-interval-submit.sh verify -s A,B,…   # parity against the per-scan path store at those scans (the base's)
+#   TASKS=8 job/cw-interval-submit.sh verify -s A,B,…  # … split over 8 Batch tasks (each its share of the scans)
 #   DRY=1 job/cw-interval-submit.sh build       # print the body only
 #
 # Same image, SA and R2 secrets as the scan job (cw-batch-submit.sh); R2 through `job/r2-profile.sh`. Never
@@ -30,8 +31,9 @@ DISK_GB=${DISK_GB:-1000}
 JOB_ID=${JOB_ID:-cw-iv-$CMD-$(date -u +%Y%m%d-%H%M%S)}
 STORE=${STORE:-}
 SEED_GEN=${SEED_GEN:-}
+TASKS=${TASKS:-1}
 
-export PROJECT SA IMAGE R2_BUCKET GEN MACHINE MEM DISK_GB CMD STORE SEED_GEN
+export PROJECT SA IMAGE R2_BUCKET GEN MACHINE MEM DISK_GB CMD STORE SEED_GEN TASKS
 body=$(python3 - "$@" <<'EOF'
 import json, os, shlex, sys
 extra = " ".join(shlex.quote(a) for a in sys.argv[1:])
@@ -39,7 +41,8 @@ CMD, GEN = os.environ["CMD"], os.environ["GEN"]
 STORE, SEED = os.environ["STORE"], os.environ["SEED_GEN"]
 out = shlex.quote(STORE) if STORE else '"$R2_ARCHIVE"'
 if CMD == "verify":  # every case's lines + summary land in /stage/verify (and the generation's verify/ on R2); the summary is printed
-    run = f'dt-cloud interval-store verify -b "$R2_ARCHIVE" -g {GEN} -i 0 -n 1 -T /stage/tmp -o /stage {extra}\n'
+    # each task its share of the sampled scans (`-i` defaults to $BATCH_TASK_INDEX); each scan's marker lands in the generation's verify/
+    run = f'dt-cloud interval-store verify -b "$R2_ARCHIVE" -g {GEN} -n {os.environ["TASKS"]} -T /stage/tmp -o /stage {extra}\n'
 else:
     run = (f"dt-cloud interval-store {CMD} -g {GEN} -L 'cw-l2/{{id}}/index/{{gen}}/path-index.parquet'"
            f' -s "$R2_ARCHIVE" -o {out} -w /stage/iv -M {os.environ["MEM"]} -p "$(nproc)" {extra}\n')
@@ -56,7 +59,8 @@ cmd = (
 P = os.environ["PROJECT"]
 print(json.dumps({
     "taskGroups": [{
-        "taskCount": 1,
+        "taskCount": int(os.environ["TASKS"]) if CMD == "verify" else 1,
+        "parallelism": int(os.environ["TASKS"]) if CMD == "verify" else 1,
         "taskSpec": {
             "runnables": [{"container": {"imageUri": os.environ["IMAGE"], "entrypoint": "bash", "commands": ["-c", cmd],
                                          "volumes": ["/mnt/disks/stage:/stage:rw"]}}],
