@@ -3189,10 +3189,12 @@ main.add_command(_static_names)
 from .interval_store import cli as _interval_store  # noqa: E402
 from .interval_append import append_cmd as _interval_append, cli as _interval_runs, merge_cmd as _interval_merge  # noqa: E402
 from .interval_local import add_cmd as _interval_local_add, build_cmd as _interval_local_build, current_cmd as _interval_local_current  # noqa: E402
+from .interval_export import export_cmd as _interval_export  # noqa: E402
 
 _interval_store.add_command(_interval_local_build)
 _interval_store.add_command(_interval_local_add)
 _interval_store.add_command(_interval_local_current)
+_interval_store.add_command(_interval_export)
 _interval_store.add_command(_interval_append)
 _interval_store.add_command(_interval_merge)
 _interval_store.add_command(_interval_runs)
@@ -3295,6 +3297,11 @@ def _scan_head(fresh: bool, dry_run: bool, nf_dir: Path | None, reproc: bool, la
 
     nf = nf_dir or Path(os.environ.get("DT_NF_DIR") or "job/nf")
     sys.exit(head(profile_path, nf.absolute(), launch_dir, reproc=reproc, fresh=fresh, dry_run=dry_run))
+
+
+from .scan_retire import retire_cmd as _scan_retire  # noqa: E402
+
+_scan.add_command(_scan_retire)
 
 
 if __name__ == "__main__":
