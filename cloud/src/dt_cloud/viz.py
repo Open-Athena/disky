@@ -296,6 +296,8 @@ def write_path_index(
     attr = bool(attributions)
     resource_stage("listing-setup")
     con = duckdb.connect()
+    # Dates and hours are UTC (the as-of cut's `CAST(hour AS DATE)`), not the OS's local zone
+    con.execute("SET TimeZone = 'UTC'")
     # attribution mode is node-scale (34M-dir python-side walk); plain mode
     # stays laptop-safe
     con.execute(f"SET memory_limit='{os.environ.get('DUCKDB_MEM', '24GB' if attr else '6GB')}'")

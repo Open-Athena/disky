@@ -8,6 +8,7 @@ and meta JSONs.
 import datetime as dt
 import json
 import re
+import time
 from pathlib import Path
 
 import pandas as pd
@@ -199,7 +200,6 @@ def test_access_through_is_the_newest_log_hour_before_the_scan(tmp_path: Path, l
     ts = lambda d, h, m: dt.datetime(2026, 7, d, h, m, 17, tzinfo=dt.timezone.utc)  # noqa: E731
     pd.DataFrame({
         "bucket": ["b1"] * 3, "path": ["users", "datasets", "top.bin"],
-        # Hours far enough from midnight UTC that the as-of cut's `CAST(hour AS DATE)` agrees in any session TZ.
         "hour": [ts(18, 9, 0), ts(19, 9, 0), ts(20, 12, 0)], "op": ["GET", "PUT", "GET"],
         "last_ts": [ts(18, 9, 41), ts(19, 9, 59), ts(20, 12, 5)], "n_ops": [1, 1, 1], "bytes_out": [1, 1, 1],
     }).to_parquet(agg)
@@ -210,6 +210,29 @@ def test_access_through_is_the_newest_log_hour_before_the_scan(tmp_path: Path, l
         "from": epoch_day(ts(18, 9, 41)), "to": epoch_day(ts(19, 9, 59)), "through": "2026-07-19T09:00Z", "buckets": ["b1"],
     }
     assert json.loads((tmp_path / "out" / "meta.json").read_text())["access"]["through"] == "2026-07-19T09:00Z"
+
+
+def test_access_as_of_cut_is_utc_in_any_session_timezone(tmp_path: Path, listing: str, attribution: str, monkeypatch):
+    """The as-of cut (`day < D`) is in UTC whatever the process's timezone: a read at 02:00 UTC on the scan date is on
+    the scan date, so it's out, even where local time still says the day before (DuckDB casts a TIMESTAMPTZ to a DATE
+    in its session `TimeZone`, which defaults to the OS's)."""
+    monkeypatch.setenv("TZ", "America/New_York")
+    time.tzset()
+    try:
+        agg = tmp_path / "agg.parquet"
+        ts = lambda d, h: dt.datetime(2026, 7, d, h, 30, tzinfo=dt.timezone.utc)  # noqa: E731
+        pd.DataFrame({
+            "bucket": ["b1"] * 2, "path": ["users", "datasets"],
+            "hour": [ts(19, 23).replace(minute=0), ts(20, 2).replace(minute=0)], "op": ["GET", "GET"],
+            "last_ts": [ts(19, 23), ts(20, 2)], "n_ops": [1, 1], "bytes_out": [1, 1],
+        }).to_parquet(agg)
+        identities_path = tmp_path / "identities.yaml"
+        identities_path.write_text(IDENTITIES_YAML)
+        meta = write_path_index((listing,), tmp_path / "out", "2026-07-20T0700", (attribution,), identities_path, access=(str(agg),))
+    finally:
+        monkeypatch.delenv("TZ")
+        time.tzset()
+    assert meta["access"] == {"from": epoch_day(ts(19, 23)), "to": epoch_day(ts(19, 23)), "through": "2026-07-19T23:00Z", "buckets": ["b1"]}
 
 
 def _r2_hour_file(root: Path, ts: dt.datetime, capture: str, rows: list[tuple]) -> Path:
