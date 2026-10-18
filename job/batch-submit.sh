@@ -199,7 +199,9 @@ c["commands"] = ["scan", "head", os.environ["PROFILE"]]
 c["volumes"] = []
 t["volumes"] = []
 t["computeResource"] = {"cpuMilli": 2000, "memoryMib": 7000}
-t["maxRunDuration"] = "21600s"
+# 12 h: the 2026-10-18 scan hit 6 h (a 158-min access ingest gating the index, then a 2 h+ static-names drill) and the
+# kill left the scan unsynced; the head only orchestrates, so a long run costs an e2-standard-2
+t["maxRunDuration"] = "43200s"
 keep = {"CLOUDFLARE_API_TOKEN", "SLACK_BOT_TOKEN"}
 t["environment"]["secretVariables"] = {k: v for k, v in t["environment"]["secretVariables"].items() if k in keep}
 pol = j["allocationPolicy"]["instances"][0]["policy"]
