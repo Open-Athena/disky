@@ -138,6 +138,19 @@ daily = BatchCron(
     depends_on=[secrets, static_secrets, snapshot_secret],
 )
 
+# The access-log poller (specs/access-log-freshness.md §A): GCS delivers each hour's usage CSVs ~9–16 h late, so
+# ingest them hourly as they land instead of in the daily scan; the scan's `index` reads `access/agg` as it stands.
+access_ingest = BatchCron(
+    "gcs-access-ingest-hourly",
+    project=project,
+    region=region,
+    schedule="20 * * * *",
+    submitter=job_dir / "access-submit.sh",
+    sa_email=job.email,
+    adopt=adopt,
+    depends_on=[secrets],
+)
+
 # The hourly D1 → Google Sheet mirror (deploy/sheet-mirror/): `deploy.sh` ships
 # the image and the rendered config; this owns the job, its trigger and IAM.
 sheet_sync = RunJobCron(
