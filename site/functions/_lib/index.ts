@@ -491,14 +491,16 @@ export async function openIndex(env: Env, date: string, variant = 'path'): Promi
 export const intervalsOn = (env: Env): boolean => env.PATH_STORE === 'intervals' && !!env.INTERVAL_STORE_GEN && !!env.INDEX_R2
 
 /** A request's path store: `PATH_STORE=opt-in` reads the interval store only for requests asking
- *  `ps=iv` (so one deployment serves both, side by side); a secondary store (`store=`) never does. The
+ *  `ps=iv` (so one deployment serves both, side by side), `intervals` for every request but one asking `ps=scan` (the
+ *  per-scan sorts, for a parity check); a secondary store (`store=`) never does. The
  *  generation is `INTERVAL_STORE_GEN` (a pin), else the store's current one (`ivCurrentGen`), fixed for the
  *  request: none (no pointer yet) reads per-scan stores. */
 export async function withPathStore<C extends { request: Request; env: Env }>(ctx: C): Promise<C> {
   const { env } = ctx
   if (env.PATH_STORE !== 'opt-in' && env.PATH_STORE !== 'intervals') return ctx
   const u = new URL(ctx.request.url).searchParams
-  const on = !u.get('store') && (env.PATH_STORE === 'intervals' || u.get('ps') === 'iv')
+  const ps = u.get('ps')
+  const on = !u.get('store') && ps !== 'scan' && (env.PATH_STORE === 'intervals' || ps === 'iv')
   const gen = on ? await ivGen(env) : env.INTERVAL_STORE_GEN
   const w = (ctx as { waitUntil?: unknown }).waitUntil
   return { ...ctx, env: { ...env, PATH_STORE: on ? 'intervals' : undefined, INTERVAL_STORE_GEN: gen ?? undefined }, ...(typeof w === 'function' ? { waitUntil: w.bind(ctx) } : {}) }
@@ -981,7 +983,10 @@ export async function ivLastRead(env: Env, date: string, paths: string[], maxGro
  * names on a v1 index, the layer-2's on a store sort (§1.1). `usr` and the
  * class pivots only where the file has them (cw has neither). */
 export const V1_ROW_COLUMNS = ['path', 'depth', 'usr', 'b', 'o', 'wts', 'wb', 'c2', 'c3', 'c4', 'a']
-export const IV_ROW_COLUMNS = ['depth', 'path', 'usr', 'vf', 'vt', 'kind', 'size', 'n_files', 'n_children', 'n_desc', 'mtime', 'wts', 'wb', 'c2', 'c3', 'c4', 'us', 'last_read']
+/** The interval store's storage-class byte columns, by class (`interval_store.CLASS_COLS`): their one definition on
+ * the site, so a deployment that names its classes renames them here and there only. */
+export const IV_CLASS_COLS = { 2: 'c2', 3: 'c3', 4: 'c4' } as const
+export const IV_ROW_COLUMNS = ['depth', 'path', 'usr', 'vf', 'vt', 'kind', 'size', 'n_files', 'n_children', 'n_desc', 'mtime', 'wts', 'wb', IV_CLASS_COLS[2], IV_CLASS_COLS[3], IV_CLASS_COLS[4], 'us', 'last_read']
 export const V2_ROW_COLUMNS = ['path', 'depth', 'usr', 'kind', 'size', 'n_files', 'n_children', 'n_desc', 'mtime', 'mtime_mean', 'last_read', 'sum_storage_class_id_2', 'sum_storage_class_id_3', 'sum_storage_class_id_4']
 
 /** What a shaped read projects: a v1 index reads every column (its columns
@@ -1002,7 +1007,7 @@ export function rowColumns(version: number, schema: SchemaElement[]): string[] |
 export function columnsFor(h: IndexHandle, fields: (keyof Row)[]): string[] {
   const v2: Partial<Record<keyof Row, string[]>> = { size: ['size'], n_files: ['n_files'], last_read: ['last_read'], cls2: ['sum_storage_class_id_2'], cls3: ['sum_storage_class_id_3'], cls4: ['sum_storage_class_id_4'], mtime_mean: ['mtime_mean', 'size'], mtime_w: ['mtime_mean', 'size'] }
   const v1: Partial<Record<keyof Row, string[]>> = { size: ['b'], n_files: ['o'], last_read: ['a'], cls2: ['c2'], cls3: ['c3'], cls4: ['c4'], mtime_mean: ['wts', 'wb'], mtime_w: ['wb'] }
-  const v3: Partial<Record<keyof Row, string[]>> = { size: ['size'], n_files: ['n_files'], last_read: ['last_read'], cls2: ['c2'], cls3: ['c3'], cls4: ['c4'], mtime_mean: ['wts', 'wb'], mtime_w: ['wb'], us: ['us', 'size'] }
+  const v3: Partial<Record<keyof Row, string[]>> = { size: ['size'], n_files: ['n_files'], last_read: ['last_read'], cls2: [IV_CLASS_COLS[2]], cls3: [IV_CLASS_COLS[3]], cls4: [IV_CLASS_COLS[4]], mtime_mean: ['wts', 'wb'], mtime_w: ['wb'], us: ['us', 'size'] }
   const map = h.version >= 3 ? v3 : isStore(h) ? v2 : v1
   const have = new Set(h.schema.slice(1).map(l => l.name))
   const out = new Set<string>()
@@ -1438,9 +1443,9 @@ const toRowV3 = (r: Record<string, unknown>): Row => {
     mtime_mean: wb > 0 ? num(r.wts) / wb : null,
     mtime_w: wb,
     last_read: r.last_read == null ? null : opt(r.last_read),
-    cls2: num(r.c2),
-    cls3: num(r.c3),
-    cls4: num(r.c4),
+    cls2: num(r[IV_CLASS_COLS[2]]),
+    cls3: num(r[IV_CLASS_COLS[3]]),
+    cls4: num(r[IV_CLASS_COLS[4]]),
     us: r.us == null ? null : usMap(str(r.us), size),
     vf: num(r.vf),
     vt: num(r.vt),

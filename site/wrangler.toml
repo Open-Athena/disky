@@ -19,7 +19,7 @@ enabled = true
 [vars]
 STORE = "oa-r2"
 STORES_EXTRA = "meta"
-STORES_JSON = '{"meta":{"vars":{"ROOT_LABEL":"OA R2 metadata","SNAPSHOTS_SUBDIR":"meta","STORE_SCHEME":"r2://","STORE_BUCKETS":"oa-r2-usage-data,oa-r2-usage-index","STORE_PREFIXES":"meta-l2/,snapshots/meta/","STORE_BUCKET":"oa-r2-usage-index","STORE_REGION":"auto","ROOT_TITLE":"This deployment’s scan archive and serving indexes","STATIC_GEN":"2026-10-15metab","FILTER_STATIC_HEAVY":"1"},"secrets":{"STORE_ENDPOINT":"STORE_ENDPOINT","STORE_ACCESS_KEY_ID":"STORE_ACCESS_KEY_ID","STORE_SECRET_ACCESS_KEY":"STORE_SECRET_ACCESS_KEY"}},"all":{"union":["primary","meta"],"main":true,"sources":{"primary":{"label":"R2 buckets","icon":"/icons/r2.svg"},"meta":{"label":"Scan metadata","icon":"/icons/meta.svg"}}}}'
+STORES_JSON = '{"meta":{"path":"/meta","vars":{"ROOT_LABEL":"OA R2 metadata","SNAPSHOTS_SUBDIR":"meta","STORE_SCHEME":"r2://","STORE_BUCKETS":"oa-r2-usage-data,oa-r2-usage-index","STORE_PREFIXES":"meta-l2/,snapshots/meta/","STORE_BUCKET":"oa-r2-usage-index","STORE_REGION":"auto","ROOT_TITLE":"This deployment’s scan archive and serving indexes","STATIC_GEN":"2026-10-15metab","FILTER_STATIC_HEAVY":"1"},"secrets":{"STORE_ENDPOINT":"STORE_ENDPOINT","STORE_ACCESS_KEY_ID":"STORE_ACCESS_KEY_ID","STORE_SECRET_ACCESS_KEY":"STORE_SECRET_ACCESS_KEY"}},"all":{"union":["primary","meta"],"main":true,"sources":{"primary":{"label":"R2 buckets","icon":"/icons/r2.svg"},"meta":{"label":"Scan metadata","icon":"/icons/meta.svg"}}}}'
 META_TREE_URL = "https://r2.oa.dev/meta"
 AUTH_MODE = "app"
 ROOT_LABEL = "Open Athena R2"
