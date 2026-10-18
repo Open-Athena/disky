@@ -64,7 +64,7 @@ KEY_COLS = ["depth", "path"]
 #: of the store names them from here (and the site's interval reader from `IV_CLASS_COLS`, `_lib/index.ts`), so a
 #: deployment whose classes have names (gcs: Nearline, Coldline, Archive) renames them in one place; a new generation
 #: (`backfill-generation`, which reads an older one's class columns by position) carries the rename.
-CLASS_COLS = {2: "c2", 3: "c3", 4: "c4"}
+CLASS_COLS = {2: "nearline_bytes", 3: "coldline_bytes", 4: "archive_bytes"}
 CLS = list(CLASS_COLS.values())
 #: The object's native version (GCS `generation`), opt-in per generation (`scans.json` `"generation": true`, set by a
 #: build over sources that carry it, or by `backfill-generation`): absent from every file of a generation without it.
