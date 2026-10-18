@@ -52,7 +52,7 @@ from . import index_footer as F
 from . import interval_compact as ic
 from . import interval_store as ist
 from .append_runner import latest_key
-from .blobstore import Store
+from .blobstore import Store, store_url
 from .scan_id import SCAN_ID
 from .static_names import err
 
@@ -271,9 +271,10 @@ def retire(scans_root: str, layouts: list[str], *, iv_root: str, static_gen: str
            execute: bool = False, markers_only: bool = False, backup_root: str | None = None, d1: bool = True,
            d1_store: str = F.PRIMARY_STORE, drop_path: bool = False, work: Path | None = None) -> dict:
     """Plan (and with `execute`, carry out) the retirement; returns the report (`scans`, `totals`, `d1`, …)."""
+    scans_root, iv_root = store_url(scans_root), store_url(iv_root)  # a bare bucket name is a GCS bucket (a profile's)
     src = Store(scans_root)
     iv = Store(iv_root)
-    st = Store(static_root or iv_root)
+    st = Store(store_url(static_root) if static_root else iv_root)
     if iv_gen is None:
         iv_gen, how = ic.resolve(iv)
         if iv_gen is None:
@@ -344,7 +345,7 @@ def retire(scans_root: str, layouts: list[str], *, iv_root: str, static_gen: str
             return report
         doomed = {k: n for sid in retiring for k, n in scans[sid].deletable().items()}
         if backup_root:
-            report["backup"] = backup(src, Store(backup_root), doomed, work / "backup")
+            report["backup"] = backup(src, Store(store_url(backup_root)), doomed, work / "backup")
             err(f"retire: backed up {report['backup']['objects']} objects ({report['backup']['bytes']:,} B) to {backup_root}")
         if d1:
             report["d1_deleted"] = d1_delete(retiring, d1_store, drop_path)
