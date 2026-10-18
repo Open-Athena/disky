@@ -110,7 +110,6 @@ function DurationStrip({ runs, color, onPick, win, onWin, hover }: {
   runs: RunSummary[]; color: (p: string) => string; onPick: (id: string) => void
   win: RunSpan | null; onWin: (w: RunSpan | null) => void; hover: HoverRun
 }) {
-  const tip = useSvgTip()
   const [ref, W] = useWidth<HTMLDivElement>()
   const [drag, setDrag] = useState<[number, number] | null>(null)
   const dragged = useRef(false)
@@ -172,14 +171,12 @@ function DurationStrip({ runs, color, onPick, win, onWin, hover }: {
           const cx = x(p.run.started_ts!) - bw / 2
           const failed = p.run.status === 'failed'
           const main = p.spans.filter(s => s.lane === 0)
-          const where = p.failed_at ? ` · failed ${p.failed_at.startsWith('after') ? p.failed_at : `in ${p.failed_at}`}` : ''
           const id = p.run.run_id
           const out = !drag && !inSpan(win, p.run.started_ts)
-          const tipOn = tip.on(<><div><b>{p.run.scan}</b> · {p.run.kind} · {runOutcome(p.run, p.phase_issues)}</div><div>{fmtDur(p.secs!)}{where}</div>{p.spans.map(s => <div key={s.phase}><i className="sw" style={{ background: phaseFill(s, color) }} />{s.phase} {fmtDur(s.end - s.start)}{s.lane ? ' (beside)' : ''}{s.status === 'failed' ? ` · ${phaseOutcome(s)}` : ''}</div>)}</>)
           return (
             <g key={id} className={`sr-col${failed ? ' failed' : ''}${hover.id === id ? ' brushed' : hover.id || out ? ' dimmed' : ''}`}
               onClick={() => { if (!dragged.current) onPick(id) }} role="link" aria-label={`${p.run.scan} ${p.run.kind} run`}
-              onPointerMove={e => { if (drag) return; tipOn.onPointerMove(e); hover.enter(id) }} onPointerLeave={() => { tipOn.onPointerLeave(); hover.leave() }}>
+              onPointerMove={() => { if (!drag) hover.enter(id) }} onPointerLeave={hover.leave}>
               <rect className="sr-col-hit" x={cx - 2} y={T} width={bw + 4} height={H - T - B} />
               <rect className="sr-col-total" x={cx} y={y(p.secs! / 3600)} width={bw} height={Math.max(1, y(0) - y(p.secs! / 3600))} />
               {!failed && main.map(s => (
@@ -191,14 +188,43 @@ function DurationStrip({ runs, color, onPick, win, onWin, hover }: {
         })}
         <line className="axis" x1={L} x2={W - R} y1={y(0)} y2={y(0)} />
       </svg>
-      {tip.el}
     </div>
   )
 }
 
-function Legend({ order, color }: { order: string[]; color: (p: string) => string }) {
+/** The phase legend, and the hovered run's readout (a bar's or a table row's): each phase's time in it, beside its
+ * swatch (the phases it didn't run fade), with the run's summary on the line above. The grid's cells are fixed, so a
+ * hover never reflows the page. */
+function Legend({ order, color, run }: { order: string[]; color: (p: string) => string; run?: RunSummary }) {
   if (!order.length) return null
-  return <div className="sr-legend">{order.map(p => <span key={p}><i className="sw" style={{ background: color(p) }} />{p}</span>)}<span><i className="sw" style={{ background: 'var(--other)' }} />unrecorded work (not necessarily idle)</span><span><i className="sw failed" />failed</span></div>
+  const by = new Map<string, { secs: number; beside: boolean; failed: boolean }>()
+  for (const s of run?.spans ?? []) {
+    const e = by.get(s.phase) ?? { secs: 0, beside: false, failed: false }
+    e.secs += s.end - s.start
+    if (s.lane) e.beside = true
+    if (s.status === 'failed') e.failed = true
+    by.set(s.phase, e)
+  }
+  // the run's time no main-lane phase accounts for
+  const other = run?.secs == null ? null : run.secs - run.spans.filter(s => !s.lane).reduce((t, s) => t + s.end - s.start, 0)
+  const where = run?.failed_at ? ` · failed ${run.failed_at.startsWith('after') ? run.failed_at : `in ${run.failed_at}`}` : ''
+  const cell = (key: string, sw: ReactNode, label: string, dur: ReactNode, cls = '') =>
+    <span key={key} className={cls || undefined}>{sw}<span className="lbl">{label}</span><span className="dur">{dur}</span></span>
+  return <div className={`sr-phases${run ? ' readout' : ''}`}>
+    <div className="sr-phases-head">{run
+      ? <><b>{fmtRunTime(run.run.started_ts!)}</b> · {run.run.kind} · {runOutcome(run.run, run.phase_issues)}{run.secs != null && <> · {fmtDur(run.secs)}</>}{where}{[...by.values()].some(e => e.beside) && <span className="dim"> · ∥ beside the main sequence</span>}</>
+      : <span className="dim">Hover a bar or a row for its phases.</span>}</div>
+    <div className="sr-phases-grid">
+      {order.map(p => {
+        const e = by.get(p)
+        return cell(p, <i className="sw" style={{ background: color(p) }} />, p,
+          e && <>{e.beside && '∥ '}{fmtDur(e.secs)}</>,
+          run ? (e ? (e.failed ? 'failed' : '') : 'absent') : '')
+      })}
+      {cell('other', <i className="sw" style={{ background: 'var(--other)' }} />, 'unrecorded work (not necessarily idle)', other != null && other >= 1 && fmtDur(other), run && !(other != null && other >= 1) ? 'absent' : '')}
+      {cell('failed', <i className="sw failed" />, 'failed', null, run && run.run.status !== 'failed' ? 'absent' : '')}
+    </div>
+  </div>
 }
 
 function Links({ run, links }: { run: ScanRun; links: Links }) {
@@ -245,7 +271,7 @@ export function ScansPage() {
         <section className="sr-chart">
           <h3>Duration by run</h3>
           <DurationStrip runs={filtered} color={color} onPick={id => nav(scanHref(id))} win={span} onWin={setSpan} hover={hover} />
-          <Legend order={order} color={color} />
+          <Legend order={order} color={color} run={hover.id ? runs.find(r => r.run.run_id === hover.id) : undefined} />
         </section>
         <div className="run-filters">
           {kinds.length > 1 && <select aria-label="Filter by kind" value={kind} onChange={e => setKind(e.target.value)}><option value="">all kinds</option>{kinds.map(k => <option key={k}>{k}</option>)}</select>}

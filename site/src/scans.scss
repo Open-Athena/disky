@@ -18,6 +18,17 @@
   .sw { display: inline-block; width: 9px; height: 9px; border-radius: 2px; margin-right: 5px; vertical-align: baseline;
     &.failed { background: color-mix(in srgb, var(--danger) 70%, transparent); } }
   .sr-legend { display: flex; flex-wrap: wrap; gap: 4px 14px; font-size: 12px; color: var(--ink-2); margin-top: 4px; }
+  // /scans' phase legend doubles as the hovered run's readout (`.readout`): fixed grid cells, so durations appear
+  // without reflow
+  .sr-phases { font-size: 12px; color: var(--ink-2); margin-top: 4px;
+    .sr-phases-head { min-height: 18px; margin-bottom: 3px; font-size: 12.5px; color: var(--ink); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .sr-phases-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(210px, 40%), 1fr)); gap: 2px 14px; }
+    .sr-phases-grid > span { display: flex; align-items: baseline; min-width: 0; padding: 0 3px; border-radius: 3px; }
+    .sw { flex: none; align-self: center; }
+    .lbl { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .dur { margin-left: auto; padding-left: 8px; font-variant-numeric: tabular-nums; color: var(--ink); white-space: nowrap; }
+    &.readout { .sr-phases-grid > span:not(.absent) { background: color-mix(in srgb, var(--ink) 6%, transparent); }
+      .absent { opacity: 0.35; } .failed .dur { color: var(--danger); } } }
   .sr-chart { margin-top: 8px; }
   .sr-svgwrap { position: relative; }
   .sr-svgtip { position: absolute; transform: translate(-50%, calc(-100% - 12px)); pointer-events: none; white-space: nowrap; z-index: var(--z-float); }
