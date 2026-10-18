@@ -81,6 +81,16 @@ CREATE TABLE allowed_emails (
   ts    INTEGER NOT NULL
 , read_only INTEGER NOT NULL DEFAULT 0);
 
+CREATE TABLE chart_annotations (
+  id      INTEGER PRIMARY KEY AUTOINCREMENT,
+  store   TEXT NOT NULL,
+  at      TEXT NOT NULL,
+  text    TEXT NOT NULL,
+  author  TEXT NOT NULL,
+  created INTEGER NOT NULL,
+  updated INTEGER NOT NULL
+);
+
 CREATE TABLE claims (
   prefix TEXT PRIMARY KEY,
   who    TEXT NOT NULL,
@@ -431,6 +441,8 @@ CREATE INDEX access_requests_status ON access_requests (status, created_at DESC)
 CREATE INDEX idx_actions_actor ON actions (actor, ts);
 
 CREATE INDEX admin_edits_tbl ON admin_edits (tbl, ts);
+
+CREATE INDEX chart_annotations_store ON chart_annotations (store, at);
 
 CREATE INDEX idx_deletion_bands_prefix ON deletion_bands (prefix);
 

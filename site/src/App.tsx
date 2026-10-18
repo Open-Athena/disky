@@ -8,7 +8,7 @@ import { stringParam, useUrlState } from 'use-prms'
 import { bareEmpty, legacyOwner, ownerParam } from './ownerParam'
 import { AGE_MODES, AgeChart } from './AgeChart'
 import { canonId, shortName, shortUserKey } from './UserChip'
-import { signInUrl, useCanAssign, useCanStage, useIdent as useIdentity } from './auth'
+import { signInUrl, useCanAssign, useCanStage, useIdent as useIdentity, useIsAdmin } from './auth'
 import { AttributionRules } from './AttributionRules'
 import { DiffTreemap, DiffHeader, useDiffModel } from './DiffTreemap'
 import { DiffTable } from './DiffTable'
@@ -171,6 +171,7 @@ function AppContent() {
     navigate({ pathname: legacy ? `${base}/${legacy.replace(/^\/+|\/+$/g, '')}` : store.path, search: rest ? `?${rest}` : '', hash: window.location.hash }, { replace: true })
   }, [search, navigate, store])
   const canAssign = useCanAssign()
+  const isAdmin = useIsAdmin()
   const canStage = useCanStage()
   const ident = useIdentity()
   // The owner axis (`Store.owners`): the ownership ledger overlays the map
@@ -1496,6 +1497,7 @@ function AppContent() {
         onPickDate={setDP}
         onBrush={brushRange}
         window={diffWindow}
+        admin={isAdmin}
       />
 
       {startMiss && (

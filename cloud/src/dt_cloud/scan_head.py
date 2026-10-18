@@ -306,9 +306,22 @@ def finish_args(rc: int, error: str | None, cost: list[str], dag: Path, run_id: 
             *(["-D", str(dag)] if dag.is_file() else [])]
 
 
+def _groovy(s: str) -> str:
+    return "'" + s.replace("\\", "\\\\").replace("'", "\\'").replace("\n", "\\n") + "'"
+
+
+def run_config(run_id: str, profile_json: str) -> str:
+    """The run's own task env, as a Nextflow `env` scope: this head's run id and the profile JSON. Nextflow's task hash
+    leaves the `env` scope out (unlike anything in a task's script), so a resume from a new head job (a new
+    `BATCH_JOB_UID`), or after a profile edit, still finds the finished tasks in the cache."""
+    return f"env {{\n    DT_RUN_ID = {_groovy(run_id)}\n    DT_SCAN_PROFILE_JSON = {_groovy(profile_json)}\n}}\n"
+
+
 def nextflow_argv(nf_dir: Path, launch: Path, session: str) -> list[str]:
-    """The Nextflow command the head runs in `launch` (after writing its params, executor config and history line)."""
+    """The Nextflow command the head runs in `launch` (after writing its params, executor and run configs and history
+    line)."""
     return ["nextflow", "run", str(nf_dir / "scan.nf"), "-c", str(nf_dir / "base.config"), "-c", str(launch / "executor.config"),
+            "-c", str(launch / "run.config"),
             "-params-file", str(launch / "params.json"), "-resume", session, "-with-trace", str(launch / "trace.tsv"),
             "-with-dag", str(launch / "dag.mmd"), "-with-timeline", str(launch / "timeline.html"), "-with-report", str(launch / "report.html")]
 
@@ -346,6 +359,7 @@ def head(profile_path: Path, nf_dir: Path, launch: Path | None, *, reproc: bool 
         params(profile, profile_json, scan, gen, job_start, run_id, session, env, reproc=reproc, fresh=fresh), indent=1) + "\n")
     image = env.get("DT_SCAN_IMAGE") or None
     (launch / "executor.config").write_text(executor_config(profile, image))
+    (launch / "run.config").write_text(run_config(run_id, profile_json))
     trace = launch / "trace.tsv"
     for name in REPORTS:
         (launch / name).unlink(missing_ok=True)
