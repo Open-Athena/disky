@@ -72,8 +72,9 @@ def test_recovery_controller_waits_for_success_and_pins_child_image():
 
 @pytest.mark.parametrize("pin, expected", [("", ("n2-standard-4", 4000, 14000, "8GB", "4", "1")), ("1", ("n2-highmem-32", 8000, 250000, "100GB", "16", None))])
 def test_split_is_manual_only_and_does_not_change_cron(pin, expected):
+    # NF=0: the one-VM spec (the cron's default is the Nextflow head, `test_cron_is_the_nextflow_head`)
     result = run(["bash", "job/batch-submit.sh"], cwd=ROOT_DIR, env={
-        "PATH": environ["PATH"], "DRY": "1", "PIN": pin, "SPLIT_COMPUTE": "1", "IMAGE": IMAGE,
+        "PATH": environ["PATH"], "DRY": "1", "PIN": pin, "NF": "0", "SPLIT_COMPUTE": "1", "IMAGE": IMAGE,
     }, capture_output=True, text=True)
     assert (result.returncode, result.stderr) == (0, "")
     spec = loads(result.stdout)
@@ -164,7 +165,7 @@ def test_manual_zone_override_does_not_change_cron(pin, expected):
 
 
 def test_four_core_controller_override_keeps_a_satisfiable_request():
-    result = run(["bash", "job/batch-submit.sh"], cwd=ROOT_DIR, env={"PATH": environ["PATH"], "DRY": "1", "MACHINE": "e2-standard-4", "SPLIT_COMPUTE": "1", "IMAGE": IMAGE}, capture_output=True, text=True)
+    result = run(["bash", "job/batch-submit.sh"], cwd=ROOT_DIR, env={"PATH": environ["PATH"], "DRY": "1", "NF": "0", "MACHINE": "e2-standard-4", "SPLIT_COMPUTE": "1", "IMAGE": IMAGE}, capture_output=True, text=True)
     assert (result.returncode, result.stderr) == (0, "")
     spec = loads(result.stdout)
     assert spec["taskGroups"][0]["taskSpec"]["computeResource"] == {"cpuMilli": 4000, "memoryMib": 14000}
@@ -187,3 +188,18 @@ dt-cloud() { printf 'DT %s | record=%s alerts=%s\n' "$*" "${DT_RECORD:-}" "${DT_
     # the caller's bash (the job image's is 5.x): macOS's /bin/bash 3.2 reports this `$LINENO` one short
     result = run([which("bash"), "-c", src], env={"PATH": "/usr/bin:/bin", **mode}, capture_output=True, text=True)
     assert (result.returncode, result.stdout, result.stderr) == (7, f"DT scan-run finish -x 7 -e exit 7: sh -c 'exit 7' (run.sh:{line}) | {expected_env}\n", "")
+
+
+def test_cron_is_the_nextflow_head():
+    result = run(["bash", "job/batch-submit.sh"], cwd=ROOT_DIR, env={"PATH": environ["PATH"], "DRY": "1", "PIN": "1"}, capture_output=True, text=True)
+    assert (result.returncode, result.stderr) == (0, "")
+    spec = loads(result.stdout)
+    task = spec["taskGroups"][0]["taskSpec"]
+    c = task["runnables"][0]["container"]
+    assert (c["entrypoint"], c["commands"], task["maxRunDuration"], task["computeResource"], task["volumes"],
+            sorted(task["environment"]["secretVariables"]), task["environment"]["variables"]["DT_TRIGGER"],
+            spec["allocationPolicy"]["instances"][0]["policy"]) == (
+        "dt-cloud", ["scan", "head", "/app/job/profiles/gcs.yml"], "43200s", {"cpuMilli": 2000, "memoryMib": 7000}, [],
+        ["CLOUDFLARE_API_TOKEN", "SLACK_BOT_TOKEN"], "schedule",
+        {"machineType": "e2-standard-2", "bootDisk": {"type": "pd-balanced", "sizeGb": "30"}},
+    )
