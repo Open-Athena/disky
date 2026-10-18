@@ -289,6 +289,17 @@ header .hrow {
   &.scan { font-variant-numeric: tabular-nums; }
 }
 
+// A two-option top-bar control (the color mode when a scan has two): both options shown, one click switches.
+.tb-seg {
+  display: inline-flex; border: 1px solid var(--line); border-radius: 6px; overflow: hidden;
+  button {
+    font: inherit; font-size: 12.5px; font-weight: 600; padding: 2px 7px; cursor: pointer;
+    background: var(--panel); color: var(--ink-3); border: none;
+    &.on { background: var(--line); color: var(--ink); }
+    & + button { border-left: 1px solid var(--line); }
+  }
+}
+
 // The deepest breadcrumb taps open this path card (PathPopover, portaled to
 // <body>): the full prefix + a copy button. Tap-only, so it never rides in on a
 // fresh page load the way a hover tip did.
