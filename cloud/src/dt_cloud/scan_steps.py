@@ -989,13 +989,15 @@ def _snap_root(ctx: Ctx) -> str:
     return f"{ctx.env.get('R2_ARCHIVE') or ctx.data_uri}/{ctx.snapshots}"
 
 
-@step("non-live", core=False, soft=True, options={"classes": list})
+@step("non-live", core=False, stage="pre", soft=True, options={"classes": list})
 def non_live(ctx: Ctx, arg: str | None) -> None:
     """Each source's non-live bytes (`dt-cloud non-live`, specs/non-live-bytes.md phase 1): per class of
     `options.non-live.classes` (each one the sources' provider has: `soft-deleted` on GCS, `noncurrent` /
     `delete-marker` on S3, `mpu`), the bytes the listing of current objects misses, totaled per bucket into
-    `<layer2>non-live/<bucket>.parquet` (a few rows: kept per scan, the totals' history). Read-only; off unless the
-    profile lists it in `steps`. Never fatal: a failure warns, the scan's other outputs stand."""
+    `<layer2>non-live/<bucket>.parquet` (a few rows: kept per scan, the totals' history) and the scan's snapshot
+    `non-live.json` (every bucket's rows: what the site reads beside `meta.json`). A `pre` step, beside `list`: the
+    snapshot dir reaches R2 with the scan's others (`publish-r2`). Read-only; off unless the profile lists it in
+    `steps`. Never fatal: a failure warns, the scan's other outputs stand."""
     classes = ctx.opt("non-live", "classes", [])
     if not classes:
         err("non-live: no options.non-live.classes: nothing measured")
@@ -1011,6 +1013,7 @@ def non_live(ctx: Ctx, arg: str | None) -> None:
                 continue
             endpoint = src.endpoint or (ctx.env.get("R2_ENDPOINT") if src.kind == "r2" else None)
             ctx.sh(["dt-cloud", "non-live", "-c", ",".join(has), *(["-E", endpoint] if endpoint else []),
+                    "-j", ctx.data_root / ctx.snapshots / ctx.scan / "non-live.json",
                     "-o", ctx.data_root / ctx.layer2 / "non-live" / f"{src.bucket}.parquet", src.uri],
                    fatal=False, warn=f"non-live failed on {src.uri} (the scan's other outputs stand)")
 
