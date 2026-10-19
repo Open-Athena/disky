@@ -413,7 +413,7 @@ describe('a secondary store\'s pages unfurl as that store (`STORES_JSON` `path`)
       await fullTier(db, 'diff', { store: 'meta', path: 'snapshots', d: '261012' }, 'TokMetaAAA', NOW),
       await fullTier(db, 'diff', { path: 'cw-root/snapshots', d: '261012' }, 'TokMetaAAA', NOW),
       await fullTier(db, 'diff', { path: 'snapshots', d: '261012' }, 'TokMetaAAA', NOW),
-    ]).toEqual(['https://cw.example/meta/snapshots?d=261012&section=diff&og=TokMetaAAA#diff', { day: 304 }, null, null])
+    ]).toEqual(['https://cw.example/meta/snapshots?d=261012&section=diff&og=TokMetaAAA', { day: 304 }, null, null])
     expect([pageOf(dep, new URL('https://cw.example/staff/x'))?.env.STORE_SCOPE, pageOf(dep, new URL('https://cw.example/meta/x'))?.env.STORE_SCOPE]).toEqual(['admin', undefined])
   })
 

@@ -46,8 +46,7 @@ import { batchCompletion, batchIsCollapsed, isCurrentlyStaged, stagedMapTree, st
 import { batchAnchor } from './runHistory'
 import { batchLeads, coalesceBatches, idRanges } from '../functions/_lib/batchGroups'
 import { useLocation, useNavigationType } from 'react-router-dom'
-import { useSectionSpy } from 'use-prms/sections'
-import { SECTION_MODE } from './sectionMode'
+import { useSectionSpy, type SectionMode } from 'use-prms/sections'
 import { machineFor } from '../functions/_lib/sweepMachines'
 
 const iso = (ts: number): string => new Date(ts * 1000).toISOString()
@@ -60,6 +59,10 @@ const prefixToPath = (prefix: string): string => {
 }
 
 /** Rows per batch page; the flat (filtered or ungrouped) table pages longer. */
+// The batch in view stays in the fragment (`#batch-12`): its permalinks are plain `#` links, the linked batch opens
+// from the router's `hash`, and `?s=` is the table's sort. Its link preview is the page's (no per-batch card).
+// A module constant: `useSectionSpy` re-resolves its mode whenever this object's identity changes.
+const SECTION_MODE: SectionMode = { kind: 'fragment' }
 const PAGE = 20
 const FLAT_PAGE = 50
 

@@ -27,6 +27,7 @@ import { warmSubtree } from '../../api/subtree.js'
 import { colorModeCodec } from '../../../src/colorMode.js'
 import { diffCard, resolveDiffScans } from './diff.js'
 import { encodeScan } from '../../../src/scanSlug.js'
+import { SECTION_KEY } from '../../../src/homeSections.js'
 import type { ColorMode } from '../../../src/types.js'
 
 export type OgEnv = Env & PolicyEnv & {
@@ -192,7 +193,7 @@ async function cardData(env: OgEnv, kind: string, params: Record<string, string>
   // The page's own title, recomputed from the signed view (a secondary store's below its path).
   const page = kind === 'map' || kind === 'diff' ? `/${params.path ?? ''}` : kind === 'user' ? `/user/${params.id ?? ''}` : `/${kind}`
   const pu = new URL(page, url.origin)
-  if (kind === 'diff') pu.searchParams.set('section', 'diff')
+  if (kind === 'diff') pu.searchParams.set(SECTION_KEY, 'diff')
   for (const [k, v] of Object.entries(params)) if (k !== 'path' && k !== 'id' && k !== 'store') pu.searchParams.set(k, v)
   const title = pageView(pu, site.name, site.root, params.store)?.title ?? site.name
   switch (kind) {

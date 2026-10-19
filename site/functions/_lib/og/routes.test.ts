@@ -13,6 +13,19 @@ describe('pageView: page URL → card kind, view params, title', () => {
       { kind: 'diff', params: { path: 'bucket', d: '26092812-26091700', dm: 'max' }, title: 'bucket · changes' },
     ])
   })
+  it('the section the scroll-spy names (`?section=`): diff gets its card, the rest the map; `?s=` is the shade axis', () => {
+    expect([
+      pv('/bucket?s=c&section=diff'),
+      pv('/bucket?section=over-time'),
+      pv('/bucket?section=tbl&d=261002'),
+      pv('/bucket?s=diff'),
+    ]).toEqual([
+      { kind: 'diff', params: { path: 'bucket' }, title: 'bucket · changes' },
+      { kind: 'map', params: { path: 'bucket' }, title: 'bucket' },
+      { kind: 'map', params: { path: 'bucket', d: '261002' }, title: 'bucket' },
+      { kind: 'map', params: { path: 'bucket' }, title: 'bucket' },
+    ])
+  })
   it('map pages: the path, and only the params that change the card', () => {
     expect([
       pv('/'),

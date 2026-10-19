@@ -2,6 +2,7 @@
  * params the card is drawn from (and that a view token is minted over), and
  * the unfurl's title. Pure: no env, no I/O. */
 import { mountedSegs, urlSegsOf } from '../../../src/pathCrumbs.js'
+import { SECTION_KEY } from '../../../src/homeSections.js'
 import { canonicalSel } from '../../../src/scanSlug.js'
 
 export type OgKind = 'map' | 'diff' | 'staged' | 'users' | 'user' | 'assignments'
@@ -89,7 +90,8 @@ function mapView(segs: string[], sp: URLSearchParams, site: string, root: readon
   const params: Record<string, string> = { ...lead, ...(path ? { path } : {}), ...pick(sp, MAP_KEYS) }
   const where = urlSegsOf(root, tree).join('/') || site
   const extras = [params.f ? `filter: ${params.f}` : null, params.o !== undefined ? `owner: ${params.o === '' ? 'unowned' : params.o === '*' ? 'owned' : params.o}` : null].filter(Boolean)
-  if (sp.get('section') === 'diff') {
+  // The section in view (`?section=`: the home page's scroll-spy writes it, and share links carry it).
+  if (sp.get(SECTION_KEY) === 'diff') {
     const dm = sp.get('dm')
     return { kind: 'diff', params: { ...params, ...(dm === 'max' ? { dm } : {}) }, title: [where, 'changes', ...extras].join(' · ') }
   }
