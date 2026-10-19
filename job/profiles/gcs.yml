@@ -63,6 +63,9 @@ env:
   ACCESS_BUCKETS: marin-us-central1 marin-us-central2 marin-us-east1 marin-us-east5 marin-eu-west4 marin-us-west1 marin-us-west4
   WARM_PATHS: ",marin-us-central2,marin-us-east5,marin-us-central1,marin-eu-west4,marin-us-west4,marin-us-east1"
   PROTECTED_BUCKETS: marin-*
+  # each object's GCS `generation` in the path sorts (`path-index -G`), so the interval store's versions carry it
+  # (2026-10-09b.g2 onward, backfilled; specs/lean-scans.md §3.1)
+  PATH_INDEX_GENERATION: "1"
   DUCKDB_MEM: 100GB
   DUCKDB_MEM_ACCESS: 48GB
   DUCKDB_THREADS: "16"
