@@ -51,7 +51,7 @@ async function serve(ctx: MiddlewareCtx): Promise<Response> {
   if (url.pathname.startsWith('/assets/')) return isHtml(res) ? assetMiss() : res
   if (ctx.request.method !== 'GET' || !isHtml(res)) return res
   try {
-    return await stampPage(ctx.env, url, res)
+    return await stampPage(ctx.env, url, res, ctx.waitUntil ? p => ctx.waitUntil!(p) : undefined)
   } catch (e) {
     // An unfurl detail must never break the page.
     console.log(`og stamp failed: ${(e as Error).message}`)
