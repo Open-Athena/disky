@@ -18,11 +18,10 @@ import { hexQuery } from '../staticFilter.js'
 import { dateColor, HI_CONTRAST, slotColor } from '../../../src/colors.js'
 import { mapColorMode } from '../../../src/colorMode.js'
 import { barControls } from '../../../src/pageBar.js'
-import { listingTime } from '../../../src/listingTime.js'
 import { readState, readThrough } from '../../../src/readLens.js'
 import { applyLedger } from '../../../src/ledgerOverlay.js'
 import { ownerIndex } from '../../../src/ownerIndex.js'
-import type { ColorMode, Meta, TreeNode, UserInfo } from '../../../src/types.js'
+import { type ColorMode, type Meta, MODE_LABELS, type TreeNode, type UserInfo } from '../../../src/types.js'
 import { type CardData, type CardTile, type LegendItem, fmtB } from './card.js'
 import type { OgTier } from './sign.js'
 
@@ -222,7 +221,8 @@ export async function mapCard(env: Env, site: Site, title: string, params: Recor
   const users = meta.users ?? []
   const available = barControls({ owners: !!users.length, hasAttr: !!users.length, classes: false, readRange: !!meta.access }).color
   const mode = mapColorMode(params.c, available, site.defaultColor ?? (users.length ? 'user' : 'tree'))
-  const colorLabel = mode === 'date' ? listingTime(site.scheme).label : mode === 'user' ? 'owner' : mode
+  // the page's own name for the mode (`MODE_LABELS`: `written`, `read`, `tree`), but `owner` for `user`, as cards say
+  const colorLabel = mode === 'user' ? 'owner' : MODE_LABELS[mode]
   const subtitle = `scan ${fmtScanUtc(date)}${filterNote} · color by ${colorLabel}`
   let query
   try {
