@@ -1001,7 +1001,7 @@ export async function ivLastRead(env: Env, date: string, paths: string[], maxGro
 export const V1_ROW_COLUMNS = ['path', 'depth', 'usr', 'b', 'o', 'wts', 'wb', 'c2', 'c3', 'c4', 'a']
 /** The interval store's storage-class byte columns, by class (`interval_store.CLASS_COLS`): their one definition on
  * the site, so a deployment that names its classes renames them here and there only. */
-export const IV_CLASS_COLS = { 2: 'c2', 3: 'c3', 4: 'c4' } as const
+export const IV_CLASS_COLS = { 2: 'nearline_bytes', 3: 'coldline_bytes', 4: 'archive_bytes' } as const
 export const IV_ROW_COLUMNS = ['depth', 'path', 'usr', 'vf', 'vt', 'kind', 'size', 'n_files', 'n_children', 'n_desc', 'mtime', 'wts', 'wb', IV_CLASS_COLS[2], IV_CLASS_COLS[3], IV_CLASS_COLS[4], 'us', 'last_read']
 export const V2_ROW_COLUMNS = ['path', 'depth', 'usr', 'kind', 'size', 'n_files', 'n_children', 'n_desc', 'mtime', 'mtime_mean', 'last_read', 'sum_storage_class_id_2', 'sum_storage_class_id_3', 'sum_storage_class_id_4']
 
