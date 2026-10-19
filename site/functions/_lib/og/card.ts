@@ -1,6 +1,6 @@
 /** The card SVG (specs/done/dogi.md): 1200×630, a header (site, title, subtitle), a
  * treemap of the view, and a footer (totals, and the legend). Pure and
- * DOM-free (`@rdub/treemap/squarify` only), so it runs in the Worker and is
+ * DOM-free (`@open-athena/treemap/squarify` only), so it runs in the Worker and is
  * tested by its structure.
  *
  * Tiers: an `anon` card draws shapes and colours only. No tile is labelled
@@ -8,8 +8,8 @@
  * person (a scraper can't walk the tree card by card), at any depth. A `full`
  * card labels tiles at every depth where they fit and names the legend's owners. An explicitly public map may also
  * label its paths without changing its unsigned authentication tier. */
-import { squarify } from '@rdub/treemap/squarify'
-import { parseColor } from '@rdub/treemap/parseColor'
+import { squarify } from '@open-athena/treemap/squarify'
+import { parseColor } from '@open-athena/treemap/parseColor'
 
 export const CARD_W = 1200
 export const CARD_H = 630
