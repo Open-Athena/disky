@@ -38,7 +38,7 @@ machines:
   small: e2-standard-2
   medium: e2-standard-4
   post: e2-standard-4
-steps: [access-ingest, healthcheck, retire]
+steps: [access-ingest, healthcheck, retire, dups]
 # over-time groups and the generation-file sweep (`index-gc -F`) aren't in the one-VM job yet: each is its own change
 skip: [bucket-check, over-time, index-gc]
 secrets:
@@ -103,3 +103,6 @@ options:
   # in the log) until Ryan runs the first deletes by hand (`scan retire -x -b`); only scans with a passing verify marker
   retire: {keep: 2, execute: false, markers_only: true, store: gs://oa-gcs-usage-dvx, static_gen: 2026-10-08c,
            static_store: gs://oa-gcs-usage-dvx}
+  # the /dups report beside the scan's index (specs/dups.md): read from the bysize sort (its `tot` prunes to paths ≥ 1 GiB)
+  # on the post machine; the top 200 groups' copies spot-checked by crc32c (a moved copy is stageable only once it passes)
+  dups: {check: 200, mem: 10GB}

@@ -83,6 +83,7 @@ OBJECT_BUCKETS = "marin-us-central2,marin-us-central1,marin-us-east1,marin-us-ea
 # Viewers stage deletions into a shared open plan (`POST /api/plans/stage`,
 # the children table's trash gesture); `stage_batches` exists in this D1.
 STAGING = "1"
+DUPS = "1"   # the duplicate-candidate report: `/api/dups` + `/dups`, over the `dups` step's report beside each scan's index
 # Staged-plan review in Slack (specs/done/staged-slack.md): one thread per staged
 # plan in #gcs-admin, with Dry-run / Delete-for-real / Reject-batch buttons
 # (`/slack/actions`). `EXECUTOR` is gcs's `Store.executor`: without it the base
@@ -192,6 +193,7 @@ STORE_BUCKETS = "marin-us-central2,marin-us-central1,marin-us-east1,marin-us-eas
 # the store creds — `gcs-usage-browse@` holds objectViewer on each).
 OBJECT_BUCKETS = "marin-us-central2,marin-us-central1,marin-us-east1,marin-us-east5,marin-us-west4,marin-eu-west4"
 STAGING = "1"
+DUPS = "1"   # the duplicate-candidate report: `/api/dups` + `/dups`, over the `dups` step's report beside each scan's index
 # Staged-plan review in Slack (specs/done/staged-slack.md): one thread per staged
 # plan in #gcs-admin, with Dry-run / Delete-for-real / Reject-batch buttons
 # (`/slack/actions`). `EXECUTOR` is gcs's `Store.executor`: without it the base
