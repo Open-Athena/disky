@@ -1,11 +1,13 @@
 name: Publish @open-athena/treemap
 
-# Publishes `packages/treemap` to npm on a `treemap-v<version>` tag (the tag must
-# match `package.json`'s version), via npm trusted publishing: GitHub's OIDC token,
-# no stored npm token (npmjs.com → the package's settings → Trusted publisher:
-# GitHub Actions, this repo, workflow `publish-treemap.yml`). Trusted publishing
-# can only be set up once the package exists, so 0.1.0 was published by hand.
-# Provenance is attached automatically.
+# Publishes a `dist/treemap` commit (`build-dist.yml`'s output: the packed package, `dist/` + README + package.json)
+# to npm, as-is but for its version: tag the DIST commit `treemap-v<version>` (e.g. `git tag treemap-v0.1.0
+# <dist-sha>`), and its `<version>-dist.<sha>` becomes `<version>`. So what npm serves is the same build a
+# `github:…#<dist-sha>` pin installs, built once by `build-dist.yml`.
+#
+# Auth: npm trusted publishing (GitHub's OIDC token; no stored npm token), set on npmjs.com → the package's settings →
+# Trusted publisher: GitHub Actions, this repo, workflow `publish-treemap.yml`. It can only be set once the package
+# exists, so 0.1.0 was published by hand (from its dist commit, the same way). Provenance is attached automatically.
 on:
   push:
     tags: ["treemap-v*"]
@@ -19,19 +21,26 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v4
         with:
           node-version: "24"
           registry-url: "https://registry.npmjs.org"
-      - name: Tag matches the package version
+      - name: A dist commit, versioned as the tag
         run: |
-          v=$(node -p "require('./packages/treemap/package.json').version")
-          [ "${GITHUB_REF_NAME}" = "treemap-v$v" ] || { echo "tag ${GITHUB_REF_NAME} ≠ treemap-v$v"; exit 1; }
-      - run: pnpm install --frozen-lockfile --filter @open-athena/treemap...
-      - run: cd packages/treemap && pnpm typecheck && pnpm test
-      # npm ≥ 11.5.1 speaks trusted publishing; `pnpm pack` applies `publishConfig` (the `dist/` entry points)
-      - name: Publish
+          git log -1 --format=%B | grep -q '^Built from [0-9a-f]\{40\}$' || { echo "${GITHUB_REF_NAME} isn't on a dist/treemap commit (no 'Built from <sha>')"; exit 1; }
+          v=${GITHUB_REF_NAME#treemap-v}
+          node -e '
+            const fs = require("fs"), p = JSON.parse(fs.readFileSync("package.json"))
+            const base = p.version.replace(/-dist\.[0-9a-f]+$/, "")
+            if (p.name !== "@open-athena/treemap" || base !== process.argv[1]) { console.error(`${p.name}@${p.version} ≠ @open-athena/treemap@${process.argv[1]}`); process.exit(1) }
+            p.version = base
+            fs.writeFileSync("package.json", JSON.stringify(p, null, 2) + "\n")
+          ' "$v"
+      # npm ≥ 11.5.1 speaks trusted publishing. `--ignore-scripts`: the dist commit is already built (its
+      # `prepack` would run the source's `tsup`).
+      - name: Publish (a version npm has already is left alone: 0.1.0's tag marks the hand publish)
         run: |
+          v=$(node -p 'require("./package.json").version')
+          if npm view "@open-athena/treemap@$v" version >/dev/null 2>&1; then echo "@open-athena/treemap@$v is on npm already"; exit 0; fi
           npm install -g npm@11.6.2
-          cd packages/treemap && pnpm pack && npm publish ./open-athena-treemap-*.tgz --access public
+          npm publish --access public --ignore-scripts
