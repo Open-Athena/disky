@@ -955,6 +955,31 @@ def index_gc(ctx: Ctx, arg: str | None) -> None:
                warn="index-gc -F failed (superseded generations stay until the next run)")
 
 
+@step("dups", core=False, soft=True, options={"floor": int, "check": int, "check_objects": int, "suspect_copies": int,
+                                               "mem": str, "threads": int})
+def dups(ctx: Ctx, arg: str | None) -> None:
+    """The scan's duplicate-candidate groups (`dt-cloud dups`, specs/dups.md §1) beside its index:
+    `<layer2>index/<gen>/dups.{parquet,json}` (`dups.json` last, the skip-if-done mark), read from the scan's `bysize`
+    sort (its `tot` prunes the read to the paths over the floor), else its `path` sort. Options: `floor` (bytes),
+    `suspect_copies`, `check` (spot-check the top N groups' copies on GCS), `check_objects`, `mem`, `threads`. Off
+    unless the profile lists it in `steps`; never fatal."""
+    key_dir = ctx.data_root / ctx.index_key
+    if ctx.done(key_dir / "dups.json", "dups"):
+        return
+    bysize = key_dir / "path-index-bysize.parquet"
+    src = bysize if bysize.exists() else ctx.need(key_dir / "path-index.parquet", "index")
+    out = ctx.work / "dups"
+    flags = {"floor": "-f", "check": "-g", "check_objects": "-n", "suspect_copies": "-s", "mem": "-m", "threads": "-t"}
+    args = [a for k, f in flags.items() if ctx.opt("dups", k) is not None for a in (f, ctx.opt("dups", k))]
+    with ctx.phase("dups"):
+        r = ctx.sh(["dt-cloud", "dups", "-d", ctx.scan, *args, "-T", ctx.work / "dups-tmp", "-o", out, src], fatal=False,
+                   fails_phase=True, warn="dups failed (the scan's other outputs stand)")
+        if r is None:
+            return
+        copy_atomic(out / "dups.parquet", key_dir / "dups.parquet")
+        copy_atomic(out / "dups.json", key_dir / "dups.json")
+
+
 def _retire_check(p: ScanProfile) -> list[str]:
     o = p.opts("retire")
     problems = [] if isinstance(o.get("keep"), int) and o["keep"] >= 1 else ["options.retire.keep: required, ≥ 1 (the newest scans never retired)"]
