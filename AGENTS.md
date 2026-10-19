@@ -81,6 +81,13 @@ disk-tree tiers L2        # Cut the path store's sorts (spec `path-store.md` §1
                           # `dt-cloud index-write` (cw) and `dt-cloud path-index -P` (gcs, the r2 demo)
                           # cut the same two sorts from their bucket unions — objects as rows, L2 column
                           # names — under `path-index[-bysize][-by-user].parquet` (spec §4.2–4.4)
+dt-cloud path-index -p BUCKET [-K LO:HI] -P DIR/path-index.parquet …  # One part of a sharded index
+                          # (`index_parts.py`): one bucket's objects (`-K`: first key segment in [LO, HI)), its sorts
+                          # (no sidecars) + `part.json` / `roots.parquet` / `age.parquet` / `pfx.parquet` beside -P
+dt-cloud path-index-merge -o SNAP -P DIR/path-index.parquet [-S] PART_DIR…  # The parts k-way merged by each
+                          # sort's key into exactly the one pass's bytes (same 8K groups, a split bucket's root rebuilt),
+                          # + sidecars, `attr.tsv`, `age.json`/`meta.json`. Scan step: `options.index.parts`
+                          # (`{bucket: [bounds]}`; `{}` = per bucket) → scan.nf's `index_part` fan-out, then `index` merges
 dt-cloud index-recut SRC OUT  # Re-cut a published generation's `bysize` from its `path` sort into a NEW
                           # generation dir (never over one): `-c` checks root + depth-1 views against per-path
                           # sums over `path` (`bysize_check`); then `index-sync -v bysize -g <gen>` points at it

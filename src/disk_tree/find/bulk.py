@@ -121,7 +121,7 @@ class BulkLister(Protocol):
         self,
         fs: "fsspec.AbstractFileSystem",
         root: str,
-    ) -> "tuple[list[tuple[str, int, Optional[str], Optional[str]]], list[str], list[str]]":
+    ) -> "tuple[list[tuple], list[str], list[str]]":
         """Walk ``root`` two levels: (shallow_files, depth2_prefixes, self_dirs).
 
         Default implementation (below) is fsspec-generic; GCS overrides only
@@ -133,7 +133,7 @@ class BulkLister(Protocol):
         self,
         bucket: str,
         self_dirs: list[str],
-    ) -> "list[tuple[str, int, Optional[str], Optional[str]]]":
+    ) -> "list[tuple]":
         """Return the placeholder objects behind ``self_dirs``.
 
         Only GCS surfaces zero-byte ``<name>/`` blobs as directories in an
@@ -147,7 +147,7 @@ class BulkLister(Protocol):
 def generic_discover(
     fs: "fsspec.AbstractFileSystem",
     root: str,
-) -> "tuple[list[tuple[str, int, Optional[str], Optional[str]]], list[str], list[str]]":
+) -> "tuple[list[tuple], list[str], list[str]]":
     """Two-level walk via fsspec, extracting shallow files, depth-2 prefixes,
     self-dir placeholders.
 
@@ -156,7 +156,7 @@ def generic_discover(
     parent, so skip them at both levels; their names are returned so the
     caller can fetch the placeholder *objects* separately.
     """
-    shallow: "list[tuple[str, int, Optional[str], Optional[str]]]" = []
+    shallow: "list[tuple]" = []
     stream_prefixes: list[str] = []
     self_dirs: list[str] = []
     for e1 in fs.ls(root, detail=True):
