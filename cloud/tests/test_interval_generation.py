@@ -187,6 +187,16 @@ def test_compaction_keeps_generation(on, tmp_path):
     assert _columns(out / "pv" / "r0000.parquet") == [*ist.PV_SCHEMA.names, "generation"]
 
 
+def test_compaction_refuses_a_generation_borrowing_its_ranges(on, tmp_path):
+    shutil.copytree(on["gen"], tmp_path / "g")
+    (tmp_path / "g" / "ranges.json").unlink()
+    with pytest.raises(SystemExit) as e:
+        ic.compact_gen(tmp_path / "g", tmp_path / "g.c001", tmp_path / "w", gen="g", new_gen="g.c001", level=None, rg_rows=RG, threads=2, mem="1GB")
+    assert (str(e.value), (tmp_path / "g.c001").exists()) == (
+        "g: no ranges.json: a staged build's generation borrowing its ranges and base from another (its `ranges_gen`) can't be "
+        "compacted in place; backfill-generation -R makes a self-contained one", False)
+
+
 def _export(store: Path, scan: str, dest: Path, gen: str | None = None) -> pa.Table:
     args = ["-o", str(store), "-w", str(dest.parent / f"w-{dest.name}"), "-t", "path", *(["-g", gen] if gen else []), scan, str(dest)]
     res = CliRunner().invoke(ie.export_cmd, args, catch_exceptions=False)
@@ -265,6 +275,19 @@ def test_backfill_fills_versions_live_since_the_first_generation(world, backfill
     assert json.loads((store / ic.CURRENT).read_text()) == {"gen": "g"}
     # Served as a build over generation-bearing sorts serves it (its versions are that build's: `_through(5)` above).
     assert _columns(g2 / "served" / "path.parquet") == [*ist.PVL_SCHEMA.names, "generation"]
+
+
+def test_a_parallel_backfill_writes_the_serial_ones_bytes(world, off, backfilled, tmp_path):
+    """`-j 3`: both key ranges at once, each filled (`filler`'s temp table) on its own cursor, then the served sorts three
+    at a time: the serial backfill's files and counts."""
+    store = tmp_path / "store"
+    shutil.copytree(off["store"], store)
+    out = _backfill(store, tmp_path / "w", world, "g2", "-j", "3")
+    g2, ref = store / ist.PREFIX / "g2", backfilled["store"] / ist.PREFIX / "g2"
+    assert (out["filled"], out["rows"]) == (backfilled["out"]["filled"], backfilled["out"]["rows"])
+    assert ((g2 / ib.BACKFILL).read_text(), (g2 / "served" / "stats.json").read_text()) == ((ref / ib.BACKFILL).read_text(), (ref / "served" / "stats.json").read_text())
+    assert sorted(_parquets(g2)) == sorted(_parquets(ref))
+    assert _parquets(g2) == _parquets(ref)
 
 
 def test_backfill_borrows_a_staged_generations_ranges(world, off, backfilled, tmp_path):
