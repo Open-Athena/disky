@@ -38,7 +38,8 @@ jobs:
           ' "$v"
       # npm ≥ 11.5.1 speaks trusted publishing. `--ignore-scripts`: the dist commit is already built (its
       # `prepack` would run the source's `tsup`).
-      - name: Publish (a version npm has already is left alone: 0.1.0's tag marks the hand publish)
+      # a version npm has already is left alone (0.1.0's tag marks the hand publish)
+      - name: Publish
         run: |
           v=$(node -p 'require("./package.json").version')
           if npm view "@open-athena/treemap@$v" version >/dev/null 2>&1; then echo "@open-athena/treemap@$v is on npm already"; exit 0; fi
