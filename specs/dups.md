@@ -12,16 +12,17 @@ A **group** is a set of ≥2 paths judged to hold the same data (`moved` copies 
 
 | tier | rule | confidence |
 |---|---|---|
-| `exact` | every object under the paths matches by relative name, size and `crc32c` | proven |
 | `tree` | same relative path (the path minus its bucket) and identical `size` and `n_files` | high |
 | `moved` | different relative paths, identical `size`, `n_files` and basename | needs a check |
+
+A group is `exact` (a column beside its tier, so a `moved` group keeps its names and its id) when every object under its copies matches the keep copy's by relative name, size and `crc32c`: proven (§4).
 
 Dirs and objects are both grouped when their total size (the sum of the index's owner slices) is ≥ a floor (`-f`, default 1 GiB); the `bysize` sort's `tot` column prunes the read to those paths.
 
 Groups are **maximal**: a group is dropped when its copies' parents are exactly another group's copies (the report shows `marin-*/tokenized/foo/`, not each of its shards). A child group with a different copy set survives, and its copies under another group's copy are flagged `nested`: the `net_*` totals count only un-nested copies, so a byte counts once. Groups of ≥7 copies (`-s`) are flagged `suspect` (mostly same-size collisions, e.g. shards named alike) and totaled apart. Tier totals overlap (a `moved` group can span two `tree` groups): they're never summed.
 
 Output, beside the scan's index: `<layer2>index/<gen>/dups.parquet`, one row per (group, copy):
-`group, tier, rel, path, bucket, kind, size, n_files, mtime, created` (epoch s), `last_read` (epoch days), the class pivots (`sum_storage_class_id_*`), `copies, reclaimable, n_buckets, nested, suspect, keep, check, check_n, check_eq`, sorted by the group's reclaimable bytes (size × (copies − 1)) descending, in 8K-row groups. `keep` is the suggested copy (the latest read, ties → the oldest). Plus `dups.json`: totals by tier (gross), net by tier, suspect, by bucket pair (net; a diagonal pair = ≥2 copies in one bucket), the copies histogram and the checks' verdicts. A scan step `dups` (post, soft, opt-in via the profile's `steps`, options `floor`, `check`, `check_objects`, `suspect_copies`, `mem`, `threads`) runs it in the post task.
+`group, tier, rel, path, bucket, kind, size, n_files, mtime, created` (epoch s), `last_read` (epoch days), the class pivots (`sum_storage_class_id_*`), `copies, reclaimable, n_buckets, nested, suspect, keep, exact, check, check_n, check_eq`, sorted by the group's reclaimable bytes (size × (copies − 1)) descending, in 8K-row groups. `keep` is the suggested copy (the latest read, ties → the oldest). Plus `dups.json`: totals by tier (gross), net by tier, suspect, by bucket pair (net; a diagonal pair = ≥2 copies in one bucket), the copies histogram and the checks' verdicts. A scan step `dups` (post, soft, opt-in via the profile's `steps`, options `floor`, `check`, `check_objects`, `suspect_copies`, `mem`, `threads`, `listing`) runs it in the post task. `dups.json` (v2) adds `verified_copies` and `exact` (net totals of the exact groups by tier).
 
 ## 2. API: `GET /api/dups?date=<scan>`
 
@@ -37,10 +38,17 @@ Reads the scan's `dups.json` and `dups.parquet` from the index store (range read
 
 ## 4. Exactness: `crc32c` in the listings ([cloud])
 
-GCS returns `crc32c` (every object) and `md5Hash` (non-composite) in the list response. `disk-tree bulk-list` keeps `crc32c` as a nullable column (S3/R2: NULL, or the ETag where it's a plain MD5, as a separate column). Then `tree` groups are upgraded to `exact` by a join, and `moved` ones confirmed or dropped. Until then, the step spot-checks the top N groups (`-g N`, by reclaimable bytes): each copy is listed (name, size, crc32c; ≤ `-n` objects) and compared to the keep copy: `check` = `equal` | `partial` (capped listings) | `differs`, with `check_n` / `check_eq` counts. The research pass found `tree` groups whose names and sizes all match but whose crc32c all differ, so `tree` is high confidence, not proof.
+GCS returns `crc32c` for every object in the list response. `disk-tree bulk-list -c` (gcs:// only, opt-in: a listing without it is byte-for-byte what it was) keeps it as a nullable `crc32c` column (int64: the unsigned 32-bit checksum) after `generation`, in every shard of the run. S3/R2 list no checksum (`-c` refuses them); an MD5/ETag column is not done.
+
+`dt-cloud dups -l <shards>` (the step's `listing: true`: each source's shards under `layout.listing` in the data store; an importing profile has none there and gets a warning) reads the scan's raw listing once, rather than carrying the checksum through `path-index` (as `-G` carries `generation`): the listing is already there in the post task (retire keeps the newest 2 scans'), and a per-dir digest in the index would touch every aggregation engine. Each object is matched to the copies it lies under (a dir copy by its first `d` path segments, one hash-join key per dir-copy depth `d`; an object copy by its name, after pruning to the copies' buckets and top-level dirs), and each copy gets its object count, how many carry a checksum, and an order-free digest (the sum of each object's hash of its name relative to the copy, its size and its CRC32C). A non-keep copy is `equal` to the keep copy when both are fully checksummed with the same count and digest, else `differs` (null without the checksums): `check` = that, `check_n` = the keep copy's objects, `check_eq` = all of them when equal. A differing `moved` copy is dropped (and its group when < 2 copies remain, or when it's left with a `tree` group's copies; `copies`, `reclaimable`, `n_buckets`, `suspect` follow; the child groups maximality dropped under it aren't restored); a differing `tree` copy stays, `differs`. A group whose every copy is `equal` is `exact`.
+
+Groups without any verdict are what the spot check covers (`-g N`, by reclaimable bytes): each copy is listed on GCS (name, size, crc32c; ≤ `-n` objects) and compared to the keep copy: `check` = `equal` | `partial` (capped listings) | `differs`, with `check_n` / `check_eq` counts. The research pass found `tree` groups whose names and sizes all match but whose crc32c all differ, so `tree` is high confidence, not proof.
+
+Cost (estimated, not yet measured on a real listing): a CRC32C is 4 random bytes (incompressible): ~4–5 B per object in the shards, ~2 GB on gcs's ~425M objects a scan (the raw listings are ~10.7 GB), kept for the newest 2 scans by retire's `layer1`. The `dups -l` pass reads the scan's `bucket, name, size_bytes, crc32c` once, on the post machine. To turn it on for gcs: `options.list.bulk_args: [-c]`, `options.dups.listing: true`, an image rebuild.
 
 ## Status
 
 - 2026-10-18: a research pass on the 10-18 scan (Batch) measured the candidates and their tiers; its method and SQL seeded §1 (its per-slice size floor undercounted multi-owner paths: fixed by summing slices first).
 - 2026-10-19: `dt-cloud dups` + the `dups` step, `/api/dups`, `/dups` (gated by `DUPS=1`) built; gcs enables the step and the var.
-- Not started: `crc32c` in the listings (§4), `owner` / `deleted` per copy (§2).
+- 2026-10-19: §4 built (`bulk-list -c`, `dups -l`, `exact`; the page tags exact groups), not yet on in gcs's profile.
+- Not started: `owner` / `deleted` per copy (§2); an MD5/ETag column for S3/R2.

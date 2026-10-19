@@ -956,13 +956,14 @@ def index_gc(ctx: Ctx, arg: str | None) -> None:
 
 
 @step("dups", core=False, soft=True, options={"floor": int, "check": int, "check_objects": int, "suspect_copies": int,
-                                               "mem": str, "threads": int})
+                                               "mem": str, "threads": int, "listing": bool})
 def dups(ctx: Ctx, arg: str | None) -> None:
     """The scan's duplicate-candidate groups (`dt-cloud dups`, specs/dups.md §1) beside its index:
     `<layer2>index/<gen>/dups.{parquet,json}` (`dups.json` last, the skip-if-done mark), read from the scan's `bysize`
     sort (its `tot` prunes the read to the paths over the floor), else its `path` sort. Options: `floor` (bytes),
-    `suspect_copies`, `check` (spot-check the top N groups' copies on GCS), `check_objects`, `mem`, `threads`. Off
-    unless the profile lists it in `steps`; never fatal."""
+    `suspect_copies`, `check` (spot-check the top N groups' copies on GCS), `check_objects`, `mem`, `threads`,
+    `listing` (`-l` each source's raw listing shards in the data store: copies proven `exact` by their objects'
+    crc32c, which the listing carries with `options.list.bulk_args: [-c]`). Off unless the profile lists it in `steps`; never fatal."""
     key_dir = ctx.data_root / ctx.index_key
     if ctx.done(key_dir / "dups.json", "dups"):
         return
@@ -971,6 +972,12 @@ def dups(ctx: Ctx, arg: str | None) -> None:
     out = ctx.work / "dups"
     flags = {"floor": "-f", "check": "-g", "check_objects": "-n", "suspect_copies": "-s", "mem": "-m", "threads": "-t"}
     args = [a for k, f in flags.items() if ctx.opt("dups", k) is not None for a in (f, ctx.opt("dups", k))]
+    if ctx.opt("dups", "listing", False):
+        if ctx.profile.layout.listing is None:  # an importing profile's listings stay in its list tasks' scratch
+            err("dups: options.dups.listing without layout.listing: no exact verdicts")
+        else:
+            args += [a for src in ctx.profile.sources
+                     for a in ("-l", f"{ctx.data_root / ctx.listing_key(src.bucket)}/shard-*.parquet")]
     with ctx.phase("dups"):
         r = ctx.sh(["dt-cloud", "dups", "-d", ctx.scan, *args, "-T", ctx.work / "dups-tmp", "-o", out, src], fatal=False,
                    fails_phase=True, warn="dups failed (the scan's other outputs stand)")
