@@ -93,7 +93,7 @@ def shard_keys(root: Store, template: str, scan: str) -> list[str]:
     """Scan `scan`'s raw listing shard keys under `root` matching `template` (`{id}` the scan id, globs allowed)."""
     pat = template.replace("{id}", scan)
     lead = pat.split("*", 1)[0].split("?", 1)[0].split("[", 1)[0]
-    prefix = lead.rsplit("/", 1)[0] if "/" in lead else ""
+    prefix = lead.rsplit("/", 1)[0] + "/" if "/" in lead else ""  # the scan's dir: `keys` lists a bare name's parent
     return sorted(k for k in root.keys(prefix) if fnmatch.fnmatchcase(k, pat))
 
 
