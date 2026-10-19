@@ -277,6 +277,19 @@ def test_backfill_fills_versions_live_since_the_first_generation(world, backfill
     assert _columns(g2 / "served" / "path.parquet") == [*ist.PVL_SCHEMA.names, "generation"]
 
 
+def test_a_parallel_backfill_writes_the_serial_ones_bytes(world, off, backfilled, tmp_path):
+    """`-j 3`: both key ranges at once, each filled (`filler`'s temp table) on its own cursor, then the served sorts three
+    at a time: the serial backfill's files and counts."""
+    store = tmp_path / "store"
+    shutil.copytree(off["store"], store)
+    out = _backfill(store, tmp_path / "w", world, "g2", "-j", "3")
+    g2, ref = store / ist.PREFIX / "g2", backfilled["store"] / ist.PREFIX / "g2"
+    assert (out["filled"], out["rows"]) == (backfilled["out"]["filled"], backfilled["out"]["rows"])
+    assert ((g2 / ib.BACKFILL).read_text(), (g2 / "served" / "stats.json").read_text()) == ((ref / ib.BACKFILL).read_text(), (ref / "served" / "stats.json").read_text())
+    assert sorted(_parquets(g2)) == sorted(_parquets(ref))
+    assert _parquets(g2) == _parquets(ref)
+
+
 def test_backfill_borrows_a_staged_generations_ranges(world, off, backfilled, tmp_path):
     """A staged build's generation holds only its scans, runs and served sorts; its key ranges and base range files live
     in its ranges generation. `-R` mirrors them in, and the new generation is the same as when the source held them."""

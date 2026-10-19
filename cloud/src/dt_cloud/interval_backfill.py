@@ -217,7 +217,7 @@ def filler(index: str, ranges: dict, counts: dict[str, int]) -> ic.Fill:
 def backfill(store: Store, gen: str, new_gen: str, listing_root: str, template: str, work: Path, *, ranges_gen: str | None = None,
              since: str | None = None,
              stall_s: float = STALL_S, rg_rows: int = ist.SERVED_RG,
-             threads: int = 4, mem: str = "4GB") -> dict:
+             threads: int = 4, mem: str = "4GB", jobs: int = 1) -> dict:
     """Generation `gen` of `store` folded into `new_gen` with the objects' `generation` from the raw listings (`template`
     under `listing_root`), published to the store (data first, `scans.json` last; `CURRENT.json` untouched). A staged
     build's generation may borrow its key ranges and base range files from `ranges_gen` (its deployment's `ranges_gen`):
@@ -252,7 +252,7 @@ def backfill(store: Store, gen: str, new_gen: str, listing_root: str, template: 
     ranges = json.loads((gen_dir / "ranges.json").read_text())
     counts: dict[str, int] = {}
     out = work / "store" / new_prefix
-    doc, rows, sorts, stats = ic.fold_gen(gen_dir, out, work, gen=gen, runs=runs, rg_rows=rg_rows, threads=threads, mem=mem,
+    doc, rows, sorts, stats = ic.fold_gen(gen_dir, out, work, gen=gen, runs=runs, rg_rows=rg_rows, threads=threads, mem=mem, jobs=jobs,
                                           fill=filler(str(work / GEN_INDEX), ranges, counts))
     rec = {"from": gen, "manifest": newest, "runs": [r["key"] for r in runs], "scans": len(doc["scans"]), "listings": idx["scans"],
            "listed": idx["rows"], "filled": sum(counts.values())}
@@ -271,6 +271,7 @@ def _publish_order(keys: list[str]) -> list[str]:
 
 @command("backfill-generation")
 @option("-g", "--gen", help="The source generation (default: the store's current, followed to its newest successor); never rewritten")
+@option("-j", "--jobs", default=1, type=IntRange(min=1), help="Key ranges, then served sorts, folded this many at a time, on cursors of one DuckDB database (-p threads and -M memory shared): each ends in a serial parquet writer. The output's bytes don't depend on it")
 @option("-l", "--listing", "template", required=True, help="Key template of a scan's raw listing shards under -s: `{id}` the scan id, globs allowed (e.g. `listing/{id}/*/*.parquet`)")
 @option("-M", "--mem", default="4GB", help="DuckDB memory limit")
 @option("-o", "--out", "store_root", required=True, help="The store: a dir or URL (`r2://bucket[/prefix]`, `s3://…`, `gs://…`), the readers' INDEX_R2 root")
@@ -282,7 +283,7 @@ def _publish_order(keys: list[str]) -> list[str]:
 @option("-S", "--since", help="Skip, unread, the scans before this id (their listings carry no `generation`)")
 @option("-T", "--stall", "stall_s", default=STALL_S, type=IntRange(min=0), help="Exit 3 when no listing is read for this many seconds (0: never)")
 @option("-w", "--work", help="Local work dir (default: a temporary one, removed after); the source generation is mirrored into it")
-def backfill_cmd(gen, template, mem, store_root, to_gen, threads, ranges_gen, rg_rows, listing_root, since, stall_s, work) -> None:
+def backfill_cmd(gen, jobs, template, mem, store_root, to_gen, threads, ranges_gen, rg_rows, listing_root, since, stall_s, work) -> None:
     """Fold a generation into a new one whose object versions carry their GCS `generation`, read from the raw listings:
     each version takes the first one listed within it; versions that ended before any listing had one stay NULL. The
     source and `CURRENT.json` are left as they are: verify the new generation, then `interval-store current -s TO_GEN`.
@@ -297,7 +298,7 @@ def backfill_cmd(gen, template, mem, store_root, to_gen, threads, ranges_gen, rg
             raise SystemExit(f"{store.root}/{PREFIX}: no current generation ({how}): name one with -g")
     gen = ic.chain(store, gen)[-1]
     with workdir(work) as w:
-        print(json.dumps(backfill(store, gen, to_gen, listing_root, template, w, ranges_gen=ranges_gen, since=since, stall_s=stall_s, rg_rows=rg_rows, threads=threads, mem=mem), indent=1))
+        print(json.dumps(backfill(store, gen, to_gen, listing_root, template, w, ranges_gen=ranges_gen, since=since, stall_s=stall_s, rg_rows=rg_rows, threads=threads, mem=mem, jobs=jobs), indent=1))
 
 
 # ── Parity against the listings ────────────────────────────────────────────

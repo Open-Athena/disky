@@ -651,11 +651,13 @@ def write_served(con, src: str, sort: str, out: Path, schema: pa.Schema, *, rg_r
                 raise ValueError(f"{out.name}: a closed version's vf/vt isn't one of the scans' stamps")
             t = pa.Table.from_batches([b]).drop_columns(["__seg"])
             t = t.cast(schema) if t.schema != schema else t
-            # The batch's runs of one segment (it's sorted by segment first).
-            vals = segs.to_pylist()
-            cuts = [0] + [x for x in range(1, len(vals)) if vals[x] != vals[x - 1]] + [len(vals)]
+            # The batch's runs of one segment (it's sorted by segment first), found in Arrow: a per-row Python loop holds
+            # the GIL, which serialized concurrent cuts (`cut_gen` `jobs`).
+            m = len(segs)
+            change = pc.indices_nonzero(pc.not_equal(segs.slice(1), segs.slice(0, m - 1))).to_pylist() if m > 1 else []
+            cuts = [0, *(x + 1 for x in change), m]
             for a, z in zip(cuts, cuts[1:]):
-                s = vals[a]
+                s = segs[a].as_py()
                 if s != cur:
                     flush(True)
                     cur = s
@@ -695,22 +697,30 @@ def write_served(con, src: str, sort: str, out: Path, schema: pa.Schema, *, rg_r
     return {"sort": sort, "rows": start, "groups": len(rows), "bytes": out.stat().st_size, "groups_bytes": gp.stat().st_size, "segments": segs}
 
 
-def cut_gen(con, gen_dir: Path, scans: dict, *, rg_rows: int = SERVED_RG) -> tuple[dict, dict]:
+def cut_gen(con, gen_dir: Path, scans: dict, *, rg_rows: int = SERVED_RG, jobs: int = 1) -> tuple[dict, dict]:
     """A generation's served sorts from its range files under `gen_dir` (every `served_sorts(scans["slices"])` entry,
     dyadic segments over `scans`' stamps): `served/<sort>.parquet` + `.groups.parquet` + `<sort>.json`, then its churn
     (`served/stats.json`). What a base build (`interval_local.build_gen`) and a compaction (`interval_compact`) cut.
-    Returns `({sort: {rows, groups, bytes}}, stats)`."""
+    `jobs` sorts at a time (`static_names.each`, the largest sources first): each is a parallel DuckDB sort, then a
+    serial pyarrow writer, which the other sorts overlap. Returns `({sort: {rows, groups, bytes}}, stats)`."""
     stamps = [s["ts"] for s in scans["scans"]]
-    served, sorts = gen_dir / "served", {}
+    served = gen_dir / "served"
     gen = has_generation(scans)
-    for sort in served_sorts(scans["slices"]):
+    todo = served_sorts(scans["slices"])
+    size = {sub: sum(p.stat().st_size for p in (gen_dir / sub).glob("r*.parquet")) for sub in {SORTS[s][0] for s in todo}}
+
+    def one(cur, sort: str) -> dict:
         sub, _, _ = SORTS[sort]
         t1 = monotonic()
-        sd = write_served(con, f"read_parquet({q(str(gen_dir / sub / 'r*.parquet'))})", sort, served / f"{sort}.parquet", served_schema(sort, gen),
+        sd = write_served(cur, f"read_parquet({q(str(gen_dir / sub / 'r*.parquet'))})", sort, served / f"{sort}.parquet", served_schema(sort, gen),
                           rg_rows=rg_rows, stamps=stamps)
         sd["s"] = round(monotonic() - t1, 1)
         (served / f"{sort}.json").write_text(json.dumps(sd, sort_keys=True) + "\n")
-        sorts[sort] = {"rows": sd["rows"], "groups": sd["groups"], "bytes": sd["bytes"]}
+        return sd
+
+    order = sorted(todo, key=lambda s: -size[SORTS[s][0]])
+    got = dict(zip(order, sn.each(con, one, order, jobs)))
+    sorts = {sort: {"rows": got[sort]["rows"], "groups": got[sort]["groups"], "bytes": got[sort]["bytes"]} for sort in todo}
     stats = {**churn_stats(con, str(gen_dir), scans), "slices": scans["slices"]}
     (served / "stats.json").write_text(json.dumps(stats, indent=1) + "\n")
     return sorts, stats
