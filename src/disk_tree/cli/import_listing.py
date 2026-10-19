@@ -200,6 +200,13 @@ def import_bucket(
     # A `file` root collapses to the bare path (a reduced capture's root).
     scan_path = canonical(f'{scheme}://{bucket}')
 
+    if engine != 'pandas':
+        from disk_tree.find.import_listing import listing_rows
+        from disk_tree.listing import prepare_listing
+        if not listing_rows(con, prepare_listing(con, listings)):
+            # an empty bucket: its root alone, the same on every engine (the out-of-core ones need rows)
+            err(f"  {bucket}: empty listing; a root-only scan (engine pandas)")
+            engine = 'pandas'
     if engine == 'pandas':
         from disk_tree.find.import_listing import import_listing
         df = import_listing(
