@@ -27,7 +27,8 @@ import { fromUrlPath, mountedSegs, pathCopy, pathText, urlSegsOf } from './pathC
 import { listsObjects, openHref, treeHref } from './objects'
 import { Busy, Skeleton } from './Busy'
 import { useRules } from './rules'
-import { useHashSpy } from './hashSpy'
+import { useSectionSpy } from 'use-prms/sections'
+import { SECTION_MODE } from './sectionMode'
 import { useScrollSpyPref } from './prefs'
 import { SectionAnchor } from './SectionAnchor'
 import { barControls } from './pageBar'
@@ -671,7 +672,15 @@ function AppContent() {
   // position across navigation. A pending deep link is re-armed as the map,
   // meta and scans land (sections mount off different queries).
   const [spy] = useScrollSpyPref()
-  useHashSpy({ ids: SECTION_IDS, location, navType, deps: [mapTree, meta, scans], legacy: LEGACY_ANCHORS, offset: topbarH, spy: spy === 'on' })
+  useSectionSpy({
+    sections: SECTION_IDS,
+    nav: { location, navType },
+    deps: [mapTree, meta, scans],
+    aliases: LEGACY_ANCHORS,
+    reference: { offset: topbarH },
+    write: spy === 'on' ? 'replace' : 'off',
+    mode: SECTION_MODE,
+  })
   const [lens, setLens] = useState(false)  // treemap storage-class lens (hatch by cold fraction)
   const { fmtBytes } = useUnits()
   // The treemap's drill path now lives in the URL *path* (below the store's own
@@ -747,7 +756,7 @@ function AppContent() {
   )
   // A drill leaves any opened object behind (`?open=` names a child of the
   // drilled directory), and the section hash: a new path starts at the top
-  // (`useHashSpy`). Never copy the router's `hash` into a navigation — the spy
+  // (`useSectionSpy`). Never copy the router's `hash` into a navigation — the spy
   // rewrites the URL's behind the router's back, so it's whatever section was
   // last *linked*, not the one in view (a crumb click warped to it).
   const drillTo = (segs: string[]) => {

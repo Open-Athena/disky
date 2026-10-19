@@ -46,7 +46,8 @@ import { batchCompletion, batchIsCollapsed, isCurrentlyStaged, stagedMapTree, st
 import { batchAnchor } from './runHistory'
 import { batchLeads, coalesceBatches, idRanges } from '../functions/_lib/batchGroups'
 import { useLocation, useNavigationType } from 'react-router-dom'
-import { useHashSpy } from './hashSpy'
+import { useSectionSpy } from 'use-prms/sections'
+import { SECTION_MODE } from './sectionMode'
 import { machineFor } from '../functions/_lib/sweepMachines'
 
 const iso = (ts: number): string => new Date(ts * 1000).toISOString()
@@ -359,7 +360,7 @@ export function StagedPage() {
   // names the session in view in the hash. A member batch's link lands on its session.
   const sessionAnchors = useMemo(() => groups.filter(g => g.id != null && g.id > 0).map(g => batchAnchor(g.id)), [groups])
   const memberAnchors = useMemo(() => Object.fromEntries([...leadOf].filter(([id, l]) => id !== l).map(([id, l]) => [batchAnchor(id), batchAnchor(l)])), [leadOf])
-  useHashSpy({ ids: sessionAnchors, location, navType, deps: [batches.length, loadingContents, stats], legacy: memberAnchors })
+  useSectionSpy({ sections: sessionAnchors, nav: { location, navType }, deps: [batches.length, loadingContents, stats], aliases: memberAnchors, mode: SECTION_MODE })
 
   const renderGroup = (g: Group) => {
     const k = gkey(g)
