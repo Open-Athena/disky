@@ -549,3 +549,25 @@ def test_store_versions_one_sort_is_the_windowed_table(tmp_path):
         QUALIFY row_number() OVER (PARTITION BY depth, path, vf ORDER BY vt) = 1 ORDER BY ALL""").fetchall()
     assert con.execute(f"SELECT * FROM {ib.VERSIONS} ORDER BY ALL").fetchall() == windowed == [
         (2, "b/d", 1, 5, "dir", None), (2, "b/d", 5, 2**31, "dir", None), (3, "b/d/x", 1, 2**31, "file", 7)]
+
+
+def test_store_versions_base_and_runs_is_the_windowed_union(tmp_path):
+    """A base plus runs: a run's close record (a smaller `vt`) wins over the base's open row of the same version, a run's
+    new version is added, a version the runs never touch is the base's; the same table as one window over the union,
+    without windowing the base's rows the runs don't share."""
+    O = 2**31
+    def write(name: str, rows: list[tuple]) -> str:
+        cols = ["depth", "path", "vf", "vt", "kind", ist.GENERATION]
+        f = tmp_path / f"{name}.parquet"
+        pq.write_table(pa.table({c: [r[i] for r in rows] for i, c in enumerate(cols)}), f)
+        return str(f)
+    base = write("base", [(2, "b/a", 1, O, "file", 3), (2, "b/c", 1, O, "file", 4), (2, "b/d", 1, 5, "file", 5)])
+    run1 = write("run1", [(2, "b/a", 1, 7, "file", 3), (2, "b/a", 7, O, "file", 8)])
+    run2 = write("run2", [(2, "b/a", 7, 9, "file", 8), (2, "b/e", 9, O, "file", 9)])
+    con = duckdb.connect()
+    ib.store_versions(con, [base, run1, run2])
+    windowed = con.execute(f"""SELECT * FROM read_parquet([{', '.join(repr(f) for f in (base, run1, run2))}])
+        QUALIFY row_number() OVER (PARTITION BY depth, path, vf ORDER BY vt) = 1 ORDER BY ALL""").fetchall()
+    assert con.execute(f"SELECT * FROM {ib.VERSIONS} ORDER BY ALL").fetchall() == windowed == [
+        (2, "b/a", 1, 7, "file", 3), (2, "b/a", 7, 9, "file", 8), (2, "b/c", 1, O, "file", 4), (2, "b/d", 1, 5, "file", 5),
+        (2, "b/e", 9, O, "file", 9)]
