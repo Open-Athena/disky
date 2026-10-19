@@ -894,6 +894,8 @@ def cut_cmd(bucket, no_dyadic, profile, gen, index, mount, mem, out, to_gen, thr
         (out_dir / "stats.json").write_text(json.dumps(doc, indent=1) + "\n")
         if not no_upload:
             _refuse_overwrite(store, [f"{dst_prefix}/served/stats.json"])
+            if to_gen and to_gen != gen:
+                copy_base(store, prefix, dst_prefix)
             store.put_tree(out_dir, f"{dst_prefix}/served")
             record_slices(store, dst_prefix, scans, has_slices, has_gen)
         print(json.dumps({k: v for k, v in doc.items() if k != "scans"}), flush=True)
@@ -920,6 +922,22 @@ def cut_cmd(bucket, no_dyadic, profile, gen, index, mount, mem, out, to_gen, thr
     if not no_upload:
         # The generation's scans and owner axis (the reader's `scans.json`; under `-O`, the new generation's).
         record_slices(store, dst_prefix, scans, has_slices, has_gen)
+
+
+def copy_base(store: Store, src: str, dst: str, *, workers: int = 16) -> int:
+    """Generation `src`'s key ranges (`ranges.json`) and base range files (`SUB_SCHEMA`'s dirs) copied into `dst` (server
+    side on a bucket), each unless `dst` has it at its size: a generation cut from another's ranges (`cut -O`) holds its
+    own base, as every reader (append, compaction, backfill, retire's lineage) assumes. Returns how many it copied."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    have = store.listing(dst)
+    todo = [k for k, n in store.listing(src).items()
+            if (k[len(src) + 1:] == "ranges.json" or k[len(src) + 1:].split("/")[0] in SUB_SCHEMA)
+            and have.get(f"{dst}/{k[len(src) + 1:]}") != n]
+    with ThreadPoolExecutor(workers) as ex:
+        list(ex.map(lambda k: store.copy(k, f"{dst}/{k[len(src) + 1:]}"), todo))
+    err(f"cut: {len(todo)} base files ({src}'s ranges.json and range files) copied into {dst}")
+    return len(todo)
 
 
 def download_served(store: Store, prefix: str, dst: Path, *, workers: int = 16) -> None:
