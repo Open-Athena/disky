@@ -8,6 +8,14 @@ Why: dispatch ignores the row selection. A real run acts on the plan's whole sta
 
 Ryan: "definitely shouldn't delete things that were DR'd then specifically excluded from deletion", and an exact prior dry run isn't important enough to gate on.
 
+## Status (2026-10-19, controller)
+
+Built on `cloud`, all four points. Not yet seen in a browser (gcs: CIC on dev, without a real delete).
+- **Selection (1):** `DispatchReq.items` (the checked rows' `digestLines`; absent = the whole plan, the Slack thread's buttons) → `planItems(…, only)` / `selectItems`: both executors' snapshots, `plan.json` and the run's digest hold exactly those; an item the plan doesn't hold refuses (400 `not in the plan: …`), an empty selection too (`nothing selected`). /staged sends the checked rows (in the checked buckets); both buttons are disabled until a row is checked ("dry-run N selected", "real delete N selected…"), and the armed confirm lists each prefix with its size.
+- **Staging scans (2):** the scan picker is gone; a run lists from the newest scan, and the manifest's `as_of` holds keep each item to what its staging scan saw (already there: `sweep_manifest.load_holds`).
+- **No dry-run gate (3):** `realRun` replaces `realGate` in `dispatchPlan` (the Slack thread still reads `realGate` for its buttons' state): only a run in flight refuses. A finished dry run of exactly the selection at that scan is reused (gcs `execute-reviewed`, its scan when none is given); otherwise gcs's real run lists afresh (`sweep manifest` + `sweep execute --for-real`), as cw's always did. The 10/19 cause: the real run reused a dry run's manifest of the whole plan, the selection never reaching the server.
+- **Test (4):** `executor.test.ts`: three items dry-run, one unchecked, real → the executor acts on the other two, a fresh listing, the run's digest theirs.
+
 ## Change
 
 1. **The selection is the run.** "dispatch dry-run" and "real delete…" act on the checked rows (all rows when none are checked — or disable both until something is checked; pick one and say so in the button). The confirm step lists the prefixes and their total ("delete 9 prefixes · 45 T: …"), not just a count.

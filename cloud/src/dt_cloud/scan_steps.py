@@ -814,13 +814,27 @@ def publish_r2(ctx: Ctx, arg: str | None) -> None:
                                     "remains visible; repair the R2 copy, then resume", hard=True)
 
 
-@step("interval-store", stage="serve", soft=True, options={"store": str, "timeout": str, "mem": str, "profile": str, "merge_wait": int},
-      requires=primary_only("interval-store", "the site serves another store's scans per scan, and the interval store's "
-                                              "`interval-store/CURRENT.json` is the primary's"))
+_iv_primary = primary_only("interval-store", "the site serves another store's scans per scan, and the interval store's "
+                                            "`interval-store/CURRENT.json` is the primary's")
+
+
+def _iv_check(p: ScanProfile) -> list[str]:
+    o = p.opts("interval-store")
+    bad = [f"options.interval-store.source: {o['source']!r} (one of store, data)"] if o.get("source", "store") not in ("store", "data") else []
+    if o.get("source") and o.get("profile"):
+        bad.append("options.interval-store.source: only on the one-machine path (the staged one reads its profile's layouts)")
+    return _iv_primary(p) + bad
+
+
+@step("interval-store", stage="serve", soft=True, options={"store": str, "timeout": str, "mem": str, "profile": str, "merge_wait": int,
+                                                             "source": str},
+      requires=_iv_check)
 def interval_store(ctx: Ctx, arg: str | None) -> None:
     """Append this scan (and any pending) to the change-interval path store beside its current generation, then the
     due carries / compaction (`interval-store add`). Never fatal (`-W`): a failure or the timeout warns, the next run
-    catches up. Reads the scans' `path` sorts at `<layer2>/index/<gen>/path-index.parquet` from the store.
+    catches up. Reads the scans' `path` sorts at `<layer2>/index/<gen>/path-index.parquet` from the store, or with
+    `options.interval-store.source: data` from the data store, as `static-names` does (so `publish-r2 -S` needn't copy
+    the sorts to the store: specs/lean-scans.md §1.1).
     `options.interval-store.profile`: the staged path instead (`interval-store append -c`, its per-range stages Batch
     jobs of their own, in this task's image; `merge_wait` seconds on the merge job), for a store too big for one task."""
     if ctx.reproc:
@@ -852,7 +866,8 @@ def interval_store(ctx: Ctx, arg: str | None) -> None:
         err(f"no interval store at {store} yet: not appending {ctx.scan}")
         return
     layout = ctx.profile.layout.layer2.replace("{scan}", "{id}") + "index/{gen}/path-index.parquet"
-    cmd = ["dt-cloud", "interval-store", "add", "-L", layout, "-s", store, "-o", store, "-w", str(ctx.work / "interval-store"),
+    source = ctx.data_uri if ctx.opt("interval-store", "source", "store") == "data" else store
+    cmd = ["dt-cloud", "interval-store", "add", "-L", layout, "-s", source, "-o", store, "-w", str(ctx.work / "interval-store"),
            *(["-M", ctx.opt("interval-store", "mem")] if ctx.opt("interval-store", "mem") else []), "-p", str(ctx.nproc)]
     ctx.run.begin("interval-store")
     err("+ " + " ".join(cmd))
@@ -987,10 +1002,33 @@ def retire(ctx: Ctx, arg: str | None) -> None:
     roots = [r for r in dict.fromkeys([first, *(archive if c == "r2" else c for c in o.get("copies", []))]) if r]
     with ctx.phase("retire", note=None if o.get("execute") else "dry run"):
         for i, root in enumerate(roots):
-            d1 = [] if i == 0 and ctx.has(*CF) else ["-R"]
+            # a copy after the D1 pass: its rows are that pass's (`-D`: no "-R leaves D1 rows" warning in a dry run)
+            d1 = [] if i == 0 and ctx.has(*CF) else ["-R", *(["-D"] if ctx.has(*CF) else [])]
             backup = ["-b", o["backup"]] if i == 0 and o.get("backup") else []
             ctx.sh(["dt-cloud", "scan", "retire", *backup, *common, *d1, "-s", root], fatal=False, fails_phase=True,
                    warn=f"retire failed on {root} (its per-scan files stay; the next run retries)")
+
+
+@step("store-gc", core=False, soft=True, options={"execute": bool, "grace": int, "store": str})
+def store_gc(ctx: Ctx, arg: str | None) -> None:
+    """Superseded interval-store generations (`dt-cloud store-gc -l`): what the current generation was compacted or
+    backfilled from, past the grace (`grace` seconds, default 3 days), its parity markers moved first; on the interval
+    store (`store`, default the interval-store step's, else `$R2_ARCHIVE`) and on `$R2_ARCHIVE` when that's another
+    copy. Off unless the profile lists it in `steps`; a dry run unless `execute: true`. Static-names generations aren't
+    in it: which one each site reads isn't the job's to know (`store-gc -t static-names -k …` by hand)."""
+    if ctx.reproc:
+        err("store-gc off under REPROC")
+        return
+    archive = ctx.env.get("R2_ARCHIVE")
+    store = ctx.opt("store-gc", "store") or ctx.opt("interval-store", "store") or archive
+    if not store:
+        err("store-gc: no interval store (options.store-gc.store, options.interval-store.store or R2): nothing collected")
+        return
+    args = ["-t", "interval-store", "-l", *(["-G", ctx.opt("store-gc", "grace")] if ctx.opt("store-gc", "grace") is not None else []),
+            *(["-x"] if ctx.opt("store-gc", "execute") else [])]
+    with ctx.phase("store-gc", note=None if ctx.opt("store-gc", "execute") else "dry run"):
+        for root in dict.fromkeys(r for r in (store, archive) if r):
+            ctx.sh(["dt-cloud", "store-gc", *args, "-o", root], fatal=False, warn=f"store-gc failed on {root} (the generations stay)")
 
 
 def store_args_t(ctx: Ctx) -> list[str]:

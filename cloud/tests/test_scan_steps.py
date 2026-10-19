@@ -398,6 +398,25 @@ def test_interval_store_staged_append(tmp_path, env, monkeypatch):
                     "/app/job/interval-store.json", "img@sha256:abc")]
 
 
+def test_interval_store_adds_from_the_store_or_the_data_store(tmp_path, env, monkeypatch):
+    """The one-machine `add` reads the scans' sorts from the store by default, and from the data store with
+    `source: data` (so `publish-r2 -S` needn't copy them; specs/lean-scans.md §1.1); a bad `source` is refused."""
+    from dt_cloud import scan_runs
+
+    ran = []
+    monkeypatch.setattr(scan_runs, "run_grouped", lambda cmd, timeout, grace, env=None, **kw: (ran.append(" ".join(cmd)), scan_runs.Ran(0, False, None))[1])
+    env["R2_ARCHIVE"] = "r2://idx"
+    for source in ({}, {"source": "data"}):
+        c = gcs_ctx(tmp_path, dict(env), monkeypatch, **{"interval-store": {"mem": "12GB", **source}})
+        c.sh_impl = Runner(tmp_path, stdout={"dt-cloud interval-store current": "g1\n"})
+        S.interval_store(c, None)
+    add = "dt-cloud interval-store add -L listing/{id}/index/{gen}/path-index.parquet -s {src} -o r2://idx -w <tmp>/t/dt-scan/2026-10-16T1200/interval-store -M 12GB -p 32"
+    assert [r.replace(str(tmp_path), "<tmp>") for r in ran] == [add.replace("{src}", "r2://idx"), add.replace("{src}", "gs://dvx")]
+    with pytest.raises(ValueError) as e:
+        gcs_ctx(tmp_path, dict(env), monkeypatch, **{"interval-store": {"source": "r2"}})
+    assert str(e.value) == "profile: options.interval-store.source: 'r2' (one of store, data)"
+
+
 def test_lifecycle_pull_takes_the_s3_sources_endpoint(tmp_path, env, monkeypatch):
     """The publish step's `lifecycle pull` passes the S3 sources' `endpoint` (`-E`), not the sweep's `$SWEEP_S3_ENDPOINT`."""
     (tmp_path / "t").mkdir(exist_ok=True)
@@ -703,7 +722,7 @@ def test_retire_dry_run_by_default_then_each_copy(tmp_path, env):
     common = f"-G s1 -k 3 -L l2/{{id}}/index/{{gen}}/path-index.parquet -l l2/{{id}}/*.parquet -o r2://idx -S r2://idx -w {w}"
     assert c.sh_impl.calls == [
         f"dt-cloud scan retire -b gs://bak {common} -s gs://d",
-        f"dt-cloud scan retire {common} -R -s r2://idx",
+        f"dt-cloud scan retire {common} -R -D -s r2://idx",
     ]
     x = ctx(tmp_path, env, data="gs://d", steps=["retire"], options={**opts, "retire": {"keep": 2, "execute": True, "markers_only": True, "store": "gs://iv"}})
     S.retire(x, None)
@@ -770,6 +789,18 @@ def test_retire_layer1_passes_the_listing_layouts_shards(tmp_path, env):
     n = ctx(tmp_path, env, steps=["retire"], options={**opts, "list": {"import": True}})
     S.retire(n, None)
     assert n.sh_impl.calls == [f"dt-cloud scan retire -G s1 -k 2 -L l2/{{id}}/index/{{gen}}/path-index.parquet -o gs://iv -S gs://iv -w {w} -R -s <tmp>/data"]
+
+
+def test_store_gc_collects_the_interval_stores_lineage_on_each_copy(tmp_path, env):
+    """`store-gc` (listed in `steps`): `store-gc -t interval-store -l` on the interval store and on `$R2_ARCHIVE` when
+    that's another copy; a dry run unless `execute`."""
+    opts = {**NL_OPTS, "interval-store": {"store": "gs://iv"}}
+    c = ctx(tmp_path, {**env, "R2_ARCHIVE": "r2://idx"}, steps=["store-gc"], options={**opts, "store-gc": {"grace": 60}})
+    S.store_gc(c, None)
+    assert c.sh_impl.calls == ["dt-cloud store-gc -t interval-store -l -G 60 -o gs://iv", "dt-cloud store-gc -t interval-store -l -G 60 -o r2://idx"]
+    x = ctx(tmp_path, env, steps=["store-gc"], options={**opts, "store-gc": {"execute": True}})
+    S.store_gc(x, None)
+    assert x.sh_impl.calls == ["dt-cloud store-gc -t interval-store -l -x -o gs://iv"]
 
 
 def test_retire_failure_warns_and_needs_its_keep(tmp_path, env):
