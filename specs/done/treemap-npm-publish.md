@@ -35,7 +35,9 @@ Renamed `@rdub/treemap` → `@open-athena/treemap` (Ryan, 2026-10-18). `site` ke
    - `pnpm -C packages/treemap test`.
 4. **Publish** `0.1.0` with `pnpm publish --access public` from `packages/treemap`, then tag `treemap-v0.1.0`.
 5. **README:** replace the "no npm publish (yet)" install section with `pnpm add @open-athena/treemap`, keeping the dist-branch SHA pin as an alternative. Keep the `import '@open-athena/treemap/styles.css'` note.
-6. `publish-treemap.yml`: publishes a **dist commit** (Ryan: npm should be the `dist/treemap` SHA's bytes): tag the dist commit `treemap-v<version>`; the job checks it's a dist build (`Built from <sha>`), strips `-dist.<sha>` from its version (which must match the tag), and `npm publish --ignore-scripts` over trusted publishing (OIDC, no token). A version already on npm is skipped. 0.1.0 is published by hand the same way (from `f54c983e`, built from `e947ae09`), then its tag pushed.
+6. `publish-treemap.yml`: publishes a **dist commit** (Ryan: npm should be the `dist/treemap` SHA's bytes). Tag a **source** commit `treemap-v<version>` (a tag push runs the workflow from the tagged commit, and dist commits hold none); the job takes the newest dist commit built from an ancestor of the tag with `packages/treemap` unchanged since, strips `-dist.<sha>` from its version (which must match the tag), and `npm publish --ignore-scripts` over trusted publishing (OIDC, no token). A version already on npm is skipped.
+
+**Published 2026-10-19:** `@open-athena/treemap@0.1.0`, by hand (OTP) from dist commit `f54c983e` (built from `e947ae09`); verified installing from npm into a fresh Vite + React app (typecheck, build). Trusted publisher set (repo `runsascoded/disky`, workflow `publish-treemap.yml`, `npm publish` allowed). **0.1.1 published by the workflow** (tag `treemap-v0.1.1` on `bc717d22`, dist commit `8485a722`), with provenance; its first try failed E422 until `package.json` carried `repository` (npm's provenance check matches it to the workflow's repo). The deck uses `@open-athena/treemap@^0.1.0`.
 
 ## Consumer follow-up (the deck, not this repo)
 

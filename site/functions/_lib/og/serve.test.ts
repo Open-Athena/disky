@@ -5,6 +5,7 @@ import { anonymousPage, pageOf, serveCard, siteOf, stampPage, type OgEnv } from 
 import { anonymousPolicy, genericTitle } from './policy'
 import { fullTier, mint } from './tokens'
 import { EPOCH } from './sign'
+import { BUILD } from '../build'
 import { sqliteD1 } from '../testD1'
 
 // 2026-10-02T12:00Z: day 274.
@@ -108,7 +109,7 @@ describe('restricted anonymous OG responses', () => {
     const response = await serveCard({ request: request(path), env: env() })
     expect(textNodes(await response.text())).toEqual(['CW storage', 'Private storage dashboard', '', 'Sign in to explore storage', ''])
     expect([mocks.live.mock.calls.length, mocks.data.mock.calls, mocks.head.mock.calls]).toEqual([1, [], []])
-    expect(mocks.match.mock.calls.map(call => call[0].url)).toEqual(['https://cw.example/og/map.png?policy=generic&r=8'])
+    expect(mocks.match.mock.calls.map(call => call[0].url)).toEqual([`https://cw.example/og/map.png?policy=generic&r=8&bld=${BUILD.sha}`])
   })
 
   it('valid explicit shares remain detailed and private', async () => {
@@ -192,7 +193,7 @@ describe('restricted anonymous OG responses', () => {
     expect([response.headers.get('x-og-tier'), response.headers.get('cache-control'), textNodes(await response.text())])
       .toEqual(['anon', 'public, max-age=0, must-revalidate', ['CW storage', 'secret/path', 'scan 2026-10-12T1201', '99 TiB · 123 objects']])
     expect(mocks.match.mock.calls.map(call => call[0].url)).toEqual([
-      'https://cw.example/og/map.png?policy=shape&r=8&s=2026-10-12T1201&tier=anon&h=0',
+      `https://cw.example/og/map.png?policy=shape&r=8&s=2026-10-12T1201&tier=anon&h=0&bld=${BUILD.sha}`,
     ])
   })
 
@@ -201,7 +202,7 @@ describe('restricted anonymous OG responses', () => {
     const response = await serveCard({ request: request('/og/map.png?policy=shape&r=2'), env: env({ OG_ANONYMOUS: 'generic' }) })
     expect([textNodes(await response.text()), mocks.match.mock.calls.map(call => call[0].url)]).toEqual([
       ['CW storage', 'Private storage dashboard', '', 'Sign in to explore storage', ''],
-      ['https://cw.example/og/map.png?policy=generic&r=8'],
+      [`https://cw.example/og/map.png?policy=generic&r=8&bld=${BUILD.sha}`],
     ])
   })
 
@@ -210,13 +211,30 @@ describe('restricted anonymous OG responses', () => {
       .toEqual(['generic', 'generic', 'shape', 'full', 'shape', 'generic'])
   })
 
+  it('a card whose view read failed is drawn but never cached (no colo put, `no-store`), so the next fetch retries', async () => {
+    mocks.data.mockResolvedValue({ ...protectedData, tiles: [], total: '', empty: 'view unavailable', failed: true })
+    const response = await serveCard({ request: request('/og/map.png?s=2026-10-12T1201'), env: env({ OG_ANONYMOUS: 'full' }) })
+    expect([response.status, response.headers.get('cache-control'), mocks.put.mock.calls.length, textNodes(await response.text())])
+      .toEqual([200, 'no-store', 0, ['CW storage', 'secret/path', 'scan 2026-10-12T1201', 'view unavailable', '']])
+  })
+
+  it('reads the primary through its path store: an unpinned interval store at `CURRENT.json`\'s generation', async () => {
+    const r2 = { get: vi.fn(async (key: string) => (key === 'interval-store/CURRENT.json' ? { json: async () => ({ gen: 'g7' }) } : null)) }
+    const e = env({ OG_ANONYMOUS: 'full', PATH_STORE: 'intervals', INDEX_R2: r2 } as unknown as Partial<OgEnv>)
+    await serveCard({ request: request('/og/map.png'), env: e })
+    const read = mocks.data.mock.calls[0][0] as OgEnv
+    expect([read.PATH_STORE, read.INTERVAL_STORE_GEN, r2.get.mock.calls.map(c => c[0])]).toEqual(['intervals', 'g7', ['interval-store/CURRENT.json']])
+  })
+
   it('full policy: an anonymous fetch draws the full card (labelled), cached apart from the other policies', async () => {
     const response = await serveCard({ request: request('/og/map.png'), env: env({ OG_ANONYMOUS: 'full' }) })
     expect([response.headers.get('x-og-tier'), mocks.data.mock.calls.map(call => call[4]), textNodes(await response.text())])
       .toEqual(['anon', ['full'], ['CW storage', 'secret/path', 'scan 2026-10-12T1201', 'secret 99 B', '99 TiB · 123 objects']])
-    expect(mocks.match.mock.calls.map(call => call[0].url)).toEqual([
-      'https://cw.example/og/map.png?policy=full&r=8&s=2026-10-12T1201&tier=anon&h=0',
-    ])
+    const key = `https://cw.example/og/map.png?policy=full&r=8&s=2026-10-12T1201&tier=anon&h=0&bld=${BUILD.sha}`
+    expect(mocks.match.mock.calls.map(call => call[0].url)).toEqual([key])
+    // the colo keeps it a year under that key (scan, version, ledger head, build); the client a day at most
+    expect([mocks.put.mock.calls.map(call => [call[0].url, call[1].headers.get('cache-control')]), response.headers.get('cache-control')])
+      .toEqual([[[key, 'public, max-age=31536000']], 'public, max-age=0, must-revalidate'])
   })
 
   it('full policy: an anonymous page preview carries the view\'s scan and totals', async () => {
@@ -282,6 +300,23 @@ describe('a secondary store\'s pages unfurl as that store (`STORES_JSON` `path`)
   const deployment = (extra: Partial<OgEnv> = {}) => env({ OG_CARDS: '1', STORES_JSON, STORE_ROOT: 'cw-root', OG_DEFAULT_COLOR: 'user', ...extra } as Partial<OgEnv>)
   const storeOf = (e: unknown) => (e as { STORE_KEY?: string }).STORE_KEY ?? 'primary'
   const full = () => mocks.tier.mockResolvedValue({ tier: 'full', day: expDay(Math.floor(Date.now() / 1000), 7), cred: { t: 'TokMetaAAA' } })
+
+  it('a full card\'s image is fetched while the page is stamped (the unfurler asks for it next); an anonymous one isn\'t', async () => {
+    const fetched: string[] = []
+    const spy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (u: RequestInfo | URL) => { fetched.push(String(u)); return new Response('png') })
+    const warmed: Promise<unknown>[] = []
+    try {
+      await stampPage(deployment(), new URL('https://cw.example/meta/x'), new Response('shell'), p => warmed.push(p))
+      expect([warmed.length, fetched]).toEqual([0, []])
+      full()
+      mocks.live.mockResolvedValue(true)
+      await stampPage(deployment(), new URL('https://cw.example/meta/snapshots?d=261012&og=TokMetaAAA'), new Response('shell'), p => warmed.push(p))
+      await Promise.all(warmed)
+      expect([warmed.length, fetched]).toEqual([1, [mocks.stamp.mock.calls.at(-1)![1].image]])
+    } finally {
+      spy.mockRestore()
+    }
+  })
 
   it('page meta: its title, its data, and an image view carrying `store`; the image renders it from that store', async () => {
     full()
