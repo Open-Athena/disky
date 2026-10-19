@@ -89,7 +89,7 @@ CREATE TABLE chart_annotations (
   author  TEXT NOT NULL,
   created INTEGER NOT NULL,
   updated INTEGER NOT NULL
-);
+, path TEXT, url TEXT, kind TEXT);
 
 CREATE TABLE claims (
   prefix TEXT PRIMARY KEY,

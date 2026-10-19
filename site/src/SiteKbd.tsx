@@ -5,7 +5,7 @@ import { Omnibar, ShortcutsModal, SpeedDial, useActions, type SpeedDialAction } 
 import { SpeedDialTip } from './Tooltip'
 import { useRegistry } from './identities'
 import { hostPair, otherHostUrl, peerUrl, type Peer } from './hosts'
-import { useHelpPref } from './prefs'
+import { useHelpPref, useScrollSpyPref } from './prefs'
 import { useStore } from './store'
 import { STORES } from './stores'
 import { useTheme } from './theme'
@@ -43,6 +43,7 @@ export function SiteKbd({ extra = [], placeholder }: {
   const { units, suffixB, toggleUnits, toggleSuffixB } = useUnits()
   const [help, setHelp] = useHelpPref()
   const toggleHelp = () => setHelp(help === 'on' ? 'off' : 'on')
+  const [spy, setSpy] = useScrollSpyPref()
   // Every distinct attribution user in the registry (aliases collapse onto `u`).
   const reg = useRegistry()
   const USERS = [...new Set(Object.values(reg).map(i => i.u))].sort()
@@ -90,6 +91,13 @@ export function SiteKbd({ extra = [], placeholder }: {
       group: 'View',
       defaultBindings: ['h'],
       handler: toggleHelp,
+    },
+    'spy:toggle': {
+      label: `Section spy (?section= in the URL while scrolling): ${spy} (toggle)`,
+      description: 'Names the section in view (tree-map, tbl, over-time, diff, mtime) in the URL as you scroll, so a copied link opens there and unfurls with that section\'s card.',
+      group: 'View',
+      keywords: ['section', 'spy', 'scroll', 'url', 'param'],
+      handler: () => setSpy(spy === 'on' ? 'off' : 'on'),
     },
     ...Object.fromEntries(
       PAGES.map(([to, label]) => [
