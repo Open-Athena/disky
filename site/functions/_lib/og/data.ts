@@ -249,7 +249,8 @@ export async function mapCard(env: Env, site: Site, title: string, params: Recor
   } catch (e) {
     if (e instanceof NotFound) return { ...base, subtitle, total: '', empty: 'path not found' }
     if (e instanceof FilterRejected) return { ...base, subtitle, total: '', empty: 'search unavailable' }
-    return { ...base, subtitle, total: '', empty: 'view unavailable' }
+    console.log(`card: ${date} ${path || '/'}: view unavailable: ${(e as Error).message}`)
+    return { ...base, subtitle, total: '', empty: 'view unavailable', failed: true }
   }
   // The live assignments over the scan's attribution, as the map draws them.
   // The ledger is the primary store's (`stores.ts` `primaryOnly`): a secondary store's map draws its scan as is.

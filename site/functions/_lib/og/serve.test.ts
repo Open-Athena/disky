@@ -211,6 +211,13 @@ describe('restricted anonymous OG responses', () => {
       .toEqual(['generic', 'generic', 'shape', 'full', 'shape', 'generic'])
   })
 
+  it('a card whose view read failed is drawn but never cached (no colo put, `no-store`), so the next fetch retries', async () => {
+    mocks.data.mockResolvedValue({ ...protectedData, tiles: [], total: '', empty: 'view unavailable', failed: true })
+    const response = await serveCard({ request: request('/og/map.png?s=2026-10-12T1201'), env: env({ OG_ANONYMOUS: 'full' }) })
+    expect([response.status, response.headers.get('cache-control'), mocks.put.mock.calls.length, textNodes(await response.text())])
+      .toEqual([200, 'no-store', 0, ['CW storage', 'secret/path', 'scan 2026-10-12T1201', 'view unavailable', '']])
+  })
+
   it('reads the primary through its path store: an unpinned interval store at `CURRENT.json`\'s generation', async () => {
     const r2 = { get: vi.fn(async (key: string) => (key === 'interval-store/CURRENT.json' ? { json: async () => ({ gen: 'g7' }) } : null)) }
     const e = env({ OG_ANONYMOUS: 'full', PATH_STORE: 'intervals', INDEX_R2: r2 } as unknown as Partial<OgEnv>)
