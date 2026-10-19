@@ -382,13 +382,29 @@ export async function pathGens(env: Env, dates: string[]): Promise<string> {
   return (h >>> 0).toString(36)
 }
 
-/** Every scan of the env's store with a synced floor-free (`path`) index —
- * the primary's query as it always was, a secondary store's scoped. */
-export function pathScans(env: Env, order: boolean): Promise<{ results: { date: string }[] }> {
-  const by = order ? ' ORDER BY date' : ''
-  return isPrimary(env)
-    ? env.DB!.prepare(`SELECT DISTINCT date FROM index_schema WHERE variant = 'path'${by}`).all<{ date: string }>()
-    : env.DB!.prepare(`SELECT DISTINCT date FROM index_schema WHERE store = ? AND variant = ?${by}`).bind(storeKey(env), d1Variant(env, 'path')).all<{ date: string }>()
+/** Every scan of the env's store: each one D1 points at (a synced floor-free `path` index; the primary's query as it
+ *  always was, a secondary store's scoped), and, where the primary serves the interval store (`PATH_STORE=intervals`),
+ *  every scan its current generation holds (`storeHeldScans`), so a scan the job appended without per-scan pointers
+ *  (or whose pointers `scan retire -P` dropped) is listed (specs/lean-scans.md §1.4, S1). */
+export async function pathScans(env: Env, order: boolean): Promise<{ results: { date: string }[] }> {
+  const [d1, held] = await Promise.all([
+    isPrimary(env)
+      ? env.DB!.prepare("SELECT DISTINCT date FROM index_schema WHERE variant = 'path'").all<{ date: string }>()
+      : env.DB!.prepare('SELECT DISTINCT date FROM index_schema WHERE store = ? AND variant = ?').bind(storeKey(env), d1Variant(env, 'path')).all<{ date: string }>(),
+    storeHeldScans(env),
+  ])
+  const dates = [...new Set([...d1.results.map(r => r.date), ...held])]
+  if (order) dates.sort()
+  return { results: dates.map(date => ({ date })) }
+}
+
+/** The scans the interval store holds where the env's store serves it for every request: the primary under
+ *  `PATH_STORE=intervals`, at its pinned or current generation (`ivGen`). None under `opt-in` (a default request
+ *  reads per-scan stores), for a secondary store, or with no generation yet. */
+export async function storeHeldScans(env: Env): Promise<string[]> {
+  if (env.PATH_STORE !== 'intervals' || !isPrimary(env)) return []
+  const gen = await ivGen(env)
+  return gen ? [...(await ivScans({ ...env, INTERVAL_STORE_GEN: gen })).keys()] : []
 }
 
 /** The env's store's date-only scans whose start is known: each `path`
@@ -491,14 +507,16 @@ export async function openIndex(env: Env, date: string, variant = 'path'): Promi
 export const intervalsOn = (env: Env): boolean => env.PATH_STORE === 'intervals' && !!env.INTERVAL_STORE_GEN && !!env.INDEX_R2
 
 /** A request's path store: `PATH_STORE=opt-in` reads the interval store only for requests asking
- *  `ps=iv` (so one deployment serves both, side by side); a secondary store (`store=`) never does. The
+ *  `ps=iv` (so one deployment serves both, side by side), `intervals` for every request but one asking `ps=scan` (the
+ *  per-scan sorts, for a parity check); a secondary store (`store=`) never does. The
  *  generation is `INTERVAL_STORE_GEN` (a pin), else the store's current one (`ivCurrentGen`), fixed for the
  *  request: none (no pointer yet) reads per-scan stores. */
 export async function withPathStore<C extends { request: Request; env: Env }>(ctx: C): Promise<C> {
   const { env } = ctx
   if (env.PATH_STORE !== 'opt-in' && env.PATH_STORE !== 'intervals') return ctx
   const u = new URL(ctx.request.url).searchParams
-  const on = !u.get('store') && (env.PATH_STORE === 'intervals' || u.get('ps') === 'iv')
+  const ps = u.get('ps')
+  const on = !u.get('store') && ps !== 'scan' && (env.PATH_STORE === 'intervals' || ps === 'iv')
   const gen = on ? await ivGen(env) : env.INTERVAL_STORE_GEN
   const w = (ctx as { waitUntil?: unknown }).waitUntil
   return { ...ctx, env: { ...env, PATH_STORE: on ? 'intervals' : undefined, INTERVAL_STORE_GEN: gen ?? undefined }, ...(typeof w === 'function' ? { waitUntil: w.bind(ctx) } : {}) }

@@ -133,6 +133,7 @@ def _write_store(
     user_sort_tiers: tuple[str, ...] | None = None,
     search: bool = False,
     generation: bool = False,
+    path_only: bool = False,
 ) -> dict[str, dict]:
     """The store's sorts beside ``path_index`` (specs/done/path-store.md §4.3) from
     the rolled-up dir slices (``ptu``, ``dir_stats``, ``dir_attr`` when
@@ -222,6 +223,8 @@ def _write_store(
     _rss("store-l2")
     try:
         kw = {"row_group_rows": row_group_rows} if row_group_rows else {}
+        if path_only:
+            return write_sorts(con, str(store), path_index.parent, tiers=("path",), groups=False, **kw)
         return write_sorts(con, str(store), path_index.parent, sort_variants=((("usr",),) if attr and user_sorts else ()), variant_tiers=user_sort_tiers, search=search, **kw)
     finally:
         store.unlink()
@@ -256,6 +259,7 @@ def write_path_index(
     user_sort_tiers: tuple[str, ...] | None = None,
     search: bool = False,
     generation: bool = False,
+    path_only: bool = False,
 ) -> dict:
     """Write age.json / meta.json under ``out_dir`` (+ the path store's sorts
     beside ``path_index``); returns meta.
@@ -268,7 +272,11 @@ def write_path_index(
     ``search`` writes the search sidecars beside the `path` sort
     (specs/path-store-search.md). ``generation`` (`path-index -G`, gcs) adds
     each object's `generation` from the listing as the store's last column
-    (NULL on dirs); off, the sorts have no such column.
+    (NULL on dirs); off, the sorts have no such column. ``path_only``
+    (`path-index -O`, specs/lean-scans.md §1.1 step 2) cuts the `path` sort
+    alone: no `bysize`, no `-by-user` copies, no `.groups.*` sidecars, no
+    search sidecars — the input the interval store and the static name index
+    append from, kept until both hold the scan (`scan retire`).
 
     ``path_index`` (``<dir>/path-index.parquet``) writes the store
     (specs/done/path-store.md §4.3): every dir row — every ancestor path ×
@@ -547,7 +555,7 @@ def write_path_index(
     _rss("ptu")
     sorts: dict[str, dict] = {}
     if path_index is not None:
-        sorts = _write_store(con, src, path_index, attr=attr, fp_dir=fp_dir, maxseg=maxseg, user_sorts=user_sorts, row_group_rows=row_group_rows, user_sort_tiers=user_sort_tiers, search=search, generation=generation)
+        sorts = _write_store(con, src, path_index, attr=attr, fp_dir=fp_dir, maxseg=maxseg, user_sorts=user_sorts, row_group_rows=row_group_rows, user_sort_tiers=user_sort_tiers, search=search, generation=generation, path_only=path_only)
         _rss("store")
         # Provenance sidecar: the attributing prefixes' user/source/evidence.
         from .extras import write_extras
