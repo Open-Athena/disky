@@ -312,6 +312,10 @@ def store_versions(con, served: list[str]) -> None:
     """`VERSIONS` from the served `path` sorts (base, then runs): a version's rows across them are one, the smallest `vt`
     (a run's close record over the row it closes), as `interval_export.live_sql` reads them. Built once, filtered per scan."""
     union = " UNION ALL ".join(f"SELECT depth, path, vf, vt, kind, {ist.GENERATION} FROM read_parquet({q(f)})" for f in served)
+    if len(served) == 1:  # a base alone (a compacted or backfilled generation) has one row per version: no window, which
+        # over gcs's 1.2B rows ran DuckDB out of memory (93 GiB), where a plain copy streams
+        con.execute(f"CREATE OR REPLACE TABLE {VERSIONS} AS {union}")
+        return
     con.execute(f"""CREATE OR REPLACE TABLE {VERSIONS} AS SELECT * FROM ({union})
         QUALIFY row_number() OVER (PARTITION BY depth, path, vf ORDER BY vt) = 1""")
 

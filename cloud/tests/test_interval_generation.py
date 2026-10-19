@@ -534,3 +534,18 @@ def test_listing_files_lists_only_the_scans_dir(tmp_path, monkeypatch):
         "listing/2026-10-05/marin-a/shard-00-0000.parquet",
         "listing/2026-10-05/marin-b/shard-00-0000.parquet",
     ]
+
+
+def test_store_versions_one_sort_is_the_windowed_table(tmp_path):
+    """A single served sort (a base alone: one row per version) is copied as is, skipping the window that merges a version's
+    rows across a base and its runs: the same table, without sorting gcs's 1.2B rows in memory."""
+    rows = {"depth": [2, 2, 3], "path": ["b/d", "b/d", "b/d/x"], "vf": [1, 5, 1], "vt": [5, 2**31, 2**31],
+            "kind": ["dir", "dir", "file"], ist.GENERATION: [None, None, 7]}
+    f = tmp_path / "path.parquet"
+    pq.write_table(pa.table(rows), f)
+    con = duckdb.connect()
+    ib.store_versions(con, [str(f)])
+    windowed = con.execute(f"""SELECT * FROM read_parquet('{f}')
+        QUALIFY row_number() OVER (PARTITION BY depth, path, vf ORDER BY vt) = 1 ORDER BY ALL""").fetchall()
+    assert con.execute(f"SELECT * FROM {ib.VERSIONS} ORDER BY ALL").fetchall() == windowed == [
+        (2, "b/d", 1, 5, "dir", None), (2, "b/d", 5, 2**31, "dir", None), (3, "b/d/x", 1, 2**31, "file", 7)]
