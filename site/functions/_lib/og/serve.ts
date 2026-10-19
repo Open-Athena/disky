@@ -130,7 +130,7 @@ async function stagedVersion(env: OgEnv): Promise<string | null> {
 }
 
 /** Stamp a page's HTML with its card when it has one. */
-export async function stampPage(env0: OgEnv, url: URL, html: Response): Promise<Response> {
+export async function stampPage(env0: OgEnv, url: URL, html: Response, warm?: (p: Promise<unknown>) => void): Promise<Response> {
   const page = pageOf(env0, url)
   if (!page || !DRAWN.has(page.pv.kind)) return html
   const { pv, site } = page
@@ -148,6 +148,9 @@ export async function stampPage(env0: OgEnv, url: URL, html: Response): Promise<
   const scan = pv.kind === 'diff' ? pair?.to : pv.kind === 'staged' ? null : await resolveScan(env, pv.params.d)
   const params = { ...imageParams(pv.params, v, cred), ...(scan ? { s: scan } : {}), ...(pair?.from ? { b: pair.from } : {}), policy: anonymousPolicy(env), r: RENDER_VERSION }
   const image = url.origin + await imagePath(key, pv.kind, params, tier, day)
+  // A full card's image rendered while the unfurler reads the page: it fetches the image next, from the same colo, and a
+  // cold full render could outlast its wait (Slack showed a title and no image, 2026-10-19)
+  if (warm && tier === 'full') warm(fetch(image).then(r => r.arrayBuffer()).catch(() => undefined))
   if (pv.kind === 'diff') {
     const render = await diffCard(env, site, pv.title, { ...pv.params, ...(pair?.from ? { d: `${encodeScan(pair.to)}-${encodeScan(pair.from)}` } : {}) }, cardTier(tier, anonymousPolicy(env)), true)
     return uncachedHtml(stampMeta(html, { title: render.title, desc: `${render.subtitle} · ${render.total}`, image, imageType: 'image/png', page: url.href }))

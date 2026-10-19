@@ -286,6 +286,23 @@ describe('a secondary store\'s pages unfurl as that store (`STORES_JSON` `path`)
   const storeOf = (e: unknown) => (e as { STORE_KEY?: string }).STORE_KEY ?? 'primary'
   const full = () => mocks.tier.mockResolvedValue({ tier: 'full', day: expDay(Math.floor(Date.now() / 1000), 7), cred: { t: 'TokMetaAAA' } })
 
+  it('a full card\'s image is fetched while the page is stamped (the unfurler asks for it next); an anonymous one isn\'t', async () => {
+    const fetched: string[] = []
+    const spy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (u: RequestInfo | URL) => { fetched.push(String(u)); return new Response('png') })
+    const warmed: Promise<unknown>[] = []
+    try {
+      await stampPage(deployment(), new URL('https://cw.example/meta/x'), new Response('shell'), p => warmed.push(p))
+      expect([warmed.length, fetched]).toEqual([0, []])
+      full()
+      mocks.live.mockResolvedValue(true)
+      await stampPage(deployment(), new URL('https://cw.example/meta/snapshots?d=261012&og=TokMetaAAA'), new Response('shell'), p => warmed.push(p))
+      await Promise.all(warmed)
+      expect([warmed.length, fetched]).toEqual([1, [mocks.stamp.mock.calls.at(-1)![1].image]])
+    } finally {
+      spy.mockRestore()
+    }
+  })
+
   it('page meta: its title, its data, and an image view carrying `store`; the image renders it from that store', async () => {
     full()
     mocks.live.mockResolvedValue(true)
