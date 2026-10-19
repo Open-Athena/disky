@@ -42,7 +42,7 @@ All under `$GCS_USAGE_URL`. Reads are open to any signed-in viewer; writes need 
 
 | Method & path | Purpose |
 |---|---|
-| `POST /api/plans/stage` | Stage prefixes: `{ prefixes: [...], note?, as_of? }` → `201 { plan_id, batch_id, staged, covered, absorbed, as_of }`. A prefix under an already-staged ancestor comes back as `covered` (nothing to add); staging an ancestor `absorbs` its staged descendants (the plan keeps the ancestor). `as_of` is the scan date (e.g. `2026-10-07`, one of `/data/scans.json`) you staged from — default the latest scan, `400` if no such scan: a run deletes only objects that scan already had, unchanged, so anything written after it is held back (counted as `skipped_after_as_of` in the dry-run's summary). Re-staging a prefix keeps its original `as_of`. The gesture is all-or-nothing, with no size cap: stage a whole logical set (one person's marks) in ONE request, not in chunks — each request is its own batch on `/staged`. Any signed-in stager. |
+| `POST /api/plans/stage` | Stage prefixes: `{ prefixes: [...], note?, as_of? }` → `201 { plan_id, batch_id, staged, covered, absorbed, gone?, as_of }`. A prefix under an already-staged ancestor comes back as `covered` (nothing to add); staging an ancestor `absorbs` its staged descendants (the plan keeps the ancestor). A prefix the newest scan holds nothing under (deleted since your `as_of`, or never there) comes back as `gone` and isn't staged; when every one is gone nothing is written (`batch_id: null`, and `plan_id: null` if no plan is open). `as_of` is the scan date (e.g. `2026-10-07`, one of `/data/scans.json`) you staged from — default the latest scan, `400` if no such scan: a run deletes only objects that scan already had, unchanged, so anything written after it is held back (counted as `skipped_after_as_of` in the dry-run's summary). Re-staging a prefix keeps its original `as_of`. The gesture is all-or-nothing, with no size cap: stage a whole logical set (one person's marks) in ONE request, not in chunks — each request is its own batch on `/staged`. Any signed-in stager. |
 | `POST /api/plans/:id/batches/merge` | Fold batches into one: `{ into, ids: [...], note? }` → `{ into, merged, items }`. `into` takes the items, the earliest staging time, and `note` if given; the others are deleted. All must be in the open plan and staged by the same person. The batches' stager, or an admin. |
 | `GET /api/plans/staged` | The shared open plan, grouped the way `/staged` shows it: `{ plan, items, batches, emptied, runs }`, items with `prefix, note, added_by, added_ts, batch_id, as_of` (`as_of` null: staged before it existed — the run's scan stands in). |
 | `DELETE /api/plans/<id>/items` | Unstage: `{ prefixes: [...] }`. Stagers may remove their own items; admins any. |
@@ -143,7 +143,7 @@ gu "$GCS_USAGE_URL/api/subtree?date=$DATE&path=marin-us-east5/checkpoints&o&dept
 ```bash
 gu -X POST "$GCS_USAGE_URL/api/plans/stage" -H 'Content-Type: application/json' \
   -d '{"prefixes":["gs://marin-us-east5/scratch/old-run/","gs://marin-us-central2/tmp/2025/"],"note":"superseded by run 42"}' \
-  | jq '{ plan_id, staged, covered, absorbed }'
+  | jq '{ plan_id, staged, covered, absorbed, gone }'
 ```
 
 **Unstage**

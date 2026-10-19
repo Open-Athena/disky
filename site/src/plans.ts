@@ -13,7 +13,8 @@ export { LIVE_STATES } from './runs'
 // approves + dispatches from /staged. Nothing is deleted by inaction.
 
 export interface StageResult {
-  plan_id: number
+  /** null: nothing staged and no plan open. */
+  plan_id: number | null
   /** null: nothing new staged, so no batch. */
   batch_id: number | null
   /** What this gesture added (an item already staged doesn't count). */
@@ -24,6 +25,8 @@ export interface StageResult {
   covered: string[]
   /** Removed: staged descendants a new prefix now names. */
   absorbed: string[]
+  /** Refused: nothing under them at the newest scan (deleted since, or never there; absent: none). */
+  gone?: string[]
   /** The scan the new items are staged against (null: no scan synced yet). */
   as_of: string | null
 }

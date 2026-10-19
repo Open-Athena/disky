@@ -8,7 +8,7 @@
 //   DELETE /api/plans/:id/items    { prefixes: [...] }                     admin
 //   POST   /api/plans/:id/batches/merge { into, ids: [...], note? } -> { into, merged, items }
 //                                                                          admin, or the batches' stager
-//   POST   /api/plans/stage        { prefixes: [...], objects?: [...], note?, as_of? } -> { plan_id, batch_id, staged, staged_objects, covered, absorbed, as_of }
+//   POST   /api/plans/stage        { prefixes: [...], objects?: [...], note?, as_of? } -> { plan_id, batch_id, staged, staged_objects, covered, absorbed, gone, as_of }
 //                                                                          stager (`STAGING` deployments)
 //   GET    /api/plans/staged       the shared open plan (+ items, batches, emptied batches, runs), or { plan: null }   viewer
 //   GET    /api/plans/run?id=<run> one run's record + its per-band rows      viewer
@@ -21,7 +21,8 @@
 import type { D1Database } from "@cloudflare/workers-types"
 import { type Ctx, type Env as AuthEnv, json, requireAdmin, requireStager, requireViewer } from "../../_lib/auth.js"
 import { audit, canonicalPrefix, mergeBatches, NO_SHAPE, openPlanId, planDetail, type PlanRow, type PrefixShape, prefixShape, runDetail, stageItems } from "../../_lib/plans.js"
-import { pathScans } from "../../_lib/index.js"
+import { pathScans, storeReady } from "../../_lib/index.js"
+import { MAX_PREFIXES, prefixesAt } from "../../_lib/prefixes.js"
 import { notifyPlan, refreshThread, type NotifyEnv } from "../../_lib/stagedSlack.js"
 
 type Env = AuthEnv & NotifyEnv & { DB?: D1Database }
@@ -168,11 +169,22 @@ export const onRequest = async (ctx: Ctx & { env: Env; waitUntil?: Bg }): Promis
       asOf = body.as_of
     }
     const by = gated.email ?? gated.name ?? "guest"
-    const res = await stageItems(db, { prefixes, objects }, by, note, shape, asOf)
+    // Each item is checked against the newest scan, whatever scan it was picked at: one with nothing under it
+    // there is refused (`gone`), never a plan row.
+    const newest = scans.at(-1)
+    const present = newest && storeReady(ctx.env) ? async (keys: string[]) => {
+      const held = new Set<string>()
+      for (let i = 0; i < keys.length; i += MAX_PREFIXES) {
+        const { stats } = await prefixesAt(ctx.env, newest, keys.slice(i, i + MAX_PREFIXES))
+        for (const [k, s] of Object.entries(stats)) if (s.b > 0 || s.o > 0) held.add(k)
+      }
+      return held
+    } : undefined
+    const res = await stageItems(db, { prefixes, objects }, by, note, shape, asOf, present)
     if ("error" in res) return json(res, 400)
     // Announce the batch in the plan's Slack thread (specs/done/staged-slack.md),
     // after the response — a Slack hiccup never fails the gesture.
-    if (res.batch_id != null && res.staged.length) {
+    if (res.plan_id != null && res.batch_id != null && res.staged.length) {
       const siteUrl = new URL(ctx.request.url).origin
       background(ctx, notifyPlan(ctx.env, db, res.plan_id, siteUrl,
         { stage: { planId: res.plan_id, batchId: res.batch_id, by, prefixes: res.staged, covered: res.covered.length, note, siteUrl } }))
