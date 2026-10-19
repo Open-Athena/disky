@@ -801,6 +801,26 @@ def test_dups_reads_the_size_sort_and_writes_beside_the_index(tmp_path, env):
     assert again.sh_impl.calls == []
 
 
+def test_dups_listing_passes_each_sources_shards(tmp_path, env):
+    """`options.dups.listing`: `-l` each source's raw listing shards (this scan's, under `layout.listing` in the data
+    store), so copies are proven by their objects' crc32c; without a `layout.listing` (an importing profile), none."""
+    key = tmp_path / "data/l2/2026-10-16T1200/index/G1"
+    key.mkdir(parents=True)
+    (key / "path-index.parquet").write_text("p")
+    opts = {"static-names": {"gen": "s1"}, "digest": {"template": "t", "config": "c.yml"}, "dups": {"listing": True}}
+    c = ctx(tmp_path, env, steps=["dups"], layout={"layer2": "l2/{scan}/", "snapshots": "sub", "listing": "listing/{scan}/"}, options=opts)
+    S.dups(c, None)
+    w = "<tmp>/t/dt-scan/2026-10-16T1200"
+    l1 = "<tmp>/data/listing/2026-10-16T1200"
+    idx = "<tmp>/data/l2/2026-10-16T1200/index/G1/path-index.parquet"
+    assert c.sh_impl.calls == [f"dt-cloud dups -d 2026-10-16T1200 -l {l1}/a/shard-*.parquet -l {l1}/b/shard-*.parquet "
+                               f"-T {w}/dups-tmp -o {w}/dups {idx}"]
+    (key / "dups.json").unlink()
+    n = ctx(tmp_path, env, steps=["dups"], options={**opts, "list": {"import": True}})
+    S.dups(n, None)
+    assert n.sh_impl.calls == [f"dt-cloud dups -d 2026-10-16T1200 -T {w}/dups-tmp -o {w}/dups {idx}"]
+
+
 def test_dups_falls_back_to_the_path_sort_and_never_fails_the_run(tmp_path, env):
     key = tmp_path / "data/l2/2026-10-16T1200/index/G1"
     key.mkdir(parents=True)
