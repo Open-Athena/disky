@@ -1002,6 +1002,7 @@ def verify_runs(store: Store, prefix: str, dst: Path, scans: dict) -> list[str]:
 
 @cli.command("verify")
 @option("-b", "--bucket", help="The store: a bucket name (gs://) or URL, or a dir (default: the profile's)")
+@option("-c", "--changes", is_flag=True, help="Also count each diff's changed versions (`Store.changes`: a cost statistic, never compared; reads every group with an open or close in the span)")
 @option("-g", "--gen", required=True, help="Generation")
 @option("-i", "--index", type=int, help="Task index (default: $BATCH_TASK_INDEX)")
 @option("-m", "--mount", help="Local mount of the data bucket (per-scan sorts are copied from it)")
@@ -1010,7 +1011,7 @@ def verify_runs(store: Store, prefix: str, dst: Path, scans: dict) -> list[str]:
 @option("-s", "--scans", "scan_ids", help="Comma-separated scan ids to sample (default: the profile's `verify_scans`)")
 @option("-T", "--tmp", default="/stage/tmp", help="Local scratch (served store, per-scan copies, spill)")
 @option("-P", "--profile", help="Deployment profile JSON (default $INTERVAL_STORE_PROFILE)")
-def verify_cmd(bucket, profile, gen, index, mount, tasks, out, scan_ids, tmp) -> None:
+def verify_cmd(bucket, changes, profile, gen, index, mount, tasks, out, scan_ids, tmp) -> None:
     """Parity against the per-scan path store over the profile's `verify_scans`: every
     view's tiles and every diff's rows, with both sides' read cost; `verify/t##.jsonl` + `.json`, and each sampled
     scan's parity marker `verify/<id>.json` (`interval_verify.marker`: `pass` when every view and diff is equal)."""
@@ -1037,7 +1038,8 @@ def verify_cmd(bucket, profile, gen, index, mount, tasks, out, scan_ids, tmp) ->
         store.write_text(f"{prefix}/verify/{tag}.json", json.dumps(done, indent=1) + "\n")
         store.put(outp / f"{tag}.jsonl", f"{prefix}/verify/{tag}.jsonl")
 
-    summaries = iv.verify_task(sampled, t, tasks, str(tmp / "served"), scans, outp / f"{tag}.jsonl", tmp, mount, runs, on_summary=publish)
+    summaries = iv.verify_task(sampled, t, tasks, str(tmp / "served"), scans, outp / f"{tag}.jsonl", tmp, mount, runs, on_summary=publish,
+                                 changes=changes)
     (outp / f"{tag}.json").write_text(json.dumps(summaries, indent=1) + "\n")
     print(json.dumps(summaries), flush=True)
 
