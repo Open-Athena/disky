@@ -433,3 +433,23 @@ def test_sweep_manifest_cli_reads_the_store(world, on, tmp_path, monkeypatch):
     assert res.exit_code == 0, res.output
     rows = [(r["name"], r["generation"]) for r in pq.read_table(tmp_path / "out" / "manifest" / f"{B}.parquet").to_pylist()]
     assert rows == [("d/keep.bin", 11), ("d/meta.bin", 61), ("d/rw2.bin", 51), ("d/sub/deep.bin", 71)]
+
+
+def test_listing_files_lists_only_the_scans_dir(tmp_path, monkeypatch):
+    """A scan's shards are found by listing that scan's dir, not the parent of every scan's (`listing/`): per scan, the
+    whole tree's walk took ~2 min on gcs's mount and ran once per scan in the store."""
+    for scan in ("2026-10-05", "2026-10-06"):
+        for key in (f"listing/{scan}/marin-a/shard-00-0000.parquet", f"listing/{scan}/marin-b/shard-00-0000.parquet",
+                    f"listing/{scan}/dir-cache/age-days.parquet"):
+            (tmp_path / key).parent.mkdir(parents=True, exist_ok=True)
+            (tmp_path / key).write_bytes(b"x")
+    root = Store(str(tmp_path))
+    asked = []
+    real = root.keys
+    monkeypatch.setattr(root, "keys", lambda prefix: asked.append(prefix) or real(prefix))
+    files = ib.listing_files(root, "listing/{id}/*/shard-*.parquet", "2026-10-05", tmp_path / "w")
+    assert asked == ["listing/2026-10-05/"]
+    assert [Path(f).relative_to(tmp_path).as_posix() for f in files] == [
+        "listing/2026-10-05/marin-a/shard-00-0000.parquet",
+        "listing/2026-10-05/marin-b/shard-00-0000.parquet",
+    ]
