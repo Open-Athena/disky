@@ -90,6 +90,11 @@ dt-cloud path-index-merge -o SNAP -P DIR/path-index.parquet [-S] PART_DIR…  # 
 dt-cloud index-recut SRC OUT  # Re-cut a published generation's `bysize` from its `path` sort into a NEW
                           # generation dir (never over one): `-c` checks root + depth-1 views against per-path
                           # sums over `path` (`bysize_check`); then `index-sync -v bysize -g <gen>` points at it
+dt-cloud dups -o OUT INDEX  # A scan's duplicate-candidate groups (specs/dups.md): `tree` (same relative path, size,
+                          # `n_files` in ≥2 buckets) and `moved` (same basename, size, `n_files`, other paths) over paths ≥
+                          # `-f` (1 GiB; slices summed first, the `bysize` sort's `tot` prunes); maximal groups, per-copy
+                          # `nested` / `suspect` / `keep`, `-g N` crc32c spot checks on GCS → `dups.parquet` + `dups.json`
+                          # (the `dups` scan step writes them beside the index; `/api/dups` + `/dups` read them, `DUPS=1`)
 dt-cloud interval-store append [-c] [-n] SCAN_ID  # Append one scan to the interval store as a run beside its
                           # base generation (spec `interval-store.md` §2.7; profile `-P`/$INTERVAL_STORE_PROFILE):
                           # prepare → ranges (Batch) → publish (cut, binary-counter merges, manifest) → R2 → prune,

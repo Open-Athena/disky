@@ -3336,6 +3336,10 @@ from .non_live import non_live_cmd as _non_live  # noqa: E402
 
 main.add_command(_non_live)
 
+from .dups import dups_cmd as _dups  # noqa: E402
+
+main.add_command(_dups)
+
 from .l2_listing import l2_listing_cmd as _l2_listing  # noqa: E402
 
 main.add_command(_l2_listing)
