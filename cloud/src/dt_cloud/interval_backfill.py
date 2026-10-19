@@ -316,8 +316,17 @@ def store_versions(con, served: list[str]) -> None:
         # over gcs's 1.2B rows ran DuckDB out of memory (93 GiB), where a plain copy streams
         con.execute(f"CREATE OR REPLACE TABLE {VERSIONS} AS {union}")
         return
-    con.execute(f"""CREATE OR REPLACE TABLE {VERSIONS} AS SELECT * FROM ({union})
+    # Base plus runs: the window runs only over the runs' rows and the base rows they share a version with (a few M on
+    # gcs); the rest of the base (1.2B rows) streams through an anti-join against them, never a global window.
+    sel = lambda f: f"SELECT depth, path, vf, vt, kind, {ist.GENERATION} FROM read_parquet({q(f)})"  # noqa: E731
+    runs = " UNION ALL ".join(sel(f) for f in served[1:])
+    con.execute(f"CREATE OR REPLACE TEMP TABLE __runs AS {runs}")
+    con.execute(f"""CREATE OR REPLACE TABLE {VERSIONS} AS
+        SELECT b.* FROM ({sel(served[0])}) b ANTI JOIN __runs r USING (depth, path, vf)
+        UNION ALL
+        SELECT * FROM (SELECT * FROM __runs UNION ALL SELECT b.* FROM ({sel(served[0])}) b SEMI JOIN __runs r USING (depth, path, vf))
         QUALIFY row_number() OVER (PARTITION BY depth, path, vf ORDER BY vt) = 1""")
+    con.execute("DROP TABLE __runs")
 
 
 def listing_parity(con, files: list[str], ts: int) -> dict:
