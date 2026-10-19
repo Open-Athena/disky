@@ -15,6 +15,7 @@ import { credLive, pageTier } from './tier.js'
 import { imageParams, splitImageParams } from './cred.js'
 import { warmUrls } from './warm.js'
 import { anonymousPolicy, cardTier, genericCard, genericImagePath, genericMeta, RENDER_VERSION, type PolicyEnv } from './policy.js'
+import { BUILD } from '../build.js'
 
 import { canonId, loadRegistry } from '../identity.js'
 import { Memo, reqOf, withReq } from '../shared.js'
@@ -243,11 +244,11 @@ export async function serveCard(ctx: { request: Request; env: OgEnv; waitUntil?:
   if (r.tier === 'anon' && policy === 'generic') {
     // No ledger/scan/owner/data reads or warming, and never an old view cache key.
     // Even invalid/revoked credentials return identical content and tier headers.
-    const cacheKey = new Request(url.origin + genericImagePath)
+    const cacheKey = new Request(`${url.origin}${genericImagePath}&bld=${BUILD.sha}`)
     const cache = caches.default
     const hit = await cache.match(cacheKey)
     const response = hit ?? await renderCard(env, url, genericCard(env))
-    if (!hit) await cache.put(cacheKey, response.clone())
+    if (!hit) await cache.put(cacheKey, stored(response.clone()))
     const headers = new Headers(response.headers)
     headers.set('x-og-tier', 'anon')
     headers.set('x-og-policy', policy)
@@ -268,7 +269,7 @@ export async function serveCard(ctx: { request: Request; env: OgEnv; waitUntil?:
   const head = env.DB ? await ledgerHead(env).catch(() => 0) : 0
   // An anonymous render is one per view (+ version), whatever credential the URL named.
   const keyParams = { ...(r.tier === 'full' ? r0.params : { ...view, ...(v ? { v } : {}) }), ...(scan ? { s: scan } : {}), ...(before ? { b: before } : {}), policy, r: RENDER_VERSION }
-  const cacheKey = new Request(`${url.origin}${await imagePath(null, r.kind, keyParams, 'anon')}${Object.keys(keyParams).length ? '&' : '?'}tier=${r.tier}&h=${head}`)
+  const cacheKey = new Request(`${url.origin}${await imagePath(null, r.kind, keyParams, 'anon')}${Object.keys(keyParams).length ? '&' : '?'}tier=${r.tier}&h=${head}&bld=${BUILD.sha}`)
   const cache = caches.default
   if (ctx.waitUntil) ctx.waitUntil(warmView(env, sEnv, url.origin, r.kind, renderView, p => ctx.waitUntil!(p)))
   const hit = await cache.match(cacheKey)
@@ -286,7 +287,7 @@ export async function serveCard(ctx: { request: Request; env: OgEnv; waitUntil?:
   const t1 = Date.now()
   const res = await renderCard(env, url, data)
   res.headers.set('server-timing', `data;dur=${t1 - t0}${data.depth ? `;desc="depth ${data.depth}"` : ''}, render;dur=${Date.now() - t1}`)
-  const put = cache.put(cacheKey, new Response(res.clone().body, { headers: { ...Object.fromEntries(res.headers), 'cache-control': 'public, max-age=86400' } }))
+  const put = cache.put(cacheKey, stored(res.clone()))
   if (ctx.waitUntil) ctx.waitUntil(put)
   else await put
   return withTier(res, r.tier, r.why, !!pinnedScan || !!v)
@@ -297,6 +298,15 @@ async function renderCard(env: OgEnv, url: URL, data: CardData): Promise<Respons
   return new Response(svgToPng(cardSvg(data), await fonts(env, url.origin)), {
     headers: { 'content-type': 'image/png', 'cache-control': 'public, max-age=86400' },
   })
+}
+
+/** A rendered card as the colo cache holds it: a year. Its key names everything the image depends on (the view, the
+ *  scan, the render version, the ledger head, and the build, whose config — labels, colours, policy — a deploy can
+ *  change without a new `RENDER_VERSION`), so the entry never goes stale; a new scan or deploy is a new key. What a
+ *  client caches (`withTier`, the generic path) stays a day: its URL names the scan and version, not the ledger or
+ *  the build. */
+function stored(res: Response): Response {
+  return new Response(res.body, { headers: { ...Object.fromEntries(res.headers), 'cache-control': 'public, max-age=31536000' } })
 }
 
 /** The response with this fetch's tier header (and the cache policy its tier needs). */
