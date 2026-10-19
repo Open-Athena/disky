@@ -290,6 +290,13 @@ export async function serveCard(ctx: { request: Request; env: OgEnv; waitUntil?:
   const t1 = Date.now()
   const res = await renderCard(env, url, data)
   res.headers.set('server-timing', `data;dur=${t1 - t0}${data.depth ? `;desc="depth ${data.depth}"` : ''}, render;dur=${Date.now() - t1}`)
+  if (data.failed) {
+    // A read error drawn as "view unavailable": no cache anywhere (the colo's, the edge's, Slack's), so the next fetch
+    // retries rather than serving it for the URL's lifetime.
+    const out = withTier(res, r.tier, r.why)
+    out.headers.set('cache-control', 'no-store')
+    return out
+  }
   const put = cache.put(cacheKey, stored(res.clone()))
   if (ctx.waitUntil) ctx.waitUntil(put)
   else await put

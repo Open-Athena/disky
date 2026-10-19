@@ -44,6 +44,8 @@ export interface CardData {
   legend?: LegendItem[]
   /** Shown instead of a treemap when there's nothing to draw. */
   empty?: string
+  /** The view couldn't be read (an error, not an answer): drawn, but never cached, so the next fetch retries. */
+  failed?: boolean
   /** A heatmap instead of a treemap (`/assignments`): rows × cols, cell
    *  shade by bytes. Labels (people) only on a `full` card. */
   grid?: Grid
