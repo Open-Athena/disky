@@ -103,6 +103,23 @@ def test_entries_to_frame_empty():
     assert len(df) == 0
 
 
+def test_entries_to_frame_crc32c_column_only_when_asked():
+    """Six-field rows carry a CRC32C: written as `crc32c` iff asked (every shard of a run alike), never inferred from the
+    rows; off, the frame is the five-column one whatever the rows hold."""
+    ts = "2026-08-05T12:00:00Z"
+    rows = [('a', 1, ts, 'STANDARD', 7, 4294967295), ('b', 2, ts, 'STANDARD', 8, None), ('c', 3, ts, 'STANDARD')]
+    on = bulk.entries_to_frame('b1', rows, crc32c=True)
+    off = bulk.entries_to_frame('b1', rows)
+    assert list(on.columns) == ['bucket', 'name', 'size_bytes', 'created', 'storage_class_id', 'generation', 'crc32c']
+    assert [None if pd.isna(v) else int(v) for v in on['crc32c']] == [4294967295, None, None]
+    assert list(off.columns) == ['bucket', 'name', 'size_bytes', 'created', 'storage_class_id', 'generation']
+    assert list(bulk.entries_to_frame('b1', [], crc32c=True).columns) == list(on.columns)
+
+
+def test_crc32c_int_decodes_gcs_base64():
+    assert [bulk.crc32c_int(v) for v in ("AAAAAA==", "/////w==", "yZRlqg==", None, "")] == [0, 4294967295, 3381945770, None, None]
+
+
 # ---------- split_hot_prefixes ----------
 
 def test_split_hot_prefixes_ignores_cool_prefixes(tmp_path: Path):
@@ -377,6 +394,18 @@ def test_cli_bulk_list_r2_requires_endpoint():
     )
     assert r.returncode != 0
     assert 'requires --endpoint-url' in r.stderr
+
+
+def test_cli_bulk_list_crc32c_is_gcs_only():
+    """`-c` on an S3/R2 source fails before listing: their list APIs return no checksum."""
+    import os, subprocess, sys
+
+    r = subprocess.run(
+        [sys.executable, '-m', 'disk_tree.cli.main', 'bulk-list', '-c',
+         '-o', '/tmp/should-not-be-used', 's3://some-bucket'],
+        capture_output=True, text=True, check=False, env={**os.environ},
+    )
+    assert (r.returncode, r.stderr.strip().splitlines()[-1]) == (1, 'ValueError: -c/--crc32c applies to gcs:// only (S3/R2 list no checksum)')
 
 
 def test_s3_lister_boundary_inclusive_start(tmp_path: Path):

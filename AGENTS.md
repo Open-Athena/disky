@@ -37,7 +37,8 @@ cw-s3's jobs read that blob back (`ls $DISK_TREE_ROOT/scans/*.parquet`) as `dt-c
 **CLI** (`cli/`):
 ```bash
 disk-tree bulk-list URI    # Shard URI's object listing (gcs:// | s3:// | r2:// with `-E <endpoint>`) into
-                          # layer-1 parquet shards at `-o` (`-a` adaptive range-splitting, `-P` procs).
+                          # layer-1 parquet shards at `-o` (`-a` adaptive range-splitting, `-P` procs;
+                          # gcs:// `-c`: each object's CRC32C as a `crc32c` column, what `dt-cloud dups -l` proves copies by).
                           # `hf://<ns>[/<kind>[/<name>]]` (`find/bulk_hf.py`, `HF_TOKEN`) lists a Hugging Face
                           # namespace as bucket `<ns>`: `buckets/<b>/…`, `{models,datasets,spaces}/<repo>/…`
                           # (current tree; LFS deduped by oid) + `<repo>/@history/@unlisted` (what
