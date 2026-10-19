@@ -111,6 +111,11 @@ header h1 { font-size: 24px; font-weight: 700; margin: 0 0 4px; letter-spacing: 
   display: flex; flex-direction: column; gap: 8px;
   .allowances-note { margin: 0; .nowrap { white-space: nowrap; } }
 }
+.non-live {
+  margin: 0; font-size: 12px; font-variant-numeric: tabular-nums;
+  .non-live-class { cursor: help; }
+  .nowrap { white-space: nowrap; }
+}
 header .hrow {
   display: flex;
   align-items: baseline;
@@ -2522,7 +2527,7 @@ a.staged-chip {
 
 // An anchored section parks a little below the sticky bar — not under it, not
 // flush against it (the bar's height is published as --topbar-h; it wraps to
-// more rows on narrow viewports). `useHashSpy` reads the computed margin back
+// more rows on narrow viewports). `useSectionSpy` reads the computed margin back
 // to decide when a deep link has landed.
 :root { --anchor-gap: 16px; }
 #tree-map, #tbl, #over-time, #diff, #mtime, #dispatch, #runs { scroll-margin-top: calc(var(--topbar-h, 48px) + var(--anchor-gap)); }
@@ -2946,9 +2951,9 @@ kbd { font: inherit; font-size: 11px; padding: 0 4px; border: 1px solid var(--li
   td { padding: 4px 8px; border-bottom: 1px solid var(--line); vertical-align: middle; }
   td.created, td.read, td.owners, td.nb { white-space: nowrap; }
   .when .sw { display: inline-block; width: 8px; height: 8px; border-radius: 2px; margin-right: 5px; vertical-align: middle; }
-  td.staged-by { display: table-cell; font-size: 12.5px; .user-chip { margin-right: 4px; } }
+  td.staged-by { font-size: 12.5px; .user-chip { margin-right: 4px; } }
   code { font-size: 12.5px; }
-  .nb, .user-chip { white-space: nowrap; display: inline-block; }
+  .nb:not(td), .user-chip { white-space: nowrap; display: inline-block; }
   // Selection: the leading checkbox column is the mouse/touch handle; the
   // prefix may break anywhere, but never below a readable width — past that
   // the table scrolls in its box instead of crushing it.
