@@ -71,11 +71,14 @@ export function pageOf(env: OgEnv, url: URL): { env: OgEnv; site: Site; pv: Page
   return pv && { env: senv, site, pv }
 }
 
-/** The env a card's data reads go through: the primary's as is; a secondary store's under the data Functions'
- * path-store rule for a `store=` read (`withPathStore`: the interval store is the primary's). */
+/** The env a card's data reads go through: the data Functions' path-store rule (`withPathStore`), as a request for the
+ * store would be. The primary's under `PATH_STORE=intervals` reads the interval store at its pinned or current
+ * generation (`CURRENT.json` when unpinned), as the page's own reads do: a scan the store holds without per-scan
+ * pointers (a lean scan) draws, never "view unavailable". A secondary store's as a `store=` read (the interval store
+ * is the primary's). */
 async function dataEnv(env: OgEnv, origin: string): Promise<OgEnv> {
-  if (isPrimary(env)) return env
-  return (await withPathStore({ request: new Request(`${origin}/?store=${encodeURIComponent(env.STORE_KEY!)}`), env })).env as OgEnv
+  const q = isPrimary(env) ? '' : `?store=${encodeURIComponent(env.STORE_KEY!)}`
+  return (await withPathStore({ request: new Request(`${origin}/${q}`), env })).env as OgEnv
 }
 
 /** Called before route Functions: private anonymous unfurls must not read
@@ -234,7 +237,7 @@ export async function serveCard(ctx: { request: Request; env: OgEnv; waitUntil?:
   if (!r0 || !DRAWN.has(r0.kind as OgKind)) return new Response('not a card', { status: 404 })
   const { view, v, scan: pinnedScan, before: pinnedBefore, cred } = splitImageParams(r0.params)
   // A secondary store's card (`store=`, map and diff only): its label, mount, scope and data.
-  let sEnv: OgEnv = env
+  let sEnv: OgEnv = await dataEnv(env, url.origin)
   if ('store' in view) {
     const o = r0.kind === 'map' || r0.kind === 'diff' ? storeOgEnv(env, view.store) : null
     if (!o) return new Response('not a card', { status: 404 })

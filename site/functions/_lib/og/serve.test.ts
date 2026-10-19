@@ -211,6 +211,14 @@ describe('restricted anonymous OG responses', () => {
       .toEqual(['generic', 'generic', 'shape', 'full', 'shape', 'generic'])
   })
 
+  it('reads the primary through its path store: an unpinned interval store at `CURRENT.json`\'s generation', async () => {
+    const r2 = { get: vi.fn(async (key: string) => (key === 'interval-store/CURRENT.json' ? { json: async () => ({ gen: 'g7' }) } : null)) }
+    const e = env({ OG_ANONYMOUS: 'full', PATH_STORE: 'intervals', INDEX_R2: r2 } as unknown as Partial<OgEnv>)
+    await serveCard({ request: request('/og/map.png'), env: e })
+    const read = mocks.data.mock.calls[0][0] as OgEnv
+    expect([read.PATH_STORE, read.INTERVAL_STORE_GEN, r2.get.mock.calls.map(c => c[0])]).toEqual(['intervals', 'g7', ['interval-store/CURRENT.json']])
+  })
+
   it('full policy: an anonymous fetch draws the full card (labelled), cached apart from the other policies', async () => {
     const response = await serveCard({ request: request('/og/map.png'), env: env({ OG_ANONYMOUS: 'full' }) })
     expect([response.headers.get('x-og-tier'), mocks.data.mock.calls.map(call => call[4]), textNodes(await response.text())])
