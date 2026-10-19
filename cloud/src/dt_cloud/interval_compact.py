@@ -269,6 +269,9 @@ def compact_gen(gen_dir: Path, out: Path, work: Path, *, gen: str, new_gen: str,
     """The generation `gen` (its base and the newest manifest's runs, in `gen_dir`) folded into the new generation
     `new_gen` in `out` (`fold_gen`), and `compaction.json`. Returns a summary."""
     t0 = monotonic()
+    if not (gen_dir / "ranges.json").is_file():
+        raise SystemExit(f"{gen}: no ranges.json: a staged build's generation borrowing its ranges and base from another "
+                         f"(its `ranges_gen`) can't be compacted in place; backfill-generation -R makes a self-contained one")
     store = LocalRunStore(gen_dir, work / "lease", gen)
     base = store.read_json("scans.json")
     newest = latest_key(store.keys("manifests/"))

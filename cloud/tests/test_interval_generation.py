@@ -187,6 +187,16 @@ def test_compaction_keeps_generation(on, tmp_path):
     assert _columns(out / "pv" / "r0000.parquet") == [*ist.PV_SCHEMA.names, "generation"]
 
 
+def test_compaction_refuses_a_generation_borrowing_its_ranges(on, tmp_path):
+    shutil.copytree(on["gen"], tmp_path / "g")
+    (tmp_path / "g" / "ranges.json").unlink()
+    with pytest.raises(SystemExit) as e:
+        ic.compact_gen(tmp_path / "g", tmp_path / "g.c001", tmp_path / "w", gen="g", new_gen="g.c001", level=None, rg_rows=RG, threads=2, mem="1GB")
+    assert (str(e.value), (tmp_path / "g.c001").exists()) == (
+        "g: no ranges.json: a staged build's generation borrowing its ranges and base from another (its `ranges_gen`) can't be "
+        "compacted in place; backfill-generation -R makes a self-contained one", False)
+
+
 def _export(store: Path, scan: str, dest: Path, gen: str | None = None) -> pa.Table:
     args = ["-o", str(store), "-w", str(dest.parent / f"w-{dest.name}"), "-t", "path", *(["-g", gen] if gen else []), scan, str(dest)]
     res = CliRunner().invoke(ie.export_cmd, args, catch_exceptions=False)
