@@ -7,7 +7,7 @@ import { useRegistry } from './identities'
 import { hostPair, otherHostUrl, peerUrl, type Peer } from './hosts'
 import { useHelpPref } from './prefs'
 import { useStore } from './store'
-import { STORES } from './stores'
+import { DEFAULT_STORE, DUPS, STORES } from './stores'
 import { useTheme } from './theme'
 import { useUnits } from './units'
 import { AUTH_MODE, useCanAssign, useCanStage, useIdent, useIsAdmin, useSignOut, useStores } from './auth'
@@ -63,6 +63,7 @@ export function SiteKbd({ extra = [], placeholder }: {
     [store.path, 'Map (home)'],
     ...(canAssign && store.owners ? [['/users', 'Users — storage by owner'], ['/assignments', 'Assignments']] as [string, string][] : []),
     ...(store.staging ? [['/staged', 'Staged deletions']] as [string, string][] : []),
+    ...(DUPS && store === DEFAULT_STORE ? [['/dups', 'Duplicates — copies across buckets']] as [string, string][] : []),
     ['/scans', 'Scans — job runs'],
     ['/health', 'Health — the stores\' state'],
     ...(isAdmin ? [['/admin', 'Admin'], ['/admin/db', 'Database'], ['/admin/sessions', 'Session logs']] as [string, string][] : []),
