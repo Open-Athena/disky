@@ -30,7 +30,7 @@ from __future__ import annotations
 import json
 import re
 import shutil
-from collections.abc import Callable
+from collections.abc import Iterable, Callable
 from pathlib import Path
 from time import monotonic
 
@@ -227,11 +227,13 @@ def run_scans(gen_dir: Path, gen: str, runs: list[dict]) -> list[dict]:
 
 
 def fold_gen(gen_dir: Path, out: Path, work: Path, *, gen: str, runs: list[dict], rg_rows: int = ist.SERVED_RG, threads: int = 4,
-             mem: str = "4GB", fill: Fill | None = None) -> tuple[dict, dict, dict, dict]:
+             mem: str = "4GB", fill: Fill | None = None, on_range: Callable[[int, int], None] | None = None) -> tuple[dict, dict, dict, dict]:
     """The generation `gen` (its base in `gen_dir` and the runs `runs`) folded into a new one in `out`: its range files
     (`compact_range` over the old `ranges.json`), served sorts and churn (`interval_store.cut_gen`), and `scans.json`
     (the base's, every run scan's entry; `GENERATION` recorded when the result carries it). With `fill`, the result
-    carries `GENERATION` as the hook sets it. Returns `(scans.json, rows per table, sorts, stats)`."""
+    carries `GENERATION` as the hook sets it. Logs a line per range (`i/k`, its rows, seconds) and around the served
+    sorts' cut: an hour of silence on gcs read as a hang. `on_range(i, k)` after each range (a caller's heartbeat).
+    Returns `(scans.json, rows per table, sorts, stats)`."""
     base = json.loads((gen_dir / "scans.json").read_text())
     sliced = ist.sliced(base)
     generation = ist.has_generation(base) or fill is not None
@@ -245,10 +247,19 @@ def fold_gen(gen_dir: Path, out: Path, work: Path, *, gen: str, runs: list[dict]
     k = json.loads((out / "ranges.json").read_text())["k"]
     con = sn.connect(threads, mem, work / "duckdb-compact")
     rows: dict[str, int] = {}
+    t_all = monotonic()
     for i in range(k):
-        for t, n in compact_range(con, str(gen_dir), [str(gen_dir / r["key"]) for r in runs], f"r{i:04d}", out, sliced, generation, fill).items():
+        t0 = monotonic()
+        got = compact_range(con, str(gen_dir), [str(gen_dir / r["key"]) for r in runs], f"r{i:04d}", out, sliced, generation, fill)
+        for t, n in got.items():
             rows[t] = rows.get(t, 0) + n
+        err(f"fold {gen}: range {i + 1}/{k}: {sum(got.values()):,} rows in {monotonic() - t0:.1f}s ({monotonic() - t_all:.0f}s so far)")
+        if on_range is not None:
+            on_range(i, k)
+    t0 = monotonic()
+    err(f"fold {gen}: {k} ranges, {sum(rows.values()):,} rows in {monotonic() - t_all:.0f}s; cutting the served sorts")
     sorts, stats = ist.cut_gen(con, out, doc, rg_rows=rg_rows)
+    err(f"fold {gen}: served sorts cut in {monotonic() - t0:.0f}s")
     (out / "scans.json").write_text(json.dumps(doc, indent=1) + "\n")
     return doc, rows, sorts, stats
 
@@ -283,6 +294,22 @@ def due(gen_dir: Path, level: int | None) -> bool:
 # ── Pruning compacted generations ──────────────────────────────────────────
 
 
+def carry_markers(store: Store, old: str, into: str, files: Iterable[str] | None = None) -> int:
+    """Generation `old`'s parity markers (`verify/<id>.json`: `scan retire`'s gate) copied into `into` (a generation
+    holding the same versions: one `old` was compacted or backfilled into), each unless `into` has one for the scan;
+    returns how many. Before `old` is deleted, so its scans stay vouched for."""
+    pre = f"{PREFIX}/{old}/verify/"
+    keys = [k for k in (files if files is not None else store.keys(pre)) if k.startswith(pre) and k.endswith(".json") and "/" not in k[len(pre):]]
+    have = set(store.keys(f"{PREFIX}/{into}/verify/"))
+    n = 0
+    for k in sorted(keys):
+        dst = f"{PREFIX}/{into}/verify/{k[len(pre):]}"
+        if dst not in have:
+            store.write_bytes(dst, store.read_bytes(k))
+            n += 1
+    return n
+
+
 def prune_predecessors(store: Store, gen: str, *, now: float, grace_s: float = ar.GRACE_S, dry_run: bool = False,
                        log: Callable[[str], None] = err) -> list[dict]:
     """Each generation `gen` was compacted from (its `compaction.json`'s `from`, and theirs while unpruned), deleted from
@@ -305,6 +332,7 @@ def prune_predecessors(store: Store, gen: str, *, now: float, grace_s: float = a
         go = age >= grace_s and old != cur
         rec = {"gen": old, "objects": len(files), "bytes": sum(files.values()), "age_s": round(age), "deleted": 0}
         if go and not dry_run:
+            rec["markers"] = carry_markers(store, old, gen, files)
             rec["deleted"] = store.delete(sorted(files))
         log(f"prune {old} (compacted into {g} {round(age)}s ago): {len(files)} objects, {rec['bytes']:,} B "
             + ("deleted" if go and not dry_run else "would be deleted" if go else f"kept (grace {grace_s:.0f}s" + (", current" if old == cur else "") + ")"))

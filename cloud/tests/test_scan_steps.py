@@ -716,17 +716,28 @@ def test_retire_dry_run_by_default_then_each_copy(tmp_path, env):
     without either; a dry run unless `execute`. The layout is the other steps' `<layer2>index/{gen}/path-index.parquet`."""
     env.update(CLOUDFLARE_API_TOKEN="tok", CLOUDFLARE_ACCOUNT_ID="acct", R2_ARCHIVE="r2://idx")
     opts = {"list": {"import": True}, "static-names": {"gen": "s1"}, "digest": {"template": "t", "config": "c.yml"}}
-    c = ctx(tmp_path, env, steps=["retire"], options={**opts, "retire": {"keep": 3, "layer2": True, "copies": ["r2"], "backup": "gs://bak"}})
+    c = ctx(tmp_path, env, data="gs://d", steps=["retire"], options={**opts, "retire": {"keep": 3, "layer2": True, "copies": ["r2"], "backup": "gs://bak"}})
     S.retire(c, None)
     w = "<tmp>/t/dt-scan/2026-10-16T1200/retire"
     common = f"-G s1 -k 3 -L l2/{{id}}/index/{{gen}}/path-index.parquet -l l2/{{id}}/*.parquet -o r2://idx -S r2://idx -w {w}"
     assert c.sh_impl.calls == [
-        f"dt-cloud scan retire -b gs://bak {common} -s <tmp>/data",
-        f"dt-cloud scan retire {common} -R -s r2://idx",
+        f"dt-cloud scan retire -b gs://bak {common} -s gs://d",
+        f"dt-cloud scan retire {common} -R -D -s r2://idx",
     ]
-    x = ctx(tmp_path, env, steps=["retire"], options={**opts, "retire": {"keep": 2, "execute": True, "markers_only": True, "store": "gs://iv"}})
+    x = ctx(tmp_path, env, data="gs://d", steps=["retire"], options={**opts, "retire": {"keep": 2, "execute": True, "markers_only": True, "store": "gs://iv"}})
     S.retire(x, None)
-    assert x.sh_impl.calls == [f"dt-cloud scan retire -G s1 -k 2 -L l2/{{id}}/index/{{gen}}/path-index.parquet -m -o gs://iv -S r2://idx -w {w} -x -s <tmp>/data"]
+    assert x.sh_impl.calls == [f"dt-cloud scan retire -G s1 -k 2 -L l2/{{id}}/index/{{gen}}/path-index.parquet -m -o gs://iv -S r2://idx -w {w} -x -s gs://d"]
+
+
+def test_retire_local_data_retires_the_archive(tmp_path, env):
+    """A local data store (m3's: the task's ephemeral disk, R2 the store of record) holds only this scan: the archive is
+    the first root, with D1, and a `copies: [r2]` is that same root, not a second pass."""
+    env.update(CLOUDFLARE_API_TOKEN="tok", CLOUDFLARE_ACCOUNT_ID="acct", R2_ARCHIVE="r2://idx")
+    opts = {"list": {"import": True}, "static-names": {"gen": "s1"}, "digest": {"template": "t", "config": "c.yml"}, "retire": {"keep": 7, "copies": ["r2"]}}
+    c = ctx(tmp_path, env, steps=["retire"], options=opts)
+    S.retire(c, None)
+    w = "<tmp>/t/dt-scan/2026-10-16T1200/retire"
+    assert c.sh_impl.calls == [f"dt-cloud scan retire -G s1 -k 7 -L l2/{{id}}/index/{{gen}}/path-index.parquet -o r2://idx -S r2://idx -w {w} -s r2://idx"]
 
 
 NL_OPTS = {"list": {"import": True}, "static-names": {"gen": "s1"}, "digest": {"template": "t", "config": "c.yml"}}
@@ -778,6 +789,18 @@ def test_retire_layer1_passes_the_listing_layouts_shards(tmp_path, env):
     n = ctx(tmp_path, env, steps=["retire"], options={**opts, "list": {"import": True}})
     S.retire(n, None)
     assert n.sh_impl.calls == [f"dt-cloud scan retire -G s1 -k 2 -L l2/{{id}}/index/{{gen}}/path-index.parquet -o gs://iv -S gs://iv -w {w} -R -s <tmp>/data"]
+
+
+def test_store_gc_collects_the_interval_stores_lineage_on_each_copy(tmp_path, env):
+    """`store-gc` (listed in `steps`): `store-gc -t interval-store -l` on the interval store and on `$R2_ARCHIVE` when
+    that's another copy; a dry run unless `execute`."""
+    opts = {**NL_OPTS, "interval-store": {"store": "gs://iv"}}
+    c = ctx(tmp_path, {**env, "R2_ARCHIVE": "r2://idx"}, steps=["store-gc"], options={**opts, "store-gc": {"grace": 60}})
+    S.store_gc(c, None)
+    assert c.sh_impl.calls == ["dt-cloud store-gc -t interval-store -l -G 60 -o gs://iv", "dt-cloud store-gc -t interval-store -l -G 60 -o r2://idx"]
+    x = ctx(tmp_path, env, steps=["store-gc"], options={**opts, "store-gc": {"execute": True}})
+    S.store_gc(x, None)
+    assert x.sh_impl.calls == ["dt-cloud store-gc -t interval-store -l -x -o gs://iv"]
 
 
 def test_retire_failure_warns_and_needs_its_keep(tmp_path, env):
@@ -868,6 +891,41 @@ def test_nproc_is_capped_by_the_cgroup_quota(tmp_path, monkeypatch) -> None:
     free = S.Ctx.__new__(S.Ctx)
     free.env = {"DT_CGROUP": str(tmp_path / "absent")}
     assert [capped.nproc, free.nproc] == [2, 8]
+
+
+def test_path_index_reproc_rebuilds_a_missing_listing_from_the_layer_2(tmp_path, env, monkeypatch):
+    """REPROC (`scan head -R`) of a scan whose listing is gone but whose layer-2 is kept (a meta store's older scans):
+    that bucket's listing is rebuilt from the layer-2 (`dt-cloud l2-listing`) on local disk and read from there, not
+    staged; a bucket with its listing reads it as always. Not under REPROC, a missing listing still fails."""
+    mnt = tmp_path / "mnt/dvx"
+    (mnt / "listing/2026-10-16T1200/east").mkdir(parents=True)
+    (mnt / "listing/2026-10-16T1200/east/_SUCCESS.json").write_text("{}")
+    (mnt / "listing/2026-10-16T1200/eu.parquet").write_text("l2 of eu")
+    monkeypatch.setattr(S, "upload", lambda files, dest: None)
+    c = gcs_ctx(tmp_path, {**env, "REPROC": "1"}, monkeypatch, index={"mode": "path-index"})
+    runner = c.sh_impl
+
+    def run(argv, env, stdout=None, text=True):
+        r = runner(argv, env, stdout, text)
+        if argv[:2] == ["dt-cloud", "path-index"]:
+            (Path(argv[argv.index("-P") + 1]).parent / "path-index.parquet").write_text("")
+            out = Path(argv[argv.index("-o") + 1])
+            out.mkdir(parents=True)
+            (out / "meta.json").write_text("{}")
+        return r
+
+    c.sh_impl = run
+    S.index(c, None)
+    w = "<tmp>/t/dt-scan/2026-10-16T1200"
+    assert runner.calls == [
+        f"dt-cloud l2-listing -b eu <tmp>/mnt/dvx/listing/2026-10-16T1200/eu.parquet {w}/l2-listing/eu/shard-00000.parquet",
+        f"dt-cloud stage -o {w}/stage /gcs/dvx/listing/2026-10-16T1200/east/*.parquet /gcs/dvx/listing/2026-10-16T1200/east/_SUCCESS.json",
+        f"dt-cloud path-index -d 2026-10-16T1200 -l {w}/stage/dvx/listing/2026-10-16T1200/east/*.parquet -l {w}/l2-listing/eu/*.parquet "
+        f"-o {w}/snap -c <tmp>/mnt/dvx/listing/2026-10-16T1200/dir-cache -P {w}/path-index/path-index.parquet",
+    ]
+    fresh = gcs_ctx(tmp_path, env, monkeypatch, index={"mode": "path-index"})
+    with pytest.raises(S.StepFailed):
+        S.index(fresh, None)
 
 
 def test_path_index_on_a_local_data_dir_reads_in_place_and_copies_out(tmp_path, env, monkeypatch):
