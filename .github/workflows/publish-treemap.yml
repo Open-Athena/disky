@@ -1,0 +1,37 @@
+name: Publish @open-athena/treemap
+
+# Publishes `packages/treemap` to npm on a `treemap-v<version>` tag (the tag must
+# match `package.json`'s version), via npm trusted publishing: GitHub's OIDC token,
+# no stored npm token (npmjs.com → the package's settings → Trusted publisher:
+# GitHub Actions, this repo, workflow `publish-treemap.yml`). Trusted publishing
+# can only be set up once the package exists, so 0.1.0 was published by hand.
+# Provenance is attached automatically.
+on:
+  push:
+    tags: ["treemap-v*"]
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          registry-url: "https://registry.npmjs.org"
+      - name: Tag matches the package version
+        run: |
+          v=$(node -p "require('./packages/treemap/package.json').version")
+          [ "${GITHUB_REF_NAME}" = "treemap-v$v" ] || { echo "tag ${GITHUB_REF_NAME} ≠ treemap-v$v"; exit 1; }
+      - run: pnpm install --frozen-lockfile --filter @open-athena/treemap...
+      - run: cd packages/treemap && pnpm typecheck && pnpm test
+      # npm ≥ 11.5.1 speaks trusted publishing; `pnpm pack` applies `publishConfig` (the `dist/` entry points)
+      - name: Publish
+        run: |
+          npm install -g npm@11.6.2
+          cd packages/treemap && pnpm pack && npm publish ./open-athena-treemap-*.tgz --access public

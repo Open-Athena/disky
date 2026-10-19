@@ -35,7 +35,7 @@ Renamed `@rdub/treemap` → `@open-athena/treemap` (Ryan, 2026-10-18). `site` ke
    - `pnpm -C packages/treemap test`.
 4. **Publish** `0.1.0` with `pnpm publish --access public` from `packages/treemap`, then tag `treemap-v0.1.0`.
 5. **README:** replace the "no npm publish (yet)" install section with `pnpm add @open-athena/treemap`, keeping the dist-branch SHA pin as an alternative. Keep the `import '@open-athena/treemap/styles.css'` note.
-6. **Later, optional:** a `publish-treemap.yml` (tag-triggered, `NPM_TOKEN` secret), so later releases aren't laptop-only. Not needed for Monday.
+6. `publish-treemap.yml` (written 2026-10-18): on a `treemap-v<version>` tag, typecheck + test, then `npm publish` of the packed tarball over npm trusted publishing (OIDC, no token; provenance). Needs the trusted publisher set on npmjs.com once 0.1.0 exists.
 
 ## Consumer follow-up (the deck, not this repo)
 
