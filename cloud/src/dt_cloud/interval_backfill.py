@@ -149,14 +149,16 @@ def scan_shards(root: Store, template: str, scan: str, tmp: Path, what: str, wat
 
 
 def gen_index(con, root: Store, template: str, scans: list[dict], work: Path, *, since: str | None = None, stall_s: float = STALL_S) -> dict:
-    """`work/GEN_INDEX`: per `(depth, path, generation)` over every scan whose listing (`template` under `root`) has a
-    `generation` column, the first and last scan stamp it was listed at (`first_ts`, `last_ts`), sorted `(depth, path)`.
+    """`work/GEN_INDEX`: every distinct `(depth, path, generation)` listed by a scan whose listing (`template` under
+    `root`) has a `generation` column, with the first scan stamp it was listed at (`first_ts`), sorted `(depth, path)`.
+    Folded scan by scan (`scans` oldest first): a scan adds only the pairs no earlier one listed, so the table holds the
+    distinct versions (gcs: ~420M), not every scan's rows (19 × ~400M: 1.2 TiB spilled, then an OOM, 2026-10-19).
     A URL root's shards are copied in one scan at a time and removed after. Returns `{scans: ids read, skipped: ids
     without generations, rows}`. `since`: scans before it are skipped unread (a deployment's listings carry `generation`
     from a known scan on). The listing reads run under a `Watchdog` (`stall_s`; 0: none)."""
     from disk_tree.listing import prepare_listing
 
-    con.execute("CREATE OR REPLACE TABLE lg (path VARCHAR, generation BIGINT, ts BIGINT)")
+    con.execute("CREATE OR REPLACE TABLE lg (path VARCHAR, generation BIGINT, first_ts BIGINT)")
     read, skipped = [], []
     with Watchdog(stall_s, "backfill") as watch:
         for s in scans:
@@ -170,32 +172,41 @@ def gen_index(con, root: Store, template: str, scans: list[dict], work: Path, *,
                 continue
             t0 = monotonic()
             src = prepare_listing(con, (files,))  # one source: per-file sources would keep each bucket's first shard only
-            n = con.execute(f"""INSERT INTO lg SELECT DISTINCT bucket || '/' || name, {ist.GENERATION}, {int(s['ts'])}
-                FROM {src} WHERE {ist.GENERATION} IS NOT NULL""").fetchone()[0]
-            err(f"backfill: {s['id']}: {n:,} objects with a generation ({len(files)} shards, {monotonic() - t0:.1f}s)")
+            g = ist.GENERATION
+            n = con.execute(f"""INSERT INTO lg SELECT c.path, c.{g}, {int(s['ts'])} FROM (
+                    SELECT DISTINCT bucket || '/' || name AS path, {g} FROM {src} WHERE {g} IS NOT NULL) c
+                WHERE NOT EXISTS (SELECT 1 FROM lg WHERE lg.path = c.path AND lg.{g} = c.{g})""").fetchone()[0]
+            err(f"backfill: {s['id']}: {n:,} (path, generation) pairs new ({len(files)} shards, {monotonic() - t0:.1f}s)")
             read.append(s["id"])
             shutil.rmtree(tmp, ignore_errors=True)
             watch.beat()
     out = work / GEN_INDEX
-    con.execute(f"""COPY (SELECT len(string_split(path, '/'))::UTINYINT AS depth, path, generation, min(ts) AS first_ts, max(ts) AS last_ts
-        FROM lg GROUP BY path, generation ORDER BY depth, path, first_ts) TO {q(str(out))} (FORMAT PARQUET, ROW_GROUP_SIZE 65536)""")
+    t0 = monotonic()
+    err(f"backfill: writing {GEN_INDEX} ({len(read)} scans folded; sorting)")
+    con.execute(f"""COPY (SELECT len(string_split(path, '/'))::UTINYINT AS depth, path, generation, first_ts
+        FROM lg ORDER BY depth, path, first_ts) TO {q(str(out))} (FORMAT PARQUET, ROW_GROUP_SIZE 65536)""")
+    err(f"backfill: {GEN_INDEX} written in {monotonic() - t0:.0f}s")
     con.execute("DROP TABLE lg")
     rows = con.execute(f"SELECT count(*) FROM read_parquet({q(str(out))})").fetchone()[0]
     return {"scans": read, "skipped": skipped, "rows": rows}
 
 
 def filler(index: str, ranges: dict, counts: dict[str, int]) -> ic.Fill:
-    """The fold's hook (`interval_compact.Fill`): each object path version of the range takes the generation listed
-    first among those listed within it (`index`: `gen_index`'s file), counted in `counts`."""
+    """The fold's hook (`interval_compact.Fill`): each object path version `[vf, vt)` of the range takes the generation
+    in effect at `vf` (the newest first listed at or before it), else, for a version that began before any listing
+    had generations, the first listed within it; one first listed at or after `vt` never counts (`index`: `gen_index`'s
+    file). A `(path, generation)` never comes back once replaced, so a generation's first listing bounds it. Counted in
+    `counts`."""
     by_name = {f"r{r['i']:04d}": r for r in ranges["ranges"]}
 
     def fill(con, name: str) -> None:
         preds = " OR ".join(f"({p})" for p in sn.range_preds(by_name[name]))
         g = ist.GENERATION
         con.execute(f"""CREATE OR REPLACE TEMP TABLE __fill AS
-            SELECT p.depth, p.path, p.vf, arg_min(g.{g}, g.first_ts) AS {g}
+            SELECT p.depth, p.path, p.vf,
+                   arg_min(g.{g}, CASE WHEN g.first_ts <= p.vf THEN -g.first_ts ELSE {1 << 40} + g.first_ts END) AS {g}
             FROM pv p JOIN (SELECT * FROM read_parquet({q(index)}) WHERE {preds}) g ON g.depth = p.depth AND g.path = p.path
-            WHERE p.kind = 'file' AND g.first_ts < p.vt AND g.last_ts >= p.vf
+            WHERE p.kind = 'file' AND g.first_ts < p.vt
             GROUP BY p.depth, p.path, p.vf""")
         con.execute(f"UPDATE pv SET {g} = f.{g} FROM __fill f WHERE pv.depth = f.depth AND pv.path = f.path AND pv.vf = f.vf")
         counts[name] = con.execute("SELECT count(*) FROM __fill").fetchone()[0]

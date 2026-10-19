@@ -46,7 +46,7 @@ import { batchCompletion, batchIsCollapsed, isCurrentlyStaged, stagedMapTree, st
 import { batchAnchor } from './runHistory'
 import { batchLeads, coalesceBatches, idRanges } from '../functions/_lib/batchGroups'
 import { useLocation, useNavigationType } from 'react-router-dom'
-import { useHashSpy } from './hashSpy'
+import { useSectionSpy, type SectionMode } from 'use-prms/sections'
 import { machineFor } from '../functions/_lib/sweepMachines'
 
 const iso = (ts: number): string => new Date(ts * 1000).toISOString()
@@ -59,6 +59,10 @@ const prefixToPath = (prefix: string): string => {
 }
 
 /** Rows per batch page; the flat (filtered or ungrouped) table pages longer. */
+// The batch in view stays in the fragment (`#batch-12`): its permalinks are plain `#` links, the linked batch opens
+// from the router's `hash`, and `?s=` is the table's sort. Its link preview is the page's (no per-batch card).
+// A module constant: `useSectionSpy` re-resolves its mode whenever this object's identity changes.
+const SECTION_MODE: SectionMode = { kind: 'fragment' }
 const PAGE = 20
 const FLAT_PAGE = 50
 
@@ -359,7 +363,7 @@ export function StagedPage() {
   // names the session in view in the hash. A member batch's link lands on its session.
   const sessionAnchors = useMemo(() => groups.filter(g => g.id != null && g.id > 0).map(g => batchAnchor(g.id)), [groups])
   const memberAnchors = useMemo(() => Object.fromEntries([...leadOf].filter(([id, l]) => id !== l).map(([id, l]) => [batchAnchor(id), batchAnchor(l)])), [leadOf])
-  useHashSpy({ ids: sessionAnchors, location, navType, deps: [batches.length, loadingContents, stats], legacy: memberAnchors })
+  useSectionSpy({ sections: sessionAnchors, nav: { location, navType }, deps: [batches.length, loadingContents, stats], aliases: memberAnchors, mode: SECTION_MODE })
 
   const renderGroup = (g: Group) => {
     const k = gkey(g)

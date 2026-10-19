@@ -250,6 +250,27 @@ def first_failed(trace: Path) -> str | None:
     return None
 
 
+def echo_task_logs(trace: Path, work: Path, out=err) -> int:
+    """Each traced task's `.command.log` (its stdout + stderr) under a `--- task <name> [<hash>] <status>` line, in trace
+    order: the local executor's tasks log only into their work dirs, which a container's exit takes with it (a cloud
+    executor's tasks are jobs of their own, logged by their platform). Returns the tasks echoed."""
+    try:
+        with trace.open() as f:
+            rows = list(csv.DictReader(f, delimiter="\t"))
+    except OSError:
+        return 0
+    n = 0
+    for row in rows:
+        h = row.get("hash") or ""
+        dirs = sorted(work.glob(f"{h}*")) if "/" in h else []
+        log = dirs[0] / ".command.log" if len(dirs) == 1 else None
+        out(f"--- task {row.get('name')} [{h}] {row.get('status')}" + ("" if log and log.is_file() else " (no log)"))
+        if log and log.is_file():
+            out(log.read_text(errors="replace").rstrip("\n"))
+            n += 1
+    return n
+
+
 def _record(cmd, args: list[str]) -> None:
     """A `scan-run` subcommand, in-process (they never fail the job)."""
     try:
@@ -355,6 +376,34 @@ def nextflow_argv(nf_dir: Path, launch: Path, session: str) -> list[str]:
             "-with-dag", str(launch / "dag.mmd"), "-with-timeline", str(launch / "timeline.html"), "-with-report", str(launch / "report.html")]
 
 
+#: The DAG the head stores before the run (`preview_argv`), so the site draws the pipeline while it runs; finish's real
+#: `dag.mmd` replaces it (`scan_run_dags` upserts).
+PREVIEW_DAG = "dag-preview.mmd"
+
+
+def preview_argv(nf_dir: Path, launch: Path) -> list[str]:
+    """The run's own Nextflow command with `-preview` (the workflow built, no process run: seconds) writing just its DAG,
+    `PREVIEW_DAG`: the same graph the real run's `-with-dag` reduces to."""
+    return ["nextflow", "run", str(nf_dir / "scan.nf"), "-c", str(nf_dir / "base.config"), "-c", str(launch / "executor.config"),
+            "-c", str(launch / "run.config"), "-params-file", str(launch / "params.json"), "-preview", "-with-dag", str(launch / PREVIEW_DAG)]
+
+
+def store_preview_dag(nf_dir: Path, launch: Path, nf_env: dict[str, str], run_id: str) -> None:
+    """Store the run's DAG up front from a `-preview` (`scan-run dag`). Never fails the run: a preview that errors, times
+    out or writes no DAG only leaves the pipeline view empty until finish stores the real one."""
+    from .scan_runs import dag_cmd
+
+    try:
+        r = subprocess.run(preview_argv(nf_dir, launch), cwd=launch, env=nf_env, capture_output=True, text=True, timeout=180)
+        dag = launch / PREVIEW_DAG
+        if r.returncode or not dag.is_file():
+            err(f"scan head: DAG preview: exit {r.returncode}{'' if dag.is_file() else ', no DAG'}; the pipeline view waits for finish")
+            return
+        _record(dag_cmd, [run_id, str(dag)])
+    except Exception as e:  # noqa: BLE001 — a view, never the run
+        err(f"scan head: DAG preview failed: {type(e).__name__}: {e}")
+
+
 def head(profile_path: Path, nf_dir: Path, launch: Path | None, *, reproc: bool = False, fresh: bool = False,
          dry_run: bool = False, env: dict[str, str] | None = None) -> int:
     from . import scan_profile
@@ -390,7 +439,7 @@ def head(profile_path: Path, nf_dir: Path, launch: Path | None, *, reproc: bool 
     (launch / "executor.config").write_text(executor_config(profile, image))
     (launch / "run.config").write_text(run_config(run_id, profile_json))
     trace = launch / "trace.tsv"
-    for name in REPORTS:
+    for name in (*REPORTS, PREVIEW_DAG):
         (launch / name).unlink(missing_ok=True)
     argv = nextflow_argv(nf_dir, launch, session)
     nf_env = {**env, "NXF_ANSI_LOG": "false"}
@@ -408,6 +457,8 @@ def head(profile_path: Path, nf_dir: Path, launch: Path | None, *, reproc: bool 
         for began, ended in pre_phases(env):
             _record(phase_begin_cmd, began)
             _record(phase_end_cmd, ended)
+        if run_id:
+            store_preview_dag(nf_dir, launch, nf_env, run_id)
 
     proc = subprocess.Popen(argv, cwd=launch, env=nf_env, start_new_session=True)
     stopped: list[int] = []
@@ -440,6 +491,8 @@ def head(profile_path: Path, nf_dir: Path, launch: Path | None, *, reproc: bool 
     else:
         f = first_failed(trace) if rc else None
         error = f"nextflow exit {rc}" + (f": {f} failed" if f else "") + f" (session {session})" if rc else None
+    if not cloud:
+        echo_task_logs(trace, Path(profile.work.rstrip("/")) / "work")
     publish_reports(profile, scan, launch)
     if recording:
         _record(finish_cmd, finish_args(rc, error, cost, launch / "dag.mmd", run_id))
