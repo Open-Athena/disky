@@ -187,6 +187,16 @@ def test_compaction_keeps_generation(on, tmp_path):
     assert _columns(out / "pv" / "r0000.parquet") == [*ist.PV_SCHEMA.names, "generation"]
 
 
+def test_compaction_refuses_a_generation_borrowing_its_ranges(on, tmp_path):
+    shutil.copytree(on["gen"], tmp_path / "g")
+    (tmp_path / "g" / "ranges.json").unlink()
+    with pytest.raises(SystemExit) as e:
+        ic.compact_gen(tmp_path / "g", tmp_path / "g.c001", tmp_path / "w", gen="g", new_gen="g.c001", level=None, rg_rows=RG, threads=2, mem="1GB")
+    assert (str(e.value), (tmp_path / "g.c001").exists()) == (
+        "g: no ranges.json: a staged build's generation borrowing its ranges and base from another (its `ranges_gen`) can't be "
+        "compacted in place; backfill-generation -R makes a self-contained one", False)
+
+
 def _export(store: Path, scan: str, dest: Path, gen: str | None = None) -> pa.Table:
     args = ["-o", str(store), "-w", str(dest.parent / f"w-{dest.name}"), "-t", "path", *(["-g", gen] if gen else []), scan, str(dest)]
     res = CliRunner().invoke(ie.export_cmd, args, catch_exceptions=False)
@@ -265,6 +275,22 @@ def test_backfill_fills_versions_live_since_the_first_generation(world, backfill
     assert json.loads((store / ic.CURRENT).read_text()) == {"gen": "g"}
     # Served as a build over generation-bearing sorts serves it (its versions are that build's: `_through(5)` above).
     assert _columns(g2 / "served" / "path.parquet") == [*ist.PVL_SCHEMA.names, "generation"]
+
+
+def test_backfill_borrows_a_staged_generations_ranges(world, off, backfilled, tmp_path):
+    """A staged build's generation holds only its scans, runs and served sorts; its key ranges and base range files live
+    in its ranges generation. `-R` mirrors them in, and the new generation is the same as when the source held them."""
+    store = tmp_path / "store"
+    shutil.copytree(off["store"], store)
+    g, gr = store / ist.PREFIX / "g", store / ist.PREFIX / "gr"
+    gr.mkdir()
+    for p in [g / "ranges.json", *(g / t for t in ist.SUB_SCHEMA if (g / t).exists())]:
+        shutil.move(p, gr / p.name)
+    res = CliRunner().invoke(ib.backfill_cmd, ["-o", str(store), "-g", "g", "-O", "g2", "-s", str(world), "-l", LISTING, "-w", str(tmp_path / "w0")])
+    assert (res.exit_code, res.output.strip().splitlines()[-1]) == (1, f"{store}/{ist.PREFIX}/g/ranges.json: none; a staged build's generation names its ranges with -R")
+    _backfill(store, tmp_path / "w", world, "g2", "-g", "g", "-R", "gr")
+    g2, ref = store / ist.PREFIX / "g2", backfilled["store"] / ist.PREFIX / "g2"
+    assert (_versions(g2), _parquets(g2), (g2 / "ranges.json").read_text()) == (_versions(ref), _parquets(ref), (ref / "ranges.json").read_text())
 
 
 def test_backfill_refuses_an_existing_generation_or_one_that_has_it(world, backfilled, tmp_path):

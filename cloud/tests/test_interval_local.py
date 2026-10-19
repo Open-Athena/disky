@@ -466,6 +466,13 @@ def test_the_staged_stages_agree_on_an_unowned_generation(unowned, tmp_path):
     assert json.loads((prefix / "served" / "stats.json").read_text())["slices"] is False
     base = {key: v for key, v in _parquets(gen).items() if not key.startswith(("deltas/", "manifests/"))}
     assert _parquets(prefix) == base
+    # A cut into a new generation (`-O`) gives it its own ranges and base, not just the served sorts: self-contained.
+    common = [*common[:4], "-o", str(tmp_path / "out2"), *common[6:]]
+    for args in [["cut", *common, "-O", "g2", "-r", str(RG), *(x for s in ist.SORTS for x in ("-s", s))], ["cut", *common, "-O", "g2", "-i", str(len(ist.SORTS))]]:
+        res = CliRunner().invoke(ist.cli, args, catch_exceptions=False)
+        assert res.exit_code == 0, (args, res.output)
+    g2 = store / ist.PREFIX / "g2"
+    assert (_parquets(g2), (g2 / "ranges.json").read_text()) == (base, (prefix / "ranges.json").read_text())
 
 
 def test_verify_reads_a_non_gcs_store(world, local, tmp_path):
