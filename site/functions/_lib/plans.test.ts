@@ -229,6 +229,23 @@ describe('D1', () => {
         before,
       ])
     })
+    it('an item the newest scan holds nothing under is refused (`gone`), never a plan row; all gone stages nothing', async () => {
+      const { db, raw } = await sqliteD1()
+      const present = async (keys: string[]) => new Set(keys.filter(k => k !== 'gs://b/gone/' && k !== 'gs://b/f.bin'))
+      const before = dump(raw)
+      const allGone = await stageItems(db, ['gs://b/gone/'], 'ann', null, GS, '2026-08-24', present)
+      expect([allGone, dump(raw)]).toEqual([
+        { plan_id: null, batch_id: null, staged: [], covered: [], absorbed: [], gone: ['gs://b/gone/'], as_of: '2026-08-24' },
+        before,
+      ])
+      expect([
+        await stageItems(db, { prefixes: ['gs://b/gone/', 'gs://b/here/'], objects: ['gs://b/f.bin', 'gs://b/g.bin'] }, 'ann', null, GS, '2026-08-24', present),
+        raw.prepare('SELECT prefix, kind FROM plan_items ORDER BY prefix').all(),
+      ]).toEqual([
+        { plan_id: 1, batch_id: 1, staged: ['gs://b/here/', 'gs://b/g.bin'], staged_objects: ['gs://b/g.bin'], covered: [], absorbed: [], gone: ['gs://b/gone/', 'gs://b/f.bin'], as_of: '2026-08-24' },
+        [{ prefix: 'gs://b/g.bin', kind: 'object' }, { prefix: 'gs://b/here/', kind: null }],
+      ])
+    })
   })
 
   describe('mergeBatches — a chunked staging folds into one batch', () => {
