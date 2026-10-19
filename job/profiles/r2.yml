@@ -29,9 +29,11 @@ machines:
   post: e2-standard-8
 # r2 scans four approved buckets of an account that holds many more (specs/r2-deployment.md): an unscanned-bucket
 # alert would fire every run, and r2 holds no account-wide key to list the account's buckets with (by design)
-skip: [bucket-check]
+# `index-gc` and `over-time`: moot without per-scan sorts (the site reads the interval store; the series reads each
+# point from it, specs/lean-scans.md §1.3)
+skip: [bucket-check, index-gc, over-time]
 # `access-r2`: marin-na's read recency from the access collector (infra/cf/r2-access) for the read lens; `retire`
-# (specs/lean-scans.md §2): each run deletes the per-scan files of every scan but the newest 2
+# (specs/lean-scans.md §2): each run deletes the `path` sort of every scan but the newest once both stores hold it
 steps: [access-r2, retire]
 secrets:
   R2_ACCESS_KEY_ID: oa-r2-index-access-key-id
@@ -64,15 +66,21 @@ options:
   access-r2:
     state: r2://oa-r2-access-logs/state.json
     secrets: {AWS_ACCESS_KEY_ID: oa-r2-source-access-key-id, AWS_SECRET_ACCESS_KEY: oa-r2-source-secret-access-key}
-  index: {mode: path-index, args: [-U], mem: 12GB, age_pyramids: true, verify: true, access: access/r2/agg.parquet}
+  # Lean scans (specs/lean-scans.md §1.1): the `path` sort alone (`-O`), in the data store only; both stores append from
+  # there (`static-names` always reads the data store, `interval-store` with `source: data`); R2 gets the snapshot JSONs
+  # and age pyramids (`publish-r2 -S`); D1 gets the age pyramids' pointers only, and the site lists the scan from the
+  # interval store (S1)
+  index: {mode: path-index, args: [-U, -O], mem: 12GB, age_pyramids: true, verify: true, access: access/r2/agg.parquet}
   static-names: {gen: 2026-10-15r2b, mem: 12GB, build_args: [-x, "16,8"]}
-  interval-store: {mem: 12GB}
-  # R2 has no soft delete: superseded generation dirs are listed only until Ryan reviews a list
-  index-gc: {dry: true}
-  # the data store's per-scan sorts, then the R2 copy (`$R2_ARCHIVE`); D1 with the first. A scan without a verify marker
-  # is verified in the task first (`interval-store verify`, its marker written); one that fails keeps its files.
-  # Executing since 2026-10-18, after the reviewed backlog deletes (backup: gs://oa-r2-usage-data/retire-backup/2026-10-18)
-  retire: {keep: 2, execute: true, copies: [r2]}
+  publish-r2: {args: [-S]}
+  interval-store: {mem: 12GB, source: data}
+  index-sync:
+    variants: [age-pyramid-1h, age-pyramid-3h, age-pyramid-6h, age-pyramid-12h, age-pyramid-1d, age-pyramid-2d, age-pyramid-4d, age-pyramid-8d]
+  # the data store's per-scan sorts (the "pending" copy each append reads), then the R2 copy (`$R2_ARCHIVE`: the
+  # backlog's; new scans put none there); D1 with the first. A scan without a verify marker is verified in the task
+  # first (`interval-store verify`, its marker written); one that fails keeps its files. Executing since 2026-10-18,
+  # after the reviewed backlog deletes (backup: gs://oa-r2-usage-data/retire-backup/2026-10-18)
+  retire: {keep: 1, execute: true, copies: [r2]}
   digest:
     template: cw
     # the thread state (`digest/r2/…`) and every earlier scan's snapshots are on R2, as the one-VM job reads them
