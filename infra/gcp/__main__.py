@@ -151,6 +151,19 @@ access_ingest = BatchCron(
     depends_on=[secrets],
 )
 
+# The "data behind this site" store (`/meta`, `job/profiles/gcs-meta.yml`): the data bucket and the R2 serving
+# bucket, scanned daily after the main scan (07:00, ~2–4 h with its retire) so each meta scan sees its result.
+meta = BatchCron(
+    "gcs-meta-snapshot-daily",
+    project=project,
+    region=region,
+    schedule="0 12 * * *",
+    submitter=job_dir / "meta-submit.sh",
+    sa_email=job.email,
+    adopt=adopt,
+    depends_on=[secrets, static_secrets],
+)
+
 # The hourly D1 → Google Sheet mirror (deploy/sheet-mirror/): `deploy.sh` ships
 # the image and the rendered config; this owns the job, its trigger and IAM.
 sheet_sync = RunJobCron(
@@ -258,4 +271,4 @@ if batch_delete_edition != "DISABLED":
     pulumi.export("storage_batch_service_agent", batch_delete.agent.email)
 
 pulumi.export("job_account", job.email)
-pulumi.export("crons", [daily.job.name, sheet_sync.cron.name])
+pulumi.export("crons", [daily.job.name, meta.job.name, sheet_sync.cron.name])
