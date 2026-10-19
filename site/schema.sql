@@ -333,7 +333,7 @@ CREATE TABLE scan_run_phases (
   started_ts  INTEGER,
   finished_ts INTEGER,
   status      TEXT NOT NULL DEFAULT 'done' CHECK (status IN ('running', 'done', 'failed')),
-  note        TEXT, job_name TEXT, machine TEXT, task TEXT,
+  note        TEXT, task TEXT, job_name TEXT, machine TEXT,
   PRIMARY KEY (run_id, phase)
 );
 
