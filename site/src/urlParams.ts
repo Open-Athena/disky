@@ -223,6 +223,11 @@ export const URL_PARAMS: Record<string, UrlParamDoc> = {
     description: 'Where to return after signing in. Only same-origin paths are accepted; anything else returns to `/`.',
     pages: ['/signin'],
   },
+  nh: {
+    label: 'Hidden note kinds',
+    description: 'Comma-separated note kinds (for example `cleanup ask`) the size-over-time chart hides; the chart\'s options toggle each kind its notes use. When absent, every kind shows.',
+    examples: ['cleanup ask'],
+  },
   o: {
     label: 'Owner',
     description: 'Narrows the map to one owner pool or person: bare `o` is unowned bytes, `o=*` owned bytes, `o=me` your own, `o=<key>` one person\'s, and `o=!<key>,<key>` bytes owned by anyone other than those people. The older spellings `unowned`, `owned`, `unclaimed` and `claimed` are rewritten. It applies only on deployments with ownership, and when absent, everything is shown.',
