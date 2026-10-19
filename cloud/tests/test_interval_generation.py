@@ -267,6 +267,22 @@ def test_backfill_fills_versions_live_since_the_first_generation(world, backfill
     assert _columns(g2 / "served" / "path.parquet") == [*ist.PVL_SCHEMA.names, "generation"]
 
 
+def test_backfill_borrows_a_staged_generations_ranges(world, off, backfilled, tmp_path):
+    """A staged build's generation holds only its scans, runs and served sorts; its key ranges and base range files live
+    in its ranges generation. `-R` mirrors them in, and the new generation is the same as when the source held them."""
+    store = tmp_path / "store"
+    shutil.copytree(off["store"], store)
+    g, gr = store / ist.PREFIX / "g", store / ist.PREFIX / "gr"
+    gr.mkdir()
+    for p in [g / "ranges.json", *(g / t for t in ist.SUB_SCHEMA if (g / t).exists())]:
+        shutil.move(p, gr / p.name)
+    res = CliRunner().invoke(ib.backfill_cmd, ["-o", str(store), "-g", "g", "-O", "g2", "-s", str(world), "-l", LISTING, "-w", str(tmp_path / "w0")])
+    assert (res.exit_code, res.output.strip().splitlines()[-1]) == (1, f"{store}/{ist.PREFIX}/g/ranges.json: none; a staged build's generation names its ranges with -R")
+    _backfill(store, tmp_path / "w", world, "g2", "-g", "g", "-R", "gr")
+    g2, ref = store / ist.PREFIX / "g2", backfilled["store"] / ist.PREFIX / "g2"
+    assert (_versions(g2), _parquets(g2), (g2 / "ranges.json").read_text()) == (_versions(ref), _parquets(ref), (ref / "ranges.json").read_text())
+
+
 def test_backfill_refuses_an_existing_generation_or_one_that_has_it(world, backfilled, tmp_path):
     args = ["-o", str(backfilled["store"]), "-O", "g2", "-s", str(world), "-l", LISTING, "-w", str(tmp_path)]
     res = CliRunner().invoke(ib.backfill_cmd, args)
