@@ -118,6 +118,7 @@ def params(profile: ScanProfile, profile_json: str, scan: str, gen: str, job_sta
         "steps": list(enabled),
         "pre": [n for n in enabled if STEPS[n].stage == "pre" and n != "bucket-check"],
         "pre_label": "pre" if "pre" in profile.machines else "small",
+        "static_label": "static" if "static" in profile.machines else "small",
         # `side` steps (`non-live`): their own task from the start, which only publish-r2 and the post steps wait on
         "side": [n for n in enabled if STEPS[n].stage == "side"],
         "side_label": "side" if "side" in profile.machines else "small",
