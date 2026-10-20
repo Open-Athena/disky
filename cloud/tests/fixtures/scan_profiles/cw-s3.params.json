@@ -91,5 +91,6 @@
  "cache": true,
  "static_after_publish": false,
  "queue_size": 20,
- "work_bucket": "example-data"
+ "work_bucket": "example-data",
+ "static_label": "small"
 }

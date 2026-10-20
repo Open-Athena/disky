@@ -119,6 +119,7 @@ def params(profile: ScanProfile, profile_json: str, scan: str, gen: str, job_sta
         "steps": list(enabled),
         "pre": [n for n in enabled if STEPS[n].stage == "pre" and n != "bucket-check"],
         "pre_label": "pre" if "pre" in profile.machines else "small",
+        "static_label": "static" if "static" in profile.machines else "small",
         "interval_label": "interval" if "interval" in profile.machines else "big",
         # the sharded index's parts (`options.index.parts`): one `index_part` task each, before the merging `index`
         "index_parts": [pid for pid, _ in index_parts(profile)],

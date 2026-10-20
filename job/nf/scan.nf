@@ -28,6 +28,7 @@ params.list_default = [:]  // the profile's `machines.list`: [machine:, disk:]
 params.steps = []          // every enabled step (core minus `skip`, plus the profile's `steps`)
 params.pre = []            // enabled extra steps beside `list`, before `index` (soft: index runs without them)
 params.pre_label = 'small'
+params.static_label = 'small'
 params.interval_label = 'big'
 params.index_parts = []    // the sharded index's part ids (`options.index.parts`), each its own task before `index`
 params.index_part_label = 'big'
@@ -129,7 +130,7 @@ process index {
 }
 
 process static_names {
-    label 'small'
+    label params.static_label
     time '6h'
     input: val indexed
     output: path 'done'
