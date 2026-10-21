@@ -115,7 +115,9 @@ export interface Env {
   INTERVAL_STORE_GEN?: string
   /** A revision of the generation's files (rewritten in place): keys every cache over them apart. */
   INTERVAL_STORE_REV?: string
-  /** The static name index's generation in `INDEX_R2` (`static-names/<gen>/`); required with `FILTER_STATIC` / `NAME_SUMMARY_STATIC`. */
+  /** The static name index's generation in `INDEX_R2` (`static-names/<gen>/`): a pin; unset, the primary's is
+   *  `static-names/CURRENT.json`'s (`index.ts` `withStaticGen`, resolved per request). Required (pinned or pointed) with
+   *  `FILTER_STATIC` / `NAME_SUMMARY_STATIC`. */
   STATIC_GEN?: string
   STORE_ACCESS_KEY_ID?: string
   STORE_SECRET_ACCESS_KEY?: string

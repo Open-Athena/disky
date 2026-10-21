@@ -13,6 +13,7 @@
 import { type Ctx, json, requireViewer } from '../_lib/auth.js'
 import { staticFilterStore, type StaticFilterEnv } from '../_lib/staticFilter.js'
 import { type UnionView, withStore } from '../_lib/stores.js'
+import { withStaticGen } from '../_lib/index.js'
 import { membersAt, openUnion, unionFor } from '../_lib/union.js'
 
 const HEADERS = { 'cache-control': 'private, max-age=60' }
@@ -25,7 +26,7 @@ export const onRequestGet = async (ctx0: Ctx): Promise<Response> => {
   if (ctx instanceof Response) return ctx
   const gated = await requireViewer(ctx)
   if (gated instanceof Response) return gated
-  const s = staticFilterStore(ctx.env as unknown as StaticFilterEnv)
+  const s = staticFilterStore(await withStaticGen(ctx.env) as unknown as StaticFilterEnv)
   const scans = s ? [...await s.scans()].sort() : null
   return json({ scans }, 200, HEADERS)
 }
