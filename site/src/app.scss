@@ -1472,51 +1472,41 @@ input::placeholder, textarea::placeholder { color: var(--ink-3); opacity: 1; }
 // A wide table scrolls inside its own box, never the page (`LifecycleFold`'s rules table is ~714 px).
 .tbl-scroll { overflow-x: auto; max-width: 100%; }
 
-.classes {
-  border-collapse: collapse;
-  font-variant-numeric: tabular-nums;
-  th, td { text-align: left; padding: 4px 18px 4px 0; border-bottom: 1px solid var(--line); }
-  th { color: var(--ink-2); font-weight: 600; font-size: 13px; }
-}
-
-.attrib {
+// The compact facts row under the map's sections (`PageFacts.tsx`): the class mix as one stacked bar + legend,
+// and the ownership share with its ⓘ.
+.page-facts {
   display: flex;
-  flex-direction: column;
-  gap: 10px;
-  h2 { margin-bottom: 0; }
-  .feedback { margin-top: 8px; }
-  details {
-    summary {
-      cursor: pointer;
-      color: var(--ink-2);
-      font-size: 14px;
-      font-weight: 600;
-      &:hover { color: var(--ink); }
-    }
-    &[open] summary { margin-bottom: 6px; }
-  }
-  .rulestable {
-    font-size: 13px;
-    td, th { padding-right: 14px; }
-    code { font-size: 12px; }
-    .aliases { color: var(--ink-2); }
-  }
-  .teamchip {
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 28px;
+  margin: 18px 0 8px;
+  font-size: 13px;
+  color: var(--ink-2);
+  .fact { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; min-width: 0; }
+  .lbl { color: var(--ink-3); font-size: 11.5px; text-transform: uppercase; letter-spacing: 0.04em; }
+  .classbar {
     display: inline-flex;
-    align-items: center;
-    gap: 5px;
-    .sw { width: 9px; height: 9px; border-radius: 2px; }
+    width: 160px;
+    height: 10px;
+    border-radius: 3px;
+    overflow: hidden;
+    cursor: help;
+    outline-offset: 2px;
+    i { display: block; min-width: 2px; height: 100%; }
   }
-  .note { color: var(--ink-2); font-size: 12.5px; }
-  .todo {
-    background: var(--s4);
-    color: #1a1a19;
-    border-radius: 4px;
-    font-size: 11px;
-    font-weight: 600;
-    padding: 1px 6px;
-    margin-right: 6px;
-  }
+  .classes-legend { display: inline-flex; flex-wrap: wrap; gap: 2px 10px; }
+  .classes-legend .li { white-space: nowrap; }
+  .classes-legend .sw { display: inline-block; width: 9px; height: 9px; border-radius: 2px; margin-right: 4px; vertical-align: -1px; }
+  .pct { color: var(--ink-3); font-variant-numeric: tabular-nums; }
+  .usd { color: var(--ink); font-variant-numeric: tabular-nums; }
+  .info { color: var(--ink-3); font-size: 15px; cursor: help; }
+  b { color: var(--ink); }
+}
+.classes-scope { margin-bottom: 4px; }
+.ownership-help {
+  max-width: 380px;
+  p { margin: 0 0 6px; }
+  p:last-child { margin-bottom: 0; }
 }
 
 @media (prefers-reduced-motion: no-preference) {
