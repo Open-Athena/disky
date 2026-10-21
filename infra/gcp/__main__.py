@@ -183,8 +183,11 @@ sheet_sync = RunJobCron(
     opts=pulumi.ResourceOptions(depends_on=[secrets]),
 )
 
-# The scans' own bucket: snapshots, path indexes, access logs. Raw access-log
-# CSVs go Coldline at 30 days and are deleted at 180.
+# The scans' own bucket: snapshots, path indexes, access logs. The raw access
+# logs (`access/raw/`) are deleted at 7 days: nothing reads them after ingest
+# (`access/agg` + `access/sizes` are cut from the same chunk), so they are only a
+# window to re-aggregate in. Nextflow's task dirs (`nf/work/`) are deleted at 14:
+# a failed scan's `-resume` is the only reader.
 DATA_BUCKET = "oa-gcs-usage-dvx"
 gcp.storage.Bucket(
     DATA_BUCKET,
@@ -198,12 +201,12 @@ gcp.storage.Bucket(
     soft_delete_policy=gcp.storage.BucketSoftDeletePolicyArgs(retention_duration_seconds=604800),
     lifecycle_rules=[
         gcp.storage.BucketLifecycleRuleArgs(
-            action=gcp.storage.BucketLifecycleRuleActionArgs(type="SetStorageClass", storage_class="COLDLINE"),
-            condition=gcp.storage.BucketLifecycleRuleConditionArgs(age=30, matches_prefixes=["access/raw/"], matches_storage_classes=["STANDARD"]),
+            action=gcp.storage.BucketLifecycleRuleActionArgs(type="Delete"),
+            condition=gcp.storage.BucketLifecycleRuleConditionArgs(age=7, matches_prefixes=["access/raw/"]),
         ),
         gcp.storage.BucketLifecycleRuleArgs(
             action=gcp.storage.BucketLifecycleRuleActionArgs(type="Delete"),
-            condition=gcp.storage.BucketLifecycleRuleConditionArgs(age=180, matches_prefixes=["access/raw/"]),
+            condition=gcp.storage.BucketLifecycleRuleConditionArgs(age=14, matches_prefixes=["nf/work/"]),
         ),
     ],
     opts=adopt.opts(True, f"{project}/{DATA_BUCKET}", protect=True),
