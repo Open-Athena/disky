@@ -1241,8 +1241,9 @@ def store_gc(ctx: Ctx, arg: str | None) -> None:
     """Superseded interval-store generations (`dt-cloud store-gc -l`): what the current generation was compacted or
     backfilled from, past the grace (`grace` seconds, default 3 days), its parity markers moved first; on the interval
     store (`store`, default the interval-store step's, else `$R2_ARCHIVE`) and on `$R2_ARCHIVE` when that's another
-    copy. Off unless the profile lists it in `steps`; a dry run unless `execute: true`. Static-names generations aren't
-    in it: which one each site reads isn't the job's to know (`store-gc -t static-names -k …` by hand)."""
+    copy. Off unless the profile lists it in `steps`; a dry run unless `execute: true`. Explicit `copies` overrides the
+    archive copy. Optional `static_gens` names every live static lineage root: cleanup protects each root and its
+    newest successor, plus the native current pointer, before collecting older generations past the grace."""
     if ctx.reproc:
         err("store-gc off under REPROC")
         return
