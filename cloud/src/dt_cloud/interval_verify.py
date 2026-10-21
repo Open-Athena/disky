@@ -445,6 +445,18 @@ def _footers(src, key: str, version: int) -> dict[str, Footer]:
     return out
 
 
+#: Verify's DuckDB memory on a dedicated verify VM (`interval-store verify` on Batch).
+VERIFY_MEM = 80 << 30
+VERIFY_THREADS = 16
+
+
+def verify_budget(ram: int, cpus: int) -> tuple[int, int]:
+    """Verify's DuckDB threads and memory limit (bytes) on a machine with `ram` bytes and `cpus` cores: `VERIFY_MEM` /
+    `VERIFY_THREADS`, capped at 3/4 of the RAM and the cores, so a smaller machine (a scan's `post`, where `scan retire`
+    verifies in the task) spills instead of being killed (2026-10-21: 80 GB on a 32 GB `post`)."""
+    return min(VERIFY_THREADS, cpus), min(VERIFY_MEM, ram * 3 // 4)
+
+
 def verify_task(sampled: list[str], task: int, tasks: int, served: str, scans: dict, out_path: Path, tmp: Path, mount: str | None,
                 runs: list[str] = (), on_summary=None, *, changes: bool = False) -> list[dict]:
     """This task's share of the `sampled` scan ids (contiguous, so each diff's previous scan is local),
@@ -467,7 +479,8 @@ def verify_task(sampled: list[str], task: int, tasks: int, served: str, scans: d
     for f in (db, db.with_name(db.name + ".wal")):
         f.unlink(missing_ok=True)
     con = duckdb.connect(str(db))
-    con.execute(f"SET threads=16; SET memory_limit='80GB'; SET temp_directory={q(str(tmp / 'spill'))}")
+    threads, mem = verify_budget(os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES"), os.cpu_count() or 1)
+    con.execute(f"SET threads={threads}; SET memory_limit='{mem >> 20}MB'; SET temp_directory={q(str(tmp / 'spill'))}")
     src = Store(store_url(scans["bucket"]))
     prev = None
     summaries = []

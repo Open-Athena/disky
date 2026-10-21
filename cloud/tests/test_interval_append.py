@@ -811,13 +811,15 @@ def test_a_failed_merge_never_fails_the_run():
 
 
 def test_level_5_is_left_to_a_compaction():
-    """Two L4s never carry into an L5: the merge stage submits nothing and says a compaction is due."""
+    """Two L4s never carry into an L5: the merge stage submits no carry and says a compaction is due; the compaction
+    stage submits it."""
     f = Fake(["2026-08-03"])
     l4 = lambda a, b: {"key": f"deltas/{a}_{b}", "first": a, "last": b, "level": 4, "scans": [a, b]}  # noqa: E731
     f.keys[f"{G1}/manifests/2026-08-07.json"] = {"date": "2026-08-07", "runs": [l4("2026-08-04", "2026-08-05"), l4("2026-08-06", "2026-08-07")]}
     f.runner(merge_wait=None).carries()
-    assert (f.jobs, [m for m in f.log if m.startswith("merge")]) == (
-        [], ["merge: level 5 is due: compact into a new base generation (carries stop below it)"])
+    assert (f.calls(), [m for m in f.log if m.startswith("merge")]) == (
+        [("compact", f"compact -C level:5 -r -M 90GB -p 16 {COMMON} -m /gcs/data")],
+        ["merge: level 5 is due: compact into a new base generation (carries stop below it)"])
 
 
 def test_the_cli_merge_and_append_M(monkeypatch):

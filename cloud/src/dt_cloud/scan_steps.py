@@ -1109,13 +1109,14 @@ def index_gc(ctx: Ctx, arg: str | None) -> None:
 
 
 @step("dups", core=False, soft=True, options={"floor": int, "check": int, "check_objects": int, "suspect_copies": int,
-                                               "mem": str, "threads": int})
+                                               "mem": str, "threads": int, "listing": bool})
 def dups(ctx: Ctx, arg: str | None) -> None:
     """The scan's duplicate-candidate groups (`dt-cloud dups`, specs/dups.md §1) beside its index:
     `<layer2>index/<gen>/dups.{parquet,json}` (`dups.json` last, the skip-if-done mark), read from the scan's `bysize`
     sort (its `tot` prunes the read to the paths over the floor), else its `path` sort. Options: `floor` (bytes),
-    `suspect_copies`, `check` (spot-check the top N groups' copies on GCS), `check_objects`, `mem`, `threads`. Off
-    unless the profile lists it in `steps`; never fatal."""
+    `suspect_copies`, `check` (spot-check the top N groups' copies on GCS), `check_objects`, `mem`, `threads`,
+    `listing` (`-l` each source's raw listing shards in the data store: copies proven `exact` by their objects'
+    crc32c, which the listing carries with `options.list.bulk_args: [-c]`). Off unless the profile lists it in `steps`; never fatal."""
     key_dir = ctx.data_root / ctx.index_key
     if ctx.done(key_dir / "dups.json", "dups"):
         return
@@ -1124,6 +1125,12 @@ def dups(ctx: Ctx, arg: str | None) -> None:
     out = ctx.work / "dups"
     flags = {"floor": "-f", "check": "-g", "check_objects": "-n", "suspect_copies": "-s", "mem": "-m", "threads": "-t"}
     args = [a for k, f in flags.items() if ctx.opt("dups", k) is not None for a in (f, ctx.opt("dups", k))]
+    if ctx.opt("dups", "listing", False):
+        if ctx.profile.layout.listing is None:  # an importing profile's listings stay in its list tasks' scratch
+            err("dups: options.dups.listing without layout.listing: no exact verdicts")
+        else:
+            args += [a for src in ctx.profile.sources
+                     for a in ("-l", f"{ctx.data_root / ctx.listing_key(src.bucket)}/shard-*.parquet")]
     with ctx.phase("dups"):
         r = ctx.sh(["dt-cloud", "dups", "-d", ctx.scan, *args, "-T", ctx.work / "dups-tmp", "-o", out, src], fatal=False,
                    fails_phase=True, warn="dups failed (the scan's other outputs stand)")
@@ -1141,12 +1148,21 @@ def _retire_check(p: ScanProfile) -> list[str]:
     return problems
 
 
+@contextmanager
+def cleanup(path: Path) -> Iterator[None]:
+    """`path` removed on the way out, whether the block finished or raised."""
+    try:
+        yield
+    finally:
+        shutil.rmtree(path, ignore_errors=True)
+
+
 @step("retire", core=False, soft=True, options={"keep": int, "execute": bool, "static_gen": str, "static_store": str, "store": str,
-                                                "layer2": bool, "layer1": bool, "copies": list, "backup": str, "markers_only": bool},
+                                                "layer2": bool, "layer1": bool, "cache": bool, "copies": list, "backup": str, "markers_only": bool},
       requires=_retire_check)
 def retire(ctx: Ctx, arg: str | None) -> None:
     """Retire the per-scan sorts, footers, search sidecars (and, `layer2: true`, layer-2 listings; `layer1: true`, the raw
-    listing shards under `layout.listing`) of every scan but the
+    listing shards under `layout.listing`; `cache: true`, its `dir-cache/`) of every scan but the
     newest `keep` that both stores hold and a parity marker vouches for (`dt-cloud scan retire`; specs/lean-scans.md §2).
     Off unless the profile lists it in `steps`; a dry run (the plan in the log) unless `execute: true`. The data store
     first (`$R2_ARCHIVE` when the data store is a local dir), then each of `copies` (a root, or `r2` for `$R2_ARCHIVE`; D1 left
@@ -1172,13 +1188,23 @@ def retire(ctx: Ctx, arg: str | None) -> None:
             err("retire: options.retire.layer1 without layout.listing: raw listings kept")
         else:
             l1 = ["-1", ctx.profile.layout.listing.replace("{scan}", "{id}") + "*/shard-*.parquet"]
-    common = ["-G", static_gen, "-k", o["keep"], "-L", l2 + "index/{gen}/path-index.parquet", *(["-l", l2 + "*.parquet"] if o.get("layer2") else []), *l1,
+    cache = []
+    if o.get("cache"):
+        if ctx.profile.layout.listing is None:
+            err("retire: options.retire.cache without layout.listing: rollup caches kept")
+        else:
+            # `path-index -c`'s cache (`listing_key("dir-cache")`), one dir per index part under a sharded index
+            dc = ctx.profile.layout.listing.replace("{scan}", "{id}") + "dir-cache/"
+            cache = ["-c", dc + "*.parquet", "-c", dc + "*/*.parquet"]
+    common = ["-G", static_gen, "-k", o["keep"], "-L", l2 + "index/{gen}/path-index.parquet", *(["-l", l2 + "*.parquet"] if o.get("layer2") else []), *l1, *cache,
               *(["-m"] if o.get("markers_only") else []), "-o", store, "-S", static_store, *store_args_t(ctx), "-w", ctx.work / "retire",
               *(["-x"] if o.get("execute") else [])]
     # A local data store is the task's scratch (only this scan's files): the scans' files and D1 rows are the archive's.
     first = archive if ctx.profile.data_bucket is None and archive else ctx.data_uri
     roots = [r for r in dict.fromkeys([first, *(archive if c == "r2" else c for c in o.get("copies", []))]) if r]
-    with ctx.phase("retire", note=None if o.get("execute") else "dry run"):
+    # The work dir holds the served store the verify downloads: removed whatever happens, so a failed retire never
+    # leaves the steps after it (soft steps on the same disk) without space
+    with ctx.phase("retire", note=None if o.get("execute") else "dry run"), cleanup(ctx.work / "retire"):
         for i, root in enumerate(roots):
             # a copy after the D1 pass: its rows are that pass's (`-D`: no "-R leaves D1 rows" warning in a dry run)
             d1 = [] if i == 0 and ctx.has(*CF) else ["-R", *(["-D"] if ctx.has(*CF) else [])]

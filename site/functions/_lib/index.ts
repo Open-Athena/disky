@@ -509,61 +509,89 @@ export const intervalsOn = (env: Env): boolean => env.PATH_STORE === 'intervals'
 /** A request's path store: `PATH_STORE=opt-in` reads the interval store only for requests asking
  *  `ps=iv` (so one deployment serves both, side by side), `intervals` for every request but one asking `ps=scan` (the
  *  per-scan sorts, for a parity check); a secondary store (`store=`) never does. The
- *  generation is `INTERVAL_STORE_GEN` (a pin), else the store's current one (`ivCurrentGen`), fixed for the
- *  request: none (no pointer yet) reads per-scan stores. */
+ *  generation is `INTERVAL_STORE_GEN` (a pin), else the store's current one (`ivGen`), fixed for the
+ *  request: none (no pointer yet) reads per-scan stores. The static name index's generation is fixed here too
+ *  (`withStaticGen`), whatever the path store. */
 export async function withPathStore<C extends { request: Request; env: Env }>(ctx: C): Promise<C> {
-  const { env } = ctx
-  if (env.PATH_STORE !== 'opt-in' && env.PATH_STORE !== 'intervals') return ctx
+  const w = (ctx as { waitUntil?: unknown }).waitUntil
+  const env = await withStaticGen(ctx.env)
+  const out = (e: Env): C => (e === ctx.env ? ctx : { ...ctx, env: e, ...(typeof w === 'function' ? { waitUntil: w.bind(ctx) } : {}) })
+  if (env.PATH_STORE !== 'opt-in' && env.PATH_STORE !== 'intervals') return out(env)
   const u = new URL(ctx.request.url).searchParams
   const ps = u.get('ps')
   const on = !u.get('store') && ps !== 'scan' && (env.PATH_STORE === 'intervals' || ps === 'iv')
   const gen = on ? await ivGen(env) : env.INTERVAL_STORE_GEN
-  const w = (ctx as { waitUntil?: unknown }).waitUntil
-  return { ...ctx, env: { ...env, PATH_STORE: on ? 'intervals' : undefined, INTERVAL_STORE_GEN: gen ?? undefined }, ...(typeof w === 'function' ? { waitUntil: w.bind(ctx) } : {}) }
+  return out({ ...env, PATH_STORE: on ? 'intervals' : undefined, INTERVAL_STORE_GEN: gen ?? undefined })
 }
 
 /** The store's current-generation pointer (`interval_compact.CURRENT`: `{"gen": …}`), moved by a compaction
  *  (`interval-store add`) once the new generation is whole. */
 export const IV_CURRENT = 'interval-store/CURRENT.json'
-const ivCurrents = new Map<string, { at: number; p: Promise<string | null>; ok?: string | null }>()
+/** The static name index's (`compact_store`, specs/static-compaction.md): the same shape, moved on R2 last. */
+export const STATIC_CURRENT = 'static-names/CURRENT.json'
 
-/** `env`'s interval-store generation: `INTERVAL_STORE_GEN` when set (a pin), else `IV_CURRENT`'s (null without one or
- *  without `INDEX_R2`), held `IV_STATE_TTL` per isolate and in the colo cache: a compaction is served within the
- *  colo's TTL plus the isolate's. A failed read keeps the last pointer, or (none yet) reads per-scan stores. */
+/** `env`'s interval-store generation: `INTERVAL_STORE_GEN` when set (a pin), else `IV_CURRENT`'s (`currentGen`). */
 export async function ivGen(env: Env): Promise<string | null> {
-  const pin = env.INTERVAL_STORE_GEN?.trim()
+  return env.INTERVAL_STORE_GEN?.trim() || currentGen(env, IV_CURRENT, 'current')
+}
+
+/** `env`'s static name index generation: `STATIC_GEN` when set (a pin), else, for the primary store of a deployment
+ *  reading the index (`FILTER_STATIC` / `NAME_SUMMARY_STATIC`), `STATIC_CURRENT`'s (`currentGen`). A secondary store's
+ *  is its own config's alone (`stores.ts`), never the primary's pointer: null without one. */
+export async function staticCurrentGen(env: StaticGenEnv): Promise<string | null> {
+  const pin = env.STATIC_GEN?.trim()
   if (pin) return pin
+  const e = env as unknown as Env
+  return isPrimary(e) && (env.FILTER_STATIC === '1' || env.NAME_SUMMARY_STATIC === '1') ? currentGen(e, STATIC_CURRENT, 'static-current') : null
+}
+/** What the static name index's generation is resolved from. */
+export type StaticGenEnv = { STATIC_GEN?: string; INDEX_R2?: R2Bucket; STORE_KEY?: string; FILTER_STATIC?: string; NAME_SUMMARY_STATIC?: string }
+
+/** `env` with its static name index generation fixed (`staticCurrentGen`) for the request: unchanged when pinned or
+ *  without a pointer (an unset `STATIC_GEN` reads as it always has). */
+export async function withStaticGen<E extends StaticGenEnv>(env: E): Promise<E> {
+  if (env.STATIC_GEN?.trim()) return env
+  const gen = await staticCurrentGen(env)
+  return gen ? { ...env, STATIC_GEN: gen } : env
+}
+
+const currents = new Map<string, { at: number; p: Promise<string | null>; ok?: string | null }>()
+
+/** The generation a store's `CURRENT.json` pointer (`key`: `{"gen": …}`) names (null without one or without
+ *  `INDEX_R2`), held `IV_STATE_TTL` per isolate and in the colo cache: a compaction is served within the colo's TTL
+ *  plus the isolate's. A failed read keeps the last pointer, or (none yet) null. `name`: the read's join name. */
+async function currentGen(env: Env, key: string, name: string): Promise<string | null> {
   if (!env.INDEX_R2) return null
-  const k = storeKey(env)
-  const cur = ivCurrents.get(k)
+  const k = `${storeKey(env)}|${key}`
+  const cur = currents.get(k)
   if (cur && Date.now() - cur.at < IV_STATE_TTL) {
     if (cur.ok !== undefined) return cur.ok
     // A read another request started: joined (`shared.ts`), else read afresh here.
-    const got = await join(cur.p, ivJoin(env, 'current'))
+    const got = await join(cur.p, ivJoin(env, name))
     if (got !== STALLED) return got
-    if (ivCurrents.get(k) === cur) ivCurrents.delete(k)
-    const now = ivCurrents.get(k)
-    if (now && now !== cur) return ivGen(env)
+    if (currents.get(k) === cur) currents.delete(k)
+    const now = currents.get(k)
+    if (now && now !== cur) return currentGen(env, key, name)
   }
   const last = cur?.ok
   const entry: { at: number; p: Promise<string | null>; ok?: string | null } = { at: Date.now(), p: Promise.resolve(null) }
   entry.p = (async () => {
-    const ck = coloKey(env, IV_CURRENT, 'current=1')
+    const ck = coloKey(env, key, 'current=1')
     const hit = await colo().match(ck)
     if (hit) return (await hit.json<{ gen: string | null }>()).gen
-    const o = await env.INDEX_R2!.get(IV_CURRENT)
+    const o = await env.INDEX_R2!.get(key)
     const gen = o ? (await o.json<{ gen?: unknown }>()).gen : null
-    if (gen !== null && (typeof gen !== 'string' || !gen)) throw new Error(`${IV_CURRENT}: bad pointer`)
+    if (gen !== null && (typeof gen !== 'string' || !gen)) throw new Error(`${key}: bad pointer`)
     await colo().put(ck, new Response(JSON.stringify({ gen }), { headers: { 'content-type': 'application/json', 'cache-control': `max-age=${IV_STATE_TTL / 1000}` } }))
     return gen
   })().then(gen => { entry.ok = gen; return gen }, e => {
-    console.error(`${IV_CURRENT}: ${(e as Error).message}; ${last !== undefined ? 'serving the last pointer' : 'reading per-scan stores'}`)
+    console.error(`${key}: ${(e as Error).message}; ${last !== undefined ? 'serving the last pointer' : 'none held'}`)
     if (last !== undefined) { entry.ok = last; return last }
-    if (ivCurrents.get(k) === entry) ivCurrents.delete(k)
+    if (currents.get(k) === entry) currents.delete(k)
     return null
   })
-  ivCurrents.set(k, entry)
-  track(entry.p, ivJoin(env, 'current'), () => { if (ivCurrents.get(k) === entry) ivCurrents.delete(k) })
+  currents.set(k, entry)
+  track(entry.p, ivJoin(env, name), () => { if (currents.get(k) === entry) currents.delete(k) })
   return entry.p
 }
 /** Which path store answers `env`'s reads of a date the interval store holds: '' (per-scan), else the

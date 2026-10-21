@@ -801,6 +801,26 @@ def test_dups_reads_the_size_sort_and_writes_beside_the_index(tmp_path, env):
     assert again.sh_impl.calls == []
 
 
+def test_dups_listing_passes_each_sources_shards(tmp_path, env):
+    """`options.dups.listing`: `-l` each source's raw listing shards (this scan's, under `layout.listing` in the data
+    store), so copies are proven by their objects' crc32c; without a `layout.listing` (an importing profile), none."""
+    key = tmp_path / "data/l2/2026-10-16T1200/index/G1"
+    key.mkdir(parents=True)
+    (key / "path-index.parquet").write_text("p")
+    opts = {"static-names": {"gen": "s1"}, "digest": {"template": "t", "config": "c.yml"}, "dups": {"listing": True}}
+    c = ctx(tmp_path, env, steps=["dups"], layout={"layer2": "l2/{scan}/", "snapshots": "sub", "listing": "listing/{scan}/"}, options=opts)
+    S.dups(c, None)
+    w = "<tmp>/t/dt-scan/2026-10-16T1200"
+    l1 = "<tmp>/data/listing/2026-10-16T1200"
+    idx = "<tmp>/data/l2/2026-10-16T1200/index/G1/path-index.parquet"
+    assert c.sh_impl.calls == [f"dt-cloud dups -d 2026-10-16T1200 -l {l1}/a/shard-*.parquet -l {l1}/b/shard-*.parquet "
+                               f"-T {w}/dups-tmp -o {w}/dups {idx}"]
+    (key / "dups.json").unlink()
+    n = ctx(tmp_path, env, steps=["dups"], options={**opts, "list": {"import": True}})
+    S.dups(n, None)
+    assert n.sh_impl.calls == [f"dt-cloud dups -d 2026-10-16T1200 -T {w}/dups-tmp -o {w}/dups {idx}"]
+
+
 def test_dups_falls_back_to_the_path_sort_and_never_fails_the_run(tmp_path, env):
     key = tmp_path / "data/l2/2026-10-16T1200/index/G1"
     key.mkdir(parents=True)
@@ -825,6 +845,17 @@ def test_retire_layer1_passes_the_listing_layouts_shards(tmp_path, env):
     assert n.sh_impl.calls == [f"dt-cloud scan retire -G s1 -k 2 -L l2/{{id}}/index/{{gen}}/path-index.parquet -o gs://iv -S gs://iv -w {w} -R -s <tmp>/data"]
 
 
+def test_retire_cache_passes_the_listings_dir_cache(tmp_path, env):
+    """`cache: true`: the rollup cache `path-index -c` writes under `layout.listing` (`dir-cache/`, one dir per index part
+    when sharded) as `-c` templates."""
+    opts = {"static-names": {"gen": "s1"}, "digest": {"template": "t", "config": "c.yml"}, "retire": {"keep": 2, "cache": True, "store": "gs://iv"}}
+    c = ctx(tmp_path, env, steps=["retire"], layout={"layer2": "l2/{scan}/", "snapshots": "sub", "listing": "listing/{scan}/"}, options=opts)
+    S.retire(c, None)
+    w = "<tmp>/t/dt-scan/2026-10-16T1200/retire"
+    assert c.sh_impl.calls == [f"dt-cloud scan retire -G s1 -k 2 -L l2/{{id}}/index/{{gen}}/path-index.parquet "
+                               f"-c listing/{{id}}/dir-cache/*.parquet -c listing/{{id}}/dir-cache/*/*.parquet -o gs://iv -S gs://iv -w {w} -R -s <tmp>/data"]
+
+
 def test_store_gc_collects_the_interval_stores_lineage_on_each_copy(tmp_path, env):
     """`store-gc` (listed in `steps`): `store-gc -t interval-store -l` on the interval store and on `$R2_ARCHIVE` when
     that's another copy; a dry run unless `execute`."""
@@ -841,9 +872,14 @@ def test_retire_failure_warns_and_needs_its_keep(tmp_path, env):
     c = ctx(tmp_path, env, runner=Runner(tmp_path, fail=("dt-cloud scan retire",)), steps=["retire"],
             options={"list": {"import": True}, "static-names": {"gen": "s1", "store": "r2://idx"}, "digest": {"template": "t", "config": "c.yml"},
                      "retire": {"keep": 2, "store": "r2://idx"}})
+    # what the verify downloaded before failing (2026-10-21: the served store filled post's disk, failing every step after)
+    served = c.work / "retire" / "verify" / "served" / "path.parquet"
+    served.parent.mkdir(parents=True)
+    served.write_bytes(b"x")
     S.retire(c, None)
     assert c.sh_impl.calls == ["dt-cloud scan retire -G s1 -k 2 -L l2/{id}/index/{gen}/path-index.parquet -o r2://idx -S r2://idx "
                                "-w <tmp>/t/dt-scan/2026-10-16T1200/retire -R -s <tmp>/data"]
+    assert not (c.work / "retire").exists()
     with pytest.raises(ValueError) as e:
         profile(tmp_path, steps=["retire"], options={"list": {"import": True}, "static-names": {"profile": "sn.json"}, "digest": {"template": "t", "config": "c.yml"}, "retire": {}})
     assert str(e.value).splitlines()[1:] == [

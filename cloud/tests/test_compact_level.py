@@ -129,12 +129,14 @@ def _two(level: int) -> list[dict]:
 
 
 def test_interval_level_3_is_left_to_a_compaction():
-    """Two L2s at level 3: the merge stage submits nothing and says a level-3 compaction is due."""
+    """Two L2s at level 3: the merge stage submits no carry, says a level-3 compaction is due, and the compaction stage
+    submits it (`compact -C level:3`, with the R2 copy: the stages' account is the R2 account)."""
     f = IvFake(["2026-08-03"], compact_level=3)
     f.keys[f"{G1}/manifests/2026-08-07.json"] = {"date": "2026-08-07", "runs": _two(2)}
     f.runner(merge_wait=None).carries()
-    assert (f.jobs, [m for m in f.log if m.startswith("merge")]) == (
-        [], ["merge: level 3 is due: compact into a new base generation (carries stop below it)"])
+    assert (f.calls(), [m for m in f.log if m.startswith("merge")]) == (
+        [("compact", "compact -C level:3 -r -M 90GB -p 16 -b data -g g1 -R g0 -S scr -m /gcs/data")],
+        ["merge: level 3 is due: compact into a new base generation (carries stop below it)"])
 
 
 def test_interval_nothing_due_is_logged():

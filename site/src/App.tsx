@@ -9,7 +9,7 @@ import { bareEmpty, legacyOwner, ownerParam } from './ownerParam'
 import { AGE_MODES, AgeChart } from './AgeChart'
 import { canonId, shortName, shortUserKey } from './UserChip'
 import { signInUrl, useCanAssign, useCanStage, useIdent as useIdentity, useIsAdmin } from './auth'
-import { AttributionRules } from './AttributionRules'
+import { ClassStrip, OwnershipFact, OwnershipHelp } from './PageFacts'
 import { DiffTreemap, DiffHeader, useDiffModel } from './DiffTreemap'
 import { DiffTable } from './DiffTable'
 import { Allowances } from './Allowances'
@@ -1321,7 +1321,7 @@ function AppContent() {
         )}
         {bar.ownerFilter && (
           <span className="tb-axis">
-            <span className="lbl">owner</span>
+            <Explain text={<OwnershipHelp />} label="owner"><span className="lbl">owner</span></Explain>
             {ownerSelect}
           </span>
         )}
@@ -1704,47 +1704,20 @@ function AppContent() {
         />
       )}
 
-      {blindShown(!!fq) && meta && store.prices && (() => {
+      {/* The storage-class mix (follows the drill) and the ownership share, folded into one compact row; the
+          class bytes + $ and the ownership explainer live in their tooltips. */}
+      {blindShown(!!fq) && ((meta && store.prices) || (hasAttr && mapTree)) && (() => {
         // Class mix of the *drilled* node (each node carries descendant-inclusive
         // `cb`), so this tracks the treemap instead of always showing fleet totals.
         const node = mapPath ? mapPath[mapPath.length - 1] : tree
-        if (!node) return null
-        const mix = classMix(node)
-        const total = node.b || 1
         const scope = mapPath && mapPath.length > 1 ? mapPath.slice(1).map(n => n.n).join('/') : store.rootLabel
         return (
-          <section id="storage-classes">
-            <h2>Storage classes</h2>
-            <p className="sub">
-              Class mix + list-price estimate for <code>{scope}</code> — updates as you drill the treemap.
-            </p>
-            <table className="classes">
-              <thead>
-                <tr><th>class</th><th>bytes</th><th>est. $/mo (list, US)</th></tr>
-              </thead>
-              <tbody>
-                {Object.entries(mix)
-                  .sort((a, b) => b[1] - a[1])
-                  .map(([c, b]) => (
-                    <tr key={c}>
-                      <td>
-                        <Tooltip cell content={<>${CLASS_PRICE_US[c] ?? 0.02}/GiB·mo · {((100 * b) / total).toFixed(1)}% of these bytes</>}>
-                          <span className="dotted">{CLASS_NAMES[c] ?? c}</span>
-                        </Tooltip>
-                      </td>
-                      <td>{fmtBytes(b)}</td>
-                      <td>${Math.round((b / 1024 ** 3) * (CLASS_PRICE_US[c] ?? 0.02)).toLocaleString()}</td>
-                    </tr>
-                  ))}
-              </tbody>
-            </table>
-          </section>
+          <div className="page-facts">
+            {meta && store.prices && node && <ClassStrip mix={classMix(node)} scope={scope} />}
+            {hasAttr && mapTree && <OwnershipFact tree={mapTree} />}
+          </div>
         )
       })()}
-
-      {/* Static attribution reference — how ownership is inferred + the rule tables.
-          Reference material, so it sits last rather than sandwiched mid-page. */}
-      {blindShown(!!fq) && hasAttr && mapTree && <AttributionRules tree={mapTree} />}
 
       <SiteKbd
         placeholder={store.owners ? 'Users, color modes, scans, pages…' : 'Color modes, scans, pages, actions…'}
