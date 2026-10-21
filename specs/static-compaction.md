@@ -22,6 +22,12 @@ Before: `compact_level` L (every 2^L scans past the base; `none` = unbounded cas
 
 Which rule fired and why: `add`'s log line and JSON summary (`compact.why`); the generation's `compaction.json` (`{"level": L}` exactly as before under a level, else `{"level": null, "rule": "every:7d", "why": …}`); the staged merge stage's log (`merge: level L is due: …` as before, else `merge: compaction due under <policy> (<why>): …`) and `Runner.compaction` (the reason, for the job's record; wiring it into `/scans` is `scan-run`'s, not done here). The merge jobs get the carry bound (`carry -L <Policy.carry_level>`: `none` under `every` / `geometric`).
 
+## Built so far
+
+- Phase 1 (policy): above.
+- Phase 2a: the shared orchestrator (`append_runner.compact_store` + `Compactor`; `next_gen`, `current`/`set_current`, `chain`, `resolve_gen`, `carry_markers`, `prune_predecessors`, `compaction_doc`, `r2_publish_gen`, lifted from `interval_compact` / `interval_local.compact`, which now delegate: the interval store's tests pass unchanged), the static fold (`static_compact.fold_gen`), `static-names add` compacting when due (`-C`, `-K`, following `successor.json`), `static-names compact`, `build -r ranges.json` (the reference), `store-gc` keeping forwarding records. `test_static_compact.py`: every flavor, md5-equal to the rebuild.
+- Phase 2b (the Batch `compact` stage in both runners) and phase 3 (`read_from`): below, once built.
+
 ## Builder read source (`read_from: gcs | r2`, both stores)
 
 Both copies stay. A profile option (env override; CLI `--read-from`) picks which copy the builder reads earlier runs / the base from during `add`, merges and compaction. Writes still go to both (GCS, then the R2 copy). Each stage logs its read bytes and seconds per source, so a week of each gives real timings before deciding on one copy (gcs estimate: R2-only adds ~20 min to the pipeline). Default `gcs` (today's behavior).

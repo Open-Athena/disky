@@ -278,7 +278,10 @@ def add_cmd(compact, gen, grace_s, compact_now, jobs, layouts, mem, prune_dry_ru
     prefix = f"{PREFIX}/{gen}"
     with workdir(work) as w:
         gen_dir = w / "store" / prefix
+        t0 = monotonic()
         before = mirror(store, prefix, gen_dir, keep=lambda rel: not rel.startswith(UNREAD))
+        reads = {"source": store.root, "bytes": sum(n for k, n in before.items() if not k[len(prefix) + 1:].startswith(UNREAD)),
+                 "s": round(monotonic() - t0, 1)}
         if f"{prefix}/scans.json" not in before:
             raise SystemExit(f"{store.root}/{prefix}/scans.json: no such generation")
         base = json.loads((gen_dir / "scans.json").read_text())
@@ -314,48 +317,13 @@ def add_cmd(compact, gen, grace_s, compact_now, jobs, layouts, mem, prune_dry_ru
             ar.rm_local(gen_dir, prune["keys"])  # the mirror too: a later `add` over this work dir must not upload them again
         # Compaction runs whatever was pending: an interrupted one is redone by the next `add`.
         compacted = None
-        why = None if no_merge else forced(gen_dir) if compact_now else ic.due(gen_dir, compact)
+        why = None if no_merge else ar.forced(gen_dir) if compact_now else ar.due_in(gen_dir, compact)
         if why is not None:
-            err(f"compact {gen}: due under {compact} ({why})")
-            compacted = compact_store(store, gen, gen_dir, w, policy=compact, why=why, rg_rows=rg_rows, threads=threads, mem=mem, jobs=jobs)
+            compacted = ar.compact_store(store, ic.compactor(rg_rows), gen, gen_dir, w, policy=compact, why=why, threads=threads, mem=mem, jobs=jobs,
+                                         reads=reads)
         preds = ic.prune_predecessors(store, gen, now=sl.now(), grace_s=grace_s, dry_run=prune_dry_run)
     print(json.dumps({"gen": gen, "after": have[-1], "added": added, "merge": merged, "files": len(uploaded),
                       "prune": {k_: v for k_, v in prune.items() if k_ != "keys"}, "compact": compacted, "predecessors": preds}, indent=1))
-
-
-def forced(gen_dir: Path) -> str | None:
-    """`-K`'s reason: a forced compaction, when the generation in `gen_dir` has runs to fold (else None: nothing to do)."""
-    keys = sorted(p.relative_to(gen_dir).as_posix() for p in (gen_dir / "manifests").glob("*.json")) if (gen_dir / "manifests").is_dir() else []
-    newest = latest_key(keys)
-    return "forced (-K)" if newest is not None and json.loads((gen_dir / newest).read_text())["runs"] else None
-
-
-def compact_store(store: Store, gen: str, gen_dir: Path, work: Path, *, policy: ar.Policy, why: str, rg_rows: int, threads: int, mem: str,
-                  jobs: int = 1) -> dict:
-    """Generation `gen` (published, mirrored in `gen_dir`) folded into the next one (`interval_compact.compact_gen`) and
-    published: its files (an earlier, unpublished attempt's keys replaced; data first, `scans.json` last), then
-    `successor.json` in `gen`, then `CURRENT.json` when it named `gen` (or nothing)."""
-    new = ic.next_gen(gen)
-    new_prefix = f"{PREFIX}/{new}"
-    if stale := store.listing(new_prefix):
-        # Not yet recorded as `gen`'s successor (`resolve_gen` would have followed it): an interrupted compaction's.
-        err(f"compact {gen}: {len(stale)} objects of an unpublished {new}: replaced")
-        store.delete(sorted(stale))
-    out = work / "store" / new_prefix
-    t0, disk = monotonic(), DiskPeak(work)
-    summary = ic.compact_gen(gen_dir, out, work, gen=gen, new_gen=new, level=policy.carry_level, rg_rows=rg_rows, threads=threads, mem=mem, jobs=jobs,
-                             rule=ic.compaction_doc(policy, why))
-    summary["why"] = why
-    summary["files"] = len(upload_new(store, out, new_prefix, {}, publish_order))
-    summary["s"] = round(monotonic() - t0, 1)
-    summary["peak"] = {"disk_gb": disk.close(), "rss_gb": rss_peak_gb()}
-    err(f"compact {gen} → {new}: {summary['files']} files in {summary['s']}s (work disk peak {summary['peak']['disk_gb']} GiB, "
-        f"RSS peak {summary['peak']['rss_gb']} GiB)")
-    store.write_text(f"{PREFIX}/{gen}/{ic.SUCCESSOR}", json.dumps({"gen": new}) + "\n")
-    summary["current"] = ic.current(store) in (None, gen)
-    if summary["current"]:
-        ic.set_current(store, new)
-    return summary
 
 
 @command("current")

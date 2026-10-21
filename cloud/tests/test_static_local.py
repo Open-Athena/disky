@@ -394,7 +394,7 @@ def test_add_with_nothing_pending_is_a_nop(appended):
     # the carry's revision is the newest manifest; the ones it and `b`'s superseded seconds ago are in the grace: nothing pruned
     prune = {"manifest": f"manifests/{b}.m001.json", "grace": [f"manifests/{a}.json", f"manifests/{b}.json"], "runs": [], "objects": 0,
              "bytes": 0, "deleted": 0}
-    assert out == {"gen": "g", "after": b, "added": [], "merge": None, "files": 0, "prune": prune}
+    assert out == {"gen": "g", "after": b, "added": [], "merge": None, "files": 0, "prune": prune, "compact": None}
     assert _files(appended["gen"]) == before
 
 

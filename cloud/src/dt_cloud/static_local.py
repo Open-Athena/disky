@@ -50,7 +50,10 @@ from . import static_catalog as sc
 from . import static_drill as sd
 from . import static_names as sn
 from . import static_roots as sr
-from .append_runner import COMPACT_LEVEL, GRACE_S, MIN_GRACE_S, LocalRunStore, latest_key, prune_folded, rm_local, run_key, scans_of
+from .append_runner import (
+    COMPACT_LEVEL, GRACE_S, MIN_GRACE_S, POLICY_HELP, LocalRunStore, PolicyType, compact_store, due_in, forced, latest_key, prune_folded,
+    resolve_gen, rm_local, run_key, scans_of,
+)
 from .blobstore import Store, mirror
 from .blobstore import upload_new as _upload_new
 from .hex_runs import parse_rule, rule_json
@@ -200,10 +203,11 @@ def find_scans(root: str, layouts: list[str], local: Path, *, start: str | None 
 
 def build_gen(scans: dict, mount: str, gen_dir: Path, work: Path, *, gen: str, rule, k: int = RANGES, shard_rows: int = SHARD_ROWS,
               max_rows: int = MAX_ROWS, R: int = R_ROWS, K: int = K_KEPT, floor: int = FLOOR, chunk_rows: int = CHUNK_ROWS, threads: int = 4,
-              mem: str = "4GB", with_anchors: bool = True) -> dict:
+              mem: str = "4GB", with_anchors: bool = True, ranges: dict | None = None) -> dict:
     """A base generation over `scans` (`scans.json`'s doc; their files under `mount`) in `gen_dir`, every stage in turn:
     ranges → coalesced versions → suffix map → shards → sidecar → census → members → cells → short literals → catalog
-    → drill → anchored search (`with_anchors`: `names/` + `anchors/`). Returns a summary (rows, files, and per stage its
+    → drill → anchored search (`with_anchors`: `names/` + `anchors/`). `ranges`: these key ranges (a `ranges.json`)
+    instead of planning `k` (a compaction's reference: the rebuild over its base's ranges). Returns a summary (rows, files, and per stage its
     seconds, peak work-disk GiB and peak RSS GiB so far)."""
     t0, times, peaks = monotonic(), {}, {}
     gen_dir.mkdir(parents=True, exist_ok=True)
@@ -230,7 +234,7 @@ def build_gen(scans: dict, mount: str, gen_dir: Path, work: Path, *, gen: str, r
     doc = {**{k_: v for k_, v in scans.items() if k_ != "mount"}, **rule_json(rule)}
     (gen_dir / "scans.json").write_text(json.dumps(doc, indent=1) + "\n")
     t = monotonic()
-    ranges = sn.plan_ranges(doc, k, mount)
+    ranges = ranges or sn.plan_ranges(doc, k, mount)
     (gen_dir / "ranges.json").write_text(json.dumps(ranges, indent=1) + "\n")
     names = [f"r{r['i']:04d}" for r in ranges["ranges"]]
     for r in ranges["ranges"]:
@@ -278,7 +282,7 @@ def build_gen(scans: dict, mount: str, gen_dir: Path, work: Path, *, gen: str, r
         anchors = build_base_anchors(con, gen_dir, R=R, K=K, scans=[s["id"] for s in doc["scans"]], rule=rule)
         done("anchors", t)
     disk.close()
-    return {"gen": gen, "scans": len(doc["scans"]), "ranges": k, "suffix_rows": int(sum(side.column("rows").to_pylist())),
+    return {"gen": gen, "scans": len(doc["scans"]), "ranges": ranges["k"], "suffix_rows": int(sum(side.column("rows").to_pylist())),
             "shards": len(shard_names), "members": members["members"], "cells_rows": meta["cells_rows"], "drill": drill,
             "anchors": anchors, "s": round(monotonic() - t0, 1), "stages": times, "steps": steps, "peaks": peaks}
 
@@ -342,6 +346,66 @@ def measure_rollups(con, roots: str, *, floor: int, R: int, K: int, dirs_into: s
     return {"measure_s": t1 - t, "rollup_s": monotonic() - t1}
 
 
+def plan_groups(con, counts: list[tuple[str, int]], chunk_rows: int) -> int:
+    """Table `qg (lo, grp)`: `q` ranges of about `chunk_rows` roots over `counts` `(q, rows)` (`q_bounds`); their count."""
+    bounds = q_bounds(counts, chunk_rows)
+    con.execute("CREATE OR REPLACE TABLE qg (lo VARCHAR, grp INTEGER)")
+    sd.insert_rows(con, "qg", [(lo, g) for g, lo in enumerate(bounds)])
+    return len(bounds)
+
+
+def measure_ranges(con, work: Path, kind: str, n: int, dirs_into: str, rup_into: str, *, floor: int, R: int, K: int) -> tuple[str, dict]:
+    """Measure and roll up each of `kind`'s spilled `q` ranges (`work/<kind>/*/grp=<g>/`) into tables `dirs_into` and
+    `rup_into`; the query of all its roots."""
+    doc = {"groups": 0, "measure_s": 0.0, "rollup_s": 0.0}
+    for tb, cols in ((dirs_into, "q VARCHAR, k INTEGER, dir VARCHAR, rows BIGINT"), (rup_into, sd.ROLLUP_COLS)):
+        con.execute(f"CREATE OR REPLACE TABLE {tb} ({cols})")
+    for g in range(n):
+        files = sorted((work / kind).glob(f"*/grp={g}/*.parquet"))
+        if not files:
+            continue
+        con.execute(f"CREATE OR REPLACE TABLE qg_roots AS {read_roots(files)}")
+        m = measure_rollups(con, "qg_roots", floor=floor, R=R, K=K, dirs_into=dirs_into, rup_into=rup_into)
+        doc = {"groups": doc["groups"] + 1, **{k: doc[k] + m[k] for k in m}}
+    con.execute("DROP TABLE IF EXISTS qg_roots")
+    files = sorted((work / kind).glob("*/grp=*/*.parquet"))
+    return (read_roots(files) if files else f"SELECT * FROM (SELECT NULL::VARCHAR AS q, NULL::UTINYINT AS depth, NULL::VARCHAR AS path, "
+            "NULL::VARCHAR AS usr, NULL::BIGINT AS vf, NULL::BIGINT AS vt, NULL::BIGINT AS size, NULL::BIGINT AS n_files) WHERE false"), doc
+
+
+def finish_drill(con, gen_dir: Path, work: Path, *, aliases, long_groups: int, short_groups: int, R: int, K: int, floor: int,
+                 step=_nop_step, t: float | None = None) -> dict:
+    """A base drill's second half, from roots already spilled under `work/{long,short}/*/grp=<g>/` (canonical members'
+    long roots; short literals' roots) by `q` range (`long_groups`, `short_groups` ranges) and the member classes (table
+    `al (q, canonical)`, and `aliases` as Arrow): each range measured and rolled up, `roots-measure/{dirs,short/dirs}/`
+    (an alias gets its canonical's directories), then `drill/` (`static_drill.build_drill`). What `build_base_drill`
+    and a compaction's fold (`static_compact`) share. Returns the drill's `meta.json` and the groups measured."""
+    t = monotonic() if t is None else t
+    lcan, lm = measure_ranges(con, work, "long", long_groups, "ldirs", "lrup", floor=floor, R=R, K=K)
+    end = monotonic()
+    step("drill/measure/long", end - lm["measure_s"] - lm["rollup_s"], groups=lm["groups"], dirs=count(con, "ldirs"))
+    t = step("drill/rollup/long", end - lm["rollup_s"], rup=count(con, "lrup"))
+    sall, m = measure_ranges(con, work, "short", short_groups, "sdirs", "srup", floor=floor, R=R, K=K)
+    end = monotonic()
+    step("drill/measure/short", end - m["measure_s"] - m["rollup_s"], groups=m["groups"], dirs=count(con, "sdirs"))
+    t = step("drill/rollup/short", end - m["rollup_s"], rup=count(con, "srup"))
+    meas = gen_dir / "roots-measure"
+    # every long member's (as `roots measure` measures them): an alias's roots, so its directories, are its canonical's
+    for sub, sql in (("dirs", "SELECT al.q, d.k, d.dir, d.rows FROM ldirs d JOIN al ON al.canonical = d.q"), ("short/dirs", "SELECT * FROM sdirs")):
+        (meas / sub).mkdir(parents=True, exist_ok=True)
+        pq.write_table(con.execute(f"SELECT * FROM ({sql}) ORDER BY q, k, dir").to_arrow_table(), meas / sub / "s0000.parquet", compression=sn.CODEC)
+    t = step("drill/write/measure", t)
+    con.execute(f"CREATE OR REPLACE VIEW lcan AS {lcan}")
+    con.execute(f"CREATE OR REPLACE VIEW sall AS {sall}")
+    meta = sd.build_drill(con, gen_dir / "drill", long_roots="lcan", short_roots="sall", aliases=aliases, R=R, K=K,
+                          meta={"floor": floor}, rollups={"long": "lrup", "short": "srup"}, step=step)
+    con.execute("DROP VIEW lcan; DROP VIEW sall")
+    for tb in ("dmem", "dg", "dgq", "al", "canon", "qg", "ldirs", "sdirs", "lrup", "srup", "mem"):
+        con.execute(f"DROP TABLE IF EXISTS {tb}")
+    shutil.rmtree(work)
+    return {"meta": meta, "groups": {"long": lm["groups"], "short": m["groups"]}}
+
+
 def build_base_drill(con, gen_dir: Path, work: Path, *, R: int, K: int, floor: int, rule, chunk_rows: int = CHUNK_ROWS,
                      step=_nop_step) -> dict:
     """The base generation's `drill/` (`static_drill.build_drill`: every member's roots and rollups, in the layout the runs'
@@ -378,29 +442,6 @@ def build_base_drill(con, gen_dir: Path, work: Path, *, R: int, K: int, floor: i
                 if each:
                     each(k)
 
-    def plan_groups(counts: list[tuple[str, int]]) -> int:
-        bounds = q_bounds(counts, chunk_rows)
-        con.execute("CREATE OR REPLACE TABLE qg (lo VARCHAR, grp INTEGER)")
-        sd.insert_rows(con, "qg", [(lo, g) for g, lo in enumerate(bounds)])
-        return len(bounds)
-
-    def ranges(kind: str, n: int, dirs_into: str, rup_into: str) -> tuple[str, dict]:
-        """Measure and roll up each of `kind`'s spilled `q` ranges; the query of all its roots."""
-        doc = {"groups": 0, "measure_s": 0.0, "rollup_s": 0.0}
-        for tb, cols in ((dirs_into, "q VARCHAR, k INTEGER, dir VARCHAR, rows BIGINT"), (rup_into, sd.ROLLUP_COLS)):
-            con.execute(f"CREATE OR REPLACE TABLE {tb} ({cols})")
-        for g in range(n):
-            files = sorted((work / kind).glob(f"*/grp={g}/*.parquet"))
-            if not files:
-                continue
-            con.execute(f"CREATE OR REPLACE TABLE qg_roots AS {read_roots(files)}")
-            m = measure_rollups(con, "qg_roots", floor=floor, R=R, K=K, dirs_into=dirs_into, rup_into=rup_into)
-            doc = {"groups": doc["groups"] + 1, **{k: doc[k] + m[k] for k in m}}
-        con.execute("DROP TABLE IF EXISTS qg_roots")
-        files = sorted((work / kind).glob("*/grp=*/*.parquet"))
-        return (read_roots(files) if files else f"SELECT * FROM (SELECT NULL::VARCHAR AS q, NULL::UTINYINT AS depth, NULL::VARCHAR AS path, "
-                "NULL::VARCHAR AS usr, NULL::BIGINT AS vf, NULL::BIGINT AS vt, NULL::BIGINT AS size, NULL::BIGINT AS n_files) WHERE false"), doc
-
     con.execute(f"DROP TABLE IF EXISTS dg; CREATE TABLE dg ({sr.DIGEST_COLS})")
     for i in chunks:
         con.execute(f"CREATE OR REPLACE TABLE mem AS SELECT q FROM dmem WHERE shard = {i}")
@@ -414,7 +455,7 @@ def build_base_drill(con, gen_dir: Path, work: Path, *, R: int, K: int, floor: i
         raise RuntimeError(f"{missing} members without a root-set digest")
     aliases = con.execute("SELECT q, canonical FROM al ORDER BY q").to_arrow_table()
     con.execute("CREATE OR REPLACE TABLE canon AS SELECT DISTINCT canonical AS q FROM al")
-    groups = plan_groups(con.execute("SELECT q, n FROM dgq SEMI JOIN canon USING (q) WHERE n > 0 ORDER BY q").fetchall())
+    groups = plan_groups(con, con.execute("SELECT q, n FROM dgq SEMI JOIN canon USING (q) WHERE n > 0 ORDER BY q").fetchall(), chunk_rows)
     t = step("drill/aliases", t, members=aliases.num_rows, canonical=count(con, "canon"))
     n_long = 0
     for i in chunks:  # each shard's canonical members' roots, chunk by chunk, spilled by q range
@@ -429,10 +470,7 @@ def build_base_drill(con, gen_dir: Path, work: Path, *, R: int, K: int, floor: i
         member_loop(i, "rt", False, spill)
     con.execute("DROP TABLE IF EXISTS rt")
     t = step("drill/canonical-roots", t, lcan=n_long, groups=groups)
-    lcan, lm = ranges("long", groups, "ldirs", "lrup")
-    end = monotonic()
-    step("drill/measure/long", end - lm["measure_s"] - lm["rollup_s"], groups=lm["groups"], dirs=count(con, "ldirs"))
-    t = step("drill/rollup/long", end - lm["rollup_s"], rup=count(con, "lrup"))
+    long_groups = groups
     cis = sorted((gen_dir / "cintervals").glob("*.parquet"))
     con.execute(f"DROP TABLE IF EXISTS sc; CREATE TABLE sc (f INTEGER, {sr.COUNT_COLS})")
     for f, ci in enumerate(cis):  # a counting pass: the q ranges and each file's pieces
@@ -440,7 +478,7 @@ def build_base_drill(con, gen_dir: Path, work: Path, *, R: int, K: int, floor: i
         sr.short_roots(con, f"SELECT * FROM read_parquet({q(str(ci))})", "scf", agg="count", rule=rule)
         con.execute(f"INSERT INTO sc SELECT {f}, q, n FROM scf")
     con.execute("DROP TABLE IF EXISTS scf")
-    groups = plan_groups(con.execute("SELECT q, sum(n)::BIGINT FROM sc GROUP BY q ORDER BY q").fetchall())
+    groups = plan_groups(con, con.execute("SELECT q, sum(n)::BIGINT FROM sc GROUP BY q ORDER BY q").fetchall(), chunk_rows)
     per_file = dict(con.execute("SELECT f, sum(n)::BIGINT FROM sc GROUP BY f").fetchall())
     n_short = pieces = 0
     for f, ci in enumerate(cis):
@@ -454,26 +492,9 @@ def build_base_drill(con, gen_dir: Path, work: Path, *, R: int, K: int, floor: i
             pieces += 1
     con.execute("DROP TABLE IF EXISTS rt; DROP TABLE IF EXISTS sc")
     t = step("drill/short-roots", t, sall=n_short, pieces=pieces, groups=groups)
-    sall, m = ranges("short", groups, "sdirs", "srup")
-    end = monotonic()
-    step("drill/measure/short", end - m["measure_s"] - m["rollup_s"], groups=m["groups"], dirs=count(con, "sdirs"))
-    t = step("drill/rollup/short", end - m["rollup_s"], rup=count(con, "srup"))
-    meas = gen_dir / "roots-measure"
-    # every long member's (as `roots measure` measures them): an alias's roots, so its directories, are its canonical's
-    for sub, sql in (("dirs", "SELECT al.q, d.k, d.dir, d.rows FROM ldirs d JOIN al ON al.canonical = d.q"), ("short/dirs", "SELECT * FROM sdirs")):
-        (meas / sub).mkdir(parents=True, exist_ok=True)
-        pq.write_table(con.execute(f"SELECT * FROM ({sql}) ORDER BY q, k, dir").to_arrow_table(), meas / sub / "s0000.parquet", compression=sn.CODEC)
-    t = step("drill/write/measure", t)
-    con.execute(f"CREATE OR REPLACE VIEW lcan AS {lcan}")
-    con.execute(f"CREATE OR REPLACE VIEW sall AS {sall}")
-    meta = sd.build_drill(con, gen_dir / "drill", long_roots="lcan", short_roots="sall", aliases=aliases, R=R, K=K,
-                          meta={"floor": floor}, rollups={"long": "lrup", "short": "srup"}, step=step)
-    con.execute("DROP VIEW lcan; DROP VIEW sall")
-    for tb in ("dmem", "dg", "dgq", "al", "canon", "qg", "ldirs", "sdirs", "lrup", "srup", "mem"):
-        con.execute(f"DROP TABLE IF EXISTS {tb}")
-    shutil.rmtree(work)
-    return {"members": aliases.num_rows, "canonical": len(set(aliases.column("canonical").to_pylist())), **{k: meta[k] for k in ("R", "K")},
-            "chunks": sum(map(len, chunks.values())), "pieces": pieces, "groups": {"long": lm["groups"], "short": m["groups"]}}
+    done = finish_drill(con, gen_dir, work, aliases=aliases, long_groups=long_groups, short_groups=groups, R=R, K=K, floor=floor, step=step, t=t)
+    return {"members": aliases.num_rows, "canonical": len(set(aliases.column("canonical").to_pylist())), **{k: done["meta"][k] for k in ("R", "K")},
+            "chunks": sum(map(len, chunks.values())), "pieces": pieces, "groups": done["groups"]}
 
 
 def count(con, table: str) -> int:
@@ -628,13 +649,15 @@ def _check_gen(gen: str) -> None:
 @option("-n", "--shard-rows", default=SHARD_ROWS, type=IntRange(min=1), help="Suffix rows per shard file")
 @option("-o", "--out", "store_root", required=True, help="The store: a dir or URL (`r2://bucket[/prefix]`, `s3://…`), the readers' INDEX_R2 root")
 @option("-p", "--threads", default=4, type=IntRange(min=1), help="DuckDB threads")
+@option("-r", "--ranges-file", help="Key ranges from this `ranges.json` instead of planning -k (e.g. a compacted generation's: the rebuild it must equal)")
 @option("-R", "--read-rows", "R", default=R_ROWS, type=IntRange(min=1), help="The drill's and the anchors' heavy bound: more root rows under a directory")
 @option("-s", "--scans", "scans_root", required=True, help="Where the scans are: a dir or URL, the root of -L's keys")
 @option("-t", "--through", help="Last scan id (inclusive; default: the newest)")
 @option("-V", "--max-rows", default=MAX_ROWS, type=IntRange(min=1), help="The catalog's membership bound V (range rows)")
 @option("-w", "--work", help="Local work dir (default: a temporary one, removed after)")
 @option("-x", "--hex-runs", required=True, help="The hex-run rule the generation is built with: `MIN,TAIL` (e.g. `16,8`) or `off`")
-def build_cmd(no_anchors, chunk_rows, floor, gen, k, K, layouts, mem, shard_rows, store_root, threads, R, scans_root, through, max_rows, work, hex_runs) -> None:
+def build_cmd(no_anchors, chunk_rows, floor, gen, k, K, layouts, mem, shard_rows, store_root, threads, ranges_file, R, scans_root, through, max_rows, work,
+              hex_runs) -> None:
     """Build a base generation of the static name index on this machine, every stage in-process: the staged (Batch)
     path's stages over a local work dir, then the generation copied into the store (data files first, `meta.json`s last).
     Anchored search (`names/`, `anchors/`) is built unless `-A`. Prints a JSON summary."""
@@ -652,36 +675,47 @@ def build_cmd(no_anchors, chunk_rows, floor, gen, k, K, layouts, mem, shard_rows
         if gen_dir.exists():
             shutil.rmtree(gen_dir)
         summary = build_gen(scans, scans["mount"], gen_dir, w / "build", gen=gen, rule=rule, k=k, shard_rows=shard_rows, max_rows=max_rows,
-                            R=R, K=K, floor=floor, chunk_rows=chunk_rows, threads=threads, mem=mem, with_anchors=not no_anchors)
+                            R=R, K=K, floor=floor, chunk_rows=chunk_rows, threads=threads, mem=mem, with_anchors=not no_anchors,
+                            ranges=json.loads(Path(ranges_file).read_text()) if ranges_file else None)
         summary["files"] = len(upload_new(store, gen_dir, prefix, {}))
     print(json.dumps(summary, indent=1))
 
 
 @command("add")
-@option("-C", "--compact-level", default=COMPACT_LEVEL, type=IntRange(min=1), help="The binary counter's compaction level (carries stop below it)")
-@option("-g", "--gen", required=True, help="The base generation (`<store>/static-names/GEN/`)")
+@option("-c", "--chunk-rows", default=CHUNK_ROWS, type=IntRange(min=1), help="A compaction's drill chunks: roots per measurement / rollup q range")
+@option("-C", "--compact", "--compact-level", "compact", type=PolicyType(), default=str(COMPACT_LEVEL), envvar="STATIC_NAMES_COMPACT", show_envvar=True, help=POLICY_HELP)
+@option("-g", "--gen", required=True, help="The base generation (`<store>/static-names/GEN/`); one compacted into a newer one is followed to it")
 @option("-G", "--grace-s", default=GRACE_S, type=IntRange(min=MIN_GRACE_S), help=f"Keep a superseded manifest's runs this many seconds (default {GRACE_S}, at least {MIN_GRACE_S})")
+@option("-K", "--compact-now", is_flag=True, help="Compact into a new generation now (when the generation has runs), whatever the policy says")
 @option("-L", "--layout", "layouts", multiple=True, required=True, help="Key template of the scans' `path` sorts under -s; repeat")
 @option("-M", "--mem", default="4GB", help="DuckDB memory limit")
 @option("-n", "--prune-dry-run", is_flag=True, help="Report the folded runs the prune would delete from the store; delete nothing")
-@option("-N", "--no-merge", is_flag=True, help="Skip the due carries (a later `add` merges them)")
+@option("-N", "--no-merge", is_flag=True, help="Skip the due carries and compaction (a later `add` makes them)")
 @option("-o", "--out", "store_root", required=True, help="The store: a dir or URL, the readers' INDEX_R2 root")
 @option("-p", "--threads", default=4, type=IntRange(min=1), help="DuckDB threads")
 @option("-s", "--scans", "scans_root", required=True, help="Where the scans are: a dir or URL, the root of -L's keys")
 @option("-t", "--through", help="Last scan id to append (inclusive; default: the newest)")
 @option("-w", "--work", help="Local work dir (default: a temporary one, removed after); a URL store's generation is mirrored into it")
-def add_cmd(compact_level, gen, grace_s, layouts, mem, prune_dry_run, no_merge, store_root, threads, scans_root, through, work) -> None:
+def add_cmd(chunk_rows, compact, gen, grace_s, compact_now, layouts, mem, prune_dry_run, no_merge, store_root, threads, scans_root, through, work) -> None:
     """Append every scan after the generation's newest (base + runs), oldest first, each as a run published by its
     manifest; then the binary counter's due carries. The generation's files are never rewritten; new ones go to the store
     data first, `meta.json`s next, manifests last. Then, the publish done, the runs a carry folded are deleted from the
     store, kept while a manifest superseded less than `-G` s ago lists them (`append_runner.prune_folded`; a folded run's `cdelta/` and `scans.json` stay: later
-    appends refold them). Prints a JSON summary."""
+    appends refold them). When the compaction policy (`-C`) fires or `-K` forces it, the base and every run fold into a new
+    generation (`static_compact`: `<gen>.c<NNN>`, a rebuild's bytes), published, then pointed to (`successor.json`, and
+    `static-names/CURRENT.json` when it named this generation or nothing); the old generation stays (`store-gc -k`).
+    Prints a JSON summary."""
+    from .static_compact import compactor
+
     _check_gen(gen)
     store = Store(store_root)
+    gen = resolve_gen(store, PREFIX, gen)
     prefix = f"{PREFIX}/{gen}"
     with workdir(work) as w:
         gen_dir = w / "store" / prefix
+        t0 = monotonic()
         before = mirror(store, prefix, gen_dir)
+        reads = {"source": store.root, "bytes": sum(before.values()), "s": round(monotonic() - t0, 1)}
         if f"{prefix}/scans.json" not in before:
             raise SystemExit(f"{store.root}/{prefix}/scans.json: no such generation")
         base = json.loads((gen_dir / "scans.json").read_text())
@@ -694,12 +728,16 @@ def add_cmd(compact_level, gen, grace_s, layouts, mem, prune_dry_run, no_merge, 
         scans = find_scans(scans_root, list(layouts), w / "scans", start=have[-1], through=through)
         pending = [s for s in scans["scans"] if s["id"] > have[-1]]
         con = sn.connect(threads, mem, w / "duckdb")
-        added = [append_scan(con, gen_dir, s, scans["mount"], w, gen=gen, rule=rule, threads=threads, mem=mem, compact_level=compact_level)
+        added = [append_scan(con, gen_dir, s, scans["mount"], w, gen=gen, rule=rule, threads=threads, mem=mem, compact_level=compact.carry_level)
                  for s in pending]
-        merged = None if no_merge or not pending else merge_due(gen_dir, w, gen=gen, rule=rule, compact_level=compact_level)
+        merged = None if no_merge or not pending else merge_due(gen_dir, w, gen=gen, rule=rule, compact_level=compact.carry_level)
         uploaded = upload_new(store, gen_dir, prefix, before)
         prune = prune_folded(GenStore(store, prefix), now=now(), grace_s=grace_s, retain=FOLDED_RETAIN, dry_run=prune_dry_run, log=err)
         if not prune_dry_run:
             rm_local(gen_dir, prune["keys"])  # the mirror too: a later `add` over this work dir must not upload them again
+        compacted = None
+        why = None if no_merge else forced(gen_dir) if compact_now else due_in(gen_dir, compact)
+        if why is not None:
+            compacted = compact_store(store, compactor(chunk_rows), gen, gen_dir, w, policy=compact, why=why, threads=threads, mem=mem, reads=reads)
     print(json.dumps({"gen": gen, "after": have[-1], "added": added, "merge": merged, "files": len(uploaded),
-                      "prune": {k: v for k, v in prune.items() if k != "keys"}}, indent=1))
+                      "prune": {k: v for k, v in prune.items() if k != "keys"}, "compact": compacted}, indent=1))

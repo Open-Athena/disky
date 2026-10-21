@@ -41,7 +41,7 @@ import socket
 import sys
 import threading
 import time
-from collections.abc import Callable, Collection
+from collections.abc import Callable, Collection, Iterable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -1469,3 +1469,267 @@ def exit_on(label_: str, fn: Callable[[], Any], log: Callable[[str], None]) -> A
     except RuntimeError as e:
         log(f"{label_}: {e}")
         sys.exit(1)
+
+
+# ── Compaction: a generation folded into a new one (both stores, both paths) ──
+#
+# A store-specific `Compactor.fold` writes the new generation's files (what a fresh build over the same scans writes);
+# everything around it is shared: the policy (`compaction_why`), the lineage's names (`next_gen`), an unpublished
+# attempt cleared, the upload (data in the store's publish order, `compaction.json` last), `successor.json` in the old
+# generation, the store's `<prefix>/CURRENT.json`, the R2 copy with its pointer last, `resolve_gen` following successors,
+# the predecessor's grace (`prune_predecessors`, its parity markers carried first), and the instrumentation.
+
+#: The store's current generation: `<prefix>/CURRENT.json` = `{"gen": …}` (what unpinned readers serve, `add` appends to).
+CURRENT = "CURRENT.json"
+#: In a compacted generation: `{"gen": <its successor>}`; kept when the rest of it is pruned (the forwarding record).
+SUCCESSOR = "successor.json"
+#: In a generation a compaction wrote, uploaded last (its completion marker): `{from, manifest, runs, base_scans, scans,
+#: level[, rule, why]}`, and with `Compactor.md5s` each file's md5.
+COMPACTION = "compaction.json"
+GEN_SUFFIX = re.compile(r"(?P<root>.+)\.c(?P<n>\d{3,})")
+
+
+def next_gen(gen: str) -> str:
+    """The generation a compaction of `gen` writes: `<root>.c<NNN>`, NNN one past `gen`'s (`.c001` for a root)."""
+    m = GEN_SUFFIX.fullmatch(gen)
+    root, n = (m["root"], int(m["n"])) if m else (gen, 0)
+    return f"{root}.c{n + 1:03d}"
+
+
+def current(store, prefix: str) -> str | None:
+    """`<prefix>/CURRENT.json`'s generation, or None."""
+    key = f"{prefix}/{CURRENT}"
+    return store.read_json(key)["gen"] if store.exists(key) else None
+
+
+def set_current(store, prefix: str, gen: str) -> None:
+    """`<prefix>/CURRENT.json` → `gen` (one object written whole: readers see the old pointer or the new)."""
+    store.write_text(f"{prefix}/{CURRENT}", json.dumps({"gen": gen}) + "\n")
+
+
+def generations(store, prefix: str, marker: str = "scans.json") -> list[str]:
+    """The store's generations: `<prefix>/<gen>/<marker>` (a whole listing of the prefix)."""
+    return sorted({k.split("/")[1] for k in store.listing(prefix) if k.count("/") == 2 and k.endswith(f"/{marker}")})
+
+
+def chain(store, prefix: str, gen: str) -> list[str]:
+    """`gen`, then each successor a compaction recorded (`successor.json`), to the newest."""
+    out = [gen]
+    while store.exists(f"{prefix}/{out[-1]}/{SUCCESSOR}"):
+        nxt = store.read_json(f"{prefix}/{out[-1]}/{SUCCESSOR}")["gen"]
+        if nxt in out:
+            raise RuntimeError(f"{prefix}: successor cycle {out + [nxt]}")
+        out.append(nxt)
+    return out
+
+
+def resolve(store, prefix: str) -> tuple[str | None, str]:
+    """The generation an unpinned `add` appends to, and how it was found: `CURRENT.json`'s (`"current"`), else the
+    store's only generation (`"sole"`), else `(None, "none")` (or `"ambiguous"`: several, no pointer)."""
+    if (cur := current(store, prefix)) is not None:
+        return cur, "current"
+    gens = generations(store, prefix)
+    if len(gens) == 1:
+        return gens[0], "sole"
+    return None, "ambiguous" if gens else "none"
+
+
+def resolve_gen(store, prefix: str, gen: str | None, log: Callable[[str], None] = err, *, build_hint: str = "build one first") -> str:
+    """The generation `add` appends to: `gen` (else `resolve`'s; the store's sole generation adopted as current), followed
+    to its newest successor. A pointer naming a compacted generation (a compaction stopped between its successor record
+    and the pointer) is moved to the successor."""
+    cur = current(store, prefix)
+    if gen is None:
+        gen, how = resolve(store, prefix)
+        if gen is None:
+            raise SystemExit(f"{store.root}/{prefix}: no current generation ({how}: "
+                             + ("name one with -g" if how == "ambiguous" else build_hint) + ")")
+        if how == "sole":
+            log(f"{store.root}/{prefix}/{CURRENT}: none; adopting the store's only generation {gen}")
+            set_current(store, prefix, gen)
+            cur = gen
+    gens = chain(store, prefix, gen)
+    if len(gens) > 1:
+        log(f"{gen} was compacted into {gens[-1]} ({' → '.join(gens)}): appending there")
+    if cur is not None and cur != gens[-1] and cur in gens:
+        log(f"{store.root}/{prefix}/{CURRENT}: {cur} → {gens[-1]} (its successor)")
+        set_current(store, prefix, gens[-1])
+    return gens[-1]
+
+
+def carry_markers(store, prefix: str, old: str, into: str, files: Iterable[str] | None = None) -> int:
+    """Generation `old`'s parity markers (`verify/<id>.json`: `scan retire`'s gate) copied into `into` (a generation
+    holding the same versions: one `old` was compacted or backfilled into), each unless `into` has one for the scan;
+    returns how many. Before `old` is deleted, so its scans stay vouched for."""
+    pre = f"{prefix}/{old}/verify/"
+    keys = [k for k in (files if files is not None else store.keys(pre)) if k.startswith(pre) and k.endswith(".json") and "/" not in k[len(pre):]]
+    have = set(store.keys(f"{prefix}/{into}/verify/"))
+    n = 0
+    for k in sorted(keys):
+        dst = f"{prefix}/{into}/verify/{k[len(pre):]}"
+        if dst not in have:
+            store.write_bytes(dst, store.read_bytes(k))
+            n += 1
+    return n
+
+
+def prune_predecessors(store, prefix: str, gen: str, *, now: float, grace_s: float = GRACE_S, dry_run: bool = False,
+                       log: Callable[[str], None] = err) -> list[dict]:
+    """Each generation `gen` was compacted from (its `compaction.json`'s `from`, and theirs while unpruned), deleted from
+    `store` once its successor's `compaction.json` is `grace_s` old — but for its `successor.json` — unless the pointer
+    names it. One record per predecessor still holding files: `{gen, objects, bytes, age_s, deleted}`."""
+    # The chain first (a pruned generation's `compaction.json` goes with it), newest first, to the first pruned one.
+    found = []
+    g = gen
+    while store.exists(key := f"{prefix}/{g}/{COMPACTION}"):
+        old = store.read_json(key)["from"]
+        files = {k: n for k, n in store.listing(f"{prefix}/{old}").items() if k != f"{prefix}/{old}/{SUCCESSOR}"}
+        if not files:
+            break
+        found.append((g, old, store.mtimes(f"{prefix}/{g}")[key], files))
+        g = old
+    out = []
+    cur = current(store, prefix)
+    for g, old, mt, files in found:
+        age = now - mt
+        go = age >= grace_s and old != cur
+        rec = {"gen": old, "objects": len(files), "bytes": sum(files.values()), "age_s": round(age), "deleted": 0}
+        if go and not dry_run:
+            rec["markers"] = carry_markers(store, prefix, old, gen, files)
+            rec["deleted"] = store.delete(sorted(files))
+        log(f"prune {old} (compacted into {g} {round(age)}s ago): {len(files)} objects, {rec['bytes']:,} B "
+            + ("deleted" if go and not dry_run else "would be deleted" if go else f"kept (grace {grace_s:.0f}s" + (", current" if old == cur else "") + ")"))
+        out.append(rec)
+    return out
+
+
+def compaction_doc(policy: Policy | int | None, why: str | None) -> dict:
+    """`compaction.json`'s record of the rule: `{"level": L}` under a level that fired (as it always was), else
+    `{"level": <carry level>, "rule": "<policy>", "why": …}` (`why` also names a forced compaction)."""
+    policy = as_policy(policy)
+    if policy.rule == "level" and why is not None and why.startswith("level "):
+        return {"level": policy.level}
+    return {"level": policy.carry_level, "rule": str(policy), "why": why}
+
+
+def newest_runs(gen_dir: Path) -> tuple[str | None, list[dict]]:
+    """The newest manifest of the generation in `gen_dir` (a local dir or a mount) and its runs (`(None, [])`: none)."""
+    keys = sorted(p.relative_to(gen_dir).as_posix() for p in (gen_dir / "manifests").glob("*.json")) if (gen_dir / "manifests").is_dir() else []
+    newest = latest_key(keys)
+    return newest, json.loads((gen_dir / newest).read_text())["runs"] if newest else []
+
+
+def due_in(gen_dir: Path, policy: Policy | int | None, drilled: Collection[str] = frozenset()) -> str | None:
+    """`compaction_why` for the generation in `gen_dir` (its base's scans, its newest manifest's runs)."""
+    _, runs = newest_runs(gen_dir)
+    if not runs:
+        return None
+    base = [s["id"] for s in json.loads((gen_dir / "scans.json").read_text())["scans"]]
+    return compaction_why(runs, policy, drilled, base=base)
+
+
+def forced(gen_dir: Path, why: str = "forced (-K)") -> str | None:
+    """A forced compaction's reason, when the generation in `gen_dir` has runs to fold (else None: nothing to do)."""
+    return why if newest_runs(gen_dir)[1] else None
+
+
+@dataclass(frozen=True)
+class Compactor:
+    """A store's plug into `compact_store`: `fold(gen_dir, out, work, *, gen, new_gen, runs, threads, mem, jobs)` writes
+    the new generation into `out` (every file a fresh build over the same scans writes) and returns a summary;
+    `publish_order` the store's upload order (data, then liveness markers); `last`: the generation-relative files its
+    readers open it by, copied to R2 after the rest, in order (`compaction.json` after them); `prune`: whether
+    predecessors leave the store after the grace (`prune_predecessors`; off: a reader may pin the old generation,
+    `store-gc -k` collects it); `md5s`: `compaction.json` records each file's md5."""
+    prefix: str
+    fold: Callable[..., dict]
+    publish_order: Callable[[list[str]], list[str]]
+    last: tuple[str, ...] = ("scans.json",)
+    prune: bool = True
+    md5s: bool = False
+
+
+def _md5(p: Path) -> str:
+    import hashlib
+
+    h = hashlib.md5()
+    with open(p, "rb") as fh:
+        for b in iter(lambda: fh.read(1 << 20), b""):
+            h.update(b)
+    return h.hexdigest()
+
+
+def compact_store(store, c: Compactor, gen: str, gen_dir: Path, work: Path, *, policy: Policy | int | None, why: str, threads: int = 4,
+                  mem: str = "4GB", jobs: int = 1, r2: Callable[[str, str], dict] | None = None, reads: dict | None = None,
+                  log: Callable[[str], None] = err) -> dict:
+    """Generation `gen` of `store` (a `blobstore.Store`; its files readable in `gen_dir`: a mirror or a mount) folded
+    into the next one (`next_gen`, by `c.fold`) and published: an earlier, unpublished attempt's keys removed; the new
+    generation's files in `c.publish_order`, `compaction.json` last; `successor.json` in `gen`; `CURRENT.json` when it
+    named `gen` (or nothing); then `r2(new, gen)` (the R2 copy, its pointer last), when given. `reads`: what the caller
+    read the generation from (`{source, bytes, s}`), recorded with the summary. Returns a summary (seconds, peak
+    work-disk and RSS GiB)."""
+    from .blobstore import upload_new
+    from .static_local import DiskPeak, rss_peak_gb
+
+    new = next_gen(gen)
+    new_prefix = f"{c.prefix}/{new}"
+    if stale := store.listing(new_prefix):
+        # Not yet recorded as `gen`'s successor (`resolve_gen` would have followed it): an interrupted compaction's.
+        log(f"compact {gen}: {len(stale)} objects of an unpublished {new}: replaced")
+        store.delete(sorted(stale))
+    manifest, runs = newest_runs(gen_dir)
+    if not runs:
+        raise SystemExit(f"{gen}: no runs to compact")
+    base_scans = len(json.loads((gen_dir / "scans.json").read_text())["scans"])
+    out = work / "store" / new_prefix
+    t0, disk = monotonic(), DiskPeak(work)
+    log(f"compact {gen} → {new} under {as_policy(policy)} ({why}): {len(runs)} runs and the base")
+    summary = {"from": gen, "gen": new, **c.fold(gen_dir, out, work, gen=gen, new_gen=new, runs=runs, threads=threads, mem=mem, jobs=jobs)}
+    comp = {"from": gen, "manifest": manifest, "runs": [r["key"] for r in runs], "base_scans": base_scans,
+            "scans": len(json.loads((out / "scans.json").read_text())["scans"]), **compaction_doc(policy, why)}
+    if c.md5s:
+        comp["files"] = {p.relative_to(out).as_posix(): _md5(p) for p in sorted(out.rglob("*")) if p.is_file()}
+    (out / COMPACTION).write_text(json.dumps(comp, indent=1) + "\n")
+    t1 = monotonic()
+
+    def order(keys: list[str]) -> list[str]:
+        return [*c.publish_order([k for k in keys if k != COMPACTION]), *([COMPACTION] if COMPACTION in keys else [])]
+
+    files = upload_new(store, out, new_prefix, {}, order)
+    up_s = round(monotonic() - t1, 1)
+    store.write_text(f"{c.prefix}/{gen}/{SUCCESSOR}", json.dumps({"gen": new}) + "\n")
+    summary.update(runs=comp["runs"], scans=comp["scans"], why=why, files=len(files), upload_s=up_s,
+                   bytes=sum(p.stat().st_size for p in out.rglob("*") if p.is_file()), reads=reads)
+    summary["current"] = current(store, c.prefix) in (None, gen)
+    if summary["current"]:
+        set_current(store, c.prefix, new)
+    if r2 is not None:
+        summary["r2"] = r2(new, gen)
+    summary["s"] = round(monotonic() - t0, 1)
+    summary["peak"] = {"disk_gb": disk.close(), "rss_gb": rss_peak_gb()}
+    log(f"compact {gen} → {new}: {summary['files']} files ({summary['bytes'] / 2**30:.2f} GiB, uploaded in {up_s}s) in {summary['s']}s "
+        f"(work disk peak {summary['peak']['disk_gb']} GiB, RSS peak {summary['peak']['rss_gb']} GiB)")
+    return summary
+
+
+def r2_publish_gen(bucket: str, prefix: str, new: str, old: str, *, last: tuple[str, ...] = ("scans.json",), workers: int = 8,
+                   log: Callable[[str], None] = err) -> dict:
+    """A compacted generation to R2 from GCS (`gs://<bucket>/<prefix>/<new>/`, under the same keys): its files, those its
+    readers open it by (`last`, generation-relative) after the rest and `compaction.json` after them; checked there; then
+    the old generation's `successor.json`; then `<prefix>/CURRENT.json` (as GCS has it), last: an R2 reader following
+    the pointer never finds a generation that isn't whole. Raises (`SystemExit`, the pointer not moved) when the check
+    fails."""
+    t0 = monotonic()
+    root = f"{prefix}/{new}/"
+    tail_names = [*last, COMPACTION]
+    objs = r2_objects(bucket, [root])
+    body = [o for o in objs if o.key.removeprefix(root) not in tail_names]
+    tail = sorted((o for o in objs if o.key.removeprefix(root) in tail_names), key=lambda o: tail_names.index(o.key.removeprefix(root)))
+    doc = r2_copy(bucket, body, workers=workers, log=log)
+    for o in tail:
+        r2_copy(bucket, [o], workers=1, log=log)
+    if bad := r2_missing([*body, *tail], workers=workers):
+        raise SystemExit(f"r2 {prefix}/{new}: {len(bad)} of {len(objs)} files not on R2 after the copy (e.g. {bad[0]}): pointer not moved")
+    for key in (f"{prefix}/{old}/{SUCCESSOR}", f"{prefix}/{CURRENT}"):
+        r2_copy(bucket, r2_objects(bucket, [key]), workers=1, log=log)
+    return {"objects": len(objs), "copied": doc["copied"] + len(tail), "bytes": doc["bytes"] + sum(o.size for o in tail), "s": round(monotonic() - t0, 1)}
