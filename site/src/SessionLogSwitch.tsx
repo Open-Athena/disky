@@ -51,9 +51,10 @@ export function SessionLogSwitchView({ state, today, date, onDate, end, onEnd, o
     <section className="session-log-switch">
       <h2>Session log</h2>
       <p>
-        Records what viewers do (page views, clicks on controls, the path filter, requests and errors) so a reported bug
-        can be replayed: <Link to="/admin/sessions">/admin/sessions</Link>. Viewers see no notice. It turns itself off
-        after the chosen day, or runs until switched off with no end date.
+        Records what viewers do (page views, clicks on controls, the path filter, requests and errors), to replay a
+        reported bug (<Link to="/admin/sessions">/admin/sessions</Link>) and for the activity feed
+        (<Link to="/admin/activity">/admin/activity</Link>). While it's on, <Link to="/privacy">/privacy</Link> says
+        what is recorded. It turns itself off after the chosen day, or runs until switched off with no end date.
       </p>
       <p className="status">{switchStatus(state)}</p>
       {setUp && (

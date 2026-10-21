@@ -169,6 +169,8 @@ export interface Env {
 export interface Ctx {
   request: Request
   env: Env
+  /** Pages' per-request object, shared by the middleware and the route (each gets its own `Request` copy). */
+  data?: Record<string, unknown>
 }
 
 export const GCS_SCOPE = 'gcs'

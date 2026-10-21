@@ -5,7 +5,10 @@ generation's `successor.json` on their next run, and the job publishes GCS first
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from pathlib import Path
+
+import pytest
 
 from click.testing import CliRunner
 
@@ -149,3 +152,89 @@ def test_run_compaction_static(fixture, tmp_path):  # noqa: F811
     assert (doc["why"], doc["compact"]["gen"], doc["compact"]["current"], doc["predecessors"]) == ("forced (-K)", "g.c001", True, [])
     assert json.loads((store_dir / sn.PREFIX / "CURRENT.json").read_text()) == {"gen": "g.c001"}
     assert sorted(p.name for p in (store_dir / sn.PREFIX).iterdir()) == ["CURRENT.json", "g", "g.c001"]
+
+
+# ── An append landing during a compaction (the fold runs for hours) ─────────
+
+
+def _racing(c: ar.Compactor, during):
+    """`c` with its fold running `during()` after folding: what lands on the old generation meanwhile."""
+    def fold(*a, **kw):
+        out = c.fold(*a, **kw)
+        during()
+        return out
+    return replace(c, fold=fold)
+
+
+def _gens(store_dir: Path) -> list[str]:
+    """The generations holding any file (a local store's deletes leave empty dirs; a bucket has none)."""
+    return sorted(p.name for p in (store_dir / ist.PREFIX).iterdir() if p.is_dir() and any(f.is_file() for f in p.rglob("*")))
+
+
+def test_compaction_superseded_by_an_append_during_the_fold(tmp_path):
+    """A scan appended to the old generation while it was folded: nothing published (no successor, no pointer, the new
+    generation deleted, no prune); the next compaction folds it too."""
+    world = make_world(tmp_path / "scans", False)
+    store_dir = tmp_path / "store"
+    build(world, store_dir, tmp_path / "wb", "g", DATES[1])
+    for d in DATES[2:4]:
+        add(world, store_dir, tmp_path / "wa", "-t", d, "-C", "none")
+    store = Store(str(store_dir))
+    ar.set_current(store, ist.PREFIX, "g")
+    logs: list[str] = []
+    kw = dict(threads=2, mem="1GB", log=logs.append, now=0.0, force=True, policy=ar.NEVER)
+    race = _racing(ic.compactor(RG), lambda: add(world, store_dir, tmp_path / "wr", "-t", DATES[4], "-C", "none"))
+    doc = ar.run_compaction(store, race, "g", store_dir, tmp_path / "w1", **kw)
+    newest, runs = ar.store_newest_runs(store, f"{ist.PREFIX}/g")
+    assert (doc["compact"]["superseded"], ar.run_scans(runs)[-1], doc["compact"]["scans"], doc["predecessors"]) == (newest, DATES[4], 4, [])
+    assert (_gens(store_dir), (store_dir / ist.PREFIX / "g" / ar.SUCCESSOR).exists(), ar.current(store, ist.PREFIX)) == (["g"], False, "g")
+    again = ar.run_compaction(store, ic.compactor(RG), "g", store_dir, tmp_path / "w2", **kw)
+    assert (again["compact"]["gen"], again["compact"]["scans"], "superseded" in again["compact"]) == ("g.c001", 5, False)
+    assert json.loads((store_dir / ist.PREFIX / ar.CURRENT).read_text()) == {"gen": "g.c001"}
+
+
+def test_compaction_rolls_back_when_an_append_lands_with_its_successor(tmp_path):
+    """A scan appended between the compaction's check and its `successor.json`: the check after it finds the scan, so
+    the successor record and the new generation are removed again."""
+    world = make_world(tmp_path / "scans", False)
+    store_dir = tmp_path / "store"
+    build(world, store_dir, tmp_path / "wb", "g", DATES[1])
+    add(world, store_dir, tmp_path / "wa", "-t", DATES[2], "-C", "none")
+    ar.set_current(Store(str(store_dir)), ist.PREFIX, "g")
+
+    class Racing(Store):
+        def write_text(self, key: str, text: str) -> None:
+            if key.endswith(f"/g/{ar.SUCCESSOR}"):
+                add(world, store_dir, tmp_path / "wr", "-t", DATES[3], "-C", "none")
+            super().write_text(key, text)
+
+    doc = ar.run_compaction(Racing(str(store_dir)), ic.compactor(RG), "g", store_dir, tmp_path / "w1",
+                            threads=2, mem="1GB", log=lambda m: None, now=0.0, force=True, policy=ar.NEVER)
+    newest, runs = ar.store_newest_runs(Store(str(store_dir)), f"{ist.PREFIX}/g")
+    assert (doc["compact"]["superseded"], ar.run_scans(runs)[-1]) == (newest, DATES[3])
+    assert (_gens(store_dir), (store_dir / ist.PREFIX / "g" / ar.SUCCESSOR).exists(), ar.current(Store(str(store_dir)), ist.PREFIX)) == (["g"], False, "g")
+
+
+def test_publish_scan_never_into_a_compacted_generation(tmp_path):
+    """An append whose generation has a successor is refused before its manifest; one whose successor appears while it
+    publishes fails after (its rerun appends to the successor)."""
+    new = {"key": "runs/s2", "scans": ["s2"]}
+    doc = lambda prev, runs: {"runs": runs}  # noqa: E731
+    store = ar.LocalRunStore(tmp_path / "g", tmp_path / "scratch", gen="g")
+    store.create("manifests/s1.json", json.dumps({"runs": [{"key": "runs/s1", "scans": ["s1"], "level": 0}]}))
+    store.create(ar.SUCCESSOR, json.dumps({"gen": "g.c001"}))
+    with pytest.raises(SystemExit) as e:
+        ar.publish_scan(store, "s2", new, doc, lambda runs: [])
+    assert (str(e.value), store.exists("manifests/s2.json")) == (
+        "not publishing manifests/s2.json: generation g was compacted (successor.json); the rerun appends to its successor", False)
+
+    class Racing(ar.LocalRunStore):
+        def create(self, key: str, text: str) -> None:
+            super().create(key, text)
+            super().create(ar.SUCCESSOR, json.dumps({"gen": "h.c001"}))
+
+    racing = Racing(tmp_path / "h", tmp_path / "scratch", gen="h")
+    with pytest.raises(SystemExit) as e:
+        ar.publish_scan(racing, "s2", new, doc, lambda runs: [])
+    assert str(e.value) == ("manifests/s2.json published while generation h was compacted (successor.json appeared): when the "
+                            "compaction kept its successor, that lacks scan s2; the rerun appends it there")

@@ -7,6 +7,7 @@
  */
 import type { D1Database } from '@cloudflare/workers-types'
 import { type Cursor, fmtCursor, isErrorEvent, LIMITS, type SessionPage, type SessionRow, SESSIONS_MAX_LIMIT, SESSIONS_PAGE, type SlogBatch, type SlogEvent, type StoredEvent } from './sessionLogShape.js'
+import { purgeActivity } from './activity.js'
 
 export interface Who {
   email: string | null
@@ -67,7 +68,9 @@ export const PURGE_EVERY_MS = 3_600_000
 export async function maybePurge(db: D1Database, retainRaw: string | undefined, now: number, state: { last: number }): Promise<boolean> {
   if (now - state.last < PURGE_EVERY_MS) return false
   state.last = now
-  await purge(db, Math.floor(now / 1000) - retainDays(retainRaw) * 86_400)
+  const cutoff = Math.floor(now / 1000) - retainDays(retainRaw) * 86_400
+  await purge(db, cutoff)
+  await purgeActivity(db, cutoff)
   return true
 }
 

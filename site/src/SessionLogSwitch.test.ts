@@ -15,7 +15,7 @@ const ON: SwitchState = { enabled: true, until: Date.UTC(2026, 9, 15), indefinit
 const render = (state: SwitchState, o: Partial<SwitchViewProps> = {}) => renderToStaticMarkup(createElement(MemoryRouter, null,
   createElement(SessionLogSwitchView, { state, today: '2026-10-12', date: '2026-10-19', onDate: () => {}, end: 'dated', onEnd: () => {}, onSet: () => {}, busy: false, error: null, ...o })))
 
-const intro = '<h2>Session log</h2><p>Records what viewers do (page views, clicks on controls, the path filter, requests and errors) so a reported bug can be replayed: <a href="/admin/sessions">/admin/sessions</a>. Viewers see no notice. It turns itself off after the chosen day, or runs until switched off with no end date.</p>'
+const intro = '<h2>Session log</h2><p>Records what viewers do (page views, clicks on controls, the path filter, requests and errors), to replay a reported bug (<a href="/admin/sessions">/admin/sessions</a>) and for the activity feed (<a href="/admin/activity">/admin/activity</a>). While it&#x27;s on, <a href="/privacy">/privacy</a> says what is recorded. It turns itself off after the chosen day, or runs until switched off with no end date.</p>'
 const SET = '<button type="submit">Set end</button>'
 const radio = (on: boolean) => `<input type="radio" name="session-log-end"${on ? ' checked=""' : ''}/>`
 const form = (checked: boolean, date: string, extra = '', indefinite = false) =>
