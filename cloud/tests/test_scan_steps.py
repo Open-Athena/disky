@@ -845,6 +845,17 @@ def test_retire_layer1_passes_the_listing_layouts_shards(tmp_path, env):
     assert n.sh_impl.calls == [f"dt-cloud scan retire -G s1 -k 2 -L l2/{{id}}/index/{{gen}}/path-index.parquet -o gs://iv -S gs://iv -w {w} -R -s <tmp>/data"]
 
 
+def test_retire_cache_passes_the_listings_dir_cache(tmp_path, env):
+    """`cache: true`: the rollup cache `path-index -c` writes under `layout.listing` (`dir-cache/`, one dir per index part
+    when sharded) as `-c` templates."""
+    opts = {"static-names": {"gen": "s1"}, "digest": {"template": "t", "config": "c.yml"}, "retire": {"keep": 2, "cache": True, "store": "gs://iv"}}
+    c = ctx(tmp_path, env, steps=["retire"], layout={"layer2": "l2/{scan}/", "snapshots": "sub", "listing": "listing/{scan}/"}, options=opts)
+    S.retire(c, None)
+    w = "<tmp>/t/dt-scan/2026-10-16T1200/retire"
+    assert c.sh_impl.calls == [f"dt-cloud scan retire -G s1 -k 2 -L l2/{{id}}/index/{{gen}}/path-index.parquet "
+                               f"-c listing/{{id}}/dir-cache/*.parquet -c listing/{{id}}/dir-cache/*/*.parquet -o gs://iv -S gs://iv -w {w} -R -s <tmp>/data"]
+
+
 def test_store_gc_collects_the_interval_stores_lineage_on_each_copy(tmp_path, env):
     """`store-gc` (listed in `steps`): `store-gc -t interval-store -l` on the interval store and on `$R2_ARCHIVE` when
     that's another copy; a dry run unless `execute`."""

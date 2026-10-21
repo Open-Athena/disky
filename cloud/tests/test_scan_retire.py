@@ -267,6 +267,30 @@ def test_layer1_goes_unless_it_carries_generation_no_marker_vouches_for(fx, d1):
         "listing/2026-07-30/b/shard-000.parquet", "listing/2026-08-04T1236/b/shard-000.parquet"]
 
 
+def test_cache_goes_with_its_scan(fx, d1):
+    """A scan's rollup cache (`-c`; `path-index -c`'s `dir-cache/`, a sharded index's one dir per part) retires with the
+    scan, and its bytes alone make an otherwise clean scan worth retiring; a scan kept keeps its cache."""
+    root = fx["root"]
+    caches = [
+        "listing/2026-07-30/dir-cache/dir-stats.parquet", "listing/2026-07-30/dir-cache/age-days.parquet",
+        "listing/2026-08-04/dir-cache/p0/dir-stats.parquet",
+    ]
+    for k in caches:
+        _shard(root / k, [1])
+    newest = sorted(DATES)[-1]
+    kept = f"listing/{newest}/dir-cache/dir-stats.parquet"
+    _shard(root / kept, [1])
+    tmpl = ["-c", "listing/{id}/dir-cache/*.parquet", "-c", "listing/{id}/dir-cache/*/*.parquet"]
+    rep = _run(fx, "-m", *tmpl)
+    assert {r["id"]: r["delete"]["cache"][0] for r in rep["scans"] if r["status"] == "retire" and "cache" in r["delete"]} == {
+        "2026-07-30": 2, "2026-08-04": 1}
+    before = _files(root)
+    _run(fx, "-x", "-m", *tmpl)
+    after = _files(root)
+    assert sorted(k for k in before if "dir-cache" in k and k not in after) == sorted(caches)
+    assert kept in after
+
+
 def test_backup_within_one_store_copies_server_side(monkeypatch, tmp_path):
     """Two buckets of one filesystem: the copy never comes through the host (`get`/`put` refused here), sizes checked."""
     from dt_cloud.blobstore import Store
