@@ -242,6 +242,8 @@ export function gapStretches(gaps: readonly number[], xs: readonly number[]): [n
 }
 
 const PAD = { top: 12, right: 16, bottom: 24, left: 56 }
+/** The plot's side padding (px) — what a strip aligned under the chart (`XOverview`) insets by. */
+export const TS_PAD = { left: PAD.left, right: PAD.right } as const
 /** Height of the window's grip: a strip along the band's top edge that slides the window (anywhere else brushes). */
 const GRIP = 12
 
@@ -477,7 +479,10 @@ export function TimeSeries<T>({
       else onBrush(Math.min(d.x0, x1), Math.max(d.x0, x1))
     })
   }
-  const band = drag ? [Math.min(drag.x0, drag.x1), Math.max(drag.x0, drag.x1)] as const : xWindow
+  // The window clipped to the plotted span: a zoomed-in chart can show part of it (or none — no band).
+  const band = drag ? [Math.min(drag.x0, drag.x1), Math.max(drag.x0, drag.x1)] as const
+    : xWindow && xWindow[1] >= xMin && xWindow[0] <= xMax ? [Math.max(xMin, xWindow[0]), Math.min(xMax, xWindow[1])] as const
+    : undefined
 
   const hoverPoints: { color: string; label: string; y: number | null }[] = hoverX == null
     ? []

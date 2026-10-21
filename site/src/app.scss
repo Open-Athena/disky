@@ -2496,6 +2496,18 @@ a.staged-chip {
     &:hover:not(:disabled) { color: var(--ink); border-color: var(--ink-2); }
     &:disabled { opacity: 0.5; cursor: not-allowed; }
   }
+  // The "notes" toggle: solid while the notes show, dashed (like `+ note`) while hidden.
+  .note-toggle {
+    font: inherit; font-size: 12px; font-weight: 400; padding: 1px 7px; border-radius: 4px; cursor: pointer;
+    background: transparent; color: var(--ink-3); border: 1px dashed var(--ink-3);
+    &.on { color: var(--dt-ts-marker-ink); border: 1px solid var(--dt-ts-marker); }
+    &:hover { color: var(--ink); }
+  }
+  // The x-range's fit / reset icons sit in the presets' strip.
+  .x-range button.icon { display: inline-flex; align-items: center; padding: 1px 4px; font-size: 14px; }
+  // The overview strip under the chart (drag to zoom, double-click for every scan).
+  .over-time-overview { margin-top: 4px; }
+  .overview-help, .overview-help > .help-tgt { display: block; }
   .note-form {
     display: flex; flex-wrap: wrap; align-items: flex-start; gap: 6px 10px; margin: 0 0 8px; padding: 8px 10px;
     border: 1px solid var(--line); border-radius: 6px; background: var(--panel); font-size: 12px;
