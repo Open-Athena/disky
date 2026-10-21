@@ -861,9 +861,14 @@ def test_retire_failure_warns_and_needs_its_keep(tmp_path, env):
     c = ctx(tmp_path, env, runner=Runner(tmp_path, fail=("dt-cloud scan retire",)), steps=["retire"],
             options={"list": {"import": True}, "static-names": {"gen": "s1", "store": "r2://idx"}, "digest": {"template": "t", "config": "c.yml"},
                      "retire": {"keep": 2, "store": "r2://idx"}})
+    # what the verify downloaded before failing (2026-10-21: the served store filled post's disk, failing every step after)
+    served = c.work / "retire" / "verify" / "served" / "path.parquet"
+    served.parent.mkdir(parents=True)
+    served.write_bytes(b"x")
     S.retire(c, None)
     assert c.sh_impl.calls == ["dt-cloud scan retire -G s1 -k 2 -L l2/{id}/index/{gen}/path-index.parquet -o r2://idx -S r2://idx "
                                "-w <tmp>/t/dt-scan/2026-10-16T1200/retire -R -s <tmp>/data"]
+    assert not (c.work / "retire").exists()
     with pytest.raises(ValueError) as e:
         profile(tmp_path, steps=["retire"], options={"list": {"import": True}, "static-names": {"profile": "sn.json"}, "digest": {"template": "t", "config": "c.yml"}, "retire": {}})
     assert str(e.value).splitlines()[1:] == [
