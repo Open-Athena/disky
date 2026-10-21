@@ -20,6 +20,7 @@
 
 import { PRIMARY_STORE } from './stores.js'
 import { SEARCH_LIMITS, type SearchLimits } from './search.js'
+import { currentMeter } from './usage.js'
 
 const TTL = 86400
 const KV_TTL = 30 * 86400
@@ -84,16 +85,22 @@ const publicRes = (body: string) => new Response(body, { headers: { ...JSON_HDR,
 const clientRes = (body: string, tier: string) => new Response(body, { headers: { ...JSON_HDR, 'cache-control': PRIVATE, 'x-cache': tier } })
 
 export async function cacheMatch(env: CacheEnv, key: Request): Promise<Response | null> {
+  // The request's usage point says which tier answered (`_lib/usage.ts`).
+  const m = currentMeter()
   const hit = await colo().match(key)
   if (hit) {
+    m?.cached('edge-hit')
     const res = new Response(hit.body, hit)
     res.headers.set('cache-control', isPartial(hit) ? PARTIAL_CLIENT : PRIVATE)
     res.headers.set('x-cache', 'hit')
     return res
   }
-  if (!env.CACHE_KV) return null
-  const body = await env.CACHE_KV.get(await kvKey(key), 'text')
-  if (body == null) return null
+  const body = env.CACHE_KV ? await env.CACHE_KV.get(await kvKey(key), 'text') : null
+  if (body == null) {
+    m?.cached('miss')
+    return null
+  }
+  m?.cached('kv-hit')
   await colo().put(key, publicRes(body))
   return clientRes(body, 'kv')
 }

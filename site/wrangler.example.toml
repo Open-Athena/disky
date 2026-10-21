@@ -38,6 +38,16 @@ remote = true
 # binding = "CACHE_KV"
 # id = "00000000000000000000000000000000"
 
+# Optional: usage attribution (`_lib/usage.ts`, specs/usage-metrics.md), one Analytics
+# Engine point per Functions request (route, caller, cache tier, R2/D1/KV reads). Unset =
+# no points. The R2/D1/KV counters and the cache tier also need the `nodejs_als`
+# compatibility flag (the request's async context); without it a point carries no
+# counters and cache `none`.
+# compatibility_flags = ["nodejs_als"]
+# [[analytics_engine_datasets]]
+# binding = "USAGE"
+# dataset = "disky_usage_<deployment>"
+
 [observability]
 enabled = true
 
