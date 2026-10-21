@@ -3,6 +3,7 @@ import { gateFor } from './auth'
 import { sqliteD1 } from './testD1'
 import { alertBody, check, counts, decide, MONITOR_END_MS, MONITOR_SCOPE, POLICY, sendAlert, type Counts, type State } from './sessionMonitor'
 import { onRequestPost } from '../api/session-monitor'
+import { FOREVER_MS } from './sessionLogShape'
 import { onRequest as sessionLogRoute } from '../api/session-log/[[path]]'
 import { onRequestGet as meRoute } from '../api/me'
 
@@ -128,6 +129,24 @@ it('off/expired checks do not send or mutate state; excessive logs are refused',
   expect(send.mock.calls).toEqual([])
   for (let i = 0; i <= POLICY.batches; i++) put([{ k: 'error' }], NOW - 1, i)
   await expect(counts(db, NOW)).rejects.toThrow('session monitor batch budget exceeded')
+})
+
+it('an indefinite switch (FOREVER_MS) still ends the monitor at MONITOR_END_MS: its own absolute expiry', async () => {
+  const { db, raw, env } = await setup()
+  raw.prepare('UPDATE session_log_switch SET until_ms = ?').run(FOREVER_MS)
+  const send = vi.fn<typeof sendAlert>()
+  expect([
+    await check(db, env, NOW, true, send),
+    await check(db, env, MONITOR_END_MS / 1000 - 1, true, send),
+    await check(db, env, MONITOR_END_MS / 1000, true, send),
+    await check(db, env, Date.UTC(2027, 0, 1) / 1000, true, send),
+  ]).toEqual([
+    { status: 'dry-run', decision: 'quiet', counts: EMPTY },
+    { status: 'dry-run', decision: 'quiet', counts: EMPTY },
+    { status: 'disabled' },
+    { status: 'disabled' },
+  ])
+  expect(send.mock.calls).toEqual([])
 })
 
 it.each(['reject', '429', 'bad-json', 'ok-false', 'success'])('Slack %s is a single bounded attempt', async kind => {
