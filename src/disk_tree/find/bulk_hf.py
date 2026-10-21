@@ -45,12 +45,13 @@ bytes' age), and a bucket file's ``uploadedAt`` (falling back to its
 :data:`~disk_tree.listing.HF_CLASS_IDS`: public 1, private 5, unbilled git
 files 6 — so every non-6 byte is a billed byte. ``generation`` is NULL.
 
-**Rate limits.** The Hub answers with ``RateLimit: "api";r=<left>;t=<secs>``
-under a fixed 1000-request / 300 s window (a free account's quota). The
-client keeps ``concurrency`` requests in flight (≈8 drew 429s), stops issuing
+**Rate limits.** The Hub answers with ``RateLimit: "api";r=<left>;t=<secs>``;
+the quota depends on the authenticated account's plan. The client follows
+the returned remaining count and reset time, keeps ``concurrency`` requests
+in flight (≈8 drew 429s), stops issuing
 while the window is nearly spent until it resets, and retries 429 / 5xx
 honoring ``Retry-After``, and a reset / dropped / timed-out connection like a
-5xx. Throughput is therefore window-bound, ~3.3 req/s.
+5xx. A 1000-request / 300 s quota bounds throughput at ~3.3 req/s.
 
 Auth: ``HF_TOKEN`` (a read token sees private repos and buckets; none lists
 public ones only). ``HF_ENDPOINT`` overrides ``https://huggingface.co``.
