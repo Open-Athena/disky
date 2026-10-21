@@ -1983,10 +1983,22 @@ input::placeholder, textarea::placeholder { color: var(--ink-3); opacity: 1; }
 // with a divider above each new bucket so the (many) per-TTL rules read as a set.
 // A fleet store (`lifecycle.grouped`) folds a rule shared across buckets into
 // one row with a buckets column instead.
+// The fold takes the section's full width (not `.prose`'s 68ch measure), and the table fills it: its short columns
+// (bucket, rule, buckets, status) never wrap; the prefix and the action text wrap only when the row can't fit, the
+// action not below a phrase's width. Headers sit left over their columns, as the cells do.
+.prose.lifecycle { max-width: none; }
 .lifecycle-tbl {
-  td.bucket { color: var(--ink-2); white-space: nowrap; }
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+  th, td { text-align: left; vertical-align: top; padding: 4px 14px 4px 0; border-bottom: 1px solid var(--line); white-space: nowrap; }
+  th:last-child, td:last-child { padding-right: 0; }
+  th { color: var(--ink-2); font-weight: 600; }
+  td.prefix { white-space: normal; overflow-wrap: anywhere; }
+  td.action { white-space: normal; min-width: 22ch; }
+  td.bucket { color: var(--ink-2); }
   tr.bucket-start > td { border-top: 1px solid var(--rule, rgba(128, 128, 128, 0.28)); }
-  td.buckets { color: var(--ink-2); white-space: nowrap; }
+  td.buckets { color: var(--ink-2); }
   code.clip { display: inline-block; max-width: 36ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; vertical-align: bottom; }
 }
 
