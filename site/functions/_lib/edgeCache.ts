@@ -45,8 +45,9 @@ export interface CacheEnv { CACHE_KV?: KVNamespace; CACHE_NS?: string; PROD_HOST
 // answers with unconserved object counts into KV). 4: pool and user-lens
 // object counts exact from the manifest's per-user objects (`uo`). 5 (2026-10-14): a
 // node's `d` is its newest write, not the byte-weighted mean. 6 (2026-10-16): an mtime of 0
-// (a listing's unknown) gives no `d` (it read as 1970-01-01).
-export const CACHE_V = '6'
+// (a listing's unknown) gives no `d` (it read as 1970-01-01). 7 (2026-10-21): a node with a `d` carries `t`, that
+// newest write's instant (epoch seconds).
+export const CACHE_V = '7'
 
 /** The deployment environment a response-cache key belongs to: `''` is prod's (keys exactly as before the
  * tag existed — no one-time flush), anything else a separate keyspace. A Pages preview (the dev stack)
