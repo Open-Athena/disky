@@ -69,10 +69,10 @@ function ClassTable({ segs, usd, scope }: { segs: ClassSeg[]; usd: number; scope
   const bytes = segs.reduce((s, x) => s + x.bytes, 0)
   return (
     <div className="classes-table" id="classes-table">
+      <p className="cap">Storage classes under <code>{scope}</code> · list prices (US regions) × scanned bytes; actual spend depends on negotiated rates and credits</p>
       <table>
-        <caption>Storage classes under <code>{scope}</code> · list prices (US regions) × scanned bytes; actual spend depends on negotiated rates and credits</caption>
         <thead>
-          <tr><th>class</th><th className="num">bytes</th><th className="num">share</th><th className="num">list $/GiB·mo</th><th className="num">est. $/mo</th></tr>
+          <tr><th>class</th><th className="num">bytes</th><th className="num">share</th><th className="num rate">list $/GiB·mo</th><th className="num">est. $/mo</th></tr>
         </thead>
         <tbody>
           {segs.map(s => (
@@ -80,14 +80,14 @@ function ClassTable({ segs, usd, scope }: { segs: ClassSeg[]; usd: number; scope
               <td><i className="sw" style={{ background: CLASS_COLORS[s.c] ?? 'var(--other)' }} />{s.name}</td>
               <td className="num">{fmtBytes(s.bytes)}</td>
               <td className="num">{fracLabel(s.frac)}</td>
-              <td className="num">${CLASS_PRICE_US[s.c] ?? 0.02}</td>
+              <td className="num rate">${CLASS_PRICE_US[s.c] ?? 0.02}</td>
               <td className="num">{fmtUsd(s.usd)}</td>
             </tr>
           ))}
         </tbody>
         {segs.length > 1 && (
           <tfoot>
-            <tr><td>total</td><td className="num">{fmtBytes(bytes)}</td><td /><td /><td className="num">{fmtUsd(usd)}</td></tr>
+            <tr><td>total</td><td className="num">{fmtBytes(bytes)}</td><td /><td className="rate" /><td className="num">{fmtUsd(usd)}</td></tr>
           </tfoot>
         )}
       </table>
