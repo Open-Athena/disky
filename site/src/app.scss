@@ -2497,7 +2497,10 @@ a.staged-chip {
   .x-range button.icon { display: inline-flex; align-items: center; padding: 1px 4px; font-size: 14px; }
   // The overview strip under the chart (drag to zoom, double-click for every scan).
   .over-time-overview { margin-top: 4px; }
+  // Its help wrapper is a block: `.has-help`'s dotted "hover me" underline would run the section's full width,
+  // past the strip (inset by the plot's padding) and the legend. The strip is a control, not bare text.
   .overview-help, .overview-help > .help-tgt { display: block; }
+  .overview-help { border-bottom: none; cursor: default; }
   .note-form {
     display: flex; flex-wrap: wrap; align-items: flex-start; gap: 6px 10px; margin: 0 0 8px; padding: 8px 10px;
     border: 1px solid var(--line); border-radius: 6px; background: var(--panel); font-size: 12px;

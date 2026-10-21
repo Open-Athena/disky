@@ -269,6 +269,40 @@ function niceTicks(min: number, max: number, count: number, log = false): number
   return out
 }
 
+/** The plotted extent. x spans every series' points (and `gaps`); y spans only the *drawn* series — a `plot: false`
+ *  series (a total beside the per-part lines it would dwarf) is tooltip-only, so it never stretches the axis. With
+ *  `yFrom: 'data'` the `fit`-marked series set the y-range when any is marked, padded 5% each side; zero-anchored, the
+ *  top gets 5% headroom and the axis reaches below 0 only for a negative series. */
+export function plotExtent<T>(
+  series: Series<T>[],
+  getX: (p: T) => number,
+  getY: (p: T) => number,
+  yScale: 'linear' | 'log' = 'linear',
+  yFrom: 'zero' | 'data' = 'zero',
+  gaps?: number[],
+): { xMin: number; xMax: number; yMin: number; yMax: number } {
+  const xs: number[] = []
+  const ys: number[] = []
+  const fit = yScale === 'linear' && yFrom === 'data'
+  const drawn = series.filter(s => s.plot !== false)
+  const fitTo = fit && drawn.some(s => s.fit) ? drawn.filter(s => s.fit) : drawn
+  for (const s of series) for (const p of s.points) xs.push(getX(p))
+  for (const s of fitTo) for (const p of s.points) ys.push(getY(p))
+  if (xs.length === 0 || ys.length === 0) return { xMin: xs.length ? Math.min(...xs) : 0, xMax: xs.length ? Math.max(...xs) : 1, yMin: 0, yMax: 1 }
+  xs.push(...(gaps ?? []))
+  const yMinRaw = Math.min(...ys)
+  const yMaxRaw = Math.max(...ys)
+  const pad = fit ? Math.max(yMaxRaw - yMinRaw, Math.abs(yMaxRaw) * 0.01) * 0.05 : 0
+  // Zero-anchored: the axis still spans below 0 when a series goes negative (a Δ trace), padded like the top.
+  const below = yMinRaw < 0 ? yMinRaw * 1.05 : 0
+  return {
+    xMin: Math.min(...xs),
+    xMax: Math.max(...xs),
+    yMin: yScale === 'log' ? Math.max(1, yMinRaw) : fit ? yMinRaw - pad : below,
+    yMax: fit ? yMaxRaw + pad : yMaxRaw > 0 ? yMaxRaw * 1.05 : yMaxRaw < 0 ? 0 : 1,
+  }
+}
+
 export function TimeSeries<T>({
   series,
   getX,
@@ -317,29 +351,7 @@ export function TimeSeries<T>({
 
   const [hoverX, setHoverX] = useState<number | null>(null)
 
-  const { xMin, xMax, yMin, yMax } = useMemo(() => {
-    const xs: number[] = []
-    const ys: number[] = []
-    const fit = yScale === 'linear' && yFrom === 'data'
-    // Fitting: the `fit`-marked series set the y-range when any is marked.
-    const fitTo = fit && series.some(s => s.fit) ? series.filter(s => s.fit) : series
-    for (const s of series) for (const p of s.points) xs.push(getX(p))
-    for (const s of fitTo) for (const p of s.points) ys.push(getY(p))
-    if (xs.length === 0) return { xMin: 0, xMax: 1, yMin: 0, yMax: 1 }
-    xs.push(...(gaps ?? []))
-    const yMinRaw = Math.min(...ys)
-    const yMaxRaw = Math.max(...ys)
-    const pad = fit ? Math.max(yMaxRaw - yMinRaw, Math.abs(yMaxRaw) * 0.01) * 0.05 : 0
-    // Zero-anchored: the axis still spans below 0 when a series goes negative
-    // (a Δ trace), padded like the top.
-    const below = yMinRaw < 0 ? yMinRaw * 1.05 : 0
-    return {
-      xMin: Math.min(...xs),
-      xMax: Math.max(...xs),
-      yMin: yScale === 'log' ? Math.max(1, yMinRaw) : fit ? yMinRaw - pad : below,
-      yMax: fit ? yMaxRaw + pad : yMaxRaw > 0 ? yMaxRaw * 1.05 : yMaxRaw < 0 ? 0 : 1,
-    }
-  }, [series, getX, getY, yScale, yFrom, gaps])
+  const { xMin, xMax, yMin, yMax } = useMemo(() => plotExtent(series, getX, getY, yScale, yFrom, gaps), [series, getX, getY, yScale, yFrom, gaps])
 
   // A marker in view reserves its lane above the plot.
   const lane = markers?.some(m => m.x >= xMin && m.x <= xMax) ? MARKER_LANE : 0
