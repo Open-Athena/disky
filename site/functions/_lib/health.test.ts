@@ -1,9 +1,10 @@
 // specs/done/health-page.md: /api/health over a fake `INDEX_R2` (both stores' `scans.json`, manifests and run files) and the
 // D1 schema (`index_schema` path rows, `scan_runs`). The interval store never got scan 04; the static index's
 // run for 05 has no `drill/`; scan 07's job is running.
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { onRequestGet as route } from '../api/health'
 import { IV_RUN_FILES } from './health'
+import { IV_STATE_TTL } from './index'
 import { sqliteD1 } from './testD1'
 import type { HealthDoc } from '../../src/healthModel'
 import { BUILD } from './build'
@@ -107,6 +108,27 @@ INSERT INTO scan_runs (run_id, scan, kind, parent, status, started_ts, finished_
         const hit = await get({})
         expect([stored.build, [miss.cache, miss.doc.build], [hit.cache, hit.doc.build]]).toEqual([undefined, ['miss', BUILD], ['hit', BUILD]])
       } finally {
+        g.caches = was
+      }
+    })
+
+    it('unpinned, the static index is the generation `static-names/CURRENT.json` names, and the document is keyed by it', async () => {
+      const held = new Map<string, Response>()
+      const g = globalThis as unknown as { caches?: unknown }
+      const was = g.caches
+      g.caches = { default: { match: async (k: Request) => held.get(k.url)?.clone(), put: async (k: Request, r: Response) => { held.set(k.url, r) } } }
+      // past whatever pointer an earlier case's request left held in the isolate
+      const spy = vi.spyOn(Date, 'now').mockImplementation(() => Date.UTC(2030, 0, 1))
+      try {
+        const { doc } = await get({ FILTER_STATIC: '1', INDEX_R2: r2({ ...OBJECTS, 'static-names/CURRENT.json': { gen: 'sn1' } }) })
+        expect([doc.stores.map(s => [s.kind, s.gen, s.base]), [...held.keys()].filter(k => k.startsWith('https://health.cache/'))])
+          .toEqual([[['static', 'sn1', ['01', '02'].map(D)]], ['https://health.cache/primary/-/sn1']])
+        // no pointer: no static store, as unpinned before (the colo's copy of the old pointer expired with the isolate's)
+        held.clear()
+        spy.mockImplementation(() => Date.UTC(2030, 0, 1) + IV_STATE_TTL)
+        expect((await get({ FILTER_STATIC: '1', INDEX_R2: r2(OBJECTS) })).doc.stores).toEqual([])
+      } finally {
+        spy.mockRestore()
         g.caches = was
       }
     })
