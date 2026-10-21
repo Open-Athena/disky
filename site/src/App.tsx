@@ -9,7 +9,7 @@ import { bareEmpty, legacyOwner, ownerParam } from './ownerParam'
 import { AGE_MODES, AgeChart } from './AgeChart'
 import { canonId, shortName, shortUserKey } from './UserChip'
 import { signInUrl, useCanAssign, useCanStage, useIdent as useIdentity, useIsAdmin } from './auth'
-import { ClassStrip, OwnershipFact, OwnershipHelp } from './PageFacts'
+import { OwnershipHelp, PageFacts } from './PageFacts'
 import { DiffTreemap, DiffHeader, useDiffModel } from './DiffTreemap'
 import { DiffTable } from './DiffTable'
 import { Allowances } from './Allowances'
@@ -1489,6 +1489,15 @@ function AppContent() {
               access={meta?.access}
             /></div>
           )}
+          {/* The drilled node's storage-class mix and the ownership share, one compact row under the map's own
+              listing (it follows the drill); the per-class table opens from its disclosure (`?cx`). */}
+          {blindShown(!!fq) && (
+            <PageFacts
+              mix={meta && store.prices && mapPath ? classMix(mapPath[mapPath.length - 1]) : undefined}
+              scope={mapPath && mapPath.length > 1 ? mapPath.slice(1).map(n => n.n).join('/') : store.rootLabel}
+              tree={hasAttr ? mapTree ?? undefined : undefined}
+            />
+          )}
         </>
       ) : miss ? (
         <NoScanMatch miss={miss} fmt={fmtS} hrefFor={scan => hrefWithScan(pathname, search, selOf(new URLSearchParams(search)), scan, true, times, scans)} />
@@ -1703,21 +1712,6 @@ function AppContent() {
           note={<>Intended state is tracked in <code>{store.lifecycle.tracked}</code> (<code>dt-cloud lifecycle diff|push</code>).</>}
         />
       )}
-
-      {/* The storage-class mix (follows the drill) and the ownership share, folded into one compact row; the
-          class bytes + $ and the ownership explainer live in their tooltips. */}
-      {blindShown(!!fq) && ((meta && store.prices) || (hasAttr && mapTree)) && (() => {
-        // Class mix of the *drilled* node (each node carries descendant-inclusive
-        // `cb`), so this tracks the treemap instead of always showing fleet totals.
-        const node = mapPath ? mapPath[mapPath.length - 1] : tree
-        const scope = mapPath && mapPath.length > 1 ? mapPath.slice(1).map(n => n.n).join('/') : store.rootLabel
-        return (
-          <div className="page-facts">
-            {meta && store.prices && node && <ClassStrip mix={classMix(node)} scope={scope} />}
-            {hasAttr && mapTree && <OwnershipFact tree={mapTree} />}
-          </div>
-        )
-      })()}
 
       <SiteKbd
         placeholder={store.owners ? 'Users, color modes, scans, pages…' : 'Color modes, scans, pages, actions…'}
