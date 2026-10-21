@@ -26,7 +26,8 @@ Which rule fired and why: `add`'s log line and JSON summary (`compact.why`); the
 
 - Phase 1 (policy): above.
 - Phase 2a: the shared orchestrator (`append_runner.compact_store` + `Compactor`; `next_gen`, `current`/`set_current`, `chain`, `resolve_gen`, `carry_markers`, `prune_predecessors`, `compaction_doc`, `r2_publish_gen`, lifted from `interval_compact` / `interval_local.compact`, which now delegate: the interval store's tests pass unchanged), the static fold (`static_compact.fold_gen`), `static-names add` compacting when due (`-C`, `-K`, following `successor.json`), `static-names compact`, `build -r ranges.json` (the reference), `store-gc` keeping forwarding records. `test_static_compact.py`: every flavor, md5-equal to the rebuild.
-- Phase 2b (the Batch `compact` stage in both runners) and phase 3 (`read_from`): below, once built.
+- Phase 2b: the Batch `compact` stage in both runners (`Runner.compact_stage` after the merge stage, when the policy fires or `runs add -K` / `interval-store append -K`): one job, `static_merge compact` / `interval_append compact` (`append_runner.run_compaction`: follow successors, due check, `compact_store` reading the generation in place on the bucket's mount, then with `-r` `r2_publish_gen`: data, liveness files, `compaction.json`, the old generation's `successor.json`, then `CURRENT.json` last; predecessors pruned on GCS only, after the grace, for the interval store); when the stages' account isn't the R2 account a second job `compact-r2` as the R2 account (`publish_r2_chain`). Each runner's next run follows `successor.json` (`Runner.follow`: the profile needs no change). Non-fatal, waited on up to `-w` like the merge job.
+- Phase 3 (`read_from`): below, once built.
 
 ## Builder read source (`read_from: gcs | r2`, both stores)
 

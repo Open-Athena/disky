@@ -298,6 +298,34 @@ def _summary(doc: dict) -> dict:
     return {k: v for k, v in doc.items() if k != "keys"}
 
 
+@cli.command("compact")
+@option("-b", "--bucket", default=data_bucket, help="Data bucket")
+@option("-c", "--chunk-rows", default=1 << 22, type=IntRange(min=1), help="The drill fold's chunks: roots per measurement / rollup q range")
+@option("-g", "--gen", required=True, help="Base generation (followed to its newest successor)")
+@ar.compact_options
+def compact_cmd(bucket, chunk_rows, gen, policy, grace_s, jobs, force, mount, mem, threads, to_r2, tmp) -> None:
+    """The compaction stage (`append_runner.run_compaction` with `static_compact`): when the policy fires (or `-K`), the
+    generation's base and runs folded into `<gen>.c<NNN>` (a rebuild's bytes), published on GCS (`compaction.json`
+    last, `successor.json`, `static-names/CURRENT.json`), then with `-r` on R2 (its pointer last). The old generation
+    stays (readers pin `STATIC_GEN`; `store-gc -k`). Prints a JSON summary."""
+    from .blobstore import Store
+    from .static_compact import compactor
+
+    doc = ar.run_compaction(Store(f"gs://{bucket}"), compactor(chunk_rows), gen, Path(mount), Path(tmp), policy=policy, force=force,
+                            r2_bucket=bucket if to_r2 else None, grace_s=grace_s, threads=threads, mem=mem, jobs=jobs)
+    print(json.dumps(doc, indent=1))
+
+
+@cli.command("compact-r2")
+@option("-b", "--bucket", default=data_bucket, help="Data bucket")
+@option("-g", "--gen", required=True, help="The generation a compaction started from (its successors are copied)")
+def compact_r2_cmd(bucket, gen) -> None:
+    """Every compaction from the generation on, to R2 (the R2 account's job): each new generation, then its pointer, last."""
+    from .static_compact import compactor
+
+    print(json.dumps(ar.publish_r2_chain(bucket, PREFIX, gen, last=compactor().last), indent=1))
+
+
 @cli.command("prune")
 @option("-b", "--bucket", default=data_bucket, help="Data bucket")
 @option("-g", "--gen", required=True, help="Base generation")

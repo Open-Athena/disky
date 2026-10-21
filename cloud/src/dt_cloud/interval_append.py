@@ -536,6 +536,18 @@ class Runner(ar.Runner):
         return self.job("merge", scan, 1, "interval_append", ["carry", "-L", level_arg(self.p.policy.carry_level), *duckdb_args(self.p.machine)],
                         r2=self.merge_r2())
 
+    def compact_jobs(self, scan: str) -> list[tuple[str, dict]]:
+        r2 = self.merge_r2()
+        out = [self.job("compact", scan, 1, "interval_append", ["compact", "-C", str(self.p.policy), *(["-K"] if self.compact_now else []),
+                                                              *(["-r"] if r2 else []), *duckdb_args(self.p.machine_for("compact"))], r2=r2)]
+        if not r2:
+            out.append(self.job("compact-r2", scan, 1, "interval_append", ["compact-r2"], r2=True, mount=False))
+        return out
+
+    def with_gen(self, gen: str) -> Config:
+        """A compacted generation holds its own range files and `ranges.json`."""
+        return Config(replace(self.p, gen=gen), gen)
+
     def one(self, d: str) -> None:
         run = f"{self.root}/deltas/{d}"
         self.log(f"{d}: interval store {self.p.gen}")
@@ -862,6 +874,33 @@ def _summary(doc: dict) -> dict:
     return {k: v for k, v in doc.items() if k != "keys"}
 
 
+@cli.command("compact")
+@stage_options
+@ar.compact_options
+@option("-w", "--rg-rows", "rg_rows", default=ist.SERVED_RG, type=IntRange(min=1), help="Rows per served row group (the compacted generation's)")
+def compact_cmd(bucket, gen, ranges_gen, scratch, policy, grace_s, jobs, force, mount, mem, threads, to_r2, tmp, rg_rows) -> None:
+    """The compaction stage (`append_runner.run_compaction` with `interval_compact`): when the policy fires (or `-K`),
+    the generation's base and runs folded into `<gen>.c<NNN>` (a fresh build's bytes), published on GCS (`scans.json`,
+    then `compaction.json`, `successor.json`, `interval-store/CURRENT.json`), then with `--r2` on R2 (its pointer last);
+    predecessors past the grace leave GCS. Prints a JSON summary."""
+    from . import interval_compact as ic
+
+    if (b := gs_bucket(bucket)) is None:
+        raise SystemExit(f"interval store: the staged compaction reads a mounted GCS bucket; {bucket!r} is not one")
+    doc = ar.run_compaction(Store(f"gs://{b}"), ic.compactor(rg_rows), gen, Path(mount), Path(tmp), policy=policy, force=force,
+                            r2_bucket=b if to_r2 else None, grace_s=grace_s, threads=threads, mem=mem, jobs=jobs)
+    print(json.dumps(doc, indent=1))
+
+
+@cli.command("compact-r2")
+@stage_options
+def compact_r2_cmd(bucket, gen, ranges_gen, scratch) -> None:
+    """Every compaction from the generation on, to R2 (the R2 account's job): each new generation, then its pointer, last."""
+    if (b := gs_bucket(bucket)) is None:
+        raise SystemExit(f"interval store: {bucket!r} is not a GCS bucket")
+    print(json.dumps(ar.publish_r2_chain(b, PREFIX, gen, last=("scans.json",)), indent=1))
+
+
 @cli.command("r2")
 @stage_options
 @option("-d", "--scan", required=True, help="The published scan (`manifests/<D>.json`)")
@@ -914,21 +953,25 @@ def ready(profile: str | None) -> Config:
 
 @command("append")
 @option("-c", "--catch-up", is_flag=True, help="Append every earlier published scan still pending first, in scan-id order")
+@option("-K", "--compact-now", is_flag=True, help="After the merge stage, compact into a new generation whatever the policy says (when the generation has runs)")
 @option("-M", "--no-merge", is_flag=True, help="Skip the merge stage (the due carries wait for a later run, or `interval-store merge`)")
 @option("-n", "--dry-run", is_flag=True, help="Report each stage's state and what would run; submit and write nothing")
 @option("-P", "--profile", help="Deployment profile JSON (default $INTERVAL_STORE_PROFILE)")
 @option("-w", "--merge-wait", default=0, type=float, help="Seconds to wait on the merge job (default 0: submit it and go; it publishes on GCS when done)")
 @argument("scan_id")
-def append_cmd(catch_up: bool, no_merge: bool, dry_run: bool, profile: str | None, merge_wait: float, scan_id: str) -> None:
+def append_cmd(catch_up: bool, compact_now: bool, no_merge: bool, dry_run: bool, profile: str | None, merge_wait: float, scan_id: str) -> None:
     """Append SCAN_ID to the interval store: prepare → ranges → publish → R2 → prune, each stage skipped when its output
-    exists; then the merge stage (the due carries, non-fatal). Exit 3 when SCAN_ID is not published yet, or an earlier
-    published scan is pending (without -c)."""
+    exists; then the merge stage (the due carries, non-fatal), and when the compaction policy fires (or `-K`) the
+    compaction stage (`compact`: GCS, then R2 with its pointer last). A generation compacted since the profile named it
+    is followed to its successor. Exit 3 when SCAN_ID is not published yet, or an earlier published scan is pending
+    (without -c)."""
     cfg = ready(profile)
     runner = store_runner(cfg, dry_run=dry_run, merge=not no_merge, merge_wait=merge_wait)
+    runner.compact_now = compact_now
     t0 = monotonic()
     done = exit_on(f"interval-store append {scan_id}", lambda: runner.run(scan_id, catch_up=catch_up), lambda m: err(m))
-    print(json.dumps({"gen": cfg.p.gen, "scan": scan_id, "appended": done, "dry_run": dry_run, "s": round(monotonic() - t0, 1),
-                      "stages": runner.timings}))
+    print(json.dumps({"gen": runner.p.gen, "scan": scan_id, "appended": done, "dry_run": dry_run, "s": round(monotonic() - t0, 1),
+                      "stages": runner.timings, "compaction": runner.compaction}))
 
 
 @command("merge")

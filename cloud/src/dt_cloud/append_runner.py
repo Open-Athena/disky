@@ -1255,6 +1255,8 @@ class Runner:
     copied: set = field(default_factory=set)
     #: Why the merge stage found a compaction due (`compaction_why`: the rule that fired), or None: for the job's record.
     compaction: str | None = None
+    #: Compact after the carries whatever the policy says (`-K`), when the generation has runs.
+    compact_now: bool = False
 
     store_prefix: ClassVar[str]
     job_prefix: ClassVar[str]
@@ -1289,6 +1291,7 @@ class Runner:
     def run(self, scan_id: str, catch_up: bool = False) -> list[str]:
         """Append `scan_id` (and with `catch_up` every earlier pending scan, in order), then the merge stage. Returns the
         scans appended."""
+        self.follow()
         have, layouts = self.have()
         todo = pending_scans(have, self.published(layouts, have[-1]), scan_id, catch_up)
         # Every listed run's missing tiers first (a scan's own build reads its earlier runs').
@@ -1409,6 +1412,44 @@ class Runner:
         """The R2 job for `manifests/<manifest>.json` (default `d`'s own): its runs, checked there, then it, last."""
         raise NotImplementedError
 
+    def compact_jobs(self, scan: str) -> list[tuple[str, dict]]:
+        """The compaction's Batch jobs, in order: `compact` (one task: `run_compaction`, GCS, then R2 when the job can hold
+        the R2 credentials, `merge_r2`), else then `compact-r2` as the R2 account (the new generation to R2, its pointer
+        last)."""
+        raise NotImplementedError
+
+    def with_gen(self, gen: str) -> Any:
+        """`cfg` with generation `gen` (its successor's): what the chain appends to once a compaction moved it."""
+        raise NotImplementedError
+
+    def follow(self) -> None:
+        """Follow the profile's generation to its newest successor (`successor.json`, a compaction's forwarding record):
+        the runs append there, and the profile needs no change."""
+        gens: list[str] = [self.p.need("gen")]
+        while self.exists(f"{self.store_prefix}/{gens[-1]}/{SUCCESSOR}"):
+            nxt = self.read_json(f"{self.store_prefix}/{gens[-1]}/{SUCCESSOR}")["gen"]
+            if nxt in gens:
+                raise RuntimeError(f"{self.store_prefix}: successor cycle {gens + [nxt]}")
+            gens.append(nxt)
+        if len(gens) > 1:
+            self.log(f"{gens[0]} was compacted into {gens[-1]} ({' → '.join(gens)}): appending there")
+            self.cfg = self.with_gen(gens[-1])
+
+    def compact_stage(self, scan: str) -> None:
+        """The compaction stage (`compaction` says why): its Batch jobs (`compact_jobs`), the last waited on up to
+        `merge_wait` s; they publish the new generation on GCS, then R2 (its pointer last), so the next run appends to it
+        (`follow`). Non-fatal, as the merge stage: a rerun resumes (the job follows a finished compaction's successor)."""
+        jobs = self.compact_jobs(scan)
+        try:
+            for i, (name, spec) in enumerate(jobs):
+                wait = self.merge_wait if i == len(jobs) - 1 else None
+
+                def one(name: str = name, spec: dict = spec, wait: float | None = wait) -> None:
+                    self.run_job(name, spec, wait=wait)
+                self.stage(f"compact: {self.compaction}" if i == 0 else f"compact: {spec['labels']['stage']}", one)
+        except StillRunning as e:
+            self.log(f"compact: {e}; it publishes the new generation (GCS, then R2) when done, and the next run appends to it")
+
     def carries(self, fatal: bool = False) -> None:
         """The merge stage, once after the scans: the newest manifest's due carries (`plan_carries`), when any, as one Batch
         job (`merge_pending`: each merged run, then a revision of the newest manifest), waited on up to `merge_wait` s; then,
@@ -1419,6 +1460,7 @@ class Runner:
         if not self.merge:
             return
         try:
+            self.follow()
             keys = self.manifests()
             if not keys:
                 return
@@ -1444,14 +1486,18 @@ class Runner:
                 except StillRunning as e:
                     self.log(f"merge: {e}; it publishes its revision on GCS when done, and R2 gets it with a later run")
                     return
-                if self.dry_run:
-                    return
-                keys = self.manifests()
+                if not self.dry_run:
+                    keys = self.manifests()
             elif not compact:
                 self.log(f"merge: nothing due ({' '.join(f'L{r["level"]}' for r in m['runs']) or 'no runs'})")
-            scan, rev = parse_manifest(keys[-1].rsplit("/", 1)[-1])
-            if rev and (stem := keys[-1].rsplit("/", 1)[-1].removesuffix(".json")) not in self.copied:
-                self.r2(scan, stem)
+            if not self.dry_run:
+                scan, rev = parse_manifest(keys[-1].rsplit("/", 1)[-1])
+                if rev and (stem := keys[-1].rsplit("/", 1)[-1].removesuffix(".json")) not in self.copied:
+                    self.r2(scan, stem)
+            if self.compact_now and m["runs"] and not compact:
+                self.compaction = "forced (-K)"
+            if self.compaction is not None and m["runs"]:
+                self.compact_stage(m["date"])
         except Exception as e:
             if fatal:
                 raise RuntimeError(str(e)) from e
@@ -1682,6 +1728,7 @@ def compact_store(store, c: Compactor, gen: str, gen_dir: Path, work: Path, *, p
         raise SystemExit(f"{gen}: no runs to compact")
     base_scans = len(json.loads((gen_dir / "scans.json").read_text())["scans"])
     out = work / "store" / new_prefix
+    work.mkdir(parents=True, exist_ok=True)
     t0, disk = monotonic(), DiskPeak(work)
     log(f"compact {gen} → {new} under {as_policy(policy)} ({why}): {len(runs)} runs and the base")
     summary = {"from": gen, "gen": new, **c.fold(gen_dir, out, work, gen=gen, new_gen=new, runs=runs, threads=threads, mem=mem, jobs=jobs)}
@@ -1733,3 +1780,63 @@ def r2_publish_gen(bucket: str, prefix: str, new: str, old: str, *, last: tuple[
     for key in (f"{prefix}/{old}/{SUCCESSOR}", f"{prefix}/{CURRENT}"):
         r2_copy(bucket, r2_objects(bucket, [key]), workers=1, log=log)
     return {"objects": len(objs), "copied": doc["copied"] + len(tail), "bytes": doc["bytes"] + sum(o.size for o in tail), "s": round(monotonic() - t0, 1)}
+
+
+def run_compaction(store, c: Compactor, gen: str, mount: Path, work: Path, *, policy: Policy | int | None, force: bool = False,
+                   r2_bucket: str | None = None, grace_s: float = GRACE_S, now: float | None = None, threads: int = 4, mem: str = "4GB",
+                   jobs: int = 1, read: Callable[[str, Path], dict] | None = None, log: Callable[[str], None] = err) -> dict:
+    """The Batch `compact` stage (both stores): generation `gen` of `store` (the data bucket, a `blobstore.Store`)
+    followed to its newest successor; when `policy` fires (or `force`, with runs), folded into the next one and published
+    (`compact_store`) — GCS first, then, with `r2_bucket` (the data bucket the R2 copy mirrors), R2 (`r2_publish_gen`:
+    the new generation, then its pointer last); then (`c.prune`) the predecessors past the grace leave the data bucket.
+    The generation is read in place from `mount` (`<mount>/<prefix>/<gen>/`, the bucket's mount), or through `read(gen,
+    dst)` (another copy, mirrored into `dst`; returns `{source, bytes, s}`). Idempotent: a rerun after a compaction
+    finds the successor, which isn't due. Returns `{gen, why, compact, predecessors}`."""
+    gen = resolve_gen(store, c.prefix, gen, log)
+    if read is not None:
+        gen_dir = work / "read" / c.prefix / gen
+        reads = read(gen, gen_dir)
+    else:
+        gen_dir = Path(mount) / c.prefix / gen
+        reads = {"source": f"{store.root} (mount)", "bytes": sum(store.listing(f"{c.prefix}/{gen}").values()), "s": None}
+    why = forced(gen_dir) if force else due_in(gen_dir, policy)
+    doc: dict = {"gen": gen, "why": why, "compact": None, "predecessors": []}
+    if why is None:
+        log(f"compact {gen}: not due under {as_policy(policy)}")
+        return doc
+    r2 = None
+    if r2_bucket:
+        r2 = lambda new, old: r2_publish_gen(r2_bucket, c.prefix, new, old, last=c.last, log=log)  # noqa: E731
+    doc["compact"] = compact_store(store, c, gen, gen_dir, work, policy=policy, why=why, threads=threads, mem=mem, jobs=jobs, r2=r2, reads=reads, log=log)
+    if c.prune:
+        doc["predecessors"] = prune_predecessors(store, c.prefix, doc["compact"]["gen"], now=time.time() if now is None else now, grace_s=grace_s, log=log)
+    return doc
+
+
+def publish_r2_chain(bucket: str, prefix: str, gen: str, *, last: tuple[str, ...] = ("scans.json",), log: Callable[[str], None] = err) -> list[dict]:
+    """`compact-r2` (the R2 account's job, when the compaction's can't hold the R2 credentials): every compaction from
+    `gen` on (its successors on GCS, `gs://<bucket>/<prefix>/`) copied to R2 in turn (`r2_publish_gen`: each new
+    generation, then its pointer, last). Idempotent: what R2 holds is skipped."""
+    from .blobstore import Store
+
+    gens = chain(Store(f"gs://{bucket}"), prefix, gen)
+    return [r2_publish_gen(bucket, prefix, new, old, last=last, log=log) for old, new in zip(gens, gens[1:])]
+
+
+def compact_options(fn):
+    """The Batch `compact` command's options (both stores' CLIs; the store's own `-b`/`-g`/… come with them)."""
+    from click import option
+
+    for opt in reversed([
+        option("-C", "--compact", "policy", type=PolicyType(), default=str(COMPACT_LEVEL), help=POLICY_HELP),
+        option("-G", "--grace-s", default=GRACE_S, type=int, help=f"Keep a compacted predecessor this many seconds (default {GRACE_S})"),
+        option("-j", "--jobs", default=1, type=int, help="Key ranges / sorts folded at a time (the interval store's fold)"),
+        option("-K", "--compact-now", "force", is_flag=True, help="Compact whatever the policy says (when the generation has runs)"),
+        option("-m", "--mount", required=True, help="Local mount of the data bucket (the fold reads the generation from it)"),
+        option("-M", "--mem", default="100GB", help="DuckDB memory limit"),
+        option("-p", "--threads", default=16, type=int, help="DuckDB threads"),
+        option("-r", "--r2", "to_r2", is_flag=True, help="Then the R2 copy (`r2_publish_gen`: the new generation, its pointer last): the job has the R2 env"),
+        option("-T", "--tmp", default="/stage/tmp", help="Work dir (the new generation is written here, then uploaded)"),
+    ]):
+        fn = opt(fn)
+    return fn
