@@ -45,7 +45,7 @@ def test_jobs_pass_read_from():
     assert _calls_merge(f) == [("merge", f"carry -L 5 -F r2 -M 90GB -p 16 {COMMON} -m /gcs/data")]
     r = f.runner()
     assert r.compact_jobs("2026-08-07")[0][1]["taskGroups"][0]["taskSpec"]["runnables"][0]["container"]["commands"][1].split(
-        "dt_cloud.interval_append ")[1] == f"compact -C level:5 -F r2 -r -M 90GB -p 16 {COMMON} -m /gcs/data"
+        "dt_cloud.interval_append ")[1] == f"compact -C level:5 -F r2 -r -j 1 -M 90GB -p 16 {COMMON} -m /gcs/data"
 
 
 def test_read_from_r2_needs_the_r2_account():

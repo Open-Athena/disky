@@ -107,6 +107,11 @@ MANIFEST = re.compile(rf"(?P<scan>[^/]+?)(?:\.m(?P<rev>\d{{{REV_DIGITS}}}))?\.js
 LEASE_S = 4 * 3600
 #: A Batch task's longest run (`job_spec`).
 MAX_RUN_S = 4 * 3600
+#: Stages that fold a whole generation on one VM (`compact`): they run longer than `MAX_RUN_S` (gcs's first interval-store
+#: compaction, 2026-10-21: a 2 h 10 min fold, then ~35 min per served sort in series), and always STANDARD, since a
+#: reclaimed spot task restarts from zero (the static one was reclaimed ~3 h in). No merge lease is held through them.
+LONG_STAGES = ("compact",)
+LONG_RUN_S = 16 * 3600
 #: The merge status record's name under the generation (`<prefix>/<gen>/merging.json` on R2): `/health` reads it by key.
 #: No reader lists the generation's root (manifests are found under `manifests/`, by name), so it never reads as data.
 MERGE_STATUS = "merging.json"
@@ -899,7 +904,8 @@ def job_spec(p: Profile, name: str, tasks: int, commands: list[str], *, stage: s
     per = getattr(p, "machine_for", None)  # a profile with per-stage overrides (static names); else its one machine
     machine = machine or (per(stage) if per else p.machine)
     vcpus = int(machine.rsplit("-", 1)[-1])
-    spot = p.spot and stage not in p.standard_stages
+    long = stage in LONG_STAGES
+    spot = p.spot and stage not in p.standard_stages and not long
     buckets = [p.bucket, *([p.scratch] if scratch else [])]
     env = {"STATIC_NAMES_BUCKET": p.bucket, "STATIC_NAMES_SCRATCH": p.scratch}
     environment: dict = {"variables": env}
@@ -923,7 +929,7 @@ def job_spec(p: Profile, name: str, tasks: int, commands: list[str], *, stage: s
                 "environment": environment,
                 "computeResource": {"cpuMilli": vcpus * 1000, "memoryMib": vcpus * 7700},
                 "maxRetryCount": 3 if spot else 0,
-                "maxRunDuration": f"{MAX_RUN_S}s",
+                "maxRunDuration": f"{LONG_RUN_S if long else MAX_RUN_S}s",
                 "volumes": [
                     *({"gcs": {"remotePath": b}, "mountPath": f"/mnt/disks/gcs/{b}", "mountOptions": ["--implicit-dirs"]} for b in buckets),
                     {"deviceName": "stage", "mountPath": "/mnt/disks/stage"},

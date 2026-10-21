@@ -135,7 +135,7 @@ def test_interval_level_3_is_left_to_a_compaction():
     f.keys[f"{G1}/manifests/2026-08-07.json"] = {"date": "2026-08-07", "runs": _two(2)}
     f.runner(merge_wait=None).carries()
     assert (f.calls(), [m for m in f.log if m.startswith("merge")]) == (
-        [("compact", "compact -C level:3 -r -M 90GB -p 16 -b data -g g1 -R g0 -S scr -m /gcs/data")],
+        [("compact", "compact -C level:3 -r -j 1 -M 90GB -p 16 -b data -g g1 -R g0 -S scr -m /gcs/data")],
         ["merge: level 3 is due: compact into a new base generation (carries stop below it)"])
 
 

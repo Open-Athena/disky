@@ -539,7 +539,8 @@ class Runner(ar.Runner):
     def compact_jobs(self, scan: str) -> list[tuple[str, dict]]:
         r2 = self.merge_r2()
         out = [self.job("compact", scan, 1, "interval_append", ["compact", "-C", str(self.p.policy), *(["-K"] if self.compact_now else []), *self.read_args(),
-                                                              *(["-r"] if r2 else []), *duckdb_args(self.p.machine_for("compact"))], r2=r2)]
+                                                              *(["-r"] if r2 else []), "-j", str(self.p.compact_jobs),
+                                                              *duckdb_args(self.p.machine_for("compact"))], r2=r2)]
         if not r2:
             out.append(self.job("compact-r2", scan, 1, "interval_append", ["compact-r2"], r2=True, mount=False))
         return out

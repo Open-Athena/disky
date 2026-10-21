@@ -87,6 +87,9 @@ class Profile:
     #: Which copy the builder reads a generation's base and runs from in a merge and a compaction (`append_runner.READ_FROM`):
     #: `gcs` (the data bucket, in place) or `r2` (the R2 copy, mirrored locally; it must hold the builder's inputs).
     read_from: str = "gcs"
+    #: Key ranges, then served sorts, the interval store's compaction folds at a time (`compact -j`: cursors of one DuckDB
+    #: database sharing its memory and threads). The served sorts are each ~35 min at gcs's size, so 1 runs them in series.
+    compact_jobs: int = 1
 
     def __post_init__(self):
         if self.read_from not in ("gcs", "r2"):
@@ -150,6 +153,7 @@ ENV = {
     "standard_stages": "STATIC_NAMES_STANDARD_STAGES",
     "append_tasks": "STATIC_NAMES_APPEND_TASKS", "drill": "STATIC_NAMES_DRILL", "drill_checkpoint": "STATIC_NAMES_DRILL_CHECKPOINT", "anchors": "STATIC_NAMES_ANCHORS", "src": "STATIC_NAMES_SRC",
     "hex_runs": "STATIC_NAMES_HEX_RUNS", "compact_level": "STATIC_NAMES_COMPACT_LEVEL", "compact": "STATIC_NAMES_COMPACT", "read_from": "STATIC_NAMES_READ_FROM",
+    "compact_jobs": "STATIC_NAMES_COMPACT_JOBS",
 }
 
 
@@ -196,7 +200,7 @@ def _parse(name: str, raw: str):
         from .append_runner import parse_policy
 
         return parse_policy(ENV[name], raw)
-    if name in ("ssd_gb", "append_tasks"):
+    if name in ("ssd_gb", "append_tasks", "compact_jobs"):
         return int(raw)
     if name in ("spot", "drill", "anchors"):
         return raw.strip() not in ("0", "false", "")
