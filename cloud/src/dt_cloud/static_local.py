@@ -160,6 +160,23 @@ def publish_order(keys: list[str]) -> list[str]:
     return sorted(keys, key=rank)
 
 
+def read_gen(store: Store, read_from: str | None, prefix: str, gen_dir: Path, keep=lambda rel: True, *, label: str = "read") -> tuple[dict, dict[str, int]]:
+    """The generation `prefix` of `store` mirrored into `gen_dir` (what `keep` takes), from `store` itself or (`read_from`,
+    `-F`) another copy of it (refused when the copy lacks a file `store` has: `append_runner.read_tree`). Returns the
+    read (`{source, files, bytes, fetched, s}`, logged) and `store`'s listing of the generation (what `upload_new` skips)."""
+    from .append_runner import read_tree
+
+    if read_from:
+        before = store.listing(prefix)
+        return read_tree(Store(read_from), prefix, gen_dir, keep=keep, want=before, label=label), before
+    t0 = monotonic()
+    before = mirror(store, prefix, gen_dir, keep=keep)
+    kept = {k: n for k, n in before.items() if keep(k[len(prefix) + 1:])}
+    doc: dict = {"source": store.root, "files": len(kept), "bytes": sum(kept.values()), "fetched": None, "s": round(monotonic() - t0, 1)}
+    err(f"{label}: {doc['files']} files, {doc['bytes'] / 2**30:.3f} GiB from {doc['source']} in {doc['s']}s")
+    return doc, before
+
+
 def upload_new(store: Store, local: Path, prefix: str, before: dict[str, int]) -> list[str]:
     """`blobstore.upload_new` in this store's `publish_order`."""
     return _upload_new(store, local, prefix, before, publish_order)
@@ -684,6 +701,7 @@ def build_cmd(no_anchors, chunk_rows, floor, gen, k, K, layouts, mem, shard_rows
 @command("add")
 @option("-c", "--chunk-rows", default=CHUNK_ROWS, type=IntRange(min=1), help="A compaction's drill chunks: roots per measurement / rollup q range")
 @option("-C", "--compact", "--compact-level", "compact", type=PolicyType(), default=str(COMPACT_LEVEL), envvar="STATIC_NAMES_COMPACT", show_envvar=True, help=POLICY_HELP)
+@option("-F", "--read-from", help="Read the generation from this copy of the store (a dir or URL, e.g. the R2 copy of a GCS store) instead of -o (refused when it lacks a file -o has); writes still go to -o")
 @option("-g", "--gen", required=True, help="The base generation (`<store>/static-names/GEN/`); one compacted into a newer one is followed to it")
 @option("-G", "--grace-s", default=GRACE_S, type=IntRange(min=MIN_GRACE_S), help=f"Keep a superseded manifest's runs this many seconds (default {GRACE_S}, at least {MIN_GRACE_S})")
 @option("-K", "--compact-now", is_flag=True, help="Compact into a new generation now (when the generation has runs), whatever the policy says")
@@ -696,7 +714,7 @@ def build_cmd(no_anchors, chunk_rows, floor, gen, k, K, layouts, mem, shard_rows
 @option("-s", "--scans", "scans_root", required=True, help="Where the scans are: a dir or URL, the root of -L's keys")
 @option("-t", "--through", help="Last scan id to append (inclusive; default: the newest)")
 @option("-w", "--work", help="Local work dir (default: a temporary one, removed after); a URL store's generation is mirrored into it")
-def add_cmd(chunk_rows, compact, gen, grace_s, compact_now, layouts, mem, prune_dry_run, no_merge, store_root, threads, scans_root, through, work) -> None:
+def add_cmd(chunk_rows, compact, read_from, gen, grace_s, compact_now, layouts, mem, prune_dry_run, no_merge, store_root, threads, scans_root, through, work) -> None:
     """Append every scan after the generation's newest (base + runs), oldest first, each as a run published by its
     manifest; then the binary counter's due carries. The generation's files are never rewritten; new ones go to the store
     data first, `meta.json`s next, manifests last. Then, the publish done, the runs a carry folded are deleted from the
@@ -713,9 +731,7 @@ def add_cmd(chunk_rows, compact, gen, grace_s, compact_now, layouts, mem, prune_
     prefix = f"{PREFIX}/{gen}"
     with workdir(work) as w:
         gen_dir = w / "store" / prefix
-        t0 = monotonic()
-        before = mirror(store, prefix, gen_dir)
-        reads = {"source": store.root, "bytes": sum(before.values()), "s": round(monotonic() - t0, 1)}
+        reads, before = read_gen(store, read_from, prefix, gen_dir, label=f"add {gen}: read")
         if f"{prefix}/scans.json" not in before:
             raise SystemExit(f"{store.root}/{prefix}/scans.json: no such generation")
         base = json.loads((gen_dir / "scans.json").read_text())

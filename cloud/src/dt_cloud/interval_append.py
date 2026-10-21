@@ -59,7 +59,7 @@ from time import monotonic
 from typing import Any
 
 import pyarrow as pa
-from click import IntRange, argument, command, group, option
+from click import Choice, IntRange, argument, command, group, option
 
 from . import append_runner as ar
 from . import interval_store as ist
@@ -464,7 +464,7 @@ class Config:
 #: Env overrides of an interval profile's `append` fields (a staged source tree, a job image, the R2 endpoint).
 ENV = {"src": "INTERVAL_STORE_SRC", "image": "INTERVAL_STORE_IMAGE", "r2_endpoint": "R2_ENDPOINT", "project": "GCP_PROJECT",
        "gen": "INTERVAL_STORE_GEN", "machine": "INTERVAL_STORE_MACHINE", "compact_level": "INTERVAL_STORE_COMPACT_LEVEL",
-       "compact": "INTERVAL_STORE_COMPACT"}
+       "compact": "INTERVAL_STORE_COMPACT", "read_from": "INTERVAL_STORE_READ_FROM"}
 
 
 def load_config(profile: str | None, environ: dict[str, str] | None = None) -> Config:
@@ -533,12 +533,12 @@ class Runner(ar.Runner):
         return ar.job_spec(self.p, name, tasks, commands, stage=stage, purpose="interval-store", component=COMPONENT, **kw)
 
     def merge_job(self, scan: str) -> tuple[str, dict]:
-        return self.job("merge", scan, 1, "interval_append", ["carry", "-L", level_arg(self.p.policy.carry_level), *duckdb_args(self.p.machine)],
+        return self.job("merge", scan, 1, "interval_append", ["carry", "-L", level_arg(self.p.policy.carry_level), *self.read_args(), *duckdb_args(self.p.machine)],
                         r2=self.merge_r2())
 
     def compact_jobs(self, scan: str) -> list[tuple[str, dict]]:
         r2 = self.merge_r2()
-        out = [self.job("compact", scan, 1, "interval_append", ["compact", "-C", str(self.p.policy), *(["-K"] if self.compact_now else []),
+        out = [self.job("compact", scan, 1, "interval_append", ["compact", "-C", str(self.p.policy), *(["-K"] if self.compact_now else []), *self.read_args(),
                                                               *(["-r"] if r2 else []), *duckdb_args(self.p.machine_for("compact"))], r2=r2)]
         if not r2:
             out.append(self.job("compact-r2", scan, 1, "interval_append", ["compact-r2"], r2=True, mount=False))
@@ -847,6 +847,7 @@ def publish_cmd(bucket, gen, ranges_gen, scratch, scan, compact_level, mount, me
 
 @cli.command("carry")
 @stage_options
+@option("-F", "--read-from", type=Choice(ar.READ_FROM), default="gcs", help="Read the input runs from the data bucket's mount (gcs) or the R2 copy (r2, mirrored locally; the job's R2 env)")
 @option("-L", "--compact-level", type=ar.Level(), default=ar.COMPACT_LEVEL, help=ar.LEVEL_HELP)
 @option("-m", "--mount", required=True, help="Local mount of the data bucket (the merges read the runs)")
 @option("-M", "--mem", default="100GB", help="DuckDB memory limit (the merged runs' cut)")
@@ -854,7 +855,7 @@ def publish_cmd(bucket, gen, ranges_gen, scratch, scan, compact_level, mount, me
 @option("-n", "--dry-run", is_flag=True, help="Print the plan; merge and write nothing")
 @option("-p", "--threads", default=16, type=int, help="DuckDB threads")
 @option("-T", "--tmp", default="/stage/tmp", help="Scratch dir for merges")
-def carry_cmd(bucket, gen, ranges_gen, scratch, compact_level, mount, mem, max_merges, dry_run, threads, tmp) -> None:
+def carry_cmd(bucket, gen, ranges_gen, scratch, read_from, compact_level, mount, mem, max_merges, dry_run, threads, tmp) -> None:
     """Run the newest manifest's due carries (`append_runner.plan_carries`, `merge_pending`): each merged run into its own
     dir (its deltas, its cut, its `meta.json` last), then a revision `manifests/<id>.m<NNN>.json` listing it. One merger
     per generation (a lease in the scratch bucket, mirrored to R2's `interval-store/<gen>/merging.json` for /health when the
@@ -865,7 +866,8 @@ def carry_cmd(bucket, gen, ranges_gen, scratch, compact_level, mount, mem, max_m
     sl = ist.sliced(base)
     status = None if dry_run else ar.r2_merge_status(f"{PREFIX}/{gen}")
     doc = ar.merge_pending(store, carry(gen, k, threads=threads, mem=mem, sliced=sl, generation=ist.has_generation(base)), Path(mount) / PREFIX / gen, tmp=Path(tmp), dry_run=dry_run,
-                           max_merges=max_merges, max_level=compact_level, status=status)
+                           max_merges=max_merges, max_level=compact_level, status=status,
+                           source=(ar.R2Source(), f"{PREFIX}/{gen}") if read_from == "r2" else None)
     doc["prune"] = _summary(ar.prune_folded(store, retain=FOLDED_RETAIN, dry_run=dry_run, where=" gcs"))
     print(json.dumps(doc, indent=1))
 
@@ -878,7 +880,7 @@ def _summary(doc: dict) -> dict:
 @stage_options
 @ar.compact_options
 @option("-w", "--rg-rows", "rg_rows", default=ist.SERVED_RG, type=IntRange(min=1), help="Rows per served row group (the compacted generation's)")
-def compact_cmd(bucket, gen, ranges_gen, scratch, policy, grace_s, jobs, force, mount, mem, threads, to_r2, tmp, rg_rows) -> None:
+def compact_cmd(bucket, gen, ranges_gen, scratch, policy, read_from, grace_s, jobs, force, mount, mem, threads, to_r2, tmp, rg_rows) -> None:
     """The compaction stage (`append_runner.run_compaction` with `interval_compact`): when the policy fires (or `-K`),
     the generation's base and runs folded into `<gen>.c<NNN>` (a fresh build's bytes), published on GCS (`scans.json`,
     then `compaction.json`, `successor.json`, `interval-store/CURRENT.json`), then with `--r2` on R2 (its pointer last);
@@ -888,7 +890,7 @@ def compact_cmd(bucket, gen, ranges_gen, scratch, policy, grace_s, jobs, force, 
     if (b := gs_bucket(bucket)) is None:
         raise SystemExit(f"interval store: the staged compaction reads a mounted GCS bucket; {bucket!r} is not one")
     doc = ar.run_compaction(Store(f"gs://{b}"), ic.compactor(rg_rows), gen, Path(mount), Path(tmp), policy=policy, force=force,
-                            r2_bucket=b if to_r2 else None, grace_s=grace_s, threads=threads, mem=mem, jobs=jobs)
+                            r2_bucket=b if to_r2 else None, grace_s=grace_s, threads=threads, mem=mem, jobs=jobs, read_from=read_from)
     print(json.dumps(doc, indent=1))
 
 

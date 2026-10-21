@@ -788,7 +788,8 @@ def publish_revision(store: RunStore, carry: Carry, inputs: list[str], out: dict
 
 def merge_pending(store: RunStore, carry: Carry, mount: Path, *, tmp: Path, owner: str | None = None, dry_run: bool = False,
                   max_merges: int | None = None, max_level: int | None = COMPACT_LEVEL, now: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
-                  status: MergeStatus | None = None, heartbeat_s: float | None = HEARTBEAT_S, log: Callable[[str], None] = err) -> dict:
+                  status: MergeStatus | None = None, heartbeat_s: float | None = HEARTBEAT_S, log: Callable[[str], None] = err,
+                  source=None) -> dict:
     """Run the newest manifest's due carries (`plan_carries`), one merged run at a time (`carry.build`), each published as
     a revision (`publish_revision`) before the next is planned, until none is due (or `max_merges`). `mount`: the
     generation's dir on a mount of the data bucket (the inputs are read from it). Holds the merge lease throughout
@@ -825,7 +826,9 @@ def merge_pending(store: RunStore, carry: Carry, mount: Path, *, tmp: Path, owne
                 doc = {"rows": meta.get("rows"), "bytes": meta.get("bytes"), "s": {}}
             else:
                 outp = tmp / "merge" / out["key"]
-                doc = carry.build([mount / r["key"] for r in ins], out, outp, drilled=all(r["key"] in drilled for r in ins), tmp=tmp, log=log)
+                root, reads = read_runs(store, [r["key"] for r in ins], mount, tmp / "read", source=source, log=log)
+                doc = carry.build([root / r["key"] for r in ins], out, outp, drilled=all(r["key"] in drilled for r in ins), tmp=tmp, log=log)
+                doc["reads"] = reads
                 # a merged run is written once: an earlier attempt may have left only keys this one writes (overwritten here)
                 ours = {f"{out['key']}/{f.relative_to(outp).as_posix()}" for f in outp.rglob("*") if f.is_file()}
                 if stale := sorted(set(store.keys(f"{out['key']}/")) - ours):
@@ -836,7 +839,7 @@ def merge_pending(store: RunStore, carry: Carry, mount: Path, *, tmp: Path, owne
             out = {**out, **{k: doc[k] for k in ("rows", "bytes") if doc.get(k) is not None}}
             pub = publish_revision(store, carry, [r["key"] for r in ins], out, log=log)
             done.append({"inputs": [r["key"] for r in ins], "output": out["key"], "level": out["level"], "scans": len(out["scans"]),
-                         "rows": out.get("rows"), "manifest": pub.key if pub else None, "tiers_s": doc["s"], "s": round(monotonic() - t0, 1)})
+                         "rows": out.get("rows"), "manifest": pub.key if pub else None, "tiers_s": doc["s"], "reads": doc.get("reads"), "s": round(monotonic() - t0, 1)})
             log(f"merge {out['key']} ({len(ins)} runs, {len(out['scans'])} scans): {pub.key if pub else 'already listed'} in {done[-1]['s']:.0f}s")
     except BaseException as e:
         mirror.failed(e)
@@ -1412,6 +1415,14 @@ class Runner:
         """The R2 job for `manifests/<manifest>.json` (default `d`'s own): its runs, checked there, then it, last."""
         raise NotImplementedError
 
+    def read_args(self) -> list[str]:
+        """The merge and compaction jobs' `-F` (the profile's `read_from`; none for the default `gcs`). Reading the R2 copy
+        needs its credentials in the job, so the R2 account must be the stages' own (`merge_r2`)."""
+        if self.p.read_from == "r2" and not self.merge_r2():
+            raise SystemExit(f"read_from r2: the merge and compaction jobs run as {self.p.sa}, not the R2 account {self.p.r2_sa}: "
+                             "they can't read the R2 copy (read from gcs, or make the R2 account the stages')")
+        return read_from_arg(self.p)
+
     def compact_jobs(self, scan: str) -> list[tuple[str, dict]]:
         """The compaction's Batch jobs, in order: `compact` (one task: `run_compaction`, GCS, then R2 when the job can hold
         the R2 credentials, `merge_r2`), else then `compact-r2` as the R2 account (the new generation to R2, its pointer
@@ -1693,6 +1704,8 @@ class Compactor:
     last: tuple[str, ...] = ("scans.json",)
     prune: bool = True
     md5s: bool = False
+    #: What the fold reads of the generation (generation-relative keys): what a read from another copy mirrors.
+    keep: Callable[[str], bool] = lambda rel: True
 
 
 def _md5(p: Path) -> str:
@@ -1784,21 +1797,24 @@ def r2_publish_gen(bucket: str, prefix: str, new: str, old: str, *, last: tuple[
 
 def run_compaction(store, c: Compactor, gen: str, mount: Path, work: Path, *, policy: Policy | int | None, force: bool = False,
                    r2_bucket: str | None = None, grace_s: float = GRACE_S, now: float | None = None, threads: int = 4, mem: str = "4GB",
-                   jobs: int = 1, read: Callable[[str, Path], dict] | None = None, log: Callable[[str], None] = err) -> dict:
+                   jobs: int = 1, read_from: str = "gcs", source=None, log: Callable[[str], None] = err) -> dict:
     """The Batch `compact` stage (both stores): generation `gen` of `store` (the data bucket, a `blobstore.Store`)
     followed to its newest successor; when `policy` fires (or `force`, with runs), folded into the next one and published
     (`compact_store`) — GCS first, then, with `r2_bucket` (the data bucket the R2 copy mirrors), R2 (`r2_publish_gen`:
     the new generation, then its pointer last); then (`c.prune`) the predecessors past the grace leave the data bucket.
-    The generation is read in place from `mount` (`<mount>/<prefix>/<gen>/`, the bucket's mount), or through `read(gen,
-    dst)` (another copy, mirrored into `dst`; returns `{source, bytes, s}`). Idempotent: a rerun after a compaction
-    finds the successor, which isn't due. Returns `{gen, why, compact, predecessors}`."""
+    `read_from` `gcs`: the generation is read in place from `mount` (`<mount>/<prefix>/<gen>/`, the bucket's mount);
+    `r2`: what the fold reads (`c.keep`) is mirrored from the R2 copy (`source`, default `R2Source()`) first, refused
+    when it lacks any of it (`read_tree`). Idempotent: a rerun after a compaction finds the successor, which isn't due.
+    Returns `{gen, why, compact, predecessors}`."""
     gen = resolve_gen(store, c.prefix, gen, log)
-    if read is not None:
-        gen_dir = work / "read" / c.prefix / gen
-        reads = read(gen, gen_dir)
+    prefix = f"{c.prefix}/{gen}"
+    if read_from == "r2":
+        gen_dir = work / "read" / prefix
+        reads = read_tree(source or R2Source(), prefix, gen_dir, keep=c.keep, want=store.listing(prefix), label=f"compact {gen}: read", log=log)
     else:
-        gen_dir = Path(mount) / c.prefix / gen
-        reads = {"source": f"{store.root} (mount)", "bytes": sum(store.listing(f"{c.prefix}/{gen}").values()), "s": None}
+        gen_dir = Path(mount) / prefix
+        reads = in_place({k: n for k, n in store.listing(prefix).items() if c.keep(k[len(prefix) + 1:])}, f"{store.root} (mount)",
+                         label=f"compact {gen}: read", log=log)
     why = forced(gen_dir) if force else due_in(gen_dir, policy)
     doc: dict = {"gen": gen, "why": why, "compact": None, "predecessors": []}
     if why is None:
@@ -1825,10 +1841,11 @@ def publish_r2_chain(bucket: str, prefix: str, gen: str, *, last: tuple[str, ...
 
 def compact_options(fn):
     """The Batch `compact` command's options (both stores' CLIs; the store's own `-b`/`-g`/… come with them)."""
-    from click import option
+    from click import Choice, option
 
     for opt in reversed([
         option("-C", "--compact", "policy", type=PolicyType(), default=str(COMPACT_LEVEL), help=POLICY_HELP),
+        option("-F", "--read-from", type=Choice(READ_FROM), default="gcs", help="Read the generation from the data bucket's mount (gcs) or the R2 copy (r2, mirrored locally; the job's R2 env)"),
         option("-G", "--grace-s", default=GRACE_S, type=int, help=f"Keep a compacted predecessor this many seconds (default {GRACE_S})"),
         option("-j", "--jobs", default=1, type=int, help="Key ranges / sorts folded at a time (the interval store's fold)"),
         option("-K", "--compact-now", "force", is_flag=True, help="Compact whatever the policy says (when the generation has runs)"),
@@ -1840,3 +1857,86 @@ def compact_options(fn):
     ]):
         fn = opt(fn)
     return fn
+
+
+# ── The builder's read source (`read_from`, both stores) ───────────────────
+#
+# Which copy the builder reads a generation's base and runs from in a merge and a compaction (the one-machine `add`s:
+# which store it mirrors the generation from). Writes are unchanged (GCS, then the R2 copy). `gcs` (the default) reads
+# the data bucket in place (its mount); `r2` mirrors what's read from the R2 copy onto local disk first, refusing when
+# the R2 copy lacks a file the data bucket has (it holds the readers' files only, unless the builder's inputs are copied
+# there too: specs/static-compaction.md). Each read is logged and returned as `{source, files, bytes, s}`.
+
+READ_FROM = ("gcs", "r2")
+
+
+class R2Source:
+    """The R2 copy as a read source (`listing`, `get`), over the R2 env's boto3 client (`publish.r2_client`)."""
+
+    def __init__(self, client=None, bucket: str | None = None):
+        from . import publish as pub
+
+        self.client = client or pub.r2_client()
+        self.bucket = bucket or pub.r2_bucket()
+        self.root = f"r2://{self.bucket}"
+
+    def listing(self, prefix: str) -> dict[str, int]:
+        out = {}
+        for page in self.client.get_paginator("list_objects_v2").paginate(Bucket=self.bucket, Prefix=prefix.rstrip("/") + "/"):
+            out.update({o["Key"]: int(o["Size"]) for o in page.get("Contents", [])})
+        return out
+
+    def get(self, key: str, dst: Path) -> None:
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        self.client.download_file(self.bucket, key, str(dst))
+
+
+def read_tree(src, prefix: str, dst: Path, *, keep: Callable[[str], bool] = lambda rel: True, want: dict[str, int] | None = None,
+              workers: int = 8, label: str = "read", log: Callable[[str], None] = err) -> dict:
+    """`prefix`'s files (those `keep(rel)` takes) from `src` (a `blobstore.Store` or `R2Source`) into `dst` (`dst/<rel>`;
+    a file already there with the same size is kept). `want`: the data bucket's listing of the same keys: refused
+    (`SystemExit`) when `src` lacks one of them or holds it with another size. Returns `{source, files, bytes, s}`."""
+    t0 = monotonic()
+    have = src.listing(prefix)
+    rel = lambda k: k[len(prefix.rstrip("/")) + 1:]  # noqa: E731
+    if want is not None:
+        bad = sorted(k for k, n in want.items() if keep(rel(k)) and have.get(k) != n)
+        if bad:
+            raise SystemExit(f"{label}: {src.root} lacks {len(bad)} of the data bucket's files under {prefix}/ (e.g. {bad[0]}): "
+                             "it holds the readers' files only; read from gcs")
+    todo = [(k, dst / rel(k)) for k, n in sorted(have.items()) if keep(rel(k)) and not ((dst / rel(k)).is_file() and (dst / rel(k)).stat().st_size == n)]
+    with ThreadPoolExecutor(workers) as ex:
+        list(ex.map(lambda kd: src.get(*kd), todo))
+    doc: dict[str, Any] = {"source": src.root, "files": sum(1 for k in have if keep(rel(k))), "bytes": sum(n for k, n in have.items() if keep(rel(k))),
+           "fetched": sum(have[k] for k, _ in todo), "s": round(monotonic() - t0, 1)}
+    log(f"{label}: {doc['files']} files, {doc['bytes'] / 2**30:.3f} GiB from {doc['source']} ({doc['fetched'] / 2**30:.3f} GiB fetched) in {doc['s']}s")
+    return doc
+
+
+def in_place(listing: dict[str, int], source: str, label: str = "read", log: Callable[[str], None] = err) -> dict:
+    """A read in place (the bucket's mount): its bytes, no separate seconds (they're the stage's)."""
+    doc: dict[str, Any] = {"source": source, "files": len(listing), "bytes": sum(listing.values()), "fetched": 0, "s": None}
+    log(f"{label}: {doc['files']} files, {doc['bytes'] / 2**30:.3f} GiB read in place from {source}")
+    return doc
+
+
+def read_from_arg(p: Any) -> list[str]:
+    """A merge / compaction job's `-F` (the profile's `read_from`): none for `gcs` (the default)."""
+    rf = getattr(p, "read_from", "gcs")
+    return [] if rf == "gcs" else ["-F", rf]
+
+
+def read_runs(store, keys: list[str], mount: Path, dst: Path, *, source: tuple[Any, str] | None = None, log: Callable[[str], None] = err) -> tuple[Path, dict]:
+    """A merge's input runs (`keys`, generation-relative) where its build reads them: in place on `mount` (the data
+    bucket's mount of the generation; `source` None: their bytes logged from `store`'s listing), or mirrored into `dst`
+    from `source` = `(src, gen_prefix)` (the R2 copy, `R2Source`, and the generation's key prefix there), refused when
+    the copy lacks a file `store` (the data bucket) lists. Returns the dir the runs are under and `{source, files, bytes,
+    fetched, s}`."""
+    listing = {f"{k}/{rel}": n for k in keys for rel, n in ((x.removeprefix(f"{k}/"), n) for x, n in store.listing(f"{k}/").items())}
+    if source is None:
+        return Path(mount), in_place(listing, f"{getattr(store, 'bucket', None) or getattr(store, 'root', '?')} (mount)", label="merge: read", log=log)
+    src, prefix = source
+    docs = [read_tree(src, f"{prefix}/{k}", dst / k, want={f"{prefix}/{x}": n for x, n in listing.items() if x.startswith(f"{k}/")},
+                      label=f"merge: read {k}", log=log) for k in keys]
+    return dst, {"source": src.root, "files": sum(d["files"] for d in docs), "bytes": sum(d["bytes"] for d in docs),
+                 "fetched": sum(d["fetched"] for d in docs), "s": round(sum(d["s"] for d in docs), 1)}

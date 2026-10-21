@@ -130,11 +130,11 @@ class Runner(ar.Runner):
         return {r["key"] for r in runs if self.exists(f"{self.root}/{r['key']}/drill/meta.json")}
 
     def merge_job(self, scan: str) -> tuple[str, dict]:
-        return self.job("merge", scan, 1, "static_merge", ["carry", "-g", self.cfg.gen, "-L", level_arg(self.cfg.policy.carry_level)], r2=self.merge_r2())
+        return self.job("merge", scan, 1, "static_merge", ["carry", "-g", self.cfg.gen, "-L", level_arg(self.cfg.policy.carry_level), *self.read_args()], r2=self.merge_r2())
 
     def compact_jobs(self, scan: str) -> list[tuple[str, dict]]:
         r2 = self.merge_r2()
-        out = [self.job("compact", scan, 1, "static_merge", ["compact", "-g", self.cfg.gen, "-C", str(self.cfg.policy), *(["-K"] if self.compact_now else []),
+        out = [self.job("compact", scan, 1, "static_merge", ["compact", "-g", self.cfg.gen, "-C", str(self.cfg.policy), *(["-K"] if self.compact_now else []), *self.read_args(),
                                                            *(["-r"] if r2 else []), *duckdb_args(self.cfg.machine_for("compact"))], r2=r2)]
         if not r2:
             out.append(self.job("compact-r2", scan, 1, "static_merge", ["compact-r2", "-g", self.cfg.gen], r2=True, mount=False))

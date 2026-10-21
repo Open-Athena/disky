@@ -248,6 +248,7 @@ def build_cmd(gen, jobs, k, layouts, mem, store_root, threads, rg_rows, scans_ro
 @command("add")
 @option("-C", "--compact", "--compact-level", "compact", type=ar.PolicyType(), default=str(ar.COMPACT_LEVEL), envvar=["INTERVAL_STORE_COMPACT", "INTERVAL_STORE_COMPACT_LEVEL"],
         show_envvar=True, help=ar.POLICY_HELP)
+@option("-F", "--read-from", help="Read the generation from this copy of the store (a dir or URL, e.g. the R2 copy of a GCS store) instead of -o (refused when it lacks a file -o has); writes still go to -o")
 @option("-g", "--gen", help="The base generation (`<store>/interval-store/GEN/`); default the store's current (`interval-store/CURRENT.json`, else its only generation, adopted). One compacted into a newer one is followed to it")
 @option("-G", "--grace-s", default=ar.GRACE_S, type=IntRange(min=ar.MIN_GRACE_S), help=f"Keep a superseded manifest's runs, and a compacted generation, this many seconds (default {ar.GRACE_S}, at least {ar.MIN_GRACE_S})")
 @option("-K", "--compact-now", is_flag=True, help="Compact into a new generation now (when the generation has runs), whatever the policy says")
@@ -262,7 +263,7 @@ def build_cmd(gen, jobs, k, layouts, mem, store_root, threads, rg_rows, scans_ro
 @option("-s", "--scans", "scans_root", required=True, help="Where the scans are: a dir or URL, the root of -L's keys")
 @option("-t", "--through", help="Last scan id to append (inclusive; default: the newest)")
 @option("-w", "--work", help="Local work dir (default: a temporary one, removed after); a URL store's generation is mirrored into it")
-def add_cmd(compact, gen, grace_s, compact_now, jobs, layouts, mem, prune_dry_run, no_merge, store_root, threads, rg_rows, scans_root, through,
+def add_cmd(compact, read_from, gen, grace_s, compact_now, jobs, layouts, mem, prune_dry_run, no_merge, store_root, threads, rg_rows, scans_root, through,
             work) -> None:
     """Append every scan after the generation's newest (base + runs), oldest first, each as a run published by its
     manifest; then the binary counter's due carries. The generation's published files are never rewritten; new ones go
@@ -278,10 +279,8 @@ def add_cmd(compact, gen, grace_s, compact_now, jobs, layouts, mem, prune_dry_ru
     prefix = f"{PREFIX}/{gen}"
     with workdir(work) as w:
         gen_dir = w / "store" / prefix
-        t0 = monotonic()
-        before = mirror(store, prefix, gen_dir, keep=lambda rel: not rel.startswith(UNREAD))
-        reads = {"source": store.root, "bytes": sum(n for k, n in before.items() if not k[len(prefix) + 1:].startswith(UNREAD)),
-                 "s": round(monotonic() - t0, 1)}
+        keep = lambda rel: not rel.startswith(UNREAD)  # noqa: E731
+        reads, before = sl.read_gen(store, read_from, prefix, gen_dir, keep, label=f"add {gen}: read")
         if f"{prefix}/scans.json" not in before:
             raise SystemExit(f"{store.root}/{prefix}/scans.json: no such generation")
         base = json.loads((gen_dir / "scans.json").read_text())

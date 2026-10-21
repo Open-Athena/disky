@@ -1,6 +1,6 @@
 # Static name index: compaction into a new generation
 
-Status: building (2026-10-21, Ryan's go). The design below was approved 2026-10-09 and half-built on branch `compaction` (`static_compact.py`, off the pre-rework drill); that branch is reference, not a merge source. This revision adds a shared compaction **policy** (both stores) and a **builder read source** toggle.
+Status: built on `cloud` (2026-10-21), but for the real-data acceptance and the open items at the end. The 10-09 design was half-built on branch `compaction` (off the pre-rework drill; mined for ideas, not merged). This revision adds a shared compaction **policy** and one **orchestrator** for both stores and both paths (one-machine `add`, Batch runners), and a **builder read source** toggle; where the 10-09 design changed, the section below says so.
 
 ## Why it's needed now (gcs, 2026-10-20/21)
 
@@ -22,76 +22,60 @@ Before: `compact_level` L (every 2^L scans past the base; `none` = unbounded cas
 
 Which rule fired and why: `add`'s log line and JSON summary (`compact.why`); the generation's `compaction.json` (`{"level": L}` exactly as before under a level, else `{"level": null, "rule": "every:7d", "why": …}`); the staged merge stage's log (`merge: level L is due: …` as before, else `merge: compaction due under <policy> (<why>): …`) and `Runner.compaction` (the reason, for the job's record; wiring it into `/scans` is `scan-run`'s, not done here). The merge jobs get the carry bound (`carry -L <Policy.carry_level>`: `none` under `every` / `geometric`).
 
-## Built so far
+## One orchestrator, both stores, both paths (controller's scope update, 2026-10-21)
 
-- Phase 1 (policy): above.
-- Phase 2a: the shared orchestrator (`append_runner.compact_store` + `Compactor`; `next_gen`, `current`/`set_current`, `chain`, `resolve_gen`, `carry_markers`, `prune_predecessors`, `compaction_doc`, `r2_publish_gen`, lifted from `interval_compact` / `interval_local.compact`, which now delegate: the interval store's tests pass unchanged), the static fold (`static_compact.fold_gen`), `static-names add` compacting when due (`-C`, `-K`, following `successor.json`), `static-names compact`, `build -r ranges.json` (the reference), `store-gc` keeping forwarding records. `test_static_compact.py`: every flavor, md5-equal to the rebuild.
-- Phase 2b: the Batch `compact` stage in both runners (`Runner.compact_stage` after the merge stage, when the policy fires or `runs add -K` / `interval-store append -K`): one job, `static_merge compact` / `interval_append compact` (`append_runner.run_compaction`: follow successors, due check, `compact_store` reading the generation in place on the bucket's mount, then with `-r` `r2_publish_gen`: data, liveness files, `compaction.json`, the old generation's `successor.json`, then `CURRENT.json` last; predecessors pruned on GCS only, after the grace, for the interval store); when the stages' account isn't the R2 account a second job `compact-r2` as the R2 account (`publish_r2_chain`). Each runner's next run follows `successor.json` (`Runner.follow`: the profile needs no change). Non-fatal, waited on up to `-w` like the merge job.
-- Phase 3 (`read_from`): below, once built.
+gcs runs the Batch paths (`interval-store append` = `interval_append`, `static-names runs add` = `static_runner`), which never compacted: runs piled up at level 5, and nothing moved a pointer on R2. So compaction is one shared orchestrator in `append_runner`, with a store-specific fold:
+
+- **`compact_store(store, Compactor, gen, gen_dir, work, *, policy, why, …)`**: `next_gen` (`<gen>.c<NNN>`, the lineage's next; the 10-09 draft's `<last scan>c` name is dropped: two lineages share `static-names/` in one bucket, e.g. the "meta" store's `STATIC_GEN`, and could collide); an unpublished attempt's keys cleared (a target without a `successor.json` pointing at it is an interrupted attempt, redone; the draft's "refuse a non-empty target" became this, as the interval store already did); `Compactor.fold` writes the new generation locally; `compaction.json` (`{from, manifest, runs, base_scans, scans, level[, rule, why][, files: md5 per file]}`; the draft's `compacted.json` is this one name for both stores) uploaded last, after the rest in the store's publish order; `successor.json` in the old generation; `<prefix>/CURRENT.json` = `{"gen": …}` when it named the old one or nothing; then the R2 hook. Instrumented: seconds, work-disk / RSS peaks, bytes written, upload seconds, and the read (`{source, files, bytes, fetched, s}`).
+- **Lifted from `interval_compact`** (which keeps its API as thin wrappers, byte-identical output, its tests unchanged): `current` / `set_current` / `generations` / `chain` / `resolve` / `resolve_gen` / `carry_markers` / `prune_predecessors`, each taking the store's prefix.
+- **`Compactor`**: `fold`, `publish_order`, `last` (the files readers open a generation by: R2 copies them after the rest), `prune` (predecessors leave the store after the grace: the interval store yes; the static store no — its readers pin `STATIC_GEN`, so `store-gc -k` collects them), `md5s` (static: `compaction.json` lists every file's md5), `keep` (what the fold reads: what a read from another copy mirrors).
+- **`r2_publish_gen(bucket, prefix, new, old, last)`**: the new generation GCS → R2 (data in parallel, then `last` in order, then `compaction.json`), checked there (size, md5), then the old generation's `successor.json`, then `<prefix>/CURRENT.json`, **last**. gcs's site now resolves the interval store's generation from R2 `interval-store/CURRENT.json` (no `INTERVAL_STORE_GEN` pin), so the pointer moves only once the generation is whole on R2. The static store's pointer has the same shape (`static-names/CURRENT.json`); its site still pins `STATIC_GEN` (following the pointer, or `successor.json`, is the site's change, not here).
+- **The one-machine `add`s** (`interval-store add`, `static-names add`): mirror the generation, append, carry, then `compact_store` when the policy fires or `-K`. `static-names add -g G` follows `successor.json` (`resolve_gen`); `static-names compact -g G` forces one.
+- **The Batch runners**: `Runner.compact_stage` after the merge stage (`Runner.carries`), when the policy fires or `-K` (`static-names runs add -K`, `interval-store append -K`): one Batch job, `static_merge compact` / `interval_append compact` (`run_compaction`: `resolve_gen`, the due check, `compact_store` reading the generation in place on the bucket's mount, then with `-r` the R2 copy; the interval store's predecessors past the grace leave GCS). When the stages' account can't hold the R2 credentials (`merge_r2`), a second job `compact-r2` as the R2 account (`publish_r2_chain`: every compaction from the generation on). Non-fatal and waited on up to `-w`, as the merge job; idempotent (a rerun finds the successor, not due). The runners' next run (and `runs merge` / `interval-store merge`) follow `successor.json` (`Runner.follow`: `with_gen`), so the profile's `gen` needs no change; the interval store's `ranges_gen` becomes the compacted generation (it holds its own ranges).
+- **`store-gc`** keeps a compacted generation's `successor.json` (the forwarding record) in both stores, and the static pointer's generation and successors.
 
 ## Builder read source (`read_from: gcs | r2`, both stores)
 
-Both copies stay. A profile option (env override; CLI `--read-from`) picks which copy the builder reads earlier runs / the base from during `add`, merges and compaction. Writes still go to both (GCS, then the R2 copy). Each stage logs its read bytes and seconds per source, so a week of each gives real timings before deciding on one copy (gcs estimate: R2-only adds ~20 min to the pipeline). Default `gcs` (today's behavior).
+A profile option (`read_from`; env `STATIC_NAMES_READ_FROM` / `INTERVAL_STORE_READ_FROM`; the jobs' `-F/--read-from`) picks which copy the builder reads a generation's base / runs from in **merges and compaction**; writes are unchanged. `gcs` (default, today's behavior): in place on the bucket's mount, the bytes logged from the listing (no separate seconds: they're the stage's). `r2`: what's read is mirrored from the R2 copy (`R2Source`, the job's R2 env) onto local disk first (`read_tree` / `read_runs`), logged with its bytes and seconds, and **refused** when the R2 copy lacks a file the data bucket has. The runners pass `-F r2` to the merge and compaction jobs, refusing when those jobs can't hold the R2 credentials. The one-machine `add`s take `-F <copy URL>`: mirror the generation from that copy instead of `-o` (same refusal), writing `-o` only.
 
-## Reference design (2026-10-09)
+**Design correction:** "both copies stay, pick which one the builder reads" assumed the R2 copy holds the builder's inputs. It doesn't: R2 gets the readers' files only (`static_names.R2_SERVED`: no `cintervals/`, `chist/`, runs' `cdelta/`, `catalog/members.parquet`, `ranges.json`; the interval store copies `served/` only, none of `pvl/`, `pv/`, `sv/`, …). So `read_from: r2` is refused today, by construction, rather than reading a partial copy. Real R2 timings need the builder's inputs copied too (≈ the static store's `cintervals` 5 GB + each run's `cdelta`; the interval store's range files): a per-scan R2 job option, and an egress / storage cost decision — Ryan's, not built. The per-scan stages (`append`, `shards`, `catalog`, `drill`, `anchors`, the interval `ranges`) also read the mount directly and don't take `-F` yet.
 
-## Why (original)
+## The static fold (`static_compact.fold_gen`)
 
-A generation (`static-names/<gen>/`) plus its runs answers every scan, but each run adds a tier to every read. The binary counter bounds that at ⌊log₂ n⌋ + 1 tiers. Close records also inflate the summed extents (light) and the stored rows (drill) until a merge collapses them. At level 5 (32 scans; for `2026-10-08c` before about 2026-11-08), or on demand, the base and its runs fold into a new base generation. That generation must be **the generation a full rebuild through its last scan would produce, byte for byte**: same files, same plans, same aliases. Readers then switch to it, and the old one stays until Ryan deletes it.
+`G` is the base generation, `runs` the newest manifest's runs (oldest first), `G'` the new generation. The reference is `static-names build -r G/ranges.json` through the last scan (the new `-r/--ranges-file`: a rebuild over `G`'s key ranges). Every part is the build's own code wherever it's a function of other parts:
 
-## What a generation holds, and how each part folds
+| Part of `G'` | Fold |
+|---|---|
+| `scans.json`, `ranges.json` | `G`'s scans + every run scan's `deltas/<id>/scans.json` entry (kept on folded runs, `FOLDED_RETAIN`); `G`'s ranges |
+| `cintervals/`, `chist/` | per range: `G`'s versions ∪ every scan's `cdelta`, one row per `(depth, path, usr, vf)`, smallest `vt`, written as `build_range(coalesced=True)`; `hist_sql` under the generation's rule |
+| `shards.json` | the build's planner over the folded histograms (`G`'s target rows and task count) |
+| `sx/`, `sidecar/`, `sidecar.parquet` | `merge_shards([G, *runs], plan=…)`; the sidecar as the build concatenates it |
+| `catalog/cells.parquet`, `index.parquet` | `merge_catalogs([G, *runs])` |
+| `catalog/members.parquet`, `members.json` | the build's census over `G'`'s shards (`cut_members`): the draft's "recompute from the catalog's headers" can't give `ubytes` |
+| `catalog/meta.json` | `catalog_meta` over the merge's counts and the headers (its `s` is this fold's seconds: no two builds share it either) |
+| `drill/`, `roots-measure/` | below |
+| `names/`, `anchors/` | when `G` has `anchors/meta.json`: the build's base builders over `G'` (`build_base_anchors`, `G`'s R and K) |
+| `manifests/<last>.json` | no runs (`static_append.manifest`) |
 
-`G` is the base generation, `runs` its live runs (oldest first, from the newest manifest), and `G'` the new generation, named `<last scan id>c` (e.g. `2026-10-09c`). A full rebuild through the last scan, with `G`'s key ranges, is the reference.
+**The drill** (`fold_drill`): roots are read, not recomputed from the suffix shards. Every tier's `aliases.parquet` maps every member it knows to its canonical, which holds that class's rows there (a class only splits). A member's tuple of classes, one per tier, picks its rows: `G`'s under its `G` canonical ∪ each run's under its run canonical, combined (smallest `vt` per `(path, usr, vf)`); members with equal tuples share rows. The digest is the build's (count, two hash sums of `hash(path, usr, vf, vt, size, n_files)` mod 2⁶⁴) over those rows, the classes `min(q)` per digest. The canonical members' roots and the short literals' (every tier's, combined) are spilled by `q` range, and `static_local.finish_drill` — factored out of `build_base_drill`, shared — measures, rolls up and writes `drill/` and `roots-measure/`. Departures from the 10-09 draft: no additive digest fold (the one-machine base keeps no `drill/digest/`; the tuple fold is exact and needs none), no `short-q.parquet` / `short-plan.json` (the one-machine build has no short plan; its q ranges are chunking only and don't change bytes). Every tier must carry a drill (else refused: a rebuild gives it one).
 
-| Part of `G'` | Fold | Equal to the rebuild because |
-|---|---|---|
-| `scans.json`, `ranges.json` | `G`'s scans + every run's (`scans.json` of each scan's run), `G`'s ranges | the rebuild is defined over `G`'s key ranges (the ranges partition keys; they only cut files) |
-| `cintervals/r####.parquet` | per range: `G`'s versions with every run's `cdelta` (close records set `vt`, opens add versions), `pyrmts.runs.merge_parquets` on `(depth, path, usr, vf)`, smallest `vt`, `INTERVAL_RG` groups | the coalesced versions through D are a function of the scans (`test_coalesced_from_scans_equals_two_step`); appending equals rebuilding (`test_append_open_equals_rebuild`) |
-| `chist/r####.parquet` | `hist_sql` over each folded range | the same function of the same rows |
-| `shards.json` | `plan_shards(chist, G's target_rows, G's task count)` | the build's planner over the same histograms |
-| `sx/`, `sidecar/`, `sidecar.parquet` | `merge_shards([G, *runs], plan=G'`'s plan) per shard: the streaming k-way merge of each tier's rows in the shard's prefix range, smallest `vt` | `test_compaction_equals_full_build` |
-| `catalog/{cells,index}.parquet` | `merge_catalogs([G, *runs])` | `test_catalog_equals_rebuild` |
-| `catalog/meta.json`, `members.json`, `members.parquet` | recomputed from the folded catalog (headers ≥ 3 characters, their range rows, the shard of `G'`'s plan holding their first three characters) | the members are the catalog's headers; a member's shard is its prefix's shard |
-| `drill/` | below | |
+**Proved** (`test_static_compact.py`, all three fixture flavors): `G'` after two level-0 runs (compacted by `add` when level 1 fires), after one merged run (`static-names compact`), and `G''` after a scan appended to `G'` (`add -g G` follows the successor; `-K`): every file md5-equal to `build -r` through the same scans (all but `compaction.json`, the manifests, and `catalog/meta.json`'s `s`); `compaction.json`'s md5s and rule; `store-gc` keeping the pointer and forwarding records.
 
-### The drilldown
+**Scale.** The fold is one machine's (`static-names add` / `compact`, or the Batch `compact` stage on one VM: `machines.compact` / `ssd_gbs.compact` in the profile size it). At gcs's size (≈ 136 GB of shards, 299 GB of drill roots, `cintervals` 5 GB) its DuckDB steps spill to the local SSD; the 10-09 draft's multi-task stages (light per range and per shard group, `drill-long` queue, `drill-short` per q-group) are not built: run the acceptance on one large VM first and split only if it doesn't fit. Note the staged (gcs) base drill's layout (`long/roots/s####`, `short/roots/g###`, `drill/digest/`, `short-plan.json`) differs from the one-machine build's (`r####` files cut at `q` boundaries): a compaction of a staged base writes the one-machine layout, which the readers read the same (both go through the two-level indexes) but which is **not** byte-equal to a staged rebuild. The acceptance below must compare against `static-names build -r` (one machine), or the staged reference must be rebuilt in the one-machine layout.
 
-A rebuild's drill is a function of the roots, and the roots of `G` ⊕ runs are exactly a rebuild's (`test_roots_equal_rebuild`). So the fold reads roots instead of recomputing them from the suffix shards (the costly level loop), and recomputes everything derived from them with the build's own code:
+## Acceptance (real data; needs gcs's Batch and Ryan's go)
 
-- **Classes.** A rebuild aliases members with equal root-set digests, the canonical being the least member. The digest is two order-free sums of row hashes, so it folds additively. `G`'s per-member digests (`drill/digest/`), plus each run row's hash, plus for a close record its row's hash with `vt` = D less the same row's hash with `vt` = OPEN. That gives every member's digest through D, and the classes follow as `alias-plan` makes them. This includes members new in the runs, whose classes the runs keep as singletons.
-- **Long roots and rollups, per shard of `G'`'s plan.** For the shard's canonical members, take `G`'s rows of each one's canonical in `G` (from `G`'s `long/roots/`, row groups pruned by their `q` statistics), combine them with the runs' rows (via each run's own canonical), then `build_roots`. That gives roots sorted `(q, path, usr, vf)` and rollups by `rollup_sql` (heavy = more than R distinct roots under the directory: a run's sticky extra rollups disappear), with the per-file group indexes. This is the build's `build` stage minus the level loop.
-- **Short literals.** `short-plan` cuts q-groups by each literal's root rows. A literal's rows through D are `G`'s (`drill/short-q.parquet`, written by this fold; the first fold reads `roots-measure/short/q/`) plus the runs' new identities. Per q-group, combine `G`'s rows (from `G`'s q-group holding the literal) with the runs', then `build_roots`, as `short-reduce` does.
-- **`index`**: the build's `index` stage over `G'`'s per-file indexes, then `meta.json`.
-- **Next fold and the daily runs' inputs**:
-  - `drill/digest/s####.parquet` (per member, through D);
-  - `drill/short-q.parquet`;
-  - `roots-measure/dirs/s####.parquet` and `roots-measure/short/dirs/g###.parquet`: `dir_stats` (floor 10K) over the folded roots. Long rows are per member, an alias getting its canonical's rows. Short rows are whole q-groups, so there are no depth-1 partials, and `short/top/` is empty.
+Compact gcs's current static generation and its runs on one large VM (`static-names runs add -K`, or `static_merge compact -K -g <gen> -m /gcs/<bucket>` as a Batch job), then compare with `static-names build -r <gen>/ranges.json` through the same last scan, on sampled ranges / shards / drill files: md5-equal. Record the measured cost (the job's summary: seconds per part, disk / RSS peaks, bytes) below. The interval store's Batch `compact` on gcs: its first real run is the next compaction due (or `interval-store append -K`), then check R2's `interval-store/CURRENT.json` moved last.
 
-## Publishing and switching
+## Open
 
-- `G'` is written under `static-names/<G'>/` only. The job refuses if anything is there, writes nothing under `G`, and deletes nothing.
-- The order is: the parts above; then `manifests/<last scan>.json` (`runs: []`, `scans` = all, `base_scans` = all); then `compacted.json` last. `compacted.json` holds `{from: G, runs, scans, plan, counts, md5 per served file}` and is the completion marker. The R2 copy (`r2-copy -g G'`, then `compacted.json`) follows the same order.
-- **Switching** is one setting per side. Readers set `STATIC_GEN` = `G'` (a deployment var). The runner sets the profile's base generation to `G'`. Each switches only once `compacted.json` exists, on GCS for the runner and on R2 for readers. A scan after the cut (e.g. `2026-10-09T1236`) is appended to `G'` as its first run. Its `prepare` checks that it is the next scan after `G'`'s, so the runner cannot append to `G` and `G'` both.
-- `G` and its runs stay, so a reader on `G` keeps working until it switches.
+- `read_from: r2` needs the builder's inputs on R2 (above): a decision.
+- The site following `static-names/CURRENT.json` (or `successor.json`) instead of pinning `STATIC_GEN`: the site's change.
+- `/scans` records: `Runner.compaction` (the reason) and the compaction job's summary are there for `scan-run supervise` to record; not wired.
+- One `static-names/CURRENT.json` per bucket prefix: deployments with two static lineages under one prefix (the "meta" store) would share it; the pointer is moved only when it names the compacted generation or nothing, so a second lineage never takes it over, but it can't name both.
 
-## Stages (Batch, `python -m dt_cloud.static_compact …`)
-
-1. `plan` (1 task): `scans.json`, `ranges.json`, the runs, the target generation. Refuses a non-empty target.
-2. `light` (per key range, then per shard): fold `cintervals` + `chist` per range; then `shards.json`; then `merge_shards` per shard of the plan (a task per shard group); `catalog`.
-3. `drill-classes` (1 task): the folded digests → `drill/aliases.parquet`, `drill/digest/`; `members.parquet` (from `light`).
-4. `drill-long` (queue over `G'`'s shards) and `drill-short` (per q-group): roots, rollups, per-file indexes, measurement.
-5. `drill-index`, `manifest`, `compacted.json` (1 task).
-
-## Acceptance (real data)
-
-Compact `2026-10-08c` ⊕ the 2026-10-09 run into `2026-10-09c`, then compare a sample with a full rebuild through 2026-10-09:
-
-- **Light.** `cintervals` for sampled ranges, rebuilt from the 71 scan files (`build_range(coalesced=True)`); `sx/` and `sidecar/` for sampled shards, rebuilt from those cintervals (the build's suffix map and shard writer for the shard's prefix range). Both md5-equal.
-- **Drill.** For sampled shards and q-groups, the build's `build` / `short-reduce` from the rebuilt suffix shards / cintervals (the level loop, not the fold): md5-equal roots, rollups and per-file indexes, and equal aliases.
-
-## Cost (estimate; measured figures go below once run)
+## Cost (10-09 estimate; measured figures go here once run)
 
 - Light: ~5 GB of cintervals and 136 GB of shards, read and rewritten (≈ 2 VM-hours).
-- Drill: 299 GB of roots, read and rewritten with the rollups recomputed (≈ 25–40 VM-hours, the build's `build` + `short-reduce` without the level loop).
-- About $8–12 a month at spot prices. GCS storage for a second copy is ≈ $9 a month until `G` is deleted.
-- R2: each compaction copies the whole new generation (≈ 435 GB × $0.12 ≈ $52 of GCS egress). That is the dominant cost and a reason to keep compactions rare, or to copy only what changed. Most drill and shard files change, though, because shard plans move.
+- Drill: 299 GB of roots, read and rewritten with the rollups recomputed (≈ 25–40 VM-hours).
+- R2: each compaction copies the whole new generation (≈ 435 GB × $0.12 ≈ $52 of GCS egress), the dominant cost and a reason to keep compactions rare (`geometric`).

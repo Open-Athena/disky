@@ -274,7 +274,17 @@ def compactor(chunk_rows: int = sl.CHUNK_ROWS) -> ar.Compactor:
     """The static store's plug into the shared compaction (`append_runner.compact_store`): its fold and upload order; its
     predecessors are left to `store-gc -k` (readers pin `STATIC_GEN`, so a compacted generation may still be served)."""
     return ar.Compactor(prefix=PREFIX, fold=lambda *a, **kw: fold(*a, **kw, chunk_rows=chunk_rows), publish_order=sl.publish_order,
-                        last=("scans.json", "catalog/meta.json", "drill/meta.json", f"{an.ANCHORS}/meta.json"), prune=False, md5s=True)
+                        last=("scans.json", "catalog/meta.json", "drill/meta.json", f"{an.ANCHORS}/meta.json"), prune=False, md5s=True, keep=reads)
+
+
+#: What the fold never reads of the base: the anchored search and the measurement (rebuilt), the parity markers.
+UNREAD = (f"{an.NAMES}/", "roots-measure/", "verify/")
+
+
+def reads(rel: str) -> bool:
+    """Whether the fold reads generation-relative `rel` (`Compactor.keep`): all but `UNREAD` and the base's `anchors/`
+    (whose `meta.json` says the base has anchored search)."""
+    return not rel.startswith(UNREAD) and (not rel.startswith(f"{an.ANCHORS}/") or rel == f"{an.ANCHORS}/meta.json")
 
 
 # ── CLI (one machine) ──────────────────────────────────────────────────────

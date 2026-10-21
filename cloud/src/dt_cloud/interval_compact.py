@@ -275,9 +275,10 @@ def fold(gen_dir: Path, out: Path, work: Path, *, gen: str, new_gen: str, runs: 
 def compactor(rg_rows: int = ist.SERVED_RG) -> ar.Compactor:
     """The interval store's plug into the shared compaction (`append_runner.compact_store`): `fold`, the publish order
     (data, then `scans.json`, the generation's liveness marker), predecessors pruned after the grace."""
-    from .interval_local import publish_order
+    from .interval_local import UNREAD, publish_order
 
-    return ar.Compactor(prefix=PREFIX, fold=lambda *a, **kw: fold(*a, **kw, rg_rows=rg_rows), publish_order=publish_order, last=("scans.json",))
+    return ar.Compactor(prefix=PREFIX, fold=lambda *a, **kw: fold(*a, **kw, rg_rows=rg_rows), publish_order=publish_order, last=("scans.json",),
+                        keep=lambda rel: not rel.startswith(UNREAD))
 
 
 def due(gen_dir: Path, policy: ar.Policy | int | None) -> str | None:

@@ -84,8 +84,13 @@ class Profile:
     #: `{"geometric": 1}` or `"none"`; specs/static-compaction.md): when set, it replaces `compact_level`, which is
     #: shorthand for `{"level": L}`. `policy` is the one in force.
     compact: Policy | None = None
+    #: Which copy the builder reads a generation's base and runs from in a merge and a compaction (`append_runner.READ_FROM`):
+    #: `gcs` (the data bucket, in place) or `r2` (the R2 copy, mirrored locally; it must hold the builder's inputs).
+    read_from: str = "gcs"
 
     def __post_init__(self):
+        if self.read_from not in ("gcs", "r2"):
+            raise SystemExit(f"read_from must be gcs or r2, not {self.read_from!r}")
         if self.compact_level is not None and (isinstance(self.compact_level, bool) or not isinstance(self.compact_level, int) or self.compact_level < 1):
             raise SystemExit(f"compact_level must be an integer ≥ 1 or none, not {self.compact_level!r}")
         if self.compact is not None:
@@ -144,7 +149,7 @@ ENV = {
     "machines": "STATIC_NAMES_MACHINES", "ssd_gbs": "STATIC_NAMES_SSDS",
     "standard_stages": "STATIC_NAMES_STANDARD_STAGES",
     "append_tasks": "STATIC_NAMES_APPEND_TASKS", "drill": "STATIC_NAMES_DRILL", "drill_checkpoint": "STATIC_NAMES_DRILL_CHECKPOINT", "anchors": "STATIC_NAMES_ANCHORS", "src": "STATIC_NAMES_SRC",
-    "hex_runs": "STATIC_NAMES_HEX_RUNS", "compact_level": "STATIC_NAMES_COMPACT_LEVEL", "compact": "STATIC_NAMES_COMPACT",
+    "hex_runs": "STATIC_NAMES_HEX_RUNS", "compact_level": "STATIC_NAMES_COMPACT_LEVEL", "compact": "STATIC_NAMES_COMPACT", "read_from": "STATIC_NAMES_READ_FROM",
 }
 
 
