@@ -37,7 +37,26 @@ def test_interval_compact_now():
     r = f.runner(merge_wait=None)
     r.compact_now = True
     r.carries()
-    assert (f.calls(), r.compaction) == ([("compact", f"compact -C level:1 -K -r -M 90GB -p 16 {COMMON} -m /gcs/data")], "forced (-K)")
+    assert (f.calls(), r.compaction) == ([("compact", f"compact -C level:1 -K -r -j 1 -M 90GB -p 16 {COMMON} -m /gcs/data")], "forced (-K)")
+
+
+def test_compact_jobs_run_long_on_standard_vms():
+    """Both stores' `compact` job: STANDARD even on a spot profile (a reclaimed fold restarts from zero), no retries, and
+    `LONG_RUN_S` rather than `MAX_RUN_S`; the interval store's folds `compact_jobs` sorts at a time (`-j`); `compact-r2` and
+    every other stage keep the default."""
+    r = IvFake(["2026-08-03"], compact_level=1, spot=True, compact_jobs=4).runner(merge_wait=None)
+
+    def shape(spec):
+        task = spec["taskGroups"][0]["taskSpec"]
+        return (spec["labels"]["stage"], spec["allocationPolicy"]["instances"][0]["policy"]["provisioningModel"], task["maxRetryCount"],
+                task["maxRunDuration"])
+
+    iv = r.compact_jobs("2026-08-04")
+    sr = _static_runner(1).compact_jobs("2026-10-10")
+    assert ([shape(s) for _, s in iv], [shape(s) for _, s in sr]) == (
+        [("compact", "STANDARD", 0, f"{ar.LONG_RUN_S}s")], [("compact", "STANDARD", 0, f"{ar.LONG_RUN_S}s"), ("compact-r2", "SPOT", 3, f"{ar.MAX_RUN_S}s")])
+    assert iv[0][1]["taskGroups"][0]["taskSpec"]["runnables"][0]["container"]["commands"][1].split("dt_cloud.interval_append ")[1] == (
+        f"compact -C level:1 -r -j 4 -M 90GB -p 16 {COMMON} -m /gcs/data")
 
 
 def test_interval_follows_the_successor():
