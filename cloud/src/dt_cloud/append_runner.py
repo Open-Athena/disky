@@ -72,6 +72,27 @@ class Level(ParamType):
 LEVEL_HELP = f"Compaction level: no carry reaches it; `none`: unbounded (default {COMPACT_LEVEL})"
 
 
+POLICY_FORMS = "`L` / `level:L` (an integer ≥ 1), `every:<N>d` / `every:<N>s` (days, scans), `geometric:<r>` (r > 0) or `none`"
+
+
+class PolicyType(ParamType):
+    """`-C`: a compaction policy (`parse_policy`): a bare level (`5`), `level:L`, `every:<N>d|s`, `geometric:<r>`, `none`."""
+    name = "policy"
+
+    def convert(self, value, param, ctx):
+        if value is None or isinstance(value, Policy):
+            return value
+        try:
+            return parse_policy("-C", value)
+        except SystemExit as e:
+            self.fail(str(e), param, ctx)
+
+
+POLICY_HELP = (f"Compaction policy: {POLICY_FORMS} (specs/static-compaction.md); a bare level L: carries stop below it and "
+               f"the base and every run fold into a new generation once two runs reach L − 1 (every 2^L scans); "
+               f"`every` / `geometric`: carries unbounded below the trigger; `none`: never (default {COMPACT_LEVEL})")
+
+
 def err(*a, **kw) -> None:
     print(*a, file=sys.stderr, flush=True, **kw)
 
@@ -204,14 +225,145 @@ def plan_carries(runs: list[dict], drilled: Collection[str] = frozenset(), max_l
     return [r for r, _ in stack], [(ins, r) for r, ins in stack if len(ins) > 1]
 
 
-def compaction_due(runs: list[dict], max_level: int | None, drilled: Collection[str] = frozenset()) -> bool:
-    """Whether `runs` (a manifest's, oldest first), once their due carries are made (`plan_carries`), hold two runs at
-    level `max_level` − 1: the carry between them would reach the compaction level, so the base and every run are due to
-    fold into a new base generation instead (every 2^`max_level` scans past the base). Never when unbounded (None)."""
-    if max_level is None:
-        return False
-    after, _ = plan_carries(runs, drilled, max_level)
-    return any(a["level"] == b["level"] == max_level - 1 for a, b in zip(after, after[1:]))
+# ── The compaction policy (both stores) ────────────────────────────────────
+
+
+#: A policy's rules (`Policy.rule`).
+RULES = ("level", "every", "geometric", "none")
+
+
+@dataclass(frozen=True)
+class Policy:
+    """When a generation's base and runs fold into a new base generation (specs/static-compaction.md, "Compaction policy"),
+    evaluated by `compaction_why` for both stores:
+
+    - `level` L: once the runs, carried, hold two runs at level L − 1 (every 2^L scans past the base); carries stop below
+      L (`carry_level`). A profile's `compact_level` is shorthand for it.
+    - `every` N `d` / `s`: once the newest scan is at least N days after the base's newest (`d`), or N scans past the base
+      (`s`). Carries are unbounded below the trigger.
+    - `geometric` r: once the scans past the base number at least r × the base's own (r = 1: at 2, 4, 8, … × the first
+      base's). Each compaction rewrites the whole base, so this keeps its cost per scan constant. Carries unbounded.
+    - `none`: never; carries unbounded."""
+    rule: str
+    level: int | None = None
+    every: int | None = None
+    unit: str | None = None
+    ratio: float | None = None
+
+    def __post_init__(self):
+        ok = {"level": isinstance(self.level, int) and not isinstance(self.level, bool) and self.level >= 1,
+              "every": isinstance(self.every, int) and not isinstance(self.every, bool) and self.every >= 1 and self.unit in ("d", "s"),
+              "geometric": isinstance(self.ratio, (int, float)) and not isinstance(self.ratio, bool) and self.ratio > 0,
+              "none": True}
+        if self.rule not in ok or not ok[self.rule]:
+            raise ValueError(f"not a compaction policy: {self!r}")
+
+    def __str__(self) -> str:
+        if self.rule == "level":
+            return f"level:{self.level}"
+        if self.rule == "every":
+            return f"every:{self.every}{self.unit}"
+        if self.rule == "geometric":
+            return f"geometric:{self.ratio:g}"
+        return "none"
+
+    @property
+    def carry_level(self) -> int | None:
+        """The level no carry reaches (`plan_carries`' `max_level`): L under `level`, else None (unbounded)."""
+        return self.level if self.rule == "level" else None
+
+    def to_json(self) -> dict | str:
+        """As a profile's `compact` field: `{"level": L}`, `{"every": "7d"}`, `{"geometric": r}`, or `"none"`."""
+        if self.rule == "level":
+            return {"level": self.level}
+        if self.rule == "every":
+            return {"every": f"{self.every}{self.unit}"}
+        if self.rule == "geometric":
+            return {"geometric": self.ratio}
+        return "none"
+
+
+NEVER = Policy("none")
+
+
+def level_policy(level: int | None) -> Policy:
+    """A compaction level (`compact_level`, `-L`) as a policy: `level` L, or `none` for None (unbounded)."""
+    return NEVER if level is None else Policy("level", level=level)
+
+
+def parse_policy(var: str, raw: Any) -> Policy:
+    """A profile's `compact` value (JSON: `{"level": 5}`, `{"every": "7d"}`, `{"geometric": 1}`, `"none"`, or a bare
+    level), or an env var's / option's text (`5`, `level:5`, `every:7d`, `every:30s`, `geometric:1.5`, `none`), as a
+    `Policy`; `var` names the source in the error (`SystemExit`)."""
+    bad = SystemExit(f"{var}: {raw!r} is not a compaction policy ({POLICY_FORMS})")
+    if isinstance(raw, Policy):
+        return raw
+    if isinstance(raw, dict):
+        if len(raw) != 1:
+            raise bad
+        (k, v), = raw.items()
+        raw = f"{k}:{v}"
+    if isinstance(raw, bool) or not isinstance(raw, (str, int)):
+        raise bad
+    text = str(raw).strip().lower()
+    rule, _, arg = text.partition(":") if ":" in text else (("level", "", text) if text != "none" else ("none", "", ""))
+    try:
+        if rule == "none" and not arg:
+            return NEVER
+        if rule == "level":
+            return Policy("level", level=int(arg))
+        if rule == "every" and arg[-1:] in ("d", "s"):
+            return Policy("every", every=int(arg[:-1]), unit=arg[-1])
+        if rule == "geometric":
+            r = float(arg)
+            return Policy("geometric", ratio=int(r) if r.is_integer() else r)
+    except ValueError:
+        pass
+    raise bad
+
+
+def as_policy(p: Policy | int | None) -> Policy:
+    """`p`, or a compaction level (None: unbounded) as its `level` policy."""
+    return p if isinstance(p, Policy) else level_policy(p)
+
+
+def compaction_why(runs: list[dict], policy: Policy | int | None, drilled: Collection[str] = frozenset(), *,
+                   base: Collection[str] = ()) -> str | None:
+    """Why the generation whose newest manifest lists `runs` (oldest first) is due a compaction under `policy` (a
+    `Policy`, or a compaction level: None unbounded), or None when it isn't; the reason names the rule that fired.
+    `base`: the base generation's scan ids, oldest first (`every …d` and `geometric` read them). Never without runs."""
+    policy = as_policy(policy)
+    if not runs or policy.rule == "none":
+        return None
+    if policy.rule == "level":
+        top = policy.level
+        assert top is not None
+        after, _ = plan_carries(runs, drilled, top)
+        pair = next(((a, b) for a, b in zip(after, after[1:]) if a["level"] == b["level"] == top - 1), None)
+        return None if pair is None else f"level {top}: two runs at level {top - 1} ({pair[0]['key']}, {pair[1]['key']})"
+    past = sum(len(r["scans"]) for r in runs)
+    if policy.rule == "every" and policy.unit == "s":
+        return f"every {policy.every}s: {past} scans past the base" if past >= (policy.every or 0) else None
+    base = list(base)
+    if not base:
+        raise ValueError(f"compaction policy {policy}: the base's scans are needed")
+    if policy.rule == "every":
+        from .scan_id import scan_time
+
+        days = (scan_time(runs[-1]["last"]) - scan_time(base[-1])).total_seconds() / 86400
+        return (f"every {policy.every}d: the newest scan {runs[-1]['last']} is {days:g} days after the base's newest {base[-1]}"
+                if days >= (policy.every or 0) else None)
+    ratio = policy.ratio or 0
+    return (f"geometric {ratio:g}: {past} scans past the base ≥ {ratio:g} × its {len(base)}"
+            if past >= ratio * len(base) else None)
+
+
+def compaction_due(runs: list[dict], policy: Policy | int | None, drilled: Collection[str] = frozenset(), *, base: Collection[str] = ()) -> bool:
+    """Whether `runs` (a manifest's, oldest first) are due to fold with the base into a new base generation under
+    `policy` (`compaction_why`). Under a level L (an int, or `Policy` `level`): once their due carries are made
+    (`plan_carries`), two runs at level L − 1 — the carry between them would reach the compaction level (every 2^L scans
+    past the base). Never when unbounded (None, `none`)."""
+    return compaction_why(runs, policy, drilled, base=base) is not None
 
 
 def rebase(runs: list[dict], inputs: list[str], out: dict) -> list[dict] | None:
@@ -1101,6 +1253,8 @@ class Runner:
     timings: dict = field(default_factory=dict)
     #: The manifests this run's R2 jobs copied (stems): the merge stage doesn't copy one again.
     copied: set = field(default_factory=set)
+    #: Why the merge stage found a compaction due (`compaction_why`: the rule that fired), or None: for the job's record.
+    compaction: str | None = None
 
     store_prefix: ClassVar[str]
     job_prefix: ClassVar[str]
@@ -1269,12 +1423,17 @@ class Runner:
             if not keys:
                 return
             m = self.read_json(keys[-1])
-            top = self.p.compact_level
+            policy = self.p.policy
             drilled = self.drilled(m["runs"])
-            _, merges = plan_carries(m["runs"], drilled, top)
-            compact = compaction_due(m["runs"], top, drilled)
-            if compact:
-                self.log(f"merge: level {top} is due: compact into a new base generation (carries stop below it)")
+            _, merges = plan_carries(m["runs"], drilled, policy.carry_level)
+            needs_base = policy.rule == "geometric" or (policy.rule == "every" and policy.unit == "d")
+            base = [s["id"] for s in self.base()["scans"]] if needs_base and m["runs"] else []
+            self.compaction = why = compaction_why(m["runs"], policy, drilled, base=base)
+            compact = why is not None
+            if compact and policy.rule == "level":
+                self.log(f"merge: level {policy.level} is due: compact into a new base generation (carries stop below it)")
+            elif compact:
+                self.log(f"merge: compaction due under {policy} ({why}): compact into a new base generation")
             if merges:
                 desc = "; ".join(f"{len(ins)} runs → {out['key']} (level {out['level']})" for ins, out in merges)
                 name, spec = self.merge_job(m["date"])

@@ -56,6 +56,7 @@ from datetime import datetime
 from math import ceil
 from pathlib import Path
 from time import monotonic
+from typing import Any
 
 import pyarrow as pa
 from click import IntRange, argument, command, group, option
@@ -462,7 +463,8 @@ class Config:
 
 #: Env overrides of an interval profile's `append` fields (a staged source tree, a job image, the R2 endpoint).
 ENV = {"src": "INTERVAL_STORE_SRC", "image": "INTERVAL_STORE_IMAGE", "r2_endpoint": "R2_ENDPOINT", "project": "GCP_PROJECT",
-       "gen": "INTERVAL_STORE_GEN", "machine": "INTERVAL_STORE_MACHINE", "compact_level": "INTERVAL_STORE_COMPACT_LEVEL"}
+       "gen": "INTERVAL_STORE_GEN", "machine": "INTERVAL_STORE_MACHINE", "compact_level": "INTERVAL_STORE_COMPACT_LEVEL",
+       "compact": "INTERVAL_STORE_COMPACT"}
 
 
 def load_config(profile: str | None, environ: dict[str, str] | None = None) -> Config:
@@ -475,7 +477,7 @@ def load_config(profile: str | None, environ: dict[str, str] | None = None) -> C
         raise SystemExit("interval store: the profile has no `append` section")
     ranges_gen = a.pop("ranges_gen", None)
     p = from_mapping({"name": doc.get("name", profile or ""), "bucket": doc["bucket"], **a})
-    over = {}
+    over: dict[str, Any] = {}
     for k, var in ENV.items():
         raw = (env.get(var) or "").strip()
         if not raw:
@@ -484,6 +486,8 @@ def load_config(profile: str | None, environ: dict[str, str] | None = None) -> C
             over[k] = tuple(s.strip() for s in raw.split(",") if s.strip())
         elif k == "compact_level":
             over[k] = parse_compact_level(var, raw)
+        elif k == "compact":
+            over[k] = ar.parse_policy(var, raw)
         else:
             over[k] = raw
     p = replace(p, **over)
@@ -494,7 +498,7 @@ def load_config(profile: str | None, environ: dict[str, str] | None = None) -> C
             if (b := gs_bucket(getattr(p, f))) is None:
                 raise SystemExit(f"interval store: the staged append mounts a GCS bucket; {f} {getattr(p, f)!r} is not one "
                                  "(append on one machine: `dt-cloud interval-store add`)")
-            p = replace(p, **{f: b})
+            p = replace(p, bucket=b) if f == "bucket" else replace(p, scratch=b)
     for f in ("gen", "bucket", "scratch", "layouts", "region", "image", "sa", "r2_bucket"):
         if getattr(p, f) in (None, "", ()):
             raise SystemExit(f"interval store: no {f} in the profile's `append` section" + (f" (or ${ENV[f]})" if f in ENV else ""))
@@ -529,7 +533,7 @@ class Runner(ar.Runner):
         return ar.job_spec(self.p, name, tasks, commands, stage=stage, purpose="interval-store", component=COMPONENT, **kw)
 
     def merge_job(self, scan: str) -> tuple[str, dict]:
-        return self.job("merge", scan, 1, "interval_append", ["carry", "-L", level_arg(self.p.compact_level), *duckdb_args(self.p.machine)],
+        return self.job("merge", scan, 1, "interval_append", ["carry", "-L", level_arg(self.p.policy.carry_level), *duckdb_args(self.p.machine)],
                         r2=self.merge_r2())
 
     def one(self, d: str) -> None:

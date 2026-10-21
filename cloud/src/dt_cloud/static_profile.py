@@ -14,6 +14,10 @@ import os
 from collections.abc import Mapping
 from dataclasses import dataclass, field, fields, replace
 from functools import cache
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .append_runner import Policy
 
 #: The binary counter's compaction level when a profile sets none (deployments set theirs explicitly; the examples do).
 #: Carries stop below level L, so a stack holds at most 2^L − 1 scans in carried runs, and a compaction into a new base
@@ -76,10 +80,25 @@ class Profile:
     #: `none`): unbounded, the cascade carries at every level and never asks for a compaction (≈ log2(n) runs live after
     #: n scans). Unset: `COMPACT_LEVEL`, the documented fallback; the examples set theirs explicitly.
     compact_level: int | None = COMPACT_LEVEL
+    #: The compaction policy (`append_runner.Policy`; JSON `{"level": L}`, `{"every": "7d"}`, `{"every": "30s"}`,
+    #: `{"geometric": 1}` or `"none"`; specs/static-compaction.md): when set, it replaces `compact_level`, which is
+    #: shorthand for `{"level": L}`. `policy` is the one in force.
+    compact: Policy | None = None
 
     def __post_init__(self):
         if self.compact_level is not None and (isinstance(self.compact_level, bool) or not isinstance(self.compact_level, int) or self.compact_level < 1):
             raise SystemExit(f"compact_level must be an integer ≥ 1 or none, not {self.compact_level!r}")
+        if self.compact is not None:
+            from .append_runner import parse_policy
+
+            object.__setattr__(self, "compact", parse_policy("compact", self.compact))
+
+    @property
+    def policy(self) -> Policy:
+        """The compaction policy in force: `compact`, else `compact_level` as `{level: L}` (None: `none`)."""
+        from .append_runner import level_policy
+
+        return self.compact if self.compact is not None else level_policy(self.compact_level)
 
     def machine_for(self, stage: str) -> str:
         """`stage`'s machine: its override in `machines`, else `machine`."""
@@ -125,7 +144,7 @@ ENV = {
     "machines": "STATIC_NAMES_MACHINES", "ssd_gbs": "STATIC_NAMES_SSDS",
     "standard_stages": "STATIC_NAMES_STANDARD_STAGES",
     "append_tasks": "STATIC_NAMES_APPEND_TASKS", "drill": "STATIC_NAMES_DRILL", "drill_checkpoint": "STATIC_NAMES_DRILL_CHECKPOINT", "anchors": "STATIC_NAMES_ANCHORS", "src": "STATIC_NAMES_SRC",
-    "hex_runs": "STATIC_NAMES_HEX_RUNS", "compact_level": "STATIC_NAMES_COMPACT_LEVEL",
+    "hex_runs": "STATIC_NAMES_HEX_RUNS", "compact_level": "STATIC_NAMES_COMPACT_LEVEL", "compact": "STATIC_NAMES_COMPACT",
 }
 
 
@@ -168,6 +187,10 @@ def _parse(name: str, raw: str):
         return out
     if name == "compact_level":
         return parse_compact_level(ENV[name], raw)
+    if name == "compact":
+        from .append_runner import parse_policy
+
+        return parse_policy(ENV[name], raw)
     if name in ("ssd_gb", "append_tasks"):
         return int(raw)
     if name in ("spot", "drill", "anchors"):
@@ -190,7 +213,10 @@ def from_mapping(d: Mapping) -> Profile:
 def to_mapping(p: Profile) -> dict:
     """`p` as a JSON-able mapping of every field: what a deployment checks in as its profile file (`from_mapping`'s
     inverse)."""
-    return {f.name: (list(v) if isinstance(v := getattr(p, f.name), tuple) else dict(v) if isinstance(v, Mapping) else v)
+    from .append_runner import Policy
+
+    return {f.name: (list(v) if isinstance(v := getattr(p, f.name), tuple) else dict(v) if isinstance(v, Mapping) else
+                     v.to_json() if isinstance(v, Policy) else v)
             for f in fields(Profile)}
 
 

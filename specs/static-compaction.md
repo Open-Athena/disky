@@ -10,15 +10,17 @@ Status: building (2026-10-21, Ryan's go). The design below was approved 2026-10-
 
 ## Compaction policy (shared: `append_runner`, both stores)
 
-Today: `compact_level` L (every 2^L scans past the base; `none` = unbounded cascade). Generalize to a policy object in the profile (`compact:`; `compact_level` stays as shorthand for `{level: L}`), evaluated in one place (`append_runner.compaction_due(policy, manifest, now)`) and used by `interval-store add`, `static-names add` and the staged runners:
+Before: `compact_level` L (every 2^L scans past the base; `none` = unbounded cascade). Now a policy object (`append_runner.Policy`) in the profile (`compact:`; `compact_level` stays as shorthand for `{level: L}`; `Profile.policy` is the one in force), evaluated in one place and used by `interval-store add`, `static-names add` and the staged runners' merge stage (`Runner.carries`, both stores):
 
-- `{level: L}`: as today (two runs at L − 1).
-- `{every: "<N>d" | "<N>s"}`: due when the base's newest scan is ≥ N days (or N scans) older than the newest scan. Carries run unbounded below it.
-- `{geometric: r}` (exp-backoff): due when scans since the base ≥ r × the base's own scan count (r = 1 doubles: compact at 2, 4, 8, … × the first base). Each compaction rewrites the whole base, so geometric spacing keeps its amortized cost per scan constant.
+- `append_runner.compaction_why(runs, policy, drilled, *, base)` → the reason (naming the rule that fired) or None; `compaction_due(…)` is `why is not None`. `runs`: the newest manifest's; `base`: the base's scan ids (read only by `every …d` and `geometric`). The signature keeps `compaction_due(runs, level)`'s positional order (a bare level / None still works), so the interval store's tests run unchanged; the 10-21 draft's `compaction_due(policy, manifest, now)` was reshaped to that (no clock: `every …d` measures scan ids against each other).
+- `{level: L}`: as before (two runs at L − 1, carried); carries stop below L (`Policy.carry_level`).
+- `{every: "<N>d" | "<N>s"}`: due when the newest scan is ≥ N days after the base's newest (scan ids' instants, `scan_id.scan_time`), or ≥ N scans are past the base. Carries run unbounded below it.
+- `{geometric: r}` (exp-backoff): due when the scans past the base ≥ r × the base's own scan count (r = 1 doubles: compact at 2, 4, 8, … × the first base). Each compaction rewrites the whole base, so geometric spacing keeps its amortized cost per scan constant. Carries unbounded.
 - `none`: never.
-- `-K/--compact now` on `add` (both stores) forces one.
+- Forms: profile JSON `{"level": 5}`, `{"every": "7d"}`, `{"geometric": 1}`, `"none"`; env `STATIC_NAMES_COMPACT` / `INTERVAL_STORE_COMPACT` and `add -C` take text: `5` (a bare level), `level:5`, `every:7d`, `every:30s`, `geometric:1.5`, `none` (`parse_policy`; `-C` also reads `$INTERVAL_STORE_COMPACT_LEVEL` as before).
+- `-K/--compact-now` on `add` (both stores) forces one (when the generation has runs): reason `forced (-K)`.
 
-The plan output, logs and the job's `/scans` record say which rule fired and why.
+Which rule fired and why: `add`'s log line and JSON summary (`compact.why`); the generation's `compaction.json` (`{"level": L}` exactly as before under a level, else `{"level": null, "rule": "every:7d", "why": …}`); the staged merge stage's log (`merge: level L is due: …` as before, else `merge: compaction due under <policy> (<why>): …`) and `Runner.compaction` (the reason, for the job's record; wiring it into `/scans` is `scan-run`'s, not done here). The merge jobs get the carry bound (`carry -L <Policy.carry_level>`: `none` under `every` / `geometric`).
 
 ## Builder read source (`read_from: gcs | r2`, both stores)
 

@@ -2,9 +2,10 @@
 (specs/interval-store.md §2.7 "Compaction").
 
 Runs pile up past the compaction level `L` (carries stop below it: `append_runner.plan_carries`), so read cost would grow
-with the scans. Once the newest manifest's runs, carried, hold two runs at level `L − 1` (`append_runner.compaction_due`:
-every 2^L scans past the base), `interval-store add` folds the base and every run into a **new generation**, the next
-name in the lineage (`next_gen`: `<root>.c<NNN>`):
+with the scans. Once the compaction policy fires (`append_runner.compaction_why`; under a level L, once the newest
+manifest's runs, carried, hold two runs at level `L − 1`: every 2^L scans past the base; `every` / `geometric`: by scan
+age or count), or `add -K` forces it, `interval-store add` folds the base and every run into a **new generation**, the
+next name in the lineage (`next_gen`: `<root>.c<NNN>`):
 
 - **Range files** (`compact_range`), per key range of the old generation's `ranges.json` (kept): the base's `pvl/`
   (`sv/`, `svt/` with the owner axis) and every run's deltas, one row per version (`interval_append.IDENT`) with the
@@ -280,9 +281,10 @@ def fold_gen(gen_dir: Path, out: Path, work: Path, *, gen: str, runs: list[dict]
 
 
 def compact_gen(gen_dir: Path, out: Path, work: Path, *, gen: str, new_gen: str, level: int | None, rg_rows: int = ist.SERVED_RG,
-                threads: int = 4, mem: str = "4GB", jobs: int = 1) -> dict:
+                threads: int = 4, mem: str = "4GB", jobs: int = 1, rule: dict | None = None) -> dict:
     """The generation `gen` (its base and the newest manifest's runs, in `gen_dir`) folded into the new generation
-    `new_gen` in `out` (`fold_gen`), and `compaction.json`. Returns a summary."""
+    `new_gen` in `out` (`fold_gen`), and `compaction.json` (its rule: `rule`, `compaction_doc`'s; else `{"level":
+    level}`). Returns a summary."""
     t0 = monotonic()
     if not (gen_dir / "ranges.json").is_file():
         raise SystemExit(f"{gen}: no ranges.json: a staged build's generation borrowing its ranges and base from another "
@@ -295,18 +297,31 @@ def compact_gen(gen_dir: Path, out: Path, work: Path, *, gen: str, new_gen: str,
     runs = store.read_json(newest)["runs"]
     doc, rows, sorts, stats = fold_gen(gen_dir, out, work, gen=gen, runs=runs, rg_rows=rg_rows, threads=threads, mem=mem, jobs=jobs)
     comp = {"from": gen, "manifest": newest, "runs": [r["key"] for r in runs], "base_scans": len(base["scans"]), "scans": len(doc["scans"]),
-            "level": level}
+            **(rule if rule is not None else {"level": level})}
     (out / COMPACTION).write_text(json.dumps(comp, indent=1) + "\n")
     s = round(monotonic() - t0, 1)
     err(f"compact {gen} → {new_gen}: {len(runs)} runs and the base, {len(doc['scans'])} scans, {stats['versions']:,} versions in {s}s")
     return {"from": gen, "gen": new_gen, "runs": comp["runs"], "scans": len(doc["scans"]), "rows": rows, "sorts": sorts, "s": s}
 
 
-def due(gen_dir: Path, level: int | None) -> bool:
-    """Whether the generation in `gen_dir` (its newest manifest) is due a compaction at `level`."""
+def due(gen_dir: Path, policy: ar.Policy | int | None) -> str | None:
+    """Why the generation in `gen_dir` (its base's scans and newest manifest) is due a compaction under `policy` (a
+    `Policy`, or a level), naming the rule that fired; None when it isn't (`append_runner.compaction_why`)."""
     keys = sorted(p.relative_to(gen_dir).as_posix() for p in (gen_dir / "manifests").glob("*.json")) if (gen_dir / "manifests").is_dir() else []
     newest = latest_key(keys)
-    return newest is not None and ar.compaction_due(json.loads((gen_dir / newest).read_text())["runs"], level)
+    if newest is None:
+        return None
+    base = [s["id"] for s in json.loads((gen_dir / "scans.json").read_text())["scans"]]
+    return ar.compaction_why(json.loads((gen_dir / newest).read_text())["runs"], policy, base=base)
+
+
+def compaction_doc(policy: ar.Policy | int | None, why: str | None) -> dict:
+    """`compaction.json`'s record of the rule: `{"level": L}` under a level (as it always was), else `{"level": null,
+    "rule": "<policy>", "why": …}` (`why` also names a forced compaction)."""
+    policy = ar.as_policy(policy)
+    if policy.rule == "level" and why is not None and why.startswith("level "):
+        return {"level": policy.level}
+    return {"level": policy.carry_level, "rule": str(policy), "why": why}
 
 
 # ── Pruning compacted generations ──────────────────────────────────────────
