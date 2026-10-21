@@ -1472,16 +1472,31 @@ input::placeholder, textarea::placeholder { color: var(--ink-3); opacity: 1; }
 // A wide table scrolls inside its own box, never the page (`LifecycleFold`'s rules table is ~714 px).
 .tbl-scroll { overflow-x: auto; max-width: 100%; }
 
-// The compact facts row under the map's sections (`PageFacts.tsx`): the class mix as one stacked bar + legend,
-// and the ownership share with its ⓘ.
+// The compact facts row under the map's listing (`PageFacts.tsx`): the class mix as one stacked bar + legend (its
+// caret opens the per-class table under the row), and the ownership share with its ⓘ.
 .page-facts {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 8px 28px;
-  margin: 18px 0 8px;
+  margin: 12px 0 8px;
   font-size: 13px;
   color: var(--ink-2);
+  .facts-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 28px; }
+  .disclose {
+    display: inline-flex; align-items: center; gap: 4px; padding: 1px 2px; font: inherit; background: none; border: 0;
+    color: var(--ink-3); cursor: pointer; border-radius: 4px;
+    &:hover, &:hover .lbl { color: var(--ink); }
+    .caret { font-size: 10px; width: 9px; }
+  }
+  .classes-table {
+    overflow-x: auto; max-width: 100%; margin-top: 8px;
+    table { border-collapse: collapse; font-variant-numeric: tabular-nums; }
+    caption { caption-side: top; text-align: left; color: var(--ink-3); font-size: 12px; padding-bottom: 4px; }
+    th, td { text-align: left; padding: 3px 18px 3px 0; border-bottom: 1px solid var(--line); white-space: nowrap; }
+    th:last-child, td:last-child { padding-right: 0; }
+    th { color: var(--ink-2); font-weight: 600; font-size: 12px; }
+    .num { text-align: right; }
+    td { color: var(--ink); }
+    tfoot td { font-weight: 600; border-bottom: none; }
+    .sw { display: inline-block; width: 9px; height: 9px; border-radius: 2px; margin-right: 6px; vertical-align: -1px; }
+  }
   .fact { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; min-width: 0; }
   .lbl { color: var(--ink-3); font-size: 11.5px; text-transform: uppercase; letter-spacing: 0.04em; }
   .classbar {

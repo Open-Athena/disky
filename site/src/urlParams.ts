@@ -82,6 +82,11 @@ export const URL_PARAMS: Record<string, UrlParamDoc> = {
     description: 'Limits the view\'s bytes to the listed storage classes, one letter each, in order: `s` Standard, `n` Nearline, `c` Coldline, `a` Archive. When absent (or when all four are listed), every class is counted.',
     examples: ['s', 'nc', 'sna'],
   },
+  cx: {
+    label: 'Class table open',
+    description: 'When present, the storage-class row under the map\'s listing is expanded into its table: each class\'s bytes, share, list price and estimated $/mo for the drilled path. When absent, the row shows only the stacked bar (its tooltip has the same numbers).',
+    examples: [''],
+  },
   d: {
     label: 'Scan',
     description: 'Picks the scan the page shows, and optionally the diff\'s start. A slug is a compact `YYMMDD[HH[MM]]` prefix that resolves to the latest matching scan. `END-START` pins both ends, a trailing `-7d`/`-12h` sets a look-back span, and a leading `-` keeps the end on the latest scan. When absent, the page follows the latest scan and diffs against the previous one. The map and `/names` share it, and a slug that matches no scan shows a "no scan matches" notice instead of falling back. On `/dups`, the scan whose duplicate report shows (a slug or a scan id; when absent, the newest scan with a report).',
