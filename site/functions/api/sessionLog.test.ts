@@ -7,8 +7,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { onRequest, purgeState } from './session-log/[[path]]'
 import { gateFor } from '../_lib/auth'
 import { sqliteD1 } from '../_lib/testD1'
-import { purge } from '../_lib/sessionLog'
-import { LIMITS, parseUntil, switchState, validateBatch } from '../_lib/sessionLogShape'
+import { listSessions, purge } from '../_lib/sessionLog'
+import { FOREVER_MS, fmtCursor, isForever, LIMITS, parseCursor, parseUntil, type SessionRow, switchState, validateBatch } from '../_lib/sessionLogShape'
 
 const NOW = Date.UTC(2026, 9, 12, 15, 0, 0)  // 2026-10-12T15:00Z
 const HOST = 'https://site.example.test'
@@ -155,7 +155,7 @@ describe('D1', () => {
 
     it('off by default; on with no date = 7 days; a date; off again — each change audited in admin_edits', async () => {
       const s = await setup({}, null)
-      const on7 = { enabled: true, until: Date.UTC(2026, 9, 20), reason: null, who: 'ops@example.test', ts: nowS, ...bounds }
+      const on7 = { enabled: true, until: Date.UTC(2026, 9, 20), indefinite: false, reason: null, who: 'ops@example.test', ts: nowS, ...bounds }
       expect([
         await s.call('GET', '/switch', { token: s.adminT }),
         await s.put({ enabled: true }),
@@ -163,11 +163,11 @@ describe('D1', () => {
         await s.put({ enabled: false, until: '2026-10-14' }),
         await s.call('GET', '/switch', { token: s.adminT }),
       ]).toEqual([
-        [200, { enabled: false, until: null, reason: 'off', who: null, ts: null, ...bounds }],
+        [200, { enabled: false, until: null, indefinite: false, reason: 'off', who: null, ts: null, ...bounds }],
         [200, on7],
         [200, { ...on7, until: Date.UTC(2026, 9, 15) }],
-        [200, { enabled: false, until: null, reason: 'off', who: 'ops@example.test', ts: nowS, ...bounds }],
-        [200, { enabled: false, until: null, reason: 'off', who: 'ops@example.test', ts: nowS, ...bounds }],
+        [200, { enabled: false, until: null, indefinite: false, reason: 'off', who: 'ops@example.test', ts: nowS, ...bounds }],
+        [200, { enabled: false, until: null, indefinite: false, reason: 'off', who: 'ops@example.test', ts: nowS, ...bounds }],
       ])
       expect(s.raw.prepare('SELECT * FROM session_log_switch').all()).toEqual([{ id: 1, until_ms: null, who: 'ops@example.test', ts: nowS }])
       const row = (until: number | null) => JSON.stringify({ until_ms: until, who: 'ops@example.test', ts: nowS })
@@ -200,7 +200,7 @@ describe('D1', () => {
       const s = await setup({}, '2026-10-12')
       vi.setSystemTime(Date.UTC(2026, 9, 13))
       expect(await s.call('GET', '/switch', { token: s.adminT })).toEqual([200, {
-        enabled: false, until: Date.UTC(2026, 9, 13), reason: 'expired', who: 'ops@example.test', ts: NOW / 1000,
+        enabled: false, until: Date.UTC(2026, 9, 13), indefinite: false, reason: 'expired', who: 'ops@example.test', ts: NOW / 1000,
         defaultUntil: Date.UTC(2026, 9, 21), maxUntil: Date.UTC(2026, 10, 14),
       }])
     })
@@ -212,8 +212,165 @@ describe('D1', () => {
         await s.call('GET', '/switch', { token: s.adminT }),
         await s.put({ enabled: true }),
       ]).toEqual([
-        [200, { enabled: false, until: null, reason: 'not set up', who: null, ts: null, ...bounds }],
+        [200, { enabled: false, until: null, indefinite: false, reason: 'not set up', who: null, ts: null, ...bounds }],
         [503, { error: 'session log is not set up on this deployment (no session_log table)' }],
+      ])
+    })
+  })
+
+  describe('no end date (indefinite)', () => {
+    const bounds = { defaultUntil: Date.UTC(2026, 9, 20), maxUntil: Date.UTC(2026, 10, 13) }
+    const nowS = NOW / 1000
+    const HAND_2100 = 4102444800000  // what was written to prod by hand: 2100-01-01T00:00Z
+    const onForever = (until: number, who = 'ops@example.test', ts: number | null = nowS) =>
+      ({ enabled: true, until, indefinite: true, reason: null, who, ts, ...bounds })
+
+    it('the sentinel is 2100-01-01T00:00Z; at or past it reads as indefinite, before it as a date', () => {
+      expect(FOREVER_MS).toBe(HAND_2100)
+      expect([null, NOW, Date.UTC(2099, 11, 31), FOREVER_MS, Date.UTC(2200, 0, 1)].map(isForever)).toEqual([false, false, false, true, true])
+    })
+
+    it('PUT {enabled, indefinite}: stores FOREVER_MS (audited), reads on with no end; to a date, back, and off', async () => {
+      const s = await setup({}, null)
+      expect([
+        await s.put({ enabled: true, indefinite: true }),
+        await s.call('GET', '/switch', { token: s.adminT }),
+        await s.put({ enabled: true, until: '2026-10-14' }),
+        await s.put({ enabled: true, indefinite: true, until: '' }),
+        await s.put({ enabled: false }),
+      ]).toEqual([
+        [200, onForever(FOREVER_MS)],
+        [200, onForever(FOREVER_MS)],
+        [200, { enabled: true, until: Date.UTC(2026, 9, 15), indefinite: false, reason: null, who: 'ops@example.test', ts: nowS, ...bounds }],
+        [200, onForever(FOREVER_MS)],
+        [200, { enabled: false, until: null, indefinite: false, reason: 'off', who: 'ops@example.test', ts: nowS, ...bounds }],
+      ])
+      const row = (until: number | null) => JSON.stringify({ until_ms: until, who: 'ops@example.test', ts: nowS })
+      expect(s.raw.prepare("SELECT action, old_json, new_json FROM admin_edits WHERE tbl = 'session_log_switch' ORDER BY id").all()).toEqual([
+        { action: 'insert', old_json: null, new_json: row(FOREVER_MS) },
+        { action: 'update', old_json: row(FOREVER_MS), new_json: row(Date.UTC(2026, 9, 15)) },
+        { action: 'update', old_json: row(Date.UTC(2026, 9, 15)), new_json: row(FOREVER_MS) },
+        { action: 'update', old_json: row(FOREVER_MS), new_json: row(null) },
+      ])
+    })
+
+    it('refuses an indefinite with a date, with enabled: false, or not a boolean (nothing stored)', async () => {
+      const s = await setup({}, null)
+      expect([
+        await s.put({ enabled: true, indefinite: true, until: '2026-10-14' }),
+        await s.put({ enabled: false, indefinite: true }),
+        await s.put({ enabled: true, indefinite: 'yes' }),
+      ]).toEqual([
+        [400, { error: 'until and indefinite are exclusive' }],
+        [400, { error: 'indefinite needs enabled: true' }],
+        [400, { error: 'indefinite must be true or false' }],
+      ])
+      expect(s.raw.prepare('SELECT * FROM session_log_switch').all()).toEqual([])
+    })
+
+    it('the hand-written 2100 row (and any later one) reads as on, no end date; the boot config is on, years later too', async () => {
+      const s = await setup({}, null)
+      s.raw.prepare('INSERT INTO session_log_switch VALUES (1, ?, ?, ?)').run(HAND_2100, 'ryan', 1_760_000_000)
+      expect([
+        await s.call('GET', '/switch', { token: s.adminT }),
+        await s.call('GET', '', { token: s.viewer }),
+      ]).toEqual([
+        [200, onForever(HAND_2100, 'ryan', 1_760_000_000)],
+        [200, { enabled: true, until: HAND_2100, reason: null }],
+      ])
+      s.raw.prepare('UPDATE session_log_switch SET until_ms = ?').run(Date.UTC(2200, 0, 1))
+      vi.setSystemTime(Date.UTC(2031, 0, 1))
+      expect(await s.call('GET', '', { token: s.viewer })).toEqual([200, { enabled: true, until: Date.UTC(2200, 0, 1), reason: null }])
+    })
+  })
+
+  describe('session list pages (keyset on last_ms desc, sid)', () => {
+    /** Sessions `s00`…: `last_ms` = NOW − i·1000, but `s04`–`s06` share one `last_ms` (ties order by sid); odd ones
+     *  have errors; even ones are bob's. */
+    async function seeded(n: number) {
+      const s = await setup({}, null)
+      const ins = s.raw.prepare('INSERT INTO session_log VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
+      for (let i = 0; i < n; i++) {
+        const last = i >= 4 && i <= 6 ? NOW - 4000 : NOW - i * 1000
+        ins.run(`sid-s${String(i).padStart(4, '0')}`, i % 2 ? 'ann@example.test' : 'bob@example.test', 'session', 'b', null, last - 500, last, 1, i % 2, 1, null, NOW / 1000)
+      }
+      return s
+    }
+    const sids = (r: SessionRow[]) => r.map(x => x.sid.slice(5))
+    const page = (r: { sessions: SessionRow[]; total: number; offset: number; prev: string | null; next: string | null }) =>
+      ({ sids: sids(r.sessions), total: r.total, offset: r.offset, prev: r.prev, next: r.next })
+    const cur = (i: number, last = NOW - i * 1000) => `${last}.sid-s${String(i).padStart(4, '0')}`
+
+    it('cursors: `<last_ms>.<sid>` round-trips; anything else is refused', () => {
+      expect([
+        fmtCursor({ last_ms: NOW, sid: 'sid-aaaaaa' }),
+        parseCursor(`${NOW}.sid-aaaaaa`),
+        parseCursor('sid-aaaaaa'),
+        parseCursor(`${NOW}.sid`),
+        parseCursor(`-1.sid-aaaaaa`),
+        parseCursor(`${NOW}.sid-aa.aaaa`),
+      ]).toEqual([`${NOW}.sid-aaaaaa`, { lastMs: NOW, sid: 'sid-aaaaaa' }, null, null, null, null])
+    })
+
+    it('walks forward and back by 3s, ties in sid order, counts exact; a short "newer" page is answered as the first', async () => {
+      const { db } = await seeded(8)
+      const p1 = await listSessions(db, { limit: 3 })
+      const p2 = await listSessions(db, { limit: 3, after: parseCursor(p1.next!)! })
+      const p3 = await listSessions(db, { limit: 3, after: parseCursor(p2.next!)! })
+      expect([page(p1), page(p2), page(p3)]).toEqual([
+        { sids: ['0000', '0001', '0002'], total: 8, offset: 0, prev: null, next: cur(2) },
+        { sids: ['0003', '0004', '0005'], total: 8, offset: 3, prev: cur(3), next: cur(5, NOW - 4000) },
+        { sids: ['0006', '0007'], total: 8, offset: 6, prev: cur(6, NOW - 4000), next: null },
+      ])
+      expect([
+        page(await listSessions(db, { limit: 3, before: parseCursor(p3.prev!)! })),
+        page(await listSessions(db, { limit: 3, before: parseCursor(p2.prev!)! })),
+        // Two rows ahead of s0002: short, so the first page instead.
+        page(await listSessions(db, { limit: 3, before: parseCursor(cur(2))! })),
+        // Past the end: empty, at the end.
+        page(await listSessions(db, { limit: 3, after: parseCursor(cur(7))! })),
+      ]).toEqual([
+        { sids: ['0003', '0004', '0005'], total: 8, offset: 3, prev: cur(3), next: cur(5, NOW - 4000) },
+        { sids: ['0000', '0001', '0002'], total: 8, offset: 0, prev: null, next: cur(2) },
+        { sids: ['0000', '0001', '0002'], total: 8, offset: 0, prev: null, next: cur(2) },
+        { sids: [], total: 8, offset: 8, prev: null, next: null },
+      ])
+    })
+
+    it('filters apply to the page and its counts; the default page is 50', async () => {
+      const { db } = await seeded(120)
+      const errs = await listSessions(db, { errors: true, limit: 2 })
+      const bob = await listSessions(db, { email: 'BOB', since: NOW - 5000, limit: 2 })
+      expect([
+        page(errs),
+        page(await listSessions(db, { errors: true, limit: 2, after: parseCursor(errs.next!)! })),
+        page(bob),
+        page(await listSessions(db, { email: 'BOB', since: NOW - 5000, limit: 2, after: parseCursor(bob.next!)! })),
+      ]).toEqual([
+        { sids: ['0001', '0003'], total: 60, offset: 0, prev: null, next: cur(3) },
+        { sids: ['0005', '0007'], total: 60, offset: 2, prev: cur(5, NOW - 4000), next: cur(7) },
+        { sids: ['0000', '0002'], total: 4, offset: 0, prev: null, next: cur(2) },
+        { sids: ['0004', '0006'], total: 4, offset: 2, prev: cur(4, NOW - 4000), next: null },
+      ])
+      const first = await listSessions(db, {})
+      expect([first.sessions.length, first.total, first.offset, first.next]).toEqual([50, 120, 0, cur(49)])
+    })
+
+    it('GET /sessions: after= / before= pages; both, or a bad cursor, is 400', async () => {
+      const s = await seeded(5)
+      const get = async (q: string) => { const [st, b] = await s.call('GET', `/sessions${q}`, { token: s.adminT }); return st === 200 ? page(b) : [st, b] }
+      expect([
+        await get('?limit=2'),
+        await get(`?limit=2&after=${cur(1)}`),
+        await get(`?limit=2&before=${cur(4, NOW - 4000)}`),
+        await get(`?after=${cur(1)}&before=${cur(1)}`),
+        await get('?after=nope'),
+      ]).toEqual([
+        { sids: ['0000', '0001'], total: 5, offset: 0, prev: null, next: cur(1) },
+        { sids: ['0002', '0003'], total: 5, offset: 2, prev: cur(2), next: cur(3) },
+        { sids: ['0002', '0003'], total: 5, offset: 2, prev: cur(2), next: cur(3) },
+        [400, { error: 'after and before are exclusive' }],
+        [400, { error: 'bad cursor: nope' }],
       ])
     })
   })

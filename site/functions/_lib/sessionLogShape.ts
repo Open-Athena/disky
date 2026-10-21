@@ -34,7 +34,7 @@ export const LIMITS = {
   sessionEvents: 20_000,
   /** Server: one event's serialized size. */
   eventBytes: 4096,
-  /** The switch's latest end: through the UTC day this many days ahead. */
+  /** The switch's latest dated end: through the UTC day this many days ahead (`FOREVER_MS` is the undated one). */
   maxDays: 31,
   /** The switch's end when turned on with no date. */
   defaultDays: 7,
@@ -59,6 +59,13 @@ export const endOfUtcDay = (now: number, days: number): number => {
 export const defaultUntil = (now: number): number => endOfUtcDay(now, LIMITS.defaultDays)
 /** The latest an admin may set: through the UTC day `LIMITS.maxDays` from now. */
 export const maxUntil = (now: number): number => endOfUtcDay(now, LIMITS.maxDays)
+
+/** The switch's "no end date": stored as this `until_ms` (2100-01-01T00:00Z), not NULL (NULL is off) and not a new
+ *  column, so every reader that only compares `until_ms` with its clock (the endpoint, the client logger, the
+ *  session monitor) needs no change: it never passes. Any stored value at or past it reads as indefinite (a
+ *  hand-written far-future end included). Dated ends stay within `LIMITS.maxDays`, so they never reach it. */
+export const FOREVER_MS = Date.UTC(2100, 0, 1)
+export const isForever = (until: number | null): boolean => until !== null && until >= FOREVER_MS
 
 /** The UTC date (`YYYY-MM-DD`) an exclusive end instant runs through. */
 export const lastDay = (until: number): string => new Date(until - 1).toISOString().slice(0, 10)
@@ -85,10 +92,12 @@ export function switchState(untilMs: number | null, now: number): { until: numbe
 }
 
 /** `GET` / `PUT /api/session-log/switch` (admin): the switch now, who last set it (epoch s), and the bounds a new
- *  `until` must sit in. `/admin` renders it. */
+ *  `until` must sit in. `/admin` renders it. `indefinite`: on with no end date (`until` is then `FOREVER_MS`, or the
+ *  far-future value stored). */
 export interface SwitchState {
   enabled: boolean
   until: number | null
+  indefinite: boolean
   reason: string | null
   who: string | null
   ts: number | null
@@ -139,6 +148,31 @@ export interface SessionRow {
   n_batches: number
   first_url: string | null
   received_ts: number
+}
+
+/** A position in the session list's order (`last_ms` desc, then `sid`): a row's `last_ms` and `sid`. */
+export interface Cursor { lastMs: number; sid: string }
+
+/** A cursor on the wire and in the page URL: `<last_ms>.<sid>` (sids never hold a `.`). */
+export const fmtCursor = (r: Pick<SessionRow, 'last_ms' | 'sid'>): string => `${r.last_ms}.${r.sid}`
+export function parseCursor(s: string): Cursor | null {
+  const m = /^(\d{1,16})\.([A-Za-z0-9_-]{6,40})$/.exec(s)
+  return m ? { lastMs: Number(m[1]), sid: m[2] } : null
+}
+
+/** Sessions per page of `/admin/sessions` (the API's default `limit`; at most `SESSIONS_MAX_LIMIT`). */
+export const SESSIONS_PAGE = 50
+export const SESSIONS_MAX_LIMIT = 500
+
+/** `GET /api/session-log/sessions`: one page, most recently active first. `total` = rows matching the filters,
+ *  `offset` = how many of them precede this page; `prev` / `next` are the cursors (`before=` / `after=`) of the
+ *  adjacent pages, null at either end. */
+export interface SessionPage {
+  sessions: SessionRow[]
+  total: number
+  offset: number
+  prev: string | null
+  next: string | null
 }
 
 /** A stored event with where it came from (the page load and batch), as the session view gets it. */
