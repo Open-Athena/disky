@@ -73,6 +73,31 @@ def test_failed_verification_publishes_nothing(tmp_path: Path, monkeypatch) -> N
     assert Store(str(dst)).listing("") == {}
 
 
+def test_first_publication_can_retry_after_data_uploaded(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    src, dst = tmp_path / "source", tmp_path / "age"
+    source(src, "2026-10-01", [("", 0, 1, 1)])
+    put = Store.put
+
+    def fail_catalog(
+        self: Store,
+        path: Path,
+        key: str,
+    ) -> None:
+        if self.root == str(dst) and key == "interval-store/g/scans.json":
+            raise OSError("upload interrupted")
+        return put(self, path, key)
+
+    monkeypatch.setattr(Store, "put", fail_catalog)
+    with pytest.raises(OSError, match="^upload interrupted$"):
+        age.update(str(src), LAYOUT, str(dst), "g", tmp_path / "build")
+    assert Store(str(dst)).exists("interval-store/CURRENT.json") is False
+    assert age.covered(str(dst), "2026-10-01") is False
+    monkeypatch.setattr(Store, "put", put)
+    result = age.update(str(src), LAYOUT, str(dst), "g", tmp_path / "build")
+    assert result["added"] == [{"scan": "2026-10-01", "pass": True, "cells": 8}]
+    assert age.covered(str(dst), "2026-10-01") is True
+
+
 def test_retirement_requires_marker_manifest_and_d1_before_deleting(tmp_path: Path, monkeypatch) -> None:
     from dt_cloud import index_footer as F
 

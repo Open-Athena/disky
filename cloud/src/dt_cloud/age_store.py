@@ -151,8 +151,10 @@ def update(
     # A previous failed verification may have advanced the local pointer. Only published state is authoritative.
     if local.exists():
         shutil.rmtree(local)
-    before = mirror(target, "interval-store", local / "interval-store")
-    current = ic.current(Store(str(local)))
+    current = ic.current(target)
+    # An interrupted first publication can leave data without a current pointer. Rebuild that unpublished
+    # generation locally; mirroring its partial files would make the native builder refuse the retry.
+    before = mirror(target, "interval-store", local / "interval-store") if current else target.listing("interval-store")
     have: set[str] = set()
     if current:
         from .append_runner import latest_key, scans_of
