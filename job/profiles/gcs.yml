@@ -81,7 +81,8 @@ env:
 pass: [DT_RECORD, DT_ALERTS, DISKY_LABELS]
 labels: {deployment: gcs}
 options:
-  list: {weights: true, threads: 10}
+  # `-c`: each object's crc32c in the listing (GCS returns it with the listing page), which `dups` proves copies by
+  list: {weights: true, threads: 10, bulk_args: [-c]}
   index:
     mode: path-index
     attribution: [attr/attribution-2026-07-20.parquet, attr/attribution-wandb.parquet]
@@ -110,4 +111,5 @@ options:
            static_store: gs://oa-gcs-usage-dvx}
   # the /dups report beside the scan's index (specs/dups.md): read from the bysize sort (its `tot` prunes to paths ≥ 1 GiB)
   # on the post machine; the top 200 groups' copies spot-checked by crc32c (a moved copy is stageable only once it passes)
-  dups: {check: 200, mem: 10GB}
+  # `listing`: copies proven byte-identical by every object's crc32c in the scan's raw listing (`exact`)
+  dups: {check: 200, mem: 64GB, listing: true}
