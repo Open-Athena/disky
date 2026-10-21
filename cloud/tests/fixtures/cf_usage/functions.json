@@ -1,0 +1,55 @@
+{
+  "data": {
+    "viewer": {
+      "accounts": [
+        {
+          "pagesFunctionsInvocationsAdaptiveGroups": [
+            {
+              "sum": {
+                "requests": 100000,
+                "errors": 12,
+                "subrequests": 40000
+              },
+              "quantiles": {
+                "cpuTimeP50": 2000
+              },
+              "dimensions": {
+                "date": "2026-10-19",
+                "scriptName": "my-deployment"
+              }
+            },
+            {
+              "sum": {
+                "requests": 200000,
+                "errors": 3,
+                "subrequests": 90000
+              },
+              "quantiles": {
+                "cpuTimeP50": 1500
+              },
+              "dimensions": {
+                "date": "2026-10-20",
+                "scriptName": "my-deployment"
+              }
+            },
+            {
+              "sum": {
+                "requests": 999,
+                "errors": 0,
+                "subrequests": 0
+              },
+              "quantiles": {
+                "cpuTimeP50": 900
+              },
+              "dimensions": {
+                "date": "2026-10-20",
+                "scriptName": "another-project"
+              }
+            }
+          ]
+        }
+      ]
+    }
+  },
+  "errors": null
+}

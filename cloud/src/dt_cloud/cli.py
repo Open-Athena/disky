@@ -3432,5 +3432,9 @@ from .scan_retire import retire_cmd as _scan_retire  # noqa: E402
 _scan.add_command(_scan_retire)
 
 
+from .cf_usage import cli as _cf_usage  # noqa: E402
+
+main.add_command(_cf_usage)
+
 if __name__ == "__main__":
     main()
