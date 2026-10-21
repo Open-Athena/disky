@@ -15,8 +15,11 @@
 // rides the config GET and each page load's first batch, at most hourly per
 // isolate, whether logging is on or off.
 import { type Ctx, type Env as AuthEnv, json, requireAdmin, requireViewer } from '../../_lib/auth.js'
-import { cachedSwitch, ingest, listSessions, maybePurge, sessionDetail, type SwitchCache, writeSwitch } from '../../_lib/sessionLog.js'
-import { defaultUntil, isOn, LIMITS, maxUntil, parseUntil, type SwitchState, switchState, validateBatch } from '../../_lib/sessionLogShape.js'
+import { cachedSwitch, ingest, listSessions, maybePurge, retainDays, sessionDetail, type SwitchCache, writeSwitch } from '../../_lib/sessionLog.js'
+import { defaultUntil, isNoEnd, isOn, lastDay, LIMITS, maxUntil, parseUntil, type SwitchState, switchState, validateBatch } from '../../_lib/sessionLogShape.js'
+import { feedClient, readKinds } from '../../_lib/activity.js'
+import { keptEvents } from '../../_lib/activityShape.js'
+import { noteActivity } from '../../_lib/activityHook.js'
 
 type Env = AuthEnv & { SESSION_LOG_RETAIN_DAYS?: string }
 type C = Ctx & { env: Env; params?: { path?: string | string[] }; waitUntil?: (p: Promise<unknown>) => void }
@@ -51,14 +54,17 @@ async function current(ctx: C, now: number): Promise<{ until: number | null; rea
   return switchState(row?.until_ms ?? null, now)
 }
 
+/** `enabled`: this viewer's tab logs now. `on`: the switch is on for everyone signed in (what `/privacy` tells a
+ *  visitor, signed in or not); `retainDays`: how long the log is kept. */
 async function config(ctx: C): Promise<Response> {
   const now = Date.now()
   purgeLater(ctx, now)
   const u = await current(ctx, now)
-  if (!isOn(u)) return json({ enabled: false, until: u.until, reason: u.reason }, 200, NO_STORE)
+  const shared = { on: isOn(u), retainDays: retainDays(ctx.env.SESSION_LOG_RETAIN_DAYS) }
+  if (!isOn(u)) return json({ enabled: false, until: u.until, reason: u.reason, ...shared }, 200, NO_STORE)
   const id = await requireViewer(ctx)
-  if (id instanceof Response) return json({ enabled: false, until: u.until, reason: 'no viewer identity' }, 200, NO_STORE)
-  return json({ enabled: true, until: u.until, reason: null }, 200, NO_STORE)
+  if (id instanceof Response) return json({ enabled: false, until: u.until, reason: 'no viewer identity', ...shared }, 200, NO_STORE)
+  return json({ enabled: true, until: u.until, reason: null, ...shared }, 200, NO_STORE)
 }
 
 async function post(ctx: C): Promise<Response> {
@@ -74,15 +80,23 @@ async function post(ctx: C): Promise<Response> {
   try { raw = JSON.parse(text) } catch { return json({ error: 'body is not JSON' }, 400) }
   const v = validateBatch(raw)
   if ('error' in v) return json({ error: v.error }, v.status)
+  // The kinds an admin turned off at `/admin` (specs/done/activity-feed.md) are dropped before storage.
+  const batch = { ...v.batch, events: keptEvents(v.batch.events, await readKinds(db, now)) }
+  if (!batch.events.length) return new Response(null, { status: 204 })
   let r
   try {
-    r = await ingest(db, { email: id.email, via: id.via }, ctx.request.headers.get('user-agent'), v.batch, Math.floor(now / 1000))
+    r = await ingest(db, { email: id.email, via: id.via }, ctx.request.headers.get('user-agent'), batch, Math.floor(now / 1000))
   } catch (e) {
     if (notSetUp(e)) return json({ error: NOT_SET_UP }, 503)
     throw e
   }
-  if (v.batch.seq === 0) purgeLater(ctx, now)
+  if (batch.seq === 0) purgeLater(ctx, now)
   if (r === 'capped') return json({ error: `session over ${LIMITS.sessionEvents} events` }, 429)
+  if (r === 'stored' && ctx.waitUntil) {
+    const wait = ctx.waitUntil.bind(ctx)
+    const actor = id.email ?? (id.via === 'grant' && id.name ? `grant:${id.name}` : `sid:${batch.sid}`)
+    wait(feedClient(ctx.env, { actor, via: id.via, origin: new URL(ctx.request.url).origin }, batch.sid, batch.events, wait, now))
+  }
   return new Response(null, { status: 204 })
 }
 
@@ -106,6 +120,11 @@ async function switchRoute(ctx: C): Promise<Response> {
       if ('error' in u) return json({ error: u.error }, 400)
       untilMs = u.until
     }
+    noteActivity(ctx, {
+      line: untilMs === null ? 'turned session logging off'
+        : isNoEnd(untilMs) ? 'turned session logging on, no end date'
+        : `turned session logging on through ${lastDay(untilMs)}`,
+    })
     try {
       await writeSwitch(db, untilMs, id.email ?? id.name ?? 'unknown', Math.floor(now / 1000))
     } catch (e) {

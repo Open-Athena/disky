@@ -10,6 +10,10 @@ import { restrictGate } from './_lib/restrict.js'
 import { footerCacheDrain } from './_lib/footerCache.js'
 import { coloPutsSettled } from './_lib/index.js'
 import { anonymousPage, stampPage, type OgEnv } from './_lib/og/serve.js'
+import { captureWrite, readBody } from './_lib/activityHook.js'
+import { sizeAssignments } from './_lib/activitySize.js'
+import { serverKind } from './_lib/activityShape.js'
+import type { Ctx } from './_lib/auth.js'
 
 const isHtml = (res: Response): boolean => (res.headers.get('content-type') ?? '').startsWith('text/html')
 
@@ -28,7 +32,7 @@ export const assetMiss = (): Response => new Response('asset not found\n', {
   headers: { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store' },
 })
 
-type MiddlewareCtx = { request: Request; env: OgEnv; next: () => Promise<Response>; waitUntil?: (p: Promise<unknown>) => void }
+type MiddlewareCtx = { request: Request; env: OgEnv; next: () => Promise<Response>; waitUntil?: (p: Promise<unknown>) => void; data?: Record<string, unknown> }
 
 export const onRequest = async (ctx: MiddlewareCtx): Promise<Response> => withBuild(await serve(ctx))
 
@@ -43,7 +47,15 @@ async function serve(ctx: MiddlewareCtx): Promise<Response> {
     const anonymous = await anonymousPage(ctx.env, url)
     if (anonymous) return anonymous
   }
+  // A write that may be an activity event (specs/done/activity-feed.md): its body is read from a clone before the route
+  // consumes it, and it is recorded once the route answers 2xx.
+  const activityKind = serverKind(ctx.request.method, url.pathname)
+  const body = activityKind ? readBody(ctx.request) : null
   const res = await ctx.next()
+  if (activityKind && res.ok && ctx.waitUntil) {
+    const wait = ctx.waitUntil.bind(ctx)
+    wait(captureWrite(ctx as unknown as Ctx, activityKind, body, wait, Date.now(), sizeAssignments))
+  }
   // The reader puts decoded row groups in the colo without waiting (`putColoGroup`); a Worker drops work still in
   // flight once the response is sent, so keep the isolate alive until those puts land. The footer LRU's
   // queued writes (fills, access stamps: `_lib/footerCache.ts`) start here, after the response.

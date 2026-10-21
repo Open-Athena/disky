@@ -63,12 +63,17 @@ export const maxUntil = (now: number): number => endOfUtcDay(now, LIMITS.maxDays
 /** The UTC date (`YYYY-MM-DD`) an exclusive end instant runs through. */
 export const lastDay = (until: number): string => new Date(until - 1).toISOString().slice(0, 10)
 
+/** "No end date": the switch's end when an admin keeps logging on until they turn it off. */
+export const NO_END = Date.UTC(10000, 0, 1)
+export const isNoEnd = (until: number | null): boolean => until !== null && until >= NO_END
+
 /** An admin's `until` → the instant logging ends (epoch ms), or why it's refused. A bare date runs through that
- *  UTC day; an ISO instant ends at it; empty = `defaultUntil`. Past, or past `maxUntil`, is refused (a typo can't
- *  turn it on for a year). */
+ *  UTC day; an ISO instant ends at it; empty = `defaultUntil`; `none` = no end date (`NO_END`). Past, or past
+ *  `maxUntil`, is refused (a typo can't turn it on for a year). */
 export function parseUntil(raw: string | null | undefined, now: number): { until: number } | { error: string } {
   const s = raw?.trim()
   if (!s) return { until: defaultUntil(now) }
+  if (s === 'none') return { until: NO_END }
   const day = /^(\d{4})-(\d{2})-(\d{2})$/.exec(s)
   const until = day ? Date.UTC(+day[1], +day[2] - 1, +day[3] + 1) : Date.parse(s)
   if (!Number.isFinite(until)) return { error: `unparseable until: ${s}` }
@@ -143,3 +148,22 @@ export interface SessionRow {
 
 /** A stored event with where it came from (the page load and batch), as the session view gets it. */
 export type StoredEvent = SlogEvent & { pid: string; seq: number }
+
+const cut = (s: string, n: number): string => s.length > n ? `${s.slice(0, n - 1)}…` : s
+
+const KIND_KEYS = new Set(['kind', 'op', 'action', 'mode'])
+
+/** A JSON request body as counts and kinds only: per top-level key, an array's length, a short `kind`-like
+ *  string, else the value's type. Not JSON (or not an object) → its type and length. */
+export function bodySummary(body: unknown): Record<string, string | number> | null {
+  if (body == null) return null
+  if (typeof body !== 'string') return { type: Object.prototype.toString.call(body).slice(8, -1) }
+  let j: unknown
+  try { j = JSON.parse(body) } catch { return { type: 'text', len: body.length } }
+  if (!j || typeof j !== 'object' || Array.isArray(j)) return Array.isArray(j) ? { type: 'array', len: j.length } : { type: typeof j }
+  const out: Record<string, string | number> = {}
+  for (const [k, v] of Object.entries(j as Record<string, unknown>).slice(0, 12)) {
+    out[cut(k, 30)] = Array.isArray(v) ? v.length : KIND_KEYS.has(k) && typeof v === 'string' ? cut(v, 30) : v === null ? 'null' : typeof v
+  }
+  return out
+}

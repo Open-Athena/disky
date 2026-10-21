@@ -1,10 +1,11 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useState } from 'react'
 import { Link } from 'react-router-dom'
-import { lastDay, type SwitchState } from '../functions/_lib/sessionLogShape'
+import { isNoEnd, lastDay, type SwitchState } from '../functions/_lib/sessionLogShape'
 
-// `/admin`'s session-log switch (specs/session-log.md): on through a UTC date (default 7 days, at most 31), or off.
-// It ends by itself after that date; every change is recorded in `admin_edits`.
+// `/admin`'s session-log switch (specs/session-log.md): on through a UTC date (default 7 days, at most 31), on with no
+// end date (specs/done/activity-feed.md), or off. With a date it ends by itself after it; every change is recorded in
+// `admin_edits`.
 
 const ENDPOINT = '/api/session-log/switch'
 const KEY = ['session-log', 'switch'] as const
@@ -15,6 +16,7 @@ const day = (epochS: number): string => new Date(epochS * 1000).toISOString().sl
 export function switchStatus(s: SwitchState): string {
   const by = s.who && s.ts !== null ? ` Set by ${s.who} on ${day(s.ts)}.` : ''
   if (s.reason === 'not set up') return 'Not set up on this deployment (no session_log tables): apply the session-log migration.'
+  if (s.enabled && isNoEnd(s.until)) return `On, no end date.${by}`
   if (s.enabled && s.until !== null) return `On through ${lastDay(s.until)} (UTC).${by}`
   if (s.reason === 'expired' && s.until !== null) return `Off: ended after ${lastDay(s.until)} (UTC).${by}`
   return `Off.${by}`
@@ -24,7 +26,7 @@ export interface SwitchViewProps {
   state: SwitchState
   /** Today's UTC date: the earliest a new end may be. */
   today: string
-  /** The date field's value (`YYYY-MM-DD`). */
+  /** The date field's value (`YYYY-MM-DD`), or `none` (no end date). */
   date: string
   onDate: (d: string) => void
   /** Turn on through `date` (also: change the date while on), or off. */
@@ -33,17 +35,22 @@ export interface SwitchViewProps {
   error: string | null
 }
 
+/** The switch's end as the date field holds it: `none`, or its last UTC day. */
+export const untilField = (until: number): string => isNoEnd(until) ? 'none' : lastDay(until)
+
 /** The switch, as markup (pure: `SessionLogSwitch` wires it to the API). */
 export function SessionLogSwitchView({ state, today, date, onDate, onSet, busy, error }: SwitchViewProps) {
   const setUp = state.reason !== 'not set up'
-  const changed = state.enabled && state.until !== null && date !== lastDay(state.until)
+  const noEnd = date === 'none'
+  const changed = state.enabled && state.until !== null && date !== untilField(state.until)
   return (
     <section className="session-log-switch">
       <h2>Session log</h2>
       <p>
-        Records what viewers do (page views, clicks on controls, the path filter, requests and errors) so a reported bug
-        can be replayed: <Link to="/admin/sessions">/admin/sessions</Link>. Viewers see no notice. It turns itself off
-        after the chosen day.
+        Records what viewers do (page views, clicks on controls, the path filter, requests and errors), to replay a
+        reported bug (<Link to="/admin/sessions">/admin/sessions</Link>) and for the activity feed
+        (<Link to="/admin/activity">/admin/activity</Link>). While it's on, <Link to="/privacy">/privacy</Link> says
+        what is recorded. It turns itself off after the chosen day, unless it has no end date.
       </p>
       <p className="status">{switchStatus(state)}</p>
       {setUp && (
@@ -54,8 +61,12 @@ export function SessionLogSwitchView({ state, today, date, onDate, onSet, busy, 
           </label>
           <label>
             {' '}through{' '}
-            <input type="date" value={date} min={today} max={lastDay(state.maxUntil)} disabled={busy} onChange={e => onDate(e.target.value)} />
+            <input type="date" value={noEnd ? '' : date} min={today} max={lastDay(state.maxUntil)} disabled={busy || noEnd} onChange={e => onDate(e.target.value)} />
             {' '}(UTC)
+          </label>
+          <label>
+            {' '}<input type="checkbox" checked={noEnd} disabled={busy} onChange={e => onDate(e.target.checked ? 'none' : lastDay(state.defaultUntil))} />
+            {' '}no end date
           </label>
           {changed && <button type="submit" disabled={busy}>Set date</button>}
         </form>
@@ -87,7 +98,7 @@ export function SessionLogSwitch() {
   if (q.error) return <section className="session-log-switch"><h2>Session log</h2><p className="err">{q.error.message}</p></section>
   if (!q.data) return null
   const s = q.data
-  const date = draft ?? lastDay(s.enabled && s.until !== null ? s.until : s.defaultUntil)
+  const date = draft ?? untilField(s.enabled && s.until !== null ? s.until : s.defaultUntil)
   return (
     <SessionLogSwitchView
       state={s}

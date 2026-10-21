@@ -8,7 +8,7 @@ import { onRequest, purgeState } from './session-log/[[path]]'
 import { gateFor } from '../_lib/auth'
 import { sqliteD1 } from '../_lib/testD1'
 import { purge } from '../_lib/sessionLog'
-import { LIMITS, parseUntil, switchState, validateBatch } from '../_lib/sessionLogShape'
+import { LIMITS, NO_END, parseUntil, switchState, validateBatch } from '../_lib/sessionLogShape'
 
 const NOW = Date.UTC(2026, 9, 12, 15, 0, 0)  // 2026-10-12T15:00Z
 const HOST = 'https://site.example.test'
@@ -71,6 +71,7 @@ describe('D1', () => {
         parseUntil('2026-11-13', NOW),
         parseUntil('2027-10-17', NOW),
         parseUntil('soon', NOW),
+        parseUntil(' none ', NOW),
       ]).toEqual([
         { until: Date.UTC(2026, 9, 20) },
         { until: Date.UTC(2026, 9, 20) },
@@ -83,6 +84,7 @@ describe('D1', () => {
         { error: 'until 2026-11-13 is more than 31 days ahead (latest: 2026-11-12)' },
         { error: 'until 2027-10-17 is more than 31 days ahead (latest: 2026-11-12)' },
         { error: 'unparseable until: soon' },
+        { until: NO_END },
       ])
     })
     it('the stored end: null = off; at or past it = expired', () => {
@@ -228,18 +230,18 @@ describe('D1', () => {
         await on.call('GET', ''),
         await on.call('GET', '', { token: on.viewer }),
       ]).toEqual([
-        [200, { enabled: false, until: null, reason: 'off' }],
-        [200, { enabled: false, until: null, reason: 'off' }],
-        [200, { enabled: false, until: Date.UTC(2026, 9, 18), reason: 'no viewer identity' }],
-        [200, { enabled: true, until: Date.UTC(2026, 9, 18), reason: null }],
+        [200, { enabled: false, until: null, reason: 'off', on: false, retainDays: 30 }],
+        [200, { enabled: false, until: null, reason: 'off', on: false, retainDays: 30 }],
+        [200, { enabled: false, until: Date.UTC(2026, 9, 18), reason: 'no viewer identity', on: true, retainDays: 30 }],
+        [200, { enabled: true, until: Date.UTC(2026, 9, 18), reason: null, on: true, retainDays: 30 }],
       ])
       vi.setSystemTime(Date.UTC(2026, 9, 18))
-      expect(await on.call('GET', '', { token: on.viewer })).toEqual([200, { enabled: false, until: Date.UTC(2026, 9, 18), reason: 'expired' }])
+      expect(await on.call('GET', '', { token: on.viewer })).toEqual([200, { enabled: false, until: Date.UTC(2026, 9, 18), reason: 'expired', on: false, retainDays: 30 }])
     })
 
     it('a PUBLIC_READ deploy logs anonymous viewers', async () => {
       const pub = await setup({ PUBLIC_READ: '1' })
-      expect(await pub.call('GET', '')).toEqual([200, { enabled: true, until: Date.UTC(2026, 9, 18), reason: null }])
+      expect(await pub.call('GET', '')).toEqual([200, { enabled: true, until: Date.UTC(2026, 9, 18), reason: null, on: true, retainDays: 30 }])
     })
 
     it(`reads the switch at most once per ${TTL / 1000} s per isolate; an admin change in this isolate applies at once`, async () => {
@@ -266,15 +268,15 @@ describe('D1', () => {
       vi.setSystemTime(NOW + 30_000)
       seen.push(await cfg())
       expect(seen).toEqual([
-        { enabled: true, until: NOW + 30_000, reason: null },
-        { enabled: false, until: NOW + 30_000, reason: 'expired' },
+        { enabled: true, until: NOW + 30_000, reason: null, on: true, retainDays: 30 },
+        { enabled: false, until: NOW + 30_000, reason: 'expired', on: false, retainDays: 30 },
       ])
     })
 
     it('without the migration: off ("not set up")', async () => {
       const s = await setup({}, null)
       s.raw.exec('DROP TABLE session_log_switch')
-      expect(await s.call('GET', '', { token: s.viewer })).toEqual([200, { enabled: false, until: null, reason: 'not set up' }])
+      expect(await s.call('GET', '', { token: s.viewer })).toEqual([200, { enabled: false, until: null, reason: 'not set up', on: false, retainDays: 30 }])
     })
   })
 
@@ -372,7 +374,7 @@ describe('D1', () => {
       const bare = await setup()
       bare.raw.exec('DROP TABLE session_log; DROP TABLE session_log_batches')
       purgeState.last = 0
-      expect(await bare.call('GET', '', { token: bare.viewer })).toEqual([200, { enabled: true, until: Date.UTC(2026, 9, 18), reason: null }])
+      expect(await bare.call('GET', '', { token: bare.viewer })).toEqual([200, { enabled: true, until: Date.UTC(2026, 9, 18), reason: null, on: true, retainDays: 30 }])
     })
   })
 

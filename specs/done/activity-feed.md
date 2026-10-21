@@ -20,7 +20,7 @@ A kind is a stable string. Server kinds come from write requests; client kinds a
 | `note` | `POST/PUT/DELETE /api/annotations` | on | `line` |
 | `stage` | staging writes (`/api/plans/*`) | on | `count` (its own thread already lists each; the burst links to it) |
 | `deletion` | `/api/sweep/*`, `/api/plan-sweep/*` (dispatch, stop, undo, purge) | on | `line` |
-| `access` | `/api/auth/*` writes: grant mint / rotate / revoke, request decisions, share links | on | `line` |
+| `access` | `/api/auth/*` writes (grants minted, edited, rotated, revoked, disabled; access requests approved / denied; the sign-in allowlist) and `/api/og/*` (preview links made / revoked) | on | `line` |
 | `admin` | `/api/db/*` writes (the admin console's table edits), the session-log switch, the activity config | on | `line` |
 | `token` | `POST /api/token` (an agent token minted) | on | `line` |
 | `profile` | profile writes (name, avatar) | on | `count` |
@@ -46,18 +46,20 @@ One row per kind that differs from its default (`kind` PK, `log` 0/1, `notify` `
 
 ## Server events
 
-Captured in `_middleware.ts`, after the route answers: a non-GET request that got a 2xx, from an identified actor (`identify`: an email session, a grant session or an agent token), whose route maps to a server kind. The middleware records:
+Captured in `_middleware.ts`, after the route answers: a non-GET request that got a 2xx, from an identified actor (`identify`: an email session, a grant session or an agent token), whose route maps to a server kind (`serverKind`). The body is read from a clone before the route consumes it (JSON only). The middleware records:
 
 - `ts`, `kind`, `actor` (email, else the grant's name, else `grant:<id>`), `via` (`session` / `grant`), `method`, `route` (the path, secret params masked as the session log masks them).
 - `body`: the request body summary the session log uses for `api` events (per top-level key: an array's length, a `kind`/`op`/`action`/`mode` string, else the value's type).
-- `detail`: optional, set by the route on `ctx.data.activity`: the human line and any structured fields. Routes without one get a generic line (`POST /api/annotations`).
+- `detail`: optional, set by the route with `noteActivity(ctx, …)` on Pages' per-request `ctx.data` (the middleware and the route each get their own copy of the `Request`, so a request-keyed map doesn't reach across; `data` is shared). Routes without one get a generic line: the auth package's writes say what they did (`authLine`: "minted a grant", "revoked grant g1", "approved access request r9", …), anything else `METHOD /path` with the body summary.
 
-Routes that set `detail`:
-- `/api/actions` (`assign`): per action, `pattern → owner` (`→ nobody` for a clear), the kind (folder / object), the memo if any, and the prefix's size at the latest scan (`prefixesAt`, best-effort; absent if the lookup fails).
-- `/api/annotations` (`note`): the chart, the note's text (≤ 120 chars) and whether it was added, edited or removed.
-- `/api/token` (`token`), the `/api/auth/*` writes (`access`): what was minted / rotated / revoked / decided, and for whom (email or grant name, never a key).
-- `/api/db/*` (`admin`): the table, the key and the action (`insert`/`update`/`delete`), as `admin_edits` records it.
-- The sweep and plan-sweep routes (`deletion`): the run, its mode (dry run / real) and the plan.
+Routes that note detail:
+- `/api/actions` (`assign`): per action, `` `pattern` → owner`` (`→ nobody` for a clear), the memo if any (≤ 80 chars), `object: true` for an exact key. The middleware then adds the size at the latest scan (`activitySize.ts`: `stagedStats`, as the staged threads size a plan; best-effort, unsized if the index can't be read) to `detail.bytes` and the line.
+- `/api/annotations` (`note`): added / edited / removed, the note's date and text (≤ 120 chars).
+- `/api/token` (`token`): minted / rotated / revoked their agent token.
+- `/api/og/*` (`access`): a preview link made (its page path) or revoked (never the token).
+- `/api/db/*` (`admin`): the table, the key and the action; an update shows the column and its new value (≤ 60 chars).
+- `/api/session-log/switch` and `/api/activity/kinds/*` (`admin`): what the switch / kind was set to.
+- Staging and the sweep routes have generic lines for now (follow-up: the plan id and run mode as detail, so the summary links the plan's thread).
 
 Recording runs in `waitUntil` and is best-effort: a failure is logged and never fails the request.
 
@@ -68,9 +70,10 @@ A burst is one actor's events with no gap over `BATCH_GAP_S` (15 min). Server ev
 ### Storage (migration `activity-feed`)
 
 - `activity_events`: `id`, `burst_id`, `ts`, `kind`, `actor`, `via`, `method`, `route`, `line`, `detail` (JSON). Server events only; client events stay in `session_log_batches`.
-- `activity_bursts`: `id`, `actor`, `via`, `first_ts`, `last_ts`, `counts` (JSON `{kind: n}`), `pages` (JSON: the most-viewed paths, top 5, from `view`/`nav`), `sids` (JSON: the session-log sessions it covers), `slack_ts` (the thread's parent), `slack_replies` (JSON `{kind: ts}`), `discord_id`, `rendered_ts`, `dirty`.
+- `activity_bursts`: `id`, `actor`, `via`, `origin` (for links), `first_ts`, `last_ts`, `counts` (JSON `{kind: n}`, bumped atomically per kind with `json_set`), `pages` (JSON: the 20 most-viewed paths, from `view`/`nav`), `sids` (JSON: the session-log sessions it covers), `rendered_ms`, `dirty`.
+- `activity_posts`: `(burst_id, sink, part)` → `msg_id` (Slack ts / Discord message id), `claimed_ms`. `part` is `parent` or a `line` kind's reply. The first renderer claims a row (`INSERT OR IGNORE … 'pending'`) and posts; later ones edit the posted message; a part still `pending` elsewhere is skipped, and a claim older than 60 s is retaken (its poster failed). A failed post releases its claim. So two isolates never open two threads for one burst.
 - `activity_kinds`: above.
-- Retention: `SESSION_LOG_RETAIN_DAYS` (default 30) covers all three, purged by the session log's hourly purge.
+- No foreign keys. Retention: `SESSION_LOG_RETAIN_DAYS` (default 30) covers the bursts, events and posts, in the session log's hourly purge (`maybePurge` → `purgeActivity`).
 
 ## Sinks
 
@@ -103,12 +106,16 @@ None in this version: posts name people in plain text, as the staged threads do,
 ## Always-on session logging
 
 - The switch's date becomes optional: "no end date" (`until_ms` = a sentinel far future, shown as "on, no end date"). Turning it on with a date keeps today's behaviour.
-- While logging is on (any end date), `/privacy` carries a paragraph saying what is recorded (the event kinds above with `record` on, never form contents other than the path filter, never keys or tokens), who sees it (the deployment's admins), and for how long (`SESSION_LOG_RETAIN_DAYS`).
+- `GET /api/session-log` answers `on` (the switch is on for everyone signed in) and `retainDays` to anyone, signed in or not. While it's on (any end date), `/privacy` carries a "usage log" paragraph: what is recorded, that it never records other fields' text or keys, who sees it (the admins), and for how long. `/privacy` always says that changes people make are recorded and the admins told.
 - The session-log `POST` also feeds the actor's burst: per batch, the counts of the client kinds whose `record` is on, the paths viewed, the `sid`.
 
 ## `/admin/activity`
 
-Admin only. A list of bursts, newest first: actor, how, span, counts by kind, a link to the Slack thread. Expanding a burst shows its server events (time, kind, line) and links to its sessions in `/admin/sessions`. Filters: actor (substring), kind, since; kept in the URL.
+Admin only (`src/ActivityPage.tsx`; the `/admin` table is `src/ActivityKinds.tsx`). A list of bursts, newest first: who, last active, started, via, counts by kind. A row's last-active time opens it (`?burst=<id>`): its sessions in `/admin/sessions`, its Slack thread, the pages viewed, and its server events (time, kind, line). Filters: who (substring, `?u=`), kind (`?k=`), since; kept in the URL. Also in the omnibar's pages.
+
+## Admin API
+
+`/api/activity/*`, admin only: `GET kinds` (each kind's config, its default, whether Slack / Discord are configured), `PUT kinds/<kind>` `{log, notify}`, `GET bursts?actor=&kind=&since=&limit=`, `GET bursts/<id>` (the burst, its server events, its Slack thread's permalink).
 
 ## Deployments
 
@@ -119,6 +126,12 @@ Admin only. A list of bursts, newest first: actor, how, span, counts by kind, a 
 | gcs | `#gcs-admin` (configured) | `DISCORD_ADMIN_WEBHOOK`: Ryan creates the webhook (which server / channel: open) |
 | cw | `#cw-admin` (configured) | as gcs |
 | hf, r2 | not configured: a gap in their deployment specs | not configured |
+
+Each deployment: merge `cloud`, apply `site/migrations/activity-feed.sql` to its D1 (Ryan's go), deploy. Before the migration the feed is a nop (every read and write treats a missing table as off), and the session log works as before. Optionally `wrangler pages secret put DISCORD_ADMIN_WEBHOOK`, and the session-log switch at `/admin` → "no end date".
+
+## Verified
+
+- `wrangler pages dev` over the built site with a local D1 (2026-10-21): a kinds `PUT`, the switch set to "no end date", an agent-token mint and a session-log batch landed in one burst, each server event with its route's line (`ctx.data` reaching the middleware), and a kind turned off was dropped from the next batch before storage. `/admin/activity` and `/privacy` checked in Chrome. The `/admin` table is covered by a render test; Slack / Discord against a stubbed `fetch`.
 
 ## Tests
 

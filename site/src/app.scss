@@ -3109,7 +3109,14 @@ kbd { font: inherit; font-size: 11px; padding: 0 4px; border: 1px solid var(--li
     .lanes { display: inline-flex; gap: 12px; flex-wrap: wrap; }
   }
 }
-// The privacy notice while the session log is on (About, /privacy).
+// `/admin`'s activity table (specs/done/activity-feed.md).
+.activity-kinds-table {
+  border-collapse: collapse; font-size: 13px;
+  th, td { padding: 4px 8px; text-align: left; border-bottom: 1px solid var(--line); vertical-align: middle; }
+  tr.off td:not(:nth-child(3)) { color: var(--ink-3); }
+  select { font: inherit; }
+}
+.activity-page .burst-detail { padding: 4px 0 8px; }
 
 // Section headings link to their section (`SectionAnchor`): plain heading ink, a `#` on hover.
 a.sec-anchor {

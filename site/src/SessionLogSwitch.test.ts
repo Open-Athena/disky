@@ -4,7 +4,7 @@ import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { MemoryRouter } from 'react-router-dom'
 import { describe, expect, it } from 'vitest'
-import type { SwitchState } from '../functions/_lib/sessionLogShape'
+import { NO_END, type SwitchState } from '../functions/_lib/sessionLogShape'
 import { SessionLogSwitchView, type SwitchViewProps } from './SessionLogSwitch'
 
 const bounds = { defaultUntil: Date.UTC(2026, 9, 20), maxUntil: Date.UTC(2026, 10, 13) }
@@ -14,10 +14,13 @@ const ON: SwitchState = { enabled: true, until: Date.UTC(2026, 9, 15), reason: n
 const render = (state: SwitchState, o: Partial<SwitchViewProps> = {}) => renderToStaticMarkup(createElement(MemoryRouter, null,
   createElement(SessionLogSwitchView, { state, today: '2026-10-12', date: '2026-10-19', onDate: () => {}, onSet: () => {}, busy: false, error: null, ...o })))
 
-const intro = '<h2>Session log</h2><p>Records what viewers do (page views, clicks on controls, the path filter, requests and errors) so a reported bug can be replayed: <a href="/admin/sessions">/admin/sessions</a>. Viewers see no notice. It turns itself off after the chosen day.</p>'
+const intro = '<h2>Session log</h2><p>Records what viewers do (page views, clicks on controls, the path filter, requests and errors), to replay a reported bug (<a href="/admin/sessions">/admin/sessions</a>) and for the activity feed (<a href="/admin/activity">/admin/activity</a>). While it&#x27;s on, <a href="/privacy">/privacy</a> says what is recorded. It turns itself off after the chosen day, unless it has no end date.</p>'
 const form = (checked: boolean, date: string, extra = '') =>
   `<form><label class="switch"><input type="checkbox" role="switch"${checked ? ' checked=""' : ''}/> Logging</label>`
-  + `<label> through <input type="date" min="2026-10-12" max="2026-11-12" value="${date}"/> (UTC)</label>${extra}</form>`
+  + (date === 'none'
+    ? '<label> through <input type="date" min="2026-10-12" max="2026-11-12" disabled="" value=""/> (UTC)</label><label> <input type="checkbox" checked=""/> no end date</label>'
+    : `<label> through <input type="date" min="2026-10-12" max="2026-11-12" value="${date}"/> (UTC)</label><label> <input type="checkbox"/> no end date</label>`)
+  + `${extra}</form>`
 
 describe('the /admin session-log switch', () => {
   it('off (never set): unchecked, the date defaulting to 7 days out', () => {
@@ -31,6 +34,16 @@ describe('the /admin session-log switch', () => {
   it('on, with the date changed: a "Set date" button', () => {
     expect(render(ON, { date: '2026-10-20' })).toBe(
       `<section class="session-log-switch">${intro}<p class="status">On through 2026-10-14 (UTC). Set by ops@example.test on 2026-10-12.</p>${form(true, '2026-10-20', '<button type="submit">Set date</button>')}</section>`,
+    )
+  })
+  it('on with no end date: the date field off, the box checked', () => {
+    expect(render({ ...ON, until: NO_END }, { date: 'none' })).toBe(
+      `<section class="session-log-switch">${intro}<p class="status">On, no end date. Set by ops@example.test on 2026-10-12.</p>${form(true, 'none')}</section>`,
+    )
+  })
+  it('on through a date, "no end date" checked: a "Set date" button', () => {
+    expect(render(ON, { date: 'none' })).toBe(
+      `<section class="session-log-switch">${intro}<p class="status">On through 2026-10-14 (UTC). Set by ops@example.test on 2026-10-12.</p>${form(true, 'none', '<button type="submit">Set date</button>')}</section>`,
     )
   })
   it('expired: off, saying when it ended; an error shows under the form', () => {
