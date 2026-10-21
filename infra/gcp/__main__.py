@@ -81,8 +81,8 @@ job = JobAccount(
 # index tiers, the snapshot JSONs and the digest's state (all also on R2 but the state, which the digest keeps beside
 # its snapshots root). Expired: the raw listings (`raw/`, re-listable; kept a month for `bulk-list -W`-style reuse and
 # debugging) and Nextflow's task dirs and resume cache (`nf/work/`, `nf/cache/`: a scan resumes within days or not at
-# all), and `scratch/` (job/profiles/hf-scratch.yml's test runs) after a week. `nf/runs/` (the run reports, the /scans
-# DAG) stays.
+# all), and `scratch/` after a week. Full HTML reports expire after 30 days; the small DAG/trace and /scans records
+# remain as the operational ledger. Meta raw listings have the same 30-day window as the primary's.
 data = gcp.storage.Bucket(
     "hf-usage-data",
     project=project,
@@ -95,7 +95,13 @@ data = gcp.storage.Bucket(
             action=gcp.storage.BucketLifecycleRuleActionArgs(type="Delete"),
             condition=gcp.storage.BucketLifecycleRuleConditionArgs(age=age, matches_prefixes=prefixes),
         )
-        for age, prefixes in ((30, ["raw/"]), (14, ["nf/work/", "nf/cache/"]), (7, ["scratch/"]))
+        for age, prefixes in ((30, ["raw/", "meta-listing/"]), (14, ["nf/work/", "nf/cache/"]), (7, ["scratch/"]))
+    ] + [
+        gcp.storage.BucketLifecycleRuleArgs(
+            action=gcp.storage.BucketLifecycleRuleActionArgs(type="Delete"),
+            condition=gcp.storage.BucketLifecycleRuleConditionArgs(age=30, matches_prefixes=["nf/runs/"],
+                                                                matches_suffixes=["/report.html", "/timeline.html"]),
+        )
     ],
     labels={"component": "data"},
     opts=pulumi.ResourceOptions(protect=True),

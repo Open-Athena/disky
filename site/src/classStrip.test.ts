@@ -7,9 +7,9 @@ describe('classSegments', () => {
   it('largest class first, empty classes dropped, shares and list-price $/mo per class and in total', () => {
     expect(classSegments({ 1: 600 * GiB, 3: 300 * GiB, 2: 100 * GiB, 4: 0 })).toEqual({
       segs: [
-        { c: '1', name: 'Standard', bytes: 600 * GiB, frac: 0.6, usd: 12 },
-        { c: '3', name: 'Coldline', bytes: 300 * GiB, frac: 0.3, usd: 1.2 },
-        { c: '2', name: 'Nearline', bytes: 100 * GiB, frac: 0.1, usd: 1 },
+        { c: '1', name: 'Public', bytes: 600 * GiB, frac: 0.6, usd: 12 },
+        { c: '3', name: '3', bytes: 300 * GiB, frac: 0.3, usd: 1.2 },
+        { c: '2', name: '2', bytes: 100 * GiB, frac: 0.1, usd: 1 },
       ],
       usd: 14.2,
     })

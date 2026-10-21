@@ -173,8 +173,11 @@ def test_gcp_stack(monkeypatch: pytest.MonkeyPatch):
         assert {k: bucket[k] for k in ("name", "location", "uniformBucketLevelAccess", "publicAccessPrevention")} == {
             "name": "oa-hf-usage-data", "location": "US-CENTRAL1", "uniformBucketLevelAccess": True, "publicAccessPrevention": "enforced",
         }
-        assert [(r["condition"]["age"], r["condition"]["matchesPrefixes"], r["action"]["type"]) for r in bucket["lifecycleRules"]] == [
-            (30, ["raw/"], "Delete"), (14, ["nf/work/", "nf/cache/"], "Delete"), (7, ["scratch/"], "Delete"),
+        assert [(r["condition"], r["action"]) for r in bucket["lifecycleRules"]] == [
+            ({"age": 30, "matchesPrefixes": ["raw/", "meta-listing/"]}, {"type": "Delete"}),
+            ({"age": 14, "matchesPrefixes": ["nf/work/", "nf/cache/"]}, {"type": "Delete"}),
+            ({"age": 7, "matchesPrefixes": ["scratch/"]}, {"type": "Delete"}),
+            ({"age": 30, "matchesPrefixes": ["nf/runs/"], "matchesSuffixes": ["/report.html", "/timeline.html"]}, {"type": "Delete"}),
         ]
         assert {k: m.inputs("hf-usage-data-job")[k] for k in ("bucket", "role", "member")} == {
             "bucket": "oa-hf-usage-data", "role": "roles/storage.objectAdmin", "member": f"serviceAccount:{sa}",
@@ -228,7 +231,8 @@ def test_scan_profile_matches_the_site_and_the_stack():
     p = load(str(REPO / "job" / "profiles" / "hf.yml"))
     w = tomllib.loads((REPO / "site" / "wrangler.toml").read_text())
     [db] = w["d1_databases"]
-    assert (p.env["D1_DB_ID"], p.env["D1_DB_NAME"], p.opts("static-names")["gen"]) == (db["database_id"], db["database_name"], w["vars"]["STATIC_GEN"])
+    assert (p.env["D1_DB_ID"], p.env["D1_DB_NAME"], p.opts("static-names")["current_key"]) == (db["database_id"], db["database_name"], w["vars"]["STATIC_CURRENT_KEY"])
+    assert p.opts("age-store")["store"] == f"r2://{w['vars']['STORE_BUCKET']}/{w['vars']['AGE_STORE_PREFIX']}"
     block = re.search(r"^HF_SECRETS = \[\n(.*?)^\]", (INFRA / "gcp" / "__main__.py").read_text(), re.M | re.S).group(1)
     stack_secrets = re.findall(r'^    "([a-z0-9-]+)",', block, re.M)
     assert len(stack_secrets) == 9
@@ -254,8 +258,11 @@ def test_meta_profile_matches_the_site_and_the_stack():
     for env in (w["vars"], w["env"]["preview"]["vars"]):
         assert env["STORES_EXTRA"] == "meta"
         meta = json.loads(env["STORES_JSON"])["meta"]["vars"]
-        assert (meta["STATIC_GEN"], meta["SNAPSHOTS_SUBDIR"], meta["STORE_BUCKETS"], meta["STORE_PREFIXES"]) == (
-            p.opts("static-names")["gen"], "meta", "oa-hf-usage-data,oa-hf-usage-index", "meta-l2/,snapshots/meta/")
+        assert (meta["STATIC_CURRENT_KEY"], meta["SNAPSHOTS_SUBDIR"], meta["STORE_BUCKETS"], meta["STORE_PREFIXES"]) == (
+            p.opts("static-names")["current_key"], "meta", "oa-hf-usage-data,oa-hf-usage-index", "meta-l2/,snapshots/meta/")
+        assert meta["PATH_STORE"] == "intervals"
+        assert p.opts("interval-store")["store"] + "/interval-store" == f"r2://{meta['STORE_BUCKET']}/{meta['INTERVAL_STORE_PREFIX']}"
+        assert p.opts("age-store")["store"] == f"r2://{meta['STORE_BUCKET']}/{meta['AGE_STORE_PREFIX']}"
     assert [s.uri for s in p.sources] == ["gcs://oa-hf-usage-data", "r2://oa-hf-usage-index"]
     block = re.search(r"^HF_SECRETS = \[\n(.*?)^\]", (INFRA / "gcp" / "__main__.py").read_text(), re.M | re.S).group(1)
     stack_secrets = set(re.findall(r'^    "([a-z0-9-]+)",', block, re.M))

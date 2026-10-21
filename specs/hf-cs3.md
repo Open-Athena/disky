@@ -21,5 +21,10 @@ Approved 2026-10-21. Preserve all historical map, diff and age-chart answers whi
 
 ## Progress
 
-- Shared `cloud` merge completed; validation pending.
-- Remaining phases pending.
+- Shared `cloud` merged through `76acbcbb` as `c4779025`; 163 targeted merge checks passed.
+- Shared implementation in `35954b69`: independent interval prefixes and cache namespaces, verified age-cell history and gated retirement, independent static pointers, successor-aware retirement/cleanup. Optional features stay off outside configured deployments. Site: 2,596 tests passed, both typechecks and build passed; targeted cloud history, compaction, retirement and profile checks passed.
+- HF's two profiles configure independent primary-age, meta-path and meta-age roots, keep two recent full inputs and collect superseded generations. Static lineages publish separate pointers while retaining their original roots as fixed rollback anchors. Both site's environments follow those pointers.
+- Retention recipe: primary/meta raw 30 days, full Nextflow report/timeline HTML 30 days, work/cache 14 days, scratch seven days. DAG/trace and run/scan records remain as the small operational ledger. The site's custom run DAG/timeline reads the ledger; it has no direct full-report links to invalidate. Five HF stack/profile mock checks passed. Infrastructure apply pending.
+- HF bucket listing improvement is separately shareable as `390852b5`: request 5,000 entries per bucket-tree page (the official OpenAPI maximum) and preserve server pagination. 432 engine tests passed and mypy is clean over 56 source files. This does not change repo commit-date semantics.
+- Cloud and GCS transcripts checked for overlapping work; no parallel implementation of age history or secondary interval namespaces found. Shared ownership handoff left under the cloud worktree's `specs/cs3-history-handoff.md`. Research and a local, unposted `thrds` draft about large HF bucket inventories are in progress alongside rollout.
+- Pending: candidate image, Batch history bootstrap and parity, pointer cutover, dev/prod rollout, scoped lifecycle apply and manual scans. Browser connector unavailable in this Codex thread; CIC has not been performed.

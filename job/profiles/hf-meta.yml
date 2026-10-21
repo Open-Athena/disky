@@ -1,7 +1,7 @@
 # hf.oa.dev's "data behind this site" store (`store: meta`, specs/pipelines-everywhere.md §3.1, as `r2`'s `r2-meta.yml`):
 # its own data and serving buckets through the same `scan.nf`, a second head beside `hf.yml`'s (`job/hf-meta-submit.sh`,
-# the `hf-usage-meta` cron). A secondary store is served per scan: no interval store, and warm-cache / probe carry no
-# `store=` yet. The R2 source lists through `$R2_ENDPOINT` (a secret: the repo is public), with the job's R2 key.
+# the `hf-usage-meta` cron). Its path and age histories have independent R2 namespaces and current pointers.
+# Warm-cache / probe carry no `store=` yet. The R2 source lists through `$R2_ENDPOINT` (a secret), with the job's key.
 deployment: hf
 store: meta
 executor:
@@ -30,9 +30,9 @@ machines:
   big: e2-standard-4
   list: e2-standard-4
   post: e2-standard-2
-skip: [bucket-check, interval-store, over-time, warm-cache, probe, digest]
+skip: [bucket-check, over-time, warm-cache, probe, digest]
 # the data bucket's soft-deleted bytes (7 d retention): what the listing of current objects misses (specs/non-live-bytes.md)
-steps: [non-live]
+steps: [non-live, age-store, retire, store-gc]
 secrets:
   CLOUDFLARE_API_TOKEN: hf-usage-cf-token
   CLOUDFLARE_ACCOUNT_ID: hf-usage-cf-account-id
@@ -51,6 +51,10 @@ pass: [DT_RECORD, DT_ALERTS]
 labels: {deployment: hf}
 options:
   index: {mode: path-index, args: [-U], mem: 8GB, age_pyramids: true, verify: true}
-  static-names: {gen: 2026-10-18hfmetab, mem: 8GB, build_args: [-x, "16,8"]}   # site/wrangler.toml STORES_JSON meta STATIC_GEN
+  static-names: {gen: 2026-10-18hfmetab, current_key: static-names/meta-CURRENT.json, mem: 8GB, build_args: [-x, "16,8"]}
+  interval-store: {store: "r2://oa-hf-usage-index/history/meta", source: data, timeout: 60m, mem: 8GB}
+  age-store: {store: "r2://oa-hf-usage-index/history/meta-age", gen: 2026-10-21hfmeta-age, keep: 2, execute: true, copies: ["r2://oa-hf-usage-index"]}
+  retire: {keep: 2, layer2: true, execute: true, store: "r2://oa-hf-usage-index/history/meta", static_store: "r2://oa-hf-usage-index", copies: ["r2://oa-hf-usage-index"]}
+  store-gc: {store: "r2://oa-hf-usage-index/history/meta", copies: [], execute: true}
   index-gc: {dry: true}
   non-live: {classes: [soft-deleted]}   # GCS only: R2 has no soft delete (skipped)
