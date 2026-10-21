@@ -1,6 +1,15 @@
 # Usage metrics: who drives load and spend
 
-Status: proposed 2026-10-21 (gcs; shared code, so `[cloud]`).
+Status: phase 1 on dev.gcs.oa.dev and phase 2's code landed 2026-10-21 (gcs; shared code, so `[cloud]`). Phase 2 runs live once a token exists; phase 3 open.
+
+## As built
+
+- `site/functions/_lib/usage.ts`: the `Meter`, the route table (`ROUTES`; `usage.test.ts` pins that every Function file maps into it), caller resolution, the point and the binding instrumentation. The env's R2 / D1 / KV bindings are wrapped once per isolate (the env object is the isolate's); each call charges the meter of the request it runs in, found through `AsyncLocalStorage`. That needs the `nodejs_als` compatibility flag in the deployment's `wrangler.toml` (gcs has it). The module is imported by a computed specifier, so a deployment without the flag still builds: its points carry route, caller, status and store, with zero counters and cache `none`.
+- `via` = `token` for a grant presented as `Authorization: Bearer`, `grant` for a share link's cookie session. The caller is the grant's name, else its note, with emails masked and cut to the 96-byte index. `bot` uses a user-agent regex (`BOT_UA`); the site had no earlier heuristic.
+- `blob8` = `prod` on `PROD_HOST`, else `dev`: gcs's dev stack writes to prod's dataset.
+- R2 counts are Class B reads (`get` + `head`). R2 bytes are the ranges actually returned.
+- `dt-cloud cf-usage` (`cloud/src/dt_cloud/cf_usage.py`): one GraphQL query per dataset, `$CF_ANALYTICS_TOKEN`. The Functions dataset has no CPU sum, so its CPU ms are estimated as requests × p50. Scripts are matched by name containing the Pages project; when none matches, the account total is used and a note says so. The field names come from Cloudflare's docs and are unverified against the live schema until a token exists.
+
 
 ## Why
 
@@ -50,7 +59,7 @@ Requests come from browsers (sessions), share links, agent and CLI tokens, the j
 ## Surfaces
 
 - **`dt-cloud cf-usage [-d DAYS] [-j]`.** Pulls (1) for the account, filtered to the deployment's script/buckets/database/namespaces from its wrangler config, and (2) through the Analytics Engine SQL API. Prints a per-day table: billed units and list-price $, then the attribution by caller and by route.
-  - Needs a CF API token with Account Analytics: Read. Use the existing `CLOUDFLARE_API_TOKEN` if its permissions cover it; otherwise a new read-only token, which is a secret and goes through the user.
+  - Needs a CF API token with Account Analytics: Read. The existing `CLOUDFLARE_API_TOKEN` doesn't cover it (GraphQL: "not authorized for that account"), so a new read-only token is needed, as `$CF_ANALYTICS_TOKEN`. It is a secret and goes through the user.
   - Prices live in one table in code: R2 Class A/B, storage, D1 rows read/written, Functions requests/CPU, KV.
 - **The daily job** runs it after `digest` and stores `snapshots/usage/<date>.json`, so `/admin/usage` reads a file, not a live API call per view. The same token is needed as a job secret.
 - **`/admin/usage`** (admin):
