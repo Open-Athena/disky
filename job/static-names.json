@@ -36,6 +36,7 @@
  "compact_level": 5,
  "standard_stages": [
   "anchors",
+  "compact",
   "drill"
  ],
  "drill_checkpoint": "oa-gcs-usage-scratch"
