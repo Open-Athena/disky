@@ -1158,11 +1158,11 @@ def cleanup(path: Path) -> Iterator[None]:
 
 
 @step("retire", core=False, soft=True, options={"keep": int, "execute": bool, "static_gen": str, "static_store": str, "store": str,
-                                                "layer2": bool, "layer1": bool, "copies": list, "backup": str, "markers_only": bool},
+                                                "layer2": bool, "layer1": bool, "cache": bool, "copies": list, "backup": str, "markers_only": bool},
       requires=_retire_check)
 def retire(ctx: Ctx, arg: str | None) -> None:
     """Retire the per-scan sorts, footers, search sidecars (and, `layer2: true`, layer-2 listings; `layer1: true`, the raw
-    listing shards under `layout.listing`) of every scan but the
+    listing shards under `layout.listing`; `cache: true`, its `dir-cache/`) of every scan but the
     newest `keep` that both stores hold and a parity marker vouches for (`dt-cloud scan retire`; specs/lean-scans.md §2).
     Off unless the profile lists it in `steps`; a dry run (the plan in the log) unless `execute: true`. The data store
     first (`$R2_ARCHIVE` when the data store is a local dir), then each of `copies` (a root, or `r2` for `$R2_ARCHIVE`; D1 left
@@ -1188,7 +1188,15 @@ def retire(ctx: Ctx, arg: str | None) -> None:
             err("retire: options.retire.layer1 without layout.listing: raw listings kept")
         else:
             l1 = ["-1", ctx.profile.layout.listing.replace("{scan}", "{id}") + "*/shard-*.parquet"]
-    common = ["-G", static_gen, "-k", o["keep"], "-L", l2 + "index/{gen}/path-index.parquet", *(["-l", l2 + "*.parquet"] if o.get("layer2") else []), *l1,
+    cache = []
+    if o.get("cache"):
+        if ctx.profile.layout.listing is None:
+            err("retire: options.retire.cache without layout.listing: rollup caches kept")
+        else:
+            # `path-index -c`'s cache (`listing_key("dir-cache")`), one dir per index part under a sharded index
+            dc = ctx.profile.layout.listing.replace("{scan}", "{id}") + "dir-cache/"
+            cache = ["-c", dc + "*.parquet", "-c", dc + "*/*.parquet"]
+    common = ["-G", static_gen, "-k", o["keep"], "-L", l2 + "index/{gen}/path-index.parquet", *(["-l", l2 + "*.parquet"] if o.get("layer2") else []), *l1, *cache,
               *(["-m"] if o.get("markers_only") else []), "-o", store, "-S", static_store, *store_args_t(ctx), "-w", ctx.work / "retire",
               *(["-x"] if o.get("execute") else [])]
     # A local data store is the task's scratch (only this scan's files): the scans' files and D1 rows are the archive's.
