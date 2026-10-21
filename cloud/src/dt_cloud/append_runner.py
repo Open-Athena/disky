@@ -566,10 +566,16 @@ def publish_scan(store: RunStore, scan: str, new: dict, doc: Callable[[dict, lis
     """Add scan `scan`'s level-0 run `new` to the newest earlier manifest's runs (a scan's, or a merge's revision of it)
     and write `manifests/<scan>.json`, once and last: `doc(prev, runs)` the manifest (`prev` the newest earlier manifest,
     or `{}`), checked first that no listed run lacks a file (`missing(runs)`) and that `refuse(before, after)` says
-    nothing. No carries: those run apart (`merge_pending`). Raises `SystemExit` on a refusal."""
+    nothing. No carries: those run apart (`merge_pending`). Raises `SystemExit` on a refusal.
+
+    Never into a compacted generation (its `successor.json`; the rerun follows it and appends there), checked before
+    the manifest is written and again after: a compaction checks the newest manifest after writing `successor.json`
+    (`compact_store`), so a race is caught by one side or both, never published past."""
     key = f"manifests/{manifest_name(scan)}"
     if store.exists(key):
         raise SystemExit(f"{key} exists: manifests are never rewritten")
+    if store.exists(SUCCESSOR):
+        raise SystemExit(f"not publishing {key}: generation {store.gen} was compacted ({SUCCESSOR}); the rerun appends to its successor")
     prev = latest_key(store.keys("manifests/"), before=scan)
     m = store.read_json(prev) if prev else {}
     runs = m.get("runs", [])
@@ -580,6 +586,9 @@ def publish_scan(store: RunStore, scan: str, new: dict, doc: Callable[[dict, lis
     if why := refuse(runs, after):
         raise SystemExit(f"not publishing {key}: {why}")
     store.create(key, json.dumps(out, indent=1) + "\n")
+    if store.exists(SUCCESSOR):
+        raise SystemExit(f"{key} published while generation {store.gen} was compacted ({SUCCESSOR} appeared): when the compaction "
+                         f"kept its successor, that lacks scan {scan}; the rerun appends it there")
     return out
 
 
@@ -1718,6 +1727,18 @@ def _md5(p: Path) -> str:
     return h.hexdigest()
 
 
+def run_scans(runs: list[dict]) -> list[str]:
+    """The scans a manifest's runs cover, in order (a carry's revision keeps them; an append adds one)."""
+    return [s for r in runs for s in r["scans"]]
+
+
+def store_newest_runs(store, prefix: str) -> tuple[str | None, list[dict]]:
+    """`newest_runs` read from the store itself (`<prefix>/manifests/`, listed fresh), not a mount or a mirror."""
+    keys = [k.removeprefix(f"{prefix}/") for k in store.keys(f"{prefix}/manifests/")]
+    newest = latest_key(keys)
+    return newest, store.read_json(f"{prefix}/{newest}")["runs"] if newest else []
+
+
 def compact_store(store, c: Compactor, gen: str, gen_dir: Path, work: Path, *, policy: Policy | int | None, why: str, threads: int = 4,
                   mem: str = "4GB", jobs: int = 1, r2: Callable[[str, str], dict] | None = None, reads: dict | None = None,
                   log: Callable[[str], None] = err) -> dict:
@@ -1726,7 +1747,13 @@ def compact_store(store, c: Compactor, gen: str, gen_dir: Path, work: Path, *, p
     generation's files in `c.publish_order`, `compaction.json` last; `successor.json` in `gen`; `CURRENT.json` when it
     named `gen` (or nothing); then `r2(new, gen)` (the R2 copy, its pointer last), when given. `reads`: what the caller
     read the generation from (`{source, bytes, s}`), recorded with the summary. Returns a summary (seconds, peak
-    work-disk and RSS GiB)."""
+    work-disk and RSS GiB).
+
+    An append can land on `gen` while the fold runs (hours): the new generation would lack its scan. So `gen`'s newest
+    manifest must still cover exactly the folded scans (a carry's revision may replace it; it keeps them) just before
+    `successor.json` is written, and again just after (`publish_scan` checks for `successor.json` after writing its
+    manifest, so one of the two sees the other). A scan that landed: the new generation is deleted (and the successor
+    record, when written), nothing else moves, and the summary says `superseded`; the next compaction folds it all."""
     from .blobstore import upload_new
     from .static_local import DiskPeak, rss_peak_gb
 
@@ -1757,7 +1784,25 @@ def compact_store(store, c: Compactor, gen: str, gen_dir: Path, work: Path, *, p
 
     files = upload_new(store, out, new_prefix, {}, order)
     up_s = round(monotonic() - t1, 1)
+    folded = run_scans(runs)
+
+    def landed() -> str | None:
+        key, now_runs = store_newest_runs(store, f"{c.prefix}/{gen}")
+        return None if run_scans(now_runs) == folded else key
+
+    def superseded(key: str, successor: bool) -> dict:
+        log(f"compact {gen} → {new}: {key} landed on {gen} during the fold (it covers scans {new} lacks): not publishing; "
+            f"{new} deleted, the next compaction folds it")
+        if successor:
+            store.delete([f"{c.prefix}/{gen}/{SUCCESSOR}"])
+        store.delete(sorted(store.listing(new_prefix)))
+        return {**summary, "runs": comp["runs"], "scans": comp["scans"], "superseded": key, "s": round(monotonic() - t0, 1)}
+
+    if key := landed():
+        return superseded(key, successor=False)
     store.write_text(f"{c.prefix}/{gen}/{SUCCESSOR}", json.dumps({"gen": new}) + "\n")
+    if key := landed():
+        return superseded(key, successor=True)
     summary.update(runs=comp["runs"], scans=comp["scans"], why=why, files=len(files), upload_s=up_s,
                    bytes=sum(p.stat().st_size for p in out.rglob("*") if p.is_file()), reads=reads)
     summary["current"] = current(store, c.prefix) in (None, gen)
@@ -1824,7 +1869,7 @@ def run_compaction(store, c: Compactor, gen: str, mount: Path, work: Path, *, po
     if r2_bucket:
         r2 = lambda new, old: r2_publish_gen(r2_bucket, c.prefix, new, old, last=c.last, log=log)  # noqa: E731
     doc["compact"] = compact_store(store, c, gen, gen_dir, work, policy=policy, why=why, threads=threads, mem=mem, jobs=jobs, r2=r2, reads=reads, log=log)
-    if c.prune:
+    if c.prune and not doc["compact"].get("superseded"):
         doc["predecessors"] = prune_predecessors(store, c.prefix, doc["compact"]["gen"], now=time.time() if now is None else now, grace_s=grace_s, log=log)
     return doc
 
