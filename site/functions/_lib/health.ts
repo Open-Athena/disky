@@ -7,7 +7,7 @@ import { COMPACT_LEVEL, type HealthDoc, healthDoc, type HealthRun, type MergeRec
 import { newestManifest } from './manifests.js'
 import { loadScanRuns } from './scanRuns.js'
 import { staticGen, staticPrefix } from './staticNames.js'
-import { pathScans } from './index.js'
+import { ivPrefix, pathScans } from './index.js'
 import { storeKey } from './stores.js'
 import type { Env } from './auth.js'
 
@@ -88,7 +88,7 @@ async function readRuns(r2: R2, kind: StoreRead['kind'], gen: string, root: stri
 export async function readInterval(env: Env): Promise<StoreRead | null> {
   const r2 = env.INDEX_R2 as R2 | undefined, gen = env.INTERVAL_STORE_GEN?.trim()
   if (!r2 || !gen) return null
-  const root = `interval-store/${gen}`
+  const root = `${ivPrefix(env)}/${gen}`
   return readStack(r2, 'interval', gen, root, async r => ({ r2: (await Promise.all(IV_RUN_FILES.map(f => has(r2, `${root}/${r.key}/${f}`)))).every(Boolean) }))
 }
 

@@ -474,25 +474,31 @@ def test_hf_list_then_index(tmp_path, env, monkeypatch):
     ]
 
 
-@pytest.mark.parametrize("has_gen, sub", [
-    (True, ["add"]),
-    (False, ["build"]),
+@pytest.mark.parametrize("has_gen, has_successor, pointer, sub", [
+    (True, False, None, ["add"]),
+    (False, False, None, ["build"]),
+    (False, True, "static-names/main-CURRENT.json", ["add"]),
 ])
-def test_static_names_one_machine(tmp_path, env, monkeypatch, has_gen, sub):
+def test_static_names_one_machine(tmp_path, env, monkeypatch, has_gen, has_successor, pointer, sub):
     """`options.static-names.gen`: `static-names add` in the task, the scans into R2's generation; `build` (+
     `build_args`) when R2 has none. On a local data dir (this one's), which holds only this scan, the scans are read
     from R2 itself, where publish-r2 put this one first."""
     monkeypatch.setattr(S.Ctx, "nproc", property(lambda self: 4))
     asked = []
-    monkeypatch.setattr(S.Ctx, "store_has", lambda self, root, key: asked.append((root, key)) or has_gen)
+    monkeypatch.setattr(S.Ctx, "store_has", lambda self, root, key: asked.append((root, key)) or (has_gen if key.endswith("scans.json") else has_successor))
     env.update(R2_ENDPOINT="https://r2.example.org", R2_BUCKET="r2b", R2_ACCESS_KEY_ID="k", R2_SECRET_ACCESS_KEY="s")
-    c = ctx(tmp_path, env, **hf_profile())
+    profile = hf_profile()
+    if pointer:
+        profile["options"]["static-names"]["current_key"] = pointer
+    c = ctx(tmp_path, env, **profile)
     S.static_names(c, None)
     w = "<tmp>/t/dt-scan/2026-10-16T1200"
-    tail = [] if has_gen else ["-x", "16,8"]
-    assert (asked, c.sh_impl.calls) == ([("r2://r2b", "static-names/2026-10-15hf/scans.json")], [" ".join([
+    tail = ["-x", "16,8"] if sub == ["build"] else []
+    keys = ["static-names/2026-10-15hf/scans.json", *([] if has_gen else ["static-names/2026-10-15hf/successor.json"])]
+    current = f" -u {pointer}" if pointer else ""
+    assert (asked, c.sh_impl.calls) == ([("r2://r2b", key) for key in keys], [" ".join([
         "dt-cloud static-names", *sub, "-g 2026-10-15hf -L listing/{id}/index/{gen}/path-index.parquet -s r2://r2b",
-        f"-o r2://r2b -w {w}/static-names -p 4 -M 8GB", *tail])])
+        f"-o r2://r2b -w {w}/static-names -p 4{current} -M 8GB", *tail])])
 
 
 def test_static_names_profile_checks():

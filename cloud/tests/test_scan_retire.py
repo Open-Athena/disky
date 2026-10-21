@@ -134,6 +134,18 @@ def _deleted(fx, d: str) -> dict[str, list[int]]:
 KEPT = {"age": [2, 10], "extras": [1, 5], "snapshot": [1, 2]}
 
 
+def test_static_coverage_follows_a_compacted_generation(fx, d1):
+    before = _run(fx, "-m")
+    root = fx["store"] / "static-names"
+    (root / STATIC_GEN).rename(root / f"{STATIC_GEN}.c001")
+    (root / STATIC_GEN).mkdir()
+    (root / STATIC_GEN / "successor.json").write_text(json.dumps({"gen": f"{STATIC_GEN}.c001"}) + "\n")
+    after = _run(fx, "-m")
+    assert after["static_gen"] == f"{STATIC_GEN}.c001"
+    assert [(s["id"], s["status"]) for s in after["scans"]] == [(s["id"], s["status"]) for s in before["scans"]]
+    assert after["totals"] == before["totals"]
+
+
 def test_the_keep_window_counts_the_deployments_scans_not_one_copys(fx, d1):
     """A copy missing the newest scans (a lean scan writes no per-scan files to R2) still keeps only the deployment's
     newest `-k`: its own last ones retire like any other."""

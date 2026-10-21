@@ -3312,6 +3312,9 @@ _interval_store.add_command(_interval_merge)
 _interval_store.add_command(_interval_runs)
 main.add_command(_interval_store)
 
+from .age_store import age_store_cmd as _age_store  # noqa: E402
+main.add_command(_age_store)
+
 from .scan_runs import cli as _scan_runs  # noqa: E402
 
 main.add_command(_scan_runs)

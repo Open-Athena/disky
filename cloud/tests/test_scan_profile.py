@@ -184,17 +184,20 @@ META = Path(__file__).parent / "fixtures" / "scan_profiles" / "meta-store.yml"
 
 def test_store():
     """`store` (default the primary) names the site store; a store other than the primary runs only the steps that can
-    serve it (no interval store, warm-up or probe: they read the primary's)."""
+    serve it (an interval store needs its own explicit root; warm-up/probe remain primary-only)."""
     assert (parse(minimal()).store, parse(minimal()).primary) == ("primary", True)
     p = load(META)
     assert (p.store, p.primary, p.enabled()) == ("meta", False, ("list", "index", "static-names", "publish-r2", "index-rows", "index-sync", "index-gc"))
     assert problems(minimal(store="Meta")) == ["store: a `STORES_JSON` key: lowercase letters, digits and '-' (got 'Meta')"]
     assert problems(minimal(store="meta")) == [
-        "store meta: skip interval-store (the site serves another store's scans per scan, and the interval store's "
-        "`interval-store/CURRENT.json` is the primary's)",
+        "options.interval-store.store: required for a secondary store (an independent namespace)",
         "store meta: skip warm-cache (its requests carry no `store=`: it would warm the primary's views)",
         "store meta: skip probe (its requests carry no `store=`: it would probe the primary's views)",
     ]
+    data = minimal(store="meta", skip=["warm-cache", "probe"])
+    data["options"]["interval-store"] = {"store": "r2://idx/history/meta"}
+    own = parse(data)
+    assert (own.store, own.opts("interval-store")) == ("meta", {"store": "r2://idx/history/meta"})
 
 
 def test_secrets_overlay():
