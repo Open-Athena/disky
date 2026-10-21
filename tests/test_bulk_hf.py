@@ -8,6 +8,7 @@ kept — plus BFCL-RL's real 2,140 B residual of old versions. biotasks' tree
 is split over two pages (a synthetic cursor) to exercise `Link` pagination.
 The `lfs-files` and 429 responses are synthetic: the read token gets 403
 from `lfs-files`, and the run never hit a 429.
+Expanded tree URLs request 100 entries after a live check of that supported limit; the response bodies remain trimmed.
 """
 
 from __future__ import annotations
@@ -122,6 +123,27 @@ def test_bucket_uses_maximum_page_size_and_follows_server_pagination():
     ]
 
 
+def test_repo_uses_larger_expanded_pages_and_preserves_dates():
+    recorded = json.loads(FIXTURE.read_text())
+    base = f"/api/datasets/open-athena/{BFCL.split('/')[1]}"
+    info = base + INFO
+    tree = f"{base}/tree/{recorded[info]['body']['sha']}"
+    first = tree + "?recursive=true&expand=true&limit=100"
+    second = tree + "?recursive=true&expand=true&limit=100&cursor=p2"
+    entries = recorded[first]["body"]
+    c, replay = client({
+        first: ok(entries[:1], {"link": f'<{E}{second}>; rel="next"'}),
+        second: ok(entries[1:]),
+    })
+    rows, totals = bulk_hf.list_repo(c, "datasets", "open-athena", BFCL.split("/")[1])
+    assert (rows, totals) == (EXPECTED_ROWS[3:6], EXPECTED_TOTALS[1])
+    assert replay.calls == [
+        (f"{E}{info}", {"Authorization": "Bearer t0k"}),
+        (f"{E}{first}", {"Authorization": "Bearer t0k"}),
+        (f"{E}{second}", {"Authorization": "Bearer t0k"}),
+    ]
+
+
 def test_list_namespace_logs_progress(capsys):
     # One line per finished unit (an interval of 0), the last excepted: its totals line follows from the caller.
     c, _ = client()
@@ -160,7 +182,7 @@ OLD = "ab" * 32
 
 
 def _lfs_files_fixture() -> dict:
-    tree = json.loads(FIXTURE.read_text())[f"/api/{BFCL.replace('datasets/', 'datasets/open-athena/')}/tree/b5c35eae7ca3c1f6c1ea9f8d3e52b2ee45fe67c4?recursive=true&expand=true"]["body"]
+    tree = json.loads(FIXTURE.read_text())[f"/api/{BFCL.replace('datasets/', 'datasets/open-athena/')}/tree/b5c35eae7ca3c1f6c1ea9f8d3e52b2ee45fe67c4?recursive=true&expand=true&limit=100"]["body"]
     [cur] = [e["lfs"]["oid"] for e in tree if "lfs" in e]
     return {f"/api/datasets/open-athena/{BFCL.split('/')[1]}/lfs-files": ok([
         {"fileOid": cur, "oid": "1" * 40, "filename": "artifacts.tar.gz", "pushedAt": "2026-10-11T11:49:28.000Z", "ref": "main", "size": 86937622},
