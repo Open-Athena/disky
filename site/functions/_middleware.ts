@@ -3,7 +3,9 @@
 // each URL shows. Everything else passes through untouched, except an
 // `/assets/` miss (`assetMiss`). Every response, whatever answered it (a Function,
 // a cached body, the gate, a static asset), leaves with the build that served it
-// (`x-disky-build: <sha> <time>`, `_lib/build.ts`).
+// (`x-disky-build: <sha> <time>`, `_lib/build.ts`), and is counted: one usage point
+// per request (route, caller, cache tier, the R2/D1/KV it cost; `_lib/usage.ts`,
+// specs/usage-metrics.md), written after the response.
 import { withBuild } from './_lib/build.js'
 import { hostRedirect } from './_lib/hostRedirect.js'
 import { restrictGate } from './_lib/restrict.js'
@@ -14,6 +16,7 @@ import { captureWrite, readBody } from './_lib/activityHook.js'
 import { sizeAssignments } from './_lib/activitySize.js'
 import { serverKind } from './_lib/activityShape.js'
 import type { Ctx } from './_lib/auth.js'
+import { instrumentBindings, Meter, metered, usagePoint, type UsageEnv, writeUsage } from './_lib/usage.js'
 
 const isHtml = (res: Response): boolean => (res.headers.get('content-type') ?? '').startsWith('text/html')
 
@@ -32,9 +35,24 @@ export const assetMiss = (): Response => new Response('asset not found\n', {
   headers: { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store' },
 })
 
-type MiddlewareCtx = { request: Request; env: OgEnv; next: () => Promise<Response>; waitUntil?: (p: Promise<unknown>) => void; data?: Record<string, unknown> }
+type MiddlewareCtx = { request: Request; env: OgEnv & UsageEnv; next: () => Promise<Response>; waitUntil?: (p: Promise<unknown>) => void; data?: Record<string, unknown> }
 
-export const onRequest = async (ctx: MiddlewareCtx): Promise<Response> => withBuild(await serve(ctx))
+export const onRequest = async (ctx: MiddlewareCtx): Promise<Response> => {
+  const m = new Meter()
+  // What `serve` leaves running past the response (the colo puts, the footer LRU's writes): the point waits for it,
+  // so its reads are counted.
+  const left: Promise<unknown>[] = []
+  const wu = ctx.waitUntil
+  const sctx: MiddlewareCtx = wu ? { ...ctx, waitUntil: p => { left.push(p); wu(p) } } : ctx
+  const res = withBuild(await metered(m, ctx, () => { instrumentBindings(ctx.env); return serve(sctx) }))
+  if (wu && ctx.env.USAGE) {
+    const wallMs = Date.now() - m.t0
+    wu(Promise.allSettled(left)
+      .then(() => writeUsage(ctx.env, usagePoint(m, ctx.request, res, wallMs, ctx.env.PROD_HOST)))
+      .catch(e => console.log(`usage point failed: ${(e as Error).message}`)))
+  }
+  return res
+}
 
 async function serve(ctx: MiddlewareCtx): Promise<Response> {
   // a renamed deployment's old hosts: before the gate, so a signed-out visitor follows a posted link to the new host

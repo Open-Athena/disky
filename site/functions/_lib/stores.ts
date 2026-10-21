@@ -63,6 +63,7 @@
  */
 import type { Env } from './auth.js'
 import { withReq } from './shared.js'
+import { meterOf } from './usage.js'
 
 /** `index_schema.store` of the primary store's rows (a fixed sentinel: one
  * migration lineage serves several deploys, each with its own `STORE`). */
@@ -290,6 +291,9 @@ export function withStore<C extends { request: Request; env: Env }>(ctx: C): C |
   }
   const cfg = Object.hasOwn(stores, key) ? stores[key] : undefined
   if (!cfg) return jsonErr(`unknown store '${key}'`, 404)
+  // The request's usage point names the store it read (`_lib/usage.ts`).
+  const m = meterOf(ctx)
+  if (m) m.store = key
   return as(storeEnv(ctx.env, key, cfg))
 }
 
