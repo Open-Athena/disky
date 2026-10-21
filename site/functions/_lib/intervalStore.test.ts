@@ -77,7 +77,10 @@ function flatten(t: ViewNode): Tiles {
   const rec = (n: ViewNode, p: string) => {
     let k = p
     for (let i = 2; k in out; i++) k = `${p}#${i}`
-    const { c, ...rest } = n
+    // `t` (the newest write's instant) isn't in the Python reference's views: it must name the same day as `d`, then
+    // the rest is compared exactly.
+    const { c, t, ...rest } = n
+    if (t !== undefined) expect([k, Math.floor((t as number) / 86400)]).toEqual([k, rest.d])
     const us = rest.us as [string, number][] | undefined
     out[k] = { ...rest, ...(us ? { us: [...us].sort((a, b) => b[1] - a[1] || (a[0] < b[0] ? -1 : 1)) } : {}) }
     const kids = [...(c ?? [])].sort((a, b) => b.b - a.b || (a.n < b.n ? -1 : a.n > b.n ? 1 : 0) || (canon(a) < canon(b) ? -1 : canon(a) > canon(b) ? 1 : 0))

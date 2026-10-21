@@ -11,6 +11,7 @@ import { pathCopy, pathCrumbs, pathLead, pathText } from './pathCrumbs'
 import { useStagedIndex } from './StageAction'
 import { cellAction } from './objects'
 import { canonId, UserChip, ghHandle, shortName } from './UserChip'
+import { newestLabel, shareOfTotal } from './viewNums'
 import { dateColor, dateGradientCss, epochDaysToDate, epochDaysToMonth, inkFor, slotColor, userColor } from './colors'
 import type { UserIndexEntry } from './colors'
 import { OwnerControls } from './OwnerControls'
@@ -238,6 +239,8 @@ export function Treemap({ root, mode, shade = 'none', userIdx, dateRange, readRa
 }) {
   usePerfCommit('treemap')
   const time = listingTime(scheme)
+  // ` · 12.34% of total`, or nothing for the whole total (`shareOfTotal`).
+  const share = (n: TreeNode) => { const s = shareOfTotal(n.b, root.b); return s ? ` · ${s}` : '' }
   const { fmtBytes, fmtBytesLike } = useUnits()
   const [liP, setLiP] = useUrlState('li', stringParam('s'))
   const liMetrics = useMemo(() => new Set([...(liP ?? 's')].filter((m): m is LiMetric => m === 's' || m === 'p' || m === 'c')), [liP])
@@ -288,14 +291,17 @@ export function Treemap({ root, mode, shade = 'none', userIdx, dateRange, readRa
     const o = tiny.reduce((s, it) => s + it.o, 0)
     const us: Record<string, number> = {}
     let md = -1
+    let mt = -1
     let ma = -1
     for (const it of tiny) {
       for (const [u, ub] of it.us ?? []) us[u] = (us[u] ?? 0) + ub
       if (it.d != null && it.d > md) md = it.d
+      if (it.t != null && it.t > mt) mt = it.t
       if (it.a != null && it.a > ma) ma = it.a
     }
     const folded: TreeNode = { n: `(+${tiny.length})`, b, o }
     if (md >= 0) folded.d = md
+    if (mt >= 0) folded.t = mt
     if (ma >= 0) folded.a = ma
     const topUs = Object.entries(us).sort((a, c) => c[1] - a[1]).slice(0, 5)
     if (topUs.length) folded.us = topUs as [string, number][]
@@ -699,8 +705,8 @@ export function Treemap({ root, mode, shade = 'none', userIdx, dateRange, readRa
         {/* Under a union root: the root's store and that store's scan. */}
         <RootSourceLine node={path[1]} />
         <div className="nums">
-          {fmtBytes(n.b)} · {fmtN(n.o)} objects · {((100 * n.b) / root.b).toFixed(2)}% of total
-          {n.d != null && <> · last {time.label} {epochDaysToDate(n.d)}</>}
+          {fmtBytes(n.b)} · {fmtN(n.o)} objects{share(n)}
+          {newestLabel(n) && <> · last {time.label} {newestLabel(n)}</>}
           {n.a != null
             ? <> · last read {epochDaysToDate(n.a)}</>
             : readRange && !n.n.startsWith('(') && (readLogged(path[1]?.n)
@@ -790,8 +796,8 @@ export function Treemap({ root, mode, shade = 'none', userIdx, dateRange, readRa
         <div className="tip-viewcard">
           <div className="vc-scope">{p.length > 1 ? pathText(schemeOf(p), p.slice(1).map(x => x.n)) : n.n}</div>
           <div className="nums">
-            {fmtBytes(n.b)} · {fmtN(n.o)} objects · {root.b ? ((100 * n.b) / root.b).toFixed(2) : 0}% of total
-            {n.d != null && <> · last {time.label} {epochDaysToDate(n.d)}</>}
+            {fmtBytes(n.b)} · {fmtN(n.o)} objects{share(n)}
+            {newestLabel(n) && <> · last {time.label} {newestLabel(n)}</>}
           </div>
           <div className="vc-hint">Hover a cell for its details · click one to open it.</div>
         </div>
