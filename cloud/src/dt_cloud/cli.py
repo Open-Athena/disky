@@ -3290,6 +3290,8 @@ _static_names.add_command(_static_roots)
 _static_names.add_command(_static_anchors)
 _static_names.add_command(_static_local_build)
 _static_names.add_command(_static_local_add)
+from .static_compact import compact_cmd as _static_compact  # noqa: E402
+_static_names.add_command(_static_compact)
 main.add_command(_static_names)
 
 from .interval_store import cli as _interval_store  # noqa: E402

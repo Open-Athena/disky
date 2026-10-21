@@ -130,7 +130,18 @@ class Runner(ar.Runner):
         return {r["key"] for r in runs if self.exists(f"{self.root}/{r['key']}/drill/meta.json")}
 
     def merge_job(self, scan: str) -> tuple[str, dict]:
-        return self.job("merge", scan, 1, "static_merge", ["carry", "-g", self.cfg.gen, "-L", level_arg(self.cfg.compact_level)], r2=self.merge_r2())
+        return self.job("merge", scan, 1, "static_merge", ["carry", "-g", self.cfg.gen, "-L", level_arg(self.cfg.policy.carry_level), *self.read_args()], r2=self.merge_r2())
+
+    def compact_jobs(self, scan: str) -> list[tuple[str, dict]]:
+        r2 = self.merge_r2()
+        out = [self.job("compact", scan, 1, "static_merge", ["compact", "-g", self.cfg.gen, "-C", str(self.cfg.policy), *(["-K"] if self.compact_now else []), *self.read_args(),
+                                                           *(["-r"] if r2 else []), *duckdb_args(self.cfg.machine_for("compact"))], r2=r2)]
+        if not r2:
+            out.append(self.job("compact-r2", scan, 1, "static_merge", ["compact-r2", "-g", self.cfg.gen], r2=True, mount=False))
+        return out
+
+    def with_gen(self, gen: str) -> Profile:
+        return replace(self.cfg, gen=gen)
 
     def one(self, d: str) -> None:
         run = f"{self.root}/deltas/{d}"
@@ -374,19 +385,23 @@ def gcs_runner(cfg: Profile, *, dry_run: bool = False, verify_terms: str | None 
 @command("add")
 @option("-c", "--catch-up", is_flag=True, help="Append every earlier published scan still pending first, in scan-id order")
 @option("-g", "--gen", help="Base generation (default: the profile's, $STATIC_NAMES_GEN)")
+@option("-K", "--compact-now", is_flag=True, help="After the merge stage, compact into a new generation whatever the policy says (when the generation has runs)")
 @option("-M", "--no-merge", is_flag=True, help="Skip the merge stage (the due carries wait for a later run, or `runs merge`)")
 @option("-n", "--dry-run", is_flag=True, help="Report each stage's state and what would run; submit and write nothing")
 @option("-t", "--verify-terms", help="Also run `runs verify` with this terms file (a gs:// URL)")
 @option("-w", "--merge-wait", default=0, type=float, help="Seconds to wait on the merge job (default 0: submit it and go; it publishes on GCS when done)")
 @argument("scan_id")
-def add_cmd(catch_up: bool, gen: str | None, no_merge: bool, dry_run: bool, verify_terms: str | None, merge_wait: float, scan_id: str) -> None:
+def add_cmd(catch_up: bool, gen: str | None, compact_now: bool, no_merge: bool, dry_run: bool, verify_terms: str | None, merge_wait: float,
+            scan_id: str) -> None:
     """Append SCAN_ID to the static name index: prepare → append → shards ∥ catalog → [drill] ∥ [anchors] → publish → R2 → prune, each stage
     skipped when its output exists; then the merge stage (the due carries, non-fatal). Exit 3 when SCAN_ID is not published
-    yet, or an earlier published scan is pending (without -c)."""
+    yet, or an earlier published scan is pending (without -c). A generation compacted since the profile named it is
+    followed to its successor; when the compaction policy fires (or `-K`), the compaction stage follows the merge stage."""
     cfg = ready(profile(), gen)
     runner = gcs_runner(cfg, dry_run=dry_run, verify_terms=verify_terms, merge=not no_merge, merge_wait=merge_wait)
+    runner.compact_now = compact_now
     done = exit_on(f"static-names runs add {scan_id}", lambda: runner.run(scan_id, catch_up=catch_up), lambda m: err(m))
-    print(json.dumps({"gen": cfg.gen, "scan": scan_id, "appended": done, "dry_run": dry_run}))
+    print(json.dumps({"gen": runner.cfg.gen, "scan": scan_id, "appended": done, "dry_run": dry_run, "compaction": runner.compaction}))
 
 
 @command("merge")

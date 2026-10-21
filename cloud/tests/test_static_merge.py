@@ -217,7 +217,7 @@ def _stack(store, key: str) -> list[tuple[str, int]]:
 
 
 def _summary(doc: dict) -> list[dict]:
-    return [{k: v for k, v in m.items() if k not in ("tiers_s", "s")} for m in doc["merged"]]
+    return [{k: v for k, v in m.items() if k not in ("tiers_s", "reads", "s")} for m in doc["merged"]]
 
 
 def _rows(store, keys: list[str]) -> int:
