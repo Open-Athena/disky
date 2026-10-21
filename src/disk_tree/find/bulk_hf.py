@@ -85,6 +85,8 @@ REPO_KINDS = ("models", "datasets", "spaces")
 KINDS = ("buckets", *REPO_KINDS)
 HISTORY_DIR = "@history"
 UNLISTED = "@unlisted"
+# Hub OpenAPI: bucket tree pages default to 1000, with a maximum of 5000. Repos have separate limits.
+BUCKET_PAGE_SIZE = 5000
 
 
 # --- URIs --------------------------------------------------------------------
@@ -282,7 +284,7 @@ class UnitTotals:
 def list_bucket(client: HfClient, namespace: str, name: str, private: Optional[bool], size: Optional[int]) -> "tuple[list, UnitTotals]":
     rows = []
     cls = _visibility(private)
-    for e in client.paginate(f"/api/buckets/{namespace}/{quote(name)}/tree", [("recursive", "true")]):
+    for e in client.paginate(f"/api/buckets/{namespace}/{quote(name)}/tree", [("recursive", "true"), ("limit", str(BUCKET_PAGE_SIZE))]):
         if e["type"] != "file":
             continue
         rows.append((f"buckets/{name}/{e['path']}", int(e["size"]), e.get("uploadedAt") or e.get("mtime"), cls, None))
