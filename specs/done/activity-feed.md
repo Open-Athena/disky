@@ -105,7 +105,7 @@ None in this version: posts name people in plain text, as the staged threads do,
 
 ## Always-on session logging
 
-- The switch's date becomes optional: "no end date" (`until_ms` = a sentinel far future, shown as "on, no end date"). Turning it on with a date keeps today's behaviour.
+- The switch's "no end date" is gcs's (`f20a4c20`, adopted on `cloud`): `PUT {enabled: true, indefinite: true}` stores `until_ms = FOREVER_MS` (2100-01-01; any stored value at or past it reads as indefinite), shown as "on, no end date". Turning it on with a date keeps today's behaviour. (`cloud` first had its own year-10000 `NO_END`; dropped for gcs's, which was already live.)
 - `GET /api/session-log` answers `on` (the switch is on for everyone signed in) and `retainDays` to anyone, signed in or not. While it's on (any end date), `/privacy` carries a "usage log" paragraph: what is recorded, that it never records other fields' text or keys, who sees it (the admins), and for how long. `/privacy` always says that changes people make are recorded and the admins told.
 - The session-log `POST` also feeds the actor's burst: per batch, the counts of the client kinds whose `record` is on, the paths viewed, the `sid`.
 
