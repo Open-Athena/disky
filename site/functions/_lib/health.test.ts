@@ -61,6 +61,18 @@ INSERT INTO scan_runs (run_id, scan, kind, parent, status, started_ts, finished_
   }
 
   describe('GET /api/health', () => {
+    it('reads a secondary history namespace and its scoped scan rows', async () => {
+      const { db } = await sqliteD1()
+      const objects = Object.fromEntries(Object.entries(OBJECTS).map(([k, v]) => [k.replace(/^interval-store\//, 'history/meta/interval-store/'), v]))
+      const response = await route({ request: new Request('http://localhost/api/health?store=meta&fresh=1'), env: {
+        DB: db, INDEX_R2: r2(objects), INTERVAL_STORE_GEN: 'primary-pin', PATH_STORE: 'intervals',
+        STORES_JSON: JSON.stringify({ meta: { vars: { PATH_STORE: 'intervals', INTERVAL_STORE_GEN: 'iv1', INTERVAL_STORE_PREFIX: 'history/meta/interval-store' } } }),
+      } as never })
+      const doc = await response.json() as HealthDoc
+      expect([response.status, doc.stores.map(s => [s.kind, s.gen, s.base, s.runs.map(r => r.r2)])]).toEqual([
+        200, [['interval', 'iv1', ['01', '02', '03'].map(D), [true, true]]],
+      ])
+    })
     it('reads both stores and D1: stacks, coverage gaps, freshness inputs', async () => {
       const { db, raw } = await sqliteD1()
       raw.exec(SEED)

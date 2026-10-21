@@ -151,6 +151,18 @@ describe('static-names/CURRENT.json', () => {
   }
   const reads = (log: string[]) => log.filter(k => k === CURRENT).length
 
+  it('an explicit secondary pointer is independent of the primary pointer and cleared on another store', async () => {
+    vi.spyOn(Date, 'now').mockImplementation(() => Date.UTC(2032, 0, 1))
+    const log: string[] = []
+    const bucket = { get: async (key: string) => {
+      log.push(key)
+      return { json: async () => ({ gen: key === 'static-names/test-primary-CURRENT.json' ? 'primary' : 'meta.c001' }) }
+    } } as unknown as R2Bucket
+    const env = { FILTER_STATIC: '1', INDEX_R2: bucket, STATIC_CURRENT_KEY: 'static-names/test-primary-CURRENT.json', STORES_JSON: JSON.stringify({ meta: { vars: { STATIC_CURRENT_KEY: 'static-names/test-meta-CURRENT.json' } }, bare: {} }) }
+    expect([(await seen(env, '&store=meta')).STATIC_GEN, (await seen(env)).STATIC_GEN, (await seen(env, '&store=bare')).STATIC_GEN]).toEqual(['meta.c001', 'primary', undefined])
+    expect(log).toEqual(['static-names/test-meta-CURRENT.json', 'static-names/test-primary-CURRENT.json'])
+  })
+
   it('unpinned: the pointer\'s generation, held `IV_STATE_TTL`, a move followed after it; a pin wins; a failed read keeps the last; none = unset', async () => {
     let t = Date.now() + 10 * IV_STATE_TTL
     vi.spyOn(Date, 'now').mockImplementation(() => t)

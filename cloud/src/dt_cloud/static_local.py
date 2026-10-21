@@ -670,10 +670,11 @@ def _check_gen(gen: str) -> None:
 @option("-R", "--read-rows", "R", default=R_ROWS, type=IntRange(min=1), help="The drill's and the anchors' heavy bound: more root rows under a directory")
 @option("-s", "--scans", "scans_root", required=True, help="Where the scans are: a dir or URL, the root of -L's keys")
 @option("-t", "--through", help="Last scan id (inclusive; default: the newest)")
+@option("-u", "--current-key", help="Publish this lineage's independent current-pointer key after the generation is whole")
 @option("-V", "--max-rows", default=MAX_ROWS, type=IntRange(min=1), help="The catalog's membership bound V (range rows)")
 @option("-w", "--work", help="Local work dir (default: a temporary one, removed after)")
 @option("-x", "--hex-runs", required=True, help="The hex-run rule the generation is built with: `MIN,TAIL` (e.g. `16,8`) or `off`")
-def build_cmd(no_anchors, chunk_rows, floor, gen, k, K, layouts, mem, shard_rows, store_root, threads, ranges_file, R, scans_root, through, max_rows, work,
+def build_cmd(no_anchors, chunk_rows, floor, gen, k, K, layouts, mem, shard_rows, store_root, threads, ranges_file, R, scans_root, through, current_key, max_rows, work,
               hex_runs) -> None:
     """Build a base generation of the static name index on this machine, every stage in-process: the staged (Batch)
     path's stages over a local work dir, then the generation copied into the store (data files first, `meta.json`s last).
@@ -695,7 +696,15 @@ def build_cmd(no_anchors, chunk_rows, floor, gen, k, K, layouts, mem, shard_rows
                             R=R, K=K, floor=floor, chunk_rows=chunk_rows, threads=threads, mem=mem, with_anchors=not no_anchors,
                             ranges=json.loads(Path(ranges_file).read_text()) if ranges_file else None)
         summary["files"] = len(upload_new(store, gen_dir, prefix, {}))
+    publish_current(store, gen, current_key)
     print(json.dumps(summary, indent=1))
+
+
+def publish_current(store: Store, gen: str, key: str | None) -> None:
+    """An explicitly configured lineage's pointer; a second lineage never overwrites the first one's pointer."""
+    if key:
+        newest = resolve_gen(store, PREFIX, gen)
+        store.write_bytes(key, (json.dumps({"gen": newest}) + "\n").encode())
 
 
 @command("add")
@@ -713,8 +722,9 @@ def build_cmd(no_anchors, chunk_rows, floor, gen, k, K, layouts, mem, shard_rows
 @option("-p", "--threads", default=4, type=IntRange(min=1), help="DuckDB threads")
 @option("-s", "--scans", "scans_root", required=True, help="Where the scans are: a dir or URL, the root of -L's keys")
 @option("-t", "--through", help="Last scan id to append (inclusive; default: the newest)")
+@option("-u", "--current-key", help="Publish this lineage's independent current-pointer key after append/compaction succeeds")
 @option("-w", "--work", help="Local work dir (default: a temporary one, removed after); a URL store's generation is mirrored into it")
-def add_cmd(chunk_rows, compact, read_from, gen, grace_s, compact_now, layouts, mem, prune_dry_run, no_merge, store_root, threads, scans_root, through, work) -> None:
+def add_cmd(chunk_rows, compact, read_from, gen, grace_s, compact_now, layouts, mem, prune_dry_run, no_merge, store_root, threads, scans_root, through, current_key, work) -> None:
     """Append every scan after the generation's newest (base + runs), oldest first, each as a run published by its
     manifest; then the binary counter's due carries. The generation's files are never rewritten; new ones go to the store
     data first, `meta.json`s next, manifests last. Then, the publish done, the runs a carry folded are deleted from the
@@ -755,5 +765,6 @@ def add_cmd(chunk_rows, compact, read_from, gen, grace_s, compact_now, layouts, 
         why = None if no_merge else forced(gen_dir) if compact_now else due_in(gen_dir, compact)
         if why is not None:
             compacted = compact_store(store, compactor(chunk_rows), gen, gen_dir, w, policy=compact, why=why, threads=threads, mem=mem, reads=reads)
+    publish_current(store, gen, current_key)
     print(json.dumps({"gen": gen, "after": have[-1], "added": added, "merge": merged, "files": len(uploaded),
                       "prune": {k: v for k, v in prune.items() if k != "keys"}, "compact": compacted}, indent=1))

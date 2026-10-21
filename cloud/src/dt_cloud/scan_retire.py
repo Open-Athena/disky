@@ -356,6 +356,9 @@ def retire(scans_root: str, layouts: list[str], *, iv_root: str, static_gen: str
         if iv_gen is None:
             raise SystemExit(f"{iv.root}/{PREFIX}: no current generation ({how}): name one with -g")
     iv_gen = ic.chain(iv, iv_gen)[-1]
+    from .append_runner import chain
+
+    static_gen = chain(st, STATIC_PREFIX, static_gen)[-1]
     in_iv = set(listed(iv, f"{PREFIX}/{iv_gen}"))
     in_static = set(listed(st, f"{STATIC_PREFIX}/{static_gen}"))
     gens = lineage(iv, iv_gen)

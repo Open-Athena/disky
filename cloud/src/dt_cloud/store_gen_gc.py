@@ -56,6 +56,8 @@ def plan(store: Store, kind: str, keep: list[str], *, lineage_only: bool, grace_
         # a compaction's pointer (`static-names/CURRENT.json`) and its successors are live too
         cur = ar.current(store, prefix)
         protected = {*keep, *(ar.chain(store, prefix, cur) if cur else [])}
+        # Several independent lineages can share one bucket. `add -g` follows each root's forwarding records.
+        protected.update(ar.chain(store, prefix, g)[-1] for g in keep)
     else:
         prefix = ist.PREFIX
         cur, how = ic.resolve(store)
