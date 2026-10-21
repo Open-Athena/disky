@@ -38,8 +38,9 @@ machines:
   small: e2-standard-2
   medium: e2-standard-4
   # retire verifies each scan it retires against the served interval store, downloaded to the boot disk first (+ the
-  # runs and the scan's sorts): the default disk filled on 2026-10-21 and every step after retire failed
-  post: {type: e2-highmem-4, disk: 400}
+  # runs and the scan's sorts): the default disk filled on 2026-10-21 and every step after retire failed; and its DuckDB
+  # is tuned for 80 GB (a 32 GB machine was killed mid-verify the same day)
+  post: {type: e2-highmem-16, disk: 400}
 steps: [access-ingest, healthcheck, retire, dups]
 # over-time groups and the generation-file sweep (`index-gc -F`) aren't in the one-VM job yet: each is its own change
 skip: [bucket-check, over-time, index-gc]
