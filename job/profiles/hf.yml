@@ -21,7 +21,7 @@ layout:
   snapshots: hf
   # the raw listing (shards + the lister's `_SUCCESS.json`: the billing reconciliation), expired after 30 days
   listing: raw/{scan}/
-# The whole org is one source: a rate-limited Hub lister (1000 requests / 5 min; 429s at 8 in flight), one process.
+# The whole org is one source: a Hub lister following the token's rate-limit headers, one process.
 sources:
   - {uri: "hf://open-athena", threads: 3}
 # Small machines: the listing waits on the Hub, and the import, sorts, static names and interval store over one org
@@ -71,7 +71,7 @@ options:
     mem: 8GB
     args: [-T, "{work}/duckdb-tmp"]
   static-names:
-    gen: 2026-10-18hfb   # site/wrangler.toml STATIC_GEN
+    gen: 2026-10-18hfb   # this lineage's root; add follows compaction successors
     current_key: static-names/primary-CURRENT.json
     mem: 8GB
     build_args: [-x, "16,8"]
@@ -86,7 +86,7 @@ options:
   # (first `-x` by hand 2026-10-18, Batch `hf-retire-x-20261018-191046`; the dry plan checked on scan 2026-10-18T2307).
   retire: {keep: 2, layer2: true, execute: true, store: "r2://oa-hf-usage-index", static_store: "r2://oa-hf-usage-index", copies: ["r2://oa-hf-usage-index"]}
   # The interval-store generations the current one was compacted or backfilled from, past 3 days (`store-gc -l`);
-  # executing since 2026-10-19. Static-names generations stay by hand (`store-gc -t static-names -k <live gens>`).
+  # executing since 2026-10-19. Static cleanup protects both configured lineage roots and their newest successors.
   store-gc: {store: "r2://oa-hf-usage-index", execute: true, static_gens: [2026-10-18hfb, 2026-10-18hfmetab]}
   # The digest's live thread state and the earlier scans' snapshots are on R2 (publish-r2 lands this scan's before
   # `post`): the data store's root would find no state and post a second OP.
