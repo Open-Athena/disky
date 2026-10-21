@@ -1,6 +1,6 @@
 import { useQuery } from '@tanstack/react-query'
 import { Link } from 'react-router-dom'
-import { isNoEnd, lastDay } from '../functions/_lib/sessionLogShape'
+import { isForever, lastDay } from '../functions/_lib/sessionLogShape'
 import { DEFAULT_STORE } from './stores'
 
 interface LogConfig { on?: boolean; until?: number | null; retainDays?: number }
@@ -23,7 +23,7 @@ export function UsageLogNotice({ log }: { log: LogConfig }) {
   if (!log.on || typeof log.until !== 'number') return null
   return (
     <p>
-      <b>A usage log</b>, {isNoEnd(log.until) ? 'on now' : `on now, through ${lastDay(log.until)} (UTC)`}: what signed-in people
+      <b>A usage log</b>, {isForever(log.until) ? 'on now' : `on now, through ${lastDay(log.until)} (UTC)`}: what signed-in people
       do in the site (pages opened, URL changes, clicks on controls, the path filter, picker choices, failed requests and
       errors) and when. It never records what you type in other fields, and never keys or tokens. Only the site's
       admins see it, to see how the site is used and to reproduce reported problems; it is kept for {log.retainDays ?? 30} days.

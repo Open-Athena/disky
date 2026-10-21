@@ -1,13 +1,13 @@
 import { autoUpdate, flip, FloatingPortal, offset, shift, useFloating } from '@floating-ui/react'
-import { useQuery } from '@tanstack/react-query'
+import { keepPreviousData, useQuery } from '@tanstack/react-query'
 import { memo, useCallback, useMemo, useRef, useState } from 'react'
 import { Link, useParams, useSearchParams } from 'react-router-dom'
-import type { SessionRow, StoredEvent } from '../functions/_lib/sessionLogShape'
+import type { SessionPage, SessionRow, StoredEvent } from '../functions/_lib/sessionLogShape'
 import { useRegistry } from './identities'
 import { NO_AUTOFILL } from './noAutofill'
 import { useUserEmails } from './owners'
 import { relAgo } from './prefixes'
-import { fmtClock, fmtDuration, fmtOffset, LANES, type Line, ticks, timeline, uaLabel, viewerOf } from './sessionsModel'
+import { fmtClock, fmtDuration, fmtOffset, LANES, type Line, pagerLabel, sessionsQuery, ticks, timeline, uaLabel, viewerOf } from './sessionsModel'
 import { SiteNav } from './SiteNav'
 import { Tooltip } from './Tooltip'
 import { UserChip } from './UserChip'
@@ -45,12 +45,27 @@ function SessionList() {
   const email = sp.get('u') ?? ''
   const since = sp.get('since') ?? ''
   const errors = sp.get('err') === '1'
-  const set = (k: string, v: string | null) => setSp(p => { const n = new URLSearchParams(p); if (v) n.set(k, v); else n.delete(k); return n }, { replace: true })
-  const qs = new URLSearchParams({ ...(email ? { email } : {}), ...(since ? { since } : {}), ...(errors ? { errors: '1' } : {}) }).toString()
+  // The page: a cursor in the URL (`after=` / `before=`, as the API takes them); none = the first page.
+  const after = sp.get('after'), before = sp.get('before')
+  /** A filter change returns to the first page. */
+  const set = (k: string, v: string | null) => setSp(p => {
+    const n = new URLSearchParams(p)
+    if (v) n.set(k, v); else n.delete(k)
+    n.delete('after'); n.delete('before')
+    return n
+  }, { replace: true })
+  const go = (k: 'after' | 'before', c: string) => setSp(p => {
+    const n = new URLSearchParams(p)
+    n.delete('after'); n.delete('before'); n.set(k, c)
+    return n
+  })
+  const qs = sessionsQuery({ email, since, errors, after, before })
   const q = useQuery({
     queryKey: ['session-log', 'sessions', qs],
-    queryFn: () => getJson<{ sessions: SessionRow[] }>(`/api/session-log/sessions${qs ? `?${qs}` : ''}`),
+    queryFn: () => getJson<SessionPage>(`/api/session-log/sessions${qs ? `?${qs}` : ''}`),
+    placeholderData: keepPreviousData,
   })
+  const pager = q.data && <Pager page={q.data} onGo={go} />
   return (
     <>
       <h1>Sessions</h1>
@@ -62,6 +77,7 @@ function SessionList() {
         <label><input type="checkbox" checked={errors} onChange={e => set('err', e.target.checked ? '1' : null)} /> with errors</label>
       </div>
       {q.error && <p className="err">{q.error.message}</p>}
+      {pager}
       <div className="table-scroll">
         <table className="sessions">
           <thead>
@@ -85,7 +101,20 @@ function SessionList() {
           </tbody>
         </table>
       </div>
+      {q.data && q.data.sessions.length > 10 && pager}
     </>
+  )
+}
+
+/** "51–100 of 312" with prev / next: the page's cursors (`prev` / `next`), disabled at either end. */
+function Pager({ page, onGo }: { page: SessionPage; onGo: (k: 'after' | 'before', c: string) => void }) {
+  const { prev, next } = page
+  return (
+    <nav className="sessions-pager" aria-label="Pages">
+      <button type="button" disabled={!prev} onClick={() => prev && onGo('before', prev)}>← newer</button>
+      <span>{pagerLabel(page)}</span>
+      <button type="button" disabled={!next} onClick={() => next && onGo('after', next)}>older →</button>
+    </nav>
   )
 }
 
