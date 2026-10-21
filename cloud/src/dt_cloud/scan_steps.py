@@ -1148,6 +1148,15 @@ def _retire_check(p: ScanProfile) -> list[str]:
     return problems
 
 
+@contextmanager
+def cleanup(path: Path) -> Iterator[None]:
+    """`path` removed on the way out, whether the block finished or raised."""
+    try:
+        yield
+    finally:
+        shutil.rmtree(path, ignore_errors=True)
+
+
 @step("retire", core=False, soft=True, options={"keep": int, "execute": bool, "static_gen": str, "static_store": str, "store": str,
                                                 "layer2": bool, "layer1": bool, "copies": list, "backup": str, "markers_only": bool},
       requires=_retire_check)
@@ -1185,7 +1194,9 @@ def retire(ctx: Ctx, arg: str | None) -> None:
     # A local data store is the task's scratch (only this scan's files): the scans' files and D1 rows are the archive's.
     first = archive if ctx.profile.data_bucket is None and archive else ctx.data_uri
     roots = [r for r in dict.fromkeys([first, *(archive if c == "r2" else c for c in o.get("copies", []))]) if r]
-    with ctx.phase("retire", note=None if o.get("execute") else "dry run"):
+    # The work dir holds the served store the verify downloads: removed whatever happens, so a failed retire never
+    # leaves the steps after it (soft steps on the same disk) without space
+    with ctx.phase("retire", note=None if o.get("execute") else "dry run"), cleanup(ctx.work / "retire"):
         for i, root in enumerate(roots):
             # a copy after the D1 pass: its rows are that pass's (`-D`: no "-R leaves D1 rows" warning in a dry run)
             d1 = [] if i == 0 and ctx.has(*CF) else ["-R", *(["-D"] if ctx.has(*CF) else [])]
