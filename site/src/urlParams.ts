@@ -235,10 +235,10 @@ export const URL_PARAMS: Record<string, UrlParamDoc> = {
     description: 'Where to return after signing in. Only same-origin paths are accepted; anything else returns to `/`.',
     pages: ['/signin'],
   },
-  nh: {
-    label: 'Hidden note kinds',
-    description: 'Comma-separated note kinds (for example `cleanup ask`) the size-over-time chart hides; the chart\'s options toggle each kind its notes use. When absent, every kind shows.',
-    examples: ['cleanup ask'],
+  nn: {
+    label: 'Notes hidden',
+    description: 'When present (as a bare `?nn`), the size-over-time chart hides its notes (the markers pinned to dates); the chart\'s "notes" toggle sets it, and is offered only where the chart has notes. When absent, notes show.',
+    examples: [''],
   },
   o: {
     label: 'Owner',
@@ -429,8 +429,8 @@ export const URL_PARAMS: Record<string, UrlParamDoc> = {
   },
   xr: {
     label: 'Time range',
-    description: 'The size-over-time chart\'s x-range: `1w` or `1m`. When absent, the chart shows all scans.',
-    examples: ['1w', '1m'],
+    description: 'The size-over-time chart\'s displayed x-range: `1w` or `1m` (the last week / 30 days of scans), or `<from>..<to>` (two scan ids: the stretch brushed on the strip under the chart, or fitted to the diff window). It only frames the chart; the diff window is `w`. When absent, the chart shows all scans.',
+    examples: ['1w', '1m', '2026-09-01..2026-10-01'],
   },
   ym: {
     label: 'Y values',

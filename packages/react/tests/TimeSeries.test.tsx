@@ -356,6 +356,15 @@ describe('<TimeSeries>', () => {
     expect(bandOf(container)!.edges).toEqual([[56, '2 3'], [220, '2 3']])
   })
 
+  it('a window reaching past the plotted span (a zoomed chart) is clipped to it; one wholly outside draws no band', () => {
+    const band = (w: [number, number]) => bandOf(withSize(() => render(<TimeSeries series={brushSeries} getX={p => p.t} getY={p => p.y} window={w} />)).container)
+    expect([band([-5, 1]), band([1, 9]), band([5, 9])]).toEqual([
+      { x: 56, width: 164, fill: 'var(--dt-ts-window, rgba(255,255,255,0.07))', edges: [[56, '2 3'], [220, '2 3']] },
+      { x: 220, width: 164, fill: 'var(--dt-ts-window, rgba(255,255,255,0.07))', edges: [[220, '2 3'], [384, '2 3']] },
+      null,
+    ])
+  })
+
   // Mirror the component's own pixel math so expected path `d`s are exact
   // (same float→string as production), not eyeballed.
   function geom(w: number, h: number, xMin: number, xMax: number, yMin: number, yMax: number) {
