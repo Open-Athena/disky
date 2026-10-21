@@ -20,10 +20,12 @@
  "machine": "n2-highmem-32",
  "ssd_gb": 1500,
  "machines": {
-  "drill": "n2-highmem-48"
+  "drill": "n2-highmem-48",
+  "compact": "n2-highmem-48"
  },
  "ssd_gbs": {
-  "drill": 3000
+  "drill": 3000,
+  "compact": 3000
  },
  "spot": true,
  "append_tasks": 16,
