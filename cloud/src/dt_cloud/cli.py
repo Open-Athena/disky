@@ -1650,12 +1650,17 @@ def plan_sweep() -> None:
     """Plan-first deletion on CoreWeave: build manifests from a plan and execute them (boto3/CAIOS)."""
 
 
+from .sweep_analysis import analyze_preserved_cmd
+plan_sweep.add_command(analyze_preserved_cmd)
+
+
 @plan_sweep.command("manifest")
 @option("-d", "--date", required=True, help="Scan id (SNAP_ID) whose layer-2 parquet to pin")
+@option("-I", "--interval-store", envvar="SWEEP_INTERVAL_STORE", help="Review source for retired scan files (default $R2_ARCHIVE, else the data store)")
 @option("-l", "--l2", "l2_path", help="Layer-2 parquet path (default: /gcs/<data>/cw-l2/<date>/<bucket>.parquet)")
 @option("-o", "--out", required=True, help="Output dir for manifest/ + plan-summary.json")
 @argument("plan_path")
-def plan_sweep_manifest(date: str, l2_path: str | None, out: str, plan_path: str) -> None:
+def plan_sweep_manifest(date: str, interval_store: str | None, l2_path: str | None, out: str, plan_path: str) -> None:
     """Expand a curated PLAN (json) into an object-level deletion manifest.
 
     Deletes nothing; reads the pinned layer-2 parquet and writes
@@ -1669,7 +1674,18 @@ def plan_sweep_manifest(date: str, l2_path: str | None, out: str, plan_path: str
     plan = load_plan(plan_path)
 
     def l2_for(scan: str) -> str:
-        return f"/gcs/{data_bucket()}/cw-l2/{scan}/{plan.bucket}.parquet"
+        from disk_tree import blobfs
+        from .sweep_source import review_source
+
+        root = f"/gcs/{data_bucket()}"
+        path = f"{root}/cw-l2/{scan}/{plan.bucket}.parquet"
+        if blobfs.exists(path):
+            return path
+        err(f"manifest: {scan} layer-2 retired; reconstructing the selected objects from the interval store")
+        prefixes = plan.sweep if scan == date else [p for p in plan.sweep if plan.as_of.get(p) == scan]
+        exact = plan.objects if scan == date else [p for p in plan.objects if plan.as_of.get(p) == scan]
+        return review_source(interval_store or os.environ.get("R2_ARCHIVE") or root, scan, plan.bucket, prefixes, exact,
+                             Path(out) / "review" / f"{scan}.parquet")
 
     # Items staged as of another scan are checked against that scan's layer-2.
     summary = build_manifest(l2_path or l2_for(date), plan, out, date=date, l2_for=l2_for)
@@ -1678,27 +1694,27 @@ def plan_sweep_manifest(date: str, l2_path: str | None, out: str, plan_path: str
 
 
 @plan_sweep.command("execute")
-@option("-G", "--no-versioning-guard", is_flag=True, help="Skip the versioning preflight: a real delete is then PERMANENT (no delete marker to undo)")
-@option("-r", "--for-real", is_flag=True, help="Actually delete (writes recoverable delete markers); default is a dry run")
+@option("-r", "--for-real", is_flag=True, help="Actually delete (may be permanent); default is a dry run")
 @argument("run_dir")
-def plan_sweep_execute(no_versioning_guard: bool, for_real: bool, run_dir: str) -> None:
+def plan_sweep_execute(for_real: bool, run_dir: str) -> None:
     """Execute the manifest under RUN_DIR against CoreWeave S3 (boto3).
 
     Default is a dry run (touches nothing). `--for-real` deletes reviewed keys
-    whose (size, mtime) still match; refused unless the bucket has versioning
-    Status=Enabled — `-G` disables that guard (deletes become permanent; the
-    summary records `versioning_guard: false`)."""
+    whose (size, mtime) still match. Bucket versioning is not required;
+    deletions may be permanent."""
     import json
 
     from .sweep import execute_plan
 
-    s = execute_plan(run_dir, for_real=for_real, require_versioning=not no_versioning_guard)
+    s = execute_plan(run_dir, for_real=for_real)
     err(
         f"{'REAL' if for_real else 'DRY'}: {s['deleted_objects']} objs / {s['deleted_bytes']} bytes; "
         f"gone {s['skipped_gone']} overwritten {s['skipped_overwritten']} "
         f"drift {s['drift_new']} failed {s['delete_failed']}"
     )
     print(json.dumps(s))
+    if s["delete_failed"]:
+        raise SystemExit(1)
 
 
 @plan_sweep.command("undo")
