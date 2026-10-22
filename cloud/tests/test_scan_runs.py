@@ -947,3 +947,18 @@ def test_reconcile_cli_store_and_threshold(tmp_path, monkeypatch):
     profile.write_text(json.dumps({"store": "primary"}))
     r = CliRunner().invoke(cli, base)
     assert (r.exit_code, str(r.exception)) == (1, "scan-run reconcile: the profile names no project (its runs' Batch jobs can't be looked up)")
+def test_one_verified_repair_can_link_multiple_scans_without_rewriting_failures():
+    s, job = recovery_fixture()
+    record(s, PROFILE, '2026-10-09', 'second', 100, start=True)
+    record(s, PROFILE, '2026-10-09', 'second', 200, phase='names', note='failed (exit 1)')
+    record(s, PROFILE, '2026-10-09', 'second', 210, exit_code=0)
+    original = s.query("SELECT * FROM scan_run_phases ORDER BY run_id, seq")
+    for now in (400, 500):
+        for parent in ('original', 'second'):
+            rec = recovery_record(s, PROFILE, parent, 'names', job, now, 'Shared catch-up verified both scans', shared=True)
+            write_all(s, [rec], now)
+    assert rows(s, "SELECT run_id, parent, scan, kind, status, job_name, started_ts, finished_ts, cost_usd FROM scan_runs WHERE kind = 'phase-recovery' ORDER BY run_id") == [
+        ('recovery/original/names', 'original', '2026-10-08', 'phase-recovery', 'succeeded', 'retry-names', 300, 360, None),
+        ('recovery/second/names', 'second', '2026-10-09', 'phase-recovery', 'succeeded', 'retry-names', 300, 360, None),
+    ]
+    assert s.query("SELECT * FROM scan_run_phases WHERE run_id IN ('original', 'second') ORDER BY run_id, seq") == original
