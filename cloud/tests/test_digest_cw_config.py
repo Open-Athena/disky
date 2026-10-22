@@ -42,7 +42,8 @@ CW = DG.DigestConfig(
         "rhoarnet-us-east-08a": DG.Bucket("rhoarnet", Q08A, "08a"),
         "marin-us-east-08a": DG.Bucket("08a", Q08A, "08a"),
         "marin-us-west-04a": DG.Bucket("04a", Q100),
-        "marinfold-exp368-rno2a": DG.Bucket("rno2a", None),
+        "marinfold-exp368-rno2a": DG.Bucket("marinfold", None),
+        "marin-rno2a": DG.Bucket("rno2a", None),
     },
     prices={},
 )
