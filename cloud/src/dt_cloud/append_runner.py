@@ -758,7 +758,7 @@ class StatusMirror:
 class Carry:
     """What a store plugs into the deferred carries: `build(dirs, run, outp, *, drilled, tmp, log)` writes the merged run
     `run` of the input run dirs `dirs` (oldest first) into `outp`, its `meta.json` (naming `run["scans"]`) included, and
-    returns `{rows, bytes, s}`; `missing(store, runs)` the reader files listed runs lack; `drilled(store, runs)` the runs
+    returns `{rows, bytes, s}` (`rec`: the run's record, its phases prefixed with the carry's, for the build's steps); `missing(store, runs)` the reader files listed runs lack; `drilled(store, runs)` the runs
     carrying a drill (merged only with each other, `plan_carries`); `refuse(store, before, after)` why a revision listing
     `after` in place of `before` must not be published, or None."""
     build: Callable[..., dict]
@@ -831,7 +831,7 @@ def merge_pending(store: RunStore, carry: Carry, mount: Path, *, tmp: Path, owne
     a raise; best-effort throughout). `rec`: the run's record on `/scans` (`maint_runs`, kind `merge`): started here
     (its `scan` the newest manifest's scan), a phase per merged run (`carry L<level>`), `failed` on a raise; the caller
     finishes it (`finish_merge`, after its prune)."""
-    from .maint_runs import NULL, gib, phase
+    from .maint_runs import NULL, Prefixed, gib, phase
 
     rec = rec or NULL
     owner = owner or f"{os.environ.get('BATCH_JOB_UID') or socket.gethostname()}:{os.getpid()}"
@@ -874,7 +874,8 @@ def merge_pending(store: RunStore, carry: Carry, mount: Path, *, tmp: Path, owne
             else:
                 outp = tmp / "merge" / out["key"]
                 root, reads = read_runs(store, [r["key"] for r in ins], mount, tmp / "read", source=source, log=log)
-                doc = carry.build([root / r["key"] for r in ins], out, outp, drilled=all(r["key"] in drilled for r in ins), tmp=tmp, log=log)
+                doc = carry.build([root / r["key"] for r in ins], out, outp, drilled=all(r["key"] in drilled for r in ins), tmp=tmp, log=log,
+                                  rec=Prefixed(rec, f"{name} · "))
                 doc["reads"] = reads
                 # a merged run is written once: an earlier attempt may have left only keys this one writes (overwritten here)
                 ours = {f"{out['key']}/{f.relative_to(outp).as_posix()}" for f in outp.rglob("*") if f.is_file()}

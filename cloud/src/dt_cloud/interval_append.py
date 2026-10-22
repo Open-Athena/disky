@@ -365,7 +365,7 @@ def carry(gen: str, k: int, *, threads: int = 16, mem: str = "100GB", rg_rows: i
           generation: bool = False) -> Carry:
     """The interval store's `Carry`: merged runs by `build_merged_run`, every listed run holding `run_files(sliced)`, no
     drills."""
-    def build(dirs, run, outp, *, drilled, tmp, log):
+    def build(dirs, run, outp, *, drilled, tmp, log, rec=None):
         return build_merged_run(dirs, run, outp, gen=gen, k=k, tmp=tmp, threads=threads, mem=mem, rg_rows=rg_rows, log=log, sliced=sliced,
                                 generation=generation)
     return Carry(build=build, missing=lambda store, runs: missing_files(runs, store.exists, sliced))
