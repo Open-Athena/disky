@@ -1591,7 +1591,10 @@ class Runner:
                 self.log(f"merge: level {policy.level} is due: compact into a new base generation (carries stop below it)")
             elif compact:
                 self.log(f"merge: compaction due under {policy} ({why}): compact into a new base generation")
-            if merges:
+            forced = self.compact_now and bool(m["runs"]) and not compact
+            if merges and forced:
+                self.log(f"merge: compaction forced (-K): it folds every run, so the due carries are skipped ({len(merges)} merge{'s' * (len(merges) != 1)})")
+            elif merges:
                 desc = "; ".join(f"{len(ins)} runs → {out['key']} (level {out['level']})" for ins, out in merges)
                 name, spec = self.merge_job(m["date"], long=merge_is_long(merges))
                 # its status record's holder (`StatusMirror`)
@@ -1610,7 +1613,7 @@ class Runner:
                 scan, rev = parse_manifest(keys[-1].rsplit("/", 1)[-1])
                 if rev and (stem := keys[-1].rsplit("/", 1)[-1].removesuffix(".json")) not in self.copied:
                     self.r2(scan, stem)
-            if self.compact_now and m["runs"] and not compact:
+            if forced:
                 self.compaction = "forced (-K)"
             if self.compaction is not None and m["runs"]:
                 self.compact_stage(m["date"])
