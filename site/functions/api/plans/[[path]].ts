@@ -21,7 +21,7 @@
 import type { D1Database } from "@cloudflare/workers-types"
 import { type Ctx, type Env as AuthEnv, json, requireAdmin, requireStager, requireViewer } from "../../_lib/auth.js"
 import { audit, canonicalPrefix, mergeBatches, NO_SHAPE, openPlanId, planDetail, type PlanRow, type PrefixShape, prefixShape, runDetail, stageItems } from "../../_lib/plans.js"
-import { pathScans, storeReady } from "../../_lib/index.js"
+import { pathScans, storeReady, withPathStore } from "../../_lib/index.js"
 import { MAX_PREFIXES, prefixesAt } from "../../_lib/prefixes.js"
 import { notifyPlan, refreshThread, type NotifyEnv } from "../../_lib/stagedSlack.js"
 
@@ -117,7 +117,10 @@ async function editItems(
 
 const background = (ctx: { waitUntil?: Bg }, p: Promise<unknown>): void => { if (ctx.waitUntil) ctx.waitUntil(p); else void p }
 
-export const onRequest = async (ctx: Ctx & { env: Env; waitUntil?: Bg }): Promise<Response> => {
+export const onRequest = async (ctx0: Ctx & { env: Env; waitUntil?: Bg }): Promise<Response> => {
+  // The interval store for the dates it holds (`withPathStore`), as the map's own reads: never per-scan rows an
+  // unpinned deployment's job no longer writes (`index-sync -R`).
+  const ctx = await withPathStore(ctx0)
   if (!ctx.env.DB) return json({ error: "plans store not configured (no D1 binding)" }, 503)
   const db = ctx.env.DB
   const shape = prefixShape(ctx.env)

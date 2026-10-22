@@ -5,13 +5,14 @@
 import type { Ctx } from './auth.js'
 import { fmtBytes, type ServerEvent } from './activityShape.js'
 import { stagedStats } from './stagedSlack.js'
+import { withPathStore } from './index.js'
 
 /** Assignments' sizes at the latest scan (`detail.bytes`, and on the line), best-effort: unsized when the index
  *  can't be read here. */
 export async function sizeAssignments(ctx: Ctx, events: ServerEvent[]): Promise<void> {
   const assigned = events.filter(e => e.kind === 'assign' && typeof e.detail?.pattern === 'string')
   if (!assigned.length) return
-  const at = await stagedStats(ctx.env, assigned.map(e => e.detail!.pattern as string)).catch(() => null)
+  const at = await stagedStats((await withPathStore(ctx)).env, assigned.map(e => e.detail!.pattern as string)).catch(() => null)
   if (!at) return
   for (const e of assigned) {
     const b = at.stats[e.detail!.pattern as string]?.b
