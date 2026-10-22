@@ -501,7 +501,7 @@ ROWS_PID=""
 if index_sync_creds; then
   sr phase-begin "index-sync rows"
   (
-    if dt-cloud index-sync -r -d "/gcs/$DATA/$INDEX_DIR" -g "$GEN" -k "$INDEX_DIR" "$SNAP_ID"; then
+    if dt-cloud index-sync -R -r -d "/gcs/$DATA/$INDEX_DIR" -g "$GEN" -k "$INDEX_DIR" "$SNAP_ID"; then
       sr phase-end "index-sync rows"
     else
       echo "WARN: index-sync -r failed (the pointer step below re-syncs in full)" >&2
@@ -530,8 +530,8 @@ sr phase-begin index-sync
 { set +x; } 2>/dev/null
 if index_sync_creds; then
   SNAPS=$(dirname "/gcs/$DATA/$SNAP_PATH")
-  dt-cloud index-sync -p -M "$SNAPS" -d "/gcs/$DATA/$INDEX_DIR" -g "$GEN" -k "$INDEX_DIR" "$SNAP_ID" \
-    || dt-cloud index-sync -M "$SNAPS" -d "/gcs/$DATA/$INDEX_DIR" -g "$GEN" -k "$INDEX_DIR" "$SNAP_ID" \
+  dt-cloud index-sync -R -p -M "$SNAPS" -d "/gcs/$DATA/$INDEX_DIR" -g "$GEN" -k "$INDEX_DIR" "$SNAP_ID" \
+    || dt-cloud index-sync -R -M "$SNAPS" -d "/gcs/$DATA/$INDEX_DIR" -g "$GEN" -k "$INDEX_DIR" "$SNAP_ID" \
     || echo "WARN: index-sync failed (the site keeps serving the previous generation)" >&2
 else
   echo "WARN: no CLOUDFLARE_API_TOKEN/ACCOUNT_ID — skipping index-sync (scan stays unlisted)" >&2
