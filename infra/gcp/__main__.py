@@ -117,6 +117,17 @@ static_secrets = Secrets(
     adopt=adopt,
 )
 
+# Cloudflare Account Analytics: Read (OA account), for `dt-cloud cf-usage` (specs/usage-metrics.md): the daily usage
+# step's billed units and Analytics Engine attribution.
+analytics_secret = Secrets(
+    "gcs-cf-analytics-secret",
+    project=project,
+    secrets={"gcs-cf-analytics-token": {"app": "gcs-usage", "role": "cf-analytics-read"}},
+    accessor=job.member,
+    accessor_email=job.email_literal,
+    adopt=adopt,
+)
+
 snapshot_secret = Secrets(
     "gcs-snapshot-secret",
     project=project,
