@@ -49,28 +49,33 @@ _cap_threads_per_worker()
 from dt_cloud.d1_schema import replay, schema_file  # noqa: E402 (after the root is set)
 
 
-#: Tests per xdist group sharing one build of a module-scoped fixture (`pytest_collection_modifyitems`).
+#: Tests per xdist group sharing one build of a module-scoped fixture (`pytest_collection_modifyitems`); `slow` ones
+#: (minutes each) in pairs, apart from the rest.
 XDIST_CHUNK = 16
+XDIST_CHUNK_SLOW = 2
 
 
 @pytest.hookimpl(tryfirst=True)  # before xdist's own, which reads the groups into the node ids
 def pytest_collection_modifyitems(config, items):
     """Under `--dist loadgroup`, the tests that share a module-scoped fixture (and its params) go to one worker in
     groups of `XDIST_CHUNK`: each worker would otherwise build the fixture for itself (`test_static_drill.py`'s `world`
-    takes a minute per config, and 16 workers built it 32 times); in chunks, it is built a few times, in parallel."""
+    takes a minute per config, and 16 workers built it 32 times); in chunks, it is built a few times, in parallel. A
+    `slow` test takes minutes: those go in pairs, so no chunk holds a long run of them."""
     if not config.pluginmanager.hasplugin("xdist"):
         return
     seen: dict[tuple, int] = {}
     for item in items:
         defs = getattr(item, "_fixtureinfo", None)
         shared = sorted(n for n, fd in (defs.name2fixturedefs.items() if defs else ()) if fd and fd[-1].scope == "module")
-        if not shared or item.get_closest_marker("slow"):  # a slow test outweighs a fixture build: on its own
+        if not shared:
             continue
+        slow = item.get_closest_marker("slow") is not None
         params = getattr(item, "callspec", None)
-        key = (item.path.name, *(f"{n}={params.params[n]!r}" for n in shared if params and n in params.params))
+        key = (item.path.name, *(f"{n}={params.params[n]!r}" for n in shared if params and n in params.params), *(["slow"] if slow else []))
         i = seen[key] = seen.get(key, -1) + 1
         # no `]` in the name: xdist takes a node id's `@<group>` only after its last `]`
-        item.add_marker(pytest.mark.xdist_group(":".join(key).replace("[", "(").replace("]", ")") + f"#{i // XDIST_CHUNK}"))
+        name = ":".join(key).replace("[", "(").replace("]", ")")
+        item.add_marker(pytest.mark.xdist_group(f"{name}#{i // (XDIST_CHUNK_SLOW if slow else XDIST_CHUNK)}"))
 
 
 @pytest.fixture
