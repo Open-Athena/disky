@@ -656,3 +656,35 @@ def test_a_dag_the_database_refuses_never_leaves_the_run_unfinished(job, tmp_pat
     assert [l for l in job.take() if l.startswith("scan-run record failed")] == [
         "scan-run record failed (the scan continues): OperationalError: table scan_run_dags has no column named engine",
     ]
+
+
+def test_start_reconciles_earlier_lost_runs_and_never_fails_on_it(job):
+    """`start` marks failed the store's earlier `running` runs whose Batch job ended (here: deleted), not its own; a
+    failing reconcile is reported and the run still starts."""
+    assert job("start", "-j", "job-old", "-R", "us-east1", "2026-10-13T0600", at=T0 - 86400) == 0
+    lookups: list[tuple[str, str, str]] = []
+    job.mp.setattr(scan_runs, "batch_lookup", lambda project, name, region: lookups.append((project, name, region)))
+    job.mp.setenv("JOB_ID", "u2")
+    job.take()
+    assert job("start", "-j", "job-new", "-R", "us-east1", SCAN, at=T0) == 0
+    assert lookups == [("proj-1", "job-old", "us-east1")]
+    assert job.rows("SELECT run_id, status, error, finished_ts, updated_ts FROM scan_runs ORDER BY run_id") == [
+        ("u1", "failed", "lost: Batch job not found (deleted)", T0 - 86400, T0),
+        ("u2", "running", None, None, T0),
+    ]
+    assert job.take() == [
+        f"scan-run: {SCAN} u2 running",
+        "scan-run reconcile: u1 (2026-10-13T0600) → failed: lost: Batch job not found (deleted)",
+    ]
+
+    def boom(*a, **kw):
+        raise RuntimeError("D1 down")
+
+    job.mp.setattr(scan_runs, "reconcile", boom)
+    job.mp.setenv("JOB_ID", "u3")
+    assert job("start", SCAN, at=T0 + 10) == 0
+    assert job.rows("SELECT run_id, status FROM scan_runs WHERE run_id = 'u3'") == [("u3", "running")]
+    assert job.take() == [
+        f"scan-run: {SCAN} u3 running",
+        "scan-run reconcile failed (the run continues): RuntimeError: D1 down",
+    ]

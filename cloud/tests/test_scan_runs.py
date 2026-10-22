@@ -780,3 +780,170 @@ def test_d1_sink_reads_the_database_id_when_made(monkeypatch):
     with pytest.raises(SystemExit) as e:
         scan_runs.D1Sink()
     assert str(e.value) == "scan-run: no D1 database: set $D1_DB_ID to this deployment's D1 (or pass --sqlite / -n)"
+
+
+# ── reconcile: `running` rows whose Batch job ended without recording it ──────
+
+
+def batch_job_doc(state: str, *events: tuple[str, str]) -> dict:
+    return {"status": {"state": state, "statusEvents": [{"eventTime": t, "description": d} for t, d in events]}}
+
+
+RUN_EV = ("2026-10-18T07:02:00Z", "Job state is set from SCHEDULED to RUNNING for job projects/p/locations/r1/jobs/j1.")
+FAILED_EV = ("2026-10-18T11:02:00.123456789Z",
+             "Job state is set from RUNNING to FAILED for job projects/p/locations/r1/jobs/j1.\nJob failed due to task "
+             "failure. Specifically, task with index 0 failed due to the following task event: \"Task state is updated "
+             "from RUNNING to FAILED on zones/r1-a/instances/1 due to maximum runtime exceeded.\"")
+
+
+def reconcile_fixture() -> tuple[SqliteSink, int]:
+    """Rows in every state `reconcile` must tell apart, all but `fresh` last written 2 h before `now`."""
+    s = sink()
+    t0 = ts("2026-10-18T07:01:00")
+    now = t0 + 4 * 86400
+    old = now - 7200
+
+    def run(rid: str, status: str = "running", job: str | None = None, store: str = "primary", at: int = old) -> None:
+        s.execute([scan_runs.run_sql(Run(rid, "2026-10-18T0701", "scan", status, store=store, started_ts=t0, job_name=job,
+                                         region="r1" if job else None), at)])
+
+    run("failed", job="j-failed")
+    s.execute([scan_runs.phase_sql("failed", Phase("listing", 0, t0, t0 + 600)),
+               scan_runs.phase_sql("failed", Phase("index", 1, t0 + 600, None, "running"))])
+    run("succeeded", job="j-succeeded")
+    run("gone", job="j-gone")
+    run("live", job="j-live")
+    run("broken", job="j-broken")
+    run("fresh", job="j-fresh", at=now - 60)
+    run("nojob")
+    run("other-store", job="j-failed", store="meta")
+    run("done", status="succeeded", job="j-failed")
+    return s, now
+
+
+def fake_batch(calls: list[tuple[str, str]]):
+    jobs = {
+        "j-failed": batch_job_doc("FAILED", RUN_EV, FAILED_EV),
+        "j-succeeded": batch_job_doc("SUCCEEDED", RUN_EV, ("2026-10-18T09:00:00Z", "Job state is set from RUNNING to SUCCEEDED for job j2.")),
+        "j-gone": None,
+        "j-live": batch_job_doc("RUNNING", RUN_EV),
+    }
+
+    def lookup(name: str, region: str):
+        calls.append((name, region))
+        if name == "j-broken":
+            raise RuntimeError("403 Forbidden")
+        return jobs[name]
+
+    return lookup
+
+
+FAILED_ERROR = ("lost: Batch job FAILED; last event: Job state is set from RUNNING to FAILED for job "
+                "projects/p/locations/r1/jobs/j1. Job failed due to task failure. Specifically, task with index 0 "
+                "failed due to the following task event: \"Task state is upd…")  # `clip_error`: 240 characters
+
+
+def test_reconcile_marks_runs_whose_batch_job_ended_failed():
+    s, now = reconcile_fixture()
+    old = now - 7200
+    calls: list[tuple[str, str]] = []
+    said: list[str] = []
+    lost = scan_runs.reconcile(s, PROFILE, now, fake_batch(calls), log=said.append)
+    assert calls == [("j-failed", "r1"), ("j-succeeded", "r1"), ("j-gone", "r1"), ("j-live", "r1"), ("j-broken", "r1")]
+    assert lost == [
+        scan_runs.Lost("failed", "2026-10-18T0701", FAILED_ERROR, ts("2026-10-18T11:02:00"), "index"),
+        scan_runs.Lost("succeeded", "2026-10-18T0701",
+                       "lost: Batch job SUCCEEDED, but the run never recorded its end; last event: Job state is set from "
+                       "RUNNING to SUCCEEDED for job j2.", ts("2026-10-18T09:00:00")),
+        scan_runs.Lost("gone", "2026-10-18T0701", "lost: Batch job not found (deleted)", old),
+    ]
+    assert rows(s, "SELECT run_id, store, status, failed_phase, error, finished_ts, updated_ts FROM scan_runs ORDER BY run_id") == [
+        ("broken", "primary", "running", None, None, None, old),
+        ("done", "primary", "succeeded", None, None, None, old),
+        ("failed", "primary", "failed", "index", FAILED_ERROR, ts("2026-10-18T11:02:00"), now),
+        ("fresh", "primary", "running", None, None, None, now - 60),
+        ("gone", "primary", "failed", None, "lost: Batch job not found (deleted)", old, now),
+        ("live", "primary", "running", None, None, None, old),
+        ("nojob", "primary", "running", None, None, None, old),
+        ("other-store", "meta", "running", None, None, None, old),
+        ("succeeded", "primary", "failed", None,
+         "lost: Batch job SUCCEEDED, but the run never recorded its end; last event: Job state is set from RUNNING to "
+         "SUCCEEDED for job j2.", ts("2026-10-18T09:00:00"), now),
+    ]
+    t0 = ts("2026-10-18T07:01:00")
+    assert rows(s, "SELECT run_id, phase, started_ts, finished_ts, status, note FROM scan_run_phases ORDER BY seq") == [
+        ("failed", "listing", t0, t0 + 600, "done", None),
+        ("failed", "index", t0 + 600, ts("2026-10-18T11:02:00"), "failed", "failed (lost)"),
+    ]
+    assert said == [
+        f"scan-run reconcile: failed (2026-10-18T0701) → failed: {FAILED_ERROR}",
+        "scan-run reconcile: succeeded (2026-10-18T0701) → failed: lost: Batch job SUCCEEDED, but the run never "
+        "recorded its end; last event: Job state is set from RUNNING to SUCCEEDED for job j2.",
+        "scan-run reconcile: gone (2026-10-18T0701) → failed: lost: Batch job not found (deleted)",
+        "scan-run reconcile: broken (2026-10-18T0701): Batch lookup failed: RuntimeError: 403 Forbidden",
+        "scan-run reconcile: nojob (2026-10-18T0701): no Batch job recorded; left running",
+    ]
+    # idempotent: nothing left to reconcile but the rows it leaves alone
+    calls.clear()
+    assert scan_runs.reconcile(s, PROFILE, now + 60, fake_batch(calls), log=said.append) == []
+    assert calls == [("j-live", "r1"), ("j-broken", "r1")]
+
+
+def test_reconcile_threshold_skip_and_dry_run(capsys):
+    s, now = reconcile_fixture()
+    before = rows(s, "SELECT * FROM scan_runs ORDER BY run_id")
+    calls: list[tuple[str, str]] = []
+    assert scan_runs.reconcile(s, PROFILE, now, fake_batch(calls), after_s=3 * 3600, log=lambda m: None) == []
+    assert calls == []
+    lost = scan_runs.reconcile(s, PROFILE, now, fake_batch(calls), out=PrintSink(), skip="failed", log=lambda m: None)
+    assert [x.run_id for x in lost] == ["succeeded", "gone"]
+    assert rows(s, "SELECT * FROM scan_runs ORDER BY run_id") == before
+    end = ts("2026-10-18T09:00:00")
+    assert capsys.readouterr().out.splitlines() == [
+        f"UPDATE scan_run_phases SET status = 'failed', finished_ts = {end}, note = 'failed (lost)' "
+        "WHERE run_id = 'succeeded' AND status = 'running' AND finished_ts IS NULL;",
+        "UPDATE scan_runs SET status = 'failed', error = 'lost: Batch job SUCCEEDED, but the run never recorded its end; "
+        f"last event: Job state is set from RUNNING to SUCCEEDED for job j2.', finished_ts = COALESCE(finished_ts, {end}), "
+        f"failed_phase = COALESCE(failed_phase, NULL), updated_ts = {now} WHERE run_id = 'succeeded' AND status = 'running';",
+        f"UPDATE scan_run_phases SET status = 'failed', finished_ts = {now - 7200}, note = 'failed (lost)' "
+        "WHERE run_id = 'gone' AND status = 'running' AND finished_ts IS NULL;",
+        "UPDATE scan_runs SET status = 'failed', error = 'lost: Batch job not found (deleted)', "
+        f"finished_ts = COALESCE(finished_ts, {now - 7200}), failed_phase = COALESCE(failed_phase, NULL), "
+        f"updated_ts = {now} WHERE run_id = 'gone' AND status = 'running';",
+    ]
+
+
+@pytest.mark.parametrize("state", ["QUEUED", "SCHEDULED", "RUNNING", "CANCELLATION_IN_PROGRESS"])
+def test_lost_reason_leaves_a_live_job(state):
+    assert scan_runs.lost_reason(batch_job_doc(state, RUN_EV)) is None
+
+
+def test_lost_reason_cancelled_and_deleting():
+    assert scan_runs.lost_reason(batch_job_doc("CANCELLED", RUN_EV, ("2026-10-18T08:00:00Z", "Job state is set from RUNNING to CANCELLED."))) == (
+        "lost: Batch job CANCELLED; last event: Job state is set from RUNNING to CANCELLED.", ts("2026-10-18T08:00:00"))
+    assert scan_runs.lost_reason(batch_job_doc("DELETION_IN_PROGRESS", RUN_EV)) == (
+        f"lost: Batch job DELETION_IN_PROGRESS; last event: {RUN_EV[1]}", None)
+
+
+def test_reconcile_cli_store_and_threshold(tmp_path, monkeypatch):
+    profile = tmp_path / "scan-runs.json"
+    profile.write_text(json.dumps({"store": "primary", "project": "proj"}))
+    db = tmp_path / "runs.sqlite"
+    s = SqliteSink(db, ddl=DDL)
+    s.execute([scan_runs.run_sql(Run("m1", "2026-10-18T0701", "scan", "running", store="meta", job_name="j", region="r1"), 1000),
+               scan_runs.run_sql(Run("p1", "2026-10-18T0701", "scan", "running", job_name="j", region="r1"), 1000)])
+    lookups: list[tuple[str, str, str]] = []
+    monkeypatch.setattr(scan_runs, "batch_lookup", lambda project, name, region: lookups.append((project, name, region)))
+    monkeypatch.setattr(scan_runs, "_now", lambda: 1000 + 1800)
+    base = ["reconcile", "-c", str(profile), "-s", str(db)]
+    for args in (["-K", "meta"], ["-K", "meta", "-a", "20m"]):
+        r = CliRunner().invoke(cli, [*base, *args])
+        assert (r.exit_code, r.exception, r.stdout) == (0, None, "")
+    assert lookups == [("proj", "j", "r1")]
+    assert rows(s, "SELECT run_id, status, finished_ts, updated_ts FROM scan_runs ORDER BY run_id") == [
+        ("m1", "failed", 1000, 2800),
+        ("p1", "running", None, 1000),
+    ]
+    profile.write_text(json.dumps({"store": "primary"}))
+    r = CliRunner().invoke(cli, base)
+    assert (r.exit_code, str(r.exception)) == (1, "scan-run reconcile: the profile names no project (its runs' Batch jobs can't be looked up)")
