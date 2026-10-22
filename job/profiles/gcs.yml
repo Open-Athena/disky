@@ -100,7 +100,10 @@ options:
     barrier: true
   static-names: {profile: /app/job/static-names.json}
   interval-store: {profile: /app/job/interval-store.json, merge_wait: 1800, timeout: 60m}
-  index-sync: {retain: 30}
+  # no row groups in D1 (`index-sync -R`): every primary scan the site lists is the interval store's, so the per-scan
+  # sorts are read only as a fallback, from their cold `.groups.parquet` (specs/d1-footer-writes.md: ~247K rows a scan,
+  # each a few D1 row writes, then as many deletes when `retire` drops them two scans later)
+  index-sync: {retain: 30, d1_rows: false}
   digest: {template: gcs, config: /app/job/digest.yml, platforms: [slack, discord]}
   # the hourly poller (`gcs-access-ingest-hourly`, job/access-submit.sh) ingests the usage logs as they land; the scan
   # leaves `access-ingest` out and `index` reads `access/agg` as it stands (`meta.access.through`)
