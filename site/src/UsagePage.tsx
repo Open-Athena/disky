@@ -128,6 +128,8 @@ function DailyBars({ snaps }: { snaps: UsageSnapshot[] }) {
   const days = snaps.map(s => ({ date: s.date, costs: productCosts(s) }))
   const totals = days.map(d => Object.values(d.costs).reduce((a, b) => a + b, 0))
   const max = Math.max(...totals, 1e-9)
+  // a date under every `step`th bar (the newest always), at most ~10 across
+  const step = Math.ceil(days.length / 10)
   return (
     <section>
       <h2>List $ per day, by product</h2>
@@ -151,7 +153,7 @@ function DailyBars({ snaps }: { snaps: UsageSnapshot[] }) {
                   <span key={p.key} className="seg" style={{ background: p.color, flexGrow: d.costs[p.key] }} />
                 ))}
               </span>
-              <span className="day dim">{d.date.slice(5)}</span>
+              {(days.length - 1 - i) % step === 0 && <span className="day dim">{d.date.slice(5)}</span>}
             </span>
           </Tooltip>
         ))}
