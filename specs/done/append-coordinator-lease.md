@@ -1,6 +1,6 @@
 # One append coordinator per lineage
 
-Status: proposed (2026-10-22). Asked for by cw (request (b), 2026-10-22).
+Status: built on `cloud` (2026-10-22): `append_runner.coordinator_lease`, `Runner.coordination`. Asked for by cw (request (b), 2026-10-22).
 
 ## Problem
 
@@ -18,7 +18,7 @@ A **coordinator lease** held for all of `Runner.run`, in the base `Runner`, so b
 
 - **Key:** `<scratch>/<prefix>/coordinator.lease.json`, where `<prefix>` is the store's prefix (`static-names`, `interval-store`), with no generation in the key. This is the "lineage": a coordinator that compacts or follows `CURRENT.json` into a new generation keeps the lease it already holds. A lease keyed per generation would let a second coordinator start on the new generation while the first is still finishing the old one.
 - **Record:** `{owner, holder, at, ttl_s}`, the same shape as the merge lease. `owner` is a fresh uuid per `run`, and `holder` is `$DT_JOB_NAME` (else the host and pid), so a refusal says who holds it.
-- **Take:** use the same conditional create as `GcsRunStore.lease` (`if_generation_match=0`; replace a stale record only by its generation). Factor that into a `lease(key, …)` taking the key, so the merge lease and the coordinator lease share one function. `LocalRunStore` does the same on a local file.
+- **Take:** the same conditional create as `GcsRunStore.lease` (`if_generation_match=0`; a stale record deleted only at the generation read), over a small `LeaseFile` seam: `GcsLeaseFile` (generation preconditions) and `LocalLeaseFile` (tests). `CoordinatorLease` does take / renew / check / release over it. The merge lease keeps its own code for now; moving it onto `LeaseFile` is a later cleanup.
 - **Renew:** a heartbeat thread rewrites `at` every `HEARTBEAT_S` (300 s), conditional on the generation it last wrote (Codex's `beat`). `ttl_s` is short, `COORD_TTL_S` = 3 × `HEARTBEAT_S`, because the holder renews it. A crashed coordinator then blocks the next one for at most ~15 min, rather than for a Batch task's lifetime as the merge lease does.
 - **Lost lease:** if a renewal finds a different owner or a changed generation, the coordinator stops at the next `stage` boundary: `Runner.stage` checks before and after each stage, as Codex's did. The Batch job it already submitted keeps running, and it is safe because every stage is idempotent and post-checked. The coordinator raises `LeaseLost`, which exits 1: a real failure, since another coordinator replaced a live one.
 - **Release:** in a `finally`, conditional on owner, as `release` does now.
@@ -26,7 +26,8 @@ A **coordinator lease** held for all of `Runner.run`, in the base `Runner`, so b
   - **Scan step** (`scan_steps.py` `static_names`, and the interval-store step): treat exit 4 as "another coordinator is appending; it will reach this scan". Log it as a warning and don't fail the scan. That other coordinator is either a `-c` catch-up, which appends every published scan, or the previous scan's run, which the next scan's catch-up covers.
   - **Hand runs:** print the holder and exit 4. There is no wait flag: a coordinator waiting minutes for a lease is the wrong shape. Re-run after it finishes.
 - **Merge lease:** unchanged and still taken inside. The merge job runs on its own VM after a submit-and-go (`merge_wait` 0), so it can outlive the coordinator that submitted it. Its own lease is what serializes it against the next coordinator's merge stage.
-- **Dry runs** (`-n`): take no lease. If one is held, report who holds it.
+- **Dry runs** (`-n`): take no lease (`coordination` is None), and don't report one.
+- **Wiring:** `static_runner.gcs_runner` and `interval_append.store_runner` set `coordination` to `gcs_coordinator_lease(<scratch>, <prefix>)`. Tests construct `Runner`s without it.
 
 ## Out of scope
 
@@ -35,13 +36,13 @@ A **coordinator lease** held for all of `Runner.run`, in the base `Runner`, so b
 
 ## Tests
 
-`LocalRunStore` with an injected clock (`test_append_runner.py`):
+`LocalLeaseFile` with an injected clock (`test_append_runner.py`), plus `test_static_runner.py` for the stage boundary:
 - **Exclusion:** a second `run` while the first holds the lease raises `Busy`, and the CLI exits 4.
 - **Staleness:** a record older than `ttl_s` is taken over, and a fresh one is not.
 - **Lost lease:** overwrite the record mid-run (a fake `stage` that swaps the owner). The next stage boundary raises `LeaseLost`, and nothing after it runs.
 - **Release:** after a normal run, and after a raising stage, the lease file is gone. A release by a non-owner leaves it in place.
-- **Scan step:** a `ctx.sh` returning 4 for `runs add` logs the warning and doesn't fail the step. Assert the exact log line.
-- **Across generations:** a `follow()` to a new `CURRENT.json` generation keeps the same lease key.
+- **Scan step:** a `runs add` exiting 4 ends the phase ok (`test_static_names_busy_is_not_a_failure`). The staged interval-store step ends its phase 0 with a note.
+- **Across generations:** holds by construction, because the key has no generation in it.
 
 ## cw
 

@@ -225,6 +225,32 @@ def test_one_scan_runs_every_stage_in_order():
     assert f.calls == _chain("2026-10-09T0001", ["2026-10-09T0001"])
 
 
+def test_the_run_holds_the_coordinator_lease_and_a_lost_one_stops_it_at_the_next_stage():
+    """`coordination` is entered for the whole run; once its check raises, no further stage starts (the one running
+    finishes: its Batch job is idempotent and post-checked)."""
+    from contextlib import contextmanager
+
+    d = "2026-10-09T0001"
+    f = Fake({}, [d])
+    events = []
+
+    def check():
+        if len(f.calls) >= 2:
+            raise sd.ar.LeaseLost("lost the coordinator lease: it was deleted")
+
+    @contextmanager
+    def lease():
+        events.append("take")
+        try:
+            yield check
+        finally:
+            events.append("release")
+
+    with pytest.raises(sd.ar.LeaseLost):
+        f.daily(coordination=lease).run(d)
+    assert (f.calls, events) == (_chain(d, [d])[:2], ["take", "release"])
+
+
 def test_catch_up_appends_each_pending_scan_in_order():
     """Two scans of one day are two runs: each its own chain, the second's manifest listing both."""
     f = Fake({}, ["2026-10-09T0001", "2026-10-09T0601"])
