@@ -10,7 +10,7 @@
  */
 import { restrictedForbidden, restrictionFor } from '../_lib/restrict.js'
 import { type Ctx, json, requireViewer } from '../_lib/auth.js'
-import { storeReady, withPathStore } from '../_lib/index.js'
+import { ivRefusal, storeReady, withPathStore } from '../_lib/index.js'
 import { MAX_PREFIXES, prefixesAt } from '../_lib/prefixes.js'
 import { scanArg } from '../_lib/scanArg.js'
 
@@ -34,6 +34,8 @@ export const onRequestPost = async (ctx0: Ctx): Promise<Response> => {
     const { stats, groups } = await prefixesAt(env, date, prefixes)
     return json({ date, stats, groups }, 200, { 'cache-control': 'private, no-store' })
   } catch (e) {
+    const refusal = ivRefusal(e)
+    if (refusal) return refusal
     return json({ error: (e as Error).message }, 503)
   }
 }
