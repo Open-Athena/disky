@@ -82,3 +82,32 @@ def test_import_engines_preserve_tokens_only_on_files(tmp_path: Path, engine: st
         {"path": "d/a", "kind": "file", "version": '"a-3"'},
         {"path": "d/b", "kind": "file", "version": "9007199254740993"},
     ]
+
+
+@pytest.mark.parametrize("temp_dir", [None, "spill"])
+def test_stream_version_attach_takes_the_import_memory_limit_and_spills(tmp_path: Path, monkeypatch, temp_dir: str | None) -> None:
+    """The stream import's version attach is a hash GROUP BY over every listed name: it runs under the import's `-M` and
+    spills to `-T` (default: inside the parts dir, so a local-SSD staging disk takes it), never a fixed small cap (the
+    02a import died at 512MB, 2026-10-22)."""
+    import duckdb
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    from disk_tree.find.aggregate_stream import aggregate_stream
+
+    raw, out = tmp_path / "raw.parquet", tmp_path / "l2.parquet"
+    pq.write_table(pa.Table.from_pandas(entries_to_frame("b", [
+        ("d/a", 7, "2026-10-01T00:00:00Z", "STANDARD", None, None, '"a-3"'),
+    ]), preserve_index=False), raw)
+    configs = []
+    connect = duckdb.connect
+
+    def spy(*args, **kw):
+        configs.append(kw.get("config"))
+        return connect(*args, **kw)
+
+    monkeypatch.setattr(duckdb, "connect", spy)
+    spill = str(tmp_path / temp_dir) if temp_dir else None
+    aggregate_stream((str(raw),), "b", "s3", str(out), memory_limit="3GB", temp_dir=spill)
+    assert configs == [{"memory_limit": "3GB", "temp_directory": spill or f"{out}.parts/version-spill"}]
+    assert pq.read_table(out, columns=["path", "version"]).to_pylist()[-1] == {"path": "d/a", "version": '"a-3"'}
