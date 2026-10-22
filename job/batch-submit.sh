@@ -162,7 +162,8 @@ cat > "$spec" <<EOF
           "R2_SECRET_ACCESS_KEY": "projects/$PROJECT/secrets/gcs-static-index-r2-secret/versions/latest",
           "GCS_USAGE_TOKEN": "projects/$PROJECT/secrets/gcs-snapshot-site-token/versions/latest",
           "DISCORD_GCS_USAGE_WEBHOOK": "projects/$PROJECT/secrets/gcs-usage-discord-webhook/versions/latest",
-          "DISCORD_BOT_TOKEN": "projects/$PROJECT/secrets/marin-discord-bot-token/versions/latest"
+          "DISCORD_BOT_TOKEN": "projects/$PROJECT/secrets/marin-discord-bot-token/versions/latest",
+          "CF_ANALYTICS_TOKEN": "projects/$PROJECT/secrets/gcs-cf-analytics-token/versions/latest"
         }
       }
     }

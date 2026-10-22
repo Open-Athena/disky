@@ -614,6 +614,26 @@ else
 fi
 
 sr phase-end discord-digest
+sr phase-begin cf-usage
+
+# The deployment's Cloudflare usage per day (specs/usage-metrics.md): one
+# `snapshots/usage/<date>.json` per day of the last 7 that a copy lacks, in the
+# data bucket and on R2 (what /admin/usage reads). Never fails the snapshot.
+{ set +x; } 2>/dev/null
+if [ "${REPROC:-0}" != "1" ] && [ -n "${CF_ANALYTICS_TOKEN:+set}" ]; then
+  R2_OUT=()
+  if [ -n "${R2_ACCESS_KEY_ID:+set}" ]; then
+    R2_OUT=(-o "r2://oa-gcs-usage-index/snapshots/usage")
+  fi
+  DISKY_R2_ENDPOINT_URL="${R2_ENDPOINT:-https://$CLOUDFLARE_ACCOUNT_ID.r2.cloudflarestorage.com}" \
+  AWS_ACCESS_KEY_ID="${R2_ACCESS_KEY_ID:-}" AWS_SECRET_ACCESS_KEY="${R2_SECRET_ACCESS_KEY:-}" \
+    dt-cloud cf-usage -c site/wrangler.toml -d 7 -o "gs://$DATA/snapshots/usage" "${R2_OUT[@]}" \
+    || echo "WARN: cf-usage snapshots failed" >&2
+else
+  echo "no CF_ANALYTICS_TOKEN, or REPROC — skipping the Cloudflare usage snapshots" >&2
+fi
+set -x
+sr phase-end cf-usage
 sr phase-begin index-gc
 
 # Sweep row groups of generations the pointer no longer names (a REPROC's
