@@ -2,6 +2,10 @@
 
 The deployment's launch is [`done/r2-launch.md`]. This spec tracks the CLAUDE.md "parity by default" baseline items r2.oa.dev doesn't have yet, and how each lands.
 
+The 2026-10-20 [CS3 audit] records current pipeline health and the remaining retention gaps. Primary lean path-sort retirement is live; raw listings, age artifacts, metadata-store indexes and Nextflow bookkeeping are not all bounded yet.
+
+[CS3 audit]: r2-cs3.md
+
 ## Job baseline (2026-10-16)
 
 The daily job (`job/r2-scan`, a Python driver on GCP Batch, 07:15 UTC) records each run (`/scans`) and appends the static name index and interval store. Built on `r2` (not yet in an image):

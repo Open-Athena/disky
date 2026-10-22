@@ -40,9 +40,10 @@
     "LOOKBACK_HOURS": "6",
     "RETENTION_HOURS": "144",
     "PAGE_SIZE": "2000",
-    "MAX_PAGES": "200",
-    "MAX_HOURS": "8",
-    "VERIFY_HOURS": "1",
+    "MAX_PAGES": "400",
+    "MAX_HOURS": "32",
+    "WINDOW_MINUTES": "5",
+    "VERIFY_HOURS": "12",
     "MAX_PAGE_BYTES": "8388608"
   },
   "triggers": {

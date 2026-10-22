@@ -1,17 +1,17 @@
 # R2 access aggregates: compaction
 
-Status: 2026-10-17. Step 0 measured; step 5 implemented on `cloud` (applies pending); step 1 committed on the OA stack (apply pending); steps 2–4 proposed. Follows [r2-access-logging.md] (the hourly collector, `infra/cf/r2-access`).
+Status: 2026-10-22. Steps 1 and 5 are live on OA (seven-day raw lifecycle verified October 20; read-only per-key aggregates deployed). The OA scan consumes the private archive through `access-r2` in `job/profiles/r2.yml`. Steps 2–4 remain proposed. Compact IDs deployed October 21 at 22:59 UTC; bounded JSON hashing/upload deployed October 22 around 00:42 UTC, both with Ryan's go. The collector cleared the original ~709K-request hour, but the next hour has ~4.17M estimated requests and cannot fit the 400-page budget. Five-minute resumable windows (`WINDOW_MINUTES=5`) and the compatible reader image went live October 22 at 11:41 UTC (Ryan's go). The first windowed run (12:13) advanced the watermark from 19:00 to 19:15 on October 19 (252 of 400 pages). The 13:13 run failed `provider_http_403` and published nothing. Recovery is not yet established. See [r2-cs3.md]. Follows [r2-access-logging.md] (the collector, `infra/cf/r2-access`).
 
 ## Why
 
-At OA `marin-na` (~80K events/hour), the collector stores two things:
+At OA `marin-na` (~80K events/hour in the initial measurement), the collector stores two things:
 
 | what | where | format | size | retention |
 |---|---|---|---|---|
-| raw API pages | `runs/<scheduled>/<run>/<bucket>/<hour>/NNNN.json` | JSON (telemetry events, incl. IPs/actors) | ~1.7 GB/day | 30 days (lifecycle), ~51 GB standing |
-| hour aggregates | `agg/<bucket>/<day>/<HH>/<run>.json` | JSON, uncompressed: `[key, action, n, first_ts, last_ts]` rows | ~5.2 MB/hour | forever: ~46 GB/year |
+| raw API pages | `runs/<scheduled>/<run>/<bucket>/<hour>/NNNN.json` | JSON (telemetry events, incl. IPs/actors) | ~1.7 GB/day in the initial measurement | 7 days (lifecycle), ~12 GB at that measured rate |
+| hour aggregates | `agg/<bucket>/<day>/<HH>/<run>.json` | JSON, uncompressed: `[key, action, n, first_ts, last_ts]` rows | ~5.2 MB/hour before step 5; read rows now much smaller | forever; closed-hour retirement remains open |
 
-Nothing reads the raw pages: re-drains query the provider (which keeps 7 days), not the archive. The aggregates are the durable product, and they are stored at their least compact:
+Nothing reads the raw pages: re-drains query the provider (which keeps 7 days), not the archive. The aggregates are the durable product. The initial all-action aggregates had these costs (step 5 has since removed per-key write rows):
 
 - every row spells the full object key as a JSON string, and marin keys are long paths with shared prefixes;
 - action names repeat as strings, and timestamps as 13-digit ms integers;
@@ -38,7 +38,7 @@ So compression is a ~6× win and stops there; the next lever is **what** is stor
 
 ### 1. Raw pages: 7 days
 
-Set `retentionDays: 7` on the OA stack (the program's floor). That matches the provider's own retention, so a raw page outlives every hour it could re-derive. It cuts ~40 GB standing at OA. Needs a Pulumi apply.
+Done: `retentionDays: 7` on the OA stack (the program's floor); the live lifecycle on `runs/` is 604,800 seconds, verified October 20. That matches the provider's own retention, so a raw page outlives every hour it could re-derive. It cuts ~40 GB standing at the initial measured rate. The October 20 cap apply did not change lifecycle.
 
 ### 2. Gzip the hour aggregates in the Worker
 
@@ -82,7 +82,7 @@ The cost: there's no per-prefix write activity ("who's writing where") from R2 l
 ## Open questions
 
 - **Who owns the cursor?** The job deletes rolled hours, but the collector owns `state.json`. Either the collector stops recording `frozen` hours (they are never re-drained, so it needs nothing from them), or the job keeps its own `rolled_through` manifest beside them. I lean toward the first: `frozen` exists only for bookkeeping.
-- **Where OA's job runs.** The demo rolls in its GHA ingest. OA `marin-na` has no consumer wired yet: the r2 deployment's job would read the private archive with its own key.
+- **Where OA's job runs.** The daily Nextflow scan now consumes the private archive with its source key through `access-r2`; a future rollup stage belongs alongside that step. The demo's consumer runs in its GHA ingest.
 - **Day granularity.** The read lens shows days. If a finer lens ever matters, keep `last_ts` at the minute in the day parquet (it already is) and only lose per-hour counts.
 
 ## Not in scope
@@ -90,3 +90,4 @@ The cost: there's no per-prefix write activity ("who's writing where") from R2 l
 GCS's access pipeline (usage-log CSVs → layer-2a) has its own retention (`usage-log-ingest-cron`) and is unchanged.
 
 [r2-access-logging.md]: r2-access-logging.md
+[r2-cs3.md]: r2-cs3.md

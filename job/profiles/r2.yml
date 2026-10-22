@@ -1,6 +1,6 @@
 # r2.oa.dev's scan as a Nextflow DAG (specs/pipelines-everywhere.md §3.5): `dt-cloud scan head /app/job/profiles/r2.yml`,
-# beside `r2-meta.yml` (the "data behind this site" store). The one-VM job (`job/r2-scan run`) stays the cron until the
-# scratch run (`r2-scratch.yml`) and a prod run pass; the image is pinned here at the switch.
+# beside `r2-meta.yml` (the "data behind this site" store). The two daily scheduler heads pin their image in
+# `infra/gcp/Pulumi.r2.yaml`.
 deployment: r2
 executor:
   kind: google-batch
@@ -26,6 +26,7 @@ machines:
   # path-index, the age pyramids and the check: the one-VM job's machine (DuckDB at 12 GB over ~57M rows)
   big: {type: e2-standard-8, disk: 100}
   list: {type: e2-standard-4, disk: 50}
+  static: {type: e2-standard-4, cpus: 4, memory: 14GB, disk: 100}
   post: e2-standard-8
 # r2 scans four approved buckets of an account that holds many more (specs/r2-deployment.md): an unscanned-bucket
 # alert would fire every run, and r2 holds no account-wide key to list the account's buckets with (by design)
