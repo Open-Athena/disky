@@ -20,7 +20,7 @@ Phases overlap (static-names runs beside interval-store and post), so the totals
 | date | phase | cause | fix |
 |---|---|---|---|
 | 10-18 | head job | Batch `maxRunDuration` 6 h killed the job, skipping its exit trap; the run stayed `running` | cap 12 h; `scan-run reconcile` + `/scans` `LOST_S` (5c226585) |
-| 10-21 | retire | exit 1, then exit -9 on the post VM | open: RC needed |
+| 10-21 | retire | its verify downloads the whole served interval-store generation (~120 GB) onto a 50 GB boot disk (exit 1, ENOSPC, which then failed every later post step); the re-run's DuckDB was set to 80 GB on a 32 GB VM (exit -9) | post `e2-highmem-16` + 400 GB (3cbb09a4, 6515673e); `verify_budget` caps DuckDB at 3/4 of RAM (117a31cd); retire always cleans its work dir (937db51b). Green on 10-22 |
 | 10-22 | interval-store | `prepare` wrote under the pre-compaction generation (`follow` bug) | 599893e7 |
 | 10-22 | static L3 carry | drill merge spilled 1.2 TiB of DuckDB temp | chunked by `q` range (f4653462) |
 | 10-22 | cf-usage | relative `site/wrangler.toml` outside `/app` | 58f4ccb7 |
@@ -35,19 +35,19 @@ Phases overlap (static-names runs beside interval-store and post), so the totals
 | static-names append | scans since the base: every append refolds the base's `cintervals` + every run's `cdelta` (`rebuild_open`), and its carries' cost grows by level | keep each run's open-version state (`copen`) so an append reads the previous state + the day's delta only; carries are already amortized O(changes·log) |
 | static-names compaction | corpus size, every 2^L scans; today one Python core in `merge_shards` and a slow drill fold | parallel `merge_shards` (in progress), chunked drill (70ed412a), local-SSD staging, parallel uploads; floor ~30–45 min on one VM for a ~550 GiB corpus |
 | interval-store append | same refold pattern as static-names | same fix |
-| retire | D1 rows deleted (footer rows) | drops once `index-sync -R` (no D1 footer rows) has run 2 scans; RC the 10-21 failure |
+| retire | fleet size: its verify re-downloads the served generation (~120 GB, ~8 min) and compares a whole scan (440M objects, 22 min); plus D1 footer rows | verify in the scan's own `index` step (the sorts are already local), write the marker there, and run retire markers-only (`-m`); D1 deletes stop once `index-sync -R` has run 2 scans |
 | dups, index-rows, warm-cache | fleet-sized reads per scan | revisit after path-index is gone |
 
 ## Plan, in order
 
 1. **Green and bounded first.**
-   - RC the 10-21 `retire` failure (exit 1, then -9).
    - Land the parallel `merge_shards`.
    - Finish the static compaction re-trial, set `compact_level` back to 5, and unpin prod's `STATIC_GEN`.
    - A manual scan on the new image, which carries cw's listing `version` column.
 2. **Compaction under an hour:** local-SSD staging, parallel uploads, and overlapping the independent stages. Measure each stage against the floor above.
 3. **Appends O(#changes):** carry the open-version state between appends in both stores (static-names and interval-store).
-4. **Retire path-index:** move its remaining readers, then drop the step (`specs/lean-scans.md`).
-5. **Listing:** evaluate inventory reports vs change notifications for an O(#changes) input. This is the last O(fleet) term.
+4. **Retire's verify moves into `index`** (retire becomes markers-only: constant cost), and it logs its peak RSS and disk.
+5. **Retire path-index:** move its remaining readers, then drop the step (`specs/lean-scans.md`).
+6. **Listing:** evaluate inventory reports vs change notifications for an O(#changes) input. This is the last O(fleet) term.
 
 Every change is verified with a manual scan before the next daily (`verify-with-manual-scan`). Phase minutes are tracked in the table above.
