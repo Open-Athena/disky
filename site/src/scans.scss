@@ -73,6 +73,7 @@
       .name { fill: var(--ink); font-size: 13px; font-weight: 600; font-family: ui-monospace, monospace; }
       .sub { fill: var(--ink-3); font-size: 11.5px; }
       &.done rect { stroke: var(--grew); fill: color-mix(in srgb, var(--grew) 10%, var(--surface)); }
+      &.cached rect { stroke: var(--grew); stroke-dasharray: 2 3; fill: color-mix(in srgb, var(--grew) 6%, var(--surface)); }
       &.running rect { stroke: var(--ink); stroke-dasharray: 4 3; fill: color-mix(in srgb, var(--ink) 6%, var(--surface)); }
       &.failed rect { stroke: var(--danger); fill: color-mix(in srgb, var(--danger) 10%, var(--surface)); }
       &.failed .sub { fill: var(--danger); }

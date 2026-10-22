@@ -428,6 +428,7 @@ function PhaseTimeline({ spans, secs, color, brush }: { spans: PhaseSpan[]; secs
 
 /** A DAG node's second line: its task count, duration and state. */
 function nodeSub(n: DagNode, now: number): string {
+  if (n.status === 'cached') return n.cachedTasks.length > 1 ? `${n.cachedTasks.length} tasks · reused` : 'reused from cache'
   if (n.status === 'pending' || n.status === 'unrecorded') return n.status === 'pending' ? 'waiting' : 'no phases recorded'
   const k = n.tasks.length > 1 ? `${n.tasks.length} tasks · ` : ''
   return `${k}${n.start != null ? fmtDur((n.end ?? now) - n.start) : ''}${n.status === 'running' ? ' · running' : n.status === 'failed' ? ' · failed' : ''}`
@@ -450,9 +451,10 @@ function RunDag({ nodes, edges, brush }: { nodes: DagNode[]; edges: [string, str
   const tipOf = (n: DagNode) => <>
     <div><b>{n.label}</b></div>
     <div>{nodeSub(n, now)}{n.tasks.length === 1 && n.tasks[0].machine ? ` · ${n.tasks[0].machine}` : ''}</div>
+    {!!n.cachedTasks.length && <div className="dim">{n.cachedTasks.length} task{n.cachedTasks.length === 1 ? '' : 's'} reused from an earlier attempt; no execution time added to this attempt.</div>}
     {n.tasks.length
       ? <div className="dim">{brush?.pinned === n.id ? 'Click to close its tasks.' : 'Click for its tasks, machines and logs.'}</div>
-      : <div className="dim">{n.status === 'pending' ? 'Not started yet.' : 'This process recorded no phases (a run before phases named their task, or it ran nothing).'}</div>}
+      : n.status !== 'cached' && <div className="dim">{n.status === 'pending' ? 'Not started yet.' : 'This process recorded no phases (a run before phases named their task, or it ran nothing).'}</div>}
   </>
   return (
     <div className="sr-svgwrap sr-dagwrap"><div className="runs-wrap">
@@ -691,6 +693,7 @@ export function ScanRunPage() {
         </dl>
         {d.dag && <>
           <h3>Pipeline</h3>
+          {!!d.dag.dag.cached_tasks?.length && <p className="dim">This retry reuses completed tasks from an earlier attempt. Reused nodes do not run again; waiting nodes have yet to start.</p>}
           <RunDag nodes={nodes} edges={d.dag.dag.edges} brush={brush} />
           {pinnedNode && <StepDrawer node={pinnedNode} run={r} project={d.project} onClose={() => brush.toggle(pinnedNode.id)} />}
         </>}

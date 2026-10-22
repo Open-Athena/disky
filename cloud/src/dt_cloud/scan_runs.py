@@ -1817,7 +1817,7 @@ def dag_cmd(profile_path, d1, engine, dry_run, sqlite, run_id, file) -> None:
     """Store RUN_ID's pipeline DAG from FILE (its engine's own format, e.g. a run's archived `dag.mmd`), as
     `finish -D` does: a run recorded before its head stored one, or a re-reduction."""
     load_profile(profile_path)
-    dag = run_dag.read(engine, Path(file).read_text())
+    dag = run_dag.read_file(engine, Path(file))
     sink_for(dry_run, sqlite, d1).execute([dag_sql(run_id, engine, dag.to_json())])
     err(f"scan-run dag: {run_id} · {engine} · {len(dag.nodes)} nodes, {len(dag.edges)} edges")
 
@@ -1854,7 +1854,7 @@ def finish_cmd(dag_path, dag_engine, error, cost_labels, rc, profile_path, d1, d
     dag = None
     if dag_path:
         try:
-            dag = (dag_engine, run_dag.read(dag_engine, Path(dag_path).read_text()).to_json())
+            dag = (dag_engine, run_dag.read_file(dag_engine, Path(dag_path)).to_json())
         except (OSError, ValueError) as e:  # the DAG is a view; the record must still finish
             report_failure(e)
     j.finish(rc, error, extra, dag)
