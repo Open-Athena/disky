@@ -82,7 +82,12 @@ def _copy(stores: dict, dst: Path) -> Path:
 
 
 def _gen_files(d: Path) -> dict[str, bytes]:
-    return {p.relative_to(d).as_posix(): p.read_bytes() for p in sorted(d.rglob("*")) if p.is_file() and p.name != ar.COMPACTION}
+    """A generation's files but its compaction record, each served sort's record without its seconds (`s`, a wall time
+    that rounds to 0.1 on a loaded machine)."""
+    out = {p.relative_to(d).as_posix(): p.read_bytes() for p in sorted(d.rglob("*")) if p.is_file() and p.name != ar.COMPACTION}
+    for k in [k for k in out if k.startswith("served/") and k.endswith(".json") and k != "served/stats.json"]:
+        out[k] = json.dumps({**json.loads(out[k]), "s": None}, sort_keys=True).encode()
+    return out
 
 
 def test_compaction_reads_the_copy(stores, tmp_path):

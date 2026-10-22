@@ -62,6 +62,7 @@ r2 = "disk_tree.r2fs.R2FileSystem"
 [dependency-groups]
 dev = [
     "pytest",
+    "pytest-xdist>=3.6",
 ]
 
 [tool.uv.workspace]
