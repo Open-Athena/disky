@@ -31,6 +31,10 @@ machines:
   list: e2-standard-4
   post: e2-standard-4
 skip: [bucket-check, interval-store, over-time, warm-cache, probe, digest, index-gc]
+# `non-live`: the data bucket's soft-deleted bytes (7 d retention; the primary's `retire` deletes each old scan's sorts
+# there daily), what the listing of current objects misses (specs/non-live-bytes.md; the R2 source has none, skipped).
+# `age-store`: the meta pyramids as change intervals on R2 (specs/age-store.md), then the covered ones retired
+steps: [non-live, age-store]
 secrets:
   SLACK_BOT_TOKEN: gcs-alert-slack-bot-token
   CLOUDFLARE_API_TOKEN: cf-pages-token
@@ -62,3 +66,9 @@ options:
   index-sync:
     variants: [path, bysize, age-pyramid-1h, age-pyramid-3h, age-pyramid-6h, age-pyramid-12h, age-pyramid-1d,
                age-pyramid-2d, age-pyramid-4d, age-pyramid-8d]
+  non-live: {classes: [soft-deleted]}
+  # the site reads it as the meta store's `AGE_STORE_PREFIX` (site/wrangler.toml `STORES_JSON`); `gen` names the first
+  # generation only (the store's `interval-store/CURRENT.json` is followed after); the pyramids are read from GCS
+  # (`meta-l2/`), so the R2 copy root only retires what `publish-r2` put there
+  age-store: {store: "r2://oa-gcs-usage-index/history/meta-age", gen: 2026-10-23meta-age, keep: 2, execute: true,
+              copies: ["r2://oa-gcs-usage-index"]}
