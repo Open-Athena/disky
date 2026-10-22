@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { matchEntries, matchLabel, type NameMatches } from './folderSearch'
+import { matchEntries, matchLabel, searchScan, type NameMatches } from './folderSearch'
 
 describe('matchLabel', () => {
   it('the name, then where it is', () => {
@@ -41,5 +41,27 @@ describe('matchEntries', () => {
     expect(got.map(e => [e.id, e.label, e.description])).toEqual([['match:incomplete', 'Too many matches to list.', 'Pick to filter the map instead']])
     got[0].handler!()
     expect(picked).toEqual(['filter'])
+  })
+})
+
+describe('searchScan', () => {
+  const indexed = ['2026-10-19', '2026-10-20', '2026-10-21']
+  it('the map\'s scan when the index covers it, or when there is no static index (no list)', () => {
+    expect([searchScan('2026-10-21', indexed), searchScan('2026-10-22', null)]).toEqual(['2026-10-21', '2026-10-22'])
+  })
+  it('a just-published scan: the newest covered one before it', () => {
+    expect(searchScan('2026-10-22', indexed)).toBe('2026-10-21')
+    expect(searchScan('2026-10-20T1800', indexed)).toBe('2026-10-20')
+  })
+  it('none while the list loads, before every covered scan, or without a scan', () => {
+    expect([searchScan('2026-10-22', 'loading'), searchScan('2026-10-01', indexed), searchScan(null, indexed)]).toEqual([null, null, null])
+  })
+})
+
+describe('matchEntries scan note', () => {
+  it('a result from an older scan than the map\'s says which', () => {
+    const body: NameMatches = { date: '2026-10-21', path: '', q: 'crash', total: 1, complete: true, items: [{ path: 'crashes', kind: 'dir', b: 86, o: 8499 }] }
+    expect(matchEntries(body, { go: () => {}, filter: () => {}, size: b => `${b} B`, scanNote: 'as of scan 2026-10-21' }).map(e => [e.label, e.description]))
+      .toEqual([['crashes', 'folder · 86 B · 8,499 objects · as of scan 2026-10-21']])
   })
 })
