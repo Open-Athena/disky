@@ -117,7 +117,7 @@ class FakeStmt {
   constructor(readonly sql: string, readonly args: unknown[] = []) {}
   bind(...a: unknown[]) { return new FakeStmt(this.sql, a) }
   async first() { return { n: 1 } }
-  async all() { return { results: [], success: true, meta: { rows_read: 7 } } }
+  async all() { return { results: [], success: true, meta: { rows_read: 7, rows_written: 1 } } }
   async run() { return { results: [], success: true, meta: { rows_read: 2 } } }
   async raw() { return [] }
 }
@@ -132,7 +132,7 @@ function bindings() {
       batch: async (stmts: unknown[]) => {
         batched.push(stmts)
         if (!stmts.every(s => s instanceof FakeStmt)) throw new Error('batch got a wrapper, not a statement')
-        return stmts.map(() => ({ results: [], success: true, meta: { rows_read: 5 } }))
+        return stmts.map(() => ({ results: [], success: true, meta: { rows_read: 5, rows_written: 3 } }))
       },
       exec: async () => ({ count: 0, duration: 0 }),
     },
@@ -197,7 +197,7 @@ describe('the middleware writes one point per request', () => {
     expect(batched.map(b => b.map(s => (s as FakeStmt).sql))).toEqual([['SELECT a', 'SELECT b']])
     expect(points.map(shape)).toEqual([{
       blobs: ['/api/subtree', 'GET', 'session', 'session', '2xx', 'miss', 'primary', 'dev'],
-      doubles: [1, -1, 3, 300, 4, 17, 1],
+      doubles: [1, -1, 3, 300, 4, 17, 1, 7],
       indexes: ['session'],
     }])
   })
@@ -209,7 +209,7 @@ describe('the middleware writes one point per request', () => {
     await serveOne(req, env, async () => new Response('<!doctype html>\n', { headers: { 'content-type': 'text/html; charset=utf-8' } }))
     expect(points.map(shape)).toEqual([{
       blobs: ['page', 'GET', 'bot', 'bot', '2xx', 'none', 'primary', 'prod'],
-      doubles: [1, -1, 0, 0, 0, 0, 0],
+      doubles: [1, -1, 0, 0, 0, 0, 0, 0],
       indexes: ['bot'],
     }])
   })
@@ -222,7 +222,7 @@ describe('the middleware writes one point per request', () => {
     })
     expect(points.map(shape)).toEqual([{
       blobs: ['/api/actions', 'POST', 'public', 'public', '4xx', 'none', 'primary', 'dev'],
-      doubles: [1, -1, 0, 0, 0, 0, 0],
+      doubles: [1, -1, 0, 0, 0, 0, 0, 0],
       indexes: ['public'],
     }])
   })
@@ -239,7 +239,7 @@ describe('the middleware writes one point per request', () => {
     })
     expect(points.map(shape)).toEqual([{
       blobs: ['/api/subtree', 'GET', 'session', 'session', '2xx', 'edge-hit', 'meta', 'dev'],
-      doubles: [1, -1, 0, 0, 0, 0, 0],
+      doubles: [1, -1, 0, 0, 0, 0, 0, 0],
       indexes: ['session'],
     }])
   })
