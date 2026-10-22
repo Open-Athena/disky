@@ -28,8 +28,8 @@ def _add(root: Path, scans: dict, store: Path, work: Path, through: str, *extra:
     return json.loads(res.stdout)
 
 
-def _compact(store: Path, work: Path) -> dict:
-    res = CliRunner().invoke(sk.compact_cmd, ["-g", "g", "-o", str(store), "-w", str(work), "-p", "2", "-M", "1GB"], catch_exceptions=False)
+def _compact(store: Path, work: Path, *extra: str) -> dict:
+    res = CliRunner().invoke(sk.compact_cmd, ["-g", "g", "-o", str(store), "-w", str(work), "-p", "2", "-M", "1GB", *extra], catch_exceptions=False)
     assert res.exit_code == 0, res.output
     return json.loads(res.stdout)
 
@@ -66,10 +66,15 @@ def world(fixture, tmp_path_factory):  # noqa: F811
         _build(root, scans, b, tmp / "wb0", through=ids[1])
         out["b_add"] = _add(root, scans, b, tmp / "wb1", ids[3])
         out["b"] = _compact(b, tmp / "wb2")
+        # C: B again, its drill folded in chunks of 3 roots (many tuple chunks, runs spilled per chunk, q ranges): the same bytes
+        c = tmp / "c"
+        _build(root, scans, c, tmp / "wc0", through=ids[1])
+        _add(root, scans, c, tmp / "wc1", ids[3])
+        out["c"] = _compact(c, tmp / "wc2", "-c", "3")
         ranges = str(a / sn.PREFIX / "g" / "ranges.json")
         for gen, through in (("g.c001", ids[3]), ("g.c002", ids[4])):
             _build(root, scans, tmp / f"ref-{gen}", tmp / f"wr-{gen}", gen=gen, through=through, extra=("-r", ranges))
-    out.update(a_store=a / sn.PREFIX, b_store=b / sn.PREFIX)
+    out.update(a_store=a / sn.PREFIX, b_store=b / sn.PREFIX, c_store=c / sn.PREFIX)
     return out
 
 
@@ -90,7 +95,8 @@ def test_add_compacts_when_due_then_appends_to_the_successor(world):
     assert [(root / g / "scans.json").is_file() for g in ("g", "g.c001")] == [True, True]
 
 
-@pytest.mark.parametrize("store, gen, ref", [("a_store", "g.c001", "g.c001"), ("a_store", "g.c002", "g.c002"), ("b_store", "g.c001", "g.c001")])
+@pytest.mark.parametrize("store, gen, ref", [("a_store", "g.c001", "g.c001"), ("a_store", "g.c002", "g.c002"), ("b_store", "g.c001", "g.c001"),
+                                             ("c_store", "g.c001", "g.c001")])
 def test_compacted_generation_is_the_rebuild(world, store, gen, ref):
     got, want = world[store] / gen, world["tmp"] / f"ref-{ref}" / sn.PREFIX / ref
     g, w = _md5s(got), _md5s(want)

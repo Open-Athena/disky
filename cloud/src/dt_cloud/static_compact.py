@@ -108,14 +108,70 @@ def _roots_sql(files: list[str]) -> str:
 DEPTH = "len(string_split(path, '/'))::UTINYINT"
 
 
+def q_spans(files: list[str]) -> list[tuple[str, str | None, str | None]]:
+    """Each roots file's `(file, min q, max q)` from its footer's row-group statistics (None, None: no statistics; the
+    file is read for every chunk)."""
+    out = []
+    for f in files:
+        md = pq.ParquetFile(f).metadata
+        col = md.schema.to_arrow_schema().get_field_index("q")
+        lo = hi = None
+        for g in range(md.num_row_groups):
+            st = md.row_group(g).column(col).statistics
+            if st is None or not st.has_min_max:
+                lo = hi = None
+                break
+            lo = st.min if lo is None or st.min < lo else lo
+            hi = st.max if hi is None or st.max > hi else hi
+        else:
+            out.append((f, lo, hi))
+            continue
+        out.append((f, None, None))
+    return out
+
+
+def overlapping(spans: list[tuple[str, str | None, str | None]], lo: str, hi: str) -> list[str]:
+    """The files of `spans` that may hold a `q` in `[lo, hi]`."""
+    return [f for f, a, b in spans if a is None or (a <= hi and b >= lo)]
+
+
+class Progress:
+    """A loop's progress lines: `label k/n`, rows so far, seconds, and the rest's estimate, at most one per `every_s`
+    (and the last), so a stalled fold shows within minutes instead of at the end of its sub-step."""
+
+    def __init__(self, label: str, n: int, log: Callable[[str], None], every_s: float = 30.0):
+        self.label, self.n, self.log, self.every_s = label, n, log, every_s
+        self.t0 = self.last = monotonic()
+        self.rows = 0
+
+    def tick(self, k: int, rows: int) -> None:
+        self.rows += rows
+        now = monotonic()
+        if now - self.last < self.every_s and k + 1 < self.n:
+            return
+        self.last = now
+        s = now - self.t0
+        eta = s / (k + 1) * (self.n - k - 1)
+        self.log(f"{self.label} {k + 1}/{self.n}: {self.rows:,} rows in {s:.0f}s (≈{eta:.0f}s left; RSS peak {sl.rss_peak_gb()} GiB)")
+
+
 def fold_drill(con, tiers: list[sd.Tier], out: Path, work: Path, *, R: int, K: int, floor: int, chunk_rows: int = sl.CHUNK_ROWS,
-               step=sl._nop_step) -> dict:
+               step=sl._nop_step, log: Callable[[str], None] = err) -> dict:
     """`G'`'s `drill/` and `roots-measure/` in `out` from the tiers' drills (`G`'s, then each run's, oldest first) and
     `out/catalog/members.parquet`: each member's roots through the last scan, read from the tiers through each one's
     class map (every tier's `aliases.parquet` maps every member it knows to its canonical, which holds that class's rows
     there; a member a tier doesn't know has none there), combined; the classes by root-set digest, as the build's
     (`static_local.build_base_drill`); then `static_local.finish_drill` over the canonical members' roots and the short
-    literals'."""
+    literals'.
+
+    Chunked, so the working set is `chunk_rows` roots, not the corpus (gcs's first compaction ran one aggregate over all
+    299 GB of roots and logged nothing for 6 h): members with equal tuples of classes (one per tier) hold equal rows, so
+    the tuples (`tid`, ordered by the base's class) are cut into chunks of about `chunk_rows` rows (each tier's rows per
+    class, summed). The runs' rows are spilled once by chunk; the base's are read per chunk by its classes' `q` span
+    (the roots files are sorted by `q`, so a chunk reads the files, and row groups, that span overlaps). Each chunk's
+    combined roots and digests are exact (a tuple's rows are all in its chunk); the canonical members' roots are then
+    spilled by `q` range chunk by chunk, and the short literals' by `q` range, as the build's. `log`: a progress line per
+    chunk (at most one per 30 s)."""
     t = monotonic()
     shutil.rmtree(work, ignore_errors=True)
     work.mkdir(parents=True)
@@ -133,13 +189,53 @@ def fold_drill(con, tiers: list[sd.Tier], out: Path, work: Path, *, R: int, K: i
         FROM (SELECT DISTINCT {', '.join(f'c{i}' for i in range(n))} FROM mt)""")
     on = " AND ".join(f"t.c{i} IS NOT DISTINCT FROM mt.c{i}" for i in range(n))
     con.execute(f"CREATE OR REPLACE TABLE mtid AS SELECT mt.q, t.tid FROM mt JOIN tup AS t ON {on}")
-    parts = [f"""SELECT t.tid, r.path, r.usr, r.vf, r.vt, r.size, r.n_files FROM ({_roots_sql(tr.files('long', 'roots'))}) AS r
-                 JOIN tup AS t ON t.c{i} = r.q""" for i, tr in enumerate(tiers)]
-    con.execute(f"""CREATE OR REPLACE TABLE troots AS SELECT tid, path, usr, vf, min(vt) AS vt, any_value(size) AS size, any_value(n_files) AS n_files
-        FROM ({' UNION ALL '.join(parts)}) GROUP BY tid, path, usr, vf""")
-    t = step("drill/fold/long-roots", t, tuples=sl.count(con, "tup"), rows=sl.count(con, "troots"))
-    con.execute(f"""CREATE OR REPLACE TABLE tdig AS SELECT tid, count(*)::BIGINT AS n, (sum({ROW_HASH}) % {U64})::UBIGINT AS h1,
-        (sum(hash({ROW_HASH}, 'x')) % {U64})::UBIGINT AS h2 FROM troots GROUP BY tid""")
+    long_files = [tr.files("long", "roots") for tr in tiers]
+    for i in range(n):
+        con.execute(f"CREATE OR REPLACE TABLE tc{i} AS SELECT q, count(*)::BIGINT AS n FROM ({_roots_sql(long_files[i])}) GROUP BY q")
+    est = " + ".join(f"coalesce(tc{i}.n, 0)" for i in range(n))
+    cjoin = " ".join(f"LEFT JOIN tc{i} ON tc{i}.q = t.c{i}" for i in range(n))
+    con.execute(f"""CREATE OR REPLACE TABLE tch AS SELECT tid, ((sum(est) OVER (ORDER BY tid ROWS UNBOUNDED PRECEDING) - est) // {chunk_rows})::BIGINT AS ch
+        FROM (SELECT t.tid, {est} AS est FROM tup AS t {cjoin})""")
+    chunks = con.execute("""SELECT ch, min(tid), max(tid), min(t.c0), max(t.c0) FROM tch JOIN tup AS t USING (tid)
+        GROUP BY ch ORDER BY ch""").fetchall()
+    t = step("drill/fold/plan", t, tuples=sl.count(con, "tup"), chunks=len(chunks))
+    runs = work / "runs"
+    runs.mkdir()
+    for i in range(1, n):
+        if long_files[i]:
+            con.execute(f"""COPY (SELECT c.ch, t.tid, r.path, r.usr, r.vf, r.vt, r.size, r.n_files FROM ({_roots_sql(long_files[i])}) AS r
+                JOIN tup AS t ON t.c{i} = r.q JOIN tch AS c USING (tid)) TO {q(str(runs / f't{i:03d}'))} (FORMAT parquet, PARTITION_BY (ch), COMPRESSION zstd)""")
+    t = step("drill/fold/runs-spill", t, runs=n - 1)
+    spans = q_spans(long_files[0])
+    troots = work / "troots"
+    troots.mkdir()
+    con.execute("CREATE OR REPLACE TABLE tdig (tid BIGINT, n BIGINT, h1 UBIGINT, h2 UBIGINT)")
+    prog = Progress("drill/fold/long-roots", len(chunks), log)
+    total = 0
+    for k, (ch, a, b, lo, hi) in enumerate(chunks):
+        parts = []
+        base = overlapping(spans, lo, hi) if lo is not None else []
+        if base:
+            parts.append(f"""SELECT t.tid, r.path, r.usr, r.vf, r.vt, r.size, r.n_files FROM ({_roots_sql(base)}) AS r
+                JOIN tup AS t ON t.c0 = r.q WHERE r.q BETWEEN {q(lo)} AND {q(hi)} AND t.tid BETWEEN {a} AND {b}""")
+        spilled = sorted(str(f) for f in runs.glob(f"t*/ch={ch}/*.parquet"))
+        if spilled:
+            parts.append(f"SELECT tid, path, usr, vf, vt, size, n_files FROM read_parquet([{', '.join(q(f) for f in spilled)}], hive_partitioning = false)")
+        if not parts:
+            prog.tick(k, 0)
+            continue
+        con.execute(f"""CREATE OR REPLACE TABLE ct AS SELECT tid, path, usr, vf, min(vt) AS vt, any_value(size) AS size, any_value(n_files) AS n_files
+            FROM ({' UNION ALL '.join(parts)}) GROUP BY tid, path, usr, vf""")
+        con.execute(f"""INSERT INTO tdig SELECT tid, count(*)::BIGINT, (sum({ROW_HASH}) % {U64})::UBIGINT,
+            (sum(hash({ROW_HASH}, 'x')) % {U64})::UBIGINT FROM ct GROUP BY tid""")
+        rows = sl.count(con, "ct")
+        if rows:
+            con.execute(f"COPY ct TO {q(str(troots / f'c{ch:06d}.parquet'))} (FORMAT parquet, COMPRESSION zstd)")
+        total += rows
+        prog.tick(k, rows)
+    con.execute("DROP TABLE IF EXISTS ct")
+    shutil.rmtree(runs, ignore_errors=True)
+    t = step("drill/fold/long-roots", t, tuples=sl.count(con, "tup"), rows=total, chunks=len(chunks))
     con.execute("CREATE OR REPLACE TABLE dgq AS SELECT m.q, d.n, d.h1, d.h2 FROM mtid AS m JOIN tdig AS d USING (tid)")
     con.execute("CREATE OR REPLACE TABLE al AS SELECT q, min(q) OVER (PARTITION BY n, h1, h2) AS canonical FROM dgq")
     missing = con.execute("SELECT count(*) FROM dmem ANTI JOIN al USING (q)").fetchone()[0]
@@ -147,23 +243,49 @@ def fold_drill(con, tiers: list[sd.Tier], out: Path, work: Path, *, R: int, K: i
         raise RuntimeError(f"{missing} members without roots in any tier: the runs' drills don't cover the folded catalog's members")
     aliases = con.execute("SELECT q, canonical FROM al ORDER BY q").to_arrow_table()
     con.execute("CREATE OR REPLACE TABLE canon AS SELECT DISTINCT canonical AS q FROM al")
+    con.execute("CREATE OR REPLACE TABLE ctid AS SELECT c.q, m.tid FROM canon AS c JOIN mtid AS m USING (q)")
     t = step("drill/fold/aliases", t, members=aliases.num_rows, canonical=sl.count(con, "canon"))
-    con.execute(f"""CREATE OR REPLACE TABLE rt AS SELECT c.q, {DEPTH} AS depth, r.path, r.usr, r.vf, r.vt, r.size, r.n_files
-        FROM canon AS c JOIN mtid AS m USING (q) JOIN troots AS r USING (tid)""")
-    long_groups = sl.plan_groups(con, con.execute("SELECT q, count(*)::BIGINT FROM rt GROUP BY q ORDER BY q").fetchall(), chunk_rows)
-    n_long = sl.count(con, "rt")
-    sl.spill_roots(con, "rt", work / "long" / "fold")
-    con.execute("DROP TABLE rt; DROP TABLE troots; DROP TABLE tdig; DROP TABLE mt; DROP TABLE mtid; DROP TABLE tup")
+    long_groups = sl.plan_groups(con, con.execute("SELECT c.q, d.n FROM ctid AS c JOIN tdig AS d USING (tid) ORDER BY c.q").fetchall(), chunk_rows)
+    files = sorted(troots.glob("*.parquet"))
+    prog = Progress("drill/fold/canonical-roots", len(files), log)
+    n_long = 0
+    for k, f in enumerate(files):
+        con.execute(f"""CREATE OR REPLACE TABLE rt AS SELECT c.q, {DEPTH} AS depth, r.path, r.usr, r.vf, r.vt, r.size, r.n_files
+            FROM ctid AS c JOIN read_parquet({q(str(f))}) AS r USING (tid)""")
+        rows = sl.count(con, "rt")
+        if rows:
+            sl.spill_roots(con, "rt", work / "long" / f"fold{k:06d}")
+        n_long += rows
+        prog.tick(k, rows)
+    shutil.rmtree(troots)
+    con.execute("DROP TABLE IF EXISTS rt; DROP TABLE tdig; DROP TABLE ctid; DROP TABLE mt; DROP TABLE mtid; DROP TABLE tup; DROP TABLE tch")
     for i in range(n):
-        con.execute(f"DROP TABLE ta{i}")
+        con.execute(f"DROP TABLE ta{i}; DROP TABLE tc{i}")
     t = step("drill/fold/canonical-roots", t, lcan=n_long, groups=long_groups)
-    parts = [f"SELECT * FROM ({_roots_sql(tr.files('short', 'roots'))})" for tr in tiers]
-    con.execute(f"""CREATE OR REPLACE TABLE rt AS SELECT q, {DEPTH} AS depth, path, usr, vf, min(vt) AS vt, any_value(size) AS size,
-            any_value(n_files) AS n_files FROM ({' UNION ALL '.join(parts)}) GROUP BY q, path, usr, vf""")
-    short_groups = sl.plan_groups(con, con.execute("SELECT q, count(*)::BIGINT FROM rt GROUP BY q ORDER BY q").fetchall(), chunk_rows)
-    n_short = sl.count(con, "rt")
-    sl.spill_roots(con, "rt", work / "short" / "fold")
-    con.execute("DROP TABLE rt")
+    short_files = [tr.files("short", "roots") for tr in tiers]
+    counts = con.execute(f"""SELECT q, sum(n)::BIGINT FROM ({' UNION ALL '.join(f'SELECT q, count(*) AS n FROM ({_roots_sql(fs)}) GROUP BY q' for fs in short_files)})
+        GROUP BY q ORDER BY q""").fetchall()
+    bounds = sl.q_bounds(counts, chunk_rows)
+    short_groups = sl.plan_groups(con, counts, chunk_rows)
+    short_spans = [q_spans(fs) for fs in short_files]
+    prog = Progress("drill/fold/short-roots", len(bounds), log)
+    n_short = 0
+    for g, lo in enumerate(bounds):
+        hi = bounds[g + 1] if g + 1 < len(bounds) else None
+        last = [qq for qq, _ in counts if qq >= lo and (hi is None or qq < hi)]
+        if not last:
+            prog.tick(g, 0)
+            continue
+        where = f"q >= {q(lo)}" + (f" AND q < {q(hi)}" if hi is not None else "")
+        parts = [f"SELECT * FROM ({_roots_sql(fs)}) WHERE {where}" for sp in short_spans if (fs := overlapping(sp, last[0], last[-1]))]
+        con.execute(f"""CREATE OR REPLACE TABLE rt AS SELECT q, {DEPTH} AS depth, path, usr, vf, min(vt) AS vt, any_value(size) AS size,
+                any_value(n_files) AS n_files FROM ({' UNION ALL '.join(parts)}) GROUP BY q, path, usr, vf""")
+        rows = sl.count(con, "rt")
+        if rows:
+            sl.spill_roots(con, "rt", work / "short" / f"fold{g:06d}")
+        n_short += rows
+        prog.tick(g, rows)
+    con.execute("DROP TABLE IF EXISTS rt")
     t = step("drill/fold/short-roots", t, sall=n_short, groups=short_groups)
     done = sl.finish_drill(con, out, work, aliases=aliases, long_groups=long_groups, short_groups=short_groups, R=R, K=K, floor=floor, step=step, t=t)
     return {"members": aliases.num_rows, "canonical": len(set(aliases.column("canonical").to_pylist())), "groups": done["groups"]}
@@ -250,7 +372,8 @@ def fold_gen(gen_dir: Path, out: Path, work: Path, *, gen: str, new_gen: str, ru
     t = done("catalog", t)
     dm = json.loads((gen_dir / "drill" / "meta.json").read_text())
     tiers = [sd.Tier(gen_dir / "drill", "base"), *(sd.Tier(d / "drill", r["key"]) for d, r in zip(run_dirs, runs))]
-    drill = fold_drill(con, tiers, out, work / "drill", R=dm["R"], K=dm["K"], floor=dm.get("floor", sl.FLOOR), chunk_rows=chunk_rows, step=step)
+    drill = fold_drill(con, tiers, out, work / "drill", R=dm["R"], K=dm["K"], floor=dm.get("floor", sl.FLOOR), chunk_rows=chunk_rows, step=step,
+                       log=lambda s: log(f"compact {gen} → {new_gen}: {s}"))
     t = done("drill", t)
     anchors = None
     if (gen_dir / an.ANCHORS / "meta.json").is_file():

@@ -80,11 +80,11 @@ def ready(p: Profile, gen: str | None = None) -> Profile:
 
 
 def job_spec(cfg: Profile, name: str, tasks: int, commands: list[str], *, stage: str, scratch: bool = True, r2: bool = False,
-             machine: str | None = None, ssd_gb: int | None = None, purpose: str = "static-names", component: str | None = None) -> dict:
+             machine: str | None = None, ssd_gb: int | None = None, purpose: str = "static-names", component: str | None = None, long: bool = False) -> dict:
     """`append_runner.job_spec` labelled `purpose` (default `static-names`), its cost `component` the stage's
     (`STAGE_COMPONENTS`, else `static-names`)."""
     return ar.job_spec(cfg, name, tasks, commands, stage=stage, scratch=scratch, r2=r2, machine=machine, ssd_gb=ssd_gb, purpose=purpose,
-                       component=component or STAGE_COMPONENTS.get(stage, "static-names"))
+                       component=component or STAGE_COMPONENTS.get(stage, "static-names"), long=long)
 
 
 def job_id(stage: str, scan_id: str, now: datetime | None = None) -> str:
@@ -129,8 +129,9 @@ class Runner(ar.Runner):
     def drilled(self, runs: list[dict]) -> set[str]:
         return {r["key"] for r in runs if self.exists(f"{self.root}/{r['key']}/drill/meta.json")}
 
-    def merge_job(self, scan: str) -> tuple[str, dict]:
-        return self.job("merge", scan, 1, "static_merge", ["carry", "-g", self.cfg.gen, "-L", level_arg(self.cfg.policy.carry_level), *self.read_args()], r2=self.merge_r2())
+    def merge_job(self, scan: str, long: bool = False) -> tuple[str, dict]:
+        return self.job("merge", scan, 1, "static_merge", ["carry", "-g", self.cfg.gen, "-L", level_arg(self.cfg.policy.carry_level), *self.read_args()], r2=self.merge_r2(),
+                        long=long)
 
     def compact_jobs(self, scan: str) -> list[tuple[str, dict]]:
         r2 = self.merge_r2()

@@ -533,9 +533,9 @@ class Runner(ar.Runner):
     def spec(self, name: str, tasks: int, commands: list[str], *, stage: str, **kw) -> dict:
         return ar.job_spec(self.p, name, tasks, commands, stage=stage, purpose="interval-store", component=COMPONENT, **kw)
 
-    def merge_job(self, scan: str) -> tuple[str, dict]:
+    def merge_job(self, scan: str, long: bool = False) -> tuple[str, dict]:
         return self.job("merge", scan, 1, "interval_append", ["carry", "-L", level_arg(self.p.policy.carry_level), *self.read_args(), *duckdb_args(self.p.machine)],
-                        r2=self.merge_r2())
+                        r2=self.merge_r2(), long=long)
 
     def compact_jobs(self, scan: str) -> list[tuple[str, dict]]:
         r2 = self.merge_r2()

@@ -113,6 +113,10 @@ MAX_RUN_S = 4 * 3600
 #: reclaimed spot task restarts from zero (the static one was reclaimed ~3 h in). No merge lease is held through them.
 LONG_STAGES = ("compact",)
 LONG_RUN_S = 16 * 3600
+#: A merge job whose carries reach this level runs as a long stage (STANDARD, `LONG_RUN_S`), and its lease lives as long:
+#: a carry's inputs double per level (gcs's level-4 carry, 16 scans' runs: 183 min on a spot n2-highmem-16, 2026-10-16),
+#: so level 5's ≈ 6 h outgrows `MAX_RUN_S`, and a reclaimed spot task restarts it from zero.
+LONG_MERGE_LEVEL = 5
 #: The merge status record's name under the generation (`<prefix>/<gen>/merging.json` on R2): `/health` reads it by key.
 #: No reader lists the generation's root (manifests are found under `manifests/`, by name), so it never reads as data.
 MERGE_STATUS = "merging.json"
@@ -421,7 +425,18 @@ def rm_local(root: Path, keys: list[str]) -> None:
 
 
 def lease_stale(held: dict, now: datetime, ttl_s: int) -> bool:
-    return (now - datetime.fromisoformat(held["at"])).total_seconds() > ttl_s
+    """Whether `held` (a lease record) is past its lifetime: its own `ttl_s` (a long merge's), else `ttl_s`."""
+    return (now - datetime.fromisoformat(held["at"])).total_seconds() > held.get("ttl_s", ttl_s)
+
+
+def merge_ttl(merges: list[tuple[list[dict], dict]]) -> int:
+    """A merge job's lease lifetime: `LONG_RUN_S` when its carries reach `LONG_MERGE_LEVEL` (`merge_is_long`), else `LEASE_S`."""
+    return LONG_RUN_S if merge_is_long(merges) else LEASE_S
+
+
+def merge_is_long(merges: list[tuple[list[dict], dict]]) -> bool:
+    """Whether planned carries (`plan_carries`' merges) reach `LONG_MERGE_LEVEL`: the merge job runs as a long stage."""
+    return any(out["level"] >= LONG_MERGE_LEVEL for _, out in merges)
 
 
 class LocalRunStore:
@@ -468,7 +483,7 @@ class LocalRunStore:
         for _ in range(2):
             try:
                 with open(p, "x") as fh:
-                    fh.write(json.dumps({"owner": owner, "at": now.isoformat()}) + "\n")
+                    fh.write(json.dumps({"owner": owner, "at": now.isoformat(), "ttl_s": ttl_s}) + "\n")
                 return None
             except FileExistsError:
                 held = json.loads(p.read_text())
@@ -536,7 +551,7 @@ class GcsRunStore:
         blob = self.sb.blob(f"{self.prefix}/merge.lease.json")
         for _ in range(2):
             try:
-                blob.upload_from_string(json.dumps({"owner": owner, "at": now.isoformat()}) + "\n", if_generation_match=0)
+                blob.upload_from_string(json.dumps({"owner": owner, "at": now.isoformat(), "ttl_s": ttl_s}) + "\n", if_generation_match=0)
                 return None
             except PreconditionFailed:
                 try:
@@ -668,8 +683,9 @@ class StatusMirror:
     (`{inputs, output, level, first, last, scans}`, the first being built), `done` the merged runs published so far
     (`{output, manifest}`), times in epoch s."""
 
-    def __init__(self, sink: MergeStatus | None, owner: str, now: Callable[[], datetime], log: Callable[[str], None], heartbeat_s: float | None = HEARTBEAT_S):
-        self.sink, self.now, self.log, self.heartbeat_s = sink, now, log, heartbeat_s
+    def __init__(self, sink: MergeStatus | None, owner: str, now: Callable[[], datetime], log: Callable[[str], None], heartbeat_s: float | None = HEARTBEAT_S,
+                 lease_s: int = LEASE_S):
+        self.sink, self.now, self.log, self.heartbeat_s, self.lease_s = sink, now, log, heartbeat_s, lease_s
         self.doc: dict | None = None
         self.owner = owner
         self.lock = threading.Lock()
@@ -690,7 +706,7 @@ class StatusMirror:
             self.doc = {
                 "holder": os.environ.get(JOB_NAME_VAR) or self.owner, "owner": self.owner, "state": "merging",
                 "started_ts": self.doc["started_ts"] if self.doc else t, "updated_ts": t,
-                "heartbeat_s": self.heartbeat_s, "lease_s": LEASE_S, "manifest": manifest,
+                "heartbeat_s": self.heartbeat_s, "lease_s": self.lease_s, "manifest": manifest,
                 "merges": [{"inputs": [r["key"] for r in ins], "output": out["key"], "level": out["level"], "first": out["first"], "last": out["last"],
                             "scans": len(out["scans"])} for ins, out in merges],
                 "done": [{"output": d["output"], "manifest": d["manifest"]} for d in done],
@@ -827,7 +843,8 @@ def merge_pending(store: RunStore, carry: Carry, mount: Path, *, tmp: Path, owne
         return {"manifest": cur[0], "plan": [{"inputs": [r["key"] for r in ins], "output": out["key"], "level": out["level"]} for ins, out in merges]}
     scan, _ = parse_manifest(cur[0].removeprefix("manifests/")) or (None, 0)
     rec.start(run_scans(cur[1]["runs"])[-1] if cur[1].get("runs") else scan, getattr(store, "prefix", None) or store.gen)
-    if held := store.lease(owner, now(), LEASE_S):
+    ttl = merge_ttl(plan_carries(cur[1]["runs"], carry.drilled(store, cur[1]["runs"]), max_level)[1])
+    if held := store.lease(owner, now(), ttl):
         log(f"merge: the lease is held ({held}); not merging")
         with phase(rec, "lease") as ph:
             ph.note = f"held by {held.get('owner') if isinstance(held, dict) else held}: not merging"
@@ -835,7 +852,7 @@ def merge_pending(store: RunStore, carry: Carry, mount: Path, *, tmp: Path, owne
     done: list[dict] = []
     running: str | None = None
     names: list[str] = []
-    mirror = StatusMirror(status, owner, now, log, heartbeat_s)
+    mirror = StatusMirror(status, owner, now, log, heartbeat_s, ttl)
     try:
         while max_merges is None or len(done) < max_merges:
             key, m = newest(store)
@@ -920,14 +937,15 @@ def duckdb_args(machine: str) -> list[str]:
 
 
 def job_spec(p: Profile, name: str, tasks: int, commands: list[str], *, stage: str, purpose: str, component: str, scratch: bool = True,
-             r2: bool = False, machine: str | None = None, ssd_gb: int | None = None) -> dict:
+             r2: bool = False, machine: str | None = None, ssd_gb: int | None = None, long: bool = False) -> dict:
     """A Batch job of `tasks` tasks (in parallel) running `commands` (one shell script, `&&`-chained) in the image, the
     data bucket (and `scratch`) mounted read-only under /gcs, a local SSD at /stage. `r2`: as the R2 account, with its
-    credentials from Secret Manager. `purpose` labels the job; `component` is its cost label (`cost_labels`)."""
+    credentials from Secret Manager. `purpose` labels the job; `component` is its cost label (`cost_labels`). `long`: run it as a
+    `LONG_STAGES` stage (STANDARD, `LONG_RUN_S`) whatever its stage (a merge reaching `LONG_MERGE_LEVEL`)."""
     per = getattr(p, "machine_for", None)  # a profile with per-stage overrides (static names); else its one machine
     machine = machine or (per(stage) if per else p.machine)
     vcpus = int(machine.rsplit("-", 1)[-1])
-    long = stage in LONG_STAGES
+    long = long or stage in LONG_STAGES
     spot = p.spot and stage not in p.standard_stages and not long
     buckets = [p.bucket, *([p.scratch] if scratch else [])]
     env = {"STATIC_NAMES_BUCKET": p.bucket, "STATIC_NAMES_SCRATCH": p.scratch}
@@ -1459,8 +1477,9 @@ class Runner:
             stem = keys[-1].rsplit("/", 1)[-1].removesuffix(".json")
             self.r2(parse_manifest(f"{stem}.json")[0], stem)
 
-    def merge_job(self, scan: str) -> tuple[str, dict]:
-        """The merge job (one task: the due carries, each a revision), with the R2 credentials when `merge_r2`."""
+    def merge_job(self, scan: str, long: bool = False) -> tuple[str, dict]:
+        """The merge job (one task: the due carries, each a revision), with the R2 credentials when `merge_r2`; `long`: as a
+        long stage (`merge_is_long`)."""
         raise NotImplementedError
 
     def merge_r2(self) -> bool:
@@ -1571,7 +1590,7 @@ class Runner:
                 self.log(f"merge: compaction due under {policy} ({why}): compact into a new base generation")
             if merges:
                 desc = "; ".join(f"{len(ins)} runs → {out['key']} (level {out['level']})" for ins, out in merges)
-                name, spec = self.merge_job(m["date"])
+                name, spec = self.merge_job(m["date"], long=merge_is_long(merges))
                 # its status record's holder (`StatusMirror`)
                 spec["taskGroups"][0]["taskSpec"]["environment"]["variables"][JOB_NAME_VAR] = name
                 self.record_env(name, spec)
