@@ -81,6 +81,7 @@ options:
     lifecycle: true
     mem: 16GB
   static-names: {profile: /app/job/static-names.json}
+  publish-r2: {barrier: true}
   interval-store: {timeout: 90m, mem: 12GB}
   over-time: {mem: 16GB}
   digest: {template: cw, config: /app/job/digest.yml}

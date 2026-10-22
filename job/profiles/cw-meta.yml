@@ -56,6 +56,7 @@ env:
 pass: [DT_RECORD, DT_ALERTS, DISKY_LABELS]
 labels: {deployment: cw}
 options:
+  publish-r2: {barrier: true}
   index:
     webdata: [python, /app/job/cw-webdata.py, "{web}", "{sources}", -l, our storage, -a, "{date}"]
     mem: 8GB

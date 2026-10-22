@@ -1,5 +1,7 @@
 # cw-sweep — mark & sweep (plan / dry-run / delete on Batch) for cw-s3
 
+**Current policy (2026-10-20):** CW deletion must not require bucket versioning. Versioning retains the data behind TTL deletions and can exhaust the bucket quota. The executor no longer queries or gates on versioning; the `-G` escape hatch is removed. Dry runs remain optional. Real deletion may be permanent, so the UI must not promise recovery. Existing undo/purge commands can still operate on retained versions from historical versioned runs. This supersedes this document's original versioning prerequisite and two-stage safety model below. Atomic ETag preconditions are separate, unfinished work tracked in [delete-preconditions.md](delete-preconditions.md); current execution still checks size and mtime before deleting.
+
 Grow the cw-s3.oa.dev app a `/sweep` page and a mark axis, so an operator can
 mark CoreWeave S3 prefixes for deletion and **fire big deletes on GCP Batch from
 the app** — the sweep subsystem gcs already has, converging onto cw-s3 per the
@@ -338,3 +340,11 @@ Pulumi still declares the D1 database *exists*, wrangler fills its schema.
   may dispatch. Seed it from the Access identity list if convenient.
 - Path-prefix owner rules on cw-s3: worth surfacing as a (non-authoritative)
   owner hint now, or defer until a real W&B/Iris integration?
+
+## Retired staging inputs (2026-10-21)
+
+A staged item's `as_of` scan can outlive its per-scan parquet. `plan-sweep manifest` reconstructs only the selected objects for that cutoff from the interval store, folds closed versions before selecting the historical state, and preserves the original staging date. `-I` / `SWEEP_INTERVAL_STORE` names the review store; CW's active interval store is on R2, independently of the GCS bucket holding plans and run logs. `SWEEP_REVIEW_STORE` and `SWEEP_REVIEW_SECRETS` configure that source on the dispatcher, with separate R2 credential references. Reading a retired input never substitutes a fresh listing for the reviewed snapshot.
+
+The Python reconstruction, ordinary dispatch configuration and stale scan-run reconciliation are deployed. Production Pages deployment `5493e0ef` was explicitly approved on 2026-10-21; its review-store bindings, authenticated status API and exact entry assets were verified live. The authorized cleanup completed using a pinned run-local adapter with the same tested reader and original staging cutoffs. Object-version migration and conditional ETag execution remain local as described in `delete-preconditions.md`; these are separate from the deployed retirement-input repair.
+
+Staged-page follow-up: implemented and tested locally, awaiting production deployment approval. Prefix sizing resolves the current interval-store generation, so retired per-scan files do not break it. Paths display before sizing/history finish. Run statistics and prefix outcomes load independently of run-file browsing, with optional artifact analytics fetched separately. Completed batches retain their original prefixes from the audit trail and can be expanded or linked by fragment. A verified successful run consumes its reviewed staging even when newer objects remain; those stay recorded on the run and require a new review/staging gesture. Shared loading and upstream adoption are described in `staged-review-loading.md`.
