@@ -29,7 +29,7 @@
  * `f = n_children(P) − kept` — objects and dirs alike.
  */
 import type { Env } from './auth.js'
-import { asOfScans, folded, type IndexHandle, isStore, ivHeldDates, ivLastRead, type Lens, openIndex, pathStoreKey, perScan, planRects, slices, planSizeRects, readAsks, readRects, readRows, readRootHistoryRows, readSizeRects, type Rect, type Row, sizeVariant, type Span, TooWide, type Trace, withTrace } from './index.js'
+import { asOfScans, folded, type IndexHandle, isStore, ivHeldDates, ivLastRead, type Lens, openIndex, pathStoreKey, perScan, planRects, slices, planSizeRects, readAsks, readFits, readRects, readRows, readRootHistoryRows, readSizeRects, type Rect, type Row, sizeVariant, type Span, TooWide, type Trace, withTrace } from './index.js'
 import { type FoldedLens, ownerLens, poolLens } from './owners.js'
 import { type ClassScope, classRow, nameFilter, type NamePred, ownerKey, ownerOk, type OwnerScope } from './scope.js'
 import { filterThreshold, looseThreshold, matchRoots, pickTier, rebasedThreshold, rootRects } from './filter.js'
@@ -62,7 +62,7 @@ const COARSE_EXPS = [16, 20, 24]
  * ~1.3M rows from `path`). The two span queries cost ~20 ms. */
 export const SMALL_SUBTREE_ROWS = 0
 /** On the interval store, a subtree with more rows than this (or an unknown count) reads `bysize`
- * without planning `path` (`planSubtree`). */
+ * without planning `path`, unless the size plan exceeds the read budget (`planSubtree`). */
 export const IV_PATH_PLAN_ROWS = 1 << 18
 /** On the interval store, a depth-band read (every rect depth-bounded) takes `path` when its plan holds
  *  at most this many rows (`planSubtree`). */
@@ -438,6 +438,7 @@ async function planSubtree(
 ): Promise<SubtreePlan> {
   const held = (plan: Span[]) => plan.reduce((n, x) => n + (x.rowEnd - x.rowStart), 0)
   const of = (variant: string, plan: Span[], read: SubtreePlan['read']): SubtreePlan => ({ variant, groups: plan.length, rows: held(plan), read })
+  const fromPath = (plan: Span[]) => of(pathIdx.variant, plan, stop => readRects(pathIdx, rects, thrAt, lens, plan, stop))
   // A store generation: plan the read on both sorts (span queries only, no
   // decode) and decode whichever holds fewer rows. The cost of a `path` read
   // is ~one group per depth of the subtree, of a `bysize` read ~one group per
@@ -455,13 +456,16 @@ async function planSubtree(
   // at depth 1: 3 groups against 24). Taken when it holds at most `IV_BAND_ROWS`; past that (a flat
   // directory's children) the size sort is planned too and the one holding fewer rows read.
   if (!pathOnly && pathIdx.asOf != null && (nDesc == null || nDesc > ivPlanRows)) {
-    const pp = !lens && rects.every(q => q.dHi < 1e9) ? await planRects(pathIdx, rects, thrAt) : null
-    if (pp && held(pp) <= IV_BAND_ROWS) return of(pathIdx.variant, pp, stop => readRects(pathIdx, rects, thrAt, lens, pp, stop))
+    let pp = !lens && rects.every(q => q.dHi < 1e9) ? await planRects(pathIdx, rects, thrAt) : null
+    if (pp && held(pp) <= IV_BAND_ROWS) return fromPath(pp)
     const sized = (lens ? await tryOpen(env, date, 'bysize-user') : null) ?? await tryOpen(env, date, 'bysize')
     if (sized) {
       const sh = withTrace(sized, tr)
       const sp = await planSizeRects(sh, rects, thrAt, lens)
-      if (pp && held(pp) < held(sp)) return of(pathIdx.variant, pp, stop => readRects(pathIdx, rects, thrAt, lens, pp, stop))
+      // A tiny subtree can have an unknown row count and a low byte floor: the size sort's
+      // boundary groups then exceed the decode budget though its path range fits easily.
+      if (!readFits(sp) && !pp) pp = await planRects(pathIdx, rects, thrAt, lens)
+      if (pp && (held(pp) < held(sp) || !readFits(sp) && readFits(pp))) return fromPath(pp)
       return of(sized.variant, sp, stop => readSizeRects(sh, rects, thrAt, lens, sp, stop))
     }
   }
