@@ -222,6 +222,7 @@ def _start_rows(tiers: list[Path]) -> dict[str, int]:
 
 
 @pytest.mark.parametrize("stack", ["base", "run1", "run2", "merged"])
+@pytest.mark.slow
 def test_start_catalog_root_equals_brute_force(world, stack):
     """The fleet root of every `^q` prefix of every name, from the starts-with catalog alone (bounds 0): its members are
     exactly the prefixes with more than R rows over the tiers, and each member's per-bucket answer on every scan equals
@@ -283,6 +284,7 @@ def test_start_bound_is_raised():
     assert (an.AnchoredReader([]).start_max_rows, an.AnchoredReader([]).start_max_hits) == (an.START_MAX_ROWS, an.START_MAX_HITS)
 
 
+@pytest.mark.slow
 def test_start_catalog_mutations_fail(world, monkeypatch, tmp_path):
     """The catalog's root fails brute force when the reader ignores the runs' cells, and when the builder's first-hit
     test is the contains literal's (the lowercase parent holds the prefix anywhere, not at a segment's start)."""
@@ -336,6 +338,7 @@ def test_brute_sql_equals_brute_force(world):
         assert {c: v for c, v in got.items() if not an.term_in_path(c[0], c[1])} == {c: v for c, v in want.items() if not an.term_in_path(c[0], c[1])}
 
 
+@pytest.mark.slow
 def test_a_mutated_reader_fails(world, monkeypatch):
     """Mutation checks: a contains-style parent test, a stack that ignores the runs' cells and a largest-`vt` combine
     each make some view differ from brute force."""

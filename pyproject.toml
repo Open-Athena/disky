@@ -65,6 +65,11 @@ dev = [
     "pytest-xdist>=3.6",
 ]
 
+[tool.pytest.ini_options]
+markers = [
+    "slow: the long tail (byte-identity sweeps, brute-force oracles); CI runs them, `scripts/remote-test` skips them unless `-a`",
+]
+
 [tool.uv.workspace]
 # `cloud/` (dt-cloud, the cloud overlay) is a workspace member: ONE lockfile
 # for the engine and the overlay, one environment, so the job images, CI and
