@@ -1030,19 +1030,25 @@ def interval_store(ctx: Ctx, arg: str | None) -> None:
 
 
 def _sync_args(ctx: Ctx) -> list[str]:
-    """Both halves' arguments: the generation, the store, and `options.index-sync.variants` (`-v` each; default every
-    variant the generation holds). A local `data:` dir (the local executor's) is not what the site reads: `-b` names
+    """Both halves' arguments: the generation, the store, `options.index-sync.variants` (`-v` each; default every
+    variant the generation holds) and `options.index-sync.d1_rows: false` (`-R`: the cold footer files and the pointers,
+    no row group in D1; specs/lean-scans.md §1.4). A local `data:` dir (the local executor's) is not what the site reads: `-b` names
     the R2 bucket (`publish-r2` filled it first), where the pointer flip checks the generation is uploaded."""
     site = ["-b", f"r2://{ctx.env['R2_BUCKET']}"] if ctx.profile.data_bucket is None and ctx.has(*R2) else []
     return [*store_args(ctx), *site, "-d", str(ctx.data_root / ctx.index_key), "-g", ctx.gen, "-k", ctx.index_key,
-            *[a for v in ctx.opt("index-sync", "variants", []) for a in ("-v", v)]]
+            *[a for v in ctx.opt("index-sync", "variants", []) for a in ("-v", v)],
+            *([] if ctx.opt("index-sync", "d1_rows", True) else ["-R"])]
 
 
 def _sync_check(p: ScanProfile) -> list[str]:
     from .index_footer import INDEX_VARIANTS
 
+    o = p.opts("index-sync")
     return [f"options.index-sync.variants: {v!r} is not an index variant (one of {', '.join(INDEX_VARIANTS)})"
-            for v in p.opts("index-sync").get("variants", []) if v not in INDEX_VARIANTS]
+            for v in o.get("variants", []) if v not in INDEX_VARIANTS] + (
+        [] if o.get("d1_rows", True) or p.primary else
+        [f"store {p.store}: options.index-sync.d1_rows: false is for the primary store (a secondary store never reads the "
+         "interval store: every read of it would plan from cold footers)"])
 
 
 @step("index-rows", skippable=False, stage="serve", soft=True)
@@ -1056,13 +1062,16 @@ def index_rows(ctx: Ctx, arg: str | None) -> None:
         ctx.sh(["dt-cloud", "index-sync", "-r", *_sync_args(ctx), ctx.scan], fatal=False, warn="index-sync -r failed (the pointer flip will refuse)")
 
 
-@step("index-sync", skippable=False, stage="sync", soft=True, options={"retain": int, "variants": list}, requires=_sync_check)
+@step("index-sync", skippable=False, stage="sync", soft=True, options={"retain": int, "variants": list, "d1_rows": bool},
+      requires=_sync_check)
 def index_sync(ctx: Ctx, arg: str | None) -> None:
     """List the scan: flip its pointers (`index-sync -p`, which checks the rows `index-rows` uploaded), last of the
     serving steps, so a listed scan is whole (searchable, on R2, in the interval store); then drop superseded
     generations' D1 rows (`index-gc <scan>`; `options.index-sync.retain` N: also retire the row groups of every scan
     older than the newest N, read from their cold footer files after, D1's size cap). `options.index-sync.variants`:
-    only those variants, in both halves (`index-rows` reads them here too)."""
+    only those variants, in both halves (`index-rows` reads them here too). `options.index-sync.d1_rows: false`: no
+    row group in D1, in both halves (`-R`), for a primary store whose site reads the interval store
+    (specs/lean-scans.md §1.4)."""
     with ctx.phase("index-sync"):
         if not ctx.has(*CF):
             err("WARN: no CLOUDFLARE_API_TOKEN/ACCOUNT_ID: tiers published but not synced (scan unlisted)")

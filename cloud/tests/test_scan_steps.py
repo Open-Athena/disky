@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -353,6 +354,32 @@ def test_gcs_extra_steps(tmp_path, env, monkeypatch):
         "dt-cloud healthcheck -d 2026-10-16T1200",
         "dt-cloud digest -T gcs -C d.yml -P slack -r gs://dvx/snapshots",
     ]
+
+
+def test_index_sync_without_d1_rows(tmp_path, env, monkeypatch):
+    """`index-sync.d1_rows: false`: both halves pass `-R` (the cold footer files and the pointers, no row group in D1);
+    retention's `index-gc` is unchanged (it retires the rows earlier scans hold)."""
+    c = gcs_ctx(tmp_path, env, monkeypatch, **{"index-sync": {"retain": 30, "d1_rows": False}})
+    c.env.update(CLOUDFLARE_API_TOKEN="cf", CLOUDFLARE_ACCOUNT_ID="acct")
+    S.index_rows(c, None)
+    S.index_sync(c, None)
+    k = "listing/2026-10-16T1200/index/G1"
+    assert c.sh_impl.calls == [
+        f"dt-cloud index-sync -r -d <tmp>/mnt/dvx/{k} -g G1 -k {k} -R 2026-10-16T1200",
+        f"dt-cloud index-sync -p -d <tmp>/mnt/dvx/{k} -g G1 -k {k} -R -M <tmp>/mnt/dvx/snapshots 2026-10-16T1200",
+        "dt-cloud index-gc -r 30 2026-10-16T1200",
+    ]
+    assert S._sync_check(c.profile) == []
+
+
+def test_d1_rows_off_is_for_the_primary(tmp_path, env, monkeypatch):
+    p = gcs_ctx(tmp_path, env, monkeypatch, **{"index-sync": {"d1_rows": False}}).profile
+    assert S._sync_check(replace(p, store="meta")) == [
+        "store meta: options.index-sync.d1_rows: false is for the primary store (a secondary store never reads the "
+        "interval store: every read of it would plan from cold footers)",
+    ]
+    on = gcs_ctx(tmp_path, env, monkeypatch, **{"index-sync": {"d1_rows": True}}).profile
+    assert S._sync_check(replace(on, store="meta")) == []
 
 
 def test_publish_r2_barrier(tmp_path, env, monkeypatch):
