@@ -207,6 +207,7 @@ def world(request, tmp_path_factory):
         # each scan's drill built over them; and the level-0 tiers it built (for the heaviness bound)
         counter: list[tuple[dict, sd.Tier]] = []
         counter_built: list[sd.Tier] = []
+        chunked: list[tuple[Path, Path]] = []
         counter_stacks: dict[int, list[sd.Tier]] = {}
 
         def build(scan: dict, run: Path, cdelta: list[str], over: list[sd.Tier], out: Path, runs: list[Path], deltas: list[list[str]], **kw) -> dict:
@@ -248,6 +249,10 @@ def world(request, tmp_path_factory):
             for ins, m in merges:
                 out = root / "counter" / m["key"] / "drill"
                 sd.merge_tiers(con, [tiers[r["key"]] for r in ins], out, tier={k: m[k] for k in ("key", "first", "last", "level", "scans")})
+                # again in chunks of 2 rows per merged-`q` range (every literal its own range): the same bytes
+                chunked.append((out, root / "chunked" / m["key"] / "drill"))
+                sd.merge_tiers(con, [tiers[r["key"]] for r in ins], chunked[-1][1], tier={k: m[k] for k in ("key", "first", "last", "level", "scans")},
+                               chunk_rows=2)
                 tiers[m["key"]] = sd.Tier(out, m["key"])
             counter = [(r, tiers[r["key"]]) for r in after]
             counter_stacks[j] = [prior[0], *(t for _, t in counter)]
@@ -263,7 +268,18 @@ def world(request, tmp_path_factory):
     finally:
         sr.ROOT_RG, sr.IDX_RG = old_rg, old_idx
     return {"cfg": cfg, "base_out": base["out"], "run_dirs": runs, "scans": scans, "merged": merged, "drills": drills, "base": prior[0], "runs": prior[1:],
-            "counter": counter_stacks, "counter_built": counter_built, "metas": metas, "con": con, "backfill": backfill, "rebuilds": rebuilds}
+            "counter": counter_stacks, "counter_built": counter_built, "metas": metas, "con": con, "backfill": backfill, "rebuilds": rebuilds,
+            "chunked": chunked}
+
+
+def test_chunked_drill_merges_write_the_same_bytes(world):
+    """`merge_tiers` folded per merged-`q` range (`chunk_rows`=2: a range per literal) writes every file of the one-range
+    merge, byte for byte (spec: gcs's 10-22 L3 carry spilled 1.2 TiB folding its inputs in one table)."""
+    assert world["chunked"]
+    for one, two in world["chunked"]:
+        files = sorted(p.relative_to(one).as_posix() for p in one.rglob("*") if p.is_file())
+        assert files == sorted(p.relative_to(two).as_posix() for p in two.rglob("*") if p.is_file())
+        assert [(f, (one / f).read_bytes() == (two / f).read_bytes()) for f in files] == [(f, True) for f in files]
 
 
 # (name, last scan index, tiers, the level-0 tiers they were built from): every run apart, and the binary counter's
