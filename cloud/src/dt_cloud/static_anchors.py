@@ -565,6 +565,27 @@ def probe_prior_rows(
     return queries
 
 
+def prior_dir_counts(con) -> None:
+    """Table `pd(k, lvl, dir, n)`: per `near` (k, lvl, dir), the distinct prior versions (`prows`' `(path, usr, vf)`) under
+    `dir` (every one for `''`).
+
+    A version's rows in several tiers count once, and only its identity is read (cw's 10-20 18:06 scan: 401M prior rows,
+    367M versions; a dedup carrying every column peaked at 180 GB, 324 GB spilled). Each near counts the versions under
+    it as a difference of per-key running counts at `dir/` and `dir0` (ASOF), not by expanding every version into each
+    of its ancestors (rows × depth)."""
+    con.execute("CREATE OR REPLACE TABLE pv AS SELECT k, path, count(DISTINCT (usr, vf))::BIGINT AS n FROM prows GROUP BY k, path")
+    con.execute("CREATE OR REPLACE TABLE pvt AS SELECT k, sum(n)::BIGINT AS n FROM pv GROUP BY k")
+    con.execute("CREATE OR REPLACE TABLE pvc AS SELECT k, path, sum(n) OVER (PARTITION BY k ORDER BY path)::BIGINT AS cum FROM pv")
+    con.execute("DROP TABLE pv")
+    con.execute("""CREATE OR REPLACE TABLE pd AS SELECT near.k, near.lvl, near.dir,
+            (CASE WHEN near.dir = '' THEN coalesce(t.n, 0) ELSE coalesce(hi.cum, 0) - coalesce(lo.cum, 0) END)::BIGINT AS n
+        FROM near LEFT JOIN pvt AS t USING (k)
+        ASOF LEFT JOIN pvc AS hi ON near.k = hi.k AND near.dir || '0' > hi.path
+        ASOF LEFT JOIN pvc AS lo ON near.k = lo.k AND near.dir || '/' > lo.path""")
+    for t in ("pvt", "pvc"):
+        con.execute(f"DROP TABLE {t}")
+
+
 def near_candidates(con, R: int) -> None:
     """Bound each candidate by overlapping groups, without enumerating their cross product.
 
@@ -651,13 +672,8 @@ def run_rollups(con, prior: list[Tier], run: Tier, D: int, mode: str, R: int, K:
     near_rows = con.execute("SELECT count(*) FROM near").fetchone()[0]
     err(f"anchors {mode}: near {near_rows:,} (k, dir) over {doc['probes']:,} keys; prior rows {doc['probe_rows']:,}")
     resource_stage(f"anchors {mode}: prior versions", near=near_rows, probe_rows=doc["probe_rows"])
-    # A version's rows in several tiers count once: only its identity (and depth, a function of its path) is needed for
-    # the counts, so the dedup carries none of the row's other columns (cw's 10-20 18:06 scan: `pv` with every column
-    # held ~100 GB). The newly heavy keys' full rows are folded below, over just their prior rows.
-    con.execute("CREATE OR REPLACE TABLE pv AS SELECT DISTINCT k, depth, path, usr, vf FROM prows")
-    con.execute(f"""CREATE OR REPLACE TABLE pd AS SELECT x.k, x.lvl, x.dir, count(*)::BIGINT AS n FROM ({_level_dirs('pv')}) AS x
-        SEMI JOIN near USING (k, lvl, dir) GROUP BY ALL""")
-    con.execute("DROP TABLE pv")
+    # the newly heavy keys' full rows are folded below, over just their prior rows
+    prior_dir_counts(con)
     con.execute(f"""CREATE OR REPLACE TABLE nh AS SELECT near.k, near.lvl, near.dir, near.n + coalesce(pd.n, 0) AS rows FROM near
         LEFT JOIN pd USING (k, lvl, dir) WHERE near.n + coalesce(pd.n, 0) > {R}""")
     doc["new_heavy"] = con.execute("SELECT count(*) FROM nh").fetchone()[0]

@@ -133,3 +133,27 @@ def test_tier_reads_each_immutable_shard_plan_once(monkeypatch, tmp_path):
     assert [tier.shard_file('end', key) for key in keys] == expected
     assert [tier.shard_file('end', key) for key in keys] == expected
     assert reads == [plan]
+
+
+def test_prior_dir_counts_match_the_ancestor_expansion():
+    """`pd` by running counts equals counting each distinct version at each of its ancestors (`_level_dirs`), including
+    a version listed by two tiers, a sibling sharing a prefix (`a/b` vs `a/bc`), and a near with no versions under it."""
+    con = duckdb.connect()
+    con.execute("CREATE TABLE prows (k VARCHAR, depth INTEGER, path VARCHAR, usr VARCHAR, vf BIGINT)")
+    con.execute("""INSERT INTO prows VALUES
+        ('q', 3, 'a/b/x', '', 1), ('q', 3, 'a/b/x', '', 1), ('q', 3, 'a/b/x', '', 2), ('q', 3, 'a/b/y', 'u', 1),
+        ('q', 3, 'a/bc/z', '', 1), ('q', 2, 'a/w', '', 1), ('q', 3, 'c/d/e', '', 1), ('r', 2, 'a/b', '', 1)""")
+    con.execute("CREATE TABLE near (k VARCHAR, lvl INTEGER, dir VARCHAR, n BIGINT)")
+    con.execute("""INSERT INTO near VALUES ('q', 0, '', 1), ('q', 1, 'a', 1), ('q', 2, 'a/b', 1), ('q', 2, 'a/bc', 1),
+        ('q', 1, 'c', 1), ('q', 1, 'z', 1), ('r', 1, 'a', 1), ('s', 0, '', 1)""")
+    an.prior_dir_counts(con)
+    got = con.execute("SELECT k, lvl, dir, n FROM pd ORDER BY k, lvl, dir").fetchall()
+    con.execute("CREATE TABLE pvx AS SELECT DISTINCT k, depth, path, usr, vf FROM prows")
+    want = dict(((k, lvl, d), n) for k, lvl, d, n in con.execute(f"""SELECT x.k, x.lvl, x.dir, count(*) FROM ({an._level_dirs('pvx')}) AS x
+        SEMI JOIN near USING (k, lvl, dir) GROUP BY ALL""").fetchall())
+    assert got == [
+        ("q", 0, "", 6), ("q", 1, "a", 5), ("q", 1, "c", 1), ("q", 1, "z", 0), ("q", 2, "a/b", 3), ("q", 2, "a/bc", 1),
+        ("r", 1, "a", 1), ("s", 0, "", 0),
+    ]
+    assert [(k, lvl, d, want.get((k, lvl, d), 0)) for k, lvl, d, _ in got] == got
+
