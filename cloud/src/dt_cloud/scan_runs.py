@@ -807,8 +807,13 @@ def recovery_record(
     job: Mapping,
     now: int,
     note: str | None = None,
+    shared: bool = False,
 ) -> Record:
-    """Attach one completed Batch attempt, preserving the parent's failed phase and clock."""
+    """Attach a completed Batch attempt without rewriting the failed phase.
+
+    A shared attempt repairs multiple scans/phases: each relationship has its
+    own stable id, the same provider job link, and no duplicated cost estimate.
+    """
     from .scan_runs_backfill import BATCH_STATES, failure_of
 
     row, phases = stored(sink, parent)
@@ -824,7 +829,9 @@ def recovery_record(
     start, end = jf["started_ts"], jf["finished_ts"]
     if start is None or end is None or end < start or (original["finished_ts"] is not None and end <= original["finished_ts"]):
         raise ValueError("scan-run recovery: missing or invalid Batch attempt times")
-    uid = job["uid"]
+    uid = f"{job['uid']}/{parent}/{phase}" if shared else job["uid"]
+    if shared:
+        jf["cost_usd"] = None
     existing, existing_phases = stored(sink, uid)
     if existing and (existing["parent"], existing["scan"], existing["store"], existing["kind"], [p["phase"] for p in existing_phases]) != (
         parent, row["scan"], profile.store, "phase-recovery", [phase],
@@ -1066,6 +1073,7 @@ def report_failure(e: BaseException) -> None:
 
 
 @cli.command("recovery")
+@option("-a", "--shared-attempt", is_flag=True, help="This completed job repaired multiple scans/phases; record a stable relationship per parent/phase without duplicating its cost")
 @option("-c", "--profile", "profile_path", default=None, help=f"Deployment profile (default ${PROFILE_ENV})")
 @option("-d", "--d1", default=None, help="D1 database id (default $D1_DB_ID)")
 @option("-J", "--job", "job_name", required=True, help="Completed Batch job: its UID, times, status and links are read from Batch")
@@ -1076,6 +1084,7 @@ def report_failure(e: BaseException) -> None:
 @option("-R", "--region", required=True, help="Batch job region")
 @option("-s", "--sqlite", default=None, help="Use a local scan-run SQLite database instead of D1")
 def recovery_cmd(
+    shared_attempt: bool,
     profile_path: str | None,
     d1: str | None,
     job_name: str,
@@ -1094,7 +1103,7 @@ def recovery_cmd(
     profile = load_profile(profile_path)
     sink = sink_for(False, sqlite, d1)
     now = int(time.time())
-    rec = recovery_record(sink, profile, parent, phase, batch_job(job_name, profile.project, region), now, note)
+    rec = recovery_record(sink, profile, parent, phase, batch_job(job_name, profile.project, region), now, note, shared=shared_attempt)
     write_all(PrintSink() if dry_run else sink, [rec], now)
     err(f"scan-run recovery: {rec.run.run_id} {rec.run.status} · {parent} / {phase}")
 
