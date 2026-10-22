@@ -395,6 +395,7 @@ VIEW_STACKS = [s for s in STACKS if s[0] not in ("runs1-2", "runs1-3")]
 
 
 @pytest.mark.parametrize("stack", VIEW_STACKS, ids=[s[0] for s in VIEW_STACKS])
+@pytest.mark.slow
 def test_views_equal_brute_force(world, stack):
     """Every member's filtered view at every directory on every date, read over base ⊕ runs as the Worker reads it: a roots
     answer is brute force child for child; a rollup's kept children are brute force and its remainder the rest. Where the
@@ -441,6 +442,7 @@ def _as_children(v: dict, d: str) -> tuple[dict[str, list[int]], list[int]]:
 
 
 @pytest.mark.parametrize("j", range(BASE + 1, len(DAYS)), ids=lambda j: f"scan{j - BASE + 1}")
+@pytest.mark.slow
 def test_counter_reads_as_separate_runs(world, j):
     """`publish`'s merges change no answer: base ⊕ the binary counter's runs (merged by `merge_tiers`, later scans built
     over the merged ones) answers every member's view at every directory on every date as base ⊕ every run apart. Where
@@ -834,6 +836,7 @@ def _tables(con) -> set[str]:
 
 
 @pytest.mark.parametrize("i", range(len(DAYS) - BASE), ids=lambda i: f"run{i + 1}")
+@pytest.mark.slow
 def test_an_interrupted_build_resumes_to_the_same_bytes(world, run_rg, tmp_path, monkeypatch, i):
     """A checkpointed build (every loop item's part saved) writes the files of an uncheckpointed one, byte for byte;
     interrupted right after each of its saves (its connection's new tables and its output dir lost, as a reclaimed task's
