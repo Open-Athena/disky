@@ -24,7 +24,8 @@ const routes = (): string[] =>
 describe('index readers', () => {
   it('every route reading the path index wraps its env with `withPathStore`, or is a listed exception', () => {
     const readers = routes().filter(r => READERS.test(readFileSync(ROOT + r, 'utf8')))
-    const missing = readers.filter(r => !readFileSync(ROOT + r, 'utf8').includes('withPathStore'))
+    // `matchQuery` (`_lib/matchQuery.ts`, the name-filter routes' front half) wraps with it
+    const missing = readers.filter(r => !/\bwithPathStore\b|\bmatchQuery\b/.test(readFileSync(ROOT + r, 'utf8')))
     expect(missing).toEqual(Object.keys(EXCEPTIONS).sort())
   })
 })
