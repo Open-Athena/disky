@@ -191,7 +191,7 @@ def run_scans(gen_dir: Path, gen: str, runs: list[dict]) -> list[dict]:
 
 def fold_gen(gen_dir: Path, out: Path, work: Path, *, gen: str, runs: list[dict], rg_rows: int = ist.SERVED_RG, threads: int = 4,
              mem: str = "4GB", jobs: int = 1, fill: Fill | None = None, on_range: Callable[[int, int], None] | None = None,
-             ) -> tuple[dict, dict, dict, dict]:
+             progress: Callable[..., None] | None = None) -> tuple[dict, dict, dict, dict]:
     """The generation `gen` (its base in `gen_dir` and the runs `runs`) folded into a new one in `out`: its range files
     (`compact_range` over the old `ranges.json`), served sorts and churn (`interval_store.cut_gen`), and `scans.json`
     (the base's, every run scan's entry; `GENERATION` recorded when the result carries it). With `fill`, the result
@@ -199,8 +199,9 @@ def fold_gen(gen_dir: Path, out: Path, work: Path, *, gen: str, runs: list[dict]
     of one DuckDB database, `threads` and `mem` shared): each ends in a serial pyarrow writer, the bulk of a range's
     time; the output's bytes don't depend on it. Logs a line per range as it ends (`i/k`, its rows, seconds, how many
     are done) and around the served sorts' cut: an hour of silence on gcs read as a hang. `on_range(i, k)` after each
-    range (a caller's heartbeat; in completion order, one call at a time). Returns `(scans.json, rows per table, sorts,
-    stats)`."""
+    range (a caller's heartbeat; in completion order, one call at a time). `progress(note[, next_phase])`: the run
+    record's hook (`append_runner.compact_store`): each range's `i/k` note, then the ranges' total with `next_phase`
+    `sorts` as the served sorts' cut begins. Returns `(scans.json, rows per table, sorts, stats)`."""
     base = json.loads((gen_dir / "scans.json").read_text())
     sliced = ist.sliced(base)
     generation = ist.has_generation(base) or fill is not None
@@ -226,6 +227,8 @@ def fold_gen(gen_dir: Path, out: Path, work: Path, *, gen: str, runs: list[dict]
                 f"({done[0]}/{k} done, {monotonic() - t_all:.0f}s so far)")
             if on_range is not None:
                 on_range(i, k)
+            if progress is not None:
+                progress(f"{done[0]}/{k} ranges in {monotonic() - t_all:.0f}s")
         return got
 
     rows: dict[str, int] = {}
@@ -234,6 +237,8 @@ def fold_gen(gen_dir: Path, out: Path, work: Path, *, gen: str, runs: list[dict]
             rows[t] = rows.get(t, 0) + n
     t0 = monotonic()
     err(f"fold {gen}: {k} ranges, {sum(rows.values()):,} rows in {monotonic() - t_all:.0f}s; cutting the served sorts")
+    if progress is not None:
+        progress(f"{k} ranges, {sum(rows.values()):,} rows in {monotonic() - t_all:.0f}s", "sorts")
     sorts, stats = ist.cut_gen(con, out, doc, rg_rows=rg_rows, jobs=jobs)
     err(f"fold {gen}: served sorts cut in {monotonic() - t0:.0f}s")
     (out / "scans.json").write_text(json.dumps(doc, indent=1) + "\n")
@@ -261,13 +266,13 @@ def compact_gen(gen_dir: Path, out: Path, work: Path, *, gen: str, new_gen: str,
 
 
 def fold(gen_dir: Path, out: Path, work: Path, *, gen: str, new_gen: str, runs: list[dict], rg_rows: int = ist.SERVED_RG, threads: int = 4,
-         mem: str = "4GB", jobs: int = 1) -> dict:
+         mem: str = "4GB", jobs: int = 1, progress: Callable[..., None] | None = None) -> dict:
     """`append_runner.Compactor.fold` for the interval store: `fold_gen` (refusing a generation without its own
-    `ranges.json`). Returns `{scans, rows, sorts, versions}`."""
+    `ranges.json`; `progress` its run-record hook). Returns `{scans, rows, sorts, versions}`."""
     if not (gen_dir / "ranges.json").is_file():
         raise SystemExit(f"{gen}: no ranges.json: a staged build's generation borrowing its ranges and base from another "
                          f"(its `ranges_gen`) can't be compacted in place; backfill-generation -R makes a self-contained one")
-    doc, rows, sorts, stats = fold_gen(gen_dir, out, work, gen=gen, runs=runs, rg_rows=rg_rows, threads=threads, mem=mem, jobs=jobs)
+    doc, rows, sorts, stats = fold_gen(gen_dir, out, work, gen=gen, runs=runs, rg_rows=rg_rows, threads=threads, mem=mem, jobs=jobs, progress=progress)
     err(f"compact {gen} → {new_gen}: {len(runs)} runs and the base, {len(doc['scans'])} scans, {stats['versions']:,} versions")
     return {"scans": len(doc["scans"]), "rows": rows, "sorts": sorts, "versions": stats["versions"]}
 

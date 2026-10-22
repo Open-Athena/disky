@@ -44,6 +44,7 @@ from .append_runner import (  # noqa: F401 — the shared names, as this module 
     plan_carries,
     rebase,
 )
+from .maint_runs import NULL, from_env
 from .static_names import PREFIX, connect, err
 from .static_profile import data_bucket, scratch_bucket
 
@@ -204,10 +205,10 @@ def publish_revision(store: RunStore, inputs: list[str], out: dict, *, attempts:
 def merge_pending(store: RunStore, mount: Path, *, tmp: Path, rule=None, jobs: int = 1, owner: str | None = None, dry_run: bool = False,
                   max_merges: int | None = None, max_level: int | None = None, now: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
                   build: Callable[..., dict] = build_merged_run, status: ar.MergeStatus | None = None, heartbeat_s: float | None = ar.HEARTBEAT_S,
-                  log: Callable[[str], None] = err, source=None) -> dict:
+                  log: Callable[[str], None] = err, source=None, rec=None) -> dict:
     """The newest manifest's due carries (`append_runner.merge_pending`) with the static store's merged-run `build`."""
     return ar.merge_pending(store, carry(rule, jobs, build), mount, tmp=tmp, owner=owner, dry_run=dry_run, max_merges=max_merges,
-                            max_level=max_level, now=now, status=status, heartbeat_s=heartbeat_s, log=log, source=source)
+                            max_level=max_level, now=now, status=status, heartbeat_s=heartbeat_s, log=log, source=source, rec=rec)
 
 
 # ── Backfilling a merged run's tier ────────────────────────────────────────
@@ -289,10 +290,11 @@ def carry_cmd(bucket, read_from, gen, jobs, compact_level, mount, max_merges, dr
 
     store = gcs_store(bucket, scratch, gen)
     status = None if dry_run else ar.r2_merge_status(f"{PREFIX}/{gen}")
+    rec = NULL if dry_run else from_env("merge")
     doc = merge_pending(store, Path(mount) / PREFIX / gen, tmp=Path(tmp), rule=gen_rule_at(bucket, gen), jobs=jobs, dry_run=dry_run,
                         max_merges=max_merges, max_level=compact_level, status=status,
-                        source=(ar.R2Source(), f"{PREFIX}/{gen}") if read_from == "r2" else None)
-    doc["prune"] = _summary(ar.prune_folded(store, retain=FOLDED_RETAIN, dry_run=dry_run, where=" gcs"))
+                        source=(ar.R2Source(), f"{PREFIX}/{gen}") if read_from == "r2" else None, rec=rec)
+    doc["prune"] = _summary(ar.finish_merge(rec, doc, lambda: ar.prune_folded(store, retain=FOLDED_RETAIN, dry_run=dry_run, where=" gcs")))
     print(json.dumps(doc, indent=1))
 
 
@@ -314,7 +316,8 @@ def compact_cmd(bucket, chunk_rows, gen, policy, read_from, grace_s, jobs, force
     from .static_compact import compactor
 
     doc = ar.run_compaction(Store(f"gs://{bucket}"), compactor(chunk_rows), gen, Path(mount), Path(tmp), policy=policy, force=force,
-                            r2_bucket=bucket if to_r2 else None, grace_s=grace_s, threads=threads, mem=mem, jobs=jobs, read_from=read_from)
+                            r2_bucket=bucket if to_r2 else None, grace_s=grace_s, threads=threads, mem=mem, jobs=jobs, read_from=read_from,
+                            rec=from_env("compact"))
     print(json.dumps(doc, indent=1))
 
 

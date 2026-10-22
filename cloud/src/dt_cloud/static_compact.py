@@ -188,10 +188,11 @@ def run_scans(gen_dir: Path, gen: str, runs: list[dict]) -> list[dict]:
 
 
 def fold_gen(gen_dir: Path, out: Path, work: Path, *, gen: str, new_gen: str, runs: list[dict], threads: int = 4, mem: str = "4GB",
-             chunk_rows: int = sl.CHUNK_ROWS, log: Callable[[str], None] = err) -> dict:
+             chunk_rows: int = sl.CHUNK_ROWS, log: Callable[[str], None] = err, progress: Callable[..., None] | None = None) -> dict:
     """Generation `gen` (its base in `gen_dir`, the runs `runs`: the newest manifest's, oldest first) folded into `new_gen`
     in `out` (every part but `compaction.json`); its `manifests/<last>.json` lists no runs. Returns a summary (rows, and
-    per part its seconds, peak work-disk GiB and peak RSS GiB)."""
+    per part its seconds, peak work-disk GiB and peak RSS GiB). `progress(note)`: the run record's hook
+    (`append_runner.compact_store`), the parts done so far as each ends."""
     t0, times, peaks = monotonic(), {}, {}
     if not runs:
         raise SystemExit(f"{gen}: no runs to compact")
@@ -213,6 +214,8 @@ def fold_gen(gen_dir: Path, out: Path, work: Path, *, gen: str, new_gen: str, ru
         times[part] = round(monotonic() - t, 1)
         peaks[part] = {"disk_gb": disk.take(), "rss_gb": sl.rss_peak_gb()}
         log(f"compact {gen} → {new_gen}: {part} in {times[part]}s (work disk peak {peaks[part]['disk_gb']} GiB, RSS peak {peaks[part]['rss_gb']} GiB)")
+        if progress is not None:
+            progress("; ".join(f"{p} {s}s (disk {peaks[p]['disk_gb']} GiB, RSS {peaks[p]['rss_gb']} GiB)" for p, s in times.items()))
         return monotonic()
 
     def step(name: str, t: float, **counts: int) -> float:
@@ -265,9 +268,9 @@ def fold_gen(gen_dir: Path, out: Path, work: Path, *, gen: str, new_gen: str, ru
 
 
 def fold(gen_dir: Path, out: Path, work: Path, *, gen: str, new_gen: str, runs: list[dict], threads: int = 4, mem: str = "4GB",
-         chunk_rows: int = sl.CHUNK_ROWS, jobs: int = 1) -> dict:
+         chunk_rows: int = sl.CHUNK_ROWS, jobs: int = 1, progress: Callable[..., None] | None = None) -> dict:
     """`append_runner.Compactor.fold` for the static store (`fold_gen`; `jobs` unused: one range at a time)."""
-    return fold_gen(gen_dir, out, work, gen=gen, new_gen=new_gen, runs=runs, threads=threads, mem=mem, chunk_rows=chunk_rows)
+    return fold_gen(gen_dir, out, work, gen=gen, new_gen=new_gen, runs=runs, threads=threads, mem=mem, chunk_rows=chunk_rows, progress=progress)
 
 
 def compactor(chunk_rows: int = sl.CHUNK_ROWS) -> ar.Compactor:
