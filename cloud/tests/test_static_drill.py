@@ -58,6 +58,38 @@ def test_state_writer_streams_with_the_same_parquet_bytes(tmp_path, monkeypatch,
     actual = tmp_path / "out/state/dcount-long.parquet"
     assert actual.read_bytes() == expected.read_bytes()
     assert pq.read_table(actual).to_pylist() == [{"q": "q", "dir": f"dir/{i:03d}", "rows": i} for i in range(n)]
+
+
+@pytest.mark.parametrize("file_rows", [1, 7, 1000])
+def test_writing_sorted_chunks_writes_the_same_bytes(tmp_path, file_rows):
+    """`write_kind` over `merge_tiers`' folded ranges (files each sorted, `q`-disjoint, in `q` order) streams them: the same
+    files and index as sorting their union, with files cut inside, at and across the ranges."""
+    con = sn.connect(2, "256MB", tmp_path / "spill")
+    rnd = random.Random(7)
+    lits = ["a", "ab", "b", "bé", "c", "d'x", "e"]
+    roots = [(lit, rnd.randrange(4), f"p/{rnd.randrange(30):02d}", rnd.choice(["u1", "u2"]), vf, vf + rnd.randrange(1, 9), rnd.randrange(1 << 40), rnd.randrange(1, 99))
+             for lit in lits for vf in rnd.sample(range(100), rnd.randrange(1, 12))]
+    rollups = [(lit, f"d/{d}", kind, f"c{c}", vf, rnd.randrange(1 << 30), rnd.randrange(99))
+               for lit in lits for d in range(rnd.randrange(1, 4)) for kind, c, vf in {(rnd.randrange(3), rnd.randrange(3), rnd.randrange(50)) for _ in range(5)}]
+    con.execute("CREATE TABLE dr (q VARCHAR, depth UTINYINT, path VARCHAR, usr VARCHAR, vf BIGINT, vt BIGINT, size BIGINT, n_files BIGINT)")
+    con.executemany("INSERT INTO dr VALUES (?, ?, ?, ?, ?, ?, ?, ?)", roots)
+    con.execute("CREATE TABLE dr1 AS SELECT q, any_value(depth) AS depth, path, usr, vf, min(vt) AS vt, any_value(size) AS size, any_value(n_files) AS n_files FROM dr GROUP BY q, path, usr, vf")
+    con.execute("CREATE TABLE rup (q VARCHAR, dir VARCHAR, kind TINYINT, child VARCHAR, vf BIGINT, b BIGINT, o BIGINT)")
+    con.executemany("INSERT INTO rup VALUES (?, ?, ?, ?, ?, ?, ?)", rollups)
+    chunks = {"roots": [], "rollups": []}
+    for k, (lo, hi) in enumerate([("a", "b"), ("b", "c"), ("c", "e"), ("e", None)]):
+        where = f"q >= '{lo}'" + (f" AND q < '{hi}'" if hi else "")
+        for table, d, order in (("dr1", "roots", "q, path, usr, vf"), ("rup", "rollups", "q, dir, kind, child, vf")):
+            f = tmp_path / "folded" / d / f"c{k:06d}.parquet"
+            f.parent.mkdir(parents=True, exist_ok=True)
+            con.execute(f"COPY (SELECT * FROM {table} WHERE {where} ORDER BY {order}) TO '{f}' (FORMAT parquet, COMPRESSION zstd)")
+            chunks[d].append(f)
+    sorted_doc = sd.write_kind(con, tmp_path / "sorted", "long", roots="dr1", rollups="rup", file_rows=file_rows, rg=3)
+    chunk_doc = sd.write_kind(con, tmp_path / "chunks", "long", file_rows=file_rows, rg=3, chunks=chunks)
+    assert chunk_doc == sorted_doc
+    files = sorted(p.relative_to(tmp_path / "sorted").as_posix() for p in (tmp_path / "sorted").rglob("*") if p.is_file())
+    assert sorted(p.relative_to(tmp_path / "chunks").as_posix() for p in (tmp_path / "chunks").rglob("*") if p.is_file()) == files
+    assert [(f, (tmp_path / "sorted" / f).read_bytes() == (tmp_path / "chunks" / f).read_bytes()) for f in files] == [(f, True) for f in files]
     con.close()
 
 

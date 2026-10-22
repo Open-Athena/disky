@@ -1643,8 +1643,13 @@ def _restate(ctx, c, d, D, keep, ks, ot, leaving, b_rows, o_new, reads) -> list[
 
 def _cut(con, table: str, file_rows: int) -> list[tuple[str | None, str | None]]:
     """`table`'s `q` ranges `[lo, hi)` of about `file_rows` rows each, cut at `q` boundaries."""
+    return _cut_counts(con.execute(f"SELECT q, count(*) FROM {table} GROUP BY q ORDER BY q").fetchall(), file_rows)
+
+
+def _cut_counts(counts, file_rows: int) -> list[tuple[str | None, str | None]]:
+    """`_cut` over `counts` `(q, rows)` in `q` order."""
     bounds, n = [None], 0
-    for qq, c in con.execute(f"SELECT q, count(*) FROM {table} GROUP BY q ORDER BY q").fetchall():
+    for qq, c in counts:
         if n >= file_rows:
             bounds.append(qq)
             n = 0
@@ -1654,18 +1659,60 @@ def _cut(con, table: str, file_rows: int) -> list[tuple[str | None, str | None]]
     return list(zip(bounds, [*bounds[1:], None]))
 
 
-def write_kind(con, out: Path, kind: str, roots: str = "dr", rollups: str = "rup", file_rows: int = FILE_ROWS, rg: int | None = None) -> dict:
+def _sorted_chunks(con, files: list[Path]) -> tuple[list[tuple[str, int]], list[tuple[Path, str, str]]]:
+    """Files each sorted, `q`-disjoint and in `q` order (`merge_tiers`' folded ranges): their `(q, rows)` in `q` order, and
+    each file with its first and last `q`."""
+    counts, spans = [], []
+    for f in files:
+        got = con.execute(f"SELECT q, count(*) FROM read_parquet({q(str(f))}) GROUP BY q ORDER BY q").fetchall()
+        if got:
+            counts += got
+            spans.append((f, got[0][0], got[-1][0]))
+    return counts, spans
+
+
+def _chunk_batches(spans: list[tuple[Path, str, str]], names: list[str], lo: str | None, hi: str | None, size: int = 1 << 17):
+    """The rows in `q` range `[lo, hi)` of `spans` (`_sorted_chunks`'), in file order: already in order, so read, not sorted."""
+    for f, first, last in spans:
+        if (hi is not None and first >= hi) or (lo is not None and last < lo):
+            continue
+        whole = (lo is None or first >= lo) and (hi is None or last < hi)
+        for b in pq.ParquetFile(f).iter_batches(batch_size=size, columns=names):
+            b = pa.RecordBatch.from_arrays([b.column(c) for c in names], names=names)
+            if not whole:
+                qc = b.column("q")
+                mask = (and_(greater_equal(qc, lo), less(qc, hi)) if lo is not None and hi is not None
+                        else greater_equal(qc, lo) if lo is not None else less(qc, hi))
+                b = b.filter(mask)
+            if b.num_rows:
+                yield b
+
+
+def write_kind(con, out: Path, kind: str, roots: str = "dr", rollups: str = "rup", file_rows: int = FILE_ROWS, rg: int | None = None,
+               chunks: dict[str, list[Path]] | None = None) -> dict:
     """Tables `roots` (`ROOT_COLS`) and `rollups` (`ROLLUP_COLS`) → `out/<kind>/{roots,rollups}/r####.parquet` (sorted, `ROOT_RG`-row
-    groups, files cut at `q` boundaries) and the two-level indexes `out/<kind>-{roots,rollups}-index{,.top}.parquet`."""
+    groups, files cut at `q` boundaries) and the two-level indexes `out/<kind>-{roots,rollups}-index{,.top}.parquet`.
+    `chunks` `{sub: files}`: a sub's rows as files already in its order, `q`-disjoint and in `q` order (`merge_tiers`' folded
+    ranges), streamed in turn instead of sorted again (gcs's 10-22 L3 carry: 69 of its drill's 185 min in this sort); the
+    same bytes."""
     doc = {}
     for sub, table, order, schema, key, dic in (("roots", roots, "q, path, usr, vf", sr.ROOT_SCHEMA, "path", ["q", "usr"]),
                                                ("rollups", rollups, "q, dir, kind, child, vf", sr.ROLLUP_SCHEMA, "dir", ["q", "dir", "child"])):
         cols = ", ".join(schema.names)
         idx, rows, nbytes = [], 0, 0
-        for i, (lo, hi) in enumerate(_cut(con, table, file_rows)):
-            where = " AND ".join(x for x in (f"q >= {q(lo)}" if lo is not None else "", f"q < {q(hi)}" if hi is not None else "") if x) or "true"
+        if chunks is not None and sub in chunks:
+            counts, spans = _sorted_chunks(con, chunks[sub])
+            cuts = _cut_counts(counts, file_rows)
+        else:
+            cuts = _cut(con, table, file_rows)
+        for i, (lo, hi) in enumerate(cuts):
             name = f"{kind}/{sub}/r{i:04d}.parquet"
-            n, t = sr.write_indexed(_batches(con, f"SELECT {cols} FROM {table} WHERE {where} ORDER BY {order}"), out / name, schema, key, name, dic, rg)
+            if chunks is not None and sub in chunks:
+                batches = _chunk_batches(spans, schema.names, lo, hi)
+            else:
+                where = " AND ".join(x for x in (f"q >= {q(lo)}" if lo is not None else "", f"q < {q(hi)}" if hi is not None else "") if x) or "true"
+                batches = _batches(con, f"SELECT {cols} FROM {table} WHERE {where} ORDER BY {order}")
+            n, t = sr.write_indexed(batches, out / name, schema, key, name, dic, rg)
             rows += n
             nbytes += (out / name).stat().st_size
             idx.append(t)
@@ -1962,17 +2009,13 @@ def merge_tiers(con, tiers: list[Tier], out: Path, tier: dict, file_rows: int = 
         shutil.rmtree(kw / "roots", ignore_errors=True)
         shutil.rmtree(kw / "rollups", ignore_errors=True)
         shutil.rmtree(kw / "dcount", ignore_errors=True)
-        empty = {"roots": f"SELECT * FROM (SELECT NULL::VARCHAR AS q, 0::UTINYINT AS depth, NULL::VARCHAR AS path, NULL::VARCHAR AS usr, NULL::BIGINT AS vf, NULL::BIGINT AS vt, NULL::BIGINT AS size, NULL::BIGINT AS n_files) WHERE false",
-                 "rollups": f"SELECT * FROM (SELECT NULL::VARCHAR AS q, NULL::VARCHAR AS dir, 0::TINYINT AS kind, NULL::VARCHAR AS child, NULL::BIGINT AS vf, NULL::BIGINT AS b, NULL::BIGINT AS o) WHERE false"}
-        for view, d in (("drv", "roots"), ("rupv", "rollups")):
-            files = sorted((folded / d).glob("*.parquet"))
-            con.execute(f"CREATE OR REPLACE VIEW {view} AS {_spilled(files, '*') or empty[d]}")
         resource_stage(f"merge/{kind}/write")
-        meta.update(write_kind(con, out, kind, roots="drv", rollups="rupv", file_rows=file_rows, rg=meta["rg"]))
+        # each range's folded files are sorted and the ranges in `q` order (`c{k:06d}`): streamed in turn, not sorted again
+        meta.update(write_kind(con, out, kind, file_rows=file_rows, rg=meta["rg"],
+                               chunks={d: sorted((folded / d).glob("*.parquet")) for d in ("roots", "rollups")}))
         resource_stage(f"merge/{kind}/state")
         write_state(con, out, kind, queries=[f"SELECT q, dir, rows FROM read_parquet({q(str(f))}) ORDER BY q, dir"
                                              for f in sorted((folded / "dcount").glob("*.parquet"))])
-        con.execute("DROP VIEW drv; DROP VIEW rupv")
         for t in ("dr", "ru", "rup", "dcnt", "cmap", "lit", "qb"):
             con.execute(f"DROP TABLE IF EXISTS {t}")
         shutil.rmtree(kw)
