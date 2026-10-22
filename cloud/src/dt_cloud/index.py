@@ -112,7 +112,8 @@ def store_columns(shapes: list[tuple[list[str], dict[str, str]]]) -> list[str]:
     )
     label = [LABEL_COL] if any(LABEL_COL in cols for cols, _ in shapes) else []
     gen = [GENERATION] if any(GENERATION in cols for cols, _ in shapes) else []
-    return ["path", *label, "size", "depth", "kind", "n_files", "n_children", "n_desc", "mtime", *L2_OPTIONAL, *pivots, *gen]
+    identity = ["version"] if any("version" in cols for cols, _ in shapes) else []
+    return ["path", *label, "size", "depth", "kind", "n_files", "n_children", "n_desc", "mtime", *L2_OPTIONAL, *pivots, *gen, *identity]
 
 
 def store_rows_sql(l2: str, bucket: str, shape: tuple[list[str], dict[str, str]], columns: list[str]) -> str:
@@ -142,6 +143,7 @@ def store_rows_sql(l2: str, bucket: str, shape: tuple[list[str], dict[str, str]]
         "mtime": "mtime::BIGINT",
         **{c: (f"{c}::{t}" if c in cols else f"NULL::{t}") for c, t in L2_OPTIONAL.items()},
         GENERATION: f"{GENERATION}::BIGINT" if GENERATION in cols else "NULL::BIGINT",
+        "version": "version::VARCHAR" if "version" in cols else "NULL::VARCHAR",
     }
     sel = ",\n          ".join(f"{exprs[c] if c in exprs else pivot(c)} AS {c}" for c in columns)
     return f"""

@@ -99,16 +99,19 @@ def _class_renames(path: str) -> dict[str, str]:
     return {o: n for o, n in zip(old, ist.CLS) if o != n}
 
 
-def _versions_sql(base: str, runs: list[str], t: str, name: str, generation: bool = False) -> str:
+def _versions_sql(base: str, runs: list[str], t: str, name: str, generation: ist.Identity = False) -> str:
     """Key range `name`'s versions of table `t`: the base's range file and every run's delta, one row per version
     (`IDENT`, `usr` as '') with the smallest `vt`, in the base's columns (`interval_store.SUB_SCHEMA[t]`, `usr` '';
     `GENERATION` last in `pvl` with `generation`). Class columns of an older generation are read by position, under
     `CLASS_COLS`' names."""
-    names = ist.with_generation(ist.SUB_SCHEMA[t], generation and t == "pvl").names
+    names = ist.with_generation(ist.SUB_SCHEMA[t], generation if t == "pvl" else False).names
 
     def sel(path: str) -> str:
         back = {n: o for o, n in _class_renames(path).items()}
-        return ", ".join("coalesce(usr, '') AS usr" if c == "usr" else f"{back[c]} AS {c}" if c in back else c for c in names)
+        from disk_tree.object_version import version_sql
+        token = version_sql(pq.read_schema(path).names)
+        return ", ".join("coalesce(usr, '') AS usr" if c == "usr" else f"{token} AS version" if c == "version"
+                         else f"{back[c]} AS {c}" if c in back else c for c in names)
 
     files = [f"{base}/{t}/{name}.parquet", *(f"{r}/{t}/{name}.parquet" for r in runs)]
     parts = [f"SELECT {sel(f)} FROM read_parquet({q(f)})" for f in files]
@@ -132,7 +135,7 @@ def _islands_sql(src: str, same: list[str], keep: list[str], where: str = "true"
 Fill = Callable[[object, str], None]
 
 
-def compact_range(con, base: str, runs: list[str], name: str, out: Path, sliced: bool = True, generation: bool = False,
+def compact_range(con, base: str, runs: list[str], name: str, out: Path, sliced: bool = True, generation: ist.Identity = False,
                   fill: Fill | None = None) -> dict:
     """Key range `name` of the generation folded from the base under `base` and the runs `runs` (dirs, oldest first) into
     `out`'s range files, as `build` writes them: `pvl/`, `pv/` and `rd/` (the islands of `pvl`'s pieces), and with the
@@ -140,14 +143,14 @@ def compact_range(con, base: str, runs: list[str], name: str, out: Path, sliced:
     `fill`, set by it on the path versions and taken by their pieces. Its tables are `con`'s temp tables, so ranges
     run concurrently on cursors of one database (`fold_gen` `jobs`). Returns their row counts."""
     rf = lambda sub: out / sub / f"{name}.parquet"
-    gen_in = generation and fill is None
-    gcol = [ist.GENERATION] if gen_in else []
+    gen_in = generation if fill is None else False
+    gcol = [ist.identity_column(gen_in)] if gen_in else []
     con.execute(f"CREATE OR REPLACE TEMP TABLE pvl AS {_versions_sql(base, runs, 'pvl', name, gen_in)}")
     # A path version is the run of its pieces with equal change columns (`dr` as `build` derives it); `wts` (and
     # `GENERATION`) is carried from the version's first scan, which every piece shares (`fold`).
-    change = [c for c in ist.CHANGE_COLS if c != "dr"]
+    change = [c for c in ist.change_cols(gen_in) if c != "dr"]
     pv_src = f"SELECT *, {ia.DR} AS dr FROM pvl"
-    con.execute(f"CREATE OR REPLACE TEMP TABLE pv AS {_islands_sql(pv_src, ist.CHANGE_COLS, [*change, 'wts', *gcol])}")
+    con.execute(f"CREATE OR REPLACE TEMP TABLE pv AS {_islands_sql(pv_src, ist.change_cols(gen_in), list(dict.fromkeys([*change, 'wts', *gcol])))}")
     if fill is not None:
         for t in ("pv", "pvl"):
             con.execute(f"ALTER TABLE {t} ADD COLUMN {ist.GENERATION} BIGINT")
@@ -191,7 +194,8 @@ def run_scans(gen_dir: Path, gen: str, runs: list[dict]) -> list[dict]:
 
 def fold_gen(gen_dir: Path, out: Path, work: Path, *, gen: str, runs: list[dict], rg_rows: int = ist.SERVED_RG, threads: int = 4,
              mem: str = "4GB", jobs: int = 1, fill: Fill | None = None, on_range: Callable[[int, int], None] | None = None,
-             progress: Callable[..., None] | None = None) -> tuple[dict, dict, dict, dict]:
+             progress: Callable[..., None] | None = None,
+             identity: ist.Identity | None = None) -> tuple[dict, dict, dict, dict]:
     """The generation `gen` (its base in `gen_dir` and the runs `runs`) folded into a new one in `out`: its range files
     (`compact_range` over the old `ranges.json`), served sorts and churn (`interval_store.cut_gen`), and `scans.json`
     (the base's, every run scan's entry; `GENERATION` recorded when the result carries it). With `fill`, the result
@@ -204,7 +208,7 @@ def fold_gen(gen_dir: Path, out: Path, work: Path, *, gen: str, runs: list[dict]
     `sorts` as the served sorts' cut begins. Returns `(scans.json, rows per table, sorts, stats)`."""
     base = json.loads((gen_dir / "scans.json").read_text())
     sliced = ist.sliced(base)
-    generation = ist.has_generation(base) or fill is not None
+    generation = (ist.has_generation(base) or fill is not None) if identity is None else identity
     doc = {**{k: v for k, v in base.items() if k not in ("scans", "slices", ist.GENERATION)},
            "scans": [*base["scans"], *run_scans(gen_dir, gen, runs)], "slices": sliced}
     doc = ist.record_generation(doc, generation)

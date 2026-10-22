@@ -273,6 +273,6 @@ def test_crc32c_listing_every_shard_carries_the_column(tmp_path: Path):
                              procs=1, threads=4)
     shards = sorted((tmp_path / 'full').glob('shard-*.parquet')) + sorted((tmp_path / 'empty').glob('shard-*.parquet'))
     assert {tuple(pq.read_schema(p).names) for p in shards} == {
-        ('bucket', 'name', 'size_bytes', 'created', 'storage_class_id', 'generation', 'crc32c')}
+        ('bucket', 'name', 'size_bytes', 'created', 'storage_class_id', 'generation', 'version', 'crc32c')}
     got = sorted((n, c) for p in shards for n, c in zip(*pq.read_table(p, columns=['name', 'crc32c']).to_pydict().values()))
     assert got == sorted((k, crc32(k.encode())) for k in keys)

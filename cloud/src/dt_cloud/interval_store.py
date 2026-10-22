@@ -74,6 +74,16 @@ CLS = list(CLASS_COLS.values())
 #: the scan that saw the old one, so a new generation always opens a version by `mtime` already.
 GENERATION = "generation"
 GENERATION_FIELD = pa.field(GENERATION, pa.int64())
+OBJECT_VERSION_FIELD = pa.field("version", pa.string())
+Identity = bool | pa.Field
+
+
+def identity_column(identity: bool | pa.Field) -> str:
+    return identity.name if isinstance(identity, pa.Field) else GENERATION
+
+
+def change_cols(identity: bool | pa.Field) -> list[str]:
+    return [*CHANGE_COLS, identity.name] if isinstance(identity, pa.Field) else CHANGE_COLS
 #: The values whose change opens a version. `dr` is the size-weighted mean stamp rounded to the second
 #: (the change test; the exact `wts` is carried from the version's first scan), `us` the owner slices.
 #: `last_read` is not here: it moves from scan to scan on read paths and lives in its own intervals (`rd/`).
@@ -125,48 +135,57 @@ SV_STATE = [*SV_CHANGE, "wts"]
 SV_HASH = f"hash(depth, path, usr, kind, size, n_files, n_children, n_desc, mtime, dr, wb, {', '.join(CLS)}, last_read)"
 
 
-def with_generation(schema: pa.Schema, generation: bool) -> pa.Schema:
+def with_generation(schema: pa.Schema, generation: Identity) -> pa.Schema:
     """`schema`, with `generation` as its last column when the generation carries it."""
-    return schema.append(GENERATION_FIELD) if generation else schema
+    return schema.append(generation if isinstance(generation, pa.Field) else GENERATION_FIELD) if generation else schema
 
 
-def has_generation(scans: dict) -> bool:
+def has_generation(scans: dict) -> Identity:
     """Whether a generation (its `scans.json`) carries the objects' native version (`GENERATION`)."""
+    if scans.get("object_version"):
+        if scans["object_version"] != {"name": "version", "type": "string"}:
+            raise ValueError(f"unsupported object-version field: {scans['object_version']}")
+        return OBJECT_VERSION_FIELD
     return bool(scans.get(GENERATION))
 
 
-def file_has_generation(path: str | Path) -> bool:
+def file_has_generation(path: str | Path) -> Identity:
     """Whether a parquet file (a range file, a run's delta) carries `GENERATION`."""
-    return GENERATION in pq.read_schema(path).names
+    names = pq.read_schema(path).names
+    return OBJECT_VERSION_FIELD if "version" in names else GENERATION in names
 
 
-def source_has_generation(con, src: str) -> bool:
+def source_has_generation(con, src: str) -> Identity:
     """Whether a scan's per-scan sort carries `GENERATION` (a v2 `path` sort from a listing that has it, `path-index -G`)."""
-    return GENERATION in {r[0] for r in con.execute(f"DESCRIBE SELECT * FROM read_parquet({q(src)})").fetchall()}
+    names = {r[0] for r in con.execute(f"DESCRIBE SELECT * FROM read_parquet({q(src)})").fetchall()}
+    return OBJECT_VERSION_FIELD if "version" in names else GENERATION in names
 
 
-def generation_of(con, scans: dict, mount: str | None) -> bool:
+def generation_of(con, scans: dict, mount: str | None) -> Identity:
     """A generation's `GENERATION` flag: its `scans.json`'s when recorded, else whether some scan's sort carries the
     column (a base build's measurement, recorded by it)."""
-    if GENERATION in scans:
+    if GENERATION in scans or "object_version" in scans:
         return has_generation(scans)
-    return any(s.get("version") == 2 and source_has_generation(con, sn._src(scans["bucket"], s["src"], mount)) for s in scans["scans"])
+    fields = [source_has_generation(con, sn._src(scans["bucket"], s["src"], mount)) for s in scans["scans"] if s.get("version") == 2]
+    return OBJECT_VERSION_FIELD if any(isinstance(f, pa.Field) for f in fields) else any(fields)
 
 
-def record_generation(doc: dict, generation: bool) -> dict:
+def record_generation(doc: dict, generation: Identity) -> dict:
     """`doc` (a `scans.json`) with `"generation": true` when the generation carries it; without the key otherwise."""
-    out = {k: v for k, v in doc.items() if k != GENERATION}
+    out = {k: v for k, v in doc.items() if k not in (GENERATION, "object_version")}
+    if isinstance(generation, pa.Field):
+        return {**out, "object_version": {"name": generation.name, "type": str(generation.type)}}
     return {**out, GENERATION: True} if generation else out
 
 
-def state_cols(generation: bool) -> list[str]:
+def state_cols(generation: Identity) -> list[str]:
     """The path versions' state columns (`STATE_COLS`, `GENERATION` carried when the generation has it)."""
-    return [*STATE_COLS, GENERATION] if generation else STATE_COLS
+    return [*STATE_COLS, identity_column(generation)] if generation else STATE_COLS
 
 
-def carried(generation: bool) -> dict[str, str]:
+def carried(generation: Identity) -> dict[str, str]:
     """The path versions' carried columns: `wts`, and `GENERATION` (the first scan's that has one) when present."""
-    return {**CARRIED, GENERATION: "first"} if generation else CARRIED
+    return {**CARRIED, GENERATION: "first"} if generation and not isinstance(generation, pa.Field) else CARRIED
 
 # ── Per-scan rows → one row per path ───────────────────────────────────────
 
@@ -185,28 +204,33 @@ V1_ROW = """depth::UTINYINT AS depth, path, coalesce(usr, '') AS usr, false AS i
 CLS_SUMS = ", ".join(f"sum({c})::BIGINT AS {c}" for c in CLS)
 
 
-def _raw_sql(con, src: str, preds: list[str], version: int | None, generation: bool) -> str:
+def _raw_sql(con, src: str, preds: list[str], version: int | None, generation: Identity) -> str:
     """A scan's raw rows in the range (`V2_ROW` / `V1_ROW`), with the object's `GENERATION` (NULL on a dir row, and
     where the sort has none) when the generation carries it."""
     version = version or sn.source_version(con, src)
+    identity = identity_column(generation)
     if version == 2:
         cols = {r[0] for r in con.execute(f"DESCRIBE SELECT * FROM read_parquet({q(src)})").fetchall()}
         sel = V2_ROW.format(**{k: (c if c in cols else "NULL") for k, c in sn.V2_OPTIONAL.items()})
-        gen = f"CASE WHEN kind = 'file' THEN {GENERATION} END" if GENERATION in cols else "NULL"
+        from disk_tree.object_version import version_sql
+
+        expr = version_sql(cols) if isinstance(generation, pa.Field) else GENERATION if GENERATION in cols else "NULL"
+        gen = f"CASE WHEN kind = 'file' THEN {expr} END"
     else:
         sel, gen = V1_ROW, "NULL"
     if generation:
-        sel += f", ({gen})::BIGINT AS {GENERATION}"
+        sel += f", ({gen})::{'VARCHAR' if isinstance(generation, pa.Field) else 'BIGINT'} AS {identity}"
     return " UNION ALL ".join(f"SELECT {sel} FROM read_parquet({q(src)}) WHERE {p}" for p in preds)
 
 
-def path_rows_sql(con, src: str, preds: list[str], version: int | None = None, generation: bool = False) -> str:
+def path_rows_sql(con, src: str, preds: list[str], version: int | None = None, generation: Identity = False) -> str:
     """One scan's rows in the range, one per `(depth, path)`: the sums and maxima the reader's `merge`
     takes over a path's rows (owner slices, a v1 index's duplicate rows), `kind` = `dir` if any row is,
     `us` = the owner slices, `dr` = the mean stamp to the second; with `generation`, an object's `GENERATION`
     last (NULL on a dir, a key that is also a folder's prefix included)."""
     raw = _raw_sql(con, src, preds, version, generation)
-    gen = f", CASE WHEN bool_and(is_file) THEN max({GENERATION}) END AS {GENERATION}" if generation else ""
+    identity = identity_column(generation)
+    gen = f", CASE WHEN bool_and(is_file) THEN max({identity}) END AS {identity}" if generation else ""
     one = f"""SELECT depth, path, CASE WHEN bool_and(is_file) THEN 'file' ELSE 'dir' END AS kind, sum(size)::BIGINT AS size,
         sum(n_files)::BIGINT AS n_files, max(n_children) AS n_children, max(n_desc) AS n_desc, max(mtime) AS mtime,
         sum(wt)::DOUBLE AS wts, sum(mw)::BIGINT AS wb, max(last_read) AS last_read,
@@ -214,7 +238,7 @@ def path_rows_sql(con, src: str, preds: list[str], version: int | None = None, g
         FROM raw GROUP BY depth, path"""
     return f"""WITH raw AS ({raw}), one AS ({one}), sl AS ({us_sql_from_raw()})
         SELECT one.depth, one.path, kind, size, n_files, n_children, n_desc, mtime,
-            CASE WHEN wb > 0 THEN round(wts / wb, 0) ELSE 0 END::DOUBLE AS dr, wb, {', '.join(CLS)}, sl.us, wts, last_read{f', {GENERATION}' if generation else ''}
+            CASE WHEN wb > 0 THEN round(wts / wb, 0) ELSE 0 END::DOUBLE AS dr, wb, {', '.join(CLS)}, sl.us, wts, last_read{f', {identity}' if generation else ''}
         FROM one JOIN sl USING (depth, path)"""
 
 
@@ -381,7 +405,7 @@ def build_slices_range(scans: dict, ranges: dict, i: int, out: Path, con, *, mou
 # ── Read days folded into the path versions ──────────────────────────────
 
 
-def fold_sql(pv: str, rd: str, generation: bool = False) -> str:
+def fold_sql(pv: str, rd: str, generation: Identity = False) -> str:
     """`pv`'s versions split where `rd` (the read-day versions of the same paths) changes, each piece
     carrying its `last_read` (-1 where none is live), adjacent pieces with the same path version and
     read day merged: `PVL_SCHEMA` rows, unsorted. Equal to versioning the scans with `last_read` as one
@@ -413,7 +437,8 @@ def fold_range(root: str, i: int, out: Path, con) -> dict:
     t0 = monotonic()
     name = f"r{i:04d}"
     pv, rd = f"read_parquet({q(f'{root}/pv/{name}.parquet')})", f"read_parquet({q(f'{root}/rd/{name}.parquet')})"
-    gen = GENERATION in {r[0] for r in con.execute(f"DESCRIBE SELECT * FROM {pv}").fetchall()}
+    cols = {r[0] for r in con.execute(f"DESCRIBE SELECT * FROM {pv}").fetchall()}
+    gen = OBJECT_VERSION_FIELD if "version" in cols else GENERATION in cols
     schema = with_generation(PVL_SCHEMA, gen)
     con.execute("DROP TABLE IF EXISTS pvl")
     con.execute(f"CREATE TABLE pvl AS {fold_sql(pv, rd, gen)}")
@@ -487,10 +512,10 @@ SLICE_SUBS = ("sv", "svt")
 GENERATION_SORT = "path"
 
 
-def served_schema(sort: str, generation: bool = False) -> pa.Schema:
+def served_schema(sort: str, generation: Identity = False) -> pa.Schema:
     """A served sort's columns: its range files' (`SUB_SCHEMA`), and `GENERATION` last in `GENERATION_SORT` when the
     generation carries it."""
-    return with_generation(SUB_SCHEMA[SORTS[sort][0]], generation and sort == GENERATION_SORT)
+    return with_generation(SUB_SCHEMA[SORTS[sort][0]], generation if sort == GENERATION_SORT else False)
 
 
 def owners_of(digests) -> bool:
@@ -539,7 +564,7 @@ def gen_sliced(store: Store, prefix: str) -> bool:
     return owners_of(store.read_json(x) for x in keys)
 
 
-def record_slices(store: Store, prefix: str, scans: dict, has_slices: bool, generation: bool = False) -> None:
+def record_slices(store: Store, prefix: str, scans: dict, has_slices: bool, generation: Identity = False) -> None:
     """`scans.json` under `prefix` with the generation's `slices` (the reader's flag) and `GENERATION` (only when it
     has it: `record_generation`), unless it says so already."""
     key = f"{prefix}/scans.json"
@@ -895,8 +920,7 @@ def cut_cmd(bucket, no_dyadic, profile, gen, index, mount, mem, out, to_gen, thr
     scans = store.read_json(f"{prefix}/scans.json")
     has_slices = gen_sliced(store, prefix)
     # The objects' native version: recorded, else whether the folded path versions carry it.
-    has_gen = has_generation(scans) or GENERATION in {
-        r[0] for r in con.execute(f"DESCRIBE SELECT * FROM read_parquet({q(root + '/pvl/r*.parquet')})").fetchall()}
+    has_gen = has_generation(scans) or source_has_generation(con, root + '/pvl/r*.parquet')
     out_dir = Path(out) / "served"
     if todo == ["stats"]:
         doc = {**churn_stats(con, root, scans), "slices": has_slices}

@@ -421,16 +421,21 @@ def generation_parity(con, scan_file: str, served: str, runs: list[str], ts: int
     """The objects' `generation` at a scan, store against the scan's own sort, where both carry it (None otherwise): the
     scan's objects with one (a key that is also a folder's prefix excepted: the store folds it into the folder), and how
     many the store's version live at the scan (the `path` sort, base and runs) gives the same."""
-    from .interval_store import GENERATION, GENERATION_SORT, file_has_generation
+    from .interval_store import GENERATION_SORT, file_has_generation, identity_column
 
     files = [f"{served}/{GENERATION_SORT}.parquet", *(f"{r}/{GENERATION_SORT}.parquet" for r in runs)]
     if not file_has_generation(files[0]) or not file_has_generation(scan_file):
         return None
+    GENERATION = identity_column(file_has_generation(files[0]))
+    from disk_tree.object_version import version_sql
+
+    cols = {r[0] for r in con.execute(f"DESCRIBE SELECT * FROM read_parquet({q(scan_file)})").fetchall()}
+    own_identity = version_sql(cols) if GENERATION == "version" else GENERATION
     union = " UNION ALL ".join(f"SELECT depth, path, vf, vt, kind, {GENERATION} FROM read_parquet({q(f)})" for f in files)
     live = f"""SELECT depth, path, {GENERATION} FROM (SELECT * FROM ({union}) QUALIFY row_number() OVER (PARTITION BY depth, path, vf ORDER BY vt) = 1)
         WHERE vf <= {ts} AND {ts} < vt AND kind = 'file'"""
-    own = f"""SELECT depth::UTINYINT AS depth, path, any_value({GENERATION}) AS {GENERATION} FROM read_parquet({q(scan_file)})
-        GROUP BY depth, path HAVING bool_and(kind = 'file') AND count(*) = 1 AND any_value({GENERATION}) IS NOT NULL"""
+    own = f"""SELECT depth::UTINYINT AS depth, path, any_value({own_identity}) AS {GENERATION} FROM read_parquet({q(scan_file)})
+        GROUP BY depth, path HAVING bool_and(kind = 'file') AND count(*) = 1 AND any_value({own_identity}) IS NOT NULL"""
     n, eq = con.execute(f"""SELECT count(*), count(*) FILTER (WHERE l.{GENERATION} = o.{GENERATION})
         FROM ({own}) o LEFT JOIN ({live}) l USING (depth, path)""").fetchone()
     return {"objects": n, "equal": eq}
