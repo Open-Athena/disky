@@ -31,7 +31,7 @@ PROFILE = {
     "secrets": ["SITE_TOKEN", "SLACK_BOT_TOKEN"],
 }
 SECRET = "s3cr3t-site-token"
-NOTIFY_ENV = ("PUSHOVER_TOKEN", "PUSHOVER_USER", "DISCORD_NOTIFY_WEBHOOK", "SLACK_BOT_TOKEN", "SLACK_ALERT_CHANNEL",
+NOTIFY_ENV = ("PUSHOVER_TOKEN", "PUSHOVER_USER", "DISCORD_NOTIFY_WEBHOOK", "SLACK_BOT_TOKEN", "SLACK_ALERT_CHANNEL", "SITE_URL",
               "DISK_TREE_NOTIFY", "DISKY_NOTIFY", "DT_ALERTS", "DT_RECORD", "SCAN_ID", "BATCH_JOB_UID", "NF_PROCESS", "NF_TAG")
 
 
@@ -203,7 +203,9 @@ def test_missing_job_start_refuses_and_runs_nothing(job):
 
 
 def test_alert_payloads_warn_fail_and_finish(job, slack):
+    job.mp.setenv("SITE_URL", "https://site.test/")
     url = "https://logs.test/q;uid=u1?project=proj-1&job=job-9"
+    footer = f"<{url}|task logs> · <https://site.test/scans/u1|scan> · <https://site.test/scans|all scans>"
 
     def payload(text: str) -> tuple[str, dict, dict]:
         return (push.SLACK_URL, {"Content-Type": "application/json; charset=utf-8", "Authorization": "Bearer xoxb-test"},
@@ -220,11 +222,20 @@ def test_alert_payloads_warn_fail_and_finish(job, slack):
     assert job("finish", "-x", "2", "-e", "exit 2: cp a b (run.sh:40)", at=T0 + 101) == 0
     assert slack.calls == [
         payload(f"*⚠️ cw-s3 {SCAN}*\nstatic-names failed (exit 1): the scan publishes; search says not available\n"
-                f"Resume: `{resume}`\n<{url}|task logs>"),
-        payload(f"*❌ cw-s3 {SCAN}*\npublish failed (exit 1)\n<{url}|task logs>"),
-        payload(f"*❌ cw-s3 {SCAN}*\nrun failed (exit 2): exit 2: cp a b (run.sh:40)\n<{url}|task logs>"),
+                f"Resume: `{resume}`\n{footer}"),
+        payload(f"*❌ cw-s3 {SCAN}*\npublish failed (exit 1)\n{footer}"),
+        payload(f"*❌ cw-s3 {SCAN}*\nrun failed (exit 2): exit 2: cp a b (run.sh:40)\n{footer}"),
     ]
     assert [ln for ln in job.take() if ln.startswith("alert")] == ["alert: slack: sent"] * 3
+
+
+@pytest.mark.parametrize("site,run,store,expected", [
+    (None, 'r', 'primary', ()),
+    ('https://site.test/', None, 'primary', (('all scans', 'https://site.test/scans'),)),
+    ('https://site.test/', 'head/task', 'meta', (('scan', 'https://site.test/meta/scans/head%2Ftask'), ('all scans', 'https://site.test/meta/scans'))),
+])
+def test_scan_alert_links(site, run, store, expected):
+    assert scan_runs.scan_alert_links(site, run, store) == expected
 
 
 CMD = ('( cd "$app/cloud" && "$time_bin" -v -o "$work/static-time.txt" "$app/.venv/bin/dt-cloud" static-names "$cmd" '

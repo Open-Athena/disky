@@ -1267,6 +1267,24 @@ def _off(v: str | None) -> bool:
     return (v or "").strip().lower() in ("0", "off", "false", "no")
 
 
+def scan_alert_links(
+    site_url: str | None,
+    run_id: str | None,
+    store: str = "primary",
+) -> tuple[tuple[str, str], ...]:
+    """Site links for an alert: the exact run when known, and its store's scans list."""
+    from urllib.parse import quote
+
+    if not site_url or not site_url.strip():
+        return ()
+    base = site_url.strip().rstrip('/')
+    if store and store != "primary":
+        base += '/' + quote(store, safe='')
+    scans = base + '/scans'
+    links = (("scan", scans + '/' + quote(run_id, safe='')),) if run_id else ()
+    return (*links, ("all scans", scans))
+
+
 class JobRun:
     """One job's view of its run: profile, run id, sink, state file and alerted marker."""
 
@@ -1427,7 +1445,8 @@ class JobRun:
                 err(f"alert (no channel configured): {title}: {message}")
                 return
             url = self.logs_url()
-            notice = push.Notice(title, message, url, "task logs" if url else None, 1 if level == "fail" else 0)
+            links = scan_alert_links(self.env.get("SITE_URL"), self.run_id, self.facts().get("store", "primary"))
+            notice = push.Notice(title, message, url, "task logs" if url else None, 1 if level == "fail" else 0, links)
             for c, e in push.send(notice, chans, env=self.env, post=push.http_post):
                 err(self.redact(f"alert: {c}: {e or 'sent'}"))
         except Exception as e:  # noqa: BLE001
