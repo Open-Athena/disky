@@ -39,6 +39,10 @@
     {
       "name": "kv_reads",
       "type": "Float64"
+    },
+    {
+      "name": "d1_rows_written",
+      "type": "Float64"
     }
   ],
   "data": [
@@ -52,7 +56,8 @@
       "r2_bytes": "96000000",
       "d1_queries": 2400,
       "d1_rows_read": 120000,
-      "kv_reads": 300
+      "kv_reads": 300,
+      "d1_rows_written": 400
     },
     {
       "day": "2026-10-20",
@@ -64,7 +69,8 @@
       "r2_bytes": 60000000,
       "d1_queries": 1600,
       "d1_rows_read": 80000,
-      "kv_reads": 200
+      "kv_reads": 200,
+      "d1_rows_written": 0
     },
     {
       "day": "2026-10-20",
@@ -76,7 +82,8 @@
       "r2_bytes": 180000000,
       "d1_queries": 600,
       "d1_rows_read": 900000,
-      "kv_reads": 0
+      "kv_reads": 0,
+      "d1_rows_written": 2000
     },
     {
       "day": "2026-10-20",
@@ -88,7 +95,8 @@
       "r2_bytes": 0,
       "d1_queries": 0,
       "d1_rows_read": 0,
-      "kv_reads": 0
+      "kv_reads": 0,
+      "d1_rows_written": 0
     },
     {
       "day": "2026-10-19",
@@ -100,7 +108,8 @@
       "r2_bytes": 0,
       "d1_queries": 20,
       "d1_rows_read": 20,
-      "kv_reads": 0
+      "kv_reads": 0,
+      "d1_rows_written": 0
     }
   ],
   "rows": 5,

@@ -39,6 +39,7 @@ export class Meter {
   d1Queries = 0
   d1RowsRead = 0
   kvReads = 0
+  d1RowsWritten = 0
   constructor(readonly t0: number = Date.now()) {}
 
   /** What the gate identified (`identify`); the last call wins. */
@@ -123,14 +124,14 @@ export interface UsagePoint {
 
 /** The request's data point (spec `usage-metrics.md` §2's field table): blobs route, method, via, caller, status
  *  class, cache, store, host (`prod` on `prodHost`, else `dev`: a dev stack may share prod's dataset); doubles
- *  count, wall ms, R2 reads, R2 bytes, D1 queries, D1 rows read, KV reads; indexed by caller. */
+ *  count, wall ms, R2 reads, R2 bytes, D1 queries, D1 rows read, KV reads, D1 rows written; indexed by caller. */
 export function usagePoint(m: Meter, request: Request, res: Response, wallMs: number, prodHost?: string): UsagePoint {
   const url = new URL(request.url)
   const html = (res.headers.get('content-type') ?? '').startsWith('text/html')
   const who = m.via && m.caller ? { via: m.via, caller: m.caller } : anonymousCaller(request)
   return {
     blobs: [routeOf(url.pathname, request.method, html), request.method, who.via, who.caller, statusClass(res.status), m.cache, m.store, url.host === prodHost ? 'prod' : 'dev'],
-    doubles: [1, Math.max(0, Math.round(wallMs)), m.r2Reads, m.r2Bytes, m.d1Queries, m.d1RowsRead, m.kvReads],
+    doubles: [1, Math.max(0, Math.round(wallMs)), m.r2Reads, m.r2Bytes, m.d1Queries, m.d1RowsRead, m.kvReads, m.d1RowsWritten],
     indexes: [who.caller],
   }
 }
@@ -232,9 +233,15 @@ export function meteredR2(r2: R2Bucket): R2Bucket {
 
 const realStmt = new WeakMap<object, D1PreparedStatement>()
 
-function rowsRead(r: unknown): number {
-  const n = (r as { meta?: { rows_read?: number } } | null)?.meta?.rows_read
+function rowsMeta(r: unknown, k: 'rows_read' | 'rows_written'): number {
+  const n = (r as { meta?: Record<string, unknown> } | null)?.meta?.[k]
   return typeof n === 'number' ? n : 0
+}
+
+/** One result's rows read and written onto `m` (D1 bills both from the result's `meta`). */
+function chargeRows(m: Meter, r: unknown): void {
+  m.d1RowsRead += rowsMeta(r, 'rows_read')
+  m.d1RowsWritten += rowsMeta(r, 'rows_written')
 }
 
 /** A prepared statement whose executions count on the current meter (`batch` unwraps it back to the real one). */
@@ -254,7 +261,7 @@ function meteredStmt(s: D1PreparedStatement): D1PreparedStatement {
         return async () => {
           const r = await target[k]()
           const m = currentMeter()
-          if (m) { m.d1Queries++; m.d1RowsRead += rowsRead(r) }
+          if (m) { m.d1Queries++; chargeRows(m, r) }
           return r
         }
       }
@@ -265,7 +272,7 @@ function meteredStmt(s: D1PreparedStatement): D1PreparedStatement {
   return p
 }
 
-/** `db` (or a session of it) with each statement it runs counted: queries, and rows read where the result's
+/** `db` (or a session of it) with each statement it runs counted: queries, and rows read / written where the result's
  *  `meta` says (`all` / `run` / `batch`; `first` / `raw` carry no meta). */
 export function meteredD1<D extends Pick<D1Database, 'prepare' | 'batch'>>(db: D): D {
   return new Proxy(db, {
@@ -277,7 +284,7 @@ export function meteredD1<D extends Pick<D1Database, 'prepare' | 'batch'>>(db: D
           const m = currentMeter()
           if (m) {
             m.d1Queries += stmts.length
-            for (const r of rs) m.d1RowsRead += rowsRead(r)
+            for (const r of rs) chargeRows(m, r)
           }
           return rs
         }
