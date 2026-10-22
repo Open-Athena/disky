@@ -8,6 +8,7 @@ import type { Env } from '../auth.js'
 import { pathScans, servedStore, type Lens } from '../index.js'
 import { loadRegistry, canonId } from '../identity.js'
 import { loadLedger } from '../ledger.js'
+import { ownerAssignments } from '../ownerTotals.js'
 import { scanTimes } from '../scanTimes.js'
 import { parseOwner, queryParam, QueryError } from '../scope.js'
 import { snapshotsPrefix } from '../shared.js'
@@ -257,7 +258,15 @@ export async function mapCard(env: Env, site: Site, title: string, params: Recor
   if (!lens && env.DB && isPrimary(env)) {
     const { ownerRows } = await loadLedger(env).catch(() => ({ ownerRows: [] }))
     const idx = ownerIndex({ owners: ownerRows.map(r => ({ ...r, who: r.who ?? '', memo: null })) })
-    if (idx.count) tree = applyLedger(tree, idx, site.scheme + (path ? `${path}/` : ''), u => canonId(u, reg))
+    if (idx.count) {
+      // Each row's subtree on this scan (the owner-totals manifest), so an assignment inside a tile the card's
+      // depth cap leaves childless moves its bytes too. A filtered or owner-scoped tree holds part of each
+      // subtree: the drawn-nodes overlay alone there.
+      const sizes = query || owner ? undefined : await ownerAssignments(env, date)
+        .then(rows => new Map(rows.map(r => [r.prefix, { b: r.bytes, us: r.us }])))
+        .catch(e => { console.log(`card: ${date} ${path || '/'}: owner totals unavailable: ${(e as Error).message}`); return undefined })
+      tree = applyLedger(tree, idx, site.scheme + (path ? `${path}/` : ''), u => canonId(u, reg), sizes)
+    }
   }
   const color = ownerColors(users)
   const name = (u: string) => reg[u]?.name ?? u
