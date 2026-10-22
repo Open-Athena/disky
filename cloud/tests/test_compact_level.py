@@ -260,3 +260,16 @@ def test_interval_env_overrides_and_validates_the_level(tmp_path):
     with pytest.raises(SystemExit) as e:
         ia.load_config(str(p), {})
     assert str(e.value) == "compact_level must be an integer ≥ 1 or none, not 0"
+
+
+def test_anchors_run_as_a_long_stage():
+    """A static anchors job: STANDARD, `LONG_RUN_S`, no retries; drill (a short stage) keeps the defaults."""
+    spot = _static_runner(5)
+    spot.cfg = Profile(**{**spot.cfg.__dict__, "spot": True})
+
+    def shape(stage: str) -> tuple:
+        spec = sd.job_spec(spot.cfg, f"sn-{stage}-x", 1, ["true"], stage=stage)
+        ts = spec["taskGroups"][0]["taskSpec"]
+        return ts["maxRunDuration"], ts["maxRetryCount"], spec["allocationPolicy"]["instances"][0]["policy"]["provisioningModel"]
+
+    assert [shape("anchors"), shape("drill")] == [(f"{ar.LONG_RUN_S}s", 0, "STANDARD"), (f"{ar.MAX_RUN_S}s", 3, "SPOT")]
