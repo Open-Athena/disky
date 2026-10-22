@@ -1,5 +1,7 @@
 # Sweep executor — plan → review → execute (deleting what's marked `sweep`)
 
+**Moved to `specs/done/` 2026-10-22** (gcs's spec sweep, Ryan's go): Superseded by staged-path dispatch (`specs/done/staged-delete.md`, `staged-runs.md`), as its own 10-11 note says. Kept as history.
+
 The marking phase is done ([mark-sweep-ui.md], [actions-ledger.md]); ~1,108 Ti is marked `sweep` and nothing can actually delete yet ([repo-hygiene-audit.md] ranks this spec #1). This spec designs the deletion system: **manifest-based, three-phase, dry-run-first**, with an admin review UI. We are deleting other people's data with (currently) **no undo** — soft delete is disabled on all six buckets (`retentionDurationSeconds=0`, no versioning, verified 2026-09-01) — so the design leans hard on: pinned inputs, an explicit reviewable manifest, independent cross-checks against the site's own fate totals, a temporary soft-delete safety net, and IAM that physically can't delete until the execute window.
 
 ## Principles

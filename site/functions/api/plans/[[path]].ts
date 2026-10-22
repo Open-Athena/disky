@@ -159,7 +159,7 @@ export const onRequest = async (ctx0: Ctx & { env: Env; waitUntil?: Bg }): Promi
     if (!shape) return json({ error: `staging ${NO_SHAPE}` }, 503)
     const body = await readBody(ctx.request)
     const strs = (v: unknown): string[] => Array.isArray(v) ? v.filter((x): x is string => typeof x === "string") : []
-    // `prefixes`: folders; `objects`: exact keys (specs/file-assign.md) —
+    // `prefixes`: folders; `objects`: exact keys (specs/done/file-assign.md) —
     // the kind is which list an item came in, never its shape.
     const prefixes = strs(body.prefixes)
     const objects = strs(body.objects)

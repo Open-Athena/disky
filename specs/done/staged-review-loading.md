@@ -1,5 +1,7 @@
 # Reviewed staging, useful run details, and visible loading
 
+**Moved to `specs/done/` 2026-10-22** (gcs's spec sweep, Ryan's go): Done: adopted on `cloud` as `1a529555` (from cw's `01d96e1b`) and merged into gcs and cw. The status line below predates the adoption.
+
 Status: implemented and deployed to CW after explicit approval on 2026-10-21 (`2c3efece`). The isolated build and full site suite pass; live API/assets verified. Shared upstream adoption is requested. No commits or pushes have been made.
 
 ## Reviewed-state lifecycle

@@ -1,5 +1,7 @@
 # Single files: assignable and stageable
 
+**Moved to `specs/done/` 2026-10-22** (gcs's spec sweep, Ryan's go): Done: file-level items are live (migration `0041_items_kind`; the ledger's `prefix` / `object` kinds). The status line below predates the merge.
+
 Status: implemented on branch `file-assign` (off `cloud`); the migrations below await Ryan's go (none applied), and the gcs lineage's twin is the gcs session's to add.
 
 Today owner assignments and plan items (and so the sweep) only take folder prefixes. A lone matching file — e.g. `ACS_(Part_1)_…_chunk003.mp3` in a folder that also holds non-matching files — can't be acted on: the filtered bulk bar lists it but never sends it, and the unfiltered table's trash button on a file row stages `key/`, which deletes nothing.

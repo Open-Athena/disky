@@ -1,7 +1,7 @@
 // Bulk actions over the filter's matches (`gcs:specs/done/selection-actions.md`): assign an owner to, or
 // stage for deletion, every match under the view — as the fewest exact items (`/api/filter-cover`: a
 // folder every object of which matches stands for its matches; a lone matching file is sent as that one
-// object, specs/file-assign.md), listed by parent folder so false positives can be dropped (a whole folder's
+// object, specs/done/file-assign.md), listed by parent folder so false positives can be dropped (a whole folder's
 // worth, or one by one) before anything is sent. Offered at once: hovering or focusing the bar starts the
 // listing, a click awaits it (`useMatchAct`), then asks (with the review list), sends in batches with a
 // progress bar, and says what landed — or, over the cap, says so muted in the button's place.

@@ -22,7 +22,7 @@ generation that carries it) and created second
 (``interval_export.object_identities``). By default the listing is read when
 it exists and the store otherwise.
 
-Exact items (specs/file-assign.md) ride beside the bands: an exact key matches
+Exact items (specs/done/file-assign.md) ride beside the bands: an exact key matches
 ``name == key`` only — in row-group pruning, the eligible mask and the
 ``as_of`` hold — never ``key.bak`` or ``key/…``. An exact key under a staged
 band is redundant and dropped (``minimal_items``).

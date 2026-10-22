@@ -20,7 +20,7 @@ A plan item staged "as of" another scan than the pinned one (plan.json
 scan's layer-2 has it with the same size, mtime and object version.
 What is held back is counted as `skipped_after_as_of`.
 
-A plan's `objects` are exact items (specs/file-assign.md): relative keys that
+A plan's `objects` are exact items (specs/done/file-assign.md): relative keys that
 match `path == key` only — never `key.bak` or `key/…`. The kind is which list
 an item is in; an exact key ending in `/` is refused.
 """

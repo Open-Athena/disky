@@ -1,5 +1,7 @@
 # Retiring the ch-store VM
 
+**Moved to `specs/done/` 2026-10-22** (gcs's spec sweep, Ryan's go): Done: the ClickHouse VM and disk were deleted 2026-10-10; `bd7ce34b` removed `query_host`. Two decisions stay open: keeping the staging copy, and the old account-wide R2 token.
+
 Status: **mostly executed** (2026-10-10). What ran, by runbook step:
 
 | Step | State |

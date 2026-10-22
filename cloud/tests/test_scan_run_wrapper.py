@@ -1,4 +1,4 @@
-"""`dt-cloud scan-run start / phase-begin / phase-end / phase -- CMD / finish` (specs/scan-job-wrapper.md): the
+"""`dt-cloud scan-run start / phase-begin / phase-end / phase -- CMD / finish` (specs/done/scan-job-wrapper.md): the
 recorded rows, byte-exact PHASE lines, alert payloads through a fake transport, one alert per failure across
 processes, redaction, and `-T`'s process-group kill."""
 from __future__ import annotations
