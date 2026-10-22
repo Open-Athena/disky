@@ -617,10 +617,11 @@ function KindLabel({ run }: { run: ScanRun }) {
   return <>{run.kind}{st && <span className="dim"> · {st}</span>}</>
 }
 
-/** A running run's current phase and its elapsed time, and a warning when the run has gone quiet (no heartbeat). */
+/** A running run's current phase and its elapsed time (its heartbeat's live note in the tip), and a warning when the
+ * run has gone quiet (no heartbeat). */
 function Live({ live, inline }: { live: NonNullable<ReturnType<typeof liveness>>; inline?: boolean }) {
   return <span className={`sr-live${inline ? ' inline' : ''}`}>{inline && ' · '}
-    {live.phase && <Tooltip content="The phase running now, and how long it has run."><span>{live.phase}{live.elapsed != null && <> · {fmtDur(live.elapsed)}</>}</span></Tooltip>}
+    {live.phase && <Tooltip content={<><div>The phase running now, and how long it has run.</div>{live.note && <div className="dim">{live.note}</div>}</>}><span>{live.phase}{live.elapsed != null && <> · {fmtDur(live.elapsed)}</>}</span></Tooltip>}
     {live.quiet != null && <Tooltip content={QUIET_TIP}><span className="sr-quiet">{live.phase ? ' · ' : ''}quiet {fmtDur(live.quiet)}</span></Tooltip>}
   </span>
 }
