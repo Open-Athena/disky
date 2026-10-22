@@ -1,6 +1,6 @@
 # Usage metrics: who drives load and spend
 
-Status: phase 1 on dev.gcs.oa.dev and phase 2's code landed 2026-10-21 (gcs; shared code, so `[cloud]`). Phase 2 runs live once a token exists; phase 3 open.
+Status: phases 1–3 built (2026-10-21; shared code, so `[cloud]`, gcs's wiring in its own commits). Phase 1 and `/admin/usage` are on dev.gcs.oa.dev; the `cf-usage` step reaches the daily job with the next image rebuild. Prod is not deployed, so prod's Functions requests carry no usage point yet.
 
 ## As built
 
@@ -8,7 +8,20 @@ Status: phase 1 on dev.gcs.oa.dev and phase 2's code landed 2026-10-21 (gcs; sha
 - `via` = `token` for a grant presented as `Authorization: Bearer`, `grant` for a share link's cookie session. The caller is the grant's name, else its note, with emails masked and cut to the 96-byte index. `bot` uses a user-agent regex (`BOT_UA`); the site had no earlier heuristic.
 - `blob8` = `prod` on `PROD_HOST`, else `dev`: gcs's dev stack writes to prod's dataset.
 - R2 counts are Class B reads (`get` + `head`). R2 bytes are the ranges actually returned.
-- `dt-cloud cf-usage` (`cloud/src/dt_cloud/cf_usage.py`): one GraphQL query per dataset, `$CF_ANALYTICS_TOKEN`. The Functions dataset has no CPU sum, so its CPU ms are estimated as requests × p50. Scripts are matched by name containing the Pages project; when none matches, the account total is used and a note says so. The field names come from Cloudflare's docs and are unverified against the live schema until a token exists.
+- `double8` = D1 rows written (the result's `meta.rows_written`), added with phase 3.
+- `dt-cloud cf-usage` (`cloud/src/dt_cloud/cf_usage.py`): one GraphQL query per dataset, `$CF_ANALYTICS_TOKEN`, verified against the live schema (2026-10-21).
+  - **Pages scripts.** `pagesFunctionsInvocationsAdaptiveGroups` never names a script by its project: a project's two scripts are `pages-worker--<n>-production` and `pages-worker--<n>-preview` (gcs: `pages-worker--16777874`). Only the Pages API maps one to the other (`production_script_name`), and the analytics token can't read it. So the stem is configuration: `CF_PAGES_SCRIPT` in the wrangler config's `[vars]` (or `-s`). The query filters on `scriptName_in` and groups by hour; the report and snapshots split production and preview. Without a stem, the account's total is used, with a note.
+  - **CPU.** No dataset has a CPU sum for a Pages script (`workersInvocationsAdaptive.cpuTimeUs` covers Workers only). The Functions dataset has CPU quantiles p25…p99.9 (µs) and `wallTime` (µs). Each hourly group's mean is the quantile function integrated by trapezoids (0 at p=0, p99.9 held to p=1), capped at the group's wall time. The tail carries the mean: on 2026-10-14, gcs prod's p50 was 33 ms, its p90 3.2 s and its mean about 1 s, so requests × p50 under-counted about 30×. The open ends bias the estimate low.
+  - `-o ROOT` (repeatable): one snapshot per day, written for the window's days any root lacks (`-f` rewrites all of them). Attribution in snapshots covers both hosts.
+- **Snapshots** (`snapshots/usage/<date>.json`, `cf_usage.snapshot`, `version: 1`): `date`, `project`; `units` (every `PRICES` unit, storage as the day's GB level); `usd` (list $ per unit before the included amounts, a storage unit's day being a 30th of its month); `plan` (per unit: `label`, `usd` per `per`, monthly `included`, `storage`); `functions` (`{production, preview}` → `{requests, cpu_ms}`); `by_caller` (`caller`, `via`) and `by_route` (`route`), each with the `AE_SUMS` (`requests`, `wall_ms`, `r2_reads`, `r2_bytes`, `d1_queries`, `d1_rows_read`, `kv_reads`, `d1_rows_written`), top 100 by requests plus `(other)`; `notes`. Integral numbers are ints and the rest are rounded to 6 places, so a rewrite gives the same bytes.
+- **Job step** `cf-usage` (`scan_steps.py`, post stage, after `digest`): not core, because a core step would need every store profile to skip it. A deployment lists it in `steps` once its token is a secret. It runs `dt-cloud cf-usage -c site/wrangler.toml -d 7 -o <data>/snapshots/usage [-o $R2_ARCHIVE/snapshots/usage]`, so a missed day is backfilled by the next run. It is skipped without `CF_ANALYTICS_TOKEN` or on REPROC. It is soft: a failure fails only its phase. The image now carries `site/wrangler.toml`. gcs: `steps: [..., cf-usage]`, `secrets: CF_ANALYTICS_TOKEN: gcs-cf-analytics-token`, the same secret in `job/batch-submit.sh`, and the same write in `job/run.sh` (the one-VM fallback) after the Discord digest.
+- **`/api/usage`** (admin, `?days=1..92`, default 30): the newest documents from the served store (`INDEX_R2` under `SERVED_R2`), oldest first, version 1 only. `/data/*` serves only `snapshots/<scan id>/`.
+- **`/admin/usage`** (`UsagePage.tsx`, `usageModel.ts`, its own chunk; linked from `/admin` and the ☰ menu). URL state: `days` (7 / 30), `attr` (caller / route), `um` (ranking metric). It shows:
+  - tiles: the overage $, the list $, and D1 rows written's share of the overage;
+  - a units table: used, included pro rata, over, over $ and list $, with D1 rows written marked;
+  - stacked daily bars of list $ by product, D1 rows written at the base, with a per-day tooltip;
+  - the attribution table, top 12 plus `(other)`, with each row's share of the ranking metric and the coverage of billed requests by usage points.
+- **First numbers (gcs, 30 days to 2026-10-21):** D1 rows written are about three quarters of list $ and about half of the overage. They are the job's `index-sync` footer writes through D1's HTTP API, so the site's attribution doesn't see them; `specs/d1-footer-writes.md` works on that. R2 storage is next. Billed usage before 2026-10-01 (the path store's launch) is near zero.
 
 
 ## Why
@@ -67,6 +80,12 @@ Requests come from browsers (sessions), share links, agent and CLI tokens, the j
   - stacked bars by day: requests, R2 ops, D1 rows read, by caller (top N + other);
   - a route × caller table for a chosen window.
 - **Instrumentation-only first:** phase 1 can ship before the token exists. The data points start accumulating, and Analytics Engine keeps 3 months.
+
+## Open
+
+- Deploy prod (phase 1's meter and `/admin/usage`) and rebuild the job image, so the 07:00 run writes the snapshots. The daily cron body (`PIN=1 DRY=1`, infra/gcp) only matters for `NF=0`; the Nextflow tasks read the profile's secrets.
+- Other deployments: each adds `CF_PAGES_SCRIPT`, a `CF_ANALYTICS_TOKEN` secret, and `cf-usage` in `steps`. Until then, their deployment specs list it as a gap.
+- Option: give the token Pages: Read, so `cf-usage` can resolve the stem from the Pages API instead of configuration.
 
 ## Phases
 
