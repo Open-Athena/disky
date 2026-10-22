@@ -1163,7 +1163,7 @@ def _age_check(p: ScanProfile) -> list[str]:
     return [f"options.age-store.{key}: required" for key in ("store", "gen") if not o.get(key)]
 
 
-@step("age-store", core=False, soft=True, options={"store": str, "gen": str, "keep": int, "execute": bool, "copies": list},
+@step("age-store", core=False, soft=True, options={"store": str, "gen": str, "keep": int, "execute": bool, "copies": list, "threads": int, "mem": str},
       requires=_age_check)
 def age_store(ctx: Ctx, arg: str | None) -> None:
     """Append verified histogram cells, then retire covered old pyramids on each copy. Runs before path retirement."""
@@ -1175,7 +1175,8 @@ def age_store(ctx: Ctx, arg: str | None) -> None:
     roots = list(dict.fromkeys([ctx.data_uri, *o.get("copies", [])]))
     argv = ["dt-cloud", "age-store", "-g", o["gen"], "-L", layout, "-o", o["store"], "-s", ctx.data_uri,
             "-T", ctx.profile.store, "-t", ctx.scan, "-w", ctx.work / "age-store", "-k", o.get("keep", 2),
-            *(a for root in roots for a in ("-r", root)), *(["-x"] if o.get("execute") else [])]
+            *(a for root in roots for a in ("-r", root)), *(["-x"] if o.get("execute") else []),
+            *(["-p", o["threads"]] if o.get("threads") else []), *(["-M", o["mem"]] if o.get("mem") else [])]
     with ctx.phase("age-store"), cleanup(ctx.work / "age-store"):
         if ctx.sh(argv, fatal=False, warn="age-store failed (uncovered histogram inputs stay)") is not None and o.get("execute"):
             ctx.sh(["dt-cloud", "store-gc", "-t", "interval-store", "-l", "-x", "-o", o["store"]], fatal=False,
