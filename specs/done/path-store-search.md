@@ -1,5 +1,7 @@
 # Path-store search: a segment-name index for the filter view
 
+**Moved to `specs/done/` 2026-10-22** (gcs's spec sweep, Ryan's go): Superseded by the static name index (`specs/architecture/static-name-search.md`; `FILTER_STATIC*`, `FILTER_INDEXED_ONLY`): no per-scan search sidecars. Kept as history.
+
 **Status:** implemented at fixture scale, 2026-10-01; the filter syntax (§1: AND, NOT, `*`, quoting; regex a hidden fallback) replaced regex 2026-10-02 (branch `seg-idx`, off `cloud`); pluggable syntaxes (§1.1: `simple`, `regex`), a 3-character minimum term, and explicit `partial` / `approximate` flags instead of silent cuts 2026-10-02 (branch `query-syntax`); writer behind `-S`, reader on whenever a generation has the sidecars. Search performance (§3.2) 2026-10-02 (branch `search-perf`): merged range reads, read/memory/wall budgets, a per-isolate result cache, and **layout v2** (§2: the store's rows name-major in place of the names file); the reader serves v1 and v2 generations. gcs build and request costs unmeasured (§7). Base work (`cloud`). Builds the "vocabulary + block index + trigrams" tiers of [diff-and-search] §"The (prefix × query) product space" for the **served** path store ([path-store]); the August sidecar (`src/disk_tree/sidecar.py`, removed from `cloud` in `360be7d`) served only the local engine.
 
 ## 0. Problem

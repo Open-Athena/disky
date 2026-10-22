@@ -331,7 +331,7 @@ class Profile:
     #: Phases that bill no compute (a run that starts before its job does: the capture it ingests, its queue wait).
     #: A run's cost at `record -x` leaves them out.
     unbilled: tuple[str, ...] = ()
-    #: The job wrapper's alerts (specs/scan-job-wrapper.md): `label` names the deployment in each alert; `logs_url` is
+    #: The job wrapper's alerts (specs/done/scan-job-wrapper.md): `label` names the deployment in each alert; `logs_url` is
     #: a template over the run's job facts (`{job_uid}`, `{project}`, `{region}`, `{job}`, `{scan}`, `{kind}`) linked
     #: from each alert, and an alert whose run lacks a fact it names carries no link.
     alerts: Mapping[str, str] = field(default_factory=dict)
@@ -1169,7 +1169,7 @@ def backfill_cmd(profile_path, d1, jobs_json, logs_json, no_measure, dry_run, su
         f"({len(jobs)} jobs, {len(logs)} log lines)")
 
 
-# ── The job wrapper: `start`, `phase-begin`/`phase-end`, `phase -- CMD`, `finish` (specs/scan-job-wrapper.md) ─────
+# ── The job wrapper: `start`, `phase-begin`/`phase-end`, `phase -- CMD`, `finish` (specs/done/scan-job-wrapper.md) ─────
 #
 # A job script's recording, PHASE markers, redaction and failure alerts, so each deployment's script keeps only its
 # step list, two one-line traps and its per-step messages. Every command reads the run id like `record` (`-r`, else

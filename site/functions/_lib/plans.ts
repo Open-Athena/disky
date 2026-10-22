@@ -60,7 +60,7 @@ export function relPrefix(raw: string, bucket: string): string {
 }
 
 /** What a plan item (or an owner action) names: a folder `prefix` — every
- * key under it — or one exact `object` key (specs/file-assign.md). Always
+ * key under it — or one exact `object` key (specs/done/file-assign.md). Always
  * carried explicitly (`plan_items.kind`, NULL = prefix), never read off the
  * string's shape. */
 export type ItemKind = 'prefix' | 'object'
@@ -288,7 +288,7 @@ export async function mergeBatches(
  * `staged` = the new items no existing prefix covers, `covered` = the new
  * items an existing prefix already names, `absorbed` = existing items a new
  * prefix covers (to remove). An item already in the plan stays as it is. Only
- * prefixes cover or absorb: an object names its one key (specs/file-assign.md). */
+ * prefixes cover or absorb: an object names its one key (specs/done/file-assign.md). */
 export function planStagingItems(have: readonly PlanItem[], add: readonly PlanItem[]): { staged: PlanItem[]; covered: PlanItem[]; absorbed: PlanItem[] } {
   const same = (a: PlanItem, b: PlanItem) => a.key === b.key && a.kind === b.kind
   const havePrefixes = new Set(have.filter(i => i.kind === 'prefix').map(i => i.key))
@@ -500,7 +500,7 @@ export async function planItems(db: D1Database, planId: number, only?: readonly 
 export class NotInPlan extends Error {}
 
 /** `items` restricted to `only` (their `digestLines`: a prefix as itself, an object as `=<key>`): what a run acts on
- * when the person dispatching it checked some rows (specs/delete-what-you-see.md). Every selected line must be one
+ * when the person dispatching it checked some rows (specs/done/delete-what-you-see.md). Every selected line must be one
  * of the plan's; an empty selection selects nothing. */
 export function selectItems<T extends PlanItem>(items: readonly T[], only: readonly string[]): T[] {
   const want = new Set(only)
@@ -671,7 +671,7 @@ export type RealRun =
   | { ok: true; reviewed: RunRow | null }
   | { ok: false; reason: string }
 
-/** How a real run of the item set `digest` (`items` of them) at scan `date` goes (specs/delete-what-you-see.md): never
+/** How a real run of the item set `digest` (`items` of them) at scan `date` goes (specs/done/delete-what-you-see.md): never
  * while a run of the plan is in flight; no prior dry run required — the run's own manifest (each item held to its
  * staging scan, generation-pinned deletes) is the safety. `reviewed`: the newest finished dry run of exactly this set
  * at that scan, whose manifest the run may reuse (none: the run lists afresh). `date` absent: that dry run's scan,

@@ -1,5 +1,5 @@
 // The deployment's GCP Batch settings for the sweep executors
-// (specs/oa-decoupling.md step 5): which project the jobs run in, where, from
+// (specs/done/oa-decoupling.md step 5): which project the jobs run in, where, from
 // which image, against which data bucket. All from `[vars]`; nothing here
 // names a deployment. A route asks for the keys it needs and answers 503
 // naming the first one unset.

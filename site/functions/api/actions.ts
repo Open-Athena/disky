@@ -11,7 +11,7 @@
  *                                { pattern, owner, kind?, set_owner?, memo?, scan? }.
  *                                `owner: null` clears; `'@me'` resolves to the
  *                                actor's canonical user id. `kind` says what
- *                                `pattern` names (specs/file-assign.md):
+ *                                `pattern` names (specs/done/file-assign.md):
  *                                `'prefix'` (default) a folder `…/`, `'object'`
  *                                one exact key (no trailing slash) — owning
  *                                that key and nothing else. No regex patterns

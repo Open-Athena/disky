@@ -29,7 +29,7 @@ export function OwnerControls({ uri, idx, node, lensed, userIdx, onPickUser }: {
     // store root ("gs://…" with no bucket path) — nothing assignable
     return null
   }
-  // A file's panel assigns that exact object; a folder's, its `/` prefix (specs/file-assign.md).
+  // A file's panel assigns that exact object; a folder's, its `/` prefix (specs/done/file-assign.md).
   const item = actionItem(uri.replace(/\/$/, ''), node?.k === 'file' ? 'file' : 'dir')
   const cl = idx.assignmentOf(item.key, item.kind)
   // Ownership: the assignment if there is one; otherwise the scan's

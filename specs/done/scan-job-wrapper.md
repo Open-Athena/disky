@@ -1,5 +1,7 @@
 # Shared scan-job wrapper: `dt-cloud scan-run phase-*` + `disk-tree notify`
 
+**Moved to `specs/done/` 2026-10-22** (gcs's spec sweep, Ryan's go): Done: `dt-cloud scan-run` (`cloud/src/dt_cloud/scan_runs.py`); gcs runs `scan-run supervise`, `job/run.sh` uses `sr phase-*`.
+
 Status: **migration step 1 built on cloud** (2026-10-14). Reviewed by gcs (9 gaps) and cw-s3 (5 gaps); both are folded in below. m3's `disk-tree notify` is on cloud (`65f0a64e`) and is the one notifier; it now has the `slack` channel. `dt-cloud scan-run start / phase-begin / phase-end / phase -- CMD / finish` are in `cloud/src/dt_cloud/scan_runs.py` (over `record`'s internals; `record` is unchanged), tested in `cloud/tests/test_scan_run_wrapper.py`. Step 2 (each deployment swapping its shim): cw switched (8d343511), pending its first verified job run; gcs built (b55f942a), pending its image and first verified run, with its old shell functions deleted. Since: `scan-run nop`, a list-valued `error_marker`, and the `scan-run supervise` entrypoint plus TERM/INT traps (below; m3's platform-terminated job recorded `succeeded`).
 
 As built, beyond the design below:

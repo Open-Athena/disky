@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Build and deploy to Cloudflare Pages — the project named in wrangler.toml.
 # The deployment's own settings come from `site/deploy.env` (on its branch;
-# specs/oa-decoupling.md): `CLOUDFLARE_ACCOUNT_ID` (required), `PTR_SHORT` (the
+# specs/done/oa-decoupling.md): `CLOUDFLARE_ACCOUNT_ID` (required), `PTR_SHORT` (the
 # local deploy-pointer prefix; default the project name), `PUSH_REMOTE`
 # (default the branch's configured push remote), and `PROD_BRANCH` / `DEV_BRANCH`
 # (the Pages branches a deploy / `--dev` deploy targets: the project's production

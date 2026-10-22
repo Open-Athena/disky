@@ -876,7 +876,7 @@ async function readView(env: Env, o: ViewOpts, cov: Coverage = {}): Promise<Read
       return { all, mine, depth }
     }
     // Phase 1. A store generation with the search sidecars answers from
-    // them (specs/path-store-search.md): the match roots anywhere under P,
+    // them (specs/done/path-store-search.md): the match roots anywhere under P,
     // exact unless a budget cut the search; anything else reads as before.
     t0 = performance.now()
     let roots: string[] = []

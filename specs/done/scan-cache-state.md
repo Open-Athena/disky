@@ -1,5 +1,7 @@
 # Show reused tasks in scan retries
 
+**Moved to `specs/done/` 2026-10-22** (gcs's spec sweep, Ryan's go): Done on `cloud`: `8f27e690` (from cw's `681ff1bc`): `/scans`' DAG shows Nextflow cache hits as "reused". Deploys are per deployment.
+
 Status: implemented and verified locally on 2026-10-22. Production Pages deployment was rejected by automatic approval review pending explicit approval. The job-image changes have not been deployed; the running retry retains its existing image. No commits or pushes.
 
 The pipeline diagram joined nodes only to phases recorded by the current attempt. Nextflow cache hits emit no new phases, so a resumed pipeline showed already completed source listing, indexing, publication and interval work as waiting. Inferring successful nodes from missing phase records would hide real unknown or pending states.

@@ -1,5 +1,7 @@
 # Treemap scaling: from DOM cells toward a canvas-backed map
 
+**Moved to `specs/done/` 2026-10-22** (gcs's spec sweep, Ryan's go): Done: the canvas renderer and its a11y overlay shipped in `packages/treemap/src/Treemap.tsx`. Color-buffer hit testing stays an optional proposal.
+
 Status (reconciled 2026-10-11): **canvas renderer and bounded accessibility overlay shipped**, alongside the DOM renderer; see the as-built sections below and `packages/treemap/src/Treemap.tsx`. Default remains DOM; color-buffer hit testing and further optimizations remain proposals, not prerequisites for implementing canvas again.
 
 ## The problem

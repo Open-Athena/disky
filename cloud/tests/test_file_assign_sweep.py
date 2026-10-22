@@ -1,4 +1,4 @@
-"""Exact (single-object) plan items through the sweep (specs/file-assign.md):
+"""Exact (single-object) plan items through the sweep (specs/done/file-assign.md):
 plan round-trip, manifest (gcs listing shards and cw layer-2), the `as_of`
 hold, execute (dry and real) and undo. An exact item matches only its own key:
 never `clip.mp3.bak`, never `clip.mp3/x`."""

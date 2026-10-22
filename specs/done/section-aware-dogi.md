@@ -1,5 +1,7 @@
 # Section-aware dynamic OpenGraph cards
 
+**Moved to `specs/done/` 2026-10-22** (gcs's spec sweep, Ryan's go): Done on `cloud` (`9b2aab6f`, `83a41c38`); each deployment's rollout is its own.
+
 Status: CW's shared implementation adopted by root in `9b2aab6f`, with sticky diff endpoint modes in `83a41c38`. Root verified 93 focused OG/share tests, the site build and a synthetic comparison rendered through the actual SVG/WASM pipeline in Chrome. Deployment owners retain live rollout and capability-verification gates; no live token was minted here. Ryan requested a real diff card for `/marin-us-east-02a?d=26092812-26091700#diff`, plus sticky diff endpoint modes.
 
 Fragments never reach the server. Sharing/minting must promote the known `#diff` (legacy `#changes`) to `section=diff` and retain the fragment for browser navigation. An ordinary span URL may still depict the main snapshot; do not assume every date range means the diff section. Section/card kind is part of preview-token authorization. Both resolved scan identities must be signed and cache-keyed; changing either changes the image URL. Anonymous CW links remain generic, and invalid/expired/revoked capabilities must downgrade before protected reads/cache access.

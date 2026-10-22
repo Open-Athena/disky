@@ -1,6 +1,9 @@
 # Sweep executor — plan → review → execute (deleting what's marked `sweep`)
 
+**Moved to `specs/done/` 2026-10-22** (gcs's spec sweep, Ryan's go): Superseded by staged-path dispatch (`specs/done/staged-delete.md`, `staged-runs.md`), as its own 10-11 note says. Kept as history.
+
 **Current GCS contract (2026-10-11 reconciliation): staged-path dispatch, implemented executor and recovery.** The mark-first design, “nothing can delete” and “no undo” below describe Sept 1, not current operations. Real jobs use pinned listings/exact generations and committed decision logs. Recovery expires separately from each object's deletion time, not run completion; stop and drain active deletion before restoring. Later as-built sections record progress history, parallel per-bucket execution and the optional adaptive controller. Production remains `SWEEP_PACING=guided`; synthetic tests do not prove a real-provider speedup. Source-object hard purging is not derived-index cleanup. See [API.md](../API.md) and [GCS operations](gcs-operations.md).
+
 
 The marking phase is done ([mark-sweep-ui.md], [actions-ledger.md]); ~1,108 Ti is marked `sweep` and nothing can actually delete yet ([repo-hygiene-audit.md] ranks this spec #1). This spec designs the deletion system: **manifest-based, three-phase, dry-run-first**, with an admin review UI. We are deleting other people's data with (currently) **no undo** — soft delete is disabled on all six buckets (`retentionDurationSeconds=0`, no versioning, verified 2026-09-01) — so the design leans hard on: pinned inputs, an explicit reviewable manifest, independent cross-checks against the site's own fate totals, a temporary soft-delete safety net, and IAM that physically can't delete until the execute window.
 

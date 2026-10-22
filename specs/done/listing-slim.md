@@ -1,6 +1,9 @@
 # Slimmer layer-2 listings: drop redundant columns, zstd, then cross-scan consolidation
 
+**Moved to `specs/done/` 2026-10-22** (gcs's spec sweep, Ryan's go): Done for what it set out to do: phases 1–2 (`disk-tree recompress`, `listing-format`). Phase 3 was superseded by the path and interval stores; rewriting a fleet's listings is per deployment.
+
 Status (reconciled 2026-10-11): **phases 1 and 2's shared code implemented**, including `recompress` / `listing-format` (see Phase 2's as-built notes). Existing-fleet rewrite acceptance remains deployment-specific. Phase 3's raw-listing archive proposal was superseded by path/interval-store work; GCS still retains raw listings and per-scan fallback tiers. Proposed 2026-09-29 from the cw-s3 session (Ryan: "yes spec it, this is a good direction").
+
 
 ## Motivation
 

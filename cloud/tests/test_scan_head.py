@@ -144,6 +144,21 @@ def test_params_reproc_fresh_and_extras():
     }
 
 
+def test_params_put_side_steps_in_their_own_task():
+    """`non-live` (stage `side`) runs as its own task beside `list` and `index` (`params.side`), never in `pre`, which
+    `index` waits on; `machines.side` sizes it."""
+    from dt_cloud.scan_profile import parse
+
+    base = {"deployment": "fix", "executor": {"kind": "local"}, "work": "/w", "data": "/d",
+            "layout": {"layer2": "l2/{scan}/", "snapshots": ""}, "sources": ["gs://a"],
+            "steps": ["access-ingest", "non-live"], "skip": ["digest", "static-names"],
+            "options": {"list": {"import": True}, "non-live": {"classes": ["soft-deleted"]}}}
+    got = H.params(parse(base), "{}", "2026-10-16", "G", "1", "", "S", {})
+    assert {k: got[k] for k in ("pre", "side", "side_label")} == {"pre": ["access-ingest"], "side": ["non-live"], "side_label": "small"}
+    sized = H.params(parse({**base, "machines": {"side": {"type": "e2-standard-4"}}}), "{}", "2026-10-16", "G", "1", "", "S", {})
+    assert sized["side_label"] == "side"
+
+
 @pytest.mark.parametrize("poller, steps, pre", [
     (False, ["bucket-check", "access-ingest", "list", "index", "index-rows", "index-sync"], ["access-ingest"]),
     (True, ["bucket-check", "list", "index", "index-rows", "index-sync"], []),

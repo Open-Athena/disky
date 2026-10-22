@@ -1,5 +1,7 @@
 # IaC templates: stand up a deployment from public components + one config file per stack
 
+**Moved to `specs/done/` 2026-10-22** (gcs's spec sweep, Ryan's go): Done: phases 1–3 (root; m3's phase 2 `8042f32`). Only open questions remain (config-only programs, the `aws/` path, m3 literals).
+
 **From:** m3 (`wt/m3`), 2026-10-02. **For:** the root session (`cloud` / `local` components), then m3 as the first consumer.
 
 **Status (2026-10-02):** phases 1–3 done (root); phase 2 done by m3 (8042f32: previews show 0 live replacements).

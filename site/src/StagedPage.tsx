@@ -327,7 +327,7 @@ export function StagedPage() {
   const planBuckets = [...perBucket.keys()].sort()
   const onBuckets = planBuckets.filter(b => !bucketsOff.has(b))
   const cut = CAPS.bucketCut && onBuckets.length < planBuckets.length ? onBuckets : undefined
-  // What a dispatch acts on: the checked rows (in the checked buckets), nothing else (specs/delete-what-you-see.md:
+  // What a dispatch acts on: the checked rows (in the checked buckets), nothing else (specs/done/delete-what-you-see.md:
   // a real run once deleted a prefix the person had unchecked). An object item goes as `=<key>`.
   const runRows = activeRows.filter(r => sel.selected.has(r.prefix) && onBuckets.includes(prefixToPath(r.prefix).split('/')[0]))
   const runItems = runRows.map(r => (r.kind === 'object' ? `=${r.prefix}` : r.prefix))

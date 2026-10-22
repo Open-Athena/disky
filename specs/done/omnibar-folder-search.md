@@ -13,7 +13,7 @@ On the map page, typing in the omnibar (`⌘K`) adds two groups to the page's ac
 - **Map:** "Filter map by "grug"" (from one character): sets `?f=` to the query, as typing it into the filter box would.
 - **Folders & files** (from two characters): the folders and files whose own names match, largest first, each labelled by its name, then its parent path (elided from the middle), with "folder · 1.2 TB · 3,400 objects" or "file · 50 MB" below. Picking a folder drills the map to it; picking a file opens it in the leaf viewer under its folder (`openHref`). When the server can't list every match (a rollup: too many), a last row says so, and picking it filters the map instead.
 
-The matches are the map's own: the filter's match roots (`allMatchRoots`, the same answer `/api/filter-cover` and the map's matched set use) at the map's scan (`?d=`, or a union view's `?at=`), in the map's filter syntax, so a result's size is what the map shows for it. The search runs over the whole map, not just the drilled folder.
+The matches are the map's own: the filter's match roots (`allMatchRoots`, the same answer `/api/filter-cover` and the map's matched set use) at the map's scan (`?d=`, or a union view's `?at=`), in the map's filter syntax, so a result's size is what the map shows for it. The search runs over the whole map, not just the drilled folder. On an indexed-only deployment whose newest scan isn't in the static name index yet (the ingest appends it after the scan publishes), the omnibar searches the newest covered scan at or before the map's (`searchScan`, over `/api/filter-scans`, as the filtered map opens on), and each result says "as of scan <id>"; found in CIC on r2.rbw.sh, 2026-10-22, where 10-22 wasn't indexed yet.
 
 ## API
 

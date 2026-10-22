@@ -111,7 +111,9 @@ MAX_RUN_S = 4 * 3600
 #: Stages that fold a whole generation on one VM (`compact`): they run longer than `MAX_RUN_S` (gcs's first interval-store
 #: compaction, 2026-10-21: a 2 h 10 min fold, then ~35 min per served sort in series), and always STANDARD, since a
 #: reclaimed spot task restarts from zero (the static one was reclaimed ~3 h in). No merge lease is held through them.
-LONG_STAGES = ("compact",)
+#: `anchors` too: one backlogged scan's anchored-search build ran past `MAX_RUN_S` twice on cw (2026-10-22, n2-highmem-16,
+#: with its probe joins bounded), each retry from zero.
+LONG_STAGES = ("compact", "anchors")
 LONG_RUN_S = 16 * 3600
 #: A merge job whose carries reach this level runs as a long stage (STANDARD, `LONG_RUN_S`), and its lease lives as long:
 #: a carry's inputs double per level (gcs's level-4 carry, 16 scans' runs: 183 min on a spot n2-highmem-16, 2026-10-16),

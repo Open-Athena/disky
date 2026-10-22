@@ -1,6 +1,9 @@
 # OA decoupling: OA-specific behavior leaves `cloud`, as deployment config
 
+**Moved to `specs/done/` 2026-10-22** (gcs's spec sweep, Ryan's go): Done: steps 1–18 on `cloud` (2026-10-03). Small leftovers: cw's About text; `CW_*` / `GCS_USAGE_*` env-var renames.
+
 **GCS follow-through (2026-10-11):** daily images/site have been rebuilt after the shared rename work. GCS still supplies legacy `GCS_USAGE_TOKEN` through supported aliases; this is not proof those aliases can be removed or that every other deployment rebuilt. The snapshot token is now independent from the sheet mirror. See [GCS operations](gcs-operations.md); remaining cross-deployment/API naming work below stays separately gated.
+
 
 **Status (2026-10-03):** steps 1–17 done on `cloud`, plus 18's names, comments and package name. dt-cloud carries no OA default (only a credit line in `usernames.py` mentions Marin).
 - **Next:** gcs and cw-s3 rebuild their images (one build each; their step-0 scripts cover every key), then switch to the renamed env vars at leisure. Old names (`GCS_USAGE_TOKEN`/`_URL`, `CW_BUCKET`/`_ENDPOINT`) are accepted for one release. After that, the site's job specs (`planDispatch`, `sweepDispatch`, `cwBatch`) switch to the new names too.
