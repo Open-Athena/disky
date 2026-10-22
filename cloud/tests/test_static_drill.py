@@ -31,6 +31,36 @@ CONFIGS = [{"R": 3, "K": 2, "floor": 2, "rg": 4, "run_rg": 2}, {"R": 5, "K": 1, 
 NOISE = ["gof.txt", "x5418y", "nk080", "48.parquet", "a'b", "é5418", "sh", "ab", "ckpt_old.bin", "data.jsonl"]
 
 
+@pytest.mark.parametrize("n", [0, 3, 19])
+def test_state_writer_streams_with_the_same_parquet_bytes(tmp_path, monkeypatch, n):
+    """State is corpus-sized: Arrow must use fixed batches rather than materialize the entire result."""
+    monkeypatch.setattr(sd, "STATE_RG", 8, raising=False)
+    monkeypatch.setattr(sd, "STATE_BATCH_ROWS", 5)
+    con = sn.connect(1, "128MB", tmp_path / "spill")
+    con.execute(f"CREATE TABLE dcnt AS SELECT 'q' AS q, printf('dir/%03d', i) AS dir, i::BIGINT AS rows FROM range({n}) t(i)")
+    expected = tmp_path / "expected.parquet"
+    pq.write_table(con.execute("SELECT * FROM dcnt ORDER BY q, dir").to_arrow_table(5).cast(sd.DCOUNT_SCHEMA),
+                   expected, compression=sn.CODEC, row_group_size=8)
+
+    class StreamingOnly:
+        def execute(self, sql):
+            self.cursor = con.execute(sql)
+            return self
+
+        def to_arrow_table(self):
+            raise AssertionError("state writer materialized the complete result")
+
+        def to_arrow_reader(self, size):
+            assert size == 5
+            return self.cursor.to_arrow_reader(size)
+
+    sd.write_state(StreamingOnly(), tmp_path / "out", "long")
+    actual = tmp_path / "out/state/dcount-long.parquet"
+    assert actual.read_bytes() == expected.read_bytes()
+    assert pq.read_table(actual).to_pylist() == [{"q": "q", "dir": f"dir/{i:03d}", "rows": i} for i in range(n)]
+    con.close()
+
+
 def _files(j: int) -> dict[str, list[tuple[str | None, int]]]:
     """Scan `j`'s files `{path: [(owner, bytes)]}`; each a case for the runs (scans BASE … BASE + 3)."""
     rng = random.Random(100 + j)

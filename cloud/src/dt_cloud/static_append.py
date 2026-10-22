@@ -129,7 +129,7 @@ def write_run_shards(batches, out: Path, target_rows: int = RUN_SHARD_ROWS, plan
     (out / "sidecar").mkdir(parents=True, exist_ok=True)
 
     def write(sid: int, batches_) -> None:
-        name = f"s{sid:04d}"
+        name = f"s{shards[sid]['i']:04d}"
         stats: list[tuple[str, str, int]] = []
 
         def on_group(g: pa.Table) -> None:
@@ -143,10 +143,10 @@ def write_run_shards(batches, out: Path, target_rows: int = RUN_SHARD_ROWS, plan
     written = set()
     for sid, grp in groupby(tagged(), key=lambda x: x[0]):
         write(sid, (b for _, b in grp))
-        written.add(sid)
-    for sh in shards:
+        written.add(shards[sid]["i"])
+    for sid, sh in enumerate(shards):
         if sh["i"] not in written:
-            write(sh["i"], iter(()))
+            write(sid, iter(()))
     for k, sh in enumerate(shards):
         sh["hi"] = shards[k + 1]["lo"] if k + 1 < len(shards) else None
         sh["prefixes"] = len(sh.pop("p3"))
