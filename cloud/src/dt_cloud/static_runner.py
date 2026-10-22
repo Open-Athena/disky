@@ -348,24 +348,26 @@ def gcs_runner(cfg: Profile, *, dry_run: bool = False, verify_terms: str | None 
     def published(layouts, start):
         return [s["id"] for s in list_scans(cfg.bucket, layouts=layouts or cfg.layouts, start=start)["scans"]]
 
+    # the local stages read the runner's generation when they run: `follow` moves it to a compacted successor
     def prepare(d):
         try:
-            sa.prepare_cmd.callback(bucket=cfg.bucket, date=d, gen=cfg.gen)
+            sa.prepare_cmd.callback(bucket=cfg.bucket, date=d, gen=runner.cfg.gen)
         except SystemExit as e:
             raise NotNext(str(e)) from e
 
     def publish(d):
-        sa.publish_cmd.callback(bucket=cfg.bucket, date=d, gen=cfg.gen, dry_run=False)
+        sa.publish_cmd.callback(bucket=cfg.bucket, date=d, gen=runner.cfg.gen, dry_run=False)
 
     def prune(d):
-        k = read_json(f"gs://{cfg.bucket}/{PREFIX}/{cfg.gen}/ranges.json")["k"]
-        doc = sa.prune_state(client, cfg.gen, d, k, bucket=cfg.bucket, scratch=cfg.scratch, dry_run=dry_run)
+        gen = runner.cfg.gen
+        k = read_json(f"gs://{cfg.bucket}/{PREFIX}/{gen}/ranges.json")["k"]
+        doc = sa.prune_state(client, gen, d, k, bucket=cfg.bucket, scratch=cfg.scratch, dry_run=dry_run)
         err(json.dumps(doc))
-        folded = ar.prune_folded(ar.GcsRunStore(cfg.bucket, None, cfg.gen, prefix=PREFIX, client=client), retain=FOLDED_RETAIN,
+        folded = ar.prune_folded(ar.GcsRunStore(cfg.bucket, None, gen, prefix=PREFIX, client=client), retain=FOLDED_RETAIN,
                                  dry_run=dry_run, where=" gcs")
         err(json.dumps({k_: v for k_, v in folded.items() if k_ != "keys"}))
 
-    return Runner(
+    runner = Runner(
         cfg=cfg,
         exists=lambda key: b.blob(key).exists(),
         count=lambda prefix, suffix: sum(1 for x in client.list_blobs(cfg.bucket, prefix=prefix) if x.name.endswith(suffix)),
@@ -381,6 +383,7 @@ def gcs_runner(cfg: Profile, *, dry_run: bool = False, verify_terms: str | None 
         merge_wait=merge_wait,
         list_keys=lambda prefix: [x.name for x in client.list_blobs(cfg.bucket, prefix=prefix)],
     )
+    return runner
 
 
 @command("add")
