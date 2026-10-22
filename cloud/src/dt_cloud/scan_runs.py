@@ -152,6 +152,12 @@ def run_sql(run: Run, now: int) -> str:
             f"ON CONFLICT(run_id) DO UPDATE SET {', '.join(sets)}")
 
 
+def heartbeat_sql(run_id: str, now: int) -> str:
+    """A running run's liveness: `updated_ts` alone, and only while the row is `running` (a beat racing the job's
+    finishing write never moves its status back, nor stamps a finished row)."""
+    return f"UPDATE scan_runs SET updated_ts = {lit(now)} WHERE run_id = {lit(run_id)} AND status = 'running'"
+
+
 def phase_sql(run_id: str, p: Phase) -> str:
     cols = ["run_id", "phase", "seq", "started_ts", "finished_ts", "status", "note"]
     vals = [run_id, p.phase, p.seq, p.started_ts, p.finished_ts, p.status, p.note]
@@ -1390,6 +1396,18 @@ class JobRun:
             report_failure(e)
             return None
 
+    def beat(self) -> None:
+        """One heartbeat: a log line naming the running phases, and the run row's `updated_ts` (`heartbeat_sql`), so
+        `/scans` tells a run waiting on a slow phase (or a Batch VM) from a dead one. Never raises."""
+        running = self.state().get("running") or []
+        err(f"heartbeat: alive{' · ' + ', '.join(running) if running else ''}")
+        if not self.recording or not self.run_id:
+            return
+        try:
+            sink_for(self.dry_run, self.sqlite, self.d1).execute([heartbeat_sql(self.run_id, _now())])
+        except (Exception, SystemExit) as e:  # noqa: BLE001 — a heartbeat never fails the job
+            report_failure(e)
+
     # alerts
 
     def task(self) -> dict[str, str]:
@@ -1866,8 +1884,9 @@ def finish_cmd(dag_path, dag_engine, error, cost_labels, rc, profile_path, d1, d
 
 @cli.command("supervise")
 @option("-G", "--grace", default="20s", help="After a TERM/INT: how long CMD's group has before KILL (default 20s, under the usual 30s platform stop timeout)")
+@option("-H", "--heartbeat", default="60s", help="While CMD runs, every this long: log the running phases and stamp the run row's `updated_ts` (default 60s; 0: off)")
 @argument("cmd", nargs=-1, required=True)
-def supervise_cmd(grace, cmd) -> None:
+def supervise_cmd(grace, heartbeat, cmd) -> None:
     """The job's entrypoint (`supervise -- bash job.sh`): run CMD in its own session and exit with its status (a
     signal death as 128+N). A SIGTERM / SIGINT goes to CMD's whole process group at once (bash, as PID 1, would defer
     it until its foreground child exits, and the platform signals only PID 1), and what's left after the grace is
@@ -1877,9 +1896,14 @@ def supervise_cmd(grace, cmd) -> None:
     `terminated (SIGTERM)`) over whatever its own EXIT trap recorded: a termination wins, even over a recorded success.
     The `fail` alert posts unless one already did. CMD exiting 0 despite the signal had finished: its record
     (`succeeded`, or `nop`) stands. Without a signal, a non-zero exit that never reached `finish` (an OOM kill, no
-    trap) is recorded failed too."""
+    trap) is recorded failed too.
+
+    Every `-H` while CMD runs, a heartbeat (`JobRun.beat`) logs the running phases and stamps the run's `updated_ts`:
+    a phase waiting long on its own Batch job (a VM the zone can't supply) reads as alive on `/scans`, not quiet."""
+    import threading
+
     try:
-        grace_s = duration(grace)
+        grace_s, beat_s = duration(grace), duration(heartbeat)
     except ValueError as e:
         err(f"scan-run supervise: {e}")
         sys.exit(2)
@@ -1887,7 +1911,18 @@ def supervise_cmd(grace, cmd) -> None:
     ptr.unlink(missing_ok=True)
     os.environ[SUPERVISE_ENV] = str(ptr)
     os.environ[TERM_GRACE_ENV] = f"{grace_s / 2:g}"
+    stop = threading.Event()
+
+    def beats() -> None:
+        while not stop.wait(beat_s):
+            j = JobRun.pointed(ptr)
+            if j is not None and j.state().get("finished") is None:
+                j.beat()
+
+    if beat_s > 0:
+        threading.Thread(target=beats, daemon=True).start()
     ran = run_grouped(cmd, None, grace_s, session=True)
+    stop.set()
     try:
         supervised_finish(ptr, ran, grace_s)
     except Exception as e:  # noqa: BLE001 — the job's own status passes through regardless
