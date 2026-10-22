@@ -509,16 +509,25 @@ def _child(path: str, dir_: str) -> str:
     return f"CASE WHEN {dir_} = '' THEN string_split({path}, '/')[1] ELSE string_split(substring({path}, length({dir_}) + 2), '/')[1] END"
 
 
+#: Keys per prior-probe query (`probe_prior_rows`): one shard read per batch, so fewer is slower, not leaner.
+PROBE_BATCH_KEYS = 1 << 16
+
+
 def probe_prior_rows(
     con,
     prior: list[Tier],
     mode: str,
-    batch_keys: int = 256,
+    batch_keys: int = PROBE_BATCH_KEYS,
 ) -> int:
     """Exact prior rows under near's union of subtrees, scanning each shard in bounded key batches.
 
     Disjoint intervals plus an ASOF lookup replace an O(rows × directories) OR predicate. Nested directories
     are merged before the lookup; a row contributes once per tier, even under multiple requested ancestors.
+
+    A batch is a contiguous run of a shard's keys (they're sorted, as its rows are): its keys go into a table
+    (`pkeys`), the shard is read over the batch's `s` range only (row-group pruning), and the ASOF join's right side is
+    just the batch's probe ranges. cw's backlogged 10-20 18:06 scan spent its whole 4 h `anchors` task in 41,767
+    256-key `IN (…)` queries of ~0.34 s each (`PROBE_BATCH_KEYS` was 256): per-query overhead, not rows.
     """
     if batch_keys <= 0:
         raise ValueError("batch_keys must be positive")
@@ -542,14 +551,16 @@ def probe_prior_rows(
         for file, file_keys in by_file.items():
             for offset in range(0, len(file_keys), batch_keys):
                 selected = file_keys[offset:offset + batch_keys]
-                key_list = ', '.join(q(k) for k in selected)
-                where = f"s IN ({key_list})"
+                values = ", ".join(f"({q(k)})" for k in selected)
+                con.execute(f"CREATE OR REPLACE TABLE pkeys AS SELECT * FROM (VALUES {values}) AS t(k)")
+                where = f"s >= {q(selected[0])} AND s <= {q(selected[-1])}"
                 resource_stage(f"anchors {mode}: prior probes", tier=ti, query=queries + 1, keys=len(selected))
                 con.execute(f"""INSERT INTO prows SELECT x.k, x.depth, x.path, x.usr, x.vf, x.vt, x.size, x.n_files, x.par
                     FROM ({shard_rows_sql([file], where)}) AS x
-                    ASOF JOIN (SELECT * FROM probe_ranges WHERE k IN ({key_list})) AS p ON x.k = p.k AND x.path >= p.lo
+                    ASOF JOIN (SELECT * FROM probe_ranges SEMI JOIN pkeys USING (k)) AS p ON x.k = p.k AND x.path >= p.lo
                     WHERE p.hi IS NULL OR x.path < p.hi""")
                 queries += 1
+    con.execute("DROP TABLE IF EXISTS pkeys")
     resource_stage(f"anchors {mode}: prior probes complete", queries=queries, keys=len(keys))
     return queries
 
