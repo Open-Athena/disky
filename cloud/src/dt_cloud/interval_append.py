@@ -78,6 +78,7 @@ from .append_runner import (  # noqa: F401 — NOT_NEXT, StateIncomplete: as thi
 from .blobstore import Store, gs_bucket, run_store, serves, store_url
 from .maint_runs import NULL, from_env
 from .static_names import OPEN, U64, err, q, write_sorted
+from .interval_verify import marker_key
 from .static_profile import Profile, from_mapping, level_arg, parse_compact_level
 
 PREFIX = ist.PREFIX
@@ -129,6 +130,19 @@ HASH = {
     "sv": ist.SV_HASH,
     "svt": f"hash({ist.SV_HASH[5:-1]}, tot)",
 }
+#: A scan's rows per table (`append_range`'s `np` / `ns`): what the open versions, and the store's answer, must be.
+SCAN_ROWS = {
+    "pvl": "SELECT * FROM np",
+    "sv": "SELECT * FROM ns",
+    "svt": "SELECT s.*, p.size AS tot FROM ns s JOIN np p ON p.depth = s.depth AND p.path = s.path",
+}
+#: What the append's parity check compares per table, row for row: `HASH`'s columns (the key, the change columns with `dr`
+#: from the stored `wts`/`wb`, `last_read`, `tot`).
+CHECK_COLS = {
+    "pvl": ["depth", "path", *ist.CHANGE_COLS, "last_read"],
+    "sv": ["depth", "path", "usr", *ist.SV_CHANGE],
+    "svt": ["depth", "path", "usr", *ist.SV_CHANGE, "tot"],
+}
 
 
 def tables(sliced: bool = True) -> tuple[str, ...]:
@@ -179,13 +193,17 @@ def _reconstructs(con, table: str, new: str, kind: str) -> tuple[list[int], list
 
 
 def append_range(con, prev: dict[str, str], scan: dict, r: dict, name: str, out: Path, *, bucket: str, mount: str | None,
-                 sliced: bool = True, generation: ist.Identity = False) -> dict:
+                 sliced: bool = True, generation: ist.Identity = False, check: list[str] | None = None) -> dict:
     """Append `scan` to one key range's open versions (`prev`: `state_schema` relations per table, `tables(sliced)`).
     Writes under `out` each table's delta `<t>/<name>.parquet` (`delta_schema`, sorted by identity then `op`) and next
     open state `state/<t>/<name>.parquet`. Raises unless the next open state is the scan's rows exactly; refuses
     (`SystemExit`) a scan naming owners in a generation without the owner axis (`sliced` false). With `generation` (the
     generation's `"generation": true`), a version opened at the scan takes its object's `GENERATION` (NULL where the
-    scan's sort has none); a continuing version keeps its own (`build`'s carry from the version's first scan)."""
+    scan's sort has none); a continuing version keeps its own (`build`'s carry from the version's first scan).
+
+    `check`: the published roots the store answers the range from (the base's range-file dir, then each run its newest
+    earlier manifest lists): the range's answer at the scan over them and this run's deltas is compared with the scan's
+    rows, row for row (`check_tables`), as `doc["check"]` (the scan's parity marker sums them: `append_marker`)."""
     from pyrmts.intervals import append_intervals
 
     t0 = monotonic()
@@ -241,12 +259,14 @@ def append_range(con, prev: dict[str, str], scan: dict, r: dict, name: str, out:
                                out / t / f"{name}.parquet", schema, ist.RANGE_RG, dictionary=dict_cols)
         n_state = write_sorted(sn._batches(con, f"SELECT {cols} FROM o_{t} WHERE vt = {OPEN} ORDER BY {', '.join(IDENT[t])}"),
                                out / "state" / t / f"{name}.parquet", state_schema(t, generation), ist.RANGE_RG, dictionary=dict_cols)
-        got, want = _reconstructs(con, f"o_{t}", {"pvl": "SELECT * FROM np", "sv": "SELECT * FROM ns",
-                                                   "svt": "SELECT s.*, p.size AS tot FROM ns s JOIN np p ON p.depth = s.depth AND p.path = s.path"}[t], t)
+        got, want = _reconstructs(con, f"o_{t}", SCAN_ROWS[t], t)
         if got != want:
             raise RuntimeError(f"append {name} {scan['id']} {t}: the open versions ({got[0]:,} rows) are not the scan's ({want[0]:,})")
         doc[t] = {"opened": n_open, "closed": n_close, "delta": n_delta, "open": n_state}
         con.execute(f"DROP TABLE o_{t}; DROP TABLE p_{t}")
+    if check is not None:
+        t1 = monotonic()
+        doc["check"] = {**check_tables(con, [*check, str(out)], name, D, sliced=sliced, generation=generation), "s": round(monotonic() - t1, 1)}
     con.execute("DROP TABLE np; DROP TABLE IF EXISTS ns; DROP TABLE npf")
     doc["s"] = round(monotonic() - t0, 1)
     err(f"append {name} {scan['id']}: " + ", ".join(f"{t} +{doc[t]['opened']:,} −{doc[t]['closed']:,}" for t in todo) + f" in {doc['s']}s")
@@ -294,6 +314,111 @@ def merge_range(inputs: list[str], name: str, out: Path, sliced: bool = True, ge
         doc[t] = write_sorted(stream, out / t / f"{name}.parquet", schema, ist.RANGE_RG,
                               dictionary=[c for c in ("kind", "us", "usr") if c in schema.names])
     return doc
+
+
+# ── The append's parity check (`scan retire`'s gate; specs/scan-cs3.md item 4) ──
+
+
+def live_sql(roots: list[str], t: str, name: str, D: int, generation: ist.Identity = False) -> str:
+    """Key range `name`'s versions of table `t` live at `D`, as the reader combines them (`interval_read.combine`): every
+    root's `<t>/<name>.parquet` (a base's range files, runs' deltas), one row per version (`IDENT`) with the smallest
+    `vt`, those with `vf ≤ D < vt`; in `CHECK_COLS[t]` (`usr` '' where no owner is named), `pvl` with `GENERATION` last
+    when the generation carries it."""
+    gcol = [ist.identity_column(generation)] if generation and t == "pvl" else []
+    key = [c for c in CHECK_COLS[t] if c in IDENT[t]]
+    cols = [*key, "vf", "vt", *(c for c in CHECK_COLS[t] if c not in (*key, "dr")), "wts", *gcol]
+    sel = ", ".join("coalesce(usr, '') AS usr" if c == "usr" else c for c in cols)
+    parts = " UNION ALL ".join(f"SELECT {sel} FROM read_parquet({q(f'{r}/{t}/{name}.parquet')})" for r in roots)
+    out = ", ".join(f"{DR} AS dr" if c == "dr" else c for c in [*CHECK_COLS[t], *gcol])
+    return f"""SELECT {out} FROM (SELECT * FROM ({parts}) WHERE vf <= {D}
+        QUALIFY row_number() OVER (PARTITION BY {', '.join(IDENT[t])} ORDER BY vt) = 1) WHERE vt > {D}"""
+
+
+def _differ(con, a: str, b: str, cols: str) -> int:
+    """Rows of `a` not in `b`, as multisets (`EXCEPT ALL`: NULLs compare equal)."""
+    return int(con.execute(f"SELECT count(*) FROM (SELECT {cols} FROM {a} EXCEPT ALL SELECT {cols} FROM {b})").fetchone()[0])
+
+
+def check_tables(con, roots: list[str], name: str, D: int, *, sliced: bool = True, generation: ist.Identity = False) -> dict:
+    """The scan's rows in key range `name` (`np`, `ns`: `append_range`'s tables) against the store's answer at `D` over
+    `roots` (`live_sql`), row for row, per table: `rows` (the scan's), `store` (the store's), `missing` (scan rows the
+    store doesn't give, as a multiset), `extra` (store rows the scan doesn't have). With `generation`, also `generation`:
+    the scan's objects that carry one, and how many the store's live version gives the same (`interval_verify
+    .generation_parity`'s count)."""
+    out: dict = {}
+    for t in tables(sliced):
+        gcol = [ist.identity_column(generation)] if generation and t == "pvl" else []
+        cols = ", ".join(CHECK_COLS[t])
+        con.execute(f"CREATE OR REPLACE TEMP TABLE c_store AS {live_sql(roots, t, name, D, generation)}")
+        con.execute(f"CREATE OR REPLACE TEMP TABLE c_scan AS SELECT {', '.join([*CHECK_COLS[t], *gcol])} FROM ({SCAN_ROWS[t]})")
+        n_scan, n_store = (int(con.execute(f"SELECT count(*) FROM {x}").fetchone()[0]) for x in ("c_scan", "c_store"))
+        out[t] = {"rows": n_scan, "store": n_store, "missing": _differ(con, "c_scan", "c_store", cols), "extra": _differ(con, "c_store", "c_scan", cols)}
+        if gcol:
+            g = gcol[0]
+            n, eq = con.execute(f"""SELECT count(*), count(*) FILTER (WHERE l.{g} = o.{g}) FROM c_scan o
+                LEFT JOIN c_store l ON l.depth = o.depth AND l.path = o.path WHERE o.kind = 'file' AND o.{g} IS NOT NULL""").fetchone()
+            out["generation"] = {"objects": int(n), "equal": int(eq)}
+    con.execute("DROP TABLE IF EXISTS c_store; DROP TABLE IF EXISTS c_scan")
+    return out
+
+
+def check_scan(con, scan: dict, r: dict, name: str, roots: list[str], *, bucket: str, mount: str | None, sliced: bool = True,
+               generation: ist.Identity = False) -> dict:
+    """`check_tables` for a scan already appended (its run one of `roots`): its rows in key range `r` (`name`) from its
+    `path` sort against the store's answer at it over `roots`. A re-check, outside `append_range`."""
+    src = sn._src(bucket, scan["src"], mount)
+    preds = sn.range_preds(r)
+    con.execute(f"CREATE OR REPLACE TABLE np AS {ist.path_rows_sql(con, src, preds, scan.get('version'), generation)}")
+    if sliced:
+        con.execute(f"CREATE OR REPLACE TABLE ns AS {ist.slice_rows_sql(con, src, preds, scan.get('version'))}")
+    try:
+        return check_tables(con, roots, name, int(scan["ts"]), sliced=sliced, generation=generation)
+    finally:
+        con.execute("DROP TABLE IF EXISTS np; DROP TABLE IF EXISTS ns")
+
+
+def check_cut(con, root: str, served: Path, *, sliced: bool = True, generation: ist.Identity = False) -> dict:
+    """Each of a run's served sorts (`served/<sort>.parquet`) against the deltas under `root` it was cut from, row for
+    row in the sort's columns: `rows` (the sort's), `missing` (delta rows it lacks), `extra` (rows the deltas lack)."""
+    out = {}
+    for sort in run_sorts(sliced):
+        names = ist.served_schema(sort, generation).names
+        cols = ", ".join(names)
+        got = f"(SELECT {cols} FROM read_parquet({q(str(served / f'{sort}.parquet'))}))"
+        want = f"(SELECT {cols} FROM {delta_relation(root, ist.SORTS[sort][0], cols=names)})"
+        out[sort] = {"rows": int(con.execute(f"SELECT count(*) FROM {got}").fetchone()[0]), "missing": _differ(con, want, got, cols),
+                     "extra": _differ(con, got, want, cols)}
+    return out
+
+
+def append_marker(gen: str, scan: str, manifest: dict, docs: list[dict], cut: dict | None) -> dict | None:
+    """Scan `scan`'s parity marker (`interval_verify.marker_key`) from its append: its ranges' checks (`docs`, every key
+    range's `ranges/r####.json`) summed per table, its run's cut check (`cut`), and `pass` when the scan has rows and
+    every row of every table, every served sort's row and every object's generation was equal. It vouches for the store
+    `manifest` (`manifests/<scan>.json`) publishes: its runs but the scan's own must be the ones each range was checked
+    against. None (no marker: `scan retire -m` keeps the scan) when a range or the cut wasn't checked (appended before
+    the check), or a range was checked against other runs (a carry's revision landed between the ranges and the
+    publish)."""
+    rk = run_key(scan, scan)
+    runs = [r["key"] for r in manifest["runs"] if r["key"] != rk]
+    if cut is None or not docs or any("check" not in d for d in docs):
+        return None
+    if any(d["check"]["runs"] != runs for d in docs):
+        return None
+    tabs: dict[str, dict[str, int]] = {}
+    gen_eq: dict[str, int] | None = None
+    for d in docs:
+        for t, v in d["check"].items():
+            if t == "generation":
+                gen_eq = {k: (gen_eq or {}).get(k, 0) + v[k] for k in ("objects", "equal")}
+            elif isinstance(v, dict):
+                e = tabs.setdefault(t, {"rows": 0, "store": 0, "missing": 0, "extra": 0})
+                for k in e:
+                    e[k] += v[k]
+    ok = (tabs.get("pvl", {}).get("rows", 0) > 0 and all(v["missing"] == v["extra"] == 0 for v in (*tabs.values(), *cut.values()))
+          and (gen_eq is None or gen_eq["equal"] == gen_eq["objects"]))
+    return {"scan": scan, "gen": gen, "how": "append", "pass": ok, "manifest": f"manifests/{scan}.json", "runs": runs, "ranges": len(docs),
+            "tables": tabs, "cut": cut, **({"generation": gen_eq} if gen_eq is not None else {})}
 
 
 def run_files(sliced: bool = True) -> tuple[str, ...]:
@@ -760,7 +885,9 @@ def stage_options(f):
 def ranges_cmd(bucket, gen, ranges_gen, scratch, scan, force, index, mount, mem, per_task, out, threads, tmp) -> None:
     """Append the scan to key ranges' open versions: `deltas/<D>/{pvl,sv,svt}/r####.parquet` and `ranges/r####.json`
     (data bucket; the marker last), `state/<D>/{pvl,sv,svt}/r####.parquet` (scratch). The open versions come from the
-    previous scan's state, else (the first run) the base's range files."""
+    previous scan's state, else (the first run) the base's range files. Each range's answer at D over the published
+    store (the base's range files, the newest earlier manifest's runs, D's deltas) is checked against D's rows, row for
+    row (`append_range`'s `check`), in its `ranges/r####.json`."""
     prefix = f"{PREFIX}/{gen}"
     run = f"{prefix}/{run_key(scan, scan)}"
     store, sstore = Store(store_url(bucket)), Store(store_url(scratch))
@@ -780,6 +907,9 @@ def ranges_cmd(bucket, gen, ranges_gen, scratch, scan, force, index, mount, mem,
     err(f"ranges task {t}: {len(todo)} ranges" + (f", {sum(counts[i] for i in todo):,} open rows at {prev} (max task "
                                                   f"{max(sum(counts[i] for i in p) for p in plan):,})" if counts else ", interleaved"))
     con = sn.connect(threads, mem, tmp)
+    # What the store answers each range from once D's run is published beside them: the base's range files and the runs
+    # the newest earlier manifest lists (`append_range`'s check).
+    check = [f"{mount}/{PREFIX}/{ranges_gen}", *(f"{mount}/{prefix}/{r['key']}" for r in runs)]
     for i in todo:
         name = f"r{i:04d}"
         if not force and store.exists(f"{run}/ranges/{name}.json"):
@@ -790,8 +920,9 @@ def ranges_cmd(bucket, gen, ranges_gen, scratch, scan, force, index, mount, mem,
         outp = Path(out) / name
         shutil.rmtree(outp, ignore_errors=True)
         doc = append_range(con, state, s, ranges["ranges"][i], name, outp, bucket=doc_scan["bucket"], mount=mount, sliced=sl,
-                           generation=ist.has_generation(base))
+                           generation=ist.has_generation(base), check=check)
         doc["prev"] = prev
+        doc["check"]["runs"] = [r["key"] for r in runs]
         sstore.put_tree(outp / "state", f"{prefix}/state/{scan}")
         for tb in tables(sl):
             store.put_tree(outp / tb, f"{run}/{tb}")
@@ -817,8 +948,11 @@ def publish_cmd(bucket, gen, ranges_gen, scratch, scan, compact_level, mount, me
     prefix = f"{PREFIX}/{gen}"
     store = run_store(bucket, None, gen, prefix=PREFIX)
     key = f"manifests/{scan}.json"
+    st = Store(store_url(bucket))
     if skip_published and store.exists(key):
         err(f"{prefix}/{key}: published")
+        if not st.exists(marker_key(prefix, scan)):
+            write_marker(st, gen, ranges_gen, scan)
         return
     if store.exists(key):
         raise SystemExit(f"{prefix}/{key} exists: manifests are never rewritten")
@@ -841,14 +975,36 @@ def publish_cmd(bucket, gen, ranges_gen, scratch, scan, compact_level, mount, me
         t0 = monotonic()
         base = Store(store_url(bucket)).read_json(f"{prefix}/scans.json")
         sl = ist.sliced(base)
-        docs = cut_run(sn.connect(threads, mem, tmp), f"{mount}/{prefix}/{rk}", outp, sliced=sl, generation=ist.has_generation(base))
+        con = sn.connect(threads, mem, tmp)
+        docs = cut_run(con, f"{mount}/{prefix}/{rk}", outp, sliced=sl, generation=ist.has_generation(base))
+        cut_s = round(monotonic() - t0, 1)
+        cut = check_cut(con, f"{mount}/{prefix}/{rk}", outp, sliced=sl, generation=ist.has_generation(base))
         Store(store_url(bucket)).put_tree(outp, f"{prefix}/{rk}/served")
         shutil.rmtree(outp)
         new = {"key": rk, "first": scan, "last": scan, "level": 0, "scans": [scan]}
-        meta = {**run_meta(gen, new, {scan: s["ts"]}, docs), "cut_s": round(monotonic() - t0, 1)}
+        meta = {**run_meta(gen, new, {scan: s["ts"]}, docs), "cut_s": cut_s, "check": cut, "check_s": round(monotonic() - t0 - cut_s, 1)}
         store.create(f"{rk}/meta.json", json.dumps(meta, indent=1) + "\n")
         err(f"{rk}: cut in {meta['cut_s']}s ({meta['bytes']:,} B)")
     print(json.dumps(publish_run(store, scan), indent=1))
+    write_marker(st, gen, ranges_gen, scan)
+
+
+def write_marker(st: Store, gen: str, ranges_gen: str, scan: str, *, workers: int = 16) -> dict | None:
+    """Scan `scan`'s parity marker from its published append (`append_marker`: its manifest, its run's `meta.json` and
+    every range's doc), written to `verify/<scan>.json` in the generation, where `scan retire` finds it; None (nothing
+    written) when the append can't vouch for the scan."""
+    prefix = f"{PREFIX}/{gen}"
+    rk = run_key(scan, scan)
+    k = st.read_json(f"{PREFIX}/{ranges_gen}/ranges.json")["k"]
+    with ThreadPoolExecutor(workers) as ex:
+        docs = list(ex.map(lambda i: st.read_json(f"{prefix}/{rk}/ranges/r{i:04d}.json"), range(k)))
+    m = append_marker(gen, scan, st.read_json(f"{prefix}/manifests/{scan}.json"), docs, st.read_json(f"{prefix}/{rk}/meta.json").get("check"))
+    if m is None:
+        err(f"{scan}: no parity marker (a range or the cut wasn't checked, or was checked against other runs than its manifest's)")
+        return None
+    st.write_text(marker_key(prefix, scan), json.dumps(m) + "\n")
+    err(f"{scan}: parity {'passed' if m['pass'] else 'FAILED'} " + json.dumps({k_: m[k_] for k_ in ("tables", "cut", "generation") if k_ in m}))
+    return m
 
 
 @cli.command("carry")

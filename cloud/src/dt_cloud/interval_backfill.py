@@ -355,7 +355,7 @@ def verify_listings(store: Store, gen: str, listing_root: str, template: str, wo
     `generation`, `pass` recomputed with it, written to `gen` (`views_gen`: where the views were compared). A scan with
     no marker gets none: its views were never checked. Returns per scan `{status, generation}`."""
     from .interval_store import download_served, verify_runs
-    from .interval_verify import marker_key
+    from .interval_verify import marker_key, rows_pass
     from .scan_retire import find_marker, lineage
 
     prefix = f"{PREFIX}/{gen}"
@@ -393,7 +393,7 @@ def verify_listings(store: Store, gen: str, listing_root: str, template: str, wo
             if m is None:
                 out[sid] = {"status": "no-marker", "generation": g}
                 continue
-            ok = m["views"] > 0 and m["views"] == m["view_eq"] and m["diffs"] == m["diff_eq"] and g["objects"] > 0 and g["equal"] == g["objects"]
+            ok = rows_pass(m) and g["objects"] > 0 and g["equal"] == g["objects"]
             store.write_text(marker_key(prefix, sid), json.dumps({**m, "gen": gen, "views_gen": m.get("views_gen", m["gen"]), "pass": ok,
                                                                    "generation": g}) + "\n")
             out[sid] = {"status": "pass" if ok else "fail", "generation": g}

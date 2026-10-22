@@ -48,13 +48,15 @@ def build_full(scans: list[dict], root: Path, out: Path) -> Path:
     return out
 
 
-def append_scan(scan: dict, root: Path, base: Path, prev: Path | None, out: Path) -> list[dict]:
-    """Every key range of one scan's run (`runs ranges`): from the base's range files, or the previous run's state."""
+def append_scan(scan: dict, root: Path, base: Path, prev: Path | None, out: Path, runs: list[Path] = ()) -> list[dict]:
+    """Every key range of one scan's run (`runs ranges`): from the base's range files, or the previous run's state;
+    checked against the store published as base + `runs` + this run."""
     con = duckdb.connect()
     docs = []
     for i, name in enumerate(NAMES):
         state = ia.run_state_sql(str(prev / "state"), name) if prev else ia.base_state_sql(str(base), name)
-        docs.append(ia.append_range(con, state, scan, RANGES["ranges"][i], name, out, bucket="b", mount=str(root)))
+        docs.append(ia.append_range(con, state, scan, RANGES["ranges"][i], name, out, bucket="b", mount=str(root),
+                                    check=[str(base), *map(str, runs)]))
     return docs
 
 
@@ -76,7 +78,7 @@ def world(tmp_path_factory):
     runs, prev, docs = {}, None, {}
     for s in scans[BASE:]:
         out = root / "runs" / s["id"]
-        docs[s["id"]] = append_scan(s, root, base, prev, out)
+        docs[s["id"]] = append_scan(s, root, base, prev, out, list(runs.values()))
         runs[s["id"]] = out
         prev = out
     # The binary counter over the appended scans: after each, the runs a manifest would list (merges made as it says).
@@ -195,6 +197,163 @@ def test_slices_live_at_each_scan_are_the_scans_owner_slices(world):
         svt = [r for r in versions(world["base"], stack, "svt") if r["vf"] <= D < r["vt"]]
         assert sorted((r["depth"], r["path"], r["usr"]) for r in svt) == sorted((r["depth"], r["path"], r["usr"]) for r in sv)
         assert [r for r in svt if r["tot"] != pv[(r["depth"], r["path"])]] == []
+
+
+# ── The append's parity check (`scan retire`'s gate) ───────────────────────
+
+
+def _live_counts(world, d: str, ts: int) -> list[dict[str, int]]:
+    """Per key range, per table: the versions the full rebuild through scan `d` has live at it (the scan's rows)."""
+    return [{t: sum(1 for r in pq.read_table(world["full"][d] / t / f"{name}.parquet", columns=["vf", "vt"]).to_pylist() if r["vf"] <= ts < r["vt"])
+             for t in ia.TABLES} for name in NAMES]
+
+
+def _equal(counts: dict[str, int]) -> dict[str, dict[str, int]]:
+    return {t: {"rows": n, "store": n, "missing": 0, "extra": 0} for t, n in counts.items()}
+
+
+def test_each_ranges_check_finds_every_row_equal(world):
+    """`append_range`'s check, against the store published as the base's range files, the earlier runs and the scan's
+    deltas: every row of every table equal, as many as the full rebuild has live at the scan."""
+    got = {d: [{k: v for k, v in x["check"].items() if k != "s"} for x in docs] for d, docs in world["docs"].items()}
+    assert got == {s["id"]: [_equal(c) for c in _live_counts(world, s["id"], s["ts"])] for s in world["scans"][BASE:]}
+    assert all(c["pvl"] > 0 for s in world["scans"][BASE:] for c in _live_counts(world, s["id"], s["ts"]))
+
+
+def _check(world, s: dict, roots: list[Path], mount: Path | None = None) -> list[dict]:
+    con = duckdb.connect()
+    return [ia.check_scan(con, s, RANGES["ranges"][i], name, [str(r) for r in roots], bucket="b", mount=str(mount or world["root"]))
+            for i, name in enumerate(NAMES)]
+
+
+def test_the_check_over_merged_runs_finds_every_row_equal(world):
+    """A scan re-checked over the runs its newest manifest lists after the binary counter's carries (merged runs)."""
+    for s in world["scans"][BASE:]:
+        stack = [p for _, p in world["stacks"][s["id"]]]
+        assert _check(world, s, [world["base"], *stack]) == [_equal(c) for c in _live_counts(world, s["id"], s["ts"])], s["id"]
+
+
+def _sum(checks: list[dict]) -> dict:
+    out: dict = {}
+    for c in checks:
+        for t, v in c.items():
+            e = out.setdefault(t, dict.fromkeys(v, 0))
+            for k in v:
+                e[k] += v[k]
+    return out
+
+
+def _copy_store(world, tmp_path: Path) -> tuple[Path, list[Path]]:
+    """A copy of the base's range files and the level-0 runs (the store a mutation corrupts)."""
+    base = tmp_path / "base"
+    shutil.copytree(world["base"], base)
+    runs = []
+    for s in world["scans"][BASE:]:
+        shutil.copytree(world["runs"][s["id"]], tmp_path / "runs" / s["id"])
+        runs.append(tmp_path / "runs" / s["id"])
+    return base, runs
+
+
+def _rewrite(path: Path, fn) -> None:
+    t = pq.read_table(path)
+    pq.write_table(pa.Table.from_pylist(fn(t.to_pylist()), schema=t.schema), path)
+
+
+def test_a_corrupted_base_file_fails_the_check(world, tmp_path):
+    """A base range file loses one version's close (a version that ended before the base's last scan, its `vt` reset to
+    open): at the first appended scan the store answers that row too, one extra; the owner slices are untouched."""
+    s = world["scans"][BASE]
+    base, runs = _copy_store(world, tmp_path)
+    last = world["scans"][BASE - 1]["ts"]
+    name, target = next((name, (r["depth"], r["path"], r["vf"])) for name in NAMES for r in pq.read_table(base / "pvl" / f"{name}.parquet").to_pylist()
+                        if r["vt"] <= last)
+    _rewrite(base / "pvl" / f"{name}.parquet", lambda rows: [{**r, "vt": sn.OPEN} if (r["depth"], r["path"], r["vf"]) == target else r for r in rows])
+    n = _sum([_equal(c) for c in _live_counts(world, s["id"], s["ts"])])
+    assert _sum(_check(world, s, [base, runs[0]])) == {**n, "pvl": {**n["pvl"], "store": n["pvl"]["rows"] + 1, "extra": 1}}
+
+
+def test_a_run_missing_an_opened_version_fails_the_check(world, tmp_path):
+    """An earlier run's delta loses a version it opened that is still open at the next scan: re-checked at that scan,
+    the store lacks that row."""
+    base, runs = _copy_store(world, tmp_path)
+    appended = world["scans"][BASE:]
+    j, target = next((j, (r["depth"], r["path"], r["vf"])) for j in range(len(runs) - 1) for name in NAMES
+                     for r in pq.read_table(runs[j] / "pvl" / f"{name}.parquet").to_pylist()
+                     if r["vf"] == appended[j]["ts"] and r["vt"] == sn.OPEN
+                     and (r["depth"], r["path"], r["vf"]) not in {(x["depth"], x["path"], x["vf"]) for x in _rows(runs[j + 1], "pvl")})
+    for name in NAMES:
+        _rewrite(runs[j] / "pvl" / f"{name}.parquet", lambda rows: [r for r in rows if (r["depth"], r["path"], r["vf"]) != target])
+    s = appended[j + 1]
+    n = _sum([_equal(c) for c in _live_counts(world, s["id"], s["ts"])])
+    assert _sum(_check(world, s, [base, *runs[:j + 2]])) == {**n, "pvl": {**n["pvl"], "store": n["pvl"]["rows"] - 1, "missing": 1}}
+
+
+def test_a_corrupted_scan_file_fails_the_check(world, tmp_path):
+    """The newest scan's sort with one object's size changed after its append: its path row, its owner slice and the
+    slice's path total each differ, one missing and one extra."""
+    s = world["scans"][-1]
+    src = tmp_path / s["src"]
+    src.parent.mkdir(parents=True)
+    shutil.copyfile(world["root"] / s["src"], src)
+    hit = []
+
+    def bump(rows):
+        out = []
+        for r in rows:
+            if not hit and r["kind"] == "file" and r["size"] > 0:
+                hit.append(r["path"])
+                r = {**r, "size": r["size"] + 1}
+            out.append(r)
+        return out
+
+    _rewrite(src, bump)
+    n = _sum([_equal(c) for c in _live_counts(world, s["id"], s["ts"])])
+    one = {"missing": 1, "extra": 1}
+    assert _sum(_check(world, s, [world["base"], *(world["runs"][x["id"]] for x in world["scans"][BASE:])], mount=tmp_path)) == {
+        t: {**v, **one} for t, v in n.items()}
+
+
+def test_the_cut_check_compares_each_served_sort_with_its_deltas(world, tmp_path):
+    """A run's served sorts are its deltas row for row; one served row dropped is missing."""
+    run = world["runs"][world["scans"][BASE]["id"]]
+    served = _cut(run, tmp_path / "served")
+    con = duckdb.connect()
+    n = {sort: sum(pq.read_metadata(p).num_rows for p in sorted((run / ist.SORTS[sort][0]).glob("r*.parquet"))) for sort in ia.RUN_SORTS}
+    assert ia.check_cut(con, str(run), served) == {sort: {"rows": n[sort], "missing": 0, "extra": 0} for sort in ia.RUN_SORTS}
+    t = pq.read_table(served / "path.parquet")
+    pq.write_table(t.slice(1), served / "path.parquet")
+    assert ia.check_cut(con, str(run), served)["path"] == {"rows": n["path"] - 1, "missing": 1, "extra": 0}
+
+
+def _doc(runs: list[str], **tables) -> dict:
+    return {"check": {"runs": runs, **{t: {"rows": 5, "store": 5, "missing": 0, "extra": 0, **tables.get(t, {})} for t in ia.TABLES}, "s": 0.1}}
+
+
+CUT = {s: {"rows": 3, "missing": 0, "extra": 0} for s in ia.RUN_SORTS}
+MANIFEST = {"runs": [{"key": "deltas/a_b"}, {"key": "deltas/c"}, {"key": "deltas/d"}]}
+
+
+def test_the_marker_sums_the_ranges_checks():
+    from dt_cloud.interval_verify import failure
+
+    m = ia.append_marker("g", "d", MANIFEST, [_doc(["deltas/a_b", "deltas/c"])] * 2, CUT)
+    assert m == {"scan": "d", "gen": "g", "how": "append", "pass": True, "manifest": "manifests/d.json", "runs": ["deltas/a_b", "deltas/c"],
+                 "ranges": 2, "tables": {t: {"rows": 10, "store": 10, "missing": 0, "extra": 0} for t in ia.TABLES}, "cut": CUT}
+    bad = ia.append_marker("g", "d", MANIFEST, [_doc(["deltas/a_b", "deltas/c"]), _doc(["deltas/a_b", "deltas/c"], sv={"store": 4, "missing": 1})],
+                           {**CUT, "slices": {"rows": 2, "missing": 1, "extra": 0}})
+    assert (bad["pass"], failure(bad)) == (False, "sv 1 missing, 0 extra; cut slices 1 missing, 0 extra")
+    gen = ia.append_marker("g", "d", MANIFEST, [{"check": {**_doc(["deltas/a_b", "deltas/c"])["check"], "generation": {"objects": 4, "equal": 3}}}], CUT)
+    assert (gen["pass"], gen["generation"], failure(gen)) == (False, {"objects": 4, "equal": 3}, "generation 3/4 equal")
+    empty = ia.append_marker("g", "d", MANIFEST, [_doc(["deltas/a_b", "deltas/c"], pvl={"rows": 0, "store": 0})], CUT)
+    assert (empty["pass"], failure(empty)) == (False, "no rows")
+
+
+def test_no_marker_when_the_append_cant_vouch():
+    """No check on a range or the cut (appended before it), or a range checked against other runs than the manifest's
+    (a carry's revision landed between the ranges and the publish): no marker."""
+    ok = _doc(["deltas/a_b", "deltas/c"])
+    assert [ia.append_marker("g", "d", MANIFEST, docs, cut) for docs, cut in [
+        ([ok, {}], CUT), ([ok], None), ([ok, _doc(["deltas/a", "deltas/b", "deltas/c"])], CUT), ([], CUT)]] == [None] * 4
 
 
 # ── Mutations: the comparison catches a broken run ─────────────────────────
