@@ -213,7 +213,7 @@ def merge_drills(dirs: list[Path], out: Path, run: dict, tmp: str | Path | None 
         raise ValueError(f"{run['key']}: inputs without drill/: {lack}")
     con = connect(threads, mem, tmp)
     return merge_tiers(con, [Tier(d / "drill", d.name) for d in dirs], out,
-                       tier={k: run[k] for k in ("key", "first", "last", "level", "scans")})
+                       tier={k: run[k] for k in ("key", "first", "last", "level", "scans")}, work=Path(tmp) / "drill-merge" if tmp else None)
 
 
 def merge_catalogs(tiers: list[Path], out: Path, membership: dict | None = None, rule: HexRule | None = None) -> dict:

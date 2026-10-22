@@ -27,7 +27,7 @@ from click import Choice, group, option
 from . import static_names as sn
 from . import static_roots as sr
 from .checkpoint import Checkpoint, code_version, Parts
-from .static_names import CODEC, OPEN, PREFIX, _batches, err, q
+from .static_names import CODEC, OPEN, PREFIX, Progress, _batches, err, q
 from .static_profile import data_bucket
 from .resource_monitor import monitor_resources, resource_stage
 
@@ -66,6 +66,7 @@ DCOUNT_SCHEMA = pa.schema([pa.field("q", pa.string(), nullable=False), pa.field(
                            pa.field("rows", pa.int64(), nullable=False)])
 ALIAS_SCHEMA = pa.schema([pa.field("q", pa.string(), nullable=False), pa.field("canonical", pa.string(), nullable=False)])
 ROLLUP_COLS = "q VARCHAR, dir VARCHAR, kind TINYINT, child VARCHAR, vf BIGINT, b BIGINT, o BIGINT"
+ROLLUP_COLS_NAMES = [c.split()[0] for c in ROLLUP_COLS.split(", ")]
 #: `ROLLUP_COLS` as Arrow: a checkpoint's parts of rollup rows (settling's, the newly heavy directories').
 ROLLUP_ARROW = pa.schema([("q", pa.string()), ("dir", pa.string()), ("kind", pa.int8()), ("child", pa.string()), ("vf", pa.int64()),
                           ("b", pa.int64()), ("o", pa.int64())])
@@ -1677,13 +1678,16 @@ def write_kind(con, out: Path, kind: str, roots: str = "dr", rollups: str = "rup
     return doc
 
 
-def write_state(con, out: Path, kind: str, table: str = "dcnt") -> None:
+def write_state(con, out: Path, kind: str, table: str = "dcnt", queries: list[str] | None = None) -> None:
+    """Table `table` (`q, dir, rows`) → `out/state/dcount-<kind>.parquet` sorted, in `STATE_RG`-row groups; `queries`: the
+    sorted rows as consecutive queries instead (`merge_tiers`' `q` ranges, in order), one stream."""
     (out / "state").mkdir(parents=True, exist_ok=True)
     with pq.ParquetWriter(out / "state" / f"dcount-{kind}.parquet", DCOUNT_SCHEMA, compression=CODEC) as writer:
         pending = []
         rows = 0
         wrote = False
-        for batch in _batches(con, f"SELECT q, dir, rows FROM {table} ORDER BY q, dir", STATE_BATCH_ROWS):
+        sqls = queries if queries is not None else [f"SELECT q, dir, rows FROM {table} ORDER BY q, dir"]
+        for batch in (b for sql in sqls for b in _batches(con, sql, STATE_BATCH_ROWS)):
             offset = 0
             while offset < batch.num_rows:
                 take = min(STATE_RG - rows, batch.num_rows - offset)
@@ -1834,14 +1838,47 @@ def meas_sql(kind: str, files: list[str], top_files: list[str] = ()) -> str:
 # ── Merging tiers (the binary counter) ─────────────────────────────────────
 
 
-def merge_tiers(con, tiers: list[Tier], out: Path, tier: dict, file_rows: int = FILE_ROWS) -> dict:
+#: A drill merge's chunks: about this many roots and rollup rows per merged-`q` range (`merge_tiers`).
+MERGE_CHUNK_ROWS = 1 << 24
+
+
+def _bounds(counts: list[tuple[str, int]], chunk_rows: int) -> list[str]:
+    """Each `q` range's first literal (the first's is `''`) over `counts` `(q, rows)` in `q` order: ranges of at most
+    `chunk_rows` rows, a literal with more a range of its own."""
+    bounds, n = [""], 0
+    for qq, c in counts:
+        if n and n + c > chunk_rows:
+            bounds.append(qq)
+            n = 0
+        n += c
+    return bounds
+
+
+def _spilled(files: list[Path], cols: str) -> str:
+    return (f"SELECT {cols} FROM read_parquet([{', '.join(q(str(f)) for f in files)}], hive_partitioning = false)" if files
+            else None)
+
+
+def merge_tiers(con, tiers: list[Tier], out: Path, tier: dict, file_rows: int = FILE_ROWS, *, work: Path | None = None,
+                chunk_rows: int = MERGE_CHUNK_ROWS, log=err) -> dict:
     """Runs' drills (oldest first) merged into one tier in `out`: the newest alias map; each input's rows re-keyed to the
     merged canonicals (a class only splits, so its canonical at an input holds the merged canonical's rows there); roots
     combined (smallest `vt`), rollups by the newest-full-header rule (the merged header full if an included input's was),
-    `dcount` summed (heavy directories dropped)."""
+    `dcount` summed (heavy directories dropped).
+
+    Chunked by merged `q` range, so the working set is `chunk_rows` rows, not the inputs' (gcs's 10-22 L3 carry, 8 runs
+    / 78.5 GiB, spilled 1.2 TiB and filled its SSD folding them in one table): every fold is per `q` (roots per
+    `(q, path, usr, vf)`, rollups per `(q, dir)`, `dcount` per `(q, dir)` against that `q`'s rollups), so each input's
+    re-keyed rows are spilled once by range (zstd parquet under `work`), each range folded on its own, and the writers
+    read the folded ranges (`write_kind` per file range, `write_state` range by range, in `q` order). Byte-identical at
+    any `chunk_rows`. `log`: a progress line per range at most every 30 s."""
     out.mkdir(parents=True, exist_ok=True)
     if len({t.rg for t in tiers}) != 1:
         raise ValueError(f"inputs' row groups differ: {[t.rg for t in tiers]}")
+    own = work is None
+    work = Path(work if work is not None else out.parent / f".{out.name}.merge")
+    shutil.rmtree(work, ignore_errors=True)
+    work.mkdir(parents=True)
     meta: dict = {**tier, **{k: tiers[-1].meta[k] for k in ("R", "K", "rg", "idx_rg", "dispatch_rows")}}
     resource_stage("merge/aliases")
     con.register("al_last", tiers[-1].alias_table())
@@ -1864,44 +1901,84 @@ def merge_tiers(con, tiers: list[Tier], out: Path, tier: dict, file_rows: int = 
                 con.unregister("al_in")
             else:
                 con.execute(f"INSERT INTO cmap SELECT q, {i}, q FROM lit")
-        con.execute(f"DROP TABLE IF EXISTS dr; CREATE TABLE dr ({sr.ROOT_COLS})")
-        con.execute(f"CREATE OR REPLACE TABLE ru (tier INTEGER, {ROLLUP_COLS})")
-        con.execute("CREATE OR REPLACE TABLE dc (q VARCHAR, dir VARCHAR, rows BIGINT)")
+        # each input's rows re-keyed (`cmap`): roots and rollups per merged `q`, then the ranges planned over their counts
+        sources = []
         for i, t in enumerate(tiers):
             for sub in ("roots", "rollups"):
-                resource_stage(f"merge/{kind}/read/{sub}", tier=i, inputs=len(tiers))
-                files = t.files(kind, sub)
-                if not files:
-                    continue
-                lst = "[" + ", ".join(q(f) for f in files) + "]"
-                cols = "m.c, 0::UTINYINT, r.path, r.usr, r.vf, r.vt, r.size, r.n_files" if sub == "roots" else f"{i}, m.c, r.dir, r.kind, r.child, r.vf, r.b, r.o"
-                con.execute(f"""INSERT INTO {'dr' if sub == 'roots' else 'ru'} SELECT {cols} FROM read_parquet({lst}) AS r
-                    JOIN cmap AS m ON m.tier = {i} AND m.ci = r.q""")
+                if files := t.files(kind, sub):
+                    lst = "[" + ", ".join(q(f) for f in files) + "]"
+                    cols = ("m.c AS q, 0::UTINYINT AS depth, r.path, r.usr, r.vf, r.vt, r.size, r.n_files" if sub == "roots"
+                            else f"{i} AS tier, m.c AS q, r.dir, r.kind, r.child, r.vf, r.b, r.o")
+                    sources.append((sub, i, f"SELECT {cols} FROM read_parquet({lst}) AS r JOIN cmap AS m ON m.tier = {i} AND m.ci = r.q"))
             if t.dcount(kind):
-                resource_stage(f"merge/{kind}/read/state", tier=i, inputs=len(tiers))
-                con.execute(f"""INSERT INTO dc SELECT m.c, r.dir, r.rows FROM read_parquet({q(t.dcount(kind))}) AS r
-                    JOIN cmap AS m ON m.tier = {i} AND m.ci = r.q""")
-        resource_stage(f"merge/{kind}/fold/roots")
-        con.execute("""CREATE OR REPLACE TABLE dr AS SELECT q, any_value(depth) AS depth, path, usr, vf, min(vt) AS vt, any_value(size) AS size,
-            any_value(n_files) AS n_files FROM dr GROUP BY q, path, usr, vf""")
-        resource_stage(f"merge/{kind}/fold/rollups")
-        con.execute(f"""CREATE OR REPLACE TABLE rup AS
-            WITH f AS (SELECT q, dir, coalesce(max(tier) FILTER (WHERE kind = {KIND_FULL}), -1) AS ft FROM ru GROUP BY q, dir),
-                 inc AS (SELECT ru.* FROM ru JOIN f USING (q, dir) WHERE ru.tier >= f.ft),
-                 h AS (SELECT q, dir, bool_or(kind = {KIND_FULL}) AS is_full, arg_max(vf, tier) AS vf, arg_max(b, tier) AS b, arg_max(o, tier) AS o
-                       FROM inc WHERE kind IN ({KIND_FULL}, {KIND_DELTA}) GROUP BY q, dir)
-            SELECT q, dir, (CASE WHEN is_full THEN {KIND_FULL} ELSE {KIND_DELTA} END)::TINYINT AS kind, '' AS child, vf, b, o FROM h
-            UNION ALL SELECT q, dir, kind, child, vf, b, o FROM inc WHERE kind IN ({KIND_KEPT}, {KIND_REST})""")
-        resource_stage(f"merge/{kind}/fold/state")
-        con.execute("""CREATE OR REPLACE TABLE dcnt AS SELECT q, dir, sum(rows)::BIGINT AS rows FROM dc
-            ANTI JOIN (SELECT DISTINCT q, dir FROM rup) AS h USING (q, dir) GROUP BY q, dir""")
+                sources.append(("dcount", i, f"""SELECT m.c AS q, r.dir, r.rows FROM read_parquet({q(t.dcount(kind))}) AS r
+                    JOIN cmap AS m ON m.tier = {i} AND m.ci = r.q"""))
+        resource_stage(f"merge/{kind}/plan", inputs=len(tiers))
+        counts = con.execute(f"""SELECT q, sum(n)::BIGINT FROM ({' UNION ALL '.join(f'SELECT q, count(*) AS n FROM ({sql}) GROUP BY q' for sub, _, sql in sources if sub != 'dcount') or 'SELECT NULL::VARCHAR AS q, 0 AS n WHERE false'})
+            GROUP BY q ORDER BY q""").fetchall()
+        bounds = _bounds(counts, chunk_rows)
+        con.execute("CREATE OR REPLACE TABLE qb (lo VARCHAR, ch INTEGER)")
+        con.executemany("INSERT INTO qb VALUES (?, ?)", [(lo, k) for k, lo in enumerate(bounds)])
+        kw = work / kind
+        for sub in ("roots", "rollups", "dcount"):
+            (kw / sub).mkdir(parents=True, exist_ok=True)
+        for sub, i, sql in sources:
+            resource_stage(f"merge/{kind}/read/{sub}", tier=i, inputs=len(tiers))
+            con.execute(f"""COPY (SELECT r.*, g.ch FROM ({sql}) AS r ASOF JOIN qb AS g ON r.q >= g.lo)
+                TO {q(str(kw / sub / f't{i:03d}'))} (FORMAT parquet, PARTITION_BY (ch), COMPRESSION zstd)""")
+        folded = kw / "folded"
+        for d in ("roots", "rollups", "dcount"):
+            (folded / d).mkdir(parents=True)
+        prog = Progress(f"merge {tier['key']}: drill/{kind}/fold", len(bounds), log)
+        n_rows = 0
+        for k in range(len(bounds)):
+            resource_stage(f"merge/{kind}/fold", chunk=k, chunks=len(bounds))
+            got = {sub: sorted(kw.glob(f"{sub}/t*/ch={k}/*.parquet")) for sub in ("roots", "rollups", "dcount")}
+            dr = _spilled(got["roots"], f"q, depth, path, usr, vf, vt, size, n_files")
+            con.execute(f"""CREATE OR REPLACE TABLE dr AS SELECT q, any_value(depth) AS depth, path, usr, vf, min(vt) AS vt, any_value(size) AS size,
+                any_value(n_files) AS n_files FROM ({dr or f'SELECT * FROM (SELECT NULL::VARCHAR AS q, 0::UTINYINT AS depth, NULL::VARCHAR AS path, NULL::VARCHAR AS usr, NULL::BIGINT AS vf, NULL::BIGINT AS vt, NULL::BIGINT AS size, NULL::BIGINT AS n_files) WHERE false'}) GROUP BY q, path, usr, vf""")
+            ru = _spilled(got["rollups"], f"tier, {', '.join(ROLLUP_COLS_NAMES)}")
+            con.execute(f"CREATE OR REPLACE TABLE ru (tier INTEGER, {ROLLUP_COLS})")
+            if ru:
+                con.execute(f"INSERT INTO ru {ru}")
+            con.execute(f"""CREATE OR REPLACE TABLE rup AS
+                WITH f AS (SELECT q, dir, coalesce(max(tier) FILTER (WHERE kind = {KIND_FULL}), -1) AS ft FROM ru GROUP BY q, dir),
+                     inc AS (SELECT ru.* FROM ru JOIN f USING (q, dir) WHERE ru.tier >= f.ft),
+                     h AS (SELECT q, dir, bool_or(kind = {KIND_FULL}) AS is_full, arg_max(vf, tier) AS vf, arg_max(b, tier) AS b, arg_max(o, tier) AS o
+                           FROM inc WHERE kind IN ({KIND_FULL}, {KIND_DELTA}) GROUP BY q, dir)
+                SELECT q, dir, (CASE WHEN is_full THEN {KIND_FULL} ELSE {KIND_DELTA} END)::TINYINT AS kind, '' AS child, vf, b, o FROM h
+                UNION ALL SELECT q, dir, kind, child, vf, b, o FROM inc WHERE kind IN ({KIND_KEPT}, {KIND_REST})""")
+            dc = _spilled(got["dcount"], "q, dir, rows")
+            con.execute(f"""CREATE OR REPLACE TABLE dcnt AS SELECT q, dir, sum(rows)::BIGINT AS rows FROM ({dc or 'SELECT NULL::VARCHAR AS q, NULL::VARCHAR AS dir, 0::BIGINT AS rows WHERE false'}) AS dc
+                ANTI JOIN (SELECT DISTINCT q, dir FROM rup) AS h USING (q, dir) GROUP BY q, dir""")
+            rows = 0
+            for table, d, order in (("dr", "roots", "q, path, usr, vf"), ("rup", "rollups", "q, dir, kind, child, vf"), ("dcnt", "dcount", "q, dir")):
+                c = con.execute(f"SELECT count(*) FROM {table}").fetchone()[0]
+                if c:
+                    con.execute(f"COPY (SELECT * FROM {table} ORDER BY {order}) TO {q(str(folded / d / f'c{k:06d}.parquet'))} (FORMAT parquet, COMPRESSION zstd)")
+                rows += c
+            n_rows += rows
+            prog.tick(k, rows)
+        shutil.rmtree(kw / "roots", ignore_errors=True)
+        shutil.rmtree(kw / "rollups", ignore_errors=True)
+        shutil.rmtree(kw / "dcount", ignore_errors=True)
+        empty = {"roots": f"SELECT * FROM (SELECT NULL::VARCHAR AS q, 0::UTINYINT AS depth, NULL::VARCHAR AS path, NULL::VARCHAR AS usr, NULL::BIGINT AS vf, NULL::BIGINT AS vt, NULL::BIGINT AS size, NULL::BIGINT AS n_files) WHERE false",
+                 "rollups": f"SELECT * FROM (SELECT NULL::VARCHAR AS q, NULL::VARCHAR AS dir, 0::TINYINT AS kind, NULL::VARCHAR AS child, NULL::BIGINT AS vf, NULL::BIGINT AS b, NULL::BIGINT AS o) WHERE false"}
+        for view, d in (("drv", "roots"), ("rupv", "rollups")):
+            files = sorted((folded / d).glob("*.parquet"))
+            con.execute(f"CREATE OR REPLACE VIEW {view} AS {_spilled(files, '*') or empty[d]}")
         resource_stage(f"merge/{kind}/write")
-        meta.update(write_kind(con, out, kind, file_rows=file_rows, rg=meta["rg"]))
+        meta.update(write_kind(con, out, kind, roots="drv", rollups="rupv", file_rows=file_rows, rg=meta["rg"]))
         resource_stage(f"merge/{kind}/state")
-        write_state(con, out, kind)
-        for t in ("dr", "ru", "dc", "rup", "dcnt", "cmap", "lit"):
+        write_state(con, out, kind, queries=[f"SELECT q, dir, rows FROM read_parquet({q(str(f))}) ORDER BY q, dir"
+                                             for f in sorted((folded / "dcount").glob("*.parquet"))])
+        con.execute("DROP VIEW drv; DROP VIEW rupv")
+        for t in ("dr", "ru", "rup", "dcnt", "cmap", "lit", "qb"):
             con.execute(f"DROP TABLE IF EXISTS {t}")
+        shutil.rmtree(kw)
     con.execute("DROP TABLE IF EXISTS cls")
+    if own:
+        shutil.rmtree(work, ignore_errors=True)
     (out / "meta.json").write_text(json.dumps(meta, indent=1) + "\n")
     return meta
 

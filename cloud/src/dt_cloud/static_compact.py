@@ -135,26 +135,6 @@ def overlapping(spans: list[tuple[str, str | None, str | None]], lo: str, hi: st
     return [f for f, a, b in spans if a is None or (a <= hi and b >= lo)]
 
 
-class Progress:
-    """A loop's progress lines: `label k/n`, rows so far, seconds, and the rest's estimate, at most one per `every_s`
-    (and the last), so a stalled fold shows within minutes instead of at the end of its sub-step."""
-
-    def __init__(self, label: str, n: int, log: Callable[[str], None], every_s: float = 30.0):
-        self.label, self.n, self.log, self.every_s = label, n, log, every_s
-        self.t0 = self.last = monotonic()
-        self.rows = 0
-
-    def tick(self, k: int, rows: int) -> None:
-        self.rows += rows
-        now = monotonic()
-        if now - self.last < self.every_s and k + 1 < self.n:
-            return
-        self.last = now
-        s = now - self.t0
-        eta = s / (k + 1) * (self.n - k - 1)
-        self.log(f"{self.label} {k + 1}/{self.n}: {self.rows:,} rows in {s:.0f}s (≈{eta:.0f}s left; RSS peak {sl.rss_peak_gb()} GiB)")
-
-
 def fold_drill(con, tiers: list[sd.Tier], out: Path, work: Path, *, R: int, K: int, floor: int, chunk_rows: int = sl.CHUNK_ROWS,
                step=sl._nop_step, log: Callable[[str], None] = err) -> dict:
     """`G'`'s `drill/` and `roots-measure/` in `out` from the tiers' drills (`G`'s, then each run's, oldest first) and
@@ -210,7 +190,7 @@ def fold_drill(con, tiers: list[sd.Tier], out: Path, work: Path, *, R: int, K: i
     troots = work / "troots"
     troots.mkdir()
     con.execute("CREATE OR REPLACE TABLE tdig (tid BIGINT, n BIGINT, h1 UBIGINT, h2 UBIGINT)")
-    prog = Progress("drill/fold/long-roots", len(chunks), log)
+    prog = sn.Progress("drill/fold/long-roots", len(chunks), log)
     total = 0
     for k, (ch, a, b, lo, hi) in enumerate(chunks):
         parts = []
@@ -247,7 +227,7 @@ def fold_drill(con, tiers: list[sd.Tier], out: Path, work: Path, *, R: int, K: i
     t = step("drill/fold/aliases", t, members=aliases.num_rows, canonical=sl.count(con, "canon"))
     long_groups = sl.plan_groups(con, con.execute("SELECT c.q, d.n FROM ctid AS c JOIN tdig AS d USING (tid) ORDER BY c.q").fetchall(), chunk_rows)
     files = sorted(troots.glob("*.parquet"))
-    prog = Progress("drill/fold/canonical-roots", len(files), log)
+    prog = sn.Progress("drill/fold/canonical-roots", len(files), log)
     n_long = 0
     for k, f in enumerate(files):
         con.execute(f"""CREATE OR REPLACE TABLE rt AS SELECT c.q, {DEPTH} AS depth, r.path, r.usr, r.vf, r.vt, r.size, r.n_files
@@ -268,7 +248,7 @@ def fold_drill(con, tiers: list[sd.Tier], out: Path, work: Path, *, R: int, K: i
     bounds = sl.q_bounds(counts, chunk_rows)
     short_groups = sl.plan_groups(con, counts, chunk_rows)
     short_spans = [q_spans(fs) for fs in short_files]
-    prog = Progress("drill/fold/short-roots", len(bounds), log)
+    prog = sn.Progress("drill/fold/short-roots", len(bounds), log)
     n_short = 0
     for g, lo in enumerate(bounds):
         hi = bounds[g + 1] if g + 1 < len(bounds) else None

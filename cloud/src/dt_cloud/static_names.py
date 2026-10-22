@@ -35,7 +35,7 @@ import sys
 from functools import partial
 from pathlib import Path
 from time import monotonic
-from typing import Iterable, Iterator
+from typing import Callable, Iterable, Iterator
 
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -284,6 +284,34 @@ def intervals_sql(con, sources: list[tuple[str, int, int | None]], preds: list[s
         srcs = [f"SELECT {', '.join([*KEY_COLS, *state_cols])} FROM ({src})" for src in srcs]
     runs = islands_sql(long_sql(srcs), KEY_COLS, state_cols)
     return stamped_sql(runs, KEY_COLS, state_cols, [e for _, e, _ in sources], OPEN)
+
+
+def rss_peak_gb() -> float:
+    """This process's peak RSS so far, GiB (`ru_maxrss`: bytes on macOS, KiB on Linux)."""
+    import resource
+
+    m = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    return round(m / ((1 << 30) if sys.platform == "darwin" else (1 << 20)), 2)
+
+
+class Progress:
+    """A loop's progress lines: `label k/n`, rows so far, seconds, and the rest's estimate, at most one per `every_s`
+    (and the last), so a stalled fold shows within minutes instead of at the end of its sub-step."""
+
+    def __init__(self, label: str, n: int, log: Callable[[str], None], every_s: float = 30.0):
+        self.label, self.n, self.log, self.every_s = label, n, log, every_s
+        self.t0 = self.last = monotonic()
+        self.rows = 0
+
+    def tick(self, k: int, rows: int) -> None:
+        self.rows += rows
+        now = monotonic()
+        if now - self.last < self.every_s and k + 1 < self.n:
+            return
+        self.last = now
+        s = now - self.t0
+        eta = s / (k + 1) * (self.n - k - 1)
+        self.log(f"{self.label} {k + 1}/{self.n}: {self.rows:,} rows in {s:.0f}s (≈{eta:.0f}s left; RSS peak {rss_peak_gb()} GiB)")
 
 
 def connect(threads: int, mem: str, tmp: str | Path | None):
