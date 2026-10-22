@@ -56,7 +56,7 @@ from .append_runner import (  # noqa: F401 — the shared names, as this module 
     pending_scans,
     task_command,
 )
-from .static_merge import FOLDED_RETAIN
+from .static_merge import FOLDED_RETAIN, LONG_ROWS
 from .static_names import PREFIX, err
 from .static_profile import Profile, level_arg, profile
 
@@ -110,6 +110,7 @@ class Runner(ar.Runner):
 
     store_prefix = PREFIX
     job_prefix = "sn"
+    long_merge_rows = LONG_ROWS
 
     def layouts(self, base: dict):
         """The base's recorded layouts (None: the profile's). Runs follow the base's recorded hex-run rule (every stage
