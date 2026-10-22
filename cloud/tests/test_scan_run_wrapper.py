@@ -399,7 +399,7 @@ SUPERVISED_HEAD = SCRIPT_HEAD.replace("sr start", "trap 'exit 143' TERM\ntrap 'e
 class Supervised:
     """`dt-cloud scan-run supervise [-G grace] -- bash job.sh`, a real process tree over a SQLite record."""
 
-    def __init__(self, tmp: Path, script: str, grace: str = "5"):
+    def __init__(self, tmp: Path, script: str, grace: str = "5", heartbeat: str = "0"):
         self.tmp = tmp
         (tmp / "scan-runs.json").write_text(json.dumps(PROFILE))
         self.db = tmp / "runs.sqlite"
@@ -408,7 +408,7 @@ class Supervised:
         env = {k: v for k, v in os.environ.items() if k not in NOTIFY_ENV}
         env.update(PATH=f"{DT_CLOUD.parent}:{env['PATH']}", TMPDIR=str(tmp), JOB_ID="u-sv", SCAN=SCAN, DB=str(self.db),
                    SCAN_RUNS_PROFILE=str(tmp / "scan-runs.json"), DT_ALERTS="stderr", T=str(tmp))
-        self.p = subprocess.Popen([str(DT_CLOUD), "scan-run", "supervise", "-G", grace, "--", "bash", str(tmp / "job.sh")],
+        self.p = subprocess.Popen([str(DT_CLOUD), "scan-run", "supervise", "-G", grace, "-H", heartbeat, "--", "bash", str(tmp / "job.sh")],
                                   env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
 
     def pid(self, name: str, timeout: float = 30) -> int:
@@ -456,6 +456,37 @@ def statuses(lines: list[str]) -> list[str]:
 
 def alerts(lines: list[str]) -> list[str]:
     return [ln for ln in lines if ln.startswith("alert")]
+
+
+def test_supervise_heartbeat_keeps_a_waiting_run_fresh(tmp_path):
+    """A phase that waits a long time writes nothing itself: `supervise`'s heartbeat logs the running phase and moves
+    the run row's `updated_ts` every `-H`, so `/scans` doesn't read the run as quiet."""
+    sv = Supervised(tmp_path, SUPERVISED_HEAD + 'sr phase -M wait -- sh -c \'echo $$ > "$T/child"; sleep 4\'\nsr finish -x 0\n',
+                    heartbeat="0.3")
+    sv.pid("child")
+    stamp = lambda: SqliteSink(sv.db).query("SELECT updated_ts FROM scan_runs")[0]["updated_ts"]  # noqa: E731
+    first = stamp()
+    time.sleep(2.5)
+    moved = stamp() - first
+    rc, out, lines = sv.end()
+    assert (rc, out, moved >= 2) == (0, "", True)
+    # before the phase begins a beat may name none
+    assert {ln for ln in lines if ln.startswith("heartbeat")} - {"heartbeat: alive"} == {"heartbeat: alive · wait"}
+    assert sv.run_row() == [("succeeded", None, None)]
+
+
+def test_heartbeat_never_touches_a_finished_run(tmp_path):
+    """The beat races the job's finishing write: it stamps only a `running` row, and never changes a status."""
+    sink = SqliteSink(tmp_path / "runs.sqlite", ddl=DDL)
+    profile = parse_profile(PROFILE)
+    scan_runs.record(sink, profile, SCAN, "r-run", 100, start=True)
+    scan_runs.record(sink, profile, SCAN, "r-done", 100, start=True)
+    scan_runs.record(sink, profile, SCAN, "r-done", 150, exit_code=0)
+    sink.execute([scan_runs.heartbeat_sql("r-run", 200), scan_runs.heartbeat_sql("r-done", 200)])
+    assert [tuple(r.values()) for r in sink.query("SELECT run_id, status, updated_ts FROM scan_runs ORDER BY run_id")] == [
+        ("r-done", "succeeded", 150),
+        ("r-run", "running", 200),
+    ]
 
 
 def test_supervise_term_fails_the_run_once_and_empties_the_tree(tmp_path):
