@@ -49,7 +49,8 @@ jobs:
 
       - name: Run tests
         if: steps.passed.outputs.cache-hit != 'true'
-        run: uv run pytest tests/ -v
+        # GHA runners have 4 cores: one xdist worker each, the tests handed out one by one (`slow` included)
+        run: uv run pytest tests/ -v -n auto --dist loadgroup --durations=30
 
       - name: Record pass
         if: steps.passed.outputs.cache-hit != 'true'
@@ -175,7 +176,9 @@ jobs:
 
       - name: Run dt-cloud tests
         if: steps.passed.outputs.cache-hit != 'true'
-        run: cd cloud && uv run --no-sync pytest tests -v
+        # one xdist worker per core, `slow` included; `loadgroup`: the conftest keeps the tests sharing a
+        # module-scoped fixture together in chunks (one build per chunk), the rest go out one by one
+        run: cd cloud && uv run --no-sync pytest tests -v -n auto --dist loadgroup --durations=30
 
       - name: Record pass
         if: steps.passed.outputs.cache-hit != 'true'
