@@ -648,17 +648,24 @@ def run_rollups(con, prior: list[Tier], run: Tier, D: int, mode: str, R: int, K:
     probe_prior_rows(con, prior, mode)
     doc["probes"] = con.execute("SELECT count(DISTINCT k) FROM near").fetchone()[0]
     doc["probe_rows"] = con.execute("SELECT count(*) FROM prows").fetchone()[0]
-    con.execute(f"""CREATE OR REPLACE TABLE pv AS SELECT k, any_value(depth) AS depth, path, usr, vf, min(vt) AS vt, any_value(size) AS size,
-            any_value(n_files) AS n_files, any_value(par) AS par FROM prows GROUP BY k, path, usr, vf""")
+    near_rows = con.execute("SELECT count(*) FROM near").fetchone()[0]
+    err(f"anchors {mode}: near {near_rows:,} (k, dir) over {doc['probes']:,} keys; prior rows {doc['probe_rows']:,}")
+    resource_stage(f"anchors {mode}: prior versions", near=near_rows, probe_rows=doc["probe_rows"])
+    # A version's rows in several tiers count once: only its identity (and depth, a function of its path) is needed for
+    # the counts, so the dedup carries none of the row's other columns (cw's 10-20 18:06 scan: `pv` with every column
+    # held ~100 GB). The newly heavy keys' full rows are folded below, over just their prior rows.
+    con.execute("CREATE OR REPLACE TABLE pv AS SELECT DISTINCT k, depth, path, usr, vf FROM prows")
     con.execute(f"""CREATE OR REPLACE TABLE pd AS SELECT x.k, x.lvl, x.dir, count(*)::BIGINT AS n FROM ({_level_dirs('pv')}) AS x
         SEMI JOIN near USING (k, lvl, dir) GROUP BY ALL""")
+    con.execute("DROP TABLE pv")
     con.execute(f"""CREATE OR REPLACE TABLE nh AS SELECT near.k, near.lvl, near.dir, near.n + coalesce(pd.n, 0) AS rows FROM near
         LEFT JOIN pd USING (k, lvl, dir) WHERE near.n + coalesce(pd.n, 0) > {R}""")
     doc["new_heavy"] = con.execute("SELECT count(*) FROM nh").fetchone()[0]
     if doc["new_heavy"]:
+        # `rollup_cells` reads only the heads' keys' roots
         con.execute(f"""CREATE OR REPLACE TABLE nroots AS SELECT * FROM (
                 SELECT k, any_value(depth) AS depth, path, usr, vf, min(vt) AS vt, any_value(size) AS size, any_value(n_files) AS n_files, any_value(par) AS par
-                FROM (SELECT * FROM pv UNION ALL SELECT * FROM rr) GROUP BY k, path, usr, vf)
+                FROM (SELECT * FROM prows SEMI JOIN (SELECT DISTINCT k FROM nh) USING (k) UNION ALL SELECT * FROM rr) GROUP BY k, path, usr, vf)
             WHERE {first_hit_sql(mode, 'k', rule=rule)}""")
         rollup_cells(con, "nroots", "nh", K, into)
     # 4. Delta headers and cells at D for the heavy (k, dir) the run touches.

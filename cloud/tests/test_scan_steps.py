@@ -29,8 +29,8 @@ def profile(tmp_path: Path, **kw):
 class Runner:
     """A fake `subprocess.run`: records each argv (tmp paths as `<tmp>`), and plays the commands' side effects."""
 
-    def __init__(self, tmp: Path, fail: tuple[str, ...] = (), stdout: dict[str, str] | None = None):
-        self.tmp, self.fail, self.stdout, self.calls, self.envs = tmp, fail, stdout or {}, [], []
+    def __init__(self, tmp: Path, fail: tuple[str, ...] = (), stdout: dict[str, str] | None = None, codes: dict[str, int] | None = None):
+        self.tmp, self.fail, self.stdout, self.codes, self.calls, self.envs = tmp, fail, stdout or {}, codes or {}, [], []
 
     def __call__(self, argv, env, stdout=None, text=True):
         cmd = " ".join(argv).replace(str(self.tmp), "<tmp>")
@@ -58,7 +58,7 @@ class Runner:
         if argv[:2] == ["python", "web.py"]:
             Path(argv[2]).mkdir(parents=True, exist_ok=True)
             (Path(argv[2]) / "meta.json").write_text("{}")
-        return subprocess.CompletedProcess(argv, 1 if key in self.fail else 0, self.stdout.get(key, ""), None)
+        return subprocess.CompletedProcess(argv, self.codes.get(key, 1 if key in self.fail else 0), self.stdout.get(key, ""), None)
 
 
 @pytest.fixture
@@ -190,6 +190,19 @@ def test_static_names_failure_records_failed_phase_and_the_run_goes_on(tmp_path,
     assert S.run_step("static-names", None, env) == 0
     assert phases == [("begin", "static-names"), ("end", "static-names", 1, {
         "warn": True, "msg": "static-names runs add failed for 2026-10-16T1200", "note": "overlapped"})]
+    assert c.sh_impl.calls == ["dt-cloud static-names runs add -c 2026-10-16T1200"]
+
+
+def test_static_names_busy_is_not_a_failure(tmp_path, env, monkeypatch):
+    """Exit 4: another coordinator holds the store's lease (a catch-up, or an earlier scan's run) and appends this scan."""
+    c = ctx(tmp_path, env, runner=Runner(tmp_path, codes={"dt-cloud static-names runs": 4}))
+    phases = []
+    c.run.begin = lambda name: phases.append(("begin", name))
+    c.run.end = lambda name, rc=0, **kw: phases.append(("end", name, rc, kw))
+    monkeypatch.setattr(S, "load_profile_env", lambda *a: c.profile)
+    monkeypatch.setattr(S, "make_ctx", lambda *a: c)
+    assert S.run_step("static-names", None, env) == 0
+    assert phases == [("begin", "static-names"), ("end", "static-names", 0, {"note": "overlapped"})]
     assert c.sh_impl.calls == ["dt-cloud static-names runs add -c 2026-10-16T1200"]
 
 

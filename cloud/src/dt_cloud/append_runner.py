@@ -7,6 +7,8 @@ listed by immutable manifests:
 
 - **Order.** Scans are appended strictly in scan-id order (`pending_scans`): exit `NOT_NEXT` (3) when SCAN_ID is not
   published yet or an earlier published scan is pending; `-c` catches up every pending scan in order.
+- **One coordinator** per store (`Runner.coordination`, `coordinator_lease`; specs/done/append-coordinator-lease.md): a lease
+  in the scratch bucket, held for the whole run and renewed by a heartbeat; another `run` meanwhile exits `BUSY` (4).
 - **Stages** (`Runner`): each skipped when its output exists, so a rerun resumes at the first missing one; Batch jobs
   submitted over the API and polled (`BatchRunner`, at most every 30 s), several at once where they're independent
   (`Runner.concurrently`), labelled for cost attribution (`job_spec`, `cost_labels`).
@@ -41,7 +43,8 @@ import socket
 import sys
 import threading
 import time
-from collections.abc import Callable, Collection, Iterable, Mapping
+from collections.abc import Callable, Collection, Iterable, Iterator, Mapping
+from contextlib import AbstractContextManager, contextmanager
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -100,6 +103,8 @@ def err(*a, **kw) -> None:
 
 #: Exit status: the scan is not published yet, or is not the next one to append.
 NOT_NEXT = 3
+#: Exit status: another coordinator holds the store's coordinator lease (`Busy`); it appends this scan too.
+BUSY = 4
 #: Revision suffix width: `<id>.m001.json` … `<id>.m999.json` sort in revision order.
 REV_DIGITS = 3
 MANIFEST = re.compile(rf"(?P<scan>[^/]+?)(?:\.m(?P<rev>\d{{{REV_DIGITS}}}))?\.json")
@@ -131,6 +136,14 @@ JOB_NAME_VAR = "DT_JOB_NAME"
 
 class NotNext(Exception):
     """The scan can't be appended now (not published, or an earlier published scan is pending): exit 3."""
+
+
+class Busy(Exception):
+    """Another coordinator holds the store's coordinator lease: exit 4."""
+
+
+class LeaseLost(RuntimeError):
+    """The coordinator lease was taken over (or couldn't be renewed) mid-run: the run stops at the next stage."""
 
 
 class StillRunning(Exception):
@@ -439,6 +452,194 @@ def merge_ttl(merges: list[tuple[list[dict], dict]]) -> int:
 def merge_is_long(merges: list[tuple[list[dict], dict]]) -> bool:
     """Whether planned carries (`plan_carries`' merges) reach `LONG_MERGE_LEVEL`: the merge job runs as a long stage."""
     return any(out["level"] >= LONG_MERGE_LEVEL for _, out in merges)
+
+
+# ── The coordinator lease: one `Runner.run` per store at a time ───────────
+
+#: The coordinator lease's name under the store's prefix in the scratch bucket (`<prefix>/coordinator.lease.json`): per
+#: store, not per generation, so a run that follows a compaction into a new generation keeps holding it.
+COORD_LEASE = "coordinator.lease.json"
+#: How long a coordinator lease lives without a renewal: three missed heartbeats, so a crashed coordinator blocks the next
+#: one for at most ~15 min (the holder renews it every `HEARTBEAT_S`).
+COORD_TTL_S = 3 * HEARTBEAT_S
+
+
+class LeaseFile(Protocol):
+    """One lease record, written only conditionally: `token` is the version a read saw (a GCS generation)."""
+    def create(self, text: str) -> bool:
+        """Write `text` if there is no record; False when there is."""
+    def read(self) -> tuple[dict, Any] | None:
+        """The record and its token, or None when there is none."""
+    def replace(self, text: str, token: Any) -> Any | None:
+        """Overwrite the record if it is still at `token`: the new token, or None when it changed."""
+    def delete(self, token: Any) -> bool:
+        """Delete the record if it is still at `token`."""
+
+
+class LocalLeaseFile:
+    """`LeaseFile` on a local file (tests, local runs): the token is the record's text; one process's threads serialize
+    on a lock."""
+
+    def __init__(self, path: Path):
+        self.path, self.lock = Path(path), threading.Lock()
+
+    def create(self, text: str) -> bool:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            with open(self.path, "x") as fh:
+                fh.write(text)
+            return True
+        except FileExistsError:
+            return False
+
+    def read(self) -> tuple[dict, Any] | None:
+        try:
+            text = self.path.read_text()
+        except FileNotFoundError:
+            return None
+        return json.loads(text), text
+
+    def replace(self, text: str, token: Any) -> Any | None:
+        with self.lock:
+            if (cur := self.read()) is None or cur[1] != token:
+                return None
+            self.path.write_text(text)
+            return text
+
+    def delete(self, token: Any) -> bool:
+        with self.lock:
+            if (cur := self.read()) is None or cur[1] != token:
+                return False
+            self.path.unlink()
+            return True
+
+
+class GcsLeaseFile:
+    """`LeaseFile` on a GCS object, by generation preconditions."""
+
+    def __init__(self, bucket: str, key: str, client=None):
+        from google.cloud import storage
+
+        self.blob = (client or storage.Client()).bucket(bucket).blob(key)
+
+    def create(self, text: str) -> bool:
+        from google.api_core.exceptions import PreconditionFailed
+
+        try:
+            self.blob.upload_from_string(text, if_generation_match=0)
+            return True
+        except PreconditionFailed:
+            return False
+
+    def read(self) -> tuple[dict, Any] | None:
+        from google.api_core.exceptions import NotFound, PreconditionFailed
+
+        for _ in range(3):
+            try:
+                self.blob.reload()
+                gen = self.blob.generation
+                return json.loads(self.blob.download_as_bytes(if_generation_match=gen)), gen
+            except NotFound:
+                return None
+            except PreconditionFailed:
+                continue
+        raise RuntimeError(f"{self.blob.name}: the lease record kept changing while read")
+
+    def replace(self, text: str, token: Any) -> Any | None:
+        from google.api_core.exceptions import NotFound, PreconditionFailed
+
+        try:
+            self.blob.upload_from_string(text, if_generation_match=token)
+            return self.blob.generation
+        except (NotFound, PreconditionFailed):
+            return None
+
+    def delete(self, token: Any) -> bool:
+        from google.api_core.exceptions import NotFound, PreconditionFailed
+
+        try:
+            self.blob.delete(if_generation_match=token)
+            return True
+        except (NotFound, PreconditionFailed):
+            return False
+
+
+class CoordinatorLease:
+    """The coordinator lease on `file`, for one run (`owner`, a fresh uuid): `take` it (or raise `Busy`), `renew` it
+    (the heartbeat; a renewal that finds it changed marks it lost), `check` (raises `LeaseLost` once lost), `release`."""
+
+    def __init__(self, file: LeaseFile, *, holder: str, now: Callable[[], datetime], ttl_s: int = COORD_TTL_S):
+        from uuid import uuid4
+
+        self.file, self.holder, self.now, self.ttl_s = file, holder, now, ttl_s
+        self.owner, self.token, self.lost = uuid4().hex, None, None
+
+    def record(self) -> str:
+        return json.dumps({"owner": self.owner, "holder": self.holder, "at": self.now().isoformat(), "ttl_s": self.ttl_s}) + "\n"
+
+    def take(self) -> None:
+        for _ in range(3):
+            if self.file.create(self.record()):
+                self.token = self.file.read()[1]
+                return
+            if (cur := self.file.read()) is None:
+                continue
+            held, token = cur
+            if not lease_stale(held, self.now(), self.ttl_s):
+                raise Busy(f"the coordinator lease is held by {held.get('holder', held['owner'])} (since {held['at']})")
+            self.file.delete(token)
+        raise Busy("the coordinator lease changed hands while being taken")
+
+    def renew(self) -> None:
+        if self.lost is not None:
+            return
+        try:
+            token = self.file.replace(self.record(), self.token)
+        except Exception as e:
+            self.lost = f"renewing it failed: {e}"
+            return
+        if token is None:
+            cur = self.file.read()
+            self.lost = f"it is now {cur[0].get('holder', cur[0]['owner'])}'s" if cur else "it was deleted"
+        else:
+            self.token = token
+
+    def check(self) -> None:
+        if self.lost is not None:
+            raise LeaseLost(f"lost the coordinator lease: {self.lost}")
+
+    def release(self) -> None:
+        if self.lost is None and self.token is not None:
+            self.file.delete(self.token)
+
+
+@contextmanager
+def coordinator_lease(file: LeaseFile, *, holder: str | None = None, now: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
+                      ttl_s: int = COORD_TTL_S, heartbeat_s: float = HEARTBEAT_S) -> Iterator[Callable[[], None]]:
+    """Hold the coordinator lease on `file` (`holder`: `$DT_JOB_NAME`, else host:pid), renewed every `heartbeat_s` on a
+    thread; yields its `check`. Raises `Busy` when another holds it. Released on the way out, unless it was lost."""
+    lease = CoordinatorLease(file, holder=holder or os.environ.get(JOB_NAME_VAR) or f"{socket.gethostname()}:{os.getpid()}",
+                             now=now, ttl_s=ttl_s)
+    lease.take()
+    stop = threading.Event()
+
+    def beat():
+        while not stop.wait(heartbeat_s):
+            lease.renew()
+
+    t = threading.Thread(target=beat, daemon=True, name="coordinator-lease")
+    t.start()
+    try:
+        yield lease.check
+    finally:
+        stop.set()
+        t.join(timeout=30)
+        lease.release()
+
+
+def gcs_coordinator_lease(scratch: str, prefix: str, client=None) -> AbstractContextManager[Callable[[], None]]:
+    """`coordinator_lease` at `gs://<scratch>/<prefix>/coordinator.lease.json`."""
+    return coordinator_lease(GcsLeaseFile(scratch, f"{prefix}/{COORD_LEASE}", client))
 
 
 class LocalRunStore:
@@ -1341,6 +1542,10 @@ class Runner:
     compact_now: bool = False
     #: The submitter's env: what its merge and compaction jobs record their runs with (`record_env`).
     environ: Mapping[str, str] = field(default_factory=lambda: dict(os.environ))
+    #: The coordinator lease (`coordinator_lease`), held for all of `run`; yields its check, which `stage` calls before and
+    #: after each stage. None: no lease (dry runs, tests).
+    coordination: Callable[[], AbstractContextManager[Callable[[], None]]] | None = None
+    check_lease: Callable[[], None] | None = None
 
     store_prefix: ClassVar[str]
     job_prefix: ClassVar[str]
@@ -1373,8 +1578,18 @@ class Runner:
         return scans_of(base, runs), self.layouts(base)
 
     def run(self, scan_id: str, catch_up: bool = False) -> list[str]:
-        """Append `scan_id` (and with `catch_up` every earlier pending scan, in order), then the merge stage. Returns the
-        scans appended."""
+        """Append `scan_id` (and with `catch_up` every earlier pending scan, in order), then the merge stage, holding the
+        coordinator lease throughout (`coordination`; `Busy` when another run holds it). Returns the scans appended."""
+        if self.coordination is None:
+            return self.append(scan_id, catch_up)
+        with self.coordination() as check:
+            self.check_lease = check
+            try:
+                return self.append(scan_id, catch_up)
+            finally:
+                self.check_lease = None
+
+    def append(self, scan_id: str, catch_up: bool) -> list[str]:
         self.follow()
         have, layouts = self.have()
         todo = pending_scans(have, self.published(layouts, have[-1]), scan_id, catch_up)
@@ -1414,10 +1629,14 @@ class Runner:
         if self.dry_run:
             self.log(f"{name}: would run")
             return
+        if self.check_lease:
+            self.check_lease()
         t = monotonic()
         self.log(f"{name}: start")
         fn()
         self.timings[name] = round(monotonic() - t, 1)
+        if self.check_lease:
+            self.check_lease()
         self.log(f"{name}: done in {monotonic() - t:.0f}s")
 
     def concurrently(self, d: str, jobs: list[tuple[str, Callable[[], None]]]) -> None:
@@ -1626,13 +1845,16 @@ class Runner:
 
 
 def exit_on(label_: str, fn: Callable[[], Any], log: Callable[[str], None]) -> Any:
-    """`fn()`, a CLI's run: `NotNext` exits `NOT_NEXT`, a failed stage (`RuntimeError`) exits 1, each logged as
+    """`fn()`, a CLI's run: `NotNext` exits `NOT_NEXT`, `Busy` `BUSY`, a failed stage (`RuntimeError`, `LeaseLost`) exits 1, each logged as
     `<label>: <why>`."""
     try:
         return fn()
     except NotNext as e:
         log(f"{label_}: {e}")
         sys.exit(NOT_NEXT)
+    except Busy as e:
+        log(f"{label_}: {e}")
+        sys.exit(BUSY)
     except RuntimeError as e:
         log(f"{label_}: {e}")
         sys.exit(1)
