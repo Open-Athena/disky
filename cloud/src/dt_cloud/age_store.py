@@ -191,7 +191,8 @@ def update(
         target.write_bytes(f"{MARKERS}/{marker['scan']}.json", (json.dumps(marker) + "\n").encode())
     after = local_store.listing("interval-store")
     pointer = "interval-store/CURRENT.json"
-    changed = [k for k, n in after.items() if k != pointer and before.get(k) != n]
+    # Unpublished files are not trusted: corrected inputs can rebuild different bytes at the same size.
+    changed = [k for k, n in after.items() if k != pointer and (not current or before.get(k) != n)]
     def publish_rank(key: str) -> tuple[int, str]:
         name = key.rsplit("/", 1)[-1]
         rank = 4 if name == "successor.json" else 3 if "/manifests/" in key else 2 if name == "scans.json" else 1 if name == "meta.json" else 0
