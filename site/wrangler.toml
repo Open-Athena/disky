@@ -58,8 +58,7 @@ JOB_SA = "gcs-usage-job@oa-internal-450019.iam.gserviceaccount.com"  # the accou
 # Deployment resources (specs/oa-decoupling.md): `cloud` carries no defaults for these.
 STORE_BUCKET = "oa-gcs-usage-dvx"     # the path store's bucket (`_lib/index.ts`)
 PATH_STORE = "intervals"   # every request reads the interval store (INDEX_R2) for the scans its generation holds; others (and any sort it lacks) read per-scan from STORE_BUCKET. The generation is `interval-store/CURRENT.json` on INDEX_R2 (a compaction moves it); `INTERVAL_STORE_GEN` would pin one
-INTERVAL_STORE_GEN = "2026-10-09b.g2"   # pinned through the first compaction trial: dev follows the pointer, prod moves once dev checks out
-STATIC_GEN = "2026-10-08c"              # pinned likewise (the static name index's `static-names/CURRENT.json`)
+STATIC_GEN = "2026-10-08c"   # pinned through the first static-names compaction: dev follows `static-names/CURRENT.json`, prod moves once dev checks out
 DATA_BUCKET = "oa-gcs-usage-dvx"      # sweep runs / plans data (`sweepDispatch`, `api/sweep/*`)
 GCP_PROJECT = "oa-internal-450019"    # Batch dispatch (`_lib/gcp.ts`)
 GCP_LOG_VIEW = "projects/oa-internal-450019/locations/global/buckets/_Default/views/gcs-sweep-task-logs"
