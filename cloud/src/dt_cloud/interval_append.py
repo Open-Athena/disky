@@ -76,6 +76,7 @@ from .append_runner import (  # noqa: F401 — NOT_NEXT, StateIncomplete: as thi
     scans_of,
 )
 from .blobstore import Store, gs_bucket, run_store, serves, store_url
+from .maint_runs import NULL, from_env
 from .static_names import OPEN, U64, err, q, write_sorted
 from .static_profile import Profile, from_mapping, level_arg, parse_compact_level
 
@@ -866,10 +867,11 @@ def carry_cmd(bucket, gen, ranges_gen, scratch, read_from, compact_level, mount,
     base = Store(store_url(bucket)).read_json(f"{PREFIX}/{gen}/scans.json")
     sl = ist.sliced(base)
     status = None if dry_run else ar.r2_merge_status(f"{PREFIX}/{gen}")
+    rec = NULL if dry_run else from_env("merge")
     doc = ar.merge_pending(store, carry(gen, k, threads=threads, mem=mem, sliced=sl, generation=ist.has_generation(base)), Path(mount) / PREFIX / gen, tmp=Path(tmp), dry_run=dry_run,
                            max_merges=max_merges, max_level=compact_level, status=status,
-                           source=(ar.R2Source(), f"{PREFIX}/{gen}") if read_from == "r2" else None)
-    doc["prune"] = _summary(ar.prune_folded(store, retain=FOLDED_RETAIN, dry_run=dry_run, where=" gcs"))
+                           source=(ar.R2Source(), f"{PREFIX}/{gen}") if read_from == "r2" else None, rec=rec)
+    doc["prune"] = _summary(ar.finish_merge(rec, doc, lambda: ar.prune_folded(store, retain=FOLDED_RETAIN, dry_run=dry_run, where=" gcs")))
     print(json.dumps(doc, indent=1))
 
 
@@ -891,7 +893,8 @@ def compact_cmd(bucket, gen, ranges_gen, scratch, policy, read_from, grace_s, jo
     if (b := gs_bucket(bucket)) is None:
         raise SystemExit(f"interval store: the staged compaction reads a mounted GCS bucket; {bucket!r} is not one")
     doc = ar.run_compaction(Store(f"gs://{b}"), ic.compactor(rg_rows), gen, Path(mount), Path(tmp), policy=policy, force=force,
-                            r2_bucket=b if to_r2 else None, grace_s=grace_s, threads=threads, mem=mem, jobs=jobs, read_from=read_from)
+                            r2_bucket=b if to_r2 else None, grace_s=grace_s, threads=threads, mem=mem, jobs=jobs, read_from=read_from,
+                            rec=from_env("compact"))
     print(json.dumps(doc, indent=1))
 
 

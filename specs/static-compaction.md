@@ -72,7 +72,7 @@ Compact gcs's current static generation and its runs on one large VM (`static-na
 
 - `read_from: r2` needs the builder's inputs on R2 (above): a decision.
 - The site following `static-names/CURRENT.json` (or `successor.json`) instead of pinning `STATIC_GEN`: the site's change.
-- `/scans` records: `Runner.compaction` (the reason) and the compaction job's summary are there for `scan-run supervise` to record; not wired.
+- ~~`/scans` records~~: done (2026-10-21, `maint_runs`): the `compact` job records itself as a `scan_runs` row (kind `compact`, its `scan` the newest scan it folds, `gen` `<store>/<gen>` then `… → <new>`), phases `read`, `due`, `fold` (the interval store's then `sorts`), `upload`, `pointer`, `r2`, `prune` with notes, a 60 s heartbeat, `nop` when not due; the `merge` job likewise (kind `merge`, a `carry L<n>` phase per merged run, `prune`). The submitter passes `$D1_DB_ID` / `$CLOUDFLARE_ACCOUNT_ID` and the profile's `record_secrets` token (`Runner.record_env`); a failed write never fails the job.
 - One `static-names/CURRENT.json` per bucket prefix: deployments with two static lineages under one prefix (the "meta" store) would share it; the pointer is moved only when it names the compacted generation or nothing, so a second lineage never takes it over, but it can't name both.
 
 ## Cost (10-09 estimate; measured figures go here once run)

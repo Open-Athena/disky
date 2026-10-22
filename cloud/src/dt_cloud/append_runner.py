@@ -41,7 +41,7 @@ import socket
 import sys
 import threading
 import time
-from collections.abc import Callable, Collection, Iterable
+from collections.abc import Callable, Collection, Iterable, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -52,6 +52,7 @@ from typing import Any, ClassVar, Protocol
 from click import ParamType
 
 from .cost_labels import label_batch_spec
+from .maint_runs import Recorder
 from .scan_id import SCAN_ID
 from .static_profile import COMPACT_LEVEL, Profile, parse_compact_level
 
@@ -803,7 +804,7 @@ def publish_revision(store: RunStore, carry: Carry, inputs: list[str], out: dict
 def merge_pending(store: RunStore, carry: Carry, mount: Path, *, tmp: Path, owner: str | None = None, dry_run: bool = False,
                   max_merges: int | None = None, max_level: int | None = COMPACT_LEVEL, now: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
                   status: MergeStatus | None = None, heartbeat_s: float | None = HEARTBEAT_S, log: Callable[[str], None] = err,
-                  source=None) -> dict:
+                  source=None, rec: Recorder | None = None) -> dict:
     """Run the newest manifest's due carries (`plan_carries`), one merged run at a time (`carry.build`), each published as
     a revision (`publish_revision`) before the next is planned, until none is due (or `max_merges`). `mount`: the
     generation's dir on a mount of the data bucket (the inputs are read from it). Holds the merge lease throughout
@@ -811,7 +812,12 @@ def merge_pending(store: RunStore, carry: Carry, mount: Path, *, tmp: Path, owne
     (every run it lists whole), and a rerun resumes: a merged dir already whole is reused. `max_level`: the compaction
     level, which no carry reaches (`plan_carries`; None: unbounded). `status`: where the lease is mirrored for /health
     (`StatusMirror`: written as each carry starts, refreshed every `heartbeat_s`, removed on a clean end, marked failed on
-    a raise; best-effort throughout)."""
+    a raise; best-effort throughout). `rec`: the run's record on `/scans` (`maint_runs`, kind `merge`): started here
+    (its `scan` the newest manifest's scan), a phase per merged run (`carry L<level>`), `failed` on a raise; the caller
+    finishes it (`finish_merge`, after its prune)."""
+    from .maint_runs import NULL, gib, phase
+
+    rec = rec or NULL
     owner = owner or f"{os.environ.get('BATCH_JOB_UID') or socket.gethostname()}:{os.getpid()}"
     cur = newest(store)
     if cur is None:
@@ -819,10 +825,16 @@ def merge_pending(store: RunStore, carry: Carry, mount: Path, *, tmp: Path, owne
     if dry_run:
         _, merges = plan_carries(cur[1]["runs"], carry.drilled(store, cur[1]["runs"]), max_level)
         return {"manifest": cur[0], "plan": [{"inputs": [r["key"] for r in ins], "output": out["key"], "level": out["level"]} for ins, out in merges]}
+    scan, _ = parse_manifest(cur[0].removeprefix("manifests/")) or (None, 0)
+    rec.start(run_scans(cur[1]["runs"])[-1] if cur[1].get("runs") else scan, getattr(store, "prefix", None) or store.gen)
     if held := store.lease(owner, now(), LEASE_S):
         log(f"merge: the lease is held ({held}); not merging")
+        with phase(rec, "lease") as ph:
+            ph.note = f"held by {held.get('owner') if isinstance(held, dict) else held}: not merging"
         return {"held": held, "merged": [], "manifest": cur[0]}
     done: list[dict] = []
+    running: str | None = None
+    names: list[str] = []
     mirror = StatusMirror(status, owner, now, log, heartbeat_s)
     try:
         while max_merges is None or len(done) < max_merges:
@@ -834,6 +846,10 @@ def merge_pending(store: RunStore, carry: Carry, mount: Path, *, tmp: Path, owne
             mirror.write(key, merges, done)
             ins, out = merges[0]
             t0 = monotonic()
+            base_name = f"carry L{out['level']}"
+            n = sum(x.split(" #")[0] == base_name for x in names)
+            names.append(name := base_name if not n else f"{base_name} #{n + 1}")
+            rec.begin(running := name)
             if complete(store, carry, out):
                 log(f"merge {out['key']}: already whole; publishing it")
                 meta = store.read_json(f"{out['key']}/meta.json")
@@ -855,8 +871,15 @@ def merge_pending(store: RunStore, carry: Carry, mount: Path, *, tmp: Path, owne
             done.append({"inputs": [r["key"] for r in ins], "output": out["key"], "level": out["level"], "scans": len(out["scans"]),
                          "rows": out.get("rows"), "manifest": pub.key if pub else None, "tiers_s": doc["s"], "reads": doc.get("reads"), "s": round(monotonic() - t0, 1)})
             log(f"merge {out['key']} ({len(ins)} runs, {len(out['scans'])} scans): {pub.key if pub else 'already listed'} in {done[-1]['s']:.0f}s")
+            rec.end(name, f"{len(ins)} runs → {out['key']} ({len(out['scans'])} scans"
+                    + (f", {out['rows']:,} rows" if isinstance(out.get("rows"), int) else "") + (f", {gib(out['bytes'])}" if out.get("bytes") is not None else "")
+                    + f"): {pub.key if pub else 'already listed'} in {done[-1]['s']:.0f}s")
+            running = None
     except BaseException as e:
         mirror.failed(e)
+        if running is not None:
+            rec.end(running, f"failed: {type(e).__name__}: {e}", failed=True)
+        rec.finish("failed", error=f"{type(e).__name__}: {e}")
         raise
     else:
         mirror.clear()
@@ -1100,6 +1123,24 @@ class PruneTarget(Protocol):
     def delete(self, keys: list[str]) -> None: ...
 
 
+def finish_merge(rec: Recorder | None, doc: dict, prune: Callable[[], dict]) -> dict:
+    """A merge job's end (both stores' `carry`): `prune()` (`prune_folded`'s summary) as the run's `prune` phase, then
+    the run finished (`maint_runs`): `succeeded` when it merged a run, else `nop` (nothing due, the lease held), or
+    `failed` (re-raised) when the prune raises. Returns `prune()`'s summary."""
+    from .maint_runs import NULL, gib, phase
+
+    rec = rec or NULL
+    try:
+        with phase(rec, "prune") as ph:
+            got = prune()
+            ph.note = f"{len(got.get('runs', []))} folded runs, {got.get('objects', 0)} objects, {gib(got.get('bytes', 0))} " + ("deleted" if got.get("deleted") else "to delete")
+    except BaseException as e:
+        rec.finish("failed", error=f"{type(e).__name__}: {e}")
+        raise
+    rec.finish("succeeded" if doc.get("merged") else "nop")
+    return got
+
+
 def prune_folded(target: PruneTarget, *, now: float | None = None, grace_s: float = GRACE_S, retain: Collection[str] = (),
                  dry_run: bool = False, where: str = "", log: Callable[[str], None] = err) -> dict:
     """Delete from `target` the runs its own manifests' carries folded (`plan_prune` over its listing and its manifests'
@@ -1275,6 +1316,8 @@ class Runner:
     compaction: str | None = None
     #: Compact after the carries whatever the policy says (`-K`), when the generation has runs.
     compact_now: bool = False
+    #: The submitter's env: what its merge and compaction jobs record their runs with (`record_env`).
+    environ: Mapping[str, str] = field(default_factory=lambda: dict(os.environ))
 
     store_prefix: ClassVar[str]
     job_prefix: ClassVar[str]
@@ -1438,6 +1481,27 @@ class Runner:
                              "they can't read the R2 copy (read from gcs, or make the R2 account the stages')")
         return read_from_arg(self.p)
 
+    def record_env(self, name: str, spec: dict) -> dict:
+        """`spec` (a merge or compaction job, named `name`) with what its run's record on `/scans` needs (`maint_runs`):
+        its job facts (`DT_JOB_NAME`, `DT_JOB_REGION`, `DT_JOB_MACHINE`, `DT_JOB_SPOT`, `DT_JOB_IMAGE`), and when the
+        profile names the D1 token's secret (`record_secrets`) and this process has `$D1_DB_ID` and
+        `$CLOUDFLARE_ACCOUNT_ID`, those (with `$SCAN_RUNS_PROFILE`, for the cost) and the token from Secret Manager.
+        Without them the job runs unrecorded (it says so in its log)."""
+        from .maint_runs import FACT_ENV, PASS_ENV
+
+        env = spec["taskGroups"][0]["taskSpec"].setdefault("environment", {})
+        v = env.setdefault("variables", {})
+        inst = spec["allocationPolicy"]["instances"][0]["policy"]
+        image = spec["taskGroups"][0]["taskSpec"]["runnables"][0]["container"]["imageUri"].rsplit("/", 1)[-1]
+        facts = {"job_name": name, "region": self.p.region, "machine": inst["machineType"],
+                 "spot": "1" if inst["provisioningModel"] == "SPOT" else "0", "image": image}
+        v.update({FACT_ENV[k]: x for k, x in facts.items() if x})
+        secrets = dict(getattr(self.p, "record_secrets", None) or {})
+        if secrets and all((self.environ.get(k) or "").strip() for k in ("D1_DB_ID", "CLOUDFLARE_ACCOUNT_ID")):
+            v.update({k: self.environ[k].strip() for k in PASS_ENV if (self.environ.get(k) or "").strip()})
+            env.setdefault("secretVariables", {}).update({k: f"projects/{self.p.project}/secrets/{x}/versions/latest" for k, x in sorted(secrets.items())})
+        return spec
+
     def compact_jobs(self, scan: str) -> list[tuple[str, dict]]:
         """The compaction's Batch jobs, in order: `compact` (one task: `run_compaction`, GCS, then R2 when the job can hold
         the R2 credentials, `merge_r2`), else then `compact-r2` as the R2 account (the new generation to R2, its pointer
@@ -1466,6 +1530,9 @@ class Runner:
         `merge_wait` s; they publish the new generation on GCS, then R2 (its pointer last), so the next run appends to it
         (`follow`). Non-fatal, as the merge stage: a rerun resumes (the job follows a finished compaction's successor)."""
         jobs = self.compact_jobs(scan)
+        if jobs:
+            # the first job folds and publishes: its run is recorded (`compact-r2`, the R2 account's, isn't)
+            jobs[0] = (jobs[0][0], self.record_env(*jobs[0]))
         try:
             for i, (name, spec) in enumerate(jobs):
                 wait = self.merge_wait if i == len(jobs) - 1 else None
@@ -1507,6 +1574,7 @@ class Runner:
                 name, spec = self.merge_job(m["date"])
                 # its status record's holder (`StatusMirror`)
                 spec["taskGroups"][0]["taskSpec"]["environment"]["variables"][JOB_NAME_VAR] = name
+                self.record_env(name, spec)
                 try:
                     self.stage(f"merge: {desc}", lambda: self.run_job(name, spec, wait=self.merge_wait))
                 except StillRunning as e:
@@ -1558,6 +1626,8 @@ SUCCESSOR = "successor.json"
 #: In a generation a compaction wrote, uploaded last (its completion marker): `{from, manifest, runs, base_scans, scans,
 #: level[, rule, why]}`, and with `Compactor.md5s` each file's md5.
 COMPACTION = "compaction.json"
+#: The least seconds between a fold's progress notes on its run record (`compact_store`).
+NOTE_S = 30.0
 GEN_SUFFIX = re.compile(r"(?P<root>.+)\.c(?P<n>\d{3,})")
 
 
@@ -1707,8 +1777,9 @@ def forced(gen_dir: Path, why: str = "forced (-K)") -> str | None:
 
 @dataclass(frozen=True)
 class Compactor:
-    """A store's plug into `compact_store`: `fold(gen_dir, out, work, *, gen, new_gen, runs, threads, mem, jobs)` writes
-    the new generation into `out` (every file a fresh build over the same scans writes) and returns a summary;
+    """A store's plug into `compact_store`: `fold(gen_dir, out, work, *, gen, new_gen, runs, threads, mem, jobs, progress)`
+    writes the new generation into `out` (every file a fresh build over the same scans writes) and returns a summary
+    (`progress(note[, next_phase])`: the run record's hook, for its running phase's note and a next phase);
     `publish_order` the store's upload order (data, then liveness markers); `last`: the generation-relative files its
     readers open it by, copied to R2 after the rest, in order (`compaction.json` after them); `prune`: whether
     predecessors leave the store after the grace (`prune_predecessors`; off: a reader may pin the old generation,
@@ -1747,7 +1818,7 @@ def store_newest_runs(store, prefix: str) -> tuple[str | None, list[dict]]:
 
 def compact_store(store, c: Compactor, gen: str, gen_dir: Path, work: Path, *, policy: Policy | int | None, why: str, threads: int = 4,
                   mem: str = "4GB", jobs: int = 1, r2: Callable[[str, str], dict] | None = None, reads: dict | None = None,
-                  log: Callable[[str], None] = err) -> dict:
+                  rec: Recorder | None = None, log: Callable[[str], None] = err) -> dict:
     """Generation `gen` of `store` (a `blobstore.Store`; its files readable in `gen_dir`: a mirror or a mount) folded
     into the next one (`next_gen`, by `c.fold`) and published: an earlier, unpublished attempt's keys removed; the new
     generation's files in `c.publish_order`, `compaction.json` last; `successor.json` in `gen`; `CURRENT.json` when it
@@ -1759,9 +1830,15 @@ def compact_store(store, c: Compactor, gen: str, gen_dir: Path, work: Path, *, p
     manifest must still cover exactly the folded scans (a carry's revision may replace it; it keeps them) just before
     `successor.json` is written, and again just after (`publish_scan` checks for `successor.json` after writing its
     manifest, so one of the two sees the other). A scan that landed: the new generation is deleted (and the successor
-    record, when written), nothing else moves, and the summary says `superseded`; the next compaction folds it all."""
+    record, when written), nothing else moves, and the summary says `superseded`; the next compaction folds it all.
+
+    `rec`: the run's record (`maint_runs`): phases `fold` (the interval store's then `sorts`: the fold's `progress`
+    hook moves it on), `upload`, `pointer`, `r2`, each with its note (rows, files, GiB, seconds, work-disk / RSS peaks)."""
     from .blobstore import upload_new
+    from .maint_runs import NULL, gib, phase
     from .static_local import DiskPeak, rss_peak_gb
+
+    rec = rec or NULL
 
     new = next_gen(gen)
     new_prefix = f"{c.prefix}/{new}"
@@ -1777,7 +1854,28 @@ def compact_store(store, c: Compactor, gen: str, gen_dir: Path, work: Path, *, p
     work.mkdir(parents=True, exist_ok=True)
     t0, disk = monotonic(), DiskPeak(work)
     log(f"compact {gen} → {new} under {as_policy(policy)} ({why}): {len(runs)} runs and the base")
-    summary = {"from": gen, "gen": new, **c.fold(gen_dir, out, work, gen=gen, new_gen=new, runs=runs, threads=threads, mem=mem, jobs=jobs)}
+    cur, noted = ["fold"], [0.0]
+
+    def progress(note: str, next_phase: str | None = None) -> None:
+        """The fold's hook: `note` on its running phase (at most every `NOTE_S`: a range ends every few seconds); with
+        `next_phase`, that phase ends with it and the next begins."""
+        if next_phase is None:
+            if monotonic() - noted[0] >= NOTE_S:
+                noted[0] = monotonic()
+                rec.note(cur[0], note)
+            return
+        rec.end(cur[0], f"{note}; work disk peak {disk.take()} GiB, RSS peak {rss_peak_gb()} GiB")
+        cur[0] = next_phase
+        rec.begin(next_phase)
+
+    rec.begin("fold")
+    try:
+        summary = {"from": gen, "gen": new, **c.fold(gen_dir, out, work, gen=gen, new_gen=new, runs=runs, threads=threads, mem=mem, jobs=jobs,
+                                                      progress=progress)}
+    except BaseException as e:
+        rec.end(cur[0], f"failed: {type(e).__name__}: {e}", failed=True)
+        raise
+    rec.end(cur[0], f"{fold_note(summary)}; work disk peak {disk.take()} GiB, RSS peak {rss_peak_gb()} GiB")
     comp = {"from": gen, "manifest": manifest, "runs": [r["key"] for r in runs], "base_scans": base_scans,
             "scans": len(json.loads((out / "scans.json").read_text())["scans"]), **compaction_doc(policy, why)}
     if c.md5s:
@@ -1788,8 +1886,10 @@ def compact_store(store, c: Compactor, gen: str, gen_dir: Path, work: Path, *, p
     def order(keys: list[str]) -> list[str]:
         return [*c.publish_order([k for k in keys if k != COMPACTION]), *([COMPACTION] if COMPACTION in keys else [])]
 
-    files = upload_new(store, out, new_prefix, {}, order)
-    up_s = round(monotonic() - t1, 1)
+    with phase(rec, "upload") as ph:
+        files = upload_new(store, out, new_prefix, {}, order)
+        up_s = round(monotonic() - t1, 1)
+        ph.note = f"{len(files)} files, {gib(sum(p.stat().st_size for p in out.rglob('*') if p.is_file()))} to {store.root}/{new_prefix}/ in {up_s}s"
     folded = run_scans(runs)
 
     def landed() -> str | None:
@@ -1804,18 +1904,26 @@ def compact_store(store, c: Compactor, gen: str, gen_dir: Path, work: Path, *, p
         store.delete(sorted(store.listing(new_prefix)))
         return {**summary, "runs": comp["runs"], "scans": comp["scans"], "superseded": key, "s": round(monotonic() - t0, 1)}
 
-    if key := landed():
-        return superseded(key, successor=False)
-    store.write_text(f"{c.prefix}/{gen}/{SUCCESSOR}", json.dumps({"gen": new}) + "\n")
-    if key := landed():
-        return superseded(key, successor=True)
-    summary.update(runs=comp["runs"], scans=comp["scans"], why=why, files=len(files), upload_s=up_s,
-                   bytes=sum(p.stat().st_size for p in out.rglob("*") if p.is_file()), reads=reads)
-    summary["current"] = current(store, c.prefix) in (None, gen)
-    if summary["current"]:
-        set_current(store, c.prefix, new)
+    with phase(rec, "pointer") as ph:
+        if key := landed():
+            ph.note = f"superseded: {key} landed on {gen} during the fold; {new} deleted, not published"
+            return superseded(key, successor=False)
+        store.write_text(f"{c.prefix}/{gen}/{SUCCESSOR}", json.dumps({"gen": new}) + "\n")
+        if key := landed():
+            ph.note = f"superseded: {key} landed on {gen} during the fold; {new} and its successor record deleted, not published"
+            return superseded(key, successor=True)
+        summary.update(runs=comp["runs"], scans=comp["scans"], why=why, files=len(files), upload_s=up_s,
+                       bytes=sum(p.stat().st_size for p in out.rglob("*") if p.is_file()), reads=reads)
+        was = current(store, c.prefix)
+        summary["current"] = was in (None, gen)
+        if summary["current"]:
+            set_current(store, c.prefix, new)
+        ph.note = f"{gen}/{SUCCESSOR} → {new}; " + (f"{CURRENT} → {new}" if summary["current"] else f"{CURRENT} names {was}: unchanged")
     if r2 is not None:
-        summary["r2"] = r2(new, gen)
+        with phase(rec, "r2") as ph:
+            summary["r2"] = r2(new, gen)
+            d = summary["r2"]
+            ph.note = f"{d.get('copied')} of {d.get('objects')} objects copied ({gib(d.get('bytes'))}) in {d.get('s')}s; the pointer last"
     summary["s"] = round(monotonic() - t0, 1)
     summary["peak"] = {"disk_gb": disk.close(), "rss_gb": rss_peak_gb()}
     log(f"compact {gen} → {new}: {summary['files']} files ({summary['bytes'] / 2**30:.2f} GiB, uploaded in {up_s}s) in {summary['s']}s "
@@ -1848,7 +1956,7 @@ def r2_publish_gen(bucket: str, prefix: str, new: str, old: str, *, last: tuple[
 
 def run_compaction(store, c: Compactor, gen: str, mount: Path, work: Path, *, policy: Policy | int | None, force: bool = False,
                    r2_bucket: str | None = None, grace_s: float = GRACE_S, now: float | None = None, threads: int = 4, mem: str = "4GB",
-                   jobs: int = 1, read_from: str = "gcs", source=None, log: Callable[[str], None] = err) -> dict:
+                   jobs: int = 1, read_from: str = "gcs", source=None, rec: Recorder | None = None, log: Callable[[str], None] = err) -> dict:
     """The Batch `compact` stage (both stores): generation `gen` of `store` (the data bucket, a `blobstore.Store`)
     followed to its newest successor; when `policy` fires (or `force`, with runs), folded into the next one and published
     (`compact_store`) — GCS first, then, with `r2_bucket` (the data bucket the R2 copy mirrors), R2 (`r2_publish_gen`:
@@ -1856,28 +1964,66 @@ def run_compaction(store, c: Compactor, gen: str, mount: Path, work: Path, *, po
     `read_from` `gcs`: the generation is read in place from `mount` (`<mount>/<prefix>/<gen>/`, the bucket's mount);
     `r2`: what the fold reads (`c.keep`) is mirrored from the R2 copy (`source`, default `R2Source()`) first, refused
     when it lacks any of it (`read_tree`). Idempotent: a rerun after a compaction finds the successor, which isn't due.
-    Returns `{gen, why, compact, predecessors}`."""
+    Returns `{gen, why, compact, predecessors}`.
+
+    `rec`: the run's record on `/scans` (`maint_runs`, kind `compact`): started once the generation is resolved (its
+    `scan` the newest scan the generation holds: the newest the fold would fold), phases `read`, `due`, then
+    `compact_store`'s, then `prune`; finished `nop` when not due, `failed` (re-raised) on any raise, else
+    `succeeded`."""
+    from .maint_runs import NULL, gib, phase
+
+    rec = rec or NULL
     gen = resolve_gen(store, c.prefix, gen, log)
     prefix = f"{c.prefix}/{gen}"
-    if read_from == "r2":
-        gen_dir = work / "read" / prefix
-        reads = read_tree(source or R2Source(), prefix, gen_dir, keep=c.keep, want=store.listing(prefix), label=f"compact {gen}: read", log=log)
-    else:
-        gen_dir = Path(mount) / prefix
-        reads = in_place({k: n for k, n in store.listing(prefix).items() if c.keep(k[len(prefix) + 1:])}, f"{store.root} (mount)",
-                         label=f"compact {gen}: read", log=log)
-    why = forced(gen_dir) if force else due_in(gen_dir, policy)
-    doc: dict = {"gen": gen, "why": why, "compact": None, "predecessors": []}
-    if why is None:
-        log(f"compact {gen}: not due under {as_policy(policy)}")
-        return doc
-    r2 = None
-    if r2_bucket:
-        r2 = lambda new, old: r2_publish_gen(r2_bucket, c.prefix, new, old, last=c.last, log=log)  # noqa: E731
-    doc["compact"] = compact_store(store, c, gen, gen_dir, work, policy=policy, why=why, threads=threads, mem=mem, jobs=jobs, r2=r2, reads=reads, log=log)
-    if c.prune and not doc["compact"].get("superseded"):
-        doc["predecessors"] = prune_predecessors(store, c.prefix, doc["compact"]["gen"], now=time.time() if now is None else now, grace_s=grace_s, log=log)
+    _, newest_listed = store_newest_runs(store, prefix)
+    scans = run_scans(newest_listed) or [s["id"] for s in store.read_json(f"{prefix}/scans.json")["scans"]]
+    rec.start(scans[-1], prefix)
+    try:
+        with phase(rec, "read") as ph:
+            if read_from == "r2":
+                gen_dir = work / "read" / prefix
+                reads = read_tree(source or R2Source(), prefix, gen_dir, keep=c.keep, want=store.listing(prefix), label=f"compact {gen}: read", log=log)
+            else:
+                gen_dir = Path(mount) / prefix
+                reads = in_place({k: n for k, n in store.listing(prefix).items() if c.keep(k[len(prefix) + 1:])}, f"{store.root} (mount)",
+                                 label=f"compact {gen}: read", log=log)
+            ph.note = f"{reads['files']} files, {gib(reads['bytes'])} from {reads['source']}" + (f" in {reads['s']}s" if reads.get("s") is not None else " (in place)")
+        with phase(rec, "due") as ph:
+            why = forced(gen_dir) if force else due_in(gen_dir, policy)
+            _, runs = newest_runs(gen_dir)
+            levels = " ".join(f"L{r['level']}" for r in runs) or "no runs"
+            ph.note = f"{why} ({len(runs)} runs: {levels})" if why is not None else f"not due under {as_policy(policy)} ({levels})"
+        doc: dict = {"gen": gen, "why": why, "compact": None, "predecessors": []}
+        if why is None:
+            log(f"compact {gen}: not due under {as_policy(policy)}")
+            rec.finish("nop")
+            return doc
+        r2 = None
+        if r2_bucket:
+            r2 = lambda new, old: r2_publish_gen(r2_bucket, c.prefix, new, old, last=c.last, log=log)  # noqa: E731
+        doc["compact"] = compact_store(store, c, gen, gen_dir, work, policy=policy, why=why, threads=threads, mem=mem, jobs=jobs, r2=r2, reads=reads,
+                                       rec=rec, log=log)
+        if c.prune and not doc["compact"].get("superseded"):
+            with phase(rec, "prune") as ph:
+                doc["predecessors"] = prune_predecessors(store, c.prefix, doc["compact"]["gen"], now=time.time() if now is None else now, grace_s=grace_s, log=log)
+                ph.note = "; ".join(f"{p['gen']}: {p['objects']} objects, {gib(p['bytes'])} " + ("deleted" if p["deleted"] else f"kept ({round(p['age_s'] / 3600)}h old)")
+                                    for p in doc["predecessors"]) or "no predecessor holds files"
+    except BaseException as e:
+        rec.finish("failed", error=f"{type(e).__name__}: {e}")
+        raise
+    new = doc["compact"]["gen"]
+    rec.finish("succeeded", gen=f"{prefix} → {new}" if not doc["compact"].get("superseded") else f"{prefix} (superseded: {new} not published)")
     return doc
+
+
+def fold_note(summary: dict) -> str:
+    """A fold's summary as its phase's note: scans, rows / versions, sorts, and the static fold's per-part seconds."""
+    parts = [f"{summary['scans']} scans" if "scans" in summary else None,
+             f"{sum(summary['rows'].values()):,} rows" if isinstance(summary.get("rows"), dict) else None,
+             f"{summary['versions']:,} versions" if isinstance(summary.get("versions"), int) else None,
+             f"{len(summary['sorts'])} sorts" if isinstance(summary.get("sorts"), (dict, list)) else None,
+             ", ".join(f"{k} {v}s" for k, v in summary["stages"].items()) if isinstance(summary.get("stages"), dict) else None]
+    return "; ".join(p for p in parts if p)
 
 
 def publish_r2_chain(bucket: str, prefix: str, gen: str, *, last: tuple[str, ...] = ("scans.json",), log: Callable[[str], None] = err) -> list[dict]:

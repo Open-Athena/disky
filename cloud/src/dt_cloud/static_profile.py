@@ -90,6 +90,10 @@ class Profile:
     #: Key ranges, then served sorts, the interval store's compaction folds at a time (`compact -j`: cursors of one DuckDB
     #: database sharing its memory and threads). The served sorts are each ~35 min at gcs's size, so 1 runs them in series.
     compact_jobs: int = 1
+    #: Env var → Secret Manager secret name, for the merge and compaction jobs to record their runs on `/scans` with
+    #: (`maint_runs`): `{"CLOUDFLARE_API_TOKEN": <the D1 token's secret>}`, with the submitter's `$D1_DB_ID` and
+    #: `$CLOUDFLARE_ACCOUNT_ID` passed through (`append_runner.Runner.record_env`). Empty: the jobs run unrecorded.
+    record_secrets: Mapping[str, str] = field(default_factory=dict)
 
     def __post_init__(self):
         if self.read_from not in ("gcs", "r2"):
@@ -153,7 +157,7 @@ ENV = {
     "standard_stages": "STATIC_NAMES_STANDARD_STAGES",
     "append_tasks": "STATIC_NAMES_APPEND_TASKS", "drill": "STATIC_NAMES_DRILL", "drill_checkpoint": "STATIC_NAMES_DRILL_CHECKPOINT", "anchors": "STATIC_NAMES_ANCHORS", "src": "STATIC_NAMES_SRC",
     "hex_runs": "STATIC_NAMES_HEX_RUNS", "compact_level": "STATIC_NAMES_COMPACT_LEVEL", "compact": "STATIC_NAMES_COMPACT", "read_from": "STATIC_NAMES_READ_FROM",
-    "compact_jobs": "STATIC_NAMES_COMPACT_JOBS",
+    "compact_jobs": "STATIC_NAMES_COMPACT_JOBS", "record_secrets": "STATIC_NAMES_RECORD_SECRETS",
 }
 
 
@@ -186,12 +190,12 @@ def _parse(name: str, raw: str):
                 raise SystemExit(f"STATIC_NAMES_R2_SECRETS: {part!r} is not endpoint=|key_id=|secret=<secret name>")
             out[k.strip()] = v.strip()
         return out
-    if name in ("machines", "ssd_gbs"):
+    if name in ("machines", "ssd_gbs", "record_secrets"):
         out = {}
         for part in filter(None, (p.strip() for p in raw.split(","))):
             k, _, v = part.partition("=")
             if not k.strip() or not v.strip():
-                raise SystemExit(f"{ENV[name]}: {part!r} is not <stage>=<value>")
+                raise SystemExit(f"{ENV[name]}: {part!r} is not " + ("<VAR>=<secret name>" if name == "record_secrets" else "<stage>=<value>"))
             out[k.strip()] = int(v) if name == "ssd_gbs" else v.strip()
         return out
     if name == "compact_level":

@@ -66,6 +66,30 @@ export interface OutputDelta extends ScanRunOutput {
   delta_rows: number | null
 }
 
+/** The maintenance kinds (`dt_cloud.maint_runs`): a store's compaction and its merges, each its own Batch job and its own
+ * row on /scans. Their `scan` is the newest scan they fold or carry (so they sort beside it) and their `gen` is
+ * `<store>/<gen>` (a compaction's finish: `<store>/<gen> → <new gen>`); they are never a scan's run (`scanRunOf`, the
+ * paging, /health's running scans skip them). */
+export const MAINT_KINDS = ['compact', 'merge'] as const
+export const isMaintenance = (kind: string): boolean => (MAINT_KINDS as readonly string[]).includes(kind)
+
+/** A maintenance run's store (`interval-store`, `static-names`): its `gen`'s first segment; null for a scan's run. */
+export const maintStore = (run: Pick<ScanRun, 'kind' | 'gen'>): string | null =>
+  isMaintenance(run.kind) && run.gen?.includes('/') ? run.gen.split('/')[0] : null
+
+/** Seconds without a write after which a running maintenance run reads as quiet (its heartbeat is every 60 s). */
+export const QUIET_S = 600
+
+/** What a running run is doing: its running phase (the newest-started, if several) and that phase's elapsed seconds
+ * (null when none runs), and how long since the run last wrote (`updated_ts`: a maintenance job's heartbeat) when that
+ * exceeds `QUIET_S`. Null for a run that isn't running. */
+export function liveness(run: Pick<ScanRun, 'status' | 'updated_ts'>, spans: readonly PhaseSpan[], now: number): { phase: string | null; elapsed: number | null; quiet: number | null } | null {
+  if (run.status !== 'running') return null
+  const cur = [...spans].filter(s => s.status === 'running').sort((a, b) => b.start - a.start)[0]
+  const quiet = now - run.updated_ts
+  return { phase: cur?.phase ?? null, elapsed: cur ? cur.end - cur.start : null, quiet: quiet > QUIET_S ? quiet : null }
+}
+
 /** A key's structure: the key with its own scan id abstracted, so a per-scan
  * key (`static/deltas/2026-10-08`) compares with the previous scan's. */
 export const structureOf = (key: string, scan: string): string => key.split(scan).join('{scan}')
@@ -238,7 +262,7 @@ export function manualScans(rows: readonly RunSummary[]): Set<string> {
 }
 
 export function scanRunOf(rows: readonly RunSummary[], scan: string): ScanRun | undefined {
-  const runs = rows.map(r => r.run).filter(r => r.scan === scan)
+  const runs = rows.map(r => r.run).filter(r => r.scan === scan && !isMaintenance(r.kind))
   return runs.find(r => r.status === 'succeeded') ?? runs[0]
 }
 
