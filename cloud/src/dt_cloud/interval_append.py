@@ -650,6 +650,7 @@ def store_runner(cfg: Config, *, dry_run: bool = False, merge: bool = True, merg
         dry_run=dry_run,
         merge=merge,
         merge_wait=merge_wait,
+        coordination=None if dry_run else lambda: ar.gcs_coordinator_lease(gs_bucket(p.scratch), PREFIX, client),
     )
     return runner
 
@@ -973,7 +974,7 @@ def append_cmd(catch_up: bool, compact_now: bool, no_merge: bool, dry_run: bool,
     exists; then the merge stage (the due carries, non-fatal), and when the compaction policy fires (or `-K`) the
     compaction stage (`compact`: GCS, then R2 with its pointer last). A generation compacted since the profile named it
     is followed to its successor. Exit 3 when SCAN_ID is not published yet, or an earlier published scan is pending
-    (without -c)."""
+    (without -c); exit 4 when another `append` holds the coordinator lease."""
     cfg = ready(profile)
     runner = store_runner(cfg, dry_run=dry_run, merge=not no_merge, merge_wait=merge_wait)
     runner.compact_now = compact_now

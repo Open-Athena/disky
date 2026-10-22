@@ -944,10 +944,13 @@ def static_names(ctx: Ctx, arg: str | None) -> None:
                    else ["build", *args, *ctx.opt("static-names", "build_args", [])])
             ctx.sh(["dt-cloud", "static-names", *sub], fatal=False, warn=f"static-names {sub[0]} failed for {ctx.scan}")
         return
+    from .append_runner import BUSY
+
     prof = ctx.opt("static-names", "profile") or ctx.env["STATIC_NAMES_PROFILE"]
+    # exit 4: another coordinator (a catch-up, or an earlier scan's run) holds the store's lease; it appends this scan too
     with ctx.phase("static-names", note="overlapped"):
         ctx.sh(["dt-cloud", "static-names", "runs", "add", "-c", ctx.scan], env={"STATIC_NAMES_PROFILE": str(prof)},
-               fatal=False, warn=f"static-names runs add failed for {ctx.scan}")
+               fatal=False, warn=f"static-names runs add failed for {ctx.scan}", allowed_codes=(BUSY,))
 
 
 @step("publish-r2", stage="serve", soft=True, options={"args": list, "require": list, "keys": list, "barrier": bool})
@@ -1004,6 +1007,8 @@ def interval_store(ctx: Ctx, arg: str | None) -> None:
 
     timeout = ctx.opt("interval-store", "timeout")
     if ctx.opt("interval-store", "profile"):
+        from .append_runner import BUSY
+
         cmd = ["dt-cloud", "interval-store", "append", "-c", "-w", str(ctx.opt("interval-store", "merge_wait", 0)), ctx.scan]
         env = {"INTERVAL_STORE_PROFILE": str(ctx.opt("interval-store", "profile"))}
         if ctx.env.get("JOB_IMAGE"):
@@ -1011,6 +1016,9 @@ def interval_store(ctx: Ctx, arg: str | None) -> None:
         ctx.run.begin("interval-store")
         err("+ " + " ".join(cmd))
         ran = run_grouped(cmd, duration(timeout) if timeout else None, 30.0, env={**ctx.env, **env})
+        if ran.rc == BUSY:
+            ctx.run.end("interval-store", 0, note="another coordinator holds the store's lease; it appends this scan")
+            return
         ctx.run.end("interval-store", ran.rc, warn=True, msg="the scan reads per-scan until a later run appends it",
                     timed_out=timeout if ran.timed_out else None, terminated=ran.signal if ran.rc else None)
         return

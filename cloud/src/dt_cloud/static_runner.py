@@ -382,6 +382,7 @@ def gcs_runner(cfg: Profile, *, dry_run: bool = False, verify_terms: str | None 
         merge=merge,
         merge_wait=merge_wait,
         list_keys=lambda prefix: [x.name for x in client.list_blobs(cfg.bucket, prefix=prefix)],
+        coordination=None if dry_run else lambda: ar.gcs_coordinator_lease(cfg.scratch, PREFIX, client),
     )
     return runner
 
@@ -399,8 +400,9 @@ def add_cmd(catch_up: bool, gen: str | None, compact_now: bool, no_merge: bool, 
             scan_id: str) -> None:
     """Append SCAN_ID to the static name index: prepare → append → shards ∥ catalog → [drill] ∥ [anchors] → publish → R2 → prune, each stage
     skipped when its output exists; then the merge stage (the due carries, non-fatal). Exit 3 when SCAN_ID is not published
-    yet, or an earlier published scan is pending (without -c). A generation compacted since the profile named it is
-    followed to its successor; when the compaction policy fires (or `-K`), the compaction stage follows the merge stage."""
+    yet, or an earlier published scan is pending (without -c); exit 4 when another `runs add` holds the coordinator lease.
+    A generation compacted since the profile named it is followed to its successor; when the compaction policy fires (or
+    `-K`), the compaction stage follows the merge stage."""
     cfg = ready(profile(), gen)
     runner = gcs_runner(cfg, dry_run=dry_run, verify_terms=verify_terms, merge=not no_merge, merge_wait=merge_wait)
     runner.compact_now = compact_now
