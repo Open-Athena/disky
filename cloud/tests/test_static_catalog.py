@@ -172,7 +172,9 @@ def _gen(root, scans: dict, tmp, v: int):
         name = f"s{s['i']:04d}"
         nodes = sc.census(con, f"read_parquet({sn.q(str(out / 'sx' / f'{name}.parquet'))})", v + 1)
         con.execute("CREATE OR REPLACE TABLE mem (q VARCHAR, rows BIGINT)")
-        con.executemany("INSERT INTO mem VALUES (?, ?)", [(r["q"], r["rows"]) for r in nodes.to_pylist() if r["rows"] > v])
+        mem = [(r["q"], r["rows"]) for r in nodes.to_pylist() if r["rows"] > v]
+        if mem:  # a shard may hold no member at a large `v`
+            con.executemany("INSERT INTO mem VALUES (?, ?)", mem)
         sc.shard_cells(con, str(out / "sx" / f"{name}.parquet"), "mem", cat / "cells" / f"{name}.parquet", chunk_rows=11)
     for r in ranges["ranges"]:
         sc.range_short(con, str(build / "cintervals" / f"r{r['i']:04d}.parquet"), cat / "short", f"r{r['i']:04d}")

@@ -597,17 +597,37 @@ def missing_files(runs: list[dict], exists: Callable[[str], bool], drill_meta: C
     return out
 
 
+def run_tiers(gen_dir: Path, runs: list[dict]) -> list[sc.RunTier]:
+    """The live runs' shards under `gen_dir` (each run's `sx/` through its `sidecar.parquet`) as the catalog's history."""
+    return [sc.RunTier(str(gen_dir / r["key"]), pq.read_table(gen_dir / r["key"] / "sidecar.parquet"), scan_epoch(r["first"])) for r in runs]
+
+
+def carried_inputs(con, state_root: Path, gen_dir: Path, runs: list[dict]) -> tuple[Path | None, list[sc.RunTier] | None]:
+    """The catalog's carried inputs for the scan after `runs` (the newest earlier manifest's): the previous scan's
+    `<state_root>/<prev>/catalog/xcount.parquet` when trusted (it names that scan and the runs' scan count, and its digest
+    matches: `trusted_xcount`), with the runs' shards under `gen_dir` as history; else `(None, None)`, a refold."""
+    days = [s for r in runs for s in r["scans"]]
+    if not days:
+        return None, None
+    state = sc.trusted_xcount(con, state_root / days[-1] / "catalog", days[-1], len(days))
+    return (state, run_tiers(gen_dir, runs)) if state is not None else (None, None)
+
+
 def catalog_delta(con, tiers: list[Path], base: sc.BaseShards, deltas: list[list[str]], V: int, out: Path, tmp: Path,
-                  rule: HexRule | None = None) -> dict:
+                  rule: HexRule | None = None, *, state: Path | None = None, history: list[sc.RunTier] | None = None,
+                  state_out: Path | None = None, scan: str | None = None) -> dict:
     """A run's catalog: `static_catalog.append` from the merged `tiers` (the base and every live run) and every
     scan's `cdelta` since the base (`deltas`, oldest first, the last = this run's scan), minus what the tiers
-    hold: the new cells and the new or changed headers."""
+    hold: the new cells and the new or changed headers. `state` + `history` (the previous scan's trusted `xcount`,
+    the live runs' shards) carry the earlier deltas' counts instead of expanding them; `state_out` gets this scan's
+    (specs/append-open-state.md). The cells are the same either way."""
     prev, full = tmp / "prev", tmp / "full"
     for d in (prev, full):
         if d.exists():
             shutil.rmtree(d)
     merge_catalogs(tiers, prev)
-    doc = sc.append(con, prev=prev, base=base, deltas=deltas, V=V, out=full, rule=rule)
+    doc = sc.append(con, prev=prev, base=base, deltas=deltas, V=V, out=full, rule=rule, state=state, history=history,
+                    state_out=state_out, scan=scan)
     pf, ff = q(str(prev / "cells.parquet")), q(str(full / "cells.parquet"))
     gone = con.execute(f"SELECT count(*) FILTER (WHERE bucket <> ''), count(*) FROM (SELECT * FROM read_parquet({pf}) EXCEPT SELECT * FROM read_parquet({ff}))").fetchone()
     if gone[0]:
@@ -956,9 +976,13 @@ def shards_cmd(bucket, date, gen, mount, mem, target_rows, out, threads, tmp) ->
 @option("-m", "--mount", required=True, help="Local mount of the data bucket")
 @option("-M", "--mem", default="100GB", help="DuckDB memory limit")
 @option("-p", "--threads", default=16, type=int, help="DuckDB threads")
+@option("-R", "--refold", is_flag=True, help="Expand every scan's `cdelta` since the base even when the previous scan's `xcount` is trusted")
+@option("-S", "--scratch", default=scratch_bucket, help="Bucket for the carried counts (`state/<D>/catalog/xcount.*`)")
 @option("-T", "--tmp", default="/stage/tmp", help="DuckDB spill dir")
-def catalog_cmd(bucket, date, gen, mount, mem, threads, tmp) -> None:
-    """The run's catalog delta → `deltas/<D>/catalog/{cells,index}.parquet`, `meta.json`."""
+def catalog_cmd(bucket, date, gen, mount, mem, threads, refold, scratch, tmp) -> None:
+    """The run's catalog delta → `deltas/<D>/catalog/{cells,index}.parquet`, `meta.json` (last), and its carried counts →
+    `state/<D>/catalog/xcount.{parquet,json}` (scratch, before `meta.json`). The earlier scans' counts come from the previous
+    scan's `xcount` when it is trusted (specs/append-open-state.md), else every scan's `cdelta` since the base is expanded."""
     prefix = f"{PREFIX}/{gen}"
     run = f"{prefix}/{run_key(date, date)}"
     _, runs = _state(bucket, gen, date)
@@ -969,10 +993,15 @@ def catalog_cmd(bucket, date, gen, mount, mem, threads, tmp) -> None:
     side = pq.read_table(f"{mount}/{prefix}/sidecar.parquet")
     con = connect(threads, mem, tmp)
     t0 = monotonic()
+    state, history = (None, None) if refold else carried_inputs(con, Path(mount).parent / scratch / prefix / "state", Path(mount) / prefix, runs)
+    err(f"catalog {date}: xcount {'carried from ' + days[-2] if state is not None else 'refold'} ({len(days)} scans past the base)")
     out = Path(tmp) / "catalog-run"
+    xout = Path(tmp) / "catalog-state"
     meta = catalog_delta(con, tiers, sc.BaseShards(f"{mount}/{prefix}", side), deltas, V, out, Path(tmp) / "catalog-work",
-                         gen_rule_at(bucket, gen))
-    upload_tree(out, bucket, f"{run}/catalog")
+                         gen_rule_at(bucket, gen), state=state, history=history, state_out=xout, scan=date)
+    upload_tree(xout, scratch, f"{prefix}/state/{date}/catalog", last=("xcount.json",))
+    shutil.rmtree(xout)
+    upload_tree(out, bucket, f"{run}/catalog", last=("meta.json",))
     shutil.rmtree(out)
     meta["s"] = round(monotonic() - t0, 1)
     print(json.dumps(meta, indent=1))
