@@ -44,6 +44,20 @@ export function matchEntries(body: NameMatches, o: { go: (m: NameMatch) => void;
   return out
 }
 
+/** `/api/name-matches` for `q` at a scan (`date`) or union instant (`at`); null when the search is refused or fails (a
+ *  query the index can't answer, a scan it doesn't cover): the filter row still applies the query, and the map says why.
+ *  `fetcher` is called bare: the primary store's is the global `fetch`, which throws "Illegal invocation" when called as
+ *  a method (`o.fetcher(…)`), and use-kbd shows a throwing endpoint as empty. */
+export async function fetchMatches(
+  fetcher: (url: string, init?: RequestInit) => Promise<Response>,
+  a: { date?: string; at?: string; q: string; qs: string; limit: number },
+  signal?: AbortSignal,
+): Promise<NameMatches | null> {
+  const sp = new URLSearchParams({ ...(a.at ? { at: a.at } : { date: a.date! }), q: a.q, qs: a.qs, limit: String(a.limit) })
+  const r = await fetcher(`/api/name-matches?${sp}`, { credentials: 'include', signal })
+  return r.ok ? await r.json() as NameMatches : null
+}
+
 export function useFolderSearch(o: {
   fetcher: (url: string, init?: RequestInit) => Promise<Response>
   /** The map's scan (`date`), or a union view's instant (`at`); none: the search waits. */
@@ -64,7 +78,9 @@ export function useFolderSearch(o: {
   const scanNote = !o.at && date && date !== o.date ? `as of scan ${date}` : undefined
   useOmnibarEndpoint('map:filter', {
     group: 'Map',
-    priority: 90,
+    // Above the page's actions (100), below the matches: a typed name is most likely a place, and the actions' loose
+    // fuzzy matches ("crash" ⊂ "…manual sCans dRAwn…") otherwise come first.
+    priority: 110,
     minQueryLength: 1,
     filter: (query): EndpointResponse => {
       const q = query.trim()
@@ -73,19 +89,15 @@ export function useFolderSearch(o: {
   })
   useOmnibarEndpoint('map:matches', {
     group: 'Folders & files',
-    priority: 80,
+    priority: 120,
     minQueryLength: MIN_QUERY,
     enabled: ready,
     pageSize: 10,
     sort: 'none',
     fetch: async (query, signal, { limit }): Promise<EndpointResponse> => {
       const q = query.trim()
-      const sp = new URLSearchParams({ ...(o.at ? { at: o.at } : { date: date! }), q, qs: o.qs, limit: String(limit) })
-      const r = await o.fetcher(`/api/name-matches?${sp}`, { credentials: 'include', signal })
-      // A query the index refuses (too short, an unsupported term) or a failed search lists nothing here: the
-      // filter row still applies it, and the map says why.
-      if (!r.ok) return { entries: [] }
-      const body = await r.json() as NameMatches
+      const body = await fetchMatches(o.fetcher, { ...(o.at ? { at: o.at } : { date: date! }), q, qs: o.qs, limit }, signal)
+      if (!body) return { entries: [] }
       const go = (m: NameMatch) => (m.kind === 'file' ? o.open : o.drill)(m.path.split('/'))
       return { entries: matchEntries(body, { go, filter: () => o.filter(q), size: o.size, scanNote }), total: body.total }
     },

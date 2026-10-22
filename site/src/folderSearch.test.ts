@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { matchEntries, matchLabel, searchScan, type NameMatches } from './folderSearch'
+import { fetchMatches, matchEntries, matchLabel, searchScan, type NameMatches } from './folderSearch'
 
 describe('matchLabel', () => {
   it('the name, then where it is', () => {
@@ -63,5 +63,26 @@ describe('matchEntries scan note', () => {
     const body: NameMatches = { date: '2026-10-21', path: '', q: 'crash', total: 1, complete: true, items: [{ path: 'crashes', kind: 'dir', b: 86, o: 8499 }] }
     expect(matchEntries(body, { go: () => {}, filter: () => {}, size: b => `${b} B`, scanNote: 'as of scan 2026-10-21' }).map(e => [e.label, e.description]))
       .toEqual([['crashes', 'folder · 86 B · 8,499 objects · as of scan 2026-10-21']])
+  })
+})
+
+describe('fetchMatches', () => {
+  const body: NameMatches = { date: '2026-10-21', path: '', q: 'crash', total: 1, complete: true, items: [{ path: 'crashes', kind: 'dir', b: 86, o: 8499 }] }
+  it('calls the fetcher bare (the global fetch throws "Illegal invocation" as a method) with the scan, query and syntax', async () => {
+    const urls: string[] = []
+    // As the browser's fetch: any `this` but the global (or none) throws.
+    function fetchLike(this: unknown, url: string): Promise<Response> {
+      if (this !== undefined && this !== globalThis) throw new TypeError('Illegal invocation')
+      urls.push(url)
+      return Promise.resolve(new Response(JSON.stringify(body), { status: 200 }))
+    }
+    expect(await fetchMatches(fetchLike, { date: '2026-10-21', q: 'crash', qs: 'plain', limit: 10 })).toEqual(body)
+    expect(urls).toEqual(['/api/name-matches?date=2026-10-21&q=crash&qs=plain&limit=10'])
+  })
+  it('a union view asks by instant; a refused search is null', async () => {
+    const urls: string[] = []
+    const refuse = (url: string) => { urls.push(url); return Promise.resolve(new Response('{"error":"Search isn’t available for this scan yet."}', { status: 400 })) }
+    expect(await fetchMatches(refuse, { at: '2026-10-22T00:00:00Z', q: 'crash', qs: 'plain', limit: 5 })).toBe(null)
+    expect(urls).toEqual(['/api/name-matches?at=2026-10-22T00%3A00%3A00Z&q=crash&qs=plain&limit=5'])
   })
 })
