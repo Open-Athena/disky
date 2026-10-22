@@ -886,6 +886,7 @@ def index_recut(check: bool, mem: str, threads: int, row_group_rows: int, tiers:
 @main.command("over-time-groups")
 @option("-b", "--bucket", envvar="DATA_BUCKET", default=None, help="Data bucket whose Batch mount (/gcs/<bucket>) is the default -p; default $DATA_BUCKET")
 @option("-g", "--gen", required=True, help="Generation id for the published index dirs (the run's, e.g. the job's $GEN)")
+@option("-I", "--interval-store", default=None, help="Store to reconstruct retired scans from (default: primary's data root; secondary stores must name their own)")
 @option("-K", "--group-size", default=None, type=int, help="Scans per sealed group (default: dt_cloud.overtime.OVER_TIME_GROUP_SIZE)")
 @option("-l", "--layer2-prefix", default=None, help="Layer-2 dir template with `{scan}` (default $LAYER2_PREFIX; one of the two is required)")
 @option("-m", "--mem", default="8GB", help="DuckDB memory limit")
@@ -899,6 +900,7 @@ def index_recut(check: bool, mem: str, threads: int, row_group_rows: int, tiers:
 def over_time_groups(
     bucket: str | None,
     gen: str,
+    interval_store: str | None,
     group_size: int | None,
     layer2_prefix: str | None,
     mem: str,
@@ -930,7 +932,7 @@ def over_time_groups(
     from disk_tree import blobfs
 
     from .index_footer import index_dir, sync_d1, synced_variants
-    from .overtime import OVER_TIME_GROUP_SIZE, multiscan_row, sealed_groups, sync_manifest, synced_groups, write_over_time_index
+    from .overtime import OVER_TIME_GROUP_SIZE, group_source, multiscan_row, sealed_groups, sync_manifest, synced_groups, write_over_time_index
 
     K = group_size or OVER_TIME_GROUP_SIZE
     l2 = resolve_layer2(layer2_prefix, "-l/--layer2-prefix")
@@ -955,7 +957,9 @@ def over_time_groups(
             dir_ = index_dir(d, "path", store=store)
             if dir_ is None:
                 raise SystemExit(f"over-time-groups: no `path` pointer for {d} (group {gid})")
-            pairs.append((d, f"{data}/{dir_}/path-index.parquet"))
+            source = group_source(d, f"{data}/{dir_}/path-index.parquet", out_dir / gid,
+                                  interval_store=interval_store or (data if store == "primary" else None), mem=mem, threads=threads)
+            pairs.append((d, source))
         summ = write_over_time_index(pairs, out_dir / gid, mem=mem, threads=threads, tmp_dir=tmp_dir)
         key = f"{l2.format(scan=gid).rstrip('/')}/index/{gen}"
         dest = f"{root}/{key}"
