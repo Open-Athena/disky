@@ -64,7 +64,7 @@ export const ROUTES: readonly string[] = [
   '/api/dups', '/api/estate', '/api/filter-caps', '/api/filter-cover', '/api/filter-scans', '/api/footer-cache',
   '/api/health', '/api/largest', '/api/me', '/api/name-summary', '/api/name-summary-registry', '/api/owner-prices',
   '/api/owners', '/api/path-index', '/api/prefixes', '/api/series', '/api/session-monitor', '/api/static-bench',
-  '/api/store', '/api/subtree', '/api/token', '/api/union-scans', '/api/whoami',
+  '/api/store', '/api/subtree', '/api/token', '/api/union-scans', '/api/usage', '/api/whoami',
   '/api/plans/prefix-history', '/api/plans/progress', '/api/plans/*',
   '/api/plan-sweep/*', '/api/sweep/*',
   '/api/activity/*', '/api/auth/*', '/api/db/*', '/api/og/*', '/api/scan-runs/*', '/api/session-log/*',
