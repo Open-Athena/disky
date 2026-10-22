@@ -99,20 +99,20 @@ def test_entries_to_frame_maps_storage_class_id():
 
 def test_entries_to_frame_empty():
     df = bulk.entries_to_frame('b1', [])
-    assert list(df.columns) == ['bucket', 'name', 'size_bytes', 'created', 'storage_class_id', 'generation']
+    assert list(df.columns) == ['bucket', 'name', 'size_bytes', 'created', 'storage_class_id', 'generation', 'version']
     assert len(df) == 0
 
 
 def test_entries_to_frame_crc32c_column_only_when_asked():
     """Six-field rows carry a CRC32C: written as `crc32c` iff asked (every shard of a run alike), never inferred from the
-    rows; off, the frame is the five-column one whatever the rows hold."""
+    rows; off, the frame lacks it whatever the rows hold. `version` is always written."""
     ts = "2026-08-05T12:00:00Z"
     rows = [('a', 1, ts, 'STANDARD', 7, 4294967295), ('b', 2, ts, 'STANDARD', 8, None), ('c', 3, ts, 'STANDARD')]
     on = bulk.entries_to_frame('b1', rows, crc32c=True)
     off = bulk.entries_to_frame('b1', rows)
-    assert list(on.columns) == ['bucket', 'name', 'size_bytes', 'created', 'storage_class_id', 'generation', 'crc32c']
+    assert list(on.columns) == ['bucket', 'name', 'size_bytes', 'created', 'storage_class_id', 'generation', 'version', 'crc32c']
     assert [None if pd.isna(v) else int(v) for v in on['crc32c']] == [4294967295, None, None]
-    assert list(off.columns) == ['bucket', 'name', 'size_bytes', 'created', 'storage_class_id', 'generation']
+    assert list(off.columns) == ['bucket', 'name', 'size_bytes', 'created', 'storage_class_id', 'generation', 'version']
     assert list(bulk.entries_to_frame('b1', [], crc32c=True).columns) == list(on.columns)
 
 
