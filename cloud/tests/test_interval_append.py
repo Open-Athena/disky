@@ -811,13 +811,15 @@ def test_a_failed_merge_never_fails_the_run():
 
 
 def test_level_5_is_left_to_a_compaction():
-    """Two L4s never carry into an L5: the merge stage submits nothing and says a compaction is due."""
+    """Two L4s never carry into an L5: the merge stage submits no carry and says a compaction is due; the compaction
+    stage submits it."""
     f = Fake(["2026-08-03"])
     l4 = lambda a, b: {"key": f"deltas/{a}_{b}", "first": a, "last": b, "level": 4, "scans": [a, b]}  # noqa: E731
     f.keys[f"{G1}/manifests/2026-08-07.json"] = {"date": "2026-08-07", "runs": [l4("2026-08-04", "2026-08-05"), l4("2026-08-06", "2026-08-07")]}
     f.runner(merge_wait=None).carries()
-    assert (f.jobs, [m for m in f.log if m.startswith("merge")]) == (
-        [], ["merge: level 5 is due: compact into a new base generation (carries stop below it)"])
+    assert (f.calls(), [m for m in f.log if m.startswith("merge")]) == (
+        [("compact", f"compact -C level:5 -r -j 1 -M 90GB -p 16 {COMMON} -m /gcs/data")],
+        ["merge: level 5 is due: compact into a new base generation (carries stop below it)"])
 
 
 def test_the_cli_merge_and_append_M(monkeypatch):
@@ -877,7 +879,11 @@ def test_jobs_are_the_profiles_and_carry_the_cost_label(monkeypatch):
     # and its own name (the record's holder)
     assert (merge["allocationPolicy"]["serviceAccount"]["email"], merge["allocationPolicy"]["instances"][0]["policy"]["machineType"],
             merge["taskGroups"][0]["taskSpec"]["environment"]) == (
-        "sa@x", "n2-highmem-16", {**R2_ENV, "variables": {**R2_ENV["variables"], **context, "SCAN_ID": "2026-08-04T1236", "DT_JOB_NAME": merge_name}})
+        "sa@x", "n2-highmem-16", {**R2_ENV, "variables": {**R2_ENV["variables"], **context, "SCAN_ID": "2026-08-04T1236", "DT_JOB_NAME": merge_name, **MERGE_FACTS}})
+
+
+#: The merge job's run facts (`Runner.record_env`, for its record on /scans); no `record_secrets`: no D1 env.
+MERGE_FACTS = {"DT_JOB_REGION": "us-east1", "DT_JOB_MACHINE": "n2-highmem-16", "DT_JOB_SPOT": "1", "DT_JOB_IMAGE": "img"}
 
 
 def test_the_merge_job_gets_no_r2_env_when_the_r2_account_differs():
@@ -888,7 +894,7 @@ def test_the_merge_job_gets_no_r2_env_when_the_r2_account_differs():
     f.runner().run("2026-08-04T1236")
     merge_name, merge = next((n, s) for n, s in f.jobs if s["labels"]["stage"] == "merge")
     assert (merge["allocationPolicy"]["serviceAccount"]["email"], merge["taskGroups"][0]["taskSpec"]["environment"]) == (
-        "sa@x", {"variables": {"STATIC_NAMES_BUCKET": "data", "STATIC_NAMES_SCRATCH": "scr", "DT_JOB_NAME": merge_name}})
+        "sa@x", {"variables": {"STATIC_NAMES_BUCKET": "data", "STATIC_NAMES_SCRATCH": "scr", "DT_JOB_NAME": merge_name, **MERGE_FACTS}})
 
 
 def test_the_profile_drives_the_append(tmp_path):

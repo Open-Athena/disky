@@ -20,6 +20,7 @@
 
 import { PRIMARY_STORE } from './stores.js'
 import { SEARCH_LIMITS, type SearchLimits } from './search.js'
+import { currentMeter } from './usage.js'
 
 const TTL = 86400
 const KV_TTL = 30 * 86400
@@ -45,8 +46,9 @@ export interface CacheEnv { CACHE_KV?: KVNamespace; CACHE_NS?: string; PROD_HOST
 // answers with unconserved object counts into KV). 4: pool and user-lens
 // object counts exact from the manifest's per-user objects (`uo`). 5 (2026-10-14): a
 // node's `d` is its newest write, not the byte-weighted mean. 6 (2026-10-16): an mtime of 0
-// (a listing's unknown) gives no `d` (it read as 1970-01-01).
-export const CACHE_V = '6'
+// (a listing's unknown) gives no `d` (it read as 1970-01-01). 7 (2026-10-21): a node with a `d` carries `t`, that
+// newest write's instant (epoch seconds).
+export const CACHE_V = '7'
 
 /** The deployment environment a response-cache key belongs to: `''` is prod's (keys exactly as before the
  * tag existed — no one-time flush), anything else a separate keyspace. A Pages preview (the dev stack)
@@ -83,16 +85,22 @@ const publicRes = (body: string) => new Response(body, { headers: { ...JSON_HDR,
 const clientRes = (body: string, tier: string) => new Response(body, { headers: { ...JSON_HDR, 'cache-control': PRIVATE, 'x-cache': tier } })
 
 export async function cacheMatch(env: CacheEnv, key: Request): Promise<Response | null> {
+  // The request's usage point says which tier answered (`_lib/usage.ts`).
+  const m = currentMeter()
   const hit = await colo().match(key)
   if (hit) {
+    m?.cached('edge-hit')
     const res = new Response(hit.body, hit)
     res.headers.set('cache-control', isPartial(hit) ? PARTIAL_CLIENT : PRIVATE)
     res.headers.set('x-cache', 'hit')
     return res
   }
-  if (!env.CACHE_KV) return null
-  const body = await env.CACHE_KV.get(await kvKey(key), 'text')
-  if (body == null) return null
+  const body = env.CACHE_KV ? await env.CACHE_KV.get(await kvKey(key), 'text') : null
+  if (body == null) {
+    m?.cached('miss')
+    return null
+  }
+  m?.cached('kv-hit')
   await colo().put(key, publicRes(body))
   return clientRes(body, 'kv')
 }

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -355,6 +356,32 @@ def test_gcs_extra_steps(tmp_path, env, monkeypatch):
     ]
 
 
+def test_index_sync_without_d1_rows(tmp_path, env, monkeypatch):
+    """`index-sync.d1_rows: false`: both halves pass `-R` (the cold footer files and the pointers, no row group in D1);
+    retention's `index-gc` is unchanged (it retires the rows earlier scans hold)."""
+    c = gcs_ctx(tmp_path, env, monkeypatch, **{"index-sync": {"retain": 30, "d1_rows": False}})
+    c.env.update(CLOUDFLARE_API_TOKEN="cf", CLOUDFLARE_ACCOUNT_ID="acct")
+    S.index_rows(c, None)
+    S.index_sync(c, None)
+    k = "listing/2026-10-16T1200/index/G1"
+    assert c.sh_impl.calls == [
+        f"dt-cloud index-sync -r -d <tmp>/mnt/dvx/{k} -g G1 -k {k} -R 2026-10-16T1200",
+        f"dt-cloud index-sync -p -d <tmp>/mnt/dvx/{k} -g G1 -k {k} -R -M <tmp>/mnt/dvx/snapshots 2026-10-16T1200",
+        "dt-cloud index-gc -r 30 2026-10-16T1200",
+    ]
+    assert S._sync_check(c.profile) == []
+
+
+def test_d1_rows_off_is_for_the_primary(tmp_path, env, monkeypatch):
+    p = gcs_ctx(tmp_path, env, monkeypatch, **{"index-sync": {"d1_rows": False}}).profile
+    assert S._sync_check(replace(p, store="meta")) == [
+        "store meta: options.index-sync.d1_rows: false is for the primary store (a secondary store never reads the "
+        "interval store: every read of it would plan from cold footers)",
+    ]
+    on = gcs_ctx(tmp_path, env, monkeypatch, **{"index-sync": {"d1_rows": True}}).profile
+    assert S._sync_check(replace(on, store="meta")) == []
+
+
 def test_publish_r2_barrier(tmp_path, env, monkeypatch):
     opts = {"publish-r2": {"args": ["-S"], "require": ["{snapshots}/{scan}/meta.json", "{index}/attr.tsv"],
                            "keys": ["snapshots/rules.json"], "barrier": True}}
@@ -474,25 +501,31 @@ def test_hf_list_then_index(tmp_path, env, monkeypatch):
     ]
 
 
-@pytest.mark.parametrize("has_gen, sub", [
-    (True, ["add"]),
-    (False, ["build"]),
+@pytest.mark.parametrize("has_gen, has_successor, pointer, sub", [
+    (True, False, None, ["add"]),
+    (False, False, None, ["build"]),
+    (False, True, "static-names/main-CURRENT.json", ["add"]),
 ])
-def test_static_names_one_machine(tmp_path, env, monkeypatch, has_gen, sub):
+def test_static_names_one_machine(tmp_path, env, monkeypatch, has_gen, has_successor, pointer, sub):
     """`options.static-names.gen`: `static-names add` in the task, the scans into R2's generation; `build` (+
     `build_args`) when R2 has none. On a local data dir (this one's), which holds only this scan, the scans are read
     from R2 itself, where publish-r2 put this one first."""
     monkeypatch.setattr(S.Ctx, "nproc", property(lambda self: 4))
     asked = []
-    monkeypatch.setattr(S.Ctx, "store_has", lambda self, root, key: asked.append((root, key)) or has_gen)
+    monkeypatch.setattr(S.Ctx, "store_has", lambda self, root, key: asked.append((root, key)) or (has_gen if key.endswith("scans.json") else has_successor))
     env.update(R2_ENDPOINT="https://r2.example.org", R2_BUCKET="r2b", R2_ACCESS_KEY_ID="k", R2_SECRET_ACCESS_KEY="s")
-    c = ctx(tmp_path, env, **hf_profile())
+    profile = hf_profile()
+    if pointer:
+        profile["options"]["static-names"]["current_key"] = pointer
+    c = ctx(tmp_path, env, **profile)
     S.static_names(c, None)
     w = "<tmp>/t/dt-scan/2026-10-16T1200"
-    tail = [] if has_gen else ["-x", "16,8"]
-    assert (asked, c.sh_impl.calls) == ([("r2://r2b", "static-names/2026-10-15hf/scans.json")], [" ".join([
+    tail = ["-x", "16,8"] if sub == ["build"] else []
+    keys = ["static-names/2026-10-15hf/scans.json", *([] if has_gen else ["static-names/2026-10-15hf/successor.json"])]
+    current = f" -u {pointer}" if pointer else ""
+    assert (asked, c.sh_impl.calls) == ([("r2://r2b", key) for key in keys], [" ".join([
         "dt-cloud static-names", *sub, "-g 2026-10-15hf -L listing/{id}/index/{gen}/path-index.parquet -s r2://r2b",
-        f"-o r2://r2b -w {w}/static-names -p 4 -M 8GB", *tail])])
+        f"-o r2://r2b -w {w}/static-names -p 4{current} -M 8GB", *tail])])
 
 
 def test_static_names_profile_checks():
@@ -801,6 +834,26 @@ def test_dups_reads_the_size_sort_and_writes_beside_the_index(tmp_path, env):
     assert again.sh_impl.calls == []
 
 
+def test_dups_listing_passes_each_sources_shards(tmp_path, env):
+    """`options.dups.listing`: `-l` each source's raw listing shards (this scan's, under `layout.listing` in the data
+    store), so copies are proven by their objects' crc32c; without a `layout.listing` (an importing profile), none."""
+    key = tmp_path / "data/l2/2026-10-16T1200/index/G1"
+    key.mkdir(parents=True)
+    (key / "path-index.parquet").write_text("p")
+    opts = {"static-names": {"gen": "s1"}, "digest": {"template": "t", "config": "c.yml"}, "dups": {"listing": True}}
+    c = ctx(tmp_path, env, steps=["dups"], layout={"layer2": "l2/{scan}/", "snapshots": "sub", "listing": "listing/{scan}/"}, options=opts)
+    S.dups(c, None)
+    w = "<tmp>/t/dt-scan/2026-10-16T1200"
+    l1 = "<tmp>/data/listing/2026-10-16T1200"
+    idx = "<tmp>/data/l2/2026-10-16T1200/index/G1/path-index.parquet"
+    assert c.sh_impl.calls == [f"dt-cloud dups -d 2026-10-16T1200 -l {l1}/a/shard-*.parquet -l {l1}/b/shard-*.parquet "
+                               f"-T {w}/dups-tmp -o {w}/dups {idx}"]
+    (key / "dups.json").unlink()
+    n = ctx(tmp_path, env, steps=["dups"], options={**opts, "list": {"import": True}})
+    S.dups(n, None)
+    assert n.sh_impl.calls == [f"dt-cloud dups -d 2026-10-16T1200 -T {w}/dups-tmp -o {w}/dups {idx}"]
+
+
 def test_dups_falls_back_to_the_path_sort_and_never_fails_the_run(tmp_path, env):
     key = tmp_path / "data/l2/2026-10-16T1200/index/G1"
     key.mkdir(parents=True)
@@ -825,6 +878,17 @@ def test_retire_layer1_passes_the_listing_layouts_shards(tmp_path, env):
     assert n.sh_impl.calls == [f"dt-cloud scan retire -G s1 -k 2 -L l2/{{id}}/index/{{gen}}/path-index.parquet -o gs://iv -S gs://iv -w {w} -R -s <tmp>/data"]
 
 
+def test_retire_cache_passes_the_listings_dir_cache(tmp_path, env):
+    """`cache: true`: the rollup cache `path-index -c` writes under `layout.listing` (`dir-cache/`, one dir per index part
+    when sharded) as `-c` templates."""
+    opts = {"static-names": {"gen": "s1"}, "digest": {"template": "t", "config": "c.yml"}, "retire": {"keep": 2, "cache": True, "store": "gs://iv"}}
+    c = ctx(tmp_path, env, steps=["retire"], layout={"layer2": "l2/{scan}/", "snapshots": "sub", "listing": "listing/{scan}/"}, options=opts)
+    S.retire(c, None)
+    w = "<tmp>/t/dt-scan/2026-10-16T1200/retire"
+    assert c.sh_impl.calls == [f"dt-cloud scan retire -G s1 -k 2 -L l2/{{id}}/index/{{gen}}/path-index.parquet "
+                               f"-c listing/{{id}}/dir-cache/*.parquet -c listing/{{id}}/dir-cache/*/*.parquet -o gs://iv -S gs://iv -w {w} -R -s <tmp>/data"]
+
+
 def test_store_gc_collects_the_interval_stores_lineage_on_each_copy(tmp_path, env):
     """`store-gc` (listed in `steps`): `store-gc -t interval-store -l` on the interval store and on `$R2_ARCHIVE` when
     that's another copy; a dry run unless `execute`."""
@@ -841,9 +905,14 @@ def test_retire_failure_warns_and_needs_its_keep(tmp_path, env):
     c = ctx(tmp_path, env, runner=Runner(tmp_path, fail=("dt-cloud scan retire",)), steps=["retire"],
             options={"list": {"import": True}, "static-names": {"gen": "s1", "store": "r2://idx"}, "digest": {"template": "t", "config": "c.yml"},
                      "retire": {"keep": 2, "store": "r2://idx"}})
+    # what the verify downloaded before failing (2026-10-21: the served store filled post's disk, failing every step after)
+    served = c.work / "retire" / "verify" / "served" / "path.parquet"
+    served.parent.mkdir(parents=True)
+    served.write_bytes(b"x")
     S.retire(c, None)
     assert c.sh_impl.calls == ["dt-cloud scan retire -G s1 -k 2 -L l2/{id}/index/{gen}/path-index.parquet -o r2://idx -S r2://idx "
                                "-w <tmp>/t/dt-scan/2026-10-16T1200/retire -R -s <tmp>/data"]
+    assert not (c.work / "retire").exists()
     with pytest.raises(ValueError) as e:
         profile(tmp_path, steps=["retire"], options={"list": {"import": True}, "static-names": {"profile": "sn.json"}, "digest": {"template": "t", "config": "c.yml"}, "retire": {}})
     assert str(e.value).splitlines()[1:] == [
@@ -1043,3 +1112,30 @@ def test_list_adopts_a_sources_listing_from_the_env(tmp_path, env, monkeypatch):
     with pytest.raises(S.StepFailed) as e:
         S.list_source(unset, "r2://disk-tree")
     assert str(e.value) == "{env:DT_CAPTURE}: $DT_CAPTURE unset"
+
+
+def test_cf_usage_snapshots_to_the_data_store_and_r2(tmp_path, env):
+    c = ctx(tmp_path, env)
+    S.cf_usage(c, None)
+    assert c.sh_impl.calls == []  # no token: skipped
+    env.update(CF_ANALYTICS_TOKEN="t", R2_ENDPOINT="https://r2.example.org", R2_BUCKET="r2b", R2_ACCESS_KEY_ID="k", R2_SECRET_ACCESS_KEY="s")
+    c = ctx(tmp_path, env, options={"cf-usage": {"days": 14, "config": "/app/site/wrangler.toml"},
+                                     "list": {"import": True}, "static-names": {"profile": "sn.json"}, "digest": {"template": "t", "config": "c.yml"}})
+    S.cf_usage(c, None)
+    assert c.sh_impl.calls == [
+        "dt-cloud cf-usage -c /app/site/wrangler.toml -d 14 -o <tmp>/data/snapshots/usage -o r2://r2b/snapshots/usage",
+    ]
+    c = ctx(tmp_path, {**env, "REPROC": "1"})
+    S.cf_usage(c, None)
+    assert c.sh_impl.calls == []
+
+
+def test_cf_usage_failure_fails_its_phase_not_the_run(tmp_path, env):
+    env.update(CF_ANALYTICS_TOKEN="t")
+    c = ctx(tmp_path, env, runner=Runner(tmp_path, fail=("dt-cloud cf-usage -c",)))
+    c.run = Ends()
+    S.cf_usage(c, None)
+    assert (c.run.calls, c.sh_impl.calls) == (
+        [("begin", "cf-usage"), ("end", "cf-usage", 1, True, "cf-usage snapshots failed (the scan's outputs stand; the next run backfills)")],
+        ["dt-cloud cf-usage -c site/wrangler.toml -d 7 -o <tmp>/data/snapshots/usage"],
+    )

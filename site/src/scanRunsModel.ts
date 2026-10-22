@@ -66,6 +66,42 @@ export interface OutputDelta extends ScanRunOutput {
   delta_rows: number | null
 }
 
+/** The maintenance kinds (`dt_cloud.maint_runs`): a store's compaction and its merges, each its own Batch job and its own
+ * row on /scans. Their `scan` is the newest scan they fold or carry (so they sort beside it) and their `gen` is
+ * `<store>/<gen>` (a compaction's finish: `<store>/<gen> → <new gen>`); they are never a scan's run (`scanRunOf`, the
+ * paging, /health's running scans skip them). */
+export const MAINT_KINDS = ['compact', 'merge'] as const
+export const isMaintenance = (kind: string): boolean => (MAINT_KINDS as readonly string[]).includes(kind)
+
+/** A maintenance run's store (`interval-store`, `static-names`): its `gen`'s first segment; null for a scan's run. */
+export const maintStore = (run: Pick<ScanRun, 'kind' | 'gen'>): string | null =>
+  isMaintenance(run.kind) && run.gen?.includes('/') ? run.gen.split('/')[0] : null
+
+/** Seconds without a write after which a running maintenance run reads as quiet (its heartbeat is every 60 s). */
+export const QUIET_S = 600
+
+/** Seconds without a write after which a running run reads as lost: its job most likely died without its exit trap
+ * (Batch's maxRunDuration, a lost VM), and `scan-run reconcile` marks it failed once Batch confirms. Until then its
+ * clock stops at its last write (`liveUntil`), so it never stretches a duration chart. */
+export const LOST_S = 7200
+
+export const isLost = (run: Pick<ScanRun, 'status' | 'updated_ts'>, now: number): boolean =>
+  run.status === 'running' && now - run.updated_ts > LOST_S
+
+/** Where a run's clock runs to while its row says running: `now`, or its last write (`updated_ts`) once lost. */
+export const liveUntil = (run: Pick<ScanRun, 'status' | 'updated_ts'>, now: number): number =>
+  isLost(run, now) ? run.updated_ts : now
+
+/** What a running run is doing: its running phase (the newest-started, if several) and that phase's elapsed seconds
+ * (null when none runs), how long since the run last wrote (`updated_ts`: a maintenance job's heartbeat) when that
+ * exceeds `QUIET_S`, and whether that exceeds `LOST_S`. Null for a run that isn't running. */
+export function liveness(run: Pick<ScanRun, 'status' | 'updated_ts'>, spans: readonly PhaseSpan[], now: number): { phase: string | null; elapsed: number | null; quiet: number | null; lost: boolean } | null {
+  if (run.status !== 'running') return null
+  const cur = [...spans].filter(s => s.status === 'running').sort((a, b) => b.start - a.start)[0]
+  const quiet = now - run.updated_ts
+  return { phase: cur?.phase ?? null, elapsed: cur ? cur.end - cur.start : null, quiet: quiet > QUIET_S ? quiet : null, lost: isLost(run, now) }
+}
+
 /** A key's structure: the key with its own scan id abstracted, so a per-scan
  * key (`static/deltas/2026-10-08`) compares with the previous scan's. */
 export const structureOf = (key: string, scan: string): string => key.split(scan).join('{scan}')
@@ -73,7 +109,6 @@ export const structureOf = (key: string, scan: string): string => key.split(scan
 /** A key's top level (`listing/b1` → `listing`). */
 export const topOf = (key: string): string => key.split('/')[0]
 
-/** A run's elapsed seconds (to `now` while it runs); null without a start. */
 /** When a run started (epoch s), for ordering runs: its `started_ts`, else its scan id's own time (a date-only id is
  *  00:00 UTC), else its `updated_ts`. `started_ts` can be NULL on rows the job recorded before it knew its start (the
  *  in-job runs before `6842ed63`), and those must not sort below every older run. */
@@ -86,9 +121,10 @@ export function runTime(r: Pick<ScanRun, 'started_ts' | 'scan' | 'updated_ts'>):
 /** Oldest first by `runTime`, then by run id. */
 export const byRunTime = (a: ScanRun, b: ScanRun): number => runTime(a) - runTime(b) || a.run_id.localeCompare(b.run_id)
 
-export function runSecs(r: Pick<ScanRun, 'started_ts' | 'finished_ts' | 'status'>, now: number): number | null {
+/** A run's elapsed seconds (while it runs, to `liveUntil`: a lost run's last write); null without a start. */
+export function runSecs(r: Pick<ScanRun, 'started_ts' | 'finished_ts' | 'status' | 'updated_ts'>, now: number): number | null {
   if (r.started_ts == null) return null
-  const end = r.finished_ts ?? (r.status === 'running' ? now : null)
+  const end = r.finished_ts ?? (r.status === 'running' ? liveUntil(r, now) : null)
   return end == null ? null : Math.max(0, end - r.started_ts)
 }
 
@@ -238,7 +274,7 @@ export function manualScans(rows: readonly RunSummary[]): Set<string> {
 }
 
 export function scanRunOf(rows: readonly RunSummary[], scan: string): ScanRun | undefined {
-  const runs = rows.map(r => r.run).filter(r => r.scan === scan)
+  const runs = rows.map(r => r.run).filter(r => r.scan === scan && !isMaintenance(r.kind))
   return runs.find(r => r.status === 'succeeded') ?? runs[0]
 }
 
@@ -256,7 +292,7 @@ export function summarize(runs: readonly ScanRun[], phases: readonly ScanRunPhas
       const ks = kids.get(run.run_id) ?? []
       const costs = [run.cost_usd, ...ks.map(k => k.cost_usd)]
       return {
-        run, secs: runSecs(run, now), spans: phaseSpans(run, byRun.get(run.run_id) ?? [], now),
+        run, secs: runSecs(run, now), spans: phaseSpans(run, byRun.get(run.run_id) ?? [], liveUntil(run, now)),
         out_bytes: sum(tops.map(o => o.bytes)), delta_bytes: sum(tops.map(o => o.delta_bytes)),
         downstream: ks.length, cost_usd: sum(costs), failed_at: failedAt(run, byRun.get(run.run_id) ?? []),
         phase_issues: phaseIssues(run, runs, phases),

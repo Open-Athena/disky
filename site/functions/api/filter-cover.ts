@@ -11,7 +11,7 @@
  * matched. `complete: false` (with `reason`) when the search can't list every match here; the items are
  * then not offered for actions. Unscoped (no owner lens, pool or class): a scoped match isn't a prefix. */
 import { type Env, requireViewer } from '../_lib/auth.js'
-import { storeReady } from '../_lib/index.js'
+import { storeReady, withPathStore } from '../_lib/index.js'
 import { queryParam, QueryError } from '../_lib/scope.js'
 import { allMatchRoots, FILTER_VIEW_V, NotFound, pathTotals } from '../_lib/view.js'
 import { COVER_V, coverFloor, coverSet, overCapReason } from '../_lib/cover.js'
@@ -104,8 +104,11 @@ async function unionCover(ctx0: Ctx, view: UnionView): Promise<Response> {
 }
 
 async function cover(ctx0: Ctx): Promise<Response> {
-  const ctx = withStore(ctx0)
-  if (ctx instanceof Response) return ctx
+  const sc = withStore(ctx0)
+  if (sc instanceof Response) return sc
+  // The static name index's generation, fixed for the request, and the interval store for the dates it holds
+  // (`withPathStore`, which does `withStaticGen` first): the match roots' sizes never come from per-scan rows.
+  const ctx = { ...sc, env: (await withPathStore(sc)).env }
   const st = serverTiming()
   traceJoins(ctx.env, st.trace)
   if (!storeReady(ctx.env)) return new Response('filter-cover API not configured (missing index store creds)', { status: 503 })

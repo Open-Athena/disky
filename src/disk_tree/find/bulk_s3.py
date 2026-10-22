@@ -199,7 +199,7 @@ class S3BulkLister:
         self,
         bucket: str,
         self_dirs: list[str],
-    ) -> "list[tuple[str, int, Optional[str], Optional[str]]]":
+    ) -> "list[tuple]":
         # No GCS-style placeholder objects in S3 land.
         return []
 

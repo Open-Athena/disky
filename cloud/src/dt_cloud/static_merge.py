@@ -44,6 +44,7 @@ from .append_runner import (  # noqa: F401 — the shared names, as this module 
     plan_carries,
     rebase,
 )
+from .maint_runs import NULL, from_env
 from .static_names import PREFIX, connect, err
 from .static_profile import data_bucket, scratch_bucket
 
@@ -124,8 +125,11 @@ def build_merged_run(dirs: list[Path], run: dict, outp: Path, *, drilled: bool, 
                      machine: tuple[int, int] | None = None, log: Callable[[str], None] = err) -> dict:
     """The merged run `run` (`plan_carries`' output) of input dirs `dirs` into `outp`: its tiers (`run_tiers`), each in its
     own spawned process when `jobs` > 1 (DuckDB limits per `tier_resources`), then `meta.json` (`run` + the shards' doc).
+    A tier whose process is killed (`BrokenProcessPool`: the OOM killer; cw's drill tier beside its anchors on a
+    highmem-16, 2026-10-20, 4 attempts) is rerun here, one at a time, with the whole machine (`concurrent=False`).
     Returns `{rows, bytes, …, "s": {tier: seconds}}`."""
     from concurrent.futures import ProcessPoolExecutor
+    from concurrent.futures.process import BrokenProcessPool
     from multiprocessing import get_context
 
     shutil.rmtree(outp, ignore_errors=True)
@@ -143,16 +147,26 @@ def build_merged_run(dirs: list[Path], run: dict, outp: Path, *, drilled: bool, 
     else:
         with ProcessPoolExecutor(min(jobs, len(args)), mp_context=get_context("spawn")) as ex:
             futures = [ex.submit(merge_tier, *a) for a in args]
-            errs = []
-            for f in futures:
+            errs, killed = [], []
+            for a, f in zip(args, futures):
                 try:
                     name, s, doc = f.result()
                     got[name] = (s, doc)
                     log(f"merge {run['key']}: {name} in {s:.0f}s")
+                except BrokenProcessPool:
+                    killed.append(a[0])
                 except Exception as e:  # noqa: BLE001 — every tier runs to its end; then the first failure is raised
                     errs.append(e)
             if errs:
                 raise errs[0]
+        if killed:
+            log(f"merge {run['key']}: {', '.join(killed)} killed in the pool (out of memory?): rerunning one at a time with the whole machine")
+            alone = tier_resources(tiers, ram, cpus, concurrent=False)
+            for a in args:
+                if a[0] in killed:
+                    name, s, doc = merge_tier(*a[:6], alone.get(a[0], {}).get("mem"), alone.get(a[0], {}).get("threads"))
+                    got[name] = (s, doc)
+                    log(f"merge {run['key']}: {name} in {s:.0f}s (alone)")
     doc = got["shards"][1]
     (outp / "meta.json").write_text(json.dumps({**run, **doc}, indent=1) + "\n")
     return {**doc, "s": {k: v[0] for k, v in got.items()}}
@@ -204,10 +218,10 @@ def publish_revision(store: RunStore, inputs: list[str], out: dict, *, attempts:
 def merge_pending(store: RunStore, mount: Path, *, tmp: Path, rule=None, jobs: int = 1, owner: str | None = None, dry_run: bool = False,
                   max_merges: int | None = None, max_level: int | None = None, now: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
                   build: Callable[..., dict] = build_merged_run, status: ar.MergeStatus | None = None, heartbeat_s: float | None = ar.HEARTBEAT_S,
-                  log: Callable[[str], None] = err) -> dict:
+                  log: Callable[[str], None] = err, source=None, rec=None) -> dict:
     """The newest manifest's due carries (`append_runner.merge_pending`) with the static store's merged-run `build`."""
     return ar.merge_pending(store, carry(rule, jobs, build), mount, tmp=tmp, owner=owner, dry_run=dry_run, max_merges=max_merges,
-                            max_level=max_level, now=now, status=status, heartbeat_s=heartbeat_s, log=log)
+                            max_level=max_level, now=now, status=status, heartbeat_s=heartbeat_s, log=log, source=source, rec=rec)
 
 
 # ── Backfilling a merged run's tier ────────────────────────────────────────
@@ -272,6 +286,7 @@ def cli() -> None:
 
 @cli.command("carry")
 @option("-b", "--bucket", default=data_bucket, help="Data bucket")
+@option("-F", "--read-from", type=Choice(ar.READ_FROM), default="gcs", help="Read the input runs from the data bucket's mount (gcs) or the R2 copy (r2, mirrored locally; the job's R2 env)")
 @option("-g", "--gen", required=True, help="Base generation")
 @option("-j", "--jobs", default=4, type=IntRange(min=1), help="Tier merges at once (each in its own process)")
 @option("-L", "--compact-level", type=ar.Level(), default=ar.COMPACT_LEVEL, help=ar.LEVEL_HELP)
@@ -280,7 +295,7 @@ def cli() -> None:
 @option("-n", "--dry-run", is_flag=True, help="Print the plan; merge and write nothing")
 @option("-S", "--scratch", default=scratch_bucket, help="Scratch bucket (the merge lease)")
 @option("-T", "--tmp", default="/stage/tmp", help="Scratch dir for merges")
-def carry_cmd(bucket, gen, jobs, compact_level, mount, max_merges, dry_run, scratch, tmp) -> None:
+def carry_cmd(bucket, read_from, gen, jobs, compact_level, mount, max_merges, dry_run, scratch, tmp) -> None:
     """Run the newest manifest's due carries (`plan_carries`): each merged run into its own dir, then a revision
     `manifests/<id>.m<NNN>.json` listing it. One merger per generation (a lease in the scratch bucket, mirrored to R2's
     `static-names/<gen>/merging.json` for /health when the job has the R2 env); resumable."""
@@ -288,14 +303,45 @@ def carry_cmd(bucket, gen, jobs, compact_level, mount, max_merges, dry_run, scra
 
     store = gcs_store(bucket, scratch, gen)
     status = None if dry_run else ar.r2_merge_status(f"{PREFIX}/{gen}")
+    rec = NULL if dry_run else from_env("merge")
     doc = merge_pending(store, Path(mount) / PREFIX / gen, tmp=Path(tmp), rule=gen_rule_at(bucket, gen), jobs=jobs, dry_run=dry_run,
-                        max_merges=max_merges, max_level=compact_level, status=status)
-    doc["prune"] = _summary(ar.prune_folded(store, retain=FOLDED_RETAIN, dry_run=dry_run, where=" gcs"))
+                        max_merges=max_merges, max_level=compact_level, status=status,
+                        source=(ar.R2Source(), f"{PREFIX}/{gen}") if read_from == "r2" else None, rec=rec)
+    doc["prune"] = _summary(ar.finish_merge(rec, doc, lambda: ar.prune_folded(store, retain=FOLDED_RETAIN, dry_run=dry_run, where=" gcs")))
     print(json.dumps(doc, indent=1))
 
 
 def _summary(doc: dict) -> dict:
     return {k: v for k, v in doc.items() if k != "keys"}
+
+
+@cli.command("compact")
+@option("-b", "--bucket", default=data_bucket, help="Data bucket")
+@option("-c", "--chunk-rows", default=1 << 22, type=IntRange(min=1), help="The drill fold's chunks: roots per measurement / rollup q range")
+@option("-g", "--gen", required=True, help="Base generation (followed to its newest successor)")
+@ar.compact_options
+def compact_cmd(bucket, chunk_rows, gen, policy, read_from, grace_s, jobs, force, mount, mem, threads, to_r2, tmp) -> None:
+    """The compaction stage (`append_runner.run_compaction` with `static_compact`): when the policy fires (or `-K`), the
+    generation's base and runs folded into `<gen>.c<NNN>` (a rebuild's bytes), published on GCS (`compaction.json`
+    last, `successor.json`, `static-names/CURRENT.json`), then with `-r` on R2 (its pointer last). The old generation
+    stays (readers pin `STATIC_GEN`; `store-gc -k`). Prints a JSON summary."""
+    from .blobstore import Store
+    from .static_compact import compactor
+
+    doc = ar.run_compaction(Store(f"gs://{bucket}"), compactor(chunk_rows), gen, Path(mount), Path(tmp), policy=policy, force=force,
+                            r2_bucket=bucket if to_r2 else None, grace_s=grace_s, threads=threads, mem=mem, jobs=jobs, read_from=read_from,
+                            rec=from_env("compact"))
+    print(json.dumps(doc, indent=1))
+
+
+@cli.command("compact-r2")
+@option("-b", "--bucket", default=data_bucket, help="Data bucket")
+@option("-g", "--gen", required=True, help="The generation a compaction started from (its successors are copied)")
+def compact_r2_cmd(bucket, gen) -> None:
+    """Every compaction from the generation on, to R2 (the R2 account's job): each new generation, then its pointer, last."""
+    from .static_compact import compactor
+
+    print(json.dumps(ar.publish_r2_chain(bucket, PREFIX, gen, last=compactor().last), indent=1))
 
 
 @cli.command("prune")

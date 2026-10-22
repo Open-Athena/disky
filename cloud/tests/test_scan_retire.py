@@ -134,6 +134,18 @@ def _deleted(fx, d: str) -> dict[str, list[int]]:
 KEPT = {"age": [2, 10], "extras": [1, 5], "snapshot": [1, 2]}
 
 
+def test_static_coverage_follows_a_compacted_generation(fx, d1):
+    before = _run(fx, "-m")
+    root = fx["store"] / "static-names"
+    (root / STATIC_GEN).rename(root / f"{STATIC_GEN}.c001")
+    (root / STATIC_GEN).mkdir()
+    (root / STATIC_GEN / "successor.json").write_text(json.dumps({"gen": f"{STATIC_GEN}.c001"}) + "\n")
+    after = _run(fx, "-m")
+    assert after["static_gen"] == f"{STATIC_GEN}.c001"
+    assert [(s["id"], s["status"]) for s in after["scans"]] == [(s["id"], s["status"]) for s in before["scans"]]
+    assert after["totals"] == before["totals"]
+
+
 def test_the_keep_window_counts_the_deployments_scans_not_one_copys(fx, d1):
     """A copy missing the newest scans (a lean scan writes no per-scan files to R2) still keeps only the deployment's
     newest `-k`: its own last ones retire like any other."""
@@ -265,6 +277,30 @@ def test_layer1_goes_unless_it_carries_generation_no_marker_vouches_for(fx, d1):
     _run(fx, "-x", "-m", "-1", LAYER1)
     assert sorted(k for k in before if k.startswith("listing/") and k not in _files(root)) == [
         "listing/2026-07-30/b/shard-000.parquet", "listing/2026-08-04T1236/b/shard-000.parquet"]
+
+
+def test_cache_goes_with_its_scan(fx, d1):
+    """A scan's rollup cache (`-c`; `path-index -c`'s `dir-cache/`, a sharded index's one dir per part) retires with the
+    scan, and its bytes alone make an otherwise clean scan worth retiring; a scan kept keeps its cache."""
+    root = fx["root"]
+    caches = [
+        "listing/2026-07-30/dir-cache/dir-stats.parquet", "listing/2026-07-30/dir-cache/age-days.parquet",
+        "listing/2026-08-04/dir-cache/p0/dir-stats.parquet",
+    ]
+    for k in caches:
+        _shard(root / k, [1])
+    newest = sorted(DATES)[-1]
+    kept = f"listing/{newest}/dir-cache/dir-stats.parquet"
+    _shard(root / kept, [1])
+    tmpl = ["-c", "listing/{id}/dir-cache/*.parquet", "-c", "listing/{id}/dir-cache/*/*.parquet"]
+    rep = _run(fx, "-m", *tmpl)
+    assert {r["id"]: r["delete"]["cache"][0] for r in rep["scans"] if r["status"] == "retire" and "cache" in r["delete"]} == {
+        "2026-07-30": 2, "2026-08-04": 1}
+    before = _files(root)
+    _run(fx, "-x", "-m", *tmpl)
+    after = _files(root)
+    assert sorted(k for k in before if "dir-cache" in k and k not in after) == sorted(caches)
+    assert kept in after
 
 
 def test_backup_within_one_store_copies_server_side(monkeypatch, tmp_path):

@@ -1016,6 +1016,7 @@ def over_time_churn_cmd(groups: tuple[str, ...]) -> None:
 @option("-M", "--snapshots", default=None, help="The store's snapshot dir (local path or URL): `-m` defaults to `<dir>/<DATE>/meta.json`, and after the pointers every other date-only scan of the store still without a start takes its own meta's (the backfill, folded into each sync; one D1 read once filled)")
 @option("-p", "--pointer-only", is_flag=True, help="Only flip the pointers, after `-r` staged the rows: refuses (exit 1, nothing flipped) unless every present variant's rows in D1 match its footer; a variant already pointed at this generation is a no-op")
 @option("-r", "--rows-only", is_flag=True, help="Only upload the row groups (+ the cold footer files), tagged with the generation — invisible until `-p` flips the pointers. Re-runnable (rows are INSERT OR REPLACE)")
+@option("-R", "--no-d1-rows", is_flag=True, help="Write no row group to D1: the rows half writes only the cold footer files (`.groups.parquet`/`.json`), and the pointer flips once D1 holds none of the generation's rows and its cold footer all of them (specs/lean-scans.md §1.4). The site plans such a generation from its cold footer: for a store whose reads the interval store serves")
 @option("-s", "--store", default="primary", help="The store these index rows belong to (specs/done/multi-store.md): `primary` (default) or a secondary store's `STORES_JSON` key")
 @option("-v", "--variant", "variants", multiple=True, type=Choice(list(INDEX_VARIANTS)), help="Only sync these variants (default: all)")
 @argument("date", callback=scan_id_option)
@@ -1031,6 +1032,7 @@ def index_sync(
     snapshots: str | None,
     pointer_only: bool,
     rows_only: bool,
+    no_d1_rows: bool,
     store: str,
     variants: tuple[str, ...],
     date: str,
@@ -1060,10 +1062,28 @@ def index_sync(
     re-sync keeps the start a pointer already holds. `-M <snapshot dir>` does
     the same from `<dir>/<DATE>/meta.json`, then fills every other date-only
     scan of the store still without a start from its own meta there (so a job
-    passing `-M` needs no separate backfill; `index-started` prints one)."""
+    passing `-M` needs no separate backfill; `index-started` prints one).
+
+    `-R` keeps the row groups out of D1 (each one a few D1 row writes, then as
+    many deletes when retention retires it): the cold footer files and the
+    pointer only. For a store the site serves from the interval store, where
+    the per-scan sorts are read only as a fallback (specs/lean-scans.md §1.4)."""
     from disk_tree import blobfs
 
-    from .index_footer import SORT_VARIANTS, IncompleteGeneration, bucket_base, check_flip, check_store, exists, fill_starts, flip_d1, meta_started, not_uploaded, sync_d1
+    from .index_footer import (
+        SORT_VARIANTS,
+        IncompleteGeneration,
+        bucket_base,
+        check_flip,
+        check_store,
+        exists,
+        fill_starts,
+        flip_d1,
+        groups_parquet_path,
+        meta_started,
+        not_uploaded,
+        sync_d1,
+    )
 
     try:
         check_store(store)
@@ -1073,8 +1093,8 @@ def index_sync(
         raise UsageError("need -d (the generation dir) or -b/$DATA_BUCKET (its root)")
     if rows_only and pointer_only:
         raise UsageError("-r and -p are the two halves of one sync: pass at most one (neither = both, rows then pointer)")
-    if local and (rows_only or pointer_only):
-        raise UsageError("-r/-p run against the remote D1 only")
+    if local and (rows_only or pointer_only or no_d1_rows):
+        raise UsageError("-r/-p/-R run against the remote D1 only")
     if (meta or snapshots) and rows_only:
         raise UsageError("-m/-M record starts on the pointers, which -r doesn't write (pass them to the -p half)")
     if snapshots and local:
@@ -1107,6 +1127,7 @@ def index_sync(
     # The pointers name `key` under the bucket the site reads; footers read from a local `-d` say nothing about
     # what is there. Never list a generation that isn't uploaded (a dry run's local tiers listed in a prod D1 500'd
     # its newest scan): with a local `-d`, the bucket must hold each present variant at `key`.
+    remote = None
     if not local and not rows_only and listing_dir is not None and not blobfs.is_url(listing_dir) and present:
         if bucket is None:
             raise UsageError("-d is a local dir: pass -b (the root the site reads) so index-sync can check the generation is uploaded there before listing it")
@@ -1115,16 +1136,28 @@ def index_sync(
         if missing:
             err(f"index-sync: refusing to list {date} gen {gen}: not uploaded under {remote}: {', '.join(missing)}")
             raise SystemExit(1)
-    if pointer_only:
+    if no_d1_rows and not pointer_only:
+        for variant, path in present:
+            n = sync_d1(date, path, variant=variant, gen=gen, key=key, store=store, rows_only=True, d1_rows=False)
+            if rows_only:
+                err(f"{pre} [{variant}] gen {gen} @ {key} — {n} row groups in the cold footer only, pointer not flipped")
+    # Without D1 rows the site plans from the cold footer: it must be where the site reads, not only in a local `-d`.
+    if no_d1_rows and remote is not None:
+        missing = not_uploaded(remote, [groups_parquet_path(INDEX_VARIANTS[v]) for v, _ in present])
+        if missing:
+            err(f"index-sync: refusing to list {date} gen {gen}: not uploaded under {remote}: {', '.join(missing)}")
+            raise SystemExit(1)
+    if pointer_only or (no_d1_rows and not rows_only):
         try:
-            flips = [check_flip(date, path, variant=variant, gen=gen, key=key, store=store, started=started) for variant, path in present]
+            flips = [check_flip(date, path, variant=variant, gen=gen, key=key, store=store, started=started, d1_rows=not no_d1_rows) for variant, path in present]
         except IncompleteGeneration as e:
             err(f"index-sync: refusing to flip any pointer — {e}")
             raise SystemExit(1) from None
+        cold = ", cold footer only" if no_d1_rows else ""
         for f in flips:
             flipped = flip_d1(f)
-            err(f"{pre} [{f.variant}] gen {gen} @ {key} — {'pointer flipped' if flipped else 'already pointed'} ({f.n} row groups)")
-    else:
+            err(f"{pre} [{f.variant}] gen {gen} @ {key} — {'pointer flipped' if flipped else 'already pointed'} ({f.n} row groups{cold})")
+    elif not no_d1_rows:
         for variant, path in present:
             n = sync_d1(date, path, variant=variant, gen=gen, key=key, remote=not local, store=store, rows_only=rows_only, started=started)
             err(f"{pre} [{variant}] gen {gen} @ {key} — {n} row groups ({'local' if local else 'remote'}){', pointer not flipped' if rows_only else ''}")
@@ -3290,6 +3323,8 @@ _static_names.add_command(_static_roots)
 _static_names.add_command(_static_anchors)
 _static_names.add_command(_static_local_build)
 _static_names.add_command(_static_local_add)
+from .static_compact import compact_cmd as _static_compact  # noqa: E402
+_static_names.add_command(_static_compact)
 main.add_command(_static_names)
 
 from .interval_store import cli as _interval_store  # noqa: E402
@@ -3309,6 +3344,9 @@ _interval_store.add_command(_interval_append)
 _interval_store.add_command(_interval_merge)
 _interval_store.add_command(_interval_runs)
 main.add_command(_interval_store)
+
+from .age_store import age_store_cmd as _age_store  # noqa: E402
+main.add_command(_age_store)
 
 from .scan_runs import cli as _scan_runs  # noqa: E402
 
@@ -3429,6 +3467,10 @@ from .scan_retire import retire_cmd as _scan_retire  # noqa: E402
 
 _scan.add_command(_scan_retire)
 
+
+from .cf_usage import cli as _cf_usage  # noqa: E402
+
+main.add_command(_cf_usage)
 
 if __name__ == "__main__":
     main()

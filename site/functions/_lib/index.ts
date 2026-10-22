@@ -374,7 +374,7 @@ export async function pathGens(env: Env, dates: string[]): Promise<string> {
   // (the store is append-only), and a miss refuses (`IvUnavailable`), never reads per-scan.
   if (intervalsOn(env)) {
     const st = await ivState(env)
-    for (const d of uniq) if (st.scans.has(d) || st.refused.has(d)) gens.set(d, `iv:${env.INTERVAL_STORE_GEN}${ivRev(env)}.${IV_ANSWER_V}`)
+    for (const d of uniq) if (st.scans.has(d) || st.refused.has(d)) gens.set(d, `iv:${ivPrefix(env)}:${env.INTERVAL_STORE_GEN}${ivRev(env)}.${IV_ANSWER_V}`)
   }
   for (const d of [...uniq].sort()) {
     for (const ch of `${d}=${gens.get(d) ?? ''};`) h = Math.imul(h ^ ch.charCodeAt(0), 0x01000193)
@@ -400,9 +400,9 @@ export async function pathScans(env: Env, order: boolean): Promise<{ results: { 
 
 /** The scans the interval store holds where the env's store serves it for every request: the primary under
  *  `PATH_STORE=intervals`, at its pinned or current generation (`ivGen`). None under `opt-in` (a default request
- *  reads per-scan stores), for a secondary store, or with no generation yet. */
+ *  reads per-scan stores), or with no generation yet. */
 export async function storeHeldScans(env: Env): Promise<string[]> {
-  if (env.PATH_STORE !== 'intervals' || !isPrimary(env)) return []
+  if (env.PATH_STORE !== 'intervals') return []
   const gen = await ivGen(env)
   return gen ? [...(await ivScans({ ...env, INTERVAL_STORE_GEN: gen })).keys()] : []
 }
@@ -508,68 +508,97 @@ export const intervalsOn = (env: Env): boolean => env.PATH_STORE === 'intervals'
 
 /** A request's path store: `PATH_STORE=opt-in` reads the interval store only for requests asking
  *  `ps=iv` (so one deployment serves both, side by side), `intervals` for every request but one asking `ps=scan` (the
- *  per-scan sorts, for a parity check); a secondary store (`store=`) never does. The
- *  generation is `INTERVAL_STORE_GEN` (a pin), else the store's current one (`ivCurrentGen`), fixed for the
- *  request: none (no pointer yet) reads per-scan stores. */
+ *  per-scan sorts, for a parity check). A secondary store opts in with its own namespace. The
+ *  generation is `INTERVAL_STORE_GEN` (a pin), else the store's current one (`ivGen`), fixed for the
+ *  request: none (no pointer yet) reads per-scan stores. The static name index's generation is fixed here too
+ *  (`withStaticGen`), whatever the path store. */
 export async function withPathStore<C extends { request: Request; env: Env }>(ctx: C): Promise<C> {
-  const { env } = ctx
-  if (env.PATH_STORE !== 'opt-in' && env.PATH_STORE !== 'intervals') return ctx
+  const w = (ctx as { waitUntil?: unknown }).waitUntil
+  const env = await withStaticGen(ctx.env)
+  const out = (e: Env): C => (e === ctx.env ? ctx : { ...ctx, env: e, ...(typeof w === 'function' ? { waitUntil: w.bind(ctx) } : {}) })
+  if (env.PATH_STORE !== 'opt-in' && env.PATH_STORE !== 'intervals') return out(env)
   const u = new URL(ctx.request.url).searchParams
   const ps = u.get('ps')
-  const on = !u.get('store') && ps !== 'scan' && (env.PATH_STORE === 'intervals' || ps === 'iv')
+  const on = ps !== 'scan' && (env.PATH_STORE === 'intervals' || ps === 'iv')
   const gen = on ? await ivGen(env) : env.INTERVAL_STORE_GEN
-  const w = (ctx as { waitUntil?: unknown }).waitUntil
-  return { ...ctx, env: { ...env, PATH_STORE: on ? 'intervals' : undefined, INTERVAL_STORE_GEN: gen ?? undefined }, ...(typeof w === 'function' ? { waitUntil: w.bind(ctx) } : {}) }
+  return out({ ...env, PATH_STORE: on ? 'intervals' : undefined, INTERVAL_STORE_GEN: gen ?? undefined })
 }
 
 /** The store's current-generation pointer (`interval_compact.CURRENT`: `{"gen": …}`), moved by a compaction
  *  (`interval-store add`) once the new generation is whole. */
 export const IV_CURRENT = 'interval-store/CURRENT.json'
-const ivCurrents = new Map<string, { at: number; p: Promise<string | null>; ok?: string | null }>()
+/** The static name index's (`compact_store`, specs/static-compaction.md): the same shape, moved on R2 last. */
+export const STATIC_CURRENT = 'static-names/CURRENT.json'
 
-/** `env`'s interval-store generation: `INTERVAL_STORE_GEN` when set (a pin), else `IV_CURRENT`'s (null without one or
- *  without `INDEX_R2`), held `IV_STATE_TTL` per isolate and in the colo cache: a compaction is served within the
- *  colo's TTL plus the isolate's. A failed read keeps the last pointer, or (none yet) reads per-scan stores. */
+/** `env`'s interval-store generation: `INTERVAL_STORE_GEN` when set (a pin), else `IV_CURRENT`'s (`currentGen`). */
 export async function ivGen(env: Env): Promise<string | null> {
-  const pin = env.INTERVAL_STORE_GEN?.trim()
+  return env.INTERVAL_STORE_GEN?.trim() || currentGen(env, `${ivPrefix(env)}/CURRENT.json`, 'current')
+}
+
+/** `env`'s static name index generation: `STATIC_GEN` when set (a pin), else, for the primary store of a deployment
+ *  reading the index (`FILTER_STATIC` / `NAME_SUMMARY_STATIC`), `STATIC_CURRENT`'s (`currentGen`). A secondary store's
+ *  is its own config's alone (`stores.ts`), never the primary's pointer: null without one. */
+export async function staticCurrentGen(env: StaticGenEnv): Promise<string | null> {
+  const pin = env.STATIC_GEN?.trim()
   if (pin) return pin
+  const e = env as unknown as Env
+  return (isPrimary(e) || env.STATIC_CURRENT_KEY) && (env.FILTER_STATIC === '1' || env.NAME_SUMMARY_STATIC === '1')
+    ? currentGen(e, env.STATIC_CURRENT_KEY || STATIC_CURRENT, 'static-current') : null
+}
+/** What the static name index's generation is resolved from. */
+export type StaticGenEnv = { STATIC_GEN?: string; STATIC_CURRENT_KEY?: string; INDEX_R2?: R2Bucket; STORE_KEY?: string; FILTER_STATIC?: string; NAME_SUMMARY_STATIC?: string }
+
+/** `env` with its static name index generation fixed (`staticCurrentGen`) for the request: unchanged when pinned or
+ *  without a pointer (an unset `STATIC_GEN` reads as it always has). */
+export async function withStaticGen<E extends StaticGenEnv>(env: E): Promise<E> {
+  if (env.STATIC_GEN?.trim()) return env
+  const gen = await staticCurrentGen(env)
+  return gen ? { ...env, STATIC_GEN: gen } : env
+}
+
+const currents = new Map<string, { at: number; p: Promise<string | null>; ok?: string | null }>()
+
+/** The generation a store's `CURRENT.json` pointer (`key`: `{"gen": …}`) names (null without one or without
+ *  `INDEX_R2`), held `IV_STATE_TTL` per isolate and in the colo cache: a compaction is served within the colo's TTL
+ *  plus the isolate's. A failed read keeps the last pointer, or (none yet) null. `name`: the read's join name. */
+async function currentGen(env: Env, key: string, name: string): Promise<string | null> {
   if (!env.INDEX_R2) return null
-  const k = storeKey(env)
-  const cur = ivCurrents.get(k)
+  const k = `${storeKey(env)}|${key}`
+  const cur = currents.get(k)
   if (cur && Date.now() - cur.at < IV_STATE_TTL) {
     if (cur.ok !== undefined) return cur.ok
     // A read another request started: joined (`shared.ts`), else read afresh here.
-    const got = await join(cur.p, ivJoin(env, 'current'))
+    const got = await join(cur.p, ivJoin(env, name))
     if (got !== STALLED) return got
-    if (ivCurrents.get(k) === cur) ivCurrents.delete(k)
-    const now = ivCurrents.get(k)
-    if (now && now !== cur) return ivGen(env)
+    if (currents.get(k) === cur) currents.delete(k)
+    const now = currents.get(k)
+    if (now && now !== cur) return currentGen(env, key, name)
   }
   const last = cur?.ok
   const entry: { at: number; p: Promise<string | null>; ok?: string | null } = { at: Date.now(), p: Promise.resolve(null) }
   entry.p = (async () => {
-    const ck = coloKey(env, IV_CURRENT, 'current=1')
+    const ck = coloKey(env, key, 'current=1')
     const hit = await colo().match(ck)
     if (hit) return (await hit.json<{ gen: string | null }>()).gen
-    const o = await env.INDEX_R2!.get(IV_CURRENT)
+    const o = await env.INDEX_R2!.get(key)
     const gen = o ? (await o.json<{ gen?: unknown }>()).gen : null
-    if (gen !== null && (typeof gen !== 'string' || !gen)) throw new Error(`${IV_CURRENT}: bad pointer`)
+    if (gen !== null && (typeof gen !== 'string' || !gen)) throw new Error(`${key}: bad pointer`)
     await colo().put(ck, new Response(JSON.stringify({ gen }), { headers: { 'content-type': 'application/json', 'cache-control': `max-age=${IV_STATE_TTL / 1000}` } }))
     return gen
   })().then(gen => { entry.ok = gen; return gen }, e => {
-    console.error(`${IV_CURRENT}: ${(e as Error).message}; ${last !== undefined ? 'serving the last pointer' : 'reading per-scan stores'}`)
+    console.error(`${key}: ${(e as Error).message}; ${last !== undefined ? 'serving the last pointer' : 'none held'}`)
     if (last !== undefined) { entry.ok = last; return last }
-    if (ivCurrents.get(k) === entry) ivCurrents.delete(k)
+    if (currents.get(k) === entry) currents.delete(k)
     return null
   })
-  ivCurrents.set(k, entry)
-  track(entry.p, ivJoin(env, 'current'), () => { if (ivCurrents.get(k) === entry) ivCurrents.delete(k) })
+  currents.set(k, entry)
+  track(entry.p, ivJoin(env, name), () => { if (currents.get(k) === entry) currents.delete(k) })
   return entry.p
 }
 /** Which path store answers `env`'s reads of a date the interval store holds: '' (per-scan), else the
  *  generation (folded or sliced). A per-isolate memo of what a date has keys by it, as by `storeKey`:
  *  under `PATH_STORE=opt-in` one isolate serves both stores. */
-export const pathStoreKey = (env: Env): string => (intervalsOn(env) ? `iv:${env.INTERVAL_STORE_GEN}${ivRev(env)}${isSliced(env) ? ':s' : ''}` : '')
+export const pathStoreKey = (env: Env): string => (intervalsOn(env) ? `iv:${ivPrefix(env)}:${env.INTERVAL_STORE_GEN}${ivRev(env)}${isSliced(env) ? ':s' : ''}` : '')
 /** `env` reading per-scan stores only: what stays per scan whatever the store holds (age pyramids, the over-time
  *  archive, search sidecars). A store-held date's sorts are never read through it (`openIndex` refuses them). */
 export const perScan = (env: Env): Env => (intervalsOn(env) ? { ...env, PATH_STORE: undefined } : env)
@@ -591,6 +620,7 @@ export const IV_ASOF = Symbol('interval-store request scans')
 export const IV_SLICED = Symbol('interval-store slices')
 const isSliced = (env: Env): boolean => !!(env as Env & { [IV_SLICED]?: boolean })[IV_SLICED]
 export const IV_PREFIX = 'interval-store'
+export const ivPrefix = (env: Env): string => env.INTERVAL_STORE_PREFIX?.replace(/\/$/, '') || IV_PREFIX
 /** `INTERVAL_STORE_REV`: a generation's files were rewritten in place (a re-cut): every cache keyed by
  *  them (colo ranges and footers, isolate handles and groups, response keys) takes the revision. */
 const ivRev = (env: Env): string => (env.INTERVAL_STORE_REV ? `@${env.INTERVAL_STORE_REV}` : '')
@@ -612,7 +642,7 @@ const IV_SIBLING = new Map([['path', 'bysize'], ['bysize', 'path'], ['slices', '
 /** A served sort's footer, opened once per isolate for every scan (a generation's files are immutable). */
 const ivFooters = new Map<string, Promise<FooterIndex>>()
 function ivFooter(env: Env, file: string): Promise<FooterIndex> {
-  const key = ivKey(env, `${IV_PREFIX}/${env.INTERVAL_STORE_GEN!}/served/${file}.groups.parquet`)
+  const key = ivKey(env, `${ivPrefix(env)}/${env.INTERVAL_STORE_GEN!}/served/${file}.groups.parquet`)
   return shared(ivFooters, `${storeKey(env)}|${key}`, () => openIvFooter(env, key, r2Bytes(env.INDEX_R2!)), 30_000, ivJoin(env, 'footer'))
 }
 
@@ -671,7 +701,7 @@ export const IV_JOIN = JOIN
 /** A memo `name` of the interval store, joined as `env`'s request (`Server-Timing`: `join-<name>`). */
 const ivJoin = (env: Env, name: string): Join => ({ name, req: reqOf(env) })
 const ivBroken = new Map<string, { at: number; error: string }>()
-const ivGenKey = (env: Env): string => `${storeKey(env)}|${env.INTERVAL_STORE_GEN}${ivRev(env)}`
+const ivGenKey = (env: Env): string => `${storeKey(env)}|${ivPrefix(env)}|${env.INTERVAL_STORE_GEN}${ivRev(env)}`
 
 /** A read of an interval store's run failed: the run is cut out (`ivMarkBroken`) and the read can be retried
  *  (`ivRetry`): a scan before the run then answers without it, the run's scans (and later runs') are refused
@@ -758,7 +788,7 @@ export async function ivRetry<T>(f: () => Promise<T>): Promise<T> {
 async function ivManifest(env: Env): Promise<IvManifest | null> {
   const r2 = env.INDEX_R2! as R2Bucket & { list?: R2Bucket['list'] }
   if (typeof r2.list !== 'function') return null
-  const prefix = `${IV_PREFIX}/${env.INTERVAL_STORE_GEN}/manifests/`
+  const prefix = `${ivPrefix(env)}/${env.INTERVAL_STORE_GEN}/manifests/`
   const names: string[] = []
   let cursor: string | undefined
   do {
@@ -784,10 +814,10 @@ interface IvStateDoc { scans: { id: string; ts: number }[]; slices: boolean; man
  *  shows up within the colo's TTL plus the isolate's. */
 async function ivStateDoc(env: Env): Promise<IvStateDoc> {
   const gen = env.INTERVAL_STORE_GEN!
-  const ck = coloKey(env, ivKey(env, `${IV_PREFIX}/${gen}/scans.json`), 'state=2')
+  const ck = coloKey(env, ivKey(env, `${ivPrefix(env)}/${gen}/scans.json`), 'state=2')
   const hit = await colo().match(ck)
   if (hit) return hit.json<IvStateDoc>()
-  const [o, manifest] = await Promise.all([env.INDEX_R2!.get(`${IV_PREFIX}/${gen}/scans.json`), ivManifest(env)])
+  const [o, manifest] = await Promise.all([env.INDEX_R2!.get(`${ivPrefix(env)}/${gen}/scans.json`), ivManifest(env)])
   if (!o) throw new Error(`interval store ${gen}: no scans.json`)
   const j = await o.json<{ scans: { id: string; ts: number }[]; slices?: boolean }>()
   const doc: IvStateDoc = { scans: j.scans, slices: j.slices !== false, manifest }
@@ -853,7 +883,7 @@ async function ivScans(env: Env): Promise<Map<string, number>> {
 /** A run's served sort: its footer (memoized as the base's), and the data file there (R2 `head`, where the binding
  *  has it), so a run listed before its files are whole is broken here, not mid-read. */
 function ivRunFooter(env: Env, run: string, file: string): Promise<FooterIndex> {
-  const dir = `${IV_PREFIX}/${env.INTERVAL_STORE_GEN!}/${run}/served`
+  const dir = `${ivPrefix(env)}/${env.INTERVAL_STORE_GEN!}/${run}/served`
   const key = ivKey(env, `${dir}/${file}.groups.parquet`)
   return shared(ivFooters, `${storeKey(env)}|${key}`, async () => {
     const r2 = env.INDEX_R2! as R2Bucket & { head?: R2Bucket['head'] }
@@ -884,10 +914,10 @@ export async function openInterval(env: Env, date: string, variant: string, retr
   // both) starts loading now, beside `scans.json`, not after it: for a sliced read, the sort the isolate's
   // state names (a slice sort until it is known).
   const pre = sortOf(wants && ivStates.get(ivGenKey(env))?.ok?.slices !== false)
-  if (pre && !(wants && ivNoSlices.has(env.INTERVAL_STORE_GEN!))) for (const f of [pre, IV_SIBLING.get(pre)]) if (f) ivFooter(env, f).catch(() => {})
+  if (pre && !(wants && ivNoSlices.has(ivGenKey(env)))) for (const f of [pre, IV_SIBLING.get(pre)]) if (f) ivFooter(env, f).catch(() => {})
   if (wants && !sortOf(true) && (variant === 'user' || variant.startsWith('coarse'))) {
     const held = (await ivScans(env)).has(date)
-    if (held && !ivNoSlices.has(env.INTERVAL_STORE_GEN!)) throw new Error(`index variant '${variant}' not synced for ${date}`)
+    if (held && !ivNoSlices.has(ivGenKey(env))) throw new Error(`index variant '${variant}' not synced for ${date}`)
   }
   if (!sortOf(wants)) return null
   const st = await ivState(env)
@@ -906,15 +936,15 @@ export async function openInterval(env: Env, date: string, variant: string, retr
   const runs = variant === 'reads' ? [] : st.runs.filter(r => st.scans.get(r.first)! <= horizon)
   const gen = env.INTERVAL_STORE_GEN!
   if (sliced) {
-    const at = ivNoSlices.get(gen)
+    const at = ivNoSlices.get(ivGenKey(env))
     if (at != null && Date.now() - at < 60_000) return null
   }
   for (const r of runs) for (const f of [file0, IV_SIBLING.get(file0)]) if (f) ivRunFooter(env, r.key, f).catch(() => {})
-  const ck = `iv:${gen}${ivRev(env)}:${date}:${variant}${sliced ? ':s' : ''}|${runs.map(r => r.key).join(',')}`
+  const ck = `iv:${ivGenKey(env)}:${date}:${variant}${sliced ? ':s' : ''}|${runs.map(r => r.key).join(',')}`
   try {
     return ivOwn(env, await shared(handles, ck, async (): Promise<IndexHandle> => {
       const src = r2Bytes(env.INDEX_R2!)
-      const dir = `${IV_PREFIX}/${gen}/served`
+      const dir = `${ivPrefix(env)}/${gen}/served`
       const key = ivKey(env, `${dir}/${file0}.parquet`)
       const footer = await ivFooter(env, file0)
       const kv = new Map((footer.metadata.key_value_metadata ?? []).map(e => [e.key, e.value]))
@@ -929,15 +959,15 @@ export async function openInterval(env: Env, date: string, variant: string, retr
     // A run that won't open is cut out; the date is then the store's (an older run's or the base's) or refused.
     if (e instanceof IvTierBroken && !retried) return openInterval(env, date, variant, true)
     if (!sliced || (e as Error).name !== 'NotFoundError') throw e
-    if (!ivNoSlices.has(gen)) console.error(`interval store ${gen}: no slice sorts (${(e as Error).message}); its sliced reads are refused for 60s`)
-    ivNoSlices.set(gen, Date.now())
+    if (!ivNoSlices.has(ivGenKey(env))) console.error(`interval store ${gen}: no slice sorts (${(e as Error).message}); its sliced reads are refused for 60s`)
+    ivNoSlices.set(ivGenKey(env), Date.now())
     return null
   }
 }
 
 /** Run `run`'s handle on sort `file`, as of `base`'s scan (`IvTierBroken` when its files won't open). */
 async function openIvRun(env: Env, base: PqHandle, run: string, file: string): Promise<IndexHandle> {
-  const dir = `${IV_PREFIX}/${env.INTERVAL_STORE_GEN!}/${run}/served`
+  const dir = `${ivPrefix(env)}/${env.INTERVAL_STORE_GEN!}/${run}/served`
   const key = ivKey(env, `${dir}/${file}.parquet`)
   let footer: FooterIndex
   try {
@@ -1809,7 +1839,7 @@ const groupKey = (h: IndexHandle, rg: number) => `${storeKey(h.env)}|${h.date}|$
  *  (every version; `cachedGroup` keeps a read's scan's) and its fetch in flight, which a concurrent
  *  read of the same group waits for instead of fetching and decoding it again. One entry for both
  *  sides is what lets a root diff's ~20 groups fit the LRU (gcs `2026-10-09b`). */
-const ivGroupKey = (h: IndexHandle, rg: number) => `${storeKey(h.env)}|iv|${h.variant}|${h.gen}|${rg}`
+const ivGroupKey = (h: IndexHandle, rg: number) => `${storeKey(h.env)}|${ivPrefix(h.env)}|iv|${h.variant}|${h.gen}|${rg}`
 const groupsInFlight = new Map<string, Promise<IvGroup | null>>()
 
 /** An interval store's group held by the isolate (every version), or undefined. */

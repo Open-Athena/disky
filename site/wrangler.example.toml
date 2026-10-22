@@ -38,6 +38,16 @@ remote = true
 # binding = "CACHE_KV"
 # id = "00000000000000000000000000000000"
 
+# Optional: usage attribution (`_lib/usage.ts`, specs/usage-metrics.md), one Analytics
+# Engine point per Functions request (route, caller, cache tier, R2/D1/KV reads). Unset =
+# no points. The R2/D1/KV counters and the cache tier also need the `nodejs_als`
+# compatibility flag (the request's async context); without it a point carries no
+# counters and cache `none`.
+# compatibility_flags = ["nodejs_als"]
+# [[analytics_engine_datasets]]
+# binding = "USAGE"
+# dataset = "disky_usage_<deployment>"
+
 [observability]
 enabled = true
 
@@ -116,6 +126,7 @@ ROOT_LABEL = "my buckets"                   # the store root's crumb label
 # --- Name search: the static name index on INDEX_R2; private viewer gate ---
 # NAME_SUMMARY_STATIC = "1"                 # `/names` (`/api/name-summary`, `/api/name-summary-registry`) from the static name index in INDEX_R2 (`_lib/nameSummaryStatic.ts`); unset = 404
 # STATIC_GEN = "<gen>"                      # required with FILTER_STATIC / NAME_SUMMARY_STATIC: the static name index generation in INDEX_R2 (`static-names/<gen>/`)
+# STATIC_CURRENT_KEY = "static-names/meta-CURRENT.json"  # independent lineage pointer (primary or secondary store); a STATIC_GEN pin wins
 # STATIC_MAX_ROWS = "400000"                # the static reader's ceiling on suffix rows per query (default 400K; the catalog threshold bounds it lower)
 # FILTER_STATIC = "1"                       # the map's filter (`q=`): a single literal's match roots on any scan of the static name index's generation, from INDEX_R2 (`_lib/staticFilter.ts`)
 # FILTER_STATIC_HEAVY = "1"                 # with FILTER_STATIC: heavy literals (catalog members, and every 1–2 character one) from the drilldown under `drill/` (`_lib/staticDrill.ts`): match roots, or a heavy directory's per-child rollup; base-generation scans only
@@ -126,6 +137,8 @@ ROOT_LABEL = "my buckets"                   # the store root's crumb label
 # FILTER_PHASE2_MS = "1500"                # ms a filtered view's phase 2 (its match roots' insides) may take; reads still running then are dropped and those roots drawn whole (`interiors` in the response; default 1500)
 # PATH_STORE = "intervals"                 # read the dates INTERVAL_STORE_GEN holds from the change-interval path store on INDEX_R2 (`_lib/index.ts` `openInterval`, specs/interval-store.md); lenses and owner pools still read per-scan stores; a request with `ps=scan` reads per-scan (a parity check). `opt-in`: only requests with `ps=iv` (the page forwards its `ps` to every `/api/` request, `src/pathStoreParam.ts`)
 # INTERVAL_STORE_GEN = "2026-10-09"         # with PATH_STORE: pin the generation, `interval-store/<gen>/` on INDEX_R2; unset = the store's current one (`interval-store/CURRENT.json`, moved by `interval-store add`'s compactions)
+# INTERVAL_STORE_PREFIX = "history/meta/interval-store"  # independent history namespace; defaults to interval-store
+# AGE_STORE_PREFIX = "history/meta-age"    # verified age-cell history under <prefix>/interval-store; uncovered scans keep per-scan readers
 # INTERVAL_STORE_REV = "2"                  # with PATH_STORE: bump when the generation's files are rewritten in place (re-keys the caches)
 # OWNER_HISTORY_BATCH = "1"                # prototype (specs/root-owner-history.md; off): a fleet-root owner series from one bounded interval-store version read, the canonical per-scan reader as fallback
 # FOOTER_CACHE_MAX_ROWS = "1000000"        # the footer LRU's budget (`_lib/footerCache.ts`, specs/done/footer-lru.md): the most `index_row_groups` rows its hot entries keep; evicted by `POST /api/footer-cache` / `dt-cloud footer-evict`. Default 1,000,000

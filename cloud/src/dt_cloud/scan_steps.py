@@ -899,14 +899,14 @@ def _static_check(p: ScanProfile) -> list[str]:
     o = p.opts("static-names")
     if o.get("gen"):
         return [f"options.static-names.{k}: not with gen (the one-machine path)" for k in ("profile",) if k in o]
-    problems = [f"options.static-names.{k}: only with gen (the one-machine path)" for k in ("store", "mem", "build_args") if k in o]
+    problems = [f"options.static-names.{k}: only with gen (the one-machine path)" for k in ("store", "mem", "build_args", "current_key") if k in o]
     if not o.get("profile") and not p.env.get("STATIC_NAMES_PROFILE"):
         problems.append("options.static-names.profile: required (the deployment's static-names profile; or env STATIC_NAMES_PROFILE, "
                         "or gen: the one-machine path, or skip: [static-names])")
     return problems
 
 
-@step("static-names", stage="serve", soft=True, options={"profile": str, "gen": str, "store": str, "mem": str, "build_args": list},
+@step("static-names", stage="serve", soft=True, options={"profile": str, "gen": str, "store": str, "mem": str, "build_args": list, "current_key": str},
       requires=_static_check)
 def static_names(ctx: Ctx, arg: str | None) -> None:
     """Append this scan (and any earlier one still pending, in scan-id order) to the static name index as a run
@@ -929,9 +929,10 @@ def static_names(ctx: Ctx, arg: str | None) -> None:
         # a local data dir holds only this scan, so the store (where publish-r2 put it, before this step) is the source
         source = ctx.data_uri if urlparse(ctx.profile.data).scheme else store
         args = ["-g", gen, "-L", layout, "-s", source, "-o", store, "-w", ctx.work / "static-names", "-p", ctx.nproc,
+                *(["-u", ctx.opt("static-names", "current_key")] if ctx.opt("static-names", "current_key") else []),
                 *(["-M", ctx.opt("static-names", "mem")] if ctx.opt("static-names", "mem") else [])]
         with ctx.phase("static-names", note="overlapped"):
-            sub = (["add", *args] if ctx.store_has(store, f"static-names/{gen}/scans.json")
+            sub = (["add", *args] if ctx.store_has(store, f"static-names/{gen}/scans.json") or ctx.store_has(store, f"static-names/{gen}/successor.json")
                    else ["build", *args, *ctx.opt("static-names", "build_args", [])])
             ctx.sh(["dt-cloud", "static-names", *sub], fatal=False, warn=f"static-names {sub[0]} failed for {ctx.scan}")
         return
@@ -967,16 +968,14 @@ def publish_r2(ctx: Ctx, arg: str | None) -> None:
                                     "remains visible; repair the R2 copy, then resume", hard=True)
 
 
-_iv_primary = primary_only("interval-store", "the site serves another store's scans per scan, and the interval store's "
-                                            "`interval-store/CURRENT.json` is the primary's")
-
-
 def _iv_check(p: ScanProfile) -> list[str]:
     o = p.opts("interval-store")
     bad = [f"options.interval-store.source: {o['source']!r} (one of store, data)"] if o.get("source", "store") not in ("store", "data") else []
     if o.get("source") and o.get("profile"):
         bad.append("options.interval-store.source: only on the one-machine path (the staged one reads its profile's layouts)")
-    return _iv_primary(p) + bad
+    if not p.primary and not o.get("store"):
+        bad.append("options.interval-store.store: required for a secondary store (an independent namespace)")
+    return bad
 
 
 @step("interval-store", stage="serve", soft=True, options={"store": str, "timeout": str, "mem": str, "profile": str, "merge_wait": int,
@@ -1030,19 +1029,25 @@ def interval_store(ctx: Ctx, arg: str | None) -> None:
 
 
 def _sync_args(ctx: Ctx) -> list[str]:
-    """Both halves' arguments: the generation, the store, and `options.index-sync.variants` (`-v` each; default every
-    variant the generation holds). A local `data:` dir (the local executor's) is not what the site reads: `-b` names
+    """Both halves' arguments: the generation, the store, `options.index-sync.variants` (`-v` each; default every
+    variant the generation holds) and `options.index-sync.d1_rows: false` (`-R`: the cold footer files and the pointers,
+    no row group in D1; specs/lean-scans.md §1.4). A local `data:` dir (the local executor's) is not what the site reads: `-b` names
     the R2 bucket (`publish-r2` filled it first), where the pointer flip checks the generation is uploaded."""
     site = ["-b", f"r2://{ctx.env['R2_BUCKET']}"] if ctx.profile.data_bucket is None and ctx.has(*R2) else []
     return [*store_args(ctx), *site, "-d", str(ctx.data_root / ctx.index_key), "-g", ctx.gen, "-k", ctx.index_key,
-            *[a for v in ctx.opt("index-sync", "variants", []) for a in ("-v", v)]]
+            *[a for v in ctx.opt("index-sync", "variants", []) for a in ("-v", v)],
+            *([] if ctx.opt("index-sync", "d1_rows", True) else ["-R"])]
 
 
 def _sync_check(p: ScanProfile) -> list[str]:
     from .index_footer import INDEX_VARIANTS
 
+    o = p.opts("index-sync")
     return [f"options.index-sync.variants: {v!r} is not an index variant (one of {', '.join(INDEX_VARIANTS)})"
-            for v in p.opts("index-sync").get("variants", []) if v not in INDEX_VARIANTS]
+            for v in o.get("variants", []) if v not in INDEX_VARIANTS] + (
+        [] if o.get("d1_rows", True) or p.primary else
+        [f"store {p.store}: options.index-sync.d1_rows: false is for the primary store (a secondary store never reads the "
+         "interval store: every read of it would plan from cold footers)"])
 
 
 @step("index-rows", skippable=False, stage="serve", soft=True)
@@ -1056,13 +1061,16 @@ def index_rows(ctx: Ctx, arg: str | None) -> None:
         ctx.sh(["dt-cloud", "index-sync", "-r", *_sync_args(ctx), ctx.scan], fatal=False, warn="index-sync -r failed (the pointer flip will refuse)")
 
 
-@step("index-sync", skippable=False, stage="sync", soft=True, options={"retain": int, "variants": list}, requires=_sync_check)
+@step("index-sync", skippable=False, stage="sync", soft=True, options={"retain": int, "variants": list, "d1_rows": bool},
+      requires=_sync_check)
 def index_sync(ctx: Ctx, arg: str | None) -> None:
     """List the scan: flip its pointers (`index-sync -p`, which checks the rows `index-rows` uploaded), last of the
     serving steps, so a listed scan is whole (searchable, on R2, in the interval store); then drop superseded
     generations' D1 rows (`index-gc <scan>`; `options.index-sync.retain` N: also retire the row groups of every scan
     older than the newest N, read from their cold footer files after, D1's size cap). `options.index-sync.variants`:
-    only those variants, in both halves (`index-rows` reads them here too)."""
+    only those variants, in both halves (`index-rows` reads them here too). `options.index-sync.d1_rows: false`: no
+    row group in D1, in both halves (`-R`), for a primary store whose site reads the interval store
+    (specs/lean-scans.md §1.4)."""
     with ctx.phase("index-sync"):
         if not ctx.has(*CF):
             err("WARN: no CLOUDFLARE_API_TOKEN/ACCOUNT_ID: tiers published but not synced (scan unlisted)")
@@ -1109,13 +1117,14 @@ def index_gc(ctx: Ctx, arg: str | None) -> None:
 
 
 @step("dups", core=False, soft=True, options={"floor": int, "check": int, "check_objects": int, "suspect_copies": int,
-                                               "mem": str, "threads": int})
+                                               "mem": str, "threads": int, "listing": bool})
 def dups(ctx: Ctx, arg: str | None) -> None:
     """The scan's duplicate-candidate groups (`dt-cloud dups`, specs/dups.md §1) beside its index:
     `<layer2>index/<gen>/dups.{parquet,json}` (`dups.json` last, the skip-if-done mark), read from the scan's `bysize`
     sort (its `tot` prunes the read to the paths over the floor), else its `path` sort. Options: `floor` (bytes),
-    `suspect_copies`, `check` (spot-check the top N groups' copies on GCS), `check_objects`, `mem`, `threads`. Off
-    unless the profile lists it in `steps`; never fatal."""
+    `suspect_copies`, `check` (spot-check the top N groups' copies on GCS), `check_objects`, `mem`, `threads`,
+    `listing` (`-l` each source's raw listing shards in the data store: copies proven `exact` by their objects'
+    crc32c, which the listing carries with `options.list.bulk_args: [-c]`). Off unless the profile lists it in `steps`; never fatal."""
     key_dir = ctx.data_root / ctx.index_key
     if ctx.done(key_dir / "dups.json", "dups"):
         return
@@ -1124,6 +1133,12 @@ def dups(ctx: Ctx, arg: str | None) -> None:
     out = ctx.work / "dups"
     flags = {"floor": "-f", "check": "-g", "check_objects": "-n", "suspect_copies": "-s", "mem": "-m", "threads": "-t"}
     args = [a for k, f in flags.items() if ctx.opt("dups", k) is not None for a in (f, ctx.opt("dups", k))]
+    if ctx.opt("dups", "listing", False):
+        if ctx.profile.layout.listing is None:  # an importing profile's listings stay in its list tasks' scratch
+            err("dups: options.dups.listing without layout.listing: no exact verdicts")
+        else:
+            args += [a for src in ctx.profile.sources
+                     for a in ("-l", f"{ctx.data_root / ctx.listing_key(src.bucket)}/shard-*.parquet")]
     with ctx.phase("dups"):
         r = ctx.sh(["dt-cloud", "dups", "-d", ctx.scan, *args, "-T", ctx.work / "dups-tmp", "-o", out, src], fatal=False,
                    fails_phase=True, warn="dups failed (the scan's other outputs stand)")
@@ -1131,6 +1146,30 @@ def dups(ctx: Ctx, arg: str | None) -> None:
             return
         copy_atomic(out / "dups.parquet", key_dir / "dups.parquet")
         copy_atomic(out / "dups.json", key_dir / "dups.json")
+
+
+def _age_check(p: ScanProfile) -> list[str]:
+    o = p.opts("age-store")
+    return [f"options.age-store.{key}: required" for key in ("store", "gen") if not o.get(key)]
+
+
+@step("age-store", core=False, soft=True, options={"store": str, "gen": str, "keep": int, "execute": bool, "copies": list},
+      requires=_age_check)
+def age_store(ctx: Ctx, arg: str | None) -> None:
+    """Append verified histogram cells, then retire covered old pyramids on each copy. Runs before path retirement."""
+    if ctx.reproc:
+        err("age-store off under REPROC")
+        return
+    o = ctx.profile.opts("age-store")
+    layout = ctx.profile.layout.layer2.replace("{scan}", "{id}") + "index/{gen}/age-pyramid-1h.parquet"
+    roots = list(dict.fromkeys([ctx.data_uri, *o.get("copies", [])]))
+    argv = ["dt-cloud", "age-store", "-g", o["gen"], "-L", layout, "-o", o["store"], "-s", ctx.data_uri,
+            "-T", ctx.profile.store, "-t", ctx.scan, "-w", ctx.work / "age-store", "-k", o.get("keep", 2),
+            *(a for root in roots for a in ("-r", root)), *(["-x"] if o.get("execute") else [])]
+    with ctx.phase("age-store"), cleanup(ctx.work / "age-store"):
+        if ctx.sh(argv, fatal=False, fails_phase=True, warn="age-store failed (uncovered histogram inputs stay)") is not None and o.get("execute"):
+            ctx.sh(["dt-cloud", "store-gc", "-t", "interval-store", "-l", "-x", "-o", o["store"]], fatal=False,
+                   warn="age-store generation cleanup failed (the next run retries)")
 
 
 def _retire_check(p: ScanProfile) -> list[str]:
@@ -1141,12 +1180,21 @@ def _retire_check(p: ScanProfile) -> list[str]:
     return problems
 
 
+@contextmanager
+def cleanup(path: Path) -> Iterator[None]:
+    """`path` removed on the way out, whether the block finished or raised."""
+    try:
+        yield
+    finally:
+        shutil.rmtree(path, ignore_errors=True)
+
+
 @step("retire", core=False, soft=True, options={"keep": int, "execute": bool, "static_gen": str, "static_store": str, "store": str,
-                                                "layer2": bool, "layer1": bool, "copies": list, "backup": str, "markers_only": bool},
+                                                "layer2": bool, "layer1": bool, "cache": bool, "copies": list, "backup": str, "markers_only": bool},
       requires=_retire_check)
 def retire(ctx: Ctx, arg: str | None) -> None:
     """Retire the per-scan sorts, footers, search sidecars (and, `layer2: true`, layer-2 listings; `layer1: true`, the raw
-    listing shards under `layout.listing`) of every scan but the
+    listing shards under `layout.listing`; `cache: true`, its `dir-cache/`) of every scan but the
     newest `keep` that both stores hold and a parity marker vouches for (`dt-cloud scan retire`; specs/lean-scans.md §2).
     Off unless the profile lists it in `steps`; a dry run (the plan in the log) unless `execute: true`. The data store
     first (`$R2_ARCHIVE` when the data store is a local dir), then each of `copies` (a root, or `r2` for `$R2_ARCHIVE`; D1 left
@@ -1172,13 +1220,23 @@ def retire(ctx: Ctx, arg: str | None) -> None:
             err("retire: options.retire.layer1 without layout.listing: raw listings kept")
         else:
             l1 = ["-1", ctx.profile.layout.listing.replace("{scan}", "{id}") + "*/shard-*.parquet"]
-    common = ["-G", static_gen, "-k", o["keep"], "-L", l2 + "index/{gen}/path-index.parquet", *(["-l", l2 + "*.parquet"] if o.get("layer2") else []), *l1,
+    cache = []
+    if o.get("cache"):
+        if ctx.profile.layout.listing is None:
+            err("retire: options.retire.cache without layout.listing: rollup caches kept")
+        else:
+            # `path-index -c`'s cache (`listing_key("dir-cache")`), one dir per index part under a sharded index
+            dc = ctx.profile.layout.listing.replace("{scan}", "{id}") + "dir-cache/"
+            cache = ["-c", dc + "*.parquet", "-c", dc + "*/*.parquet"]
+    common = ["-G", static_gen, "-k", o["keep"], "-L", l2 + "index/{gen}/path-index.parquet", *(["-l", l2 + "*.parquet"] if o.get("layer2") else []), *l1, *cache,
               *(["-m"] if o.get("markers_only") else []), "-o", store, "-S", static_store, *store_args_t(ctx), "-w", ctx.work / "retire",
               *(["-x"] if o.get("execute") else [])]
     # A local data store is the task's scratch (only this scan's files): the scans' files and D1 rows are the archive's.
     first = archive if ctx.profile.data_bucket is None and archive else ctx.data_uri
     roots = [r for r in dict.fromkeys([first, *(archive if c == "r2" else c for c in o.get("copies", []))]) if r]
-    with ctx.phase("retire", note=None if o.get("execute") else "dry run"):
+    # The work dir holds the served store the verify downloads: removed whatever happens, so a failed retire never
+    # leaves the steps after it (soft steps on the same disk) without space
+    with ctx.phase("retire", note=None if o.get("execute") else "dry run"), cleanup(ctx.work / "retire"):
         for i, root in enumerate(roots):
             # a copy after the D1 pass: its rows are that pass's (`-D`: no "-R leaves D1 rows" warning in a dry run)
             d1 = [] if i == 0 and ctx.has(*CF) else ["-R", *(["-D"] if ctx.has(*CF) else [])]
@@ -1187,13 +1245,14 @@ def retire(ctx: Ctx, arg: str | None) -> None:
                    warn=f"retire failed on {root} (its per-scan files stay; the next run retries)")
 
 
-@step("store-gc", core=False, soft=True, options={"execute": bool, "grace": int, "store": str})
+@step("store-gc", core=False, soft=True, options={"execute": bool, "grace": int, "store": str, "copies": list, "static_gens": list})
 def store_gc(ctx: Ctx, arg: str | None) -> None:
     """Superseded interval-store generations (`dt-cloud store-gc -l`): what the current generation was compacted or
     backfilled from, past the grace (`grace` seconds, default 3 days), its parity markers moved first; on the interval
     store (`store`, default the interval-store step's, else `$R2_ARCHIVE`) and on `$R2_ARCHIVE` when that's another
-    copy. Off unless the profile lists it in `steps`; a dry run unless `execute: true`. Static-names generations aren't
-    in it: which one each site reads isn't the job's to know (`store-gc -t static-names -k …` by hand)."""
+    copy. Off unless the profile lists it in `steps`; a dry run unless `execute: true`. Explicit `copies` overrides the
+    archive copy. Optional `static_gens` names every live static lineage root: cleanup protects each root and its
+    newest successor, plus the native current pointer, before collecting older generations past the grace."""
     if ctx.reproc:
         err("store-gc off under REPROC")
         return
@@ -1205,8 +1264,13 @@ def store_gc(ctx: Ctx, arg: str | None) -> None:
     args = ["-t", "interval-store", "-l", *(["-G", ctx.opt("store-gc", "grace")] if ctx.opt("store-gc", "grace") is not None else []),
             *(["-x"] if ctx.opt("store-gc", "execute") else [])]
     with ctx.phase("store-gc", note=None if ctx.opt("store-gc", "execute") else "dry run"):
-        for root in dict.fromkeys(r for r in (store, archive) if r):
+        for root in dict.fromkeys(r for r in [store, *ctx.opt("store-gc", "copies", [archive])] if r):
             ctx.sh(["dt-cloud", "store-gc", *args, "-o", root], fatal=False, warn=f"store-gc failed on {root} (the generations stay)")
+        if ctx.opt("store-gc", "static_gens") and archive:
+            static = ["-t", "static-names", *(a for g in ctx.opt("store-gc", "static_gens") for a in ("-k", g)),
+                      *(["-x"] if ctx.opt("store-gc", "execute") else [])]
+            ctx.sh(["dt-cloud", "store-gc", *static, "-o", archive], fatal=False,
+                   warn="static generation cleanup failed (the generations stay)")
 
 
 def store_args_t(ctx: Ctx) -> list[str]:
@@ -1317,6 +1381,32 @@ def _digest_root(ctx: Ctx) -> str:
     """The digest's snapshots root: `options.digest.root` (`{snapshots}` filled), else the data store's."""
     root = ctx.opt("digest", "root", None)
     return root.format(snapshots=ctx.snapshots) if root else f"{ctx.data_uri}/{ctx.snapshots}"
+
+
+#: Where the daily usage snapshots go, under the data store (and the R2 archive): one key space per deployment, beside
+#: the scans' `snapshots/<subdir>/` (`usage` is never a scan id).
+USAGE_PREFIX = "snapshots/usage"
+
+
+@step("cf-usage", core=False, soft=True, options={"config": str, "days": int},
+      requires=primary_only("cf-usage", "the usage snapshots are the deployment's, written once by its primary"))
+def cf_usage(ctx: Ctx, arg: str | None) -> None:
+    """The deployment's Cloudflare usage per day (`dt-cloud cf-usage -o`, specs/usage-metrics.md): `<data>/snapshots/
+    usage/<date>.json` (+ the R2 archive's copy, which the site's `/admin/usage` reads under `SERVED_R2`) for each of
+    the `options.cf-usage.days` (7) whole UTC days before today that a copy lacks: a missed day is backfilled the next
+    run. `options.cf-usage.config`: the deployment's Pages wrangler config in the image (`site/wrangler.toml`). Skipped
+    without `CF_ANALYTICS_TOKEN` (Account Analytics: Read; the profile's `secrets`) or on REPROC; never fatal. Not core:
+    a deployment lists it in `steps` once its token is a secret (a core step would need every store profile to skip it)."""
+    if ctx.reproc or not ctx.has("CF_ANALYTICS_TOKEN"):
+        err("no CF_ANALYTICS_TOKEN, or REPROC: skipping the Cloudflare usage snapshots")
+        return
+    with ctx.phase("cf-usage"):
+        outs = [f"{ctx.data_uri}/{USAGE_PREFIX}"]
+        if ctx.env.get("R2_ARCHIVE"):
+            outs.append(f"{ctx.env['R2_ARCHIVE']}/{USAGE_PREFIX}")
+        ctx.sh(["dt-cloud", "cf-usage", "-c", ctx.opt("cf-usage", "config", "site/wrangler.toml"),
+                "-d", str(ctx.opt("cf-usage", "days", 7)), *(a for o in outs for a in ("-o", o))],
+               fatal=False, warn="cf-usage snapshots failed (the scan's outputs stand; the next run backfills)", fails_phase=True)
 
 
 #: Core steps a profile may `skip`.

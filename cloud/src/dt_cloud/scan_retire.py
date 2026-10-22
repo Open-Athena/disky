@@ -12,6 +12,7 @@ listing shards are copies of what the stores serve: a deployment's storage then 
 | `search` | `path-index.{rows,trigrams,rows-search}.parquet` (+ footers)                            | delete |
 | `layer2` | the layer-2 listing (`-l` templates), where the deployment keeps one                    | delete |
 | `layer1` | the raw listing shards (`-1` templates), held while they carry a `generation` no marker vouches for | delete |
+| `cache`  | derived rollups (`-c` templates; `path-index -c`'s dir cache): a re-run's shortcut, rebuilt from the listing | delete |
 | `age`    | `age-pyramid-*`, `age-index*` (still read per scan)                                     | keep   |
 | `extras` | `attr.tsv*`, `ck.txt` (provenance that can't be derived later)                          | keep   |
 | `snapshot` | other `*.json` (`meta.json`, `verification.json`, …)                                  | keep   |
@@ -65,7 +66,7 @@ from .static_names import err
 
 PREFIX = ist.PREFIX
 STATIC_PREFIX = "static-names"
-DELETE = ("sort", "footer", "coarse", "search", "layer2", "layer1")
+DELETE = ("sort", "footer", "coarse", "search", "layer2", "layer1", "cache")
 KEEP = ("age", "extras", "snapshot", "over-time", "other")
 SEARCH_SUFFIXES = (".rows", ".trigrams", ".rows-search")
 #: The per-scan sorts' D1 variants (`index_footer.SORT_VARIANTS`), plus the v1 `coarse*` tiers (a LIKE).
@@ -131,9 +132,9 @@ class Scan:
         return dict(sorted(out.items()))
 
 
-def find_scans(store: Store, layouts: list[str], layer2s: list[str], layer1s: list[str] = ()) -> dict[str, Scan]:
+def find_scans(store: Store, layouts: list[str], layer2s: list[str], layer1s: list[str] = (), caches: list[str] = ()) -> dict[str, Scan]:
     """Every scan with per-scan objects under `store`: its index dirs (`layouts`) and their files, its layer-2 files
-    (`layer2s`) and raw listing shards (`layer1s`). Ids that are not scan ids are skipped."""
+    (`layer2s`), raw listing shards (`layer1s`) and rollup caches (`caches`). Ids that are not scan ids are skipped."""
     listings: dict[str, dict[str, int]] = {}
 
     def listing(prefix: str) -> dict[str, int]:
@@ -158,7 +159,7 @@ def find_scans(store: Store, layouts: list[str], layer2s: list[str], layer1s: li
             for key, n in keys.items():
                 if key.startswith(d):
                     s.objects[key] = (n, classify(key.rsplit("/", 1)[-1]))
-    for cls, ts in (("layer2", layer2s), ("layer1", layer1s)):
+    for cls, ts in (("layer2", layer2s), ("layer1", layer1s), ("cache", caches)):
         for t in ts:
             prefix, rx = template_rx(t)
             for key, n in listing(prefix).items():
@@ -341,7 +342,8 @@ def _totals(entries: Iterable[dict[str, list[int]]]) -> dict[str, list[int]]:
 
 
 def retire(scans_root: str, layouts: list[str], *, iv_root: str, static_gen: str, iv_gen: str | None = None,
-           static_root: str | None = None, layer2s: list[str] = (), layer1s: list[str] = (), keep: int = 2, only: list[str] = (),
+           static_root: str | None = None, layer2s: list[str] = (), layer1s: list[str] = (), caches: list[str] = (), keep: int = 2,
+           only: list[str] = (),
            execute: bool = False, markers_only: bool = False, backup_root: str | None = None, d1: bool = True,
            d1_store: str = F.PRIMARY_STORE, drop_path: bool = False, work: Path | None = None, d1_elsewhere: bool = False) -> dict:
     """Plan (and with `execute`, carry out) the retirement; returns the report (`scans`, `totals`, `d1`, …)."""
@@ -354,10 +356,13 @@ def retire(scans_root: str, layouts: list[str], *, iv_root: str, static_gen: str
         if iv_gen is None:
             raise SystemExit(f"{iv.root}/{PREFIX}: no current generation ({how}): name one with -g")
     iv_gen = ic.chain(iv, iv_gen)[-1]
+    from .append_runner import chain
+
+    static_gen = chain(st, STATIC_PREFIX, static_gen)[-1]
     in_iv = set(listed(iv, f"{PREFIX}/{iv_gen}"))
     in_static = set(listed(st, f"{STATIC_PREFIX}/{static_gen}"))
     gens = lineage(iv, iv_gen)
-    scans = find_scans(src, list(layouts), list(layer2s), list(layer1s))
+    scans = find_scans(src, list(layouts), list(layer2s), list(layer1s), list(caches))
     # The newest `keep` of the deployment's scans (this root's and every one the interval store holds), not of this
     # root's alone: a copy that stopped receiving per-scan files (lean scans write none to R2) would otherwise keep its
     # own last `keep` forever.
@@ -484,6 +489,7 @@ def render(report: dict) -> list[str]:
 @command("retire")
 @option("-1", "--layer1", "layer1s", multiple=True, help="Key template of a scan's raw listing shards under -s (`{id}`, `*` within a segment), e.g. `listing/{id}/*/shard-*.parquet`; repeat")
 @option("-b", "--backup", "backup_root", help="Copy every object to be deleted here first (a dir or URL; same keys; server side within one store), sizes checked")
+@option("-c", "--cache", "caches", multiple=True, help="Key template of a scan's rollup cache under -s (`{id}`, `*` within a segment), e.g. `listing/{id}/dir-cache/*.parquet`; repeat")
 @option("-D", "--d1-by-another-pass", "d1_elsewhere", is_flag=True, help="With -R: another pass over the same scans deletes their D1 rows (the scan step's first root), so `d1_left` isn't reported")
 @option("-g", "--gen", help="The interval store's generation (default: its current, `interval-store/CURRENT.json`), followed to its newest successor")
 @option("-G", "--static-gen", required=True, help="The static name index's generation (`static-names/GEN/` under -S)")
@@ -502,16 +508,16 @@ def render(report: dict) -> list[str]:
 @option("-w", "--work", help="Local work dir (verify's copies, backups' staging; default: a temporary one)")
 @option("-x", "--execute", is_flag=True, help="Back up (-b), delete the D1 rows, then the files")
 @argument("ids", nargs=-1)
-def retire_cmd(layer1s, backup_root, d1_elsewhere, gen, static_gen, as_json, keep, layer2s, layouts, markers_only, dry_run, iv_root, drop_path_pointer, no_d1,
+def retire_cmd(layer1s, backup_root, caches, d1_elsewhere, gen, static_gen, as_json, keep, layer2s, layouts, markers_only, dry_run, iv_root, drop_path_pointer, no_d1,
                scans_root, static_root, d1_store, work, execute, ids) -> None:
-    """Retire the per-scan sorts, footers, search sidecars and layer-2 and raw listings of the scans the interval store and the
+    """Retire the per-scan sorts, footers, search sidecars, layer-2 and raw listings and rollup caches of the scans the interval store and the
     static name index both hold and a parity marker vouches for (all but the newest -k; IDS: only these). A dry run by
     default: per scan the objects and bytes per class it would delete and keep, the totals, and the D1 rows that would
     go. `-x` backs up (-b), deletes the D1 rows, then the files."""
     if dry_run and execute:
         raise UsageError("-n and -x: pick one (a dry run is the default)")
     report = retire(scans_root, list(layouts), iv_root=iv_root, static_gen=static_gen, iv_gen=gen, static_root=static_root,
-                    layer2s=list(layer2s), layer1s=list(layer1s), keep=keep, only=list(ids), execute=execute, markers_only=markers_only,
+                    layer2s=list(layer2s), layer1s=list(layer1s), caches=list(caches), keep=keep, only=list(ids), execute=execute, markers_only=markers_only,
                     backup_root=backup_root, d1=not no_d1, d1_elsewhere=d1_elsewhere, d1_store=d1_store, drop_path=drop_path_pointer,
                     work=Path(work) if work else None)
     if as_json:

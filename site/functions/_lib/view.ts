@@ -338,7 +338,11 @@ function display(a: Agg): Record<string, unknown> {
   // A folder's date is its newest write, not a byte-weighted mean: a mean of
   // half-July, half-September reads "August", a date nothing was written on.
   // An mtime of 0 is a listing's "unknown" (no object was written in 1970): no date, as for none.
-  if (a.m) out.d = Math.floor(a.m / 86400)
+  if (a.m) {
+    out.d = Math.floor(a.m / 86400)
+    // …and that write's instant (epoch seconds): the map's "last created" reads it with a time of day.
+    out.t = a.m
+  }
   if (a.a != null) out.a = a.a
   const desc = (m: Record<string, number>) =>
     Object.fromEntries(Object.entries(m).sort((x, y) => y[1] - x[1]))

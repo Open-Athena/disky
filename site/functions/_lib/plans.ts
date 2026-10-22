@@ -164,7 +164,9 @@ export async function stageItems(
   note: string | null,
   shape: PrefixShape,
   asOf: string | null,
-): Promise<{ plan_id: number; /** null: nothing new (every item already staged or covered), so no batch */ batch_id: number | null; staged: string[]; /** The staged items that are exact objects (absent: none). */ staged_objects?: string[]; covered: string[]; absorbed: string[]; as_of: string | null } | { error: string }> {
+  /** Which of these canonical items hold data at the newest scan; the rest aren't staged (`gone`). */
+  present?: (keys: string[]) => Promise<Set<string>>,
+): Promise<{ /** null: nothing staged and no plan open */ plan_id: number | null; /** null: nothing new (every item already staged, covered or gone), so no batch */ batch_id: number | null; staged: string[]; /** The staged items that are exact objects (absent: none). */ staged_objects?: string[]; covered: string[]; absorbed: string[]; /** Refused: nothing under them at the newest scan (absent: none). */ gone?: string[]; as_of: string | null } | { error: string }> {
   const { prefixes: rawPrefixes = [], objects: rawObjects = [] } = Array.isArray(raw) ? { prefixes: raw } : raw
   const items: PlanItem[] = []
   const add = (i: PlanItem) => { if (!items.some(x => x.key === i.key && x.kind === i.kind)) items.push(i) }
@@ -179,8 +181,16 @@ export async function stageItems(
     add({ key: c, kind: 'object' })
   }
   if (!items.length) return { error: 'prefixes or objects required' }
+  // An item the newest scan holds nothing under (deleted since the scan it was picked at, or never there)
+  // would be a plan row with nothing to delete, which `/staged` settles and the map ignores (gcs 2026-10-02:
+  // a restore of old marks re-staged 5 prefixes a real run had deleted on 09-11).
+  const holding = present ? await present(items.map(i => i.key)) : null
+  const gone = holding ? items.filter(i => !holding.has(i.key)).map(i => i.key) : []
+  if (gone.length) items.splice(0, items.length, ...items.filter(i => holding!.has(i.key)))
+  const goneOut = gone.length ? { gone } : {}
   const ts = Math.floor(Date.now() / 1000)
   const open = await db.prepare("SELECT id FROM plans WHERE state = 'open' ORDER BY created_ts DESC LIMIT 1").first<{ id: number }>()
+  if (!items.length) return { plan_id: open?.id ?? null, batch_id: null, staged: [], covered: [], absorbed: [], ...goneOut, as_of: asOf }
   const have: PlanItem[] = open
     ? (await db.prepare('SELECT prefix, kind FROM plan_items WHERE plan_id = ?').bind(open.id).all<{ prefix: string; kind: string | null }>()).results
       .map(r => ({ key: r.prefix, kind: r.kind === 'object' ? 'object' : 'prefix' }))
@@ -192,7 +202,7 @@ export async function stageItems(
   const keys = (is: PlanItem[]) => is.map(i => i.key)
   const staged = keys(fresh), covered = keys(plan.covered), absorbed = keys(plan.absorbed)
   const stagedObjects = keys(fresh.filter(i => i.kind === 'object'))
-  if (open && !staged.length && !absorbed.length) return { plan_id: open.id, batch_id: null, staged, covered, absorbed, as_of: asOf }
+  if (open && !staged.length && !absorbed.length) return { plan_id: open.id, batch_id: null, staged, covered, absorbed, ...goneOut, as_of: asOf }
 
   // Every write below is ONE `db.batch` — one D1 transaction, all or nothing
   // (a request cut off mid-gesture used to leave a partial batch). Ids minted
@@ -222,13 +232,13 @@ export async function stageItems(
     `INSERT OR IGNORE INTO plan_items (plan_id, prefix, batch_id, added_by, added_ts, as_of, kind)
      SELECT ${planId}, json_extract(value, '$.key'), ${batchId}, ?, ?, ?, json_extract(value, '$.kind') FROM json_each(?)`,
   ).bind(who, ts, asOf, JSON.stringify(fresh.map(i => ({ key: i.key, kind: i.kind === 'object' ? 'object' : null })))))
-  const audited = { staged, ...(stagedObjects.length ? { objects: stagedObjects } : {}), covered, batch_id: 0, note, as_of: asOf }
+  const audited = { staged, ...(stagedObjects.length ? { objects: stagedObjects } : {}), covered, ...goneOut, batch_id: 0, note, as_of: asOf }
   stmts.push(db.prepare(`${edit} SELECT 'plan_items', CAST(${planId} AS TEXT), 'insert', ?, ?, ?, json_set(?, '$.batch_id', ${batchId})`)
     .bind(who, ts, absorbed.length ? JSON.stringify({ absorbed }) : null, JSON.stringify(audited)))
   stmts.push(db.prepare(`SELECT ${planId} AS plan_id, ${batchId} AS batch_id`))
   const out = await db.batch<{ plan_id: number; batch_id: number }>(stmts)
   const ids = out[out.length - 1].results[0]
-  return { plan_id: ids.plan_id, batch_id: ids.batch_id, staged, ...(stagedObjects.length ? { staged_objects: stagedObjects } : {}), covered, absorbed, as_of: asOf }
+  return { plan_id: ids.plan_id, batch_id: ids.batch_id, staged, ...(stagedObjects.length ? { staged_objects: stagedObjects } : {}), covered, absorbed, ...goneOut, as_of: asOf }
 }
 
 /** Fold stage batches `ids` into batch `into`: one logical staging that went

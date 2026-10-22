@@ -12,7 +12,7 @@
    }
   ]
  },
- "/api/buckets/open-athena/biotasks/tree?recursive=true": {
+ "/api/buckets/open-athena/biotasks/tree?recursive=true&limit=5000": {
   "status": 200,
   "headers": {
    "link": "<https://huggingface.co/api/buckets/open-athena/biotasks/tree?limit=2&recursive=true&cursor=p2>; rel=\"next\""

@@ -2,9 +2,10 @@
 (specs/interval-store.md §2.7 "Compaction").
 
 Runs pile up past the compaction level `L` (carries stop below it: `append_runner.plan_carries`), so read cost would grow
-with the scans. Once the newest manifest's runs, carried, hold two runs at level `L − 1` (`append_runner.compaction_due`:
-every 2^L scans past the base), `interval-store add` folds the base and every run into a **new generation**, the next
-name in the lineage (`next_gen`: `<root>.c<NNN>`):
+with the scans. Once the compaction policy fires (`append_runner.compaction_why`; under a level L, once the newest
+manifest's runs, carried, hold two runs at level `L − 1`: every 2^L scans past the base; `every` / `geometric`: by scan
+age or count), or `add -K` forces it, `interval-store add` folds the base and every run into a **new generation**, the
+next name in the lineage (`next_gen`: `<root>.c<NNN>`):
 
 - **Range files** (`compact_range`), per key range of the old generation's `ranges.json` (kept): the base's `pvl/`
   (`sv/`, `svt/` with the owner axis) and every run's deltas, one row per version (`interval_append.IDENT`) with the
@@ -28,7 +29,6 @@ The old generation is kept `-G` seconds (the folded-run prune's grace, `append_r
 from __future__ import annotations
 
 import json
-import re
 import shutil
 from collections.abc import Iterable, Callable
 from pathlib import Path
@@ -46,84 +46,45 @@ from .blobstore import Store
 from .static_names import err, q
 
 PREFIX = ist.PREFIX
-#: The store's current generation: `{"gen": …}` (what an unpinned reader serves, what `add` appends to by default).
-CURRENT = f"{PREFIX}/CURRENT.json"
-#: In a compacted generation: `{"gen": <its successor>}`; kept when the rest of it is pruned.
-SUCCESSOR = "successor.json"
-#: In a generation a compaction wrote: `{"from", "runs", "scans", "base_scans", "level"}`.
-COMPACTION = "compaction.json"
-GEN_SUFFIX = re.compile(r"(?P<root>.+)\.c(?P<n>\d{3,})")
+#: The store's current generation: `{"gen": …}` (what an unpinned reader serves, what `add` appends to).
+CURRENT = f"{PREFIX}/{ar.CURRENT}"
+SUCCESSOR = ar.SUCCESSOR
+COMPACTION = ar.COMPACTION
+GEN_SUFFIX = ar.GEN_SUFFIX
+next_gen = ar.next_gen
 
 
-def next_gen(gen: str) -> str:
-    """The generation a compaction of `gen` writes: `<root>.c<NNN>`, NNN one past `gen`'s (`.c001` for a root)."""
-    m = GEN_SUFFIX.fullmatch(gen)
-    root, n = (m["root"], int(m["n"])) if m else (gen, 0)
-    return f"{root}.c{n + 1:03d}"
-
-
-# ── The pointer ────────────────────────────────────────────────────────────
+# ── The pointer (the shared lineage helpers, `append_runner`, at this store's prefix) ──
 
 
 def current(store: Store) -> str | None:
     """The store's current generation (`CURRENT.json`), or None."""
-    return store.read_json(CURRENT)["gen"] if store.exists(CURRENT) else None
+    return ar.current(store, PREFIX)
 
 
 def set_current(store: Store, gen: str) -> None:
     """`CURRENT.json` → `gen` (one object written whole: readers see the old pointer or the new)."""
-    store.write_text(CURRENT, json.dumps({"gen": gen}) + "\n")
+    ar.set_current(store, PREFIX, gen)
 
 
 def generations(store: Store) -> list[str]:
-    """The store's generations: `interval-store/<gen>/scans.json` (a whole listing of the prefix: only when there is no
-    pointer)."""
-    return sorted({k.split("/")[1] for k in store.listing(PREFIX) if k.count("/") == 2 and k.endswith("/scans.json")})
+    """The store's generations: `interval-store/<gen>/scans.json`."""
+    return ar.generations(store, PREFIX)
 
 
 def chain(store: Store, gen: str) -> list[str]:
     """`gen`, then each successor a compaction recorded (`successor.json`), to the newest."""
-    out = [gen]
-    while store.exists(f"{PREFIX}/{out[-1]}/{SUCCESSOR}"):
-        nxt = store.read_json(f"{PREFIX}/{out[-1]}/{SUCCESSOR}")["gen"]
-        if nxt in out:
-            raise RuntimeError(f"{PREFIX}: successor cycle {out + [nxt]}")
-        out.append(nxt)
-    return out
+    return ar.chain(store, PREFIX, gen)
 
 
 def resolve(store: Store) -> tuple[str | None, str]:
-    """The generation an unpinned `add` appends to, and how it was found: `CURRENT.json`'s (`"current"`), else the
-    store's only generation (`"sole"`), else `(None, "none")` (or `"ambiguous"`: several, no pointer)."""
-    if (cur := current(store)) is not None:
-        return cur, "current"
-    gens = generations(store)
-    if len(gens) == 1:
-        return gens[0], "sole"
-    return None, "ambiguous" if gens else "none"
+    """`append_runner.resolve` over this store."""
+    return ar.resolve(store, PREFIX)
 
 
 def resolve_gen(store: Store, gen: str | None, log: Callable[[str], None] = err) -> str:
-    """The generation `add` appends to: `gen` (else `resolve`'s; the store's sole generation adopted as current), followed
-    to its newest successor. A pointer naming a compacted generation (a compaction stopped between its successor record
-    and the pointer) is moved to the successor."""
-    cur = current(store)
-    if gen is None:
-        gen, how = resolve(store)
-        if gen is None:
-            raise SystemExit(f"{store.root}/{PREFIX}: no current generation ({how}: "
-                             + ("name one with -g" if how == "ambiguous" else "build one with `interval-store build`") + ")")
-        if how == "sole":
-            log(f"{store.root}/{CURRENT}: none; adopting the store's only generation {gen}")
-            set_current(store, gen)
-            cur = gen
-    gens = chain(store, gen)
-    if len(gens) > 1:
-        log(f"{gen} was compacted into {gens[-1]} ({' → '.join(gens)}): appending there")
-    if cur is not None and cur != gens[-1] and cur in gens:
-        log(f"{store.root}/{CURRENT}: {cur} → {gens[-1]} (its successor)")
-        set_current(store, gens[-1])
-    return gens[-1]
+    """`append_runner.resolve_gen` over this store."""
+    return ar.resolve_gen(store, PREFIX, gen, log, build_hint="build one with `interval-store build`")
 
 
 # ── Folding base + runs into range files ───────────────────────────────────
@@ -230,7 +191,7 @@ def run_scans(gen_dir: Path, gen: str, runs: list[dict]) -> list[dict]:
 
 def fold_gen(gen_dir: Path, out: Path, work: Path, *, gen: str, runs: list[dict], rg_rows: int = ist.SERVED_RG, threads: int = 4,
              mem: str = "4GB", jobs: int = 1, fill: Fill | None = None, on_range: Callable[[int, int], None] | None = None,
-             ) -> tuple[dict, dict, dict, dict]:
+             progress: Callable[..., None] | None = None) -> tuple[dict, dict, dict, dict]:
     """The generation `gen` (its base in `gen_dir` and the runs `runs`) folded into a new one in `out`: its range files
     (`compact_range` over the old `ranges.json`), served sorts and churn (`interval_store.cut_gen`), and `scans.json`
     (the base's, every run scan's entry; `GENERATION` recorded when the result carries it). With `fill`, the result
@@ -238,8 +199,9 @@ def fold_gen(gen_dir: Path, out: Path, work: Path, *, gen: str, runs: list[dict]
     of one DuckDB database, `threads` and `mem` shared): each ends in a serial pyarrow writer, the bulk of a range's
     time; the output's bytes don't depend on it. Logs a line per range as it ends (`i/k`, its rows, seconds, how many
     are done) and around the served sorts' cut: an hour of silence on gcs read as a hang. `on_range(i, k)` after each
-    range (a caller's heartbeat; in completion order, one call at a time). Returns `(scans.json, rows per table, sorts,
-    stats)`."""
+    range (a caller's heartbeat; in completion order, one call at a time). `progress(note[, next_phase])`: the run
+    record's hook (`append_runner.compact_store`): each range's `i/k` note, then the ranges' total with `next_phase`
+    `sorts` as the served sorts' cut begins. Returns `(scans.json, rows per table, sorts, stats)`."""
     base = json.loads((gen_dir / "scans.json").read_text())
     sliced = ist.sliced(base)
     generation = ist.has_generation(base) or fill is not None
@@ -265,6 +227,8 @@ def fold_gen(gen_dir: Path, out: Path, work: Path, *, gen: str, runs: list[dict]
                 f"({done[0]}/{k} done, {monotonic() - t_all:.0f}s so far)")
             if on_range is not None:
                 on_range(i, k)
+            if progress is not None:
+                progress(f"{done[0]}/{k} ranges in {monotonic() - t_all:.0f}s")
         return got
 
     rows: dict[str, int] = {}
@@ -273,6 +237,8 @@ def fold_gen(gen_dir: Path, out: Path, work: Path, *, gen: str, runs: list[dict]
             rows[t] = rows.get(t, 0) + n
     t0 = monotonic()
     err(f"fold {gen}: {k} ranges, {sum(rows.values()):,} rows in {monotonic() - t_all:.0f}s; cutting the served sorts")
+    if progress is not None:
+        progress(f"{k} ranges, {sum(rows.values()):,} rows in {monotonic() - t_all:.0f}s", "sorts")
     sorts, stats = ist.cut_gen(con, out, doc, rg_rows=rg_rows, jobs=jobs)
     err(f"fold {gen}: served sorts cut in {monotonic() - t0:.0f}s")
     (out / "scans.json").write_text(json.dumps(doc, indent=1) + "\n")
@@ -280,79 +246,64 @@ def fold_gen(gen_dir: Path, out: Path, work: Path, *, gen: str, runs: list[dict]
 
 
 def compact_gen(gen_dir: Path, out: Path, work: Path, *, gen: str, new_gen: str, level: int | None, rg_rows: int = ist.SERVED_RG,
-                threads: int = 4, mem: str = "4GB", jobs: int = 1) -> dict:
+                threads: int = 4, mem: str = "4GB", jobs: int = 1, rule: dict | None = None) -> dict:
     """The generation `gen` (its base and the newest manifest's runs, in `gen_dir`) folded into the new generation
-    `new_gen` in `out` (`fold_gen`), and `compaction.json`. Returns a summary."""
+    `new_gen` in `out` (`fold`), and `compaction.json` (its rule: `rule`, `append_runner.compaction_doc`'s; else
+    `{"level": level}`). Returns a summary. (The published path is `append_runner.compact_store` with `compactor()`.)"""
     t0 = monotonic()
-    if not (gen_dir / "ranges.json").is_file():
-        raise SystemExit(f"{gen}: no ranges.json: a staged build's generation borrowing its ranges and base from another "
-                         f"(its `ranges_gen`) can't be compacted in place; backfill-generation -R makes a self-contained one")
     store = LocalRunStore(gen_dir, work / "lease", gen)
     base = store.read_json("scans.json")
     newest = latest_key(store.keys("manifests/"))
     if newest is None:
         raise SystemExit(f"{gen}: no runs to compact")
     runs = store.read_json(newest)["runs"]
-    doc, rows, sorts, stats = fold_gen(gen_dir, out, work, gen=gen, runs=runs, rg_rows=rg_rows, threads=threads, mem=mem, jobs=jobs)
-    comp = {"from": gen, "manifest": newest, "runs": [r["key"] for r in runs], "base_scans": len(base["scans"]), "scans": len(doc["scans"]),
-            "level": level}
+    got = fold(gen_dir, out, work, gen=gen, new_gen=new_gen, runs=runs, rg_rows=rg_rows, threads=threads, mem=mem, jobs=jobs)
+    comp = {"from": gen, "manifest": newest, "runs": [r["key"] for r in runs], "base_scans": len(base["scans"]), "scans": got["scans"],
+            **(rule if rule is not None else {"level": level})}
     (out / COMPACTION).write_text(json.dumps(comp, indent=1) + "\n")
     s = round(monotonic() - t0, 1)
-    err(f"compact {gen} → {new_gen}: {len(runs)} runs and the base, {len(doc['scans'])} scans, {stats['versions']:,} versions in {s}s")
-    return {"from": gen, "gen": new_gen, "runs": comp["runs"], "scans": len(doc["scans"]), "rows": rows, "sorts": sorts, "s": s}
+    return {"from": gen, "gen": new_gen, "runs": comp["runs"], "scans": got["scans"], "rows": got["rows"], "sorts": got["sorts"], "s": s}
 
 
-def due(gen_dir: Path, level: int | None) -> bool:
-    """Whether the generation in `gen_dir` (its newest manifest) is due a compaction at `level`."""
-    keys = sorted(p.relative_to(gen_dir).as_posix() for p in (gen_dir / "manifests").glob("*.json")) if (gen_dir / "manifests").is_dir() else []
-    newest = latest_key(keys)
-    return newest is not None and ar.compaction_due(json.loads((gen_dir / newest).read_text())["runs"], level)
+def fold(gen_dir: Path, out: Path, work: Path, *, gen: str, new_gen: str, runs: list[dict], rg_rows: int = ist.SERVED_RG, threads: int = 4,
+         mem: str = "4GB", jobs: int = 1, progress: Callable[..., None] | None = None) -> dict:
+    """`append_runner.Compactor.fold` for the interval store: `fold_gen` (refusing a generation without its own
+    `ranges.json`; `progress` its run-record hook). Returns `{scans, rows, sorts, versions}`."""
+    if not (gen_dir / "ranges.json").is_file():
+        raise SystemExit(f"{gen}: no ranges.json: a staged build's generation borrowing its ranges and base from another "
+                         f"(its `ranges_gen`) can't be compacted in place; backfill-generation -R makes a self-contained one")
+    doc, rows, sorts, stats = fold_gen(gen_dir, out, work, gen=gen, runs=runs, rg_rows=rg_rows, threads=threads, mem=mem, jobs=jobs, progress=progress)
+    err(f"compact {gen} → {new_gen}: {len(runs)} runs and the base, {len(doc['scans'])} scans, {stats['versions']:,} versions")
+    return {"scans": len(doc["scans"]), "rows": rows, "sorts": sorts, "versions": stats["versions"]}
+
+
+def compactor(rg_rows: int = ist.SERVED_RG) -> ar.Compactor:
+    """The interval store's plug into the shared compaction (`append_runner.compact_store`): `fold`, the publish order
+    (data, then `scans.json`, the generation's liveness marker), predecessors pruned after the grace."""
+    from .interval_local import UNREAD, publish_order
+
+    return ar.Compactor(prefix=PREFIX, fold=lambda *a, **kw: fold(*a, **kw, rg_rows=rg_rows), publish_order=publish_order, last=("scans.json",),
+                        keep=lambda rel: not rel.startswith(UNREAD))
+
+
+def due(gen_dir: Path, policy: ar.Policy | int | None) -> str | None:
+    """Why the generation in `gen_dir` (its base's scans and newest manifest) is due a compaction under `policy` (a
+    `Policy`, or a level), naming the rule that fired; None when it isn't (`append_runner.due_in`)."""
+    return ar.due_in(gen_dir, policy)
+
+
+compaction_doc = ar.compaction_doc
 
 
 # ── Pruning compacted generations ──────────────────────────────────────────
 
 
 def carry_markers(store: Store, old: str, into: str, files: Iterable[str] | None = None) -> int:
-    """Generation `old`'s parity markers (`verify/<id>.json`: `scan retire`'s gate) copied into `into` (a generation
-    holding the same versions: one `old` was compacted or backfilled into), each unless `into` has one for the scan;
-    returns how many. Before `old` is deleted, so its scans stay vouched for."""
-    pre = f"{PREFIX}/{old}/verify/"
-    keys = [k for k in (files if files is not None else store.keys(pre)) if k.startswith(pre) and k.endswith(".json") and "/" not in k[len(pre):]]
-    have = set(store.keys(f"{PREFIX}/{into}/verify/"))
-    n = 0
-    for k in sorted(keys):
-        dst = f"{PREFIX}/{into}/verify/{k[len(pre):]}"
-        if dst not in have:
-            store.write_bytes(dst, store.read_bytes(k))
-            n += 1
-    return n
+    """`append_runner.carry_markers` over this store."""
+    return ar.carry_markers(store, PREFIX, old, into, files)
 
 
 def prune_predecessors(store: Store, gen: str, *, now: float, grace_s: float = ar.GRACE_S, dry_run: bool = False,
                        log: Callable[[str], None] = err) -> list[dict]:
-    """Each generation `gen` was compacted from (its `compaction.json`'s `from`, and theirs while unpruned), deleted from
-    `store` once its successor's `compaction.json` is `grace_s` old — but for its `successor.json` — unless the pointer
-    names it. One record per predecessor still holding files: `{gen, objects, bytes, age_s, deleted}`."""
-    # The chain first (a pruned generation's `compaction.json` goes with it), newest first, to the first pruned one.
-    found = []
-    g = gen
-    while store.exists(key := f"{PREFIX}/{g}/{COMPACTION}"):
-        old = store.read_json(key)["from"]
-        files = {k: n for k, n in store.listing(f"{PREFIX}/{old}").items() if k != f"{PREFIX}/{old}/{SUCCESSOR}"}
-        if not files:
-            break
-        found.append((g, old, store.mtimes(f"{PREFIX}/{g}")[key], files))
-        g = old
-    out = []
-    cur = current(store)
-    for g, old, mt, files in found:
-        age = now - mt
-        go = age >= grace_s and old != cur
-        rec = {"gen": old, "objects": len(files), "bytes": sum(files.values()), "age_s": round(age), "deleted": 0}
-        if go and not dry_run:
-            rec["markers"] = carry_markers(store, old, gen, files)
-            rec["deleted"] = store.delete(sorted(files))
-        log(f"prune {old} (compacted into {g} {round(age)}s ago): {len(files)} objects, {rec['bytes']:,} B "
-            + ("deleted" if go and not dry_run else "would be deleted" if go else f"kept (grace {grace_s:.0f}s" + (", current" if old == cur else "") + ")"))
-        out.append(rec)
-    return out
+    """`append_runner.prune_predecessors` over this store."""
+    return ar.prune_predecessors(store, PREFIX, gen, now=now, grace_s=grace_s, dry_run=dry_run, log=log)

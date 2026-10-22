@@ -9,7 +9,7 @@ import { bareEmpty, legacyOwner, ownerParam } from './ownerParam'
 import { AGE_MODES, AgeChart } from './AgeChart'
 import { canonId, shortName, shortUserKey } from './UserChip'
 import { signInUrl, useCanAssign, useCanStage, useIdent as useIdentity, useIsAdmin } from './auth'
-import { AttributionRules } from './AttributionRules'
+import { OwnershipHelp, PageFacts } from './PageFacts'
 import { DiffTreemap, DiffHeader, useDiffModel } from './DiffTreemap'
 import { DiffTable } from './DiffTable'
 import { Allowances } from './Allowances'
@@ -139,7 +139,7 @@ const SPANS: [string, number][] = [['1d', 1], ['3d', 3], ['7d', 7], ['14d', 14],
 // HTTP copy of a pre-deploy answer (they were kept a day until 2026-09-17,
 // five minutes since) is never replayed after a reader rule changes. Bump
 // with `CACHE_V` in functions/_lib/edgeCache.ts.
-const API_CV = '2'
+const API_CV = '3'
 // The section in view lives in the query (`?section=diff`), where a link preview's unfurler sees it; an incoming
 // `#diff` (or a retired `#changes`) is adopted into it. A module constant: `useSectionSpy` re-resolves its mode,
 // and re-binds its scroll listener, whenever this object's identity changes.
@@ -1321,7 +1321,7 @@ function AppContent() {
         )}
         {bar.ownerFilter && (
           <span className="tb-axis">
-            <span className="lbl">owner</span>
+            <Explain text={<OwnershipHelp />} label="owner"><span className="lbl">owner</span></Explain>
             {ownerSelect}
           </span>
         )}
@@ -1488,6 +1488,15 @@ function AppContent() {
               readLogged={meta?.access?.buckets ? readLoggedOf : undefined}
               access={meta?.access}
             /></div>
+          )}
+          {/* The drilled node's storage-class mix and the ownership share, one compact row under the map's own
+              listing (it follows the drill); the per-class table opens from its disclosure (`?cx`). */}
+          {blindShown(!!fq) && (
+            <PageFacts
+              mix={meta && store.prices && mapPath ? classMix(mapPath[mapPath.length - 1]) : undefined}
+              scope={mapPath && mapPath.length > 1 ? mapPath.slice(1).map(n => n.n).join('/') : store.rootLabel}
+              tree={hasAttr ? mapTree ?? undefined : undefined}
+            />
           )}
         </>
       ) : miss ? (
@@ -1703,48 +1712,6 @@ function AppContent() {
           note={<>Intended state is tracked in <code>{store.lifecycle.tracked}</code> (<code>dt-cloud lifecycle diff|push</code>).</>}
         />
       )}
-
-      {blindShown(!!fq) && meta && store.prices && (() => {
-        // Class mix of the *drilled* node (each node carries descendant-inclusive
-        // `cb`), so this tracks the treemap instead of always showing fleet totals.
-        const node = mapPath ? mapPath[mapPath.length - 1] : tree
-        if (!node) return null
-        const mix = classMix(node)
-        const total = node.b || 1
-        const scope = mapPath && mapPath.length > 1 ? mapPath.slice(1).map(n => n.n).join('/') : store.rootLabel
-        return (
-          <section id="storage-classes">
-            <h2>Storage classes</h2>
-            <p className="sub">
-              Class mix + list-price estimate for <code>{scope}</code> — updates as you drill the treemap.
-            </p>
-            <table className="classes">
-              <thead>
-                <tr><th>class</th><th>bytes</th><th>est. $/mo (list, US)</th></tr>
-              </thead>
-              <tbody>
-                {Object.entries(mix)
-                  .sort((a, b) => b[1] - a[1])
-                  .map(([c, b]) => (
-                    <tr key={c}>
-                      <td>
-                        <Tooltip cell content={<>${CLASS_PRICE_US[c] ?? 0.02}/GiB·mo · {((100 * b) / total).toFixed(1)}% of these bytes</>}>
-                          <span className="dotted">{CLASS_NAMES[c] ?? c}</span>
-                        </Tooltip>
-                      </td>
-                      <td>{fmtBytes(b)}</td>
-                      <td>${Math.round((b / 1024 ** 3) * (CLASS_PRICE_US[c] ?? 0.02)).toLocaleString()}</td>
-                    </tr>
-                  ))}
-              </tbody>
-            </table>
-          </section>
-        )
-      })()}
-
-      {/* Static attribution reference — how ownership is inferred + the rule tables.
-          Reference material, so it sits last rather than sandwiched mid-page. */}
-      {blindShown(!!fq) && hasAttr && mapTree && <AttributionRules tree={mapTree} />}
 
       <SiteKbd
         placeholder={store.owners ? 'Users, color modes, scans, pages…' : 'Color modes, scans, pages, actions…'}

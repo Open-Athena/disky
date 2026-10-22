@@ -129,12 +129,14 @@ def _two(level: int) -> list[dict]:
 
 
 def test_interval_level_3_is_left_to_a_compaction():
-    """Two L2s at level 3: the merge stage submits nothing and says a level-3 compaction is due."""
+    """Two L2s at level 3: the merge stage submits no carry, says a level-3 compaction is due, and the compaction stage
+    submits it (`compact -C level:3`, with the R2 copy: the stages' account is the R2 account)."""
     f = IvFake(["2026-08-03"], compact_level=3)
     f.keys[f"{G1}/manifests/2026-08-07.json"] = {"date": "2026-08-07", "runs": _two(2)}
     f.runner(merge_wait=None).carries()
-    assert (f.jobs, [m for m in f.log if m.startswith("merge")]) == (
-        [], ["merge: level 3 is due: compact into a new base generation (carries stop below it)"])
+    assert (f.calls(), [m for m in f.log if m.startswith("merge")]) == (
+        [("compact", "compact -C level:3 -r -j 1 -M 90GB -p 16 -b data -g g1 -R g0 -S scr -m /gcs/data")],
+        ["merge: level 3 is due: compact into a new base generation (carries stop below it)"])
 
 
 def test_interval_nothing_due_is_logged():
@@ -172,6 +174,40 @@ def test_merge_jobs_pass_the_level(level, arg):
     assert spec["taskGroups"][0]["taskSpec"]["runnables"][0]["container"]["commands"][1] == (
         f"set -euo pipefail; mkdir -p /stage/tmp /stage/out && cd /stage && python3 -u -m dt_cloud.interval_append carry -L {arg} -M 90GB -p 16 "
         "-b data -g g1 -R g0 -S scr -m /gcs/data")
+
+
+def _level_run(level: int, first: str, last: str) -> dict:
+    return {"key": ar.run_key(first, last), "first": first, "last": last, "level": level, "scans": [first]}
+
+
+def test_merges_reaching_the_long_level_run_long():
+    l4 = [_level_run(4, "2026-10-01", "2026-10-16"), _level_run(4, "2026-10-17", "2026-11-01")]
+    l3 = [_level_run(3, "2026-10-01", "2026-10-08"), _level_run(3, "2026-10-09", "2026-10-16")]
+    assert [(ar.merge_is_long(ar.plan_carries(runs, max_level=6)[1]), ar.merge_ttl(ar.plan_carries(runs, max_level=6)[1])) for runs in (l4, l3)] == [
+        (True, ar.LONG_RUN_S), (False, ar.LEASE_S)]
+
+    def shape(spec: dict) -> tuple:
+        ts = spec["taskGroups"][0]["taskSpec"]
+        return ts["maxRunDuration"], ts["maxRetryCount"], spec["allocationPolicy"]["instances"][0]["policy"]["provisioningModel"]
+
+    spot = _static_runner(6)
+    spot.cfg = Profile(**{**spot.cfg.__dict__, "spot": True})
+    assert [shape(spot.merge_job("2026-11-01")[1]), shape(spot.merge_job("2026-11-01", long=True)[1])] == [
+        (f"{ar.MAX_RUN_S}s", 3, "SPOT"), (f"{ar.LONG_RUN_S}s", 0, "STANDARD")]
+    iv = IvFake(["2026-08-03"], compact_level=6).runner()
+    assert shape(iv.merge_job("2026-08-04", long=True)[1])[0] == f"{ar.LONG_RUN_S}s"
+
+
+def test_a_long_lease_outlives_the_default(tmp_path):
+    from datetime import datetime, timedelta, timezone
+
+    store = ar.LocalRunStore(tmp_path / "gen", tmp_path / "scratch", gen="g")
+    t0 = datetime(2026, 10, 30, tzinfo=timezone.utc)
+    assert store.lease("long", t0, ar.LONG_RUN_S) is None
+    # past the default lifetime, a short merger still sees the long holder's own lifetime
+    later = t0 + timedelta(seconds=ar.LEASE_S + 60)
+    assert store.lease("short", later, ar.LEASE_S) == {"owner": "long", "at": t0.isoformat(), "ttl_s": ar.LONG_RUN_S}
+    assert store.lease("short", t0 + timedelta(seconds=ar.LONG_RUN_S + 60), ar.LEASE_S) is None
 
 
 # ── Profiles: explicit in the examples, env overrides, validation ──────────

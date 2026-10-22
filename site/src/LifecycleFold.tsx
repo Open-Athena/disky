@@ -56,9 +56,9 @@ function RuleCells({ rule, change, prev }: Pick<BucketLifecycleRow, 'rule' | 'ch
         {change === 'removed' && <span className="chip removed">removed</span>}
         {change === 'changed' && prev && <ChangedChip rule={rule} prev={prev} />}
       </td>
-      <td>{prefix}</td>
-      <td>{describeRule(rule)}</td>
-      <td>{rule.Status}</td>
+      <td className="prefix">{prefix}</td>
+      <td className="action">{describeRule(rule)}</td>
+      <td className="status">{rule.Status}</td>
     </>
   )
 }
@@ -96,8 +96,9 @@ export function LifecycleFold({ store, asof, prevScan, note }: {
             <tr>
               {multi && !grouped && <th>bucket</th>}
               <th>rule</th>
-              {multi && grouped && <th>buckets</th>}
               <th>prefix</th><th>action</th><th>status</th>
+              {/* last, as each grouped row puts its buckets cell after the rule's own */}
+              {multi && grouped && <th>buckets</th>}
             </tr>
           </thead>
           <tbody>

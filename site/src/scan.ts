@@ -32,7 +32,13 @@ export function fmtScan(s: string, now = new Date()): string {
   // Timed ids are UTC instants; display in the viewer's local time,
   // 12-hour with a bare a/p ("8/19 6:08a"). The `?d=` token stays UTC (see
   // decodeScan) — display converts, the URL doesn't.
-  const dt = new Date(Date.UTC(+y, +mo - 1, +d, +hh, +(mm ?? '0')))
+  return fmtInstant(Date.UTC(+y, +mo - 1, +d, +hh, +(mm ?? '0')), now)
+}
+
+/** An instant (epoch ms) as the scan picker labels a timed scan: the viewer's local time, 12-hour with a bare a/p
+ *  (`10/21 10:39a`), the year only when it isn't the current one (`2025-10-21 10:39a`). */
+export function fmtInstant(ms: number, now = new Date()): string {
+  const dt = new Date(ms)
   const h = dt.getHours()
   const time = `${h % 12 || 12}:${String(dt.getMinutes()).padStart(2, '0')}${h < 12 ? 'a' : 'p'}`
   const md = `${dt.getMonth() + 1}/${dt.getDate()}`

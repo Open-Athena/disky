@@ -7,6 +7,8 @@ Two writers share one record shape and one SQL path:
   the profile ties to it), `-x <rc>` from its exit trap — so a failed run still leaves its record.
 - `backfill` (`scan_runs_backfill`): past runs, reconstructed from the Batch API, Cloud Logging's phase markers and
   the data bucket.
+- `reconcile` (also each `start`'s): `running` rows whose Batch job ended without its exit trap (maxRunDuration, a
+  lost VM) marked failed, naming the job's state.
 
 Nothing here assumes a deployment: the job kinds, markers, outputs and prices come from a profile (`Profile`), a JSON
 file named by `-c` / `$SCAN_RUNS_PROFILE`, which each deployment branch checks in.
@@ -834,6 +836,105 @@ def recovery_record(
     return Record(run, (attempt,))
 
 
+# ── Reconciling lost runs: a `running` row whose job Batch ended without its exit trap (maxRunDuration, a lost VM) ──
+
+#: How long a `running` row goes without a write (a phase, a heartbeat) before `reconcile` asks Batch about its job.
+RECONCILE_AFTER_S = 3600
+#: Batch states after which the job writes nothing more: DELETION_IN_PROGRESS is a deleted (cancelled) job's.
+BATCH_ENDED = ("SUCCEEDED", "FAILED", "CANCELLED", "DELETION_IN_PROGRESS")
+
+
+@dataclass(frozen=True)
+class Lost:
+    """One `running` row reconciled failed: why (`error`), and when its job ended (`finished_ts`)."""
+    run_id: str
+    scan: str
+    error: str
+    finished_ts: int | None
+    failed_phase: str | None = None
+
+
+def batch_lookup(project: str, name: str, region: str) -> Mapping | None:
+    """The Batch job `name` in `region`, or None when Batch has no such job (deleted: a 404)."""
+    from requests import HTTPError
+
+    from .gcp import batch_job
+
+    try:
+        return batch_job(name, project, region)
+    except HTTPError as e:
+        if e.response is not None and e.response.status_code == 404:
+            return None
+        raise
+
+
+def lost_reason(job: Mapping | None) -> tuple[str, int | None] | None:
+    """Why a `running` row's run is over, and when it ended, from its Batch job (None: not found); None while the job
+    still runs. The reason names the state and the job's last status event, on one line."""
+    if job is None:
+        return "lost: Batch job not found (deleted)", None
+    st = job.get("status", {})
+    state = st.get("state")
+    if state not in BATCH_ENDED:
+        return None
+    events = st.get("statusEvents") or ()
+    last = " ".join((events[-1].get("description") or "").split()) if events else ""
+    what = f"Batch job {state}" + (", but the run never recorded its end" if state == "SUCCEEDED" else "")
+    ended = next((_epoch(ev["eventTime"]) for ev in reversed(events)
+                  if re.search(r" to (SUCCEEDED|FAILED|CANCELLED)", ev.get("description", "")) and ev.get("eventTime")), None)
+    return clip_error(f"lost: {what}" + (f"; last event: {last}" if last else "")), ended
+
+
+def reconcile(
+    sink: Sink,
+    profile: Profile,
+    now: int,
+    lookup: Callable[[str, str], Mapping | None],
+    after_s: int = RECONCILE_AFTER_S,
+    out: Sink | None = None,
+    skip: str | None = None,
+    log: Callable[[str], None] | None = None,
+) -> list[Lost]:
+    """Mark failed the profile store's `running` rows quiet for over `after_s` whose Batch job (`lookup(job_name,
+    region)`) has ended: FAILED / CANCELLED, deleted or not found, and SUCCEEDED too (its own trap never recorded the
+    success). `finished_ts` is the job's end when Batch has one, else the row's last write; its running phases close
+    failed then. A job still running, or a row naming no job, is left alone; a failed lookup is logged and skipped.
+    Writes go to `out` (default `sink`; `PrintSink` for a dry run); `skip` is the caller's own run. Never alerts."""
+    out, log = out or sink, log or err
+    rows = sink.query(f"SELECT run_id, scan, job_name, region, updated_ts FROM scan_runs WHERE store = {lit(profile.store)} "
+                      f"AND status = 'running' AND updated_ts < {now - after_s} ORDER BY updated_ts")
+    lost: list[Lost] = []
+    for row in rows:
+        rid = row["run_id"]
+        if rid == skip:
+            continue
+        if not row["job_name"] or not row["region"]:
+            log(f"scan-run reconcile: {rid} ({row['scan']}): no Batch job recorded; left running")
+            continue
+        try:
+            why = lost_reason(lookup(row["job_name"], row["region"]))
+        except Exception as e:  # noqa: BLE001 — one row's lookup never stops the others'
+            log(f"scan-run reconcile: {rid} ({row['scan']}): Batch lookup failed: {type(e).__name__}: {e}")
+            continue
+        if why is None:
+            continue
+        error, ended = why
+        ended = ended if ended is not None else row["updated_ts"]
+        phases = sink.query(f"SELECT phase FROM scan_run_phases WHERE run_id = {lit(rid)} AND status = 'running' "
+                            "AND finished_ts IS NULL ORDER BY seq")
+        failed_phase = phases[-1]["phase"] if phases else None
+        out.execute([
+            f"UPDATE scan_run_phases SET status = 'failed', finished_ts = {lit(ended)}, note = 'failed (lost)' "
+            f"WHERE run_id = {lit(rid)} AND status = 'running' AND finished_ts IS NULL",
+            f"UPDATE scan_runs SET status = 'failed', error = {lit(error)}, finished_ts = COALESCE(finished_ts, {lit(ended)}), "
+            f"failed_phase = COALESCE(failed_phase, {lit(failed_phase)}), updated_ts = {now} "
+            f"WHERE run_id = {lit(rid)} AND status = 'running'",
+        ])
+        lost.append(Lost(rid, row["scan"], error, ended, failed_phase))
+        log(f"scan-run reconcile: {rid} ({row['scan']}) → failed: {error}")
+    return lost
+
+
 def _epoch(ts: str) -> int:
     import datetime as dt
 
@@ -996,6 +1097,27 @@ def recovery_cmd(
     rec = recovery_record(sink, profile, parent, phase, batch_job(job_name, profile.project, region), now, note)
     write_all(PrintSink() if dry_run else sink, [rec], now)
     err(f"scan-run recovery: {rec.run.run_id} {rec.run.status} · {parent} / {phase}")
+
+
+@cli.command("reconcile")
+@option("-a", "--after", default="1h", help="Reconcile `running` rows with no write (phase, heartbeat) for this long (N[s|m|h|d]; default 1h)")
+@option("-c", "--profile", "profile_path", default=None, help=f"The deployment's profile JSON (default ${PROFILE_ENV})")
+@option("-d", "--d1", default=None, help="D1 database id (default $D1_DB_ID)")
+@option("-K", "--store", "store_key", default=None, help="The store whose runs to reconcile (default the profile's `store`)")
+@option("-n", "--dry-run", is_flag=True, help="Read the record and Batch, print the SQL instead of writing it")
+@option("-s", "--sqlite", default=None, help="Use a local scan-run SQLite database instead of D1")
+def reconcile_cmd(after, profile_path, d1, store_key, dry_run, sqlite) -> None:
+    """Mark failed the `running` runs whose Batch job ended without recording it (maxRunDuration, a lost VM, a delete):
+    the error names the job's state and last status event. Runs whose job still runs are left alone; no alerts."""
+    profile = load_profile(profile_path)
+    if store_key:
+        profile = replace(profile, store=store_key)
+    if not profile.project:
+        raise SystemExit("scan-run reconcile: the profile names no project (its runs' Batch jobs can't be looked up)")
+    sink = sink_for(False, sqlite, d1)
+    lost = reconcile(sink, profile, _now(), partial(batch_lookup, profile.project), int(duration(after)),
+                     out=PrintSink() if dry_run else None)
+    err(f"scan-run reconcile: {len(lost)} lost run{'' if len(lost) == 1 else 's'}{' (dry run)' if dry_run else ''}")
 
 
 @cli.command("backfill")
@@ -1572,7 +1694,8 @@ def _phase_end_opts(f):
 def start_cmd(from_batch, gen, image, job_name, batch_job_name, kind, store_key, machine, trigger, parent, region, spot, at,
               tasks, profile_path, d1, dry_run, run_id, sqlite, scan) -> None:
     """Start the job's run of SCAN (default $SCAN_ID): record it running (`record -S`) with what started it, and keep
-    its scan, kind, parent and job facts for the phases and `finish`. Never fails the job."""
+    its scan, kind, parent and job facts for the phases and `finish`; then `reconcile` the store's earlier runs Batch
+    ended without recording it (a profile naming a project). Never fails the job."""
     j = JobRun(profile_path, d1, dry_run, run_id, sqlite)
     try:
         trigger = trigger or trigger_of(j.env)
@@ -1593,6 +1716,13 @@ def start_cmd(from_batch, gen, image, job_name, batch_job_name, kind, store_key,
     rec = j.write(at, start=True, job=job, facts=facts, trigger=trigger)
     if rec is not None:
         j.save(region=rec.run.region, job_name=rec.run.job_name)
+        if project := j.profile.project:
+            # earlier runs Batch ended without their exit trap: best-effort, never the run's failure
+            try:
+                profile = replace(j.profile, store=store_key) if store_key else j.profile
+                reconcile(sink_for(j.dry_run, j.sqlite, j.d1), profile, _now(), partial(batch_lookup, project), skip=j.run_id)
+            except (Exception, SystemExit) as e:  # noqa: BLE001
+                err(f"scan-run reconcile failed (the run continues): {type(e).__name__}: {e}")
     j.point_supervisor(profile_path, d1, dry_run, sqlite)
 
 

@@ -3,7 +3,7 @@
  * event, the URL in effect at each moment ("open this view"), and the strip
  * chart's ticks. Pure, so the rendering is pinned by `sessionsModel.test.ts`.
  */
-import { isErrorEvent, type SessionRow, type StoredEvent } from '../functions/_lib/sessionLogShape'
+import { isErrorEvent, type SessionPage, type SessionRow, type StoredEvent } from '../functions/_lib/sessionLogShape'
 import { type Registry, whoToHandle } from './identityRegistry'
 
 /** `1h 02m`, `3m 07s`, `12s`, `450ms`. */
@@ -126,4 +126,22 @@ export function viewerOf(row: Pick<SessionRow, 'email' | 'via'>, emails: Record<
   if (!email) return guest ? { kind: 'guest' } : { kind: 'anonymous' }
   const id = emails?.[email.toLowerCase()] ?? reg[whoToHandle(email)]?.u
   return id ? { kind: 'user', id, email, guest } : { kind: 'email', email, guest }
+}
+
+/** The list page's filters and cursor (its URL's `u`, `since`, `err`, `after` / `before`) → the API's query string. */
+export function sessionsQuery(f: { email: string; since: string; errors: boolean; after: string | null; before: string | null }): string {
+  const q = new URLSearchParams()
+  if (f.email) q.set('email', f.email)
+  if (f.since) q.set('since', f.since)
+  if (f.errors) q.set('errors', '1')
+  if (f.after) q.set('after', f.after)
+  else if (f.before) q.set('before', f.before)
+  return q.toString()
+}
+
+/** `51–100 of 312`; `0 of 0` when nothing matches; `none of 312` for a page past the end. */
+export function pagerLabel(p: Pick<SessionPage, 'sessions' | 'total' | 'offset'>): string {
+  const total = p.total.toLocaleString('en-US')
+  if (!p.sessions.length) return p.total ? `none of ${total}` : '0 of 0'
+  return `${(p.offset + 1).toLocaleString('en-US')}–${(p.offset + p.sessions.length).toLocaleString('en-US')} of ${total}`
 }

@@ -6,6 +6,7 @@ resuming, the lease, and a publish landing mid-merge (rebased)."""
 from __future__ import annotations
 
 import json
+import re
 import shutil
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -217,7 +218,7 @@ def _stack(store, key: str) -> list[tuple[str, int]]:
 
 
 def _summary(doc: dict) -> list[dict]:
-    return [{k: v for k, v in m.items() if k not in ("tiers_s", "s")} for m in doc["merged"]]
+    return [{k: v for k, v in m.items() if k not in ("tiers_s", "reads", "s")} for m in doc["merged"]]
 
 
 def _rows(store, keys: list[str]) -> int:
@@ -327,6 +328,58 @@ def test_parallel_tier_merges_write_the_same_bytes(chain, tmp_path):
     one, two = tmp_path / "one", tmp_path / "two"
     sm.build_merged_run(dirs, run, one, drilled=False, rule=None, tmp=tmp_path / "t1", jobs=1, log=lambda m: None)
     sm.build_merged_run(dirs, run, two, drilled=False, rule=None, tmp=tmp_path / "t2", jobs=2, log=lambda m: None)
+    files = sorted(p.relative_to(one).as_posix() for p in one.rglob("*") if p.is_file())
+    assert files == sorted(p.relative_to(two).as_posix() for p in two.rglob("*") if p.is_file())
+    assert [(f, (one / f).read_bytes() == (two / f).read_bytes()) for f in files] == [(f, True) for f in files]
+
+
+def test_a_tier_killed_in_the_pool_reruns_alone(chain, tmp_path, monkeypatch):
+    """A tier whose process dies (`BrokenProcessPool`: OOM) is rerun in-process with the whole machine's resources, and
+    the run is the same bytes as one process's; the tiers that finished in the pool aren't rerun."""
+    import concurrent.futures as cf
+    from concurrent.futures.process import BrokenProcessPool
+
+    a, b = chain["runs"][:2]
+    run = _merged(a, b, 1, [a, b])
+    dirs = [chain["gen"] / f"deltas/{s}" for s in (a, b)]
+    one, two = tmp_path / "one", tmp_path / "two"
+    sm.build_merged_run(dirs, run, one, drilled=False, rule=None, tmp=tmp_path / "t1", jobs=1, log=lambda m: None)
+    calls: list[tuple[str, bool]] = []
+    real = sm.merge_tier
+
+    class Pool:
+        def __init__(self, *a, **kw):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def submit(self, fn, *args):
+            f: cf.Future = cf.Future()
+            if args[0] == "catalog":
+                f.set_exception(BrokenProcessPool("killed"))
+            else:
+                calls.append((args[0], True))
+                f.set_result(real(*args))
+            return f
+
+    def alone(*args):
+        calls.append((args[0], False))
+        return real(*args)
+
+    monkeypatch.setattr(cf, "ProcessPoolExecutor", Pool)
+    monkeypatch.setattr(sm, "merge_tier", alone)
+    logs: list[str] = []
+    sm.build_merged_run(dirs, run, two, drilled=False, rule=None, tmp=tmp_path / "t2", jobs=2, log=logs.append)
+    assert calls == [("shards", True), ("catalog", False)]
+    assert [re.sub(r"\d+s", "<s>", m) for m in logs] == [
+        f"merge {run['key']}: shards in <s>",
+        f"merge {run['key']}: catalog killed in the pool (out of memory?): rerunning one at a time with the whole machine",
+        f"merge {run['key']}: catalog in <s> (alone)",
+    ]
     files = sorted(p.relative_to(one).as_posix() for p in one.rglob("*") if p.is_file())
     assert files == sorted(p.relative_to(two).as_posix() for p in two.rglob("*") if p.is_file())
     assert [(f, (one / f).read_bytes() == (two / f).read_bytes()) for f in files] == [(f, True) for f in files]

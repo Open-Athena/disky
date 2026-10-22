@@ -16,6 +16,7 @@
 import type { D1Database } from '@cloudflare/workers-types'
 import { type Ctx, identify, json } from '../../_lib/auth.js'
 import { TABLES, type TableSpec, tableSpec } from '../../_lib/tables.js'
+import { noteActivity } from '../../_lib/activityHook.js'
 
 const now = () => Math.floor(Date.now() / 1000)
 
@@ -104,6 +105,7 @@ export const onRequest = async (ctx: Ctx): Promise<Response> => {
         .bind(...names.map(n => row[n])),
       audit(pk, 'insert', null, row),
     ])
+    noteActivity(ctx, { line: `\`${spec.name}\`: added \`${pk}\``, table: spec.name, pk, action: 'insert' })
     return json({ ok: true, row })
   }
 
@@ -124,6 +126,7 @@ export const onRequest = async (ctx: Ctx): Promise<Response> => {
         .bind(v ? (cspec.type === 'int' ? Number(v) : v) : null, pk),
       audit(pk, 'update', old, { ...old, [col]: v || null }),
     ])
+    noteActivity(ctx, { line: `\`${spec.name}\` \`${pk}\`: ${col} = ${v ? `"${v.slice(0, 60)}"` : 'empty'}`, table: spec.name, pk, action: 'update' })
     return json({ ok: true })
   }
 
@@ -135,6 +138,7 @@ export const onRequest = async (ctx: Ctx): Promise<Response> => {
       env.DB.prepare(`DELETE FROM ${spec.name} WHERE ${spec.pk} = ?`).bind(pk),
       audit(pk, 'delete', old, null),
     ])
+    noteActivity(ctx, { line: `\`${spec.name}\`: deleted \`${pk}\``, table: spec.name, pk, action: 'delete' })
     return json({ ok: true })
   }
 

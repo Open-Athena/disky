@@ -26,6 +26,10 @@ import { PerfOverlay } from './dev/PerfOverlay'
 // The session log's viewer (admin-only): its own chunk, so the main bundle carries none of it.
 const SessionsPage = lazy(() => import('./SessionsPage').then(m => ({ default: m.SessionsPage })))
 const sessions = <AuthGate><Suspense fallback={<p className="loading">Loading…</p>}><SessionsPage /></Suspense></AuthGate>
+const ActivityPage = lazy(() => import('./ActivityPage').then(m => ({ default: m.ActivityPage })))
+const activity = <AuthGate><Suspense fallback={<p className="loading">Loading…</p>}><ActivityPage /></Suspense></AuthGate>
+const UsagePage = lazy(() => import('./UsagePage').then(m => ({ default: m.UsagePage })))
+const usage = <AuthGate><Suspense fallback={<p className="loading">Loading…</p>}><UsagePage /></Suspense></AuthGate>
 const FederatedScansPreview = import.meta.env.DEV ? lazy(() => import('./dev/FederatedScansPreview')) : null
 const ChildrenTablePreview = import.meta.env.DEV ? lazy(() => import('./dev/ChildrenTablePreview')) : null
 
@@ -71,6 +75,8 @@ export default function Root() {
       <Route path="/admin/db" element={<AuthGate><AdminDbPage /></AuthGate>} />
       <Route path="/admin/db/:table" element={<AuthGate><AdminDbPage /></AuthGate>} />
       <Route path="/admin/sessions" element={sessions} />
+      <Route path="/admin/activity" element={activity} />
+      <Route path="/admin/usage" element={usage} />
       <Route path="/admin/sessions/:sid" element={sessions} />
       <Route path="/files/*" element={<AuthGate><FilesRedirect /></AuthGate>} />
       {/* `/meta` served by another deployment (`Store.metaTree`): go there, keeping the subpath + query. */}
