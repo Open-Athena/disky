@@ -73,7 +73,12 @@ def test_failed_verification_publishes_nothing(tmp_path: Path, monkeypatch) -> N
     assert Store(str(dst)).listing("") == {}
 
 
-def test_first_publication_can_retry_after_data_uploaded(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("retry_bytes", [1, 2])
+def test_first_publication_can_retry_after_data_uploaded(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    retry_bytes: int,
+) -> None:
     src, dst = tmp_path / "source", tmp_path / "age"
     source(src, "2026-10-01", [("", 0, 1, 1)])
     put = Store.put
@@ -93,9 +98,13 @@ def test_first_publication_can_retry_after_data_uploaded(tmp_path: Path, monkeyp
     assert Store(str(dst)).exists("interval-store/CURRENT.json") is False
     assert age.covered(str(dst), "2026-10-01") is False
     monkeypatch.setattr(Store, "put", put)
+    source(src, "2026-10-01", [("", 0, retry_bytes, 1)])
     result = age.update(str(src), LAYOUT, str(dst), "g", tmp_path / "build")
     assert result["added"] == [{"scan": "2026-10-01", "pass": True, "cells": 8}]
     assert age.covered(str(dst), "2026-10-01") is True
+    assert rows(dst, "2026-10-01", tmp_path / "retried") == sorted([
+        (f"{tier}/p=/0", retry_bytes, 1) for tier in age.BINS
+    ])
 
 
 def test_retirement_requires_marker_manifest_and_d1_before_deleting(tmp_path: Path, monkeypatch) -> None:
