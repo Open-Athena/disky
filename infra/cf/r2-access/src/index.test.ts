@@ -583,6 +583,28 @@ describe('collect', () => {
     ])
   })
 
+  it('publishes completed windows when the provider fails mid-run, then fails with its code (OA 2026-10-22T13:13Z)', async () => {
+    const { env, order, read } = setup({ WINDOW_MINUTES: '5', PAGE_SIZE: '2', MAX_HOURS: '3', VERIFY_HOURS: '0', LOOKBACK_HOURS: '1' })
+    const live = provider([{ id: 'w0', timestamp: hr('08') + M, action: 'HeadObject', key: 'k' }])
+    const flaky = vi.fn<typeof fetch>(async (url, init) => {
+      const body = JSON.parse(String(init?.body))
+      if (body.view === 'events' && body.timeframe.from + 1 === hr('08') + 5 * M) return new Response(JSON.stringify({ success: false, errors: [{ code: 10000, message: 'private detail' }] }), { status: 403 })
+      return live(url, init)
+    })
+    await expect(collect(time, env.HOURLY_CRON, env, flaky, 'flaky')).rejects.toThrow('r2-access: provider_http_403_10000')
+    const state = read('state.json').buckets['jc-taxes']
+    expect([state.collected_through, Object.keys(state.hours)]).toEqual([hr('08') + 5 * M, ['2026-10-12T08:00']])
+    expect(read(`${prefix('flaky')}/_SUCCESS.json`).buckets[0]).toMatchObject({ collected_through: hr('08') + 5 * M, waiting: 11, error: 'provider_http_403_10000' })
+    expect(order.slice(-2)).toEqual(['state.json', `${prefix('flaky')}/_SUCCESS.json`])
+  })
+
+  it('fails before any write when the provider fails before a window completes', async () => {
+    const { env, order } = setup({ WINDOW_MINUTES: '5', VERIFY_HOURS: '0', LOOKBACK_HOURS: '1' })
+    const down = vi.fn<typeof fetch>(async () => { throw new TypeError('network') })
+    await expect(collect(time, env.HOURLY_CRON, env, down, 'down')).rejects.toThrow('r2-access: provider_unreachable')
+    expect(order).toEqual([])
+  })
+
   it('refuses to publish over a concurrently advanced state', async () => {
     const { env, archive, order } = setup({ VERIFY_HOURS: '0' })
     await collect(time, env.HOURLY_CRON, env, provider(rows), 'r1')
@@ -676,8 +698,8 @@ describe('handlers', () => {
     const fetcher = vi.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('private-object-key test-secret'))
     const log = vi.spyOn(console, 'error').mockImplementation(() => {})
     const { env } = setup()
-    await expect(worker.scheduled({ scheduledTime: time, cron: env.HOURLY_CRON, noRetry() {} }, env)).rejects.toThrow('r2-access: collection_failed')
+    await expect(worker.scheduled({ scheduledTime: time, cron: env.HOURLY_CRON, noRetry() {} }, env)).rejects.toThrow('r2-access: provider_unreachable')
     expect(fetcher.mock.calls.length).toBe(1)
-    expect(log.mock.calls).toEqual([[JSON.stringify({ message: 'r2-access failed', code: 'collection_failed' })]])
+    expect(log.mock.calls).toEqual([[JSON.stringify({ message: 'r2-access failed', code: 'provider_unreachable' })]])
   })
 })
