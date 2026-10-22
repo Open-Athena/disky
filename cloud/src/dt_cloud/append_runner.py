@@ -444,14 +444,16 @@ def lease_stale(held: dict, now: datetime, ttl_s: int) -> bool:
     return (now - datetime.fromisoformat(held["at"])).total_seconds() > held.get("ttl_s", ttl_s)
 
 
-def merge_ttl(merges: list[tuple[list[dict], dict]]) -> int:
-    """A merge job's lease lifetime: `LONG_RUN_S` when its carries reach `LONG_MERGE_LEVEL` (`merge_is_long`), else `LEASE_S`."""
-    return LONG_RUN_S if merge_is_long(merges) else LEASE_S
+def merge_ttl(merges: list[tuple[list[dict], dict]], long_rows: int | None = None) -> int:
+    """A merge job's lease lifetime: `LONG_RUN_S` when it runs long (`merge_is_long`), else `LEASE_S`."""
+    return LONG_RUN_S if merge_is_long(merges, long_rows) else LEASE_S
 
 
-def merge_is_long(merges: list[tuple[list[dict], dict]]) -> bool:
-    """Whether planned carries (`plan_carries`' merges) reach `LONG_MERGE_LEVEL`: the merge job runs as a long stage."""
-    return any(out["level"] >= LONG_MERGE_LEVEL for _, out in merges)
+def merge_is_long(merges: list[tuple[list[dict], dict]], long_rows: int | None = None) -> bool:
+    """Whether planned carries (`plan_carries`' merges) run as a long stage: one reaches `LONG_MERGE_LEVEL`, or (`long_rows`:
+    the store's bound, `Carry.long_rows`) their inputs hold at least `long_rows` rows (the job runs every carry in turn)."""
+    return any(out["level"] >= LONG_MERGE_LEVEL for _, out in merges) or (
+        long_rows is not None and sum(r.get("rows") or 0 for ins, _ in merges for r in ins) >= long_rows)
 
 
 # ── The coordinator lease: one `Runner.run` per store at a time ───────────
@@ -963,11 +965,13 @@ class Carry:
     `run` of the input run dirs `dirs` (oldest first) into `outp`, its `meta.json` (naming `run["scans"]`) included, and
     returns `{rows, bytes, s}` (`rec`: the run's record, its phases prefixed with the carry's, for the build's steps); `missing(store, runs)` the reader files listed runs lack; `drilled(store, runs)` the runs
     carrying a drill (merged only with each other, `plan_carries`); `refuse(store, before, after)` why a revision listing
-    `after` in place of `before` must not be published, or None."""
+    `after` in place of `before` must not be published, or None; `long_rows`: input rows from which a merge runs long
+    (`merge_is_long`; None: by level only)."""
     build: Callable[..., dict]
     missing: Callable[[RunStore, list[dict]], list[str]]
     drilled: Callable[[RunStore, list[dict]], set[str]] = lambda store, runs: set()
     refuse: Callable[[RunStore, list[dict], list[dict]], str | None] = lambda store, before, after: None
+    long_rows: int | None = None
 
 
 def newest(store: RunStore) -> tuple[str, dict] | None:
@@ -1046,7 +1050,7 @@ def merge_pending(store: RunStore, carry: Carry, mount: Path, *, tmp: Path, owne
         return {"manifest": cur[0], "plan": [{"inputs": [r["key"] for r in ins], "output": out["key"], "level": out["level"]} for ins, out in merges]}
     scan, _ = parse_manifest(cur[0].removeprefix("manifests/")) or (None, 0)
     rec.start(run_scans(cur[1]["runs"])[-1] if cur[1].get("runs") else scan, getattr(store, "prefix", None) or store.gen)
-    ttl = merge_ttl(plan_carries(cur[1]["runs"], carry.drilled(store, cur[1]["runs"]), max_level)[1])
+    ttl = merge_ttl(plan_carries(cur[1]["runs"], carry.drilled(store, cur[1]["runs"]), max_level)[1], carry.long_rows)
     if held := store.lease(owner, now(), ttl):
         log(f"merge: the lease is held ({held}); not merging")
         with phase(rec, "lease") as ph:
@@ -1549,6 +1553,8 @@ class Runner:
 
     store_prefix: ClassVar[str]
     job_prefix: ClassVar[str]
+    #: Input rows from which its merge job runs long (`merge_is_long`, the store's `Carry.long_rows`); None: by level only.
+    long_merge_rows: ClassVar[int | None] = None
 
     @property
     def p(self) -> Profile:
@@ -1817,7 +1823,7 @@ class Runner:
                 self.log(f"merge: compaction forced (-K): it folds every run, so the due carries are skipped ({len(merges)} merge{'s' * (len(merges) != 1)})")
             elif merges:
                 desc = "; ".join(f"{len(ins)} runs → {out['key']} (level {out['level']})" for ins, out in merges)
-                name, spec = self.merge_job(m["date"], long=merge_is_long(merges))
+                name, spec = self.merge_job(m["date"], long=merge_is_long(merges, self.long_merge_rows))
                 # its status record's holder (`StatusMirror`)
                 spec["taskGroups"][0]["taskSpec"]["environment"]["variables"][JOB_NAME_VAR] = name
                 self.record_env(name, spec)

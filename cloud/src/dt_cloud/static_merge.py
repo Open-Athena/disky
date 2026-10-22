@@ -273,11 +273,17 @@ def refuse(store: RunStore, before: list[dict], after: list[dict]) -> str | None
     return None
 
 
+#: Input rows (the runs' suffix rows) from which a merge job runs long (`append_runner.merge_is_long`): gcs's level-3
+#: carry (2026-10-22, 2.03 B rows from 4 runs) took 3 h 7 min on a spot n2-highmem-32, its drill 3 h 5 min, close to
+#: `MAX_RUN_S`, and a reclaimed or killed spot task restarts from zero.
+LONG_ROWS = 1_000_000_000
+
+
 def carry(rule=None, jobs: int = 1, build: Callable[..., dict] = build_merged_run) -> Carry:
     """The static store's `Carry`: `build` (`build_merged_run`, `jobs` tiers at once, the generation's hex-run `rule`)."""
     def b(dirs, run, outp, *, drilled, tmp, log, rec=None):
         return build(dirs, run, outp, drilled=drilled, rule=rule, tmp=tmp, jobs=jobs, log=log, rec=rec)
-    return Carry(build=b, missing=missing, drilled=drilled_runs, refuse=refuse)
+    return Carry(build=b, missing=missing, drilled=drilled_runs, refuse=refuse, long_rows=LONG_ROWS)
 
 
 def complete(store: RunStore, run: dict) -> bool:
