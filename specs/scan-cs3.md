@@ -36,7 +36,7 @@ Phases overlap (static-names runs beside interval-store and post), so the totals
 | static-names append | scans since the base: every append refolds the base's `cintervals` + every run's `cdelta` (`rebuild_open`), and its carries' cost grows by level | keep each run's open-version state (`copen`) so an append reads the previous state + the day's delta only; carries are already amortized O(changes·log) |
 | static-names compaction | corpus size, every 2^L scans; today one Python core in `merge_shards` and a slow drill fold | parallel `merge_shards` (in progress), chunked drill (70ed412a), local-SSD staging, parallel uploads; floor ~30–45 min on one VM for a ~550 GiB corpus |
 | interval-store append | same refold pattern as static-names | same fix |
-| retire | fleet size: its verify re-downloads the served generation (~120 GB, ~8 min) and compares a whole scan (440M objects, 22 min); plus D1 footer rows | verify in the scan's own `index` step (the sorts are already local), write the marker there, and run retire markers-only (`-m`); D1 deletes stop once `index-sync -R` has run 2 scans |
+| retire | fleet size: its verify re-downloads the served generation (~120 GB, ~8 min) and compares a whole scan (440M objects, 22 min); plus D1 footer rows | the interval-store append writes the marker (item 4, in progress); retire then only lists, backs up and deletes. D1 deletes stop once `index-sync -R` has run 2 scans |
 | dups, index-rows, warm-cache | fleet-sized reads per scan | revisit after path-index is gone |
 
 ## Plan, in order
@@ -47,7 +47,31 @@ Phases overlap (static-names runs beside interval-store and post), so the totals
    - A manual scan on the new image, which carries cw's listing `version` column.
 2. **Compaction under an hour:** local-SSD staging, parallel uploads, and overlapping the independent stages. Measure each stage against the floor above.
 3. **Appends O(#changes):** carry the open-version state between appends in both stores (static-names and interval-store).
-4. **Retire's verify moves into `index`** (retire becomes markers-only: constant cost), and it logs its peak RSS and disk.
+4. **Retire's verify moves into the interval-store append** (retire becomes markers-only: constant cost). Implemented; not deployed yet. Design and rollout below.
+
+## Item 4: the parity marker comes from the append
+
+**What a marker certifies.** `scan retire` deletes a scan's per-scan files only when `interval-store/<gen>/verify/<id>.json` passes (found through compactions and backfills). Until now `interval-store verify` wrote it at retire time: about 20 sampled views and diffs, plus an exact comparison of every object's `generation`. Now the append writes it, and it compares every row: for every key range and each version table (`pvl`, and the owner slices `sv`, `svt`), the store's answer at the scan equals the scan's rows. That is a stronger check than the sampled views. Markers from `interval-store verify` still count, and retire without `-m` still makes one for a scan that has none.
+
+**Options considered.**
+- (a) **In the append, against the published store (chosen).** Each range task already holds the scan's rows for its range (`np`, `ns`) and has just written the run's deltas. The check adds one read per range: the base's range files for that range (`pvl/`, `sv/`, `svt/` `r####.parquet`, through the mount) and each run's delta for that range, as listed in the newest earlier manifest. It combines them as the reader does (one row per version, smallest `vt`, `vf ≤ D < vt`) and compares them row for row with the scan (`EXCEPT ALL` both ways, over the `HASH` columns: the change columns, `dr` from the stored `wts`/`wb`, `last_read`, `tot`). The check reads the published files, not the scratch `state/` chain that the append's own reconstruction check uses, so a corrupted base or run file, a merged run, or a lost close shows up as missing or extra rows. `publish` then compares each of the run's served sorts row for row with the deltas they were cut from. The marker is the sum over all ranges plus the cut check.
+- (b) In `index`: the per-scan sorts are there, but the store's answer at the scan isn't. That would need the same reads (a) makes, with a second copy of the logic, and `index` runs before the append. Rejected.
+- (c) Range-read the served sorts' needed groups in retire: still a whole scan's worth of groups (every range is touched), on the post VM, every day. Rejected in favour of (a), which reuses inputs the append already has.
+
+**Exact.** Every row of every table is compared; nothing is sampled or hashed (`check_tables`, `check_cut` in `interval_append.py`). `pass` needs rows > 0, zero missing and extra in every table and every served sort, and (where the generation carries it) every object's `generation` equal. No marker is written when a range or the cut wasn't checked (scans appended before this change), or when a range was checked against different runs than its manifest lists (a carry's revision landed between `ranges` and `publish`). `retire -m` keeps such a scan, and a retire without `-m` verifies it the old way.
+
+**What it assumes.** The marker vouches for the store as published with the scan's manifest. Later carries and compactions rebuild runs and bases from the same versions. Compactions were already trusted this way (markers are found through `compaction.json` lineage). A carry's merge is the same min-`vt` combine the check uses (`test_the_check_over_merged_runs_finds_every_row_equal`). Base served sorts are cut once per generation (tested byte for byte against a fresh build). The check reads range files, not the served base sorts.
+
+**Cost.**
+- Per range, the extra work is reading the base's three range files (gcs: ~18 + 16 + 17 GB over 256 ranges, ~200 MB on average, ~1.5 GB at the largest), the runs' deltas (small), a window over the base's versions, and two `EXCEPT ALL`s over the range's ~1.7M live rows per table. Estimate: +10–30 s on a range whose append takes ~60 s, so the ranges stage grows ~3–5 min of wall time (16 tasks × 16 ranges).
+- The cut check in `publish` compares ~11M rows × 5 sorts on a busy day: about a minute.
+- Each range doc records the check's seconds (`check.s`), and the run's `meta.json` records the cut check's (`check_s`). The first manual scan measures these.
+- Retire does no verification. It lists, copies backups server side, deletes D1 rows, then deletes files: estimated a few minutes, down from 37–44.
+
+**Status.** `[cloud]` code and tests are on the agent branch (see the commits). Rollout:
+1. Rebuild the `:latest` image and run a manual scan. Its append writes `verify/<scan>.json` (`how: append`); check that it passes, and read `check.s` / `check_s`.
+2. No profile change is needed. Retire verifies only scans that have no marker. The scans appended before the rebuild (10-22T0702, 10-22T1545, and any daily before it) retire the old way, once each. Every later scan goes markers-only.
+3. `options.retire.markers_only` stays off, as a fallback. A scan that ends up without an append marker (a carry's revision raced its publish) is verified the old way instead of being kept forever. That rare case is why the post VM keeps its 400 GB disk for now. If it never happens, set `markers_only: true` and shrink the disk; the VM keeps its memory for `dups`.
 5. **Retire path-index:** move its remaining readers, then drop the step (`specs/lean-scans.md`).
 6. **Listing:** evaluate inventory reports vs change notifications for an O(#changes) input. This is the last O(fleet) term.
 
