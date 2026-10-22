@@ -3,7 +3,7 @@ import { describe, expect, it } from 'vitest'
 import {
   batchHref, failedAt, logsHref, mapHref, metaHref, outputIndex, phaseIssues, phaseOutcome, phaseOrder, phaseSpans, runTime, type ScanRun, type ScanRunOutput,
   type ScanRunPhase, manualScans, scanRunOf, structureOf, summarize, withDeltas, runOutcome, overlappingFailures, runTasks, taskLogsHref,
-  isMaintenance, liveness, maintStore, QUIET_S,
+  isMaintenance, liveness, LOST_S, maintStore, QUIET_S,
 } from './scanRunsModel'
 
 export const run = (o: Partial<ScanRun> & Pick<ScanRun, 'run_id' | 'scan'>): ScanRun => ({
@@ -267,9 +267,23 @@ describe('maintenance runs (compactions, merges: `dt_cloud.maint_runs`)', () => 
 
   it('a running one shows its running phase and elapsed time, and goes quiet without a heartbeat', () => {
     const spans = phaseSpans(compact, phases, 10_000)
-    expect(liveness(compact, spans, 10_000)).toEqual({ phase: 'sorts', elapsed: 3000, quiet: null })
-    expect(liveness(compact, spans, 9500 + QUIET_S + 1)).toEqual({ phase: 'sorts', elapsed: 3000, quiet: QUIET_S + 1 })
+    expect(liveness(compact, spans, 10_000)).toEqual({ phase: 'sorts', elapsed: 3000, quiet: null, lost: false })
+    expect(liveness(compact, spans, 9500 + QUIET_S + 1)).toEqual({ phase: 'sorts', elapsed: 3000, quiet: QUIET_S + 1, lost: false })
     expect(liveness(merged, [], 10_000)).toBeNull()
+  })
+
+  it('lost past `LOST_S` without a write: its clock stops at its last write, so it never stretches the duration chart', () => {
+    const live = 9500 + LOST_S, lost = live + 1, days = 9500 + 4 * 86400
+    expect([live, lost, days].map(now => {
+      const [row] = summarize([compact], phases, [], now)
+      return [row.secs, row.spans.map(s => [s.phase, s.end - s.start]).at(-1), liveness(compact, row.spans, now)]
+    })).toEqual([
+      [live - 3000, ['sorts', live - 7000], { phase: 'sorts', elapsed: live - 7000, quiet: LOST_S, lost: false }],
+      [9500 - 3000, ['sorts', 9500 - 7000], { phase: 'sorts', elapsed: 9500 - 7000, quiet: LOST_S + 1, lost: true }],
+      [9500 - 3000, ['sorts', 9500 - 7000], { phase: 'sorts', elapsed: 9500 - 7000, quiet: days - 9500, lost: true }],
+    ])
+    // a finished run keeps its own end, however old its last write
+    expect(summarize([{ ...compact, status: 'failed', finished_ts: 9600 }], phases, [], days).map(r => r.secs)).toEqual([6600])
   })
 
   it('is never the run behind a scan (the map\'s "scanned … ago" link)', () => {

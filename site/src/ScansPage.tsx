@@ -20,10 +20,10 @@ import { DEFAULT_STORE, type Store } from './stores'
 import { useStore } from './store'
 import { useMinSlug } from './scan'
 import {
-  batchHref, isMaintenance, liveness, logsHref, maintStore, mapHref, metaHref, type OutputDelta, phaseOrder, type PhaseSpan, type RunSummary, type ScanRun,
+  batchHref, isLost, isMaintenance, liveness, logsHref, maintStore, mapHref, metaHref, type OutputDelta, phaseOrder, type PhaseSpan, type RunSummary, type ScanRun,
   type ScanRunPhase, type PhaseIssue, type PhaseRecovery, overlappingFailures, phaseFill, phaseOutcome, runOutcome, runTasks, type RunTask, taskLogsHref,
 } from './scanRunsModel'
-import { colorer, fmtDur, fmtRunTime, getJson, type Links, PhaseBar, runDay, RunWhen, scanRunsApi, scansHref, scansStore, Status, useScanRuns } from './scanRunsUi'
+import { colorer, fmtDur, fmtRunTime, getJson, type Links, PhaseBar, QUIET_TIP, runDay, RunWhen, scanRunsApi, scansHref, scansStore, Status, useScanRuns } from './scanRunsUi'
 import { brushRole, dagNodes, processOf, type DagNode, type Hl, type RunDagRow } from './runDag'
 import './scans.scss'
 
@@ -127,6 +127,7 @@ function DurationStrip({ runs, color, onPick, win, onWin, hover }: {
   const dragged = useRef(false)
   const pts = runs.filter(r => r.secs != null && r.run.started_ts != null)
   if (pts.length < 2) return null
+  const now = Math.floor(Date.now() / 1000)
   const H = W < 500 ? 150 : 190, L = 36, R = 6, T = 8, B = 20
   const t0 = Math.min(...pts.map(p => p.run.started_ts!)), t1 = Math.max(...pts.map(p => p.run.started_ts!))
   const span = Math.max(3600, t1 - t0)
@@ -192,12 +193,12 @@ function DurationStrip({ runs, color, onPick, win, onWin, hover }: {
         })}
         {pts.map(p => {
           const { cx, w: bw, lo, hi } = cols.get(p.run.run_id)!
-          const failed = p.run.status === 'failed'
+          const failed = p.run.status === 'failed', lost = isLost(p.run, now)
           const main = p.spans.filter(s => s.lane === 0)
           const id = p.run.run_id
           const out = !drag && !inSpan(win, p.run.started_ts)
           return (
-            <g key={id} className={`sr-col${failed ? ' failed' : ''}${hover.id === id ? ' brushed' : hover.id || out ? ' dimmed' : ''}`}
+            <g key={id} className={`sr-col${failed ? ' failed' : ''}${lost ? ' lost' : ''}${hover.id === id ? ' brushed' : hover.id || out ? ' dimmed' : ''}`}
               onClick={() => { if (!dragged.current) onPick(id) }} role="link" aria-label={`${p.run.scan} ${p.run.kind} run`}
               onPointerMove={() => { if (!drag) hover.enter(id) }} onPointerLeave={hover.leave}>
               <rect className="sr-col-hit" x={lo} y={T} width={Math.max(0, hi - lo)} height={H - T - B} />
@@ -328,7 +329,7 @@ export function ScansPage() {
                     <td className="nb"><RunWhen ts={r.started_ts} scan={r.scan} href={scanHref(r.run_id)} />
                       {r.trigger === 'manual' && <> <Tooltip content="Started by hand (a submit or a resume), not by the schedule."><span className="dim">manual</span></Tooltip></>}
                       {(kinds.length > 1 || s.downstream > 0) && <div className="sr-kind">{kinds.length > 1 && <KindLabel run={r} />}{s.downstream > 0 && <Tooltip content={`${s.downstream} downstream job${s.downstream > 1 ? 's' : ''} (listing fan-out, …)`}><span>{kinds.length > 1 ? ' + ' : '+ '}{s.downstream} job{s.downstream > 1 ? 's' : ''}</span></Tooltip>}</div>}</td>
-                    <td><Status cell run={r} failedAt={s.failed_at} issues={s.phase_issues} />{live && <Live live={live} />}</td>
+                    <td><Status cell run={r} failedAt={s.failed_at} issues={s.phase_issues} lost={live?.lost} />{live && <Live live={live} />}</td>
                     <td className="num nb">{s.secs == null ? <span className="dim">—</span> : fmtDur(s.secs)}</td>
                     <td className="hide-md"><PhaseBar cell spans={s.spans} secs={s.secs} color={color} width={130} /></td>
                     <td className="num nb">{bytes(s.out_bytes)}</td>
@@ -618,7 +619,7 @@ function KindLabel({ run }: { run: ScanRun }) {
 function Live({ live, inline }: { live: NonNullable<ReturnType<typeof liveness>>; inline?: boolean }) {
   return <span className={`sr-live${inline ? ' inline' : ''}`}>{inline && ' · '}
     {live.phase && <Tooltip content="The phase running now, and how long it has run."><span>{live.phase}{live.elapsed != null && <> · {fmtDur(live.elapsed)}</>}</span></Tooltip>}
-    {live.quiet != null && <Tooltip content="The run hasn't written its record (phases, heartbeat) for this long: its job may have died. Check its Batch job."><span className="sr-quiet">{live.phase ? ' · ' : ''}quiet {fmtDur(live.quiet)}</span></Tooltip>}
+    {live.quiet != null && <Tooltip content={QUIET_TIP}><span className="sr-quiet">{live.phase ? ' · ' : ''}quiet {fmtDur(live.quiet)}</span></Tooltip>}
   </span>
 }
 
@@ -665,7 +666,7 @@ export function ScanRunPage() {
         <h1><code>{r.scan}</code>{(kinds.size > 1 || isMaintenance(r.kind)) && <> <span className="dim"><KindLabel run={r} /></span></>}</h1>
         {isMaintenance(r.kind) && <p className="sub">{r.kind === 'compact' ? 'A compaction' : 'A merge of deferred carries'} of <code>{r.gen ?? '?'}</code>, its own Batch job; <code>{r.scan}</code> is the newest scan it {r.kind === 'compact' ? 'folds' : 'carries'}{d.siblings.length > 0 && <> (<Link to={scanHref(d.siblings[d.siblings.length - 1].run_id)}>its scan run</Link>)</>}.</p>}
         <p className="sub">
-          <Status run={r} failedAt={d.failed_at} issues={d.phase_issues} />{liveDetail && <Live live={liveDetail} inline />} · {fmtRunTime(r.started_ts)} → {r.finished_ts ? fmtRunTime(r.finished_ts) : '…'}
+          <Status run={r} failedAt={d.failed_at} issues={d.phase_issues} lost={liveDetail?.lost} />{liveDetail && <Live live={liveDetail} inline />} · {fmtRunTime(r.started_ts)} → {r.finished_ts ? fmtRunTime(r.finished_ts) : '…'}
           {d.secs != null && <> · {fmtDur(d.secs)}</>}
           {tasks.length
             ? <> · <Tooltip content="A Nextflow run: a head job on this machine runs the pipeline, and each step runs as its own Batch job on a machine sized for it (Tasks below)."><span>Nextflow · {tasks.length} tasks{r.machine && <span className="dim"> + {r.machine} head</span>}</span></Tooltip></>
