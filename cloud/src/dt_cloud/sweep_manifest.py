@@ -575,7 +575,10 @@ def load_holds(
                 from .interval_export import object_identities
 
                 sources[scan] = "interval store"
-                tables.append(object_identities(source.store, scan, bucket, mb, mx, gen=source.gen))
+                identities = object_identities(source.store, scan, bucket, mb, mx, gen=source.gen)
+                if "version" in identities.column_names:
+                    identities = identities.append_column("generation", pc.cast(identities["version"], pa.int64())).select(["name", "generation", "created"])
+                tables.append(identities)
             tables += [t.select(["name", "generation", "created"]) for f in futures if (t := f.result().table) is not None]
             ref = (
                 pa.concat_tables(tables).sort_by("name").combine_chunks()
