@@ -43,4 +43,5 @@ buckets:
   rhoarnet-us-east-08a: {label: rhoarnet, zone: 08a, quota: {bytes: 500 TiB, name: 500 TiB, short: 500Ti}}
   marin-us-east-08a: {label: 08a, zone: 08a, quota: {bytes: 500 TiB, name: 500 TiB, short: 500Ti}}
   marin-us-west-04a: {label: 04a, quota: {bytes: 100 TiB, name: 100 TiB, short: 100Ti}}
+  marinfold-exp368-rno2a: {label: rno2a}  # RNO2A's zone quota not yet known
 prices: {}
