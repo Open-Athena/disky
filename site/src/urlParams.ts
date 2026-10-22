@@ -51,6 +51,12 @@ export const URL_PARAMS: Record<string, UrlParamDoc> = {
     examples: ['300', '900', '3600'],
     pages: ['/staged', '/runs'],
   },
+  attr: {
+    label: 'Usage by',
+    description: 'Groups the Cloudflare usage page\'s attribution table by `caller` (a grant, token or `session`) or `route`. Defaults to `caller`.',
+    examples: ['route'],
+    pages: ['/admin/usage'],
+  },
   axis: {
     label: 'Right axis',
     description: 'On a run\'s progress chart, adds a second metric on the right axis: `rate`, `objects`, `bytes` or `byteRate`. Defaults to `none`, and a value equal to the left metric is ignored.',
@@ -97,6 +103,12 @@ export const URL_PARAMS: Record<string, UrlParamDoc> = {
     label: 'Scan (legacy)',
     description: 'Legacy spelling of the scan selection: an ISO or compact scan id for the shown scan. It is folded into `d` and rewritten on load.',
     examples: ['2026-10-06'],
+  },
+  days: {
+    label: 'Usage window',
+    description: 'The Cloudflare usage page\'s window: the last `7` or `30` days of daily snapshots. Defaults to 30.',
+    examples: ['7'],
+    pages: ['/admin/usage'],
   },
   denied: {
     label: 'Denied address',
@@ -419,6 +431,12 @@ export const URL_PARAMS: Record<string, UrlParamDoc> = {
   u: {
     label: 'Viewer / legend pin',
     description: 'On `/admin/sessions`, filters sessions to viewers whose address contains this text. On the map it is a legacy legend pin, rewritten to `o=<key>` on load.',
+  },
+  um: {
+    label: 'Usage ranking',
+    description: 'The metric the Cloudflare usage page\'s attribution table ranks its top rows by: `requests`, `r2_reads`, `d1_rows_read` or `d1_rows_written`. Defaults to `requests`.',
+    examples: ['d1_rows_written'],
+    pages: ['/admin/usage'],
   },
   w: {
     label: 'Run window',
