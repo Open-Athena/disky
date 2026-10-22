@@ -180,17 +180,26 @@ def append_scan(con, gen_dir: Path, scan: dict, mount: str, work: Path, *, gen: 
     for r in ranges["ranges"]:
         name = f"r{r['i']:04d}"
         doc = ia.append_range(con, open_state_sql(str(gen_dir), roots, name, sliced, gen_col), scan, r, name, run, bucket=base["bucket"], mount=mount,
-                              sliced=sliced, generation=gen_col)
+                              sliced=sliced, generation=gen_col, check=[str(gen_dir), *roots])
         doc["prev"] = have[-1]
+        doc["check"]["runs"] = [x["key"] for x in runs]
         (run / "ranges").mkdir(exist_ok=True)
         (run / "ranges" / f"{name}.json").write_text(json.dumps(doc) + "\n")
     shutil.rmtree(run / "state")
     t1 = monotonic()
     docs = ia.cut_run(con, str(run), run / "served", rg_rows=rg_rows, sliced=sliced, generation=gen_col)
+    cut_s = round(monotonic() - t1, 1)
+    cut = ia.check_cut(con, str(run), run / "served", sliced=sliced, generation=gen_col)
     new = {"key": rk, "first": d, "last": d, "level": 0, "scans": [d]}
-    meta = {**ia.run_meta(gen, new, {d: scan["ts"]}, docs), "cut_s": round(monotonic() - t1, 1)}
+    meta = {**ia.run_meta(gen, new, {d: scan["ts"]}, docs), "cut_s": cut_s, "check": cut, "check_s": round(monotonic() - t1 - cut_s, 1)}
     (run / "meta.json").write_text(json.dumps(meta, indent=1) + "\n")
     manifest = ia.publish_run(store, d)
+    # The scan's parity marker (`scan retire`'s gate), uploaded with the run's files.
+    marker = ia.append_marker(gen, d, manifest, [json.loads((run / "ranges" / f"r{r['i']:04d}.json").read_text()) for r in ranges["ranges"]], cut)
+    if marker is not None:
+        (gen_dir / "verify").mkdir(exist_ok=True)
+        (gen_dir / "verify" / f"{d}.json").write_text(json.dumps(marker) + "\n")
+        err(f"add {d}: parity {'passed' if marker['pass'] else 'FAILED'} " + json.dumps({k: marker[k] for k in ("tables", "cut", "generation") if k in marker}))
     peak = {"disk_gb": disk.close(), "rss_gb": rss_peak_gb()}
     err(f"add {d}: published {len(manifest['runs'])} runs in {monotonic() - t0:.1f}s (work disk peak {peak['disk_gb']} GiB, RSS peak {peak['rss_gb']} GiB)")
     return {"scan": d, "rows": meta["rows"], "bytes": meta["bytes"], "runs": [r["key"] for r in manifest["runs"]], "s": round(monotonic() - t0, 1),

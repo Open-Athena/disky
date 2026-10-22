@@ -96,7 +96,7 @@ def fx(world, local, tmp_path) -> dict:  # noqa: F811
     (sgen / "scans.json").write_text(json.dumps({"scans": [{"id": d} for d in DATES[:4] if d != "2026-07-31"]}))
     (sgen / "manifests" / f"{DATES[-1]}.json").write_text(json.dumps({"scans": [d for d in DATES if d != "2026-07-31"]}))
     verify = store / "interval-store" / "g" / "verify"
-    verify.mkdir(parents=True)
+    verify.mkdir(parents=True, exist_ok=True)
     for d, ok in (("2026-07-30", True), ("2026-08-02", False), ("2026-08-04", True), ("2026-08-04T1236", True)):
         (verify / f"{d}.json").write_text(json.dumps({"scan": d, "gen": "g", "pass": ok, "views": 9, "view_eq": 9 if ok else 7, "diffs": 0, "diff_eq": 0}))
     return {"store": store, "root": root, "path_sizes": {d: (root / "idx" / d / "index" / "g1" / "path-index.parquet").stat().st_size for d in DATES}}
@@ -244,6 +244,47 @@ def test_execute_backs_up_verifies_and_deletes(fx, d1, tmp_path, monkeypatch, ro
         *(("footer_cache", d, "path", "g1") for d in DATES if d not in retired),
     ]
     assert rep["d1_deleted"] == sum(r["rows"] for r in rep["d1"])
+
+
+def test_a_corrupted_store_file_fails_the_append_check_and_blocks_deletion(world, local, fx, d1, tmp_path, monkeypatch):  # noqa: F811
+    """End to end, markers only: `add` appends the scans with one run's served `path` sort cut a row short (a corrupted
+    store file); that scan's append marker fails, so `retire -m -x` keeps every file of it, while the scan before it,
+    whose marker passed, retires."""
+    from test_interval_local import _add
+
+    from dt_cloud import interval_store as ist
+
+    bad = "2026-08-04T1236"
+    real = ist.write_served
+
+    def short(con, src, sort, out, *a, **k):
+        if sort == "path" and f"/deltas/{bad}/" in str(out):
+            src = f"(SELECT * FROM {src} QUALIFY row_number() OVER () > 1)"
+        return real(con, src, sort, out, *a, **k)
+    monkeypatch.setattr(ist, "write_served", short)
+    store = tmp_path / "bad-store"
+    shutil.copytree(local["base_only"], store)
+    _add(world, store, tmp_path / "work")
+    monkeypatch.setattr(ist, "write_served", real)
+    shutil.copytree(fx["store"] / "static-names", store / "static-names")
+    marker = json.loads((store / "interval-store" / "g" / "verify" / f"{bad}.json").read_text())
+    assert (marker["pass"], marker["cut"]["path"]["missing"], marker["cut"]["path"]["extra"]) == (False, 1, 0)
+    before = _files(fx["root"])
+    rep = _run({**fx, "store": store}, "-m", "-x")
+    assert _statuses(rep) == [
+        ("2026-07-30", "skip", "no verify marker", "missing"),
+        ("2026-07-31", "skip", "not in the static index's s1", None),
+        ("2026-08-02", "skip", "no verify marker", "missing"),
+        ("2026-08-03", "skip", "no verify marker", "missing"),
+        ("2026-08-04", "retire", None, "pass"),
+        (bad, "skip", "verify failed (cut path 1 missing, 0 extra)", "fail"),
+        ("2026-08-05", "keep", "one of the newest 2", None),
+        ("2026-08-07", "keep", "one of the newest 2", None),
+    ]
+    after = _files(fx["root"])
+    assert {k: n for k, n in before.items() if k.startswith(f"idx/{bad}/")} == {k: n for k, n in after.items() if k.startswith(f"idx/{bad}/")}
+    assert sorted(k for k in before if k not in after) == sorted(
+        k for k in before if k.startswith("idx/2026-08-04/") and sr.classify(k.rsplit("/", 1)[-1]) in sr.DELETE)
 
 
 def test_drop_path_pointer(fx, d1):

@@ -74,7 +74,9 @@ def local(world, tmp_path_factory):
     gen = store / ist.PREFIX / "g"
     shutil.copytree(store, tmp / "base-only")
     out = _add(world, store, tmp / "work-add")
-    return {"tmp": tmp, "store": store, "gen": gen, "base_only": tmp / "base-only", "summary": summary, "out": out}
+    # The appends' parity markers, as `add` left them (later tests' `verify` runs overwrite them).
+    markers = {p.stem: json.loads(p.read_text()) for p in sorted((gen / "verify").glob("*.json"))}
+    return {"tmp": tmp, "store": store, "gen": gen, "base_only": tmp / "base-only", "summary": summary, "out": out, "markers": markers}
 
 
 @pytest.fixture(scope="module")
@@ -166,6 +168,27 @@ def test_base_and_runs_are_a_full_rebuild(world, local, tmp_path, t):
     newest = json.loads((gen / "manifests" / f"{DATES[-1]}.m001.json").read_text())
     for runs in ([gen / r["key"] for r in newest["runs"]], [gen / "deltas" / d for d in DATES[BASE:]]):
         assert combine([_rows(gen, t), *(_rows(r, t) for r in runs)], t) == want
+
+
+def test_add_writes_each_scans_parity_marker(world, local, tmp_path):
+    """Each appended scan's marker (`scan retire`'s gate) from its append: every row of every table equal, as many as a
+    full rebuild through the scan has live at it, checked against the base and the runs its manifest lists before its
+    own; every served sort of its run equal to its deltas."""
+    import pyarrow.parquet as pq
+
+    gen = local["gen"]
+    ids = DATES[BASE:]
+    want = {}
+    for j, d in enumerate(ids):
+        s = world["scans"][BASE + j]
+        full = build_full(world["scans"][:BASE + j + 1], world["root"], tmp_path / f"full-{d}")
+        n = {t: sum(1 for p in sorted((full / t).glob("r*.parquet")) for r in pq.read_table(p, columns=["vf", "vt"]).to_pylist() if r["vf"] <= s["ts"] < r["vt"])
+             for t in ia.TABLES}
+        cut = {sort: {"rows": pq.read_metadata(gen / "deltas" / d / "served" / f"{sort}.parquet").num_rows, "missing": 0, "extra": 0} for sort in ia.RUN_SORTS}
+        want[d] = {"scan": d, "gen": "g", "how": "append", "pass": True, "manifest": f"manifests/{d}.json", "runs": [f"deltas/{x}" for x in ids[:j]],
+                   "ranges": 3, "tables": {t: {"rows": v, "store": v, "missing": 0, "extra": 0} for t, v in n.items()}, "cut": cut}
+    assert local["markers"] == want
+    assert all(m["tables"]["pvl"]["rows"] > 0 for m in want.values())
 
 
 def test_changes_counts_the_same_a_group_at_a_time(world, local):
@@ -385,7 +408,7 @@ def test_an_unowned_generation_builds_and_appends_no_slices(unowned):
     assert json.loads((gen / "served" / "stats.json").read_text())["slices"] is False
     s = unowned["summary"]
     assert (s["slices"], sorted(s["stages"]), sorted(s["sorts"])) == (False, ["cut", "versions"], ["bysize", "path", "reads"])
-    assert sorted(p.name for p in gen.iterdir()) == ["deltas", "digest", "manifests", "pv", "pvl", "ranges.json", "rd", "scans.json", "served"]
+    assert sorted(p.name for p in gen.iterdir()) == ["deltas", "digest", "manifests", "pv", "pvl", "ranges.json", "rd", "scans.json", "served", "verify"]
     assert sorted(p.name for p in (gen / "served").iterdir()) == sorted(
         [*(f"{x}{e}" for x in ("path", "bysize", "reads") for e in (".parquet", ".groups.parquet", ".json")), "stats.json"])
     k = json.loads((gen / "ranges.json").read_text())["k"]

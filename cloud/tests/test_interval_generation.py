@@ -224,6 +224,19 @@ def _verify(store: Path, gen: str, world: Path, j: int, tmp: Path) -> dict:
     return iv.verify_scans(Store(str(store)), gen, str(world), [s], tmp)[SCANS[j]]
 
 
+def test_the_appends_markers_compare_generation(world, on, off, tmp_path):
+    """Each appended scan's parity marker (its append's check) counts the objects with a generation and the store's
+    equal ones as the sampled verify does, all equal; a store without the column has no such count."""
+    store = tmp_path / "store"
+    shutil.copytree(on["store"], store)
+    marks = {p.stem: json.loads(p.read_text()) for p in sorted((store / ist.PREFIX / "g" / "verify").glob("*.json"))}
+    sampled = {SCANS[j]: _verify(store, "g", world, j, tmp_path / f"v{j}")["generation"] for j in (3, 4, 5)}
+    assert {d: (m["how"], m["pass"], m["generation"]) for d, m in marks.items()} == {d: ("append", True, g) for d, g in sampled.items()}
+    assert all(g["objects"] > 0 for g in sampled.values())
+    off_marks = {p.stem: json.loads(p.read_text()) for p in sorted((off["gen"] / "verify").glob("*.json"))}
+    assert {d: (m["pass"], "generation" in m) for d, m in off_marks.items()} == {SCANS[4]: (True, False), SCANS[5]: (True, False)}
+
+
 def test_verify_compares_generation(world, on, off, tmp_path):
     """Each sampled scan's objects with a generation against the store's live version: in the marker, and required for
     `pass`; a store or scan without the column has no such check."""
@@ -362,7 +375,8 @@ def test_verify_generation_checks_the_store_against_each_listing(world, backfill
     gens = [99 if n == "d/keep.bin" else g for n, g in zip(t["name"].to_pylist(), t["generation"].to_pylist())]
     pq.write_table(t.set_column(t.schema.get_field_index("generation"), "generation", pa.array(gens, pa.int64())), shard)
     verify = store / ist.PREFIX / "g" / "verify"
-    verify.mkdir(parents=True, exist_ok=True)
+    shutil.rmtree(verify, ignore_errors=True)  # the appends' own markers: these stand in for sampled ones
+    verify.mkdir(parents=True)
     for d in (*SCANS[:4], SCANS[5]):
         (verify / f"{d}.json").write_text(json.dumps({"scan": d, "gen": "g", "pass": True, "views": 9, "view_eq": 9, "diffs": 1, "diff_eq": 1}))
     args = ["-o", str(store), "-g", "g2", "-s", str(root), "-l", LISTING, "-w", str(tmp_path / "w")]
