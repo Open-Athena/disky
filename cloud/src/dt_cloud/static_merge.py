@@ -21,10 +21,11 @@ import os
 import shutil
 from collections.abc import Callable
 from datetime import datetime, timezone
+from faulthandler import enable
 from pathlib import Path
 from time import monotonic
 
-from click import Choice, IntRange, group, option
+from click import Choice, IntRange, UsageError, group, option
 
 from . import append_runner as ar
 from .append_runner import (  # noqa: F401 — the shared names, as this module has always offered them
@@ -47,6 +48,7 @@ from .append_runner import (  # noqa: F401 — the shared names, as this module 
 from .maint_runs import NULL, from_env
 from .static_names import PREFIX, connect, err
 from .static_profile import data_bucket, scratch_bucket
+from .resource_monitor import monitor_resources, resource_stage
 
 #: The fraction of the machine's memory the concurrent tier merges' DuckDB limits sum to.
 MEM_FRACTION = 0.75
@@ -85,6 +87,7 @@ def _machine() -> tuple[int, int]:
     return os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES"), os.cpu_count() or 1
 
 
+@monitor_resources(prefix="MERGE_RESOURCE")
 def merge_tier(name: str, dirs: list[Path], outp: Path, run: dict, rule, tmp: Path, mem: str | None = None,
                threads: int | None = None) -> tuple[str, float, dict]:
     """One tier of the merged run `run` from its input run dirs `dirs` (oldest first) into `outp`: `shards` (`sx/`,
@@ -92,7 +95,9 @@ def merge_tier(name: str, dirs: list[Path], outp: Path, run: dict, rule, tmp: Pa
     can run it. Returns `(name, seconds, doc)`."""
     from . import static_append as sa
 
+    enable(file=2)  # Native faults must leave a traceback even under a Python stderr wrapper.
     t0 = monotonic()
+    resource_stage(f"merge/{name}", inputs=len(dirs), output=run["key"], mem=mem, threads=threads)
     if name == "shards":
         doc = sa.merge_shards(dirs, outp)
     elif name == "catalog":
@@ -342,6 +347,49 @@ def compact_r2_cmd(bucket, gen) -> None:
     from .static_compact import compactor
 
     print(json.dumps(ar.publish_r2_chain(bucket, PREFIX, gen, last=compactor().last), indent=1))
+@cli.command("probe")
+@option("-d", "--manifest", required=True, help="Frozen manifest stem (scan id, optionally .mNNN), whose first due carry is built")
+@option("-g", "--gen", required=True, help="Base generation")
+@option("-j", "--jobs", default=4, type=IntRange(min=1), help="Tier merges at once")
+@option("-L", "--compact-level", type=ar.Level(), default=ar.COMPACT_LEVEL, help=ar.LEVEL_HELP)
+@option("-m", "--mount", required=True, help="Read-only local mount of the data bucket")
+@option("-o", "--out", required=True, help="New local output directory outside the mounted generation")
+@option("-T", "--tmp", default="/stage/tmp/probe", help="Local scratch dir")
+def probe_cmd(
+    manifest: str,
+    gen: str,
+    jobs: int,
+    compact_level: int | None,
+    mount: str,
+    out: str,
+    tmp: str,
+) -> None:
+    """Build one due carry from a frozen manifest locally, without upload, publication, leases or pruning.
+
+    Uses the production merge kernel and resource diagnostics over real mounted inputs; only OUT and TMP are written.
+    """
+    from .hex_runs import rule_from_json
+
+    stem = manifest.removesuffix(".json")
+    if parse_manifest(f"{stem}.json") is None:
+        raise UsageError(f"invalid manifest stem: {manifest}")
+    source = Path(mount)
+    base, output, scratch = source / PREFIX / gen, Path(out), Path(tmp)
+    for path in (output, scratch):
+        if path.resolve().is_relative_to(source.resolve()):
+            raise UsageError(f"probe output/scratch must be outside the source mount: {path}")
+    if output.exists():
+        raise UsageError(f"probe output already exists: {output}")
+    doc = json.loads((base / "manifests" / f"{stem}.json").read_text())
+    drilled = {r["key"] for r in doc["runs"] if (base / r["key"] / "drill/meta.json").exists()}
+    _, merges = plan_carries(doc["runs"], drilled, compact_level)
+    if not merges:
+        raise UsageError(f"{stem}: no carries due")
+    inputs, run = merges[0]
+    rule = rule_from_json(json.loads((base / "scans.json").read_text()).get("hex_runs"))
+    result = build_merged_run([base / r["key"] for r in inputs], run, output, drilled=all(r["key"] in drilled for r in inputs),
+                              rule=rule, tmp=scratch, jobs=jobs)
+    print(json.dumps({"gen": gen, "manifest": stem, "inputs": [r["key"] for r in inputs], "output": run["key"], "result": result}, indent=1))
 
 
 @cli.command("prune")

@@ -922,6 +922,8 @@ def task_command(p: Profile, module: str, args: list[str], *, mount: bool = True
         diagnostics = drill_exit_diagnostics()
     elif module == "static_anchors" and args[0] == "run":
         diagnostics = drill_exit_diagnostics("ANCHOR")
+    elif module == "static_merge" and args[0] in ("carry", "probe"):
+        diagnostics = drill_exit_diagnostics("MERGE")
     return f"set -euo pipefail; {diagnostics}{prep} && cd /stage && {py} dt_cloud.{module} {shlex.join([*args, *m])}"
 
 
