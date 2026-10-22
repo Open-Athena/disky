@@ -1,6 +1,6 @@
 # Appends that cost O(the day's changes): carried open state
 
-Status: 2026-10-22. Item 3 of `specs/scan-cs3.md`. Phase 2 (the catalog's carried counts) built and tested; not yet on gcs's image.
+Status: 2026-10-22. Item 3 of `specs/scan-cs3.md`. Phase 2 (the catalog's carried counts) built and tested on `cloud`-based code; not yet on gcs's image. Phase 3 (one-machine paths) not built, by decision (§2).
 
 ## What actually scales with the scans since the base
 
@@ -53,13 +53,22 @@ Unchanged: `cdelta/` stays on folded runs. It is O(changes) (~20–30 MB a scan 
 
 ## 2. One-machine paths: open versions kept between invocations
 
-`static-names add` / `interval-store add` refold every range from the base + every run on every scan. Keep the open versions instead, as the staged path does: under the store's generation, `state/<D>/` (static: `copen/r####.parquet`; interval: `{pvl,sv,svt}/r####.parquet`) plus a `state/<D>/state.json` digest written last, and the catalog's `xcount` beside them. The next `add` reads them when `D` is the newest manifest's last scan and the digest matches, else refolds. The previous day's state goes once the new manifest is up. Readers never list `state/`.
+`static-names add` / `interval-store add` refold every range from the base + every run on every scan. Carrying their state was considered and **not built**:
+- Each `add` already mirrors the whole generation into its work dir (`read_gen`: base `cintervals`, every run), so an invocation is O(generation) before any refold; the refold reads files already local. Carrying state saves compute only, on stores that are small (the r2 demo's).
+- The state would have to live in the store (the GHA work dir is ephemeral), so `-F` (read from another copy, e.g. R2) would refuse a copy that lacks it (`read_tree` checks completeness against `-o`), and readable-but-unreferenced files would land on public R2 stores.
+- These paths still get the catalog's carried counts for free if they write `xcount` beside the generation, but for the same reasons they keep refolding (`catalog_delta` without `state`), which is byte-identical.
+
+Revisit if a one-machine store grows to where its refold matters; the shape would be `state/<D>/` under the generation, a digest JSON written last, and the previous day's deleted after the manifest.
 
 ## Phases
 
 1. This spec.
 2. **Built.** `static_catalog`: `RunTier`, `write_xcount` / `trusted_xcount` / `xcount_digest`, `_candidates_refold` / `_candidates_carried`, `append(state=, history=, state_out=, scan=)`. `static_append`: `run_tiers`, `carried_inputs`, `catalog_delta(..., state=, history=, state_out=, scan=)`, `runs catalog` reads and writes `state/<D>/catalog/` (`-R` forces the refold; `-S` the scratch bucket) and uploads `meta.json` last. Logs `catalog <D>: xcount carried from <prev> | refold`. `cloud/tests/test_catalog_state.py`: three appends past a two-scan base (a carry into a level-1 run before the third), V = 3 and 12, all three fixture flavors: each run's `cells.parquet` / `index.parquet` and `xcount` byte-identical to the refold's; the history reads exercised (prefixes first kept from the runs' shards at V = 12; new members); untrusted states refused (another scan, another window, parquet without JSON, JSON without parquet, a digest mismatch with Σ n unchanged, a truncated parquet); a rewrite killed midway leaves no JSON. Not covered by a fixture: a hex-run rule on the carried path (both paths expand with the same `kept_sql`, as the run's shards were cut).
-3. The local paths' carried open versions (static first, then interval).
+3. ~~The local paths' carried open versions~~: not built (§2).
+
+## Why the history reads are safe against carries and prune
+
+The runs come from the newest earlier manifest (a scan's, or a carry's revision), as the catalog `tiers` always have. A carry changes which runs hold the deltas, not the deltas, so `xcount` (counts over the scans since the base) is the same whichever runs list them; the digest is over content, so attempts that wrote different bytes of the same content agree. A folded run's `sx/` stays while a manifest superseded less than `GRACE_S` (1 h) ago lists it, far longer than the catalog step.
 
 ## Expected effect on gcs
 

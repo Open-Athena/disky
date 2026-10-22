@@ -33,9 +33,9 @@ Phases overlap (static-names runs beside interval-store and post), so the totals
 |---|---|---|
 | list | fleet objects (a full GCS listing per bucket) | GCS has no listing diff. Options: Storage Insights inventory reports, or Pub/Sub object-change notifications feeding a change log; either makes the scan's input the day's changes |
 | path-index | fleet objects: full per-scan sorts | the interval store already serves the Map; `specs/lean-scans.md` retires per-scan sorts. What still reads them: `dups`, `attr.tsv`, `index-rows`, the digest. Move each onto the interval store or the change set, then drop the step |
-| static-names append | scans since the base: every append refolds the base's `cintervals` + every run's `cdelta` (`rebuild_open`), and its carries' cost grows by level | keep each run's open-version state (`copen`) so an append reads the previous state + the day's delta only; carries are already amortized O(changes·log) |
+| static-names append | the per-range append already reads the previous scan's `state/<prev>/copen` (flat, ~7 min); the **catalog** step expanded every scan's `cdelta` since the base (~29 min at 26 scans, growing ~1 min a scan); drill ∥ anchors read O(log) run tiers (anchors 40–90 min, the long pole) | the catalog carries its candidate counts (`xcount`) and reads the runs' shards for history (`specs/append-open-state.md`, built); carries are already amortized O(changes·log) |
 | static-names compaction | corpus size, every 2^L scans; today one Python core in `merge_shards` and a slow drill fold | parallel `merge_shards` (in progress), chunked drill (70ed412a), local-SSD staging, parallel uploads; floor ~30–45 min on one VM for a ~550 GiB corpus |
-| interval-store append | same refold pattern as static-names | same fix |
+| interval-store append | already carried: `ranges` reads `state/<prev>/` (11 min), publish 3.5, carries 7 (10-22T1545) | none needed on Batch |
 | retire | fleet size: its verify re-downloads the served generation (~120 GB, ~8 min) and compares a whole scan (440M objects, 22 min); plus D1 footer rows | the interval-store append writes the marker (item 4, in progress); retire then only lists, backs up and deletes. D1 deletes stop once `index-sync -R` has run 2 scans |
 | dups, index-rows, warm-cache | fleet-sized reads per scan | revisit after path-index is gone |
 
@@ -46,7 +46,7 @@ Phases overlap (static-names runs beside interval-store and post), so the totals
    - Finish the static compaction re-trial, set `compact_level` back to 5, and unpin prod's `STATIC_GEN`.
    - A manual scan on the new image, which carries cw's listing `version` column.
 2. **Compaction under an hour:** local-SSD staging, parallel uploads, and overlapping the independent stages. Measure each stage against the floor above.
-3. **Appends O(#changes):** carry the open-version state between appends in both stores (static-names and interval-store).
+3. **Appends O(#changes):** the static catalog's carried counts (`specs/append-open-state.md`; the per-range open versions were already carried on Batch in both stores). Next on that path: anchors.
 4. **Retire's verify moves into the interval-store append** (retire becomes markers-only: constant cost). Implemented; not deployed yet. Design and rollout below.
 
 ## Item 4: the parity marker comes from the append
