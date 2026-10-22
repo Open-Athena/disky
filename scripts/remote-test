@@ -16,7 +16,8 @@
 #   -a        include `slow`-marked tests (default: `-m 'not slow'`)
 #   -c REV    only the tests affected by changes since REV (`scripts/affected-tests`; uncommitted changes count)
 #   -d DIR    remote dir (default `disky-test/<worktree name>`, relative to the remote home)
-#   -h HOST   ssh host (default `$REMOTE_TEST_HOST`, else `mgu`)
+#   -h HOST   ssh host (default `$REMOTE_TEST_HOST`, else `mgu`; a stopped `mgu` is started first, with AWS
+#             profile `$MGU_AWS_PROFILE`, default `oa-ci-dev`)
 #   -n N      xdist workers (default `auto`, `--dist loadgroup`; `0` = serial)
 #   -P VER    Python version for the remote env (default `$REMOTE_TEST_PYTHON`, else 3.13)
 #   -s        sync only, run nothing
@@ -68,6 +69,30 @@ if [ "$tree" = "$(git rev-parse 'HEAD^{tree}')" ]; then
   sha=$(git rev-parse HEAD)
 else
   sha=$(git commit-tree "$tree" -p HEAD -m "remote-test snapshot of $name")
+fi
+
+# `mgu` stops itself after an idle hour (`idle-stop.timer`): wake it on demand. Another host's instance (or none):
+# `$REMOTE_TEST_INSTANCE`.
+instance=${REMOTE_TEST_INSTANCE:-}
+[ -n "$instance" ] || [ "$host" != mgu ] || instance=i-033c60f359aca85e8
+if ! ssh -o ConnectTimeout=5 "$host" true 2>/dev/null; then
+  [ -n "$instance" ] || { echo "remote-test: $host doesn't answer" >&2; exit 1; }
+  aws=(aws --profile "${MGU_AWS_PROFILE:-oa-ci-dev}" --region "${REMOTE_TEST_REGION:-us-east-1}")
+  echo "remote-test: $host doesn't answer; starting $instance" >&2
+  if ! err=$("${aws[@]}" ec2 start-instances --instance-ids "$instance" 2>&1 >/dev/null); then
+    if [[ $err == *[Tt]oken* || $err == *[Cc]redential* || $err == *SSO* || $err == *expired* || $err == *profile* ]]; then
+      echo "remote-test: no AWS credentials to start $host: run \`aws sso login --profile ${MGU_AWS_PROFILE:-oa-ci-dev}\` (or start it by hand)" >&2
+    else
+      echo "remote-test: starting $instance failed: $err" >&2
+    fi
+    exit 1
+  fi
+  "${aws[@]}" ec2 wait instance-running --instance-ids "$instance" || exit 1
+  for _ in $(seq 36); do  # SSH up within ~3 min
+    ssh -o ConnectTimeout=5 "$host" true 2>/dev/null && break
+    sleep 5
+  done
+  ssh -o ConnectTimeout=5 "$host" true 2>/dev/null || { echo "remote-test: $host is running but SSH isn't up after 3 min" >&2; exit 1; }
 fi
 
 ssh "$host" "set -e; [ -d $rdir/.git ] || { mkdir -p $rdir && git init -q $rdir; }"
