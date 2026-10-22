@@ -109,6 +109,19 @@ def _run(fx, *extra: str) -> dict:
     return json.loads(res.stdout)
 
 
+def test_retirement_follows_a_compacted_static_generation(fx, d1):
+    before = _run(fx)
+    old = fx["store"] / "static-names" / STATIC_GEN
+    target = old.with_name(STATIC_GEN + ".c001")
+    old.rename(target)
+    old.mkdir()
+    (old / "successor.json").write_text(json.dumps({"gen": target.name, "published_at": 0}) + "\n")
+    after = _run(fx)
+    expected = [{**row, "reason": f"not in the static index's {target.name}"}
+                if row["reason"] == f"not in the static index's {STATIC_GEN}" else row for row in before["scans"]]
+    assert after == {**before, "static_gen": target.name, "scans": expected}
+
+
 def _files(root: Path) -> dict[str, int]:
     return {p.relative_to(root).as_posix(): p.stat().st_size for p in sorted(root.rglob("*")) if p.is_file()}
 
