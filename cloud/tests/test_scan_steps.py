@@ -180,6 +180,19 @@ def test_reproc_skips_side_effects(tmp_path, env):
     assert (c.sh_impl.calls, env["DT_RECORD"]) == ([], "off")
 
 
+def test_static_names_failure_records_failed_phase_and_the_run_goes_on(tmp_path, env, monkeypatch):
+    c = ctx(tmp_path, env, runner=Runner(tmp_path, fail=("dt-cloud static-names runs",)))
+    phases = []
+    c.run.begin = lambda name: phases.append(("begin", name))
+    c.run.end = lambda name, rc=0, **kw: phases.append(("end", name, rc, kw))
+    monkeypatch.setattr(S, "load_profile_env", lambda *a: c.profile)
+    monkeypatch.setattr(S, "make_ctx", lambda *a: c)
+    assert S.run_step("static-names", None, env) == 0
+    assert phases == [("begin", "static-names"), ("end", "static-names", 1, {
+        "warn": True, "msg": "static-names runs add failed for 2026-10-16T1200", "note": "overlapped"})]
+    assert c.sh_impl.calls == ["dt-cloud static-names runs add -c 2026-10-16T1200"]
+
+
 def test_interval_store_without_a_generation(tmp_path, env):
     env["R2_ARCHIVE"] = "r2://x"
     c = ctx(tmp_path, env, runner=Runner(tmp_path, stdout={"dt-cloud interval-store current": "\n"}))
@@ -582,6 +595,86 @@ class Ends:
     def end(self, name, rc=0, warn=False, msg=None, note=None, **kw):
         self.calls.append(("end", name, rc, warn, msg))
         return 0 if warn else rc
+
+
+@pytest.mark.parametrize("name,prefix,message", [
+    ("warm_cache", "dt-cloud warm-cache -d", "cache warm-up failed for 2026-10-16T1200"),
+    ("probe", "dt-cloud probe -c", "serving probe failed for 2026-10-16T1200 (an HTTP or transport error; data is fine)"),
+    ("healthcheck", "dt-cloud healthcheck -d", "the live site's health check failed for 2026-10-16T1200 (data is fine; serving may be degraded)"),
+    ("index_gc", "dt-cloud index-gc -R", "index-gc -F failed (superseded generations stay until the next run)"),
+    ("over_time", "dt-cloud over-time-groups -g", "over-time groups failed (the series uses its configured path store)"),
+])
+def test_optional_command_failure_records_a_failed_phase(tmp_path, env, name, prefix, message):
+    env.update(SITE_TOKEN="test", SITE_URL="https://site.test", CLOUDFLARE_API_TOKEN="test", CLOUDFLARE_ACCOUNT_ID="account")
+    c = ctx(tmp_path, env, Runner(tmp_path, fail=(prefix,)))
+    c.run = Ends()
+    getattr(S, name)(c, None)
+    phase = name.replace("_", "-")
+    assert c.run.calls == [("begin", phase), ("end", phase, 1, True, message)]
+
+
+@pytest.mark.parametrize("name,prefix,warn", [
+    ("index_rows", "dt-cloud index-sync -r", "index-sync -r failed (the pointer flip will refuse)"),
+    ("index_sync", "dt-cloud index-sync -p", "index-sync failed (the site keeps serving the previous generation)"),
+])
+def test_d1_publication_failure_records_a_failed_phase(tmp_path, env, monkeypatch, name, prefix, warn):
+    env.update(CLOUDFLARE_API_TOKEN="test", CLOUDFLARE_ACCOUNT_ID="account")
+    c = ctx(tmp_path, env, Runner(tmp_path, fail=(prefix,)))
+    c.run = Ends()
+    monkeypatch.setattr(S, "load_profile_env", lambda *a: c.profile)
+    monkeypatch.setattr(S, "make_ctx", lambda *a: c)
+    assert S.run_step(name.replace("_", "-"), None, env) == 0
+    phase = name.replace("_", "-")
+    assert c.run.calls == [("begin", phase), ("end", phase, 1, True, warn)]
+
+
+@pytest.mark.parametrize("code,recorded,warn,message", [
+    (1, 0, False, None),
+    (2, 2, True, "rules command failed"),
+])
+def test_expected_findings_do_not_hide_other_command_errors(tmp_path, env, code, recorded, warn, message):
+    c = ctx(tmp_path, env)
+    c.sh_impl = lambda argv, **kw: subprocess.CompletedProcess(argv, code, "", None)
+    c.run = Ends()
+    with c.phase("findings"):
+        c.sh(["dt-cloud", "rules", "-o", "rules.json"], fatal=False, allowed_codes=(1,), warn="rules command failed")
+    assert c.run.calls == [("begin", "findings"), ("end", "findings", recorded, warn, message)]
+
+
+def test_interval_current_failure_records_failed_phase(tmp_path, env):
+    env["R2_ARCHIVE"] = "r2://index"
+    c = ctx(tmp_path, env, Runner(tmp_path, fail=("dt-cloud interval-store current",)))
+    c.run = Ends()
+    S.interval_store(c, None)
+    assert c.run.calls == [
+        ("begin", "interval-store"),
+        ("end", "interval-store", 1, True, "interval-store current failed: not appending 2026-10-16T1200"),
+    ]
+
+
+def test_bucket_check_findings_and_failed_alert_are_not_recorded_done(tmp_path, env, monkeypatch):
+    env["SITE_URL"] = "https://site.test"
+    c = ctx(tmp_path, env, Runner(tmp_path, fail=("disk-tree notify -t",)), sources=["s3://a"])
+    c.run = Ends()
+    c.run.run_id = "head"
+    monkeypatch.setattr(S, "s3_client", lambda endpoint: FakeS3({"a": 1, "b": 1, "new": 3}))
+    S.bucket_check(c, None)
+    assert c.run.calls == [
+        ("begin", "bucket-check"),
+        ("end", "bucket-check", 1, True, "unscanned-bucket check: b new"),
+    ]
+    assert c.sh_impl.calls == [
+        "disk-tree notify -t ⚠️ fix 2026-10-16T1200 -L scan https://site.test/scans/head -L all scans https://site.test/scans non-empty bucket(s) not in the profile's sources: `b new`",
+    ]
+
+
+def test_optional_step_initialization_failure_fails_task(tmp_path, env, monkeypatch):
+    def fail(profile, env):
+        raise S.StepFailed(3, "missing scan identity")
+
+    monkeypatch.setattr(S, "load_profile_env", lambda *args: profile(tmp_path))
+    monkeypatch.setattr(S, "make_ctx", fail)
+    assert S.run_step("probe", None, env) == 3
 
 
 def test_digest_failure_fails_its_phase(tmp_path, env):

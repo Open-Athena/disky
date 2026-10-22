@@ -167,7 +167,7 @@ class Ctx:
     work: Path
     run: object
     sh_impl: Callable[..., subprocess.CompletedProcess] = subprocess.run
-    #: The open phase's first `fails_phase` failure (exit code, warning): the phase ends failed with a warn alert
+    #: The open phase's first nonfatal command failure (exit code, warning): the phase ends failed with a warn alert
     failure: tuple[int, str] | None = None
 
     # layout
@@ -281,19 +281,20 @@ class Ctx:
     # running
 
     def sh(self, argv: Sequence[str], *, fatal: bool = True, warn: str | None = None, env: Mapping[str, str] | None = None,
-           capture: bool = False, fails_phase: bool = False) -> str | None:
+           capture: bool = False, allowed_codes: tuple[int, ...] = ()) -> str | None:
         """Run `argv` (logged as `+ …`; secrets only ever in the env). A failure raises `StepFailed` when `fatal`, else
-        prints `WARN: <warn>` and returns None; returns stdout when `capture`, else "". `fails_phase`: a non-fatal failure
-        still ends the open phase failed (warn-alerted, never failing the run), so /scans doesn't show it done."""
+        prints `WARN: <warn>` and returns None; returns stdout when `capture`, else "". A nonfatal failure still ends
+        the open phase failed (warn-alerted, never failing the run), so /scans doesn't show it done. `allowed_codes`
+        accepts only documented expected nonzero results, such as exit 1 for attribution-rule findings."""
         argv = [str(a) for a in argv]
         err("+ " + " ".join(argv))
         r = self.sh_impl(argv, env={**self.env, **(env or {})}, stdout=subprocess.PIPE if capture else None, text=True)
-        if r.returncode:
+        if r.returncode and r.returncode not in allowed_codes:
             if fatal:
                 raise StepFailed(r.returncode, f"exit {r.returncode}: {' '.join(argv[:3])}")
             what = warn or " ".join(argv[:3]) + " failed"
             err(f"WARN: {what} (exit {r.returncode})")
-            if fails_phase and self.failure is None:
+            if self.failure is None:
                 self.failure = (r.returncode, what)
             return None
         return r.stdout if capture else ""
@@ -301,7 +302,7 @@ class Ctx:
     @contextmanager
     def phase(self, name: str, note: str | None = None) -> Iterator[None]:
         """A `scan_runs` phase: begun, then ended (failed, with the exit code, when the body raises; failed with a warn
-        alert after a `fails_phase` command's failure)."""
+        alert after a nonfatal command's failure)."""
         self.run.begin(name)
         self.failure = None
         try:
@@ -395,11 +396,17 @@ def bucket_check(ctx: Ctx, arg: str | None) -> None:
     with ctx.phase("bucket-check"):
         for endpoint, scanned in by_endpoint.items():
             found += unscanned(s3_client(endpoint), scanned)
-    if found:
-        text = " ".join(found)
-        err(f"WARN: unscanned-bucket check: {text}")
-        ctx.sh(["disk-tree", "notify", "-t", f"⚠️ {ctx.profile.deployment} {ctx.scan}",
-                f"non-empty bucket(s) not in the profile's sources: `{text}`"], fatal=False, warn="unscanned-bucket alert not sent")
+        if found:
+            from .scan_runs import scan_alert_links
+
+            text = " ".join(found)
+            message = f"unscanned-bucket check: {text}"
+            err(f"WARN: {message}")
+            ctx.failure = (1, message)
+            links = scan_alert_links(ctx.env.get("SITE_URL"), getattr(ctx.run, "run_id", None), ctx.profile.store)
+            link_args = [arg for label, url in links for arg in ("-L", label, url)]
+            ctx.sh(["disk-tree", "notify", "-t", f"⚠️ {ctx.profile.deployment} {ctx.scan}", *link_args,
+                    f"non-empty bucket(s) not in the profile's sources: `{text}`"], fatal=False, warn="unscanned-bucket alert not sent")
 
 
 @step("access-ingest", core=False, stage="pre", soft=True, options={"args": list, "poller": bool})
@@ -679,7 +686,7 @@ def _publish(ctx: Ctx, web: Path) -> None:
                     "-o", dest / "lifecycle.json"], fatal=False, warn="lifecycle pull failed")
         if ctx.opt("index", "rules", False):
             rules = ctx.work / "rules.json"
-            ctx.sh(["dt-cloud", "rules", "-o", rules], fatal=False, warn="attribution rules have findings")
+            ctx.sh(["dt-cloud", "rules", "-o", rules], fatal=False, allowed_codes=(1,), warn="attribution rules failed")
             if rules.exists():
                 copy_atomic(rules, ctx.data_root / ctx.snapshots / "rules.json")
 
@@ -911,7 +918,8 @@ def _static_check(p: ScanProfile) -> list[str]:
 def static_names(ctx: Ctx, arg: str | None) -> None:
     """Append this scan (and any earlier one still pending, in scan-id order) to the static name index as a run
     (`static-names runs add -c`: its stages are Batch jobs of their own; idempotent). Runs beside publish-r2 →
-    interval-store (an `overlapped` phase); a failure still lists the scan, a later run's `-c` catches it up.
+    interval-store (an `overlapped` phase). Due merges and their R2 publication are waited on: a failure records the phase
+    failed, alerts, and fails the pipeline. Published data stays valid; a resume retries the missing work.
 
     `options.static-names.gen`: the one-machine path instead, for a small deployment (`static-names add` in this task:
     every scan in the data store after the generation's newest, read at the layer-2 layout's `path` sorts, appended to
@@ -1010,18 +1018,20 @@ def interval_store(ctx: Ctx, arg: str | None) -> None:
     if not store:
         err(f"interval-store: not appending {ctx.scan} (no store: options.interval-store.store or R2)")
         return
+    ctx.run.begin("interval-store")
     cur = ctx.sh(["dt-cloud", "interval-store", "current", "-o", store], fatal=False, capture=True)
     if cur is None:
-        err(f"WARN: interval-store current failed: not appending {ctx.scan}")
+        ctx.run.end("interval-store", (ctx.failure or (1, ""))[0], warn=True,
+                    msg=f"interval-store current failed: not appending {ctx.scan}")
         return
     if not cur.strip():
         err(f"no interval store at {store} yet: not appending {ctx.scan}")
+        ctx.run.end("interval-store", 0, note="skipped: no current generation")
         return
     layout = ctx.profile.layout.layer2.replace("{scan}", "{id}") + "index/{gen}/path-index.parquet"
     source = ctx.data_uri if ctx.opt("interval-store", "source", "store") == "data" else store
     cmd = ["dt-cloud", "interval-store", "add", "-L", layout, "-s", source, "-o", store, "-w", str(ctx.work / "interval-store"),
            *(["-M", ctx.opt("interval-store", "mem")] if ctx.opt("interval-store", "mem") else []), "-p", str(ctx.nproc)]
-    ctx.run.begin("interval-store")
     err("+ " + " ".join(cmd))
     ran = run_grouped(cmd, duration(timeout) if timeout else None, 30.0, env=ctx.env)
     ctx.run.end("interval-store", ran.rc, warn=True, msg="the scan reads per-scan until a later run appends it",
@@ -1094,7 +1104,7 @@ def over_time(ctx: Ctx, arg: str | None) -> None:
         out = ctx.sh(["dt-cloud", "over-time-groups", *store_args(ctx), "-g", ctx.gen, "-o", ctx.work / "over-time", "-p", root,
                       *(["-m", ctx.opt("over-time", "mem")] if ctx.opt("over-time", "mem") else []),
                       *(["-t", ctx.opt("over-time", "threads")] if ctx.opt("over-time", "threads") else [])],
-                     capture=True, fatal=False, warn="over-time groups failed (the series keeps its per-scan reads)")
+                     capture=True, fatal=False, warn="over-time groups failed (the series uses its configured path store)")
         if out is None or archive:
             return
         for gid in json.loads(out or "{}").get("groups", []):
@@ -1141,7 +1151,7 @@ def dups(ctx: Ctx, arg: str | None) -> None:
                      for a in ("-l", f"{ctx.data_root / ctx.listing_key(src.bucket)}/shard-*.parquet")]
     with ctx.phase("dups"):
         r = ctx.sh(["dt-cloud", "dups", "-d", ctx.scan, *args, "-T", ctx.work / "dups-tmp", "-o", out, src], fatal=False,
-                   fails_phase=True, warn="dups failed (the scan's other outputs stand)")
+                   warn="dups failed (the scan's other outputs stand)")
         if r is None:
             return
         copy_atomic(out / "dups.parquet", key_dir / "dups.parquet")
@@ -1167,7 +1177,7 @@ def age_store(ctx: Ctx, arg: str | None) -> None:
             "-T", ctx.profile.store, "-t", ctx.scan, "-w", ctx.work / "age-store", "-k", o.get("keep", 2),
             *(a for root in roots for a in ("-r", root)), *(["-x"] if o.get("execute") else [])]
     with ctx.phase("age-store"), cleanup(ctx.work / "age-store"):
-        if ctx.sh(argv, fatal=False, fails_phase=True, warn="age-store failed (uncovered histogram inputs stay)") is not None and o.get("execute"):
+        if ctx.sh(argv, fatal=False, warn="age-store failed (uncovered histogram inputs stay)") is not None and o.get("execute"):
             ctx.sh(["dt-cloud", "store-gc", "-t", "interval-store", "-l", "-x", "-o", o["store"]], fatal=False,
                    warn="age-store generation cleanup failed (the next run retries)")
 
@@ -1241,7 +1251,7 @@ def retire(ctx: Ctx, arg: str | None) -> None:
             # a copy after the D1 pass: its rows are that pass's (`-D`: no "-R leaves D1 rows" warning in a dry run)
             d1 = [] if i == 0 and ctx.has(*CF) else ["-R", *(["-D"] if ctx.has(*CF) else [])]
             backup = ["-b", o["backup"]] if i == 0 and o.get("backup") else []
-            ctx.sh(["dt-cloud", "scan", "retire", *backup, *common, *d1, "-s", root], fatal=False, fails_phase=True,
+            ctx.sh(["dt-cloud", "scan", "retire", *backup, *common, *d1, "-s", root], fatal=False,
                    warn=f"retire failed on {root} (its per-scan files stay; the next run retries)")
 
 
@@ -1341,7 +1351,7 @@ def probe(ctx: Ctx, arg: str | None) -> None:
             return
         sub = ctx.profile.layout.snapshots
         ctx.sh(["dt-cloud", "probe", "-c", "-u", ctx.env["SITE_URL"], "-o", f"{ctx.data_uri}/probes/{sub + '/' if sub else ''}"],
-               fatal=False, warn=f"serving probe failed for {ctx.scan} (a 5xx or a dropped request; data is fine)")
+               fatal=False, warn=f"serving probe failed for {ctx.scan} (an HTTP or transport error; data is fine)")
 
 
 #: A digest platform → the env its transport needs (`dt-cloud digest -P`).
@@ -1373,7 +1383,7 @@ def digest(ctx: Ctx, arg: str | None) -> None:
                 continue
             ctx.sh(["dt-cloud", "digest", "-T", ctx.opt("digest", "template"), "-C", ctx.opt("digest", "config"), "-P", platform,
                     *ctx.opt("digest", "args", []), "-r", _digest_root(ctx)], fatal=False,
-                   warn=f"{platform} usage-digest step failed", fails_phase=True,
+                   warn=f"{platform} usage-digest step failed",
                    env={"CLOUDFLARE_API_TOKEN": ctx.env["CF_PAGES_TOKEN"]} if ctx.has("CF_PAGES_TOKEN") else None)
 
 
@@ -1406,7 +1416,7 @@ def cf_usage(ctx: Ctx, arg: str | None) -> None:
             outs.append(f"{ctx.env['R2_ARCHIVE']}/{USAGE_PREFIX}")
         ctx.sh(["dt-cloud", "cf-usage", "-c", ctx.opt("cf-usage", "config", "site/wrangler.toml"),
                 "-d", str(ctx.opt("cf-usage", "days", 7)), *(a for o in outs for a in ("-o", o))],
-               fatal=False, warn="cf-usage snapshots failed (the scan's outputs stand; the next run backfills)", fails_phase=True)
+               fatal=False, warn="cf-usage snapshots failed (the scan's outputs stand; the next run backfills)")
 
 
 #: Core steps a profile may `skip`.
@@ -1526,6 +1536,10 @@ def run_step(name: str, arg: str | None, env: dict[str, str] | None = None, prof
     try:
         profile = load_profile_env(env, profile_path)
         ctx = make_ctx(profile, env)
+    except StepFailed as e:
+        err(f"scan step {name}: {e}")
+        return e.rc or 1
+    try:
         s.fn(ctx, arg)
         return 0
     except StepFailed as e:

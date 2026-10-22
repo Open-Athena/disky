@@ -1,6 +1,7 @@
 import { autoUpdate, flip, FloatingPortal, offset, shift, useFloating } from '@floating-ui/react'
 import { keepPreviousData, useQuery } from '@tanstack/react-query'
 import { memo, useCallback, useMemo, useRef, useState } from 'react'
+import { Loading } from './Busy'
 import { Link, useParams, useSearchParams } from 'react-router-dom'
 import type { SessionPage, SessionRow, StoredEvent } from '../functions/_lib/sessionLogShape'
 import { useRegistry } from './identities'
@@ -97,7 +98,7 @@ function SessionList() {
               </tr>
             ))}
             {q.data && !q.data.sessions.length && <tr><td colSpan={8}><em>no sessions match</em></td></tr>}
-            {q.isPending && <tr><td colSpan={8}><em>loading…</em></td></tr>}
+            {q.isPending && <tr><td colSpan={8}><Loading label="Loading sessions…" /></td></tr>}
           </tbody>
         </table>
       </div>
@@ -182,7 +183,7 @@ function SessionView({ sid }: { sid: string }) {
     if (r.top < bb.top + head || r.bottom > bb.bottom) b.scrollTop += r.top - bb.top - (bb.height - r.height) / 2
   }, [])
   if (q.error) return <p className="err">{q.error.message}</p>
-  if (!q.data) return <p className="dim">loading…</p>
+  if (!q.data) return <Loading label="Loading session…" />
   const s = q.data.session
   const jump = (i: number) => {
     setFilter('all')

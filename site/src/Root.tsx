@@ -1,6 +1,7 @@
 import { Navigate, Route, Routes, useLocation } from 'react-router-dom'
 import { lazy, Suspense, useEffect } from 'react'
 import { HotkeysProvider } from 'use-kbd'
+import { Loading } from './Busy'
 import { HelpCard, HelpProvider } from './Help'
 import { AdminDbPage } from './AdminDbPage'
 import { AdminPage } from './AdminPage'
@@ -25,11 +26,11 @@ import { PerfOverlay } from './dev/PerfOverlay'
 
 // The session log's viewer (admin-only): its own chunk, so the main bundle carries none of it.
 const SessionsPage = lazy(() => import('./SessionsPage').then(m => ({ default: m.SessionsPage })))
-const sessions = <AuthGate><Suspense fallback={<p className="loading">Loading…</p>}><SessionsPage /></Suspense></AuthGate>
+const sessions = <AuthGate><Suspense fallback={<Loading />}><SessionsPage /></Suspense></AuthGate>
 const ActivityPage = lazy(() => import('./ActivityPage').then(m => ({ default: m.ActivityPage })))
-const activity = <AuthGate><Suspense fallback={<p className="loading">Loading…</p>}><ActivityPage /></Suspense></AuthGate>
+const activity = <AuthGate><Suspense fallback={<Loading />}><ActivityPage /></Suspense></AuthGate>
 const UsagePage = lazy(() => import('./UsagePage').then(m => ({ default: m.UsagePage })))
-const usage = <AuthGate><Suspense fallback={<p className="loading">Loading…</p>}><UsagePage /></Suspense></AuthGate>
+const usage = <AuthGate><Suspense fallback={<Loading />}><UsagePage /></Suspense></AuthGate>
 const FederatedScansPreview = import.meta.env.DEV ? lazy(() => import('./dev/FederatedScansPreview')) : null
 const ChildrenTablePreview = import.meta.env.DEV ? lazy(() => import('./dev/ChildrenTablePreview')) : null
 
@@ -53,7 +54,7 @@ const PERF = typeof location !== 'undefined' && new URLSearchParams(location.sea
 function MetaTreeRedirect({ to }: { to: string }) {
   const { pathname, search, hash } = useLocation()
   useEffect(() => { location.replace(to.replace(/\/$/, '') + pathname.replace(/^\/meta/, '') + search + hash) }, [to, pathname, search, hash])
-  return <p className="loading">Opening the data bucket's meta tree…</p>
+  return <Loading label="Opening the data bucket's meta tree…" />
 }
 
 export default function Root() {
@@ -63,8 +64,8 @@ export default function Root() {
     <HotkeysProvider config={{ storageKey: 'gcs-usage' }}>
     <HelpProvider>
     <Routes>
-      {FederatedScansPreview && <Route path="/dev/federated-scans" element={<Suspense fallback={<p className="loading">Loading…</p>}><FederatedScansPreview /></Suspense>} />}
-      {ChildrenTablePreview && <Route path="/dev/children-table" element={<Suspense fallback={<p className="loading">Loading…</p>}><ChildrenTablePreview /></Suspense>} />}
+      {FederatedScansPreview && <Route path="/dev/federated-scans" element={<Suspense fallback={<Loading />}><FederatedScansPreview /></Suspense>} />}
+      {ChildrenTablePreview && <Route path="/dev/children-table" element={<Suspense fallback={<Loading />}><ChildrenTablePreview /></Suspense>} />}
       {STORES.map(s => (
         <Route key={s.key} path={`${s.path.replace(/\/$/, '')}/og`} element={<OgPage store={s} />} />
       ))}

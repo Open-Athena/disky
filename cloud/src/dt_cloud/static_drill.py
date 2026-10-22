@@ -37,6 +37,10 @@ KINDS = ("long", "short")
 FILE_ROWS = 50_000_000
 #: A run's row groups: smaller than the base's, since the reader's dispatch bound sums 2·`rg` over the tiers.
 RUN_RG = 2048
+#: Match PyArrow's former whole-table writer while bounding its Arrow work to fixed batches and row groups.
+STATE_RG = 1 << 20
+#: DuckDB's whole-table conversion used decimal 1M batches; preserve their boundaries for identical Parquet pages.
+STATE_BATCH_ROWS = 1_000_000
 #: Decoded row groups kept per group file by the builder's reads.
 GROUP_CACHE = 2048
 #: Index spans (`CachedGroupFile._span`: a run of index row groups' entries and key tuples) kept per group file.
@@ -1675,8 +1679,25 @@ def write_kind(con, out: Path, kind: str, roots: str = "dr", rollups: str = "rup
 
 def write_state(con, out: Path, kind: str, table: str = "dcnt") -> None:
     (out / "state").mkdir(parents=True, exist_ok=True)
-    pq.write_table(con.execute(f"SELECT q, dir, rows FROM {table} ORDER BY q, dir").to_arrow_table().cast(DCOUNT_SCHEMA),
-                   out / "state" / f"dcount-{kind}.parquet", compression=CODEC)
+    with pq.ParquetWriter(out / "state" / f"dcount-{kind}.parquet", DCOUNT_SCHEMA, compression=CODEC) as writer:
+        pending = []
+        rows = 0
+        wrote = False
+        for batch in _batches(con, f"SELECT q, dir, rows FROM {table} ORDER BY q, dir", STATE_BATCH_ROWS):
+            offset = 0
+            while offset < batch.num_rows:
+                take = min(STATE_RG - rows, batch.num_rows - offset)
+                pending.append(batch.slice(offset, take))
+                offset += take
+                rows += take
+                if rows == STATE_RG:
+                    writer.write_table(pa.Table.from_batches(pending).cast(DCOUNT_SCHEMA), row_group_size=STATE_RG)
+                    pending, rows, wrote = [], 0, True
+        if pending:
+            writer.write_table(pa.Table.from_batches(pending).cast(DCOUNT_SCHEMA), row_group_size=STATE_RG)
+            wrote = True
+        if not wrote:
+            writer.write_table(DCOUNT_SCHEMA.empty_table())
 
 
 def write_aliases(con, out: Path, table: str = "cls") -> None:
@@ -1822,11 +1843,13 @@ def merge_tiers(con, tiers: list[Tier], out: Path, tier: dict, file_rows: int = 
     if len({t.rg for t in tiers}) != 1:
         raise ValueError(f"inputs' row groups differ: {[t.rg for t in tiers]}")
     meta: dict = {**tier, **{k: tiers[-1].meta[k] for k in ("R", "K", "rg", "idx_rg", "dispatch_rows")}}
+    resource_stage("merge/aliases")
     con.register("al_last", tiers[-1].alias_table())
     con.execute("CREATE OR REPLACE TABLE cls AS SELECT q, canonical FROM al_last")
     con.unregister("al_last")
     write_aliases(con, out)
     for kind in KINDS:
+        resource_stage(f"merge/{kind}/classes", inputs=len(tiers))
         con.execute("CREATE OR REPLACE TABLE cmap (c VARCHAR, tier INTEGER, ci VARCHAR)")
         lits = [f"SELECT DISTINCT q FROM read_parquet([{', '.join(q(f) for f in t.files(kind, s))}])" for t in tiers for s in ("roots", "rollups")
                 if t.files(kind, s)]
@@ -1846,6 +1869,7 @@ def merge_tiers(con, tiers: list[Tier], out: Path, tier: dict, file_rows: int = 
         con.execute("CREATE OR REPLACE TABLE dc (q VARCHAR, dir VARCHAR, rows BIGINT)")
         for i, t in enumerate(tiers):
             for sub in ("roots", "rollups"):
+                resource_stage(f"merge/{kind}/read/{sub}", tier=i, inputs=len(tiers))
                 files = t.files(kind, sub)
                 if not files:
                     continue
@@ -1854,10 +1878,13 @@ def merge_tiers(con, tiers: list[Tier], out: Path, tier: dict, file_rows: int = 
                 con.execute(f"""INSERT INTO {'dr' if sub == 'roots' else 'ru'} SELECT {cols} FROM read_parquet({lst}) AS r
                     JOIN cmap AS m ON m.tier = {i} AND m.ci = r.q""")
             if t.dcount(kind):
+                resource_stage(f"merge/{kind}/read/state", tier=i, inputs=len(tiers))
                 con.execute(f"""INSERT INTO dc SELECT m.c, r.dir, r.rows FROM read_parquet({q(t.dcount(kind))}) AS r
                     JOIN cmap AS m ON m.tier = {i} AND m.ci = r.q""")
+        resource_stage(f"merge/{kind}/fold/roots")
         con.execute("""CREATE OR REPLACE TABLE dr AS SELECT q, any_value(depth) AS depth, path, usr, vf, min(vt) AS vt, any_value(size) AS size,
             any_value(n_files) AS n_files FROM dr GROUP BY q, path, usr, vf""")
+        resource_stage(f"merge/{kind}/fold/rollups")
         con.execute(f"""CREATE OR REPLACE TABLE rup AS
             WITH f AS (SELECT q, dir, coalesce(max(tier) FILTER (WHERE kind = {KIND_FULL}), -1) AS ft FROM ru GROUP BY q, dir),
                  inc AS (SELECT ru.* FROM ru JOIN f USING (q, dir) WHERE ru.tier >= f.ft),
@@ -1865,9 +1892,12 @@ def merge_tiers(con, tiers: list[Tier], out: Path, tier: dict, file_rows: int = 
                        FROM inc WHERE kind IN ({KIND_FULL}, {KIND_DELTA}) GROUP BY q, dir)
             SELECT q, dir, (CASE WHEN is_full THEN {KIND_FULL} ELSE {KIND_DELTA} END)::TINYINT AS kind, '' AS child, vf, b, o FROM h
             UNION ALL SELECT q, dir, kind, child, vf, b, o FROM inc WHERE kind IN ({KIND_KEPT}, {KIND_REST})""")
+        resource_stage(f"merge/{kind}/fold/state")
         con.execute("""CREATE OR REPLACE TABLE dcnt AS SELECT q, dir, sum(rows)::BIGINT AS rows FROM dc
             ANTI JOIN (SELECT DISTINCT q, dir FROM rup) AS h USING (q, dir) GROUP BY q, dir""")
+        resource_stage(f"merge/{kind}/write")
         meta.update(write_kind(con, out, kind, file_rows=file_rows, rg=meta["rg"]))
+        resource_stage(f"merge/{kind}/state")
         write_state(con, out, kind)
         for t in ("dr", "ru", "dc", "rup", "dcnt", "cmap", "lit"):
             con.execute(f"DROP TABLE IF EXISTS {t}")

@@ -304,7 +304,23 @@ describe('D1', () => {
       expect(d.emptied.map(({ id, staged, absorbed, unstaged }) => ({ id, staged, absorbed, unstaged }))).toEqual([
         { id: 1, staged: 2, absorbed: [{ into: 3, n: 2 }], unstaged: 0 },
       ])
-      expect(emptiedBatches(d.batches, d.items, [])).toEqual([{ ...d.emptied[0], staged: 0, absorbed: [] }])
+      expect(d.emptied[0].prefixes).toEqual(['gs://b/r/1/', 'gs://b/r/2/'])
+      expect(emptiedBatches(d.batches, d.items, [])).toEqual([{ ...d.emptied[0], prefixes: [], staged: 0, absorbed: [] }])
     })
+  })
+
+  it('retains the exact original prefix list after a completed deletion removes all batch items', async () => {
+    const { db, raw } = await sqliteD1()
+    const GS = prefixShape({ STORE_SCHEME: 'gs://', STORE_BUCKETS: 'b' })!
+    await stageItems(db, ['gs://b/one/', 'gs://b/two/'], 'actor', null, GS, null)
+    raw.exec('DELETE FROM plan_items')
+    const edits = [
+      { action: 'insert', old_json: null, new_json: JSON.stringify({ batch_id: 1, staged: ['gs://b/one/', 'gs://b/two/'] }) },
+      { action: 'delete', old_json: JSON.stringify({ prefixes: ['gs://b/one/', 'gs://b/two/'], deleted_by: 'real-run' }), new_json: null },
+    ]
+    const detail = (await planDetail(db, 1, true))!
+    expect(emptiedBatches(detail.batches, [], edits).map(b => ({ staged: b.staged, deleted: b.deleted, prefixes: b.prefixes }))).toEqual([
+      { staged: 2, deleted: 2, prefixes: ['gs://b/one/', 'gs://b/two/'] },
+    ])
   })
 })

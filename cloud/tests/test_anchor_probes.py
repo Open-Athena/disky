@@ -43,3 +43,93 @@ def test_prior_probes_are_exact_and_batched_by_shard(tmp_path, batch_keys, queri
 def test_probe_batch_size_must_be_positive():
     with pytest.raises(ValueError, match="^batch_keys must be positive$"):
         an.probe_prior_rows(None, [], "end", batch_keys=0)
+
+
+def test_probe_join_state_is_bounded_by_the_current_key_batch(tmp_path):
+    import json
+
+    con = duckdb.connect()
+    con.execute("CREATE TABLE source AS SELECT CASE WHEN i < 400 THEN 'foo' ELSE 'bar' END AS s, 3::UTINYINT AS depth, 'b/a/' || i AS path, NULL::VARCHAR AS usr, TIMESTAMP '2026-10-01' AS vf, TIMESTAMP '2027-01-01' AS vt, 1::BIGINT AS size, 1::BIGINT AS n_files FROM range(800) AS r(i)")
+    file = str(tmp_path / 'source.parquet')
+    con.execute(f'COPY source TO {an.q(file)} (FORMAT PARQUET)')
+    con.execute("CREATE TABLE near AS SELECT 'unused' || i AS k, 'b/a' AS dir FROM range(20) AS r(i) UNION ALL SELECT 'foo', 'b/a' UNION ALL SELECT 'bar', 'b/a'")
+    con.execute(f'CREATE TABLE prows({an.AR_COLS})')
+    profile = tmp_path / 'profile.json'
+    con.execute("SET enable_profiling='json'")
+    con.execute(f'SET profiling_output={an.q(str(profile))}')
+    right_rows = []
+
+    def joins(node):
+        if node.get('operator_name') == 'ASOF_JOIN':
+            yield node
+        for child in node.get('children', []):
+            yield from joins(child)
+
+    class Observed:
+        def execute(self, sql):
+            result = con.execute(sql)
+            if sql.startswith('INSERT INTO prows'):
+                right_rows.extend(node['children'][1]['operator_cardinality'] for node in joins(json.loads(profile.read_text())))
+            return result
+
+    tier = SimpleNamespace(shard_file=lambda mode, key: file if key in ('foo', 'bar') else None)
+    assert an.probe_prior_rows(Observed(), [tier], 'end', batch_keys=1) == 2
+    assert right_rows == [1, 1]
+    assert con.execute('SELECT k, count(*) FROM prows GROUP BY k ORDER BY k').fetchall() == [('bar', 400), ('foo', 400)]
+
+
+def test_candidate_bounds_include_unknown_statistics_and_exact_edges():
+    con = duckdb.connect()
+    con.execute('CREATE TABLE cand(k VARCHAR, lvl INTEGER, dir VARCHAR, n BIGINT)')
+    con.executemany('INSERT INTO cand VALUES (?, ?, ?, ?)', [
+        ('foo', 0, '', 1), ('foo', 1, 'a', 1), ('foo', 1, 'b', 1),
+        ('foo', 1, 'c', 1), ('missing', 0, '', 1),
+    ])
+    con.execute('CREATE TABLE ktk(k VARCHAR, p_min VARCHAR, p_max VARCHAR, rows BIGINT)')
+    con.executemany('INSERT INTO ktk VALUES (?, ?, ?, ?)', [
+        ('foo', None, None, 2), ('foo', 'a/a', 'a/m', 3),
+        ('foo', 'a/z', 'b/c', 5), ('foo', 'b/a', 'b/z', 7),
+        ('foo', 'b/z', None, 11), ('foo', None, 'a/a', 13),
+        ('foo', 'b/a', 'b/z', 17),
+        ('other', None, None, 999),
+    ])
+    an.near_candidates(con, 0)
+    assert con.execute('SELECT * FROM near ORDER BY k, lvl, dir').fetchall() == [
+        ('foo', 0, '', 1, 58), ('foo', 1, 'a', 1, 23),
+        ('foo', 1, 'b', 1, 42), ('foo', 1, 'c', 1, 13),
+        ('missing', 0, '', 1, 0),
+    ]
+    an.near_candidates(con, 24)
+    assert con.execute('SELECT * FROM near ORDER BY k, lvl, dir').fetchall() == [
+        ('foo', 0, '', 1, 58), ('foo', 1, 'b', 1, 42),
+    ]
+
+
+def test_candidate_bounds_scale_with_many_directories_of_one_key():
+    con = duckdb.connect()
+    con.execute("CREATE TABLE cand AS SELECT 'key' AS k, 1 AS lvl, printf('b/%06d', i) AS dir, 1::BIGINT AS n FROM range(20000) AS r(i)")
+    con.execute("CREATE TABLE ktk AS SELECT k, dir || '/a' AS p_min, dir || '/z' AS p_max, 10::BIGINT AS rows FROM cand")
+    an.near_candidates(con, 10)
+    assert con.execute('SELECT count(*), min(bound), max(bound), sum(bound) FROM near').fetchone() == (20000, 10, 10, 200000)
+
+
+def test_tier_reads_each_immutable_shard_plan_once(monkeypatch, tmp_path):
+    import json
+    from pathlib import Path
+
+    plan = tmp_path / 'shards.json'
+    plan.write_text(json.dumps({'shards': [{'i': 7, 'lo': 'aaa', 'hi': 'mmm'}, {'i': 19, 'lo': 'mmm', 'hi': None}]}) + '\n')
+    read_text = Path.read_text
+    reads = []
+
+    def read(path, *args, **kwargs):
+        reads.append(path)
+        return read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, 'read_text', read)
+    tier = an.Tier(tmp_path)
+    keys = ['000', 'aaa', 'aaaz', 'lll', 'mmm', 'zzz', 'é']
+    expected = [None, *[str(tmp_path / 'sx/s0007.parquet')] * 3, *[str(tmp_path / 'sx/s0019.parquet')] * 3]
+    assert [tier.shard_file('end', key) for key in keys] == expected
+    assert [tier.shard_file('end', key) for key in keys] == expected
+    assert reads == [plan]

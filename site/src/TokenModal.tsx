@@ -5,6 +5,7 @@
 // The raw value is also cached in this browser's localStorage at mint, so
 // *this device* can re-show it — any other device sees status only.
 import { useCallback, useEffect, useState } from 'react'
+import { Loading } from './Busy'
 import { useStore } from './store'
 
 interface Status {
@@ -120,7 +121,7 @@ export default function TokenModal({ onClose }: { onClose: () => void }) {
           <button className="token-x" type="button" onClick={onClose} aria-label="Close">×</button>
         </div>
 
-        {phase.k === 'loading' && <p className="token-muted">Loading…</p>}
+        {phase.k === 'loading' && <Loading label="Loading agent token…" />}
 
         {phase.k === 'error' && (
           <>

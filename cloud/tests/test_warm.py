@@ -1,5 +1,6 @@
 """Specs for the cache warm-up plan (`dt_cloud.warm`): exact request lists."""
 from dt_cloud import warm as W
+import pytest
 
 DATES = [f"2026-08-{d:02d}" for d in range(10, 32)] + [f"2026-09-{d:02d}" for d in range(1, 16)]
 
@@ -118,3 +119,22 @@ def test_summary_counts_refusals_apart_from_failures():
     res = [("/a", 200, 1.2, "miss"), ("/b", 409, 0.3, ""), ("/c", 409, 0.2, ""), ("/d", 500, 2.0, ""), ("/e", 0, 0.1, "URLError")]
     assert W.summary(res, "2026-10-16T0716") == "warm-cache: 1/5 warmed for 2026-10-16T0716 in 4s of request time; 2 refused (409); 2 failed"
     assert W.summary(res[:1], "d") == "warm-cache: 1/1 warmed for d in 1s of request time"
+
+
+@pytest.mark.parametrize("statuses,code,summary", [
+    ([200, 409], 0, "warm-cache: 1/2 warmed for 2026-10-20 in 2s of request time; 1 refused (409)"),
+    ([200, 500], 1, "warm-cache: 1/2 warmed for 2026-10-20 in 2s of request time; 1 failed"),
+    ([403], 1, "warm-cache: 0/1 warmed for 2026-10-20 in 1s of request time; 1 failed"),
+])
+def test_warm_cli_exits_nonzero_for_failed_requests(monkeypatch, statuses, code, summary):
+    from click.testing import CliRunner
+    from dt_cloud import cli
+
+    monkeypatch.setenv("SITE_TOKEN", "test")
+    monkeypatch.setattr(W, "scan_dates", lambda _: ["2026-10-20"])
+    monkeypatch.setattr(W, "env_paths", lambda: ("",))
+    monkeypatch.setattr(W, "warm", lambda *a, **kw: [("/a", status, 1.0, "") for status in statuses])
+    logs = []
+    monkeypatch.setattr(cli, "err", logs.append)
+    result = CliRunner().invoke(cli.warm_cache, ["-r", "local", "-u", "https://site.test"])
+    assert (result.exit_code, result.stdout, logs) == (code, "", [summary])

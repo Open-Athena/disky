@@ -35,7 +35,7 @@ export const onRequestGet = async (ctx: Ctx & { env: Env; waitUntil?: (p: Promis
   const db = ctx.env.DB
   if (db) {
     const finished = await reflectRuns(cfg, db, token, jobs, shape.buckets[0])
-    await settleOpenPlan(db)
+    await settleOpenPlan(db, sweepJobs(jobs).filter(j => j.status?.state === 'SUCCEEDED').map(jobIdOf))
     if (finished.length) {
       // Sized from the interval store for the dates it holds (`withPathStore`), as the plans routes size them.
       const p = withPathStore(ctx).then(c => announceFinished(c.env, db, finished, new URL(ctx.request.url).origin))

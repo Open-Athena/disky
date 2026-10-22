@@ -1415,6 +1415,14 @@ def _finalize_and_clean(parts_dir: str, manifest: dict, out_parquet: str, jobs: 
         _stage(f"FAILED — streamed parts preserved at {parts_dir}; rerun resumes at finalize")
         raise
     _stage("finalize done")
+    if manifest.get("version_listings"):
+        import duckdb
+        from disk_tree.listing import prepare_listing
+        from disk_tree.object_version import attach_parquet
+
+        with duckdb.connect(config={"memory_limit": "512MB"}) as version_con:
+            source = prepare_listing(version_con, tuple(manifest["version_listings"]))
+            attach_parquet(out_parquet, source, manifest["version_bucket"], version_con)
     shutil.rmtree(parts_dir, ignore_errors=True)
     return {
         'rows': manifest['rows'],
@@ -1489,6 +1497,8 @@ def aggregate_stream(
         with open(manifest_path) as fh:
             manifest = json.load(fh)
         _stage(f"resuming from streamed parts at {parts_dir} (stream pass skipped)")
+        manifest.setdefault('version_listings', list(listings))
+        manifest.setdefault('version_bucket', bucket)
         if 'scan_root' not in manifest:
             # Parts streamed before the v2 listing format (spec
             # `listing-slim.md`) still finalize as v2: the root is a function
@@ -1643,6 +1653,8 @@ def aggregate_stream(
         n_rows_total = sum(r['rows'] for r in results) + sum(p['rows'] for p in b_parts)
         max_open = max(r['max_open'] for r in results)
         manifest = {
+            'version_listings': list(listings),
+            'version_bucket': bucket,
             'pivot_names': pivot_names,
             # v2 output (spec `listing-slim.md`); a resumed manifest without
             # these keys is filled in on resume (see `aggregate_stream`).

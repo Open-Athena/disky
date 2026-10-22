@@ -476,7 +476,24 @@ def head(profile_path: Path, nf_dir: Path, launch: Path | None, *, reproc: bool 
 
     prev = {s: signal.signal(s, stop) for s in (signal.SIGTERM, signal.SIGINT)}
     try:
-        rc = proc.wait()
+        from .run_dag import cached_tasks
+        from .scan_runs import dag_cmd
+
+        seen_cached: tuple[str, ...] = ()
+        while True:
+            if recording and trace.exists():
+                cached = cached_tasks(trace.read_text())
+                dag = launch / 'dag.mmd'
+                if not dag.exists():
+                    dag = launch / PREVIEW_DAG
+                if cached != seen_cached and dag.exists():
+                    _record(dag_cmd, [run_id, str(dag)])
+                    seen_cached = cached
+            try:
+                rc = proc.wait(timeout=10)
+                break
+            except subprocess.TimeoutExpired:
+                pass
     finally:
         for s, h in prev.items():
             signal.signal(s, h)

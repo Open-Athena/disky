@@ -2,7 +2,7 @@ import { expect, it } from 'vitest'
 import type { PrefixExecution } from './prefixExecution'
 import { batchCompletion, batchIsCollapsed, isCurrentlyStaged, liveStagedItems, stagedMapTree, stagedState } from './stagedCompletion'
 
-const deleted: PrefixExecution = { kind: 'recorded', runId: 'run', objects: 5, bytes: 50, undone: 0, deadline: 700, expired: false }
+const deleted: PrefixExecution = { kind: 'recorded', runId: 'run', objects: 5, bytes: 50, preserved: 0, undone: 0, deadline: 700, expired: false }
 
 it('distinguishes recorded deletions, empty scans, and files still present at the selected scan', () => {
   expect([

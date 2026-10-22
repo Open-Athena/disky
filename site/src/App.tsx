@@ -25,7 +25,7 @@ import { FitSelect } from './FitSelect'
 import { PathPopover } from './PathPopover'
 import { fromUrlPath, mountedSegs, pathCopy, pathText, urlSegsOf } from './pathCrumbs'
 import { listsObjects, openHref, treeHref } from './objects'
-import { Busy, Skeleton } from './Busy'
+import { Busy, Loading, Skeleton } from './Busy'
 import { useRules } from './rules'
 import { useSectionSpy, withoutSection, type SectionMode } from 'use-prms/sections'
 import { LEGACY_ANCHORS, SECTION_IDS, SECTION_KEY } from './homeSections'
@@ -1458,7 +1458,7 @@ function AppContent() {
           )}
           {/* The opened object (`?open=`), under the map it was picked from. */}
           {openP && mapPath && (
-            <Suspense fallback={<p className="loading">loading the viewer…</p>}>
+            <Suspense fallback={<Loading label="Loading the viewer…" />}>
               <ObjectPanel
                 segs={[...segs, openP]}
                 node={mapPath.length - 1 === segs.length ? mapPath[mapPath.length - 1].c?.find(c => c.n === openP) : undefined}
@@ -1522,7 +1522,7 @@ function AppContent() {
         // First paint only — before even the depth-1 tree has landed (later
         // loads hold the previous tree instead): reserve the map's slot at its
         // fetch aspect (w : 0.6w), so nothing below it jumps when it arrives.
-        <div id="tree-map" className="tm-skel" aria-busy="true" aria-label="loading tree" />
+        <div id="tree-map" className="tm-skel busy-host" aria-busy="true"><Busy label="Loading storage map…" /></div>
       )}
 
       {/* Bytes per scan under the drilled prefix, scoped like the map (a user
@@ -1625,7 +1625,7 @@ function AppContent() {
             </span>
             {diffHead ? (
               <>
-                {diffStale && <span className="loading"> · aligning the rows…</span>}
+                {diffStale && <Loading label="Aligning the rows…" />}
               </>
             ) : diffErr && !diffStale && /^(404|409)/.test(diffErr.message) ? (
               <span className="tab-note">
@@ -1637,7 +1637,7 @@ function AppContent() {
               // The filter's refusal as its reason; any other failure as its message, a 5xx with a retry.
               <>{' · '}<LoadFailure as="span" className="tab-note" err={diffErr} what={`diff ${fmtS(diffPrev)} → ${fmtS(asof)}`} onRetry={() => void diffQ.refetch()} /></>
             ) : (
-              <span className="loading"> · aligning {fmtS(diffPrev)} → {fmtS(asof)}…</span>
+              <Loading label={`Aligning ${fmtS(diffPrev)} → ${fmtS(asof)}…`} />
             )}
           </span>} />
           <DiskSpaceDiff before={beforeMetaQ.data?.disk_space} after={meta?.disk_space} />
@@ -1655,7 +1655,7 @@ function AppContent() {
               {/* The map's tabular twin: the same cells as rows, sortable; a
                   row's name drills like its cell (and scrolls the maps up). */}
               <DiffTable model={diffModel} scheme={store.scheme} segs={diffSegs} onDrill={rel => openPath([...diffSegs, ...rel])} onOpen={rel => openObject([...diffSegs, ...rel])} />
-              {diffStaleOther
+              {diffStaleOther || diffStale
                 ? <Busy label={`aligning ${fmtS(diffPrev)} → ${fmtS(asof)}…`} />
                 : diffRefining
                   ? <Busy label="aligning rows…" corner />

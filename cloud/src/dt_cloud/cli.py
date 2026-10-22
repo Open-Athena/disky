@@ -600,7 +600,7 @@ def probe(against: str | None, budget: float | None, cold: bool, date: str | Non
 
     Each scenario's API requests go out concurrently, like the browser's, and
     each response's status, wall time, edge-cache tier and server time is
-    recorded. Exits nonzero on any 5xx or transport failure (and on a scenario
+    recorded. Exits nonzero on any HTTP error except the site's explicit view refusal (409), on transport failure, or a scenario
     over `--budget`). `-o` keeps the record, so a prefix of runs is a latency
     time series.
 
@@ -886,6 +886,7 @@ def index_recut(check: bool, mem: str, threads: int, row_group_rows: int, tiers:
 @main.command("over-time-groups")
 @option("-b", "--bucket", envvar="DATA_BUCKET", default=None, help="Data bucket whose Batch mount (/gcs/<bucket>) is the default -p; default $DATA_BUCKET")
 @option("-g", "--gen", required=True, help="Generation id for the published index dirs (the run's, e.g. the job's $GEN)")
+@option("-I", "--interval-store", default=None, help="Store to reconstruct retired scans from (default: primary's data root; secondary stores must name their own)")
 @option("-K", "--group-size", default=None, type=int, help="Scans per sealed group (default: dt_cloud.overtime.OVER_TIME_GROUP_SIZE)")
 @option("-l", "--layer2-prefix", default=None, help="Layer-2 dir template with `{scan}` (default $LAYER2_PREFIX; one of the two is required)")
 @option("-m", "--mem", default="8GB", help="DuckDB memory limit")
@@ -899,6 +900,7 @@ def index_recut(check: bool, mem: str, threads: int, row_group_rows: int, tiers:
 def over_time_groups(
     bucket: str | None,
     gen: str,
+    interval_store: str | None,
     group_size: int | None,
     layer2_prefix: str | None,
     mem: str,
@@ -930,7 +932,7 @@ def over_time_groups(
     from disk_tree import blobfs
 
     from .index_footer import index_dir, sync_d1, synced_variants
-    from .overtime import OVER_TIME_GROUP_SIZE, multiscan_row, sealed_groups, sync_manifest, synced_groups, write_over_time_index
+    from .overtime import OVER_TIME_GROUP_SIZE, group_source, multiscan_row, sealed_groups, sync_manifest, synced_groups, write_over_time_index
 
     K = group_size or OVER_TIME_GROUP_SIZE
     l2 = resolve_layer2(layer2_prefix, "-l/--layer2-prefix")
@@ -955,7 +957,9 @@ def over_time_groups(
             dir_ = index_dir(d, "path", store=store)
             if dir_ is None:
                 raise SystemExit(f"over-time-groups: no `path` pointer for {d} (group {gid})")
-            pairs.append((d, f"{data}/{dir_}/path-index.parquet"))
+            source = group_source(d, f"{data}/{dir_}/path-index.parquet", out_dir / gid,
+                                  interval_store=interval_store or (data if store == "primary" else None), mem=mem, threads=threads)
+            pairs.append((d, source))
         summ = write_over_time_index(pairs, out_dir / gid, mem=mem, threads=threads, tmp_dir=tmp_dir)
         key = f"{l2.format(scan=gid).rstrip('/')}/index/{gen}"
         dest = f"{root}/{key}"
@@ -1489,7 +1493,8 @@ def warm_cache(date: str | None, jobs: int, dry_run: bool, root: str | None, tok
     page's default requests (one subtree, the diff span chips 1d/3d/7d/14d/30d
     and the previous-scan pair, each with its summary) at the common canvas
     widths, so the first viewer anywhere gets a cache hit (colo cache + global
-    KV). Non-fatal: a failed request just leaves that view cold."""
+    KV). Exits nonzero for failed requests; explicit view refusals (409) are reported separately. The pipeline may
+    continue with a failed warm-up phase, since the view can be computed on demand."""
     from . import warm as wm
 
     # Deployment config: SITE_URL, DATA_BUCKET, SNAPSHOTS_SUBDIR (the job exports them).
@@ -1527,6 +1532,8 @@ def warm_cache(date: str | None, jobs: int, dry_run: bool, root: str | None, tok
     headers = headers or auth()
     res = wm.warm(site_url, headers, paths, jobs=jobs)
     err(wm.summary(res, date))
+    if any(status not in (200, 409) for _, status, _, _ in res):
+        raise SystemExit(1)
 
 
 @main.group()
@@ -1643,12 +1650,17 @@ def plan_sweep() -> None:
     """Plan-first deletion on CoreWeave: build manifests from a plan and execute them (boto3/CAIOS)."""
 
 
+from .sweep_analysis import analyze_preserved_cmd
+plan_sweep.add_command(analyze_preserved_cmd)
+
+
 @plan_sweep.command("manifest")
 @option("-d", "--date", required=True, help="Scan id (SNAP_ID) whose layer-2 parquet to pin")
+@option("-I", "--interval-store", envvar="SWEEP_INTERVAL_STORE", help="Review source for retired scan files (default $R2_ARCHIVE, else the data store)")
 @option("-l", "--l2", "l2_path", help="Layer-2 parquet path (default: /gcs/<data>/cw-l2/<date>/<bucket>.parquet)")
 @option("-o", "--out", required=True, help="Output dir for manifest/ + plan-summary.json")
 @argument("plan_path")
-def plan_sweep_manifest(date: str, l2_path: str | None, out: str, plan_path: str) -> None:
+def plan_sweep_manifest(date: str, interval_store: str | None, l2_path: str | None, out: str, plan_path: str) -> None:
     """Expand a curated PLAN (json) into an object-level deletion manifest.
 
     Deletes nothing; reads the pinned layer-2 parquet and writes
@@ -1662,7 +1674,18 @@ def plan_sweep_manifest(date: str, l2_path: str | None, out: str, plan_path: str
     plan = load_plan(plan_path)
 
     def l2_for(scan: str) -> str:
-        return f"/gcs/{data_bucket()}/cw-l2/{scan}/{plan.bucket}.parquet"
+        from disk_tree import blobfs
+        from .sweep_source import review_source
+
+        root = f"/gcs/{data_bucket()}"
+        path = f"{root}/cw-l2/{scan}/{plan.bucket}.parquet"
+        if blobfs.exists(path):
+            return path
+        err(f"manifest: {scan} layer-2 retired; reconstructing the selected objects from the interval store")
+        prefixes = plan.sweep if scan == date else [p for p in plan.sweep if plan.as_of.get(p) == scan]
+        exact = plan.objects if scan == date else [p for p in plan.objects if plan.as_of.get(p) == scan]
+        return review_source(interval_store or os.environ.get("R2_ARCHIVE") or root, scan, plan.bucket, prefixes, exact,
+                             Path(out) / "review" / f"{scan}.parquet")
 
     # Items staged as of another scan are checked against that scan's layer-2.
     summary = build_manifest(l2_path or l2_for(date), plan, out, date=date, l2_for=l2_for)
@@ -1671,27 +1694,27 @@ def plan_sweep_manifest(date: str, l2_path: str | None, out: str, plan_path: str
 
 
 @plan_sweep.command("execute")
-@option("-G", "--no-versioning-guard", is_flag=True, help="Skip the versioning preflight: a real delete is then PERMANENT (no delete marker to undo)")
-@option("-r", "--for-real", is_flag=True, help="Actually delete (writes recoverable delete markers); default is a dry run")
+@option("-r", "--for-real", is_flag=True, help="Actually delete (may be permanent); default is a dry run")
 @argument("run_dir")
-def plan_sweep_execute(no_versioning_guard: bool, for_real: bool, run_dir: str) -> None:
+def plan_sweep_execute(for_real: bool, run_dir: str) -> None:
     """Execute the manifest under RUN_DIR against CoreWeave S3 (boto3).
 
     Default is a dry run (touches nothing). `--for-real` deletes reviewed keys
-    whose (size, mtime) still match; refused unless the bucket has versioning
-    Status=Enabled — `-G` disables that guard (deletes become permanent; the
-    summary records `versioning_guard: false`)."""
+    whose (size, mtime) still match. Bucket versioning is not required;
+    deletions may be permanent."""
     import json
 
     from .sweep import execute_plan
 
-    s = execute_plan(run_dir, for_real=for_real, require_versioning=not no_versioning_guard)
+    s = execute_plan(run_dir, for_real=for_real)
     err(
         f"{'REAL' if for_real else 'DRY'}: {s['deleted_objects']} objs / {s['deleted_bytes']} bytes; "
         f"gone {s['skipped_gone']} overwritten {s['skipped_overwritten']} "
         f"drift {s['drift_new']} failed {s['delete_failed']}"
     )
     print(json.dumps(s))
+    if s["delete_failed"]:
+        raise SystemExit(1)
 
 
 @plan_sweep.command("undo")
@@ -3332,6 +3355,7 @@ from .interval_append import append_cmd as _interval_append, cli as _interval_ru
 from .interval_local import add_cmd as _interval_local_add, build_cmd as _interval_local_build, current_cmd as _interval_local_current  # noqa: E402
 from .interval_export import export_cmd as _interval_export  # noqa: E402
 from .interval_backfill import backfill_cmd as _interval_backfill  # noqa: E402
+from .interval_identity import migrate_cmd as _interval_identity  # noqa: E402
 from .interval_backfill import verify_generation_cmd as _interval_verify_generation  # noqa: E402
 
 _interval_store.add_command(_interval_local_build)
@@ -3339,6 +3363,7 @@ _interval_store.add_command(_interval_local_add)
 _interval_store.add_command(_interval_local_current)
 _interval_store.add_command(_interval_export)
 _interval_store.add_command(_interval_backfill)
+_interval_store.add_command(_interval_identity)
 _interval_store.add_command(_interval_verify_generation)
 _interval_store.add_command(_interval_append)
 _interval_store.add_command(_interval_merge)

@@ -158,6 +158,36 @@ def test_run_tiers(tmp_path):
     assert sm.run_tiers(dirs, drilled=False) == ["shards", "catalog", "anchors"]
 
 
+def test_probe_builds_frozen_inputs_without_writing_the_source(tmp_path, monkeypatch):
+    from click.testing import CliRunner
+
+    base = tmp_path / "mount/static-names/g"
+    (base / "manifests").mkdir(parents=True)
+    (base / "scans.json").write_text("{}\n")
+    runs = [_run("2026-10-18"), _run("2026-10-19")]
+    (base / "manifests/2026-10-19.json").write_text(json.dumps({"runs": runs}))
+    before = {p.relative_to(base).as_posix(): p.read_bytes() for p in base.rglob("*") if p.is_file()}
+    calls = []
+
+    def build(dirs, run, out, **kw):
+        calls.append(([p.relative_to(base).as_posix() for p in dirs], run, out, kw))
+        out.mkdir(parents=True)
+        return {"rows": 12, "bytes": 34}
+
+    monkeypatch.setattr(sm, "build_merged_run", build)
+    result = CliRunner().invoke(sm.cli, ["probe", "-g", "g", "-d", "2026-10-19", "-j", "2", "-m", str(tmp_path / "mount"),
+                                       "-o", str(tmp_path / "out"), "-T", str(tmp_path / "scratch")])
+    assert result.exit_code == 0, result.output
+    merged = _merged("2026-10-18", "2026-10-19", 1, ["2026-10-18", "2026-10-19"])
+    assert calls == [([r["key"] for r in runs], merged, tmp_path / "out",
+                      {"drilled": False, "rule": None, "tmp": tmp_path / "scratch", "jobs": 2})]
+    assert json.loads(result.stdout) == {"gen": "g", "manifest": "2026-10-19", "inputs": [r["key"] for r in runs],
+                                       "output": merged["key"], "result": {"rows": 12, "bytes": 34}}
+    assert {p.relative_to(base).as_posix(): p.read_bytes() for p in base.rglob("*") if p.is_file()} == before
+    refused = CliRunner().invoke(sm.cli, ["probe", "-g", "g", "-d", "2026-10-19", "-m", str(tmp_path / "mount"), "-o", str(base / "out")])
+    assert (refused.exit_code, refused.stderr.splitlines()[-1]) == (2, f"Error: probe output/scratch must be outside the source mount: {base / 'out'}")
+
+
 # ── Real runs ──────────────────────────────────────────────────────────────
 
 

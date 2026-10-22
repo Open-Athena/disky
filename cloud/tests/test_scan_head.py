@@ -307,7 +307,7 @@ def test_head_records_into_the_profiles_database_and_store(tmp_path, monkeypatch
         return record_sql(rec, now)
 
     monkeypatch.setattr(scan_runs, "record_sql", spy)
-    monkeypatch.setattr(H.subprocess, "Popen", lambda argv, **kw: SimpleNamespace(pid=0, wait=lambda: 0))
+    monkeypatch.setattr(H.subprocess, "Popen", lambda argv, **kw: SimpleNamespace(pid=0, wait=lambda timeout=None: 0))
     assert H.head(prof, tmp_path / "nf-dir", tmp_path / "launch") == 0
     assert (runs_written[0], runs_written[-1][:2], set(dbs)) == (
         ("2026-10-16T1200", "meta", "running", "schedule"), ("2026-10-16T1200", "meta"), {"db-from-profile"})
@@ -360,7 +360,7 @@ def test_head_stores_the_dag_before_the_run(tmp_path, monkeypatch):
         return SimpleNamespace(returncode=0)
 
     monkeypatch.setattr(H.subprocess, "run", preview)
-    monkeypatch.setattr(H.subprocess, "Popen", lambda argv, **kw: events.append("nextflow run") or SimpleNamespace(pid=0, wait=lambda: 0))
+    monkeypatch.setattr(H.subprocess, "Popen", lambda argv, **kw: events.append("nextflow run") or SimpleNamespace(pid=0, wait=lambda timeout=None: 0))
     assert H.head(prof, nf_dir, launch) == 0
     assert previews == [H.preview_argv(nf_dir, launch)]
     assert previews[0][-3:] == ["-preview", "-with-dag", str(launch / "dag-preview.mmd")]
@@ -375,6 +375,47 @@ def test_head_stores_the_dag_before_the_run(tmp_path, monkeypatch):
     events.clear()
     assert H.head(prof, nf_dir, launch) == 0
     assert ("INSERT INTO scan_run_dags" in events, "nextflow run" in events) == (False, True)
+
+
+def test_head_publishes_cache_hits_while_nextflow_is_running(tmp_path, monkeypatch):
+    from dt_cloud import run_dag
+
+    launch = tmp_path / 'launch'
+    profile = tmp_path / 'p.yml'
+    profile.write_text(f'deployment: fix\nexecutor: {{kind: local}}\nwork: {tmp_path}/nf\ndata: {tmp_path}/data\n'
+                       "layout: {layer2: 'l2/{scan}/', snapshots: ''}\nsources: [s3://a]\n"
+                       'skip: [static-names, digest, interval-store, warm-cache, probe]\n'
+                       'options: {list: {import: true}}\nenv: {SCAN_RUNS_PROFILE: unused}\n')
+    monkeypatch.setenv('DT_RUN_ID', 'run-cache')
+    monkeypatch.delenv('REPROC', raising=False)
+    monkeypatch.delenv('BATCH_JOB_UID', raising=False)
+    monkeypatch.setattr(H, 'store_preview_dag', lambda *args: (launch / H.PREVIEW_DAG).write_text('flowchart TB\n    v2(["index"])\n'))
+    writes = []
+
+    def record(cmd, args):
+        if cmd.name == 'dag':
+            writes.append((args[0], run_dag.read_file('nextflow', Path(args[1])).cached_tasks))
+
+    def popen(argv, **kwargs):
+        trace = launch / 'trace.tsv'
+        trace.write_text('name\tstatus\nindex\tCACHED\n')
+        calls = []
+
+        def wait(timeout):
+            assert timeout == 10
+            calls.append(timeout)
+            if len(calls) < 3:
+                raise H.subprocess.TimeoutExpired(argv, timeout)
+            return 0
+
+        return SimpleNamespace(pid=0, wait=wait)
+
+    monkeypatch.setattr(H, '_record', record)
+    monkeypatch.setattr(H, 'publish_reports', lambda *args: [])
+    monkeypatch.setattr(H, 'echo_task_logs', lambda *args: 0)
+    monkeypatch.setattr(H.subprocess, 'Popen', popen)
+    assert H.head(profile, tmp_path / 'nf-dir', launch) == 0
+    assert writes == [('run-cache', ('index',))]
 
 
 def test_publish_reports(tmp_path):

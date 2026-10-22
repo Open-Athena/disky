@@ -113,6 +113,29 @@ def test_run_and_summarize():
     assert summarize(results[:2], budget_ms=4000) == (True, ["  ✓ one            3.40s  2 reqs, 1 cached"])
 
 
+@pytest.mark.parametrize("status,passed", [(200, True), (409, True), (0, False), (301, False), (400, False), (401, False), (403, False), (404, False), (413, False), (429, False), (500, False)])
+def test_probe_rejects_http_errors_including_auth_and_read_budget(status, passed):
+    result = Result("one", "/a", status, 1000, 0, None, None)
+    expected = ["  ✓ one            1.00s  1 reqs, 0 cached"] if passed else [
+        "  ✗ one            1.00s  1 reqs, 0 cached, 1 failed", f"      {status} 1.00s /a",
+    ]
+    assert summarize([result]) == (passed, expected)
+
+
+@pytest.mark.parametrize("status,body,error", [
+    (200, b"<html>Sign in</html>", "invalid JSON response: <html>Sign in</html>"),
+    (200, b"", "invalid JSON response: "),
+    (403, b"denied", "denied"),
+])
+def test_probe_rejects_non_json_success_and_records_http_failure_body(status, body, error):
+    results = run(lambda path: Resp(status, 1000, len(body), None, None, body), {"one": ["/api/subtree"]})
+    assert results == [Result("one", "/api/subtree", status, 1000, len(body), None, None, error=error)]
+    assert summarize(results) == (False, [
+        "  ✗ one            1.00s  1 reqs, 0 cached, 1 failed",
+        f"      {status} 1.00s /api/subtree",
+    ])
+
+
 def test_record():
     r = [Result("one", "/a", 200, 5, 2, None, None)]
     now = dt.datetime(2026, 10, 2, 1, 2, 3, tzinfo=dt.timezone.utc)

@@ -2036,7 +2036,11 @@ async function onTier<T>(h: IndexHandle, i: number, f: (t: IndexHandle) => Promi
 
 async function selectSpans1(h: IndexHandle, rects: Rect[], cap = 4000, bMin = 0, lens?: Lens): Promise<Span[]> {
   if (h.mode !== 'd1') {
-    const pass = (g: Parameters<typeof groupMatches>[0]) => groupMatches(g, rects, bMin, lens, lensSorted(h.variant))
+    // The interval writer records true path min/max even across depth boundaries. Use them
+    // to reject unrelated prefixes before the decode budget counts those boundary groups.
+    const exactPaths = h.mode === 'pq' && h.asOf != null
+    const pass = (g: Parameters<typeof groupMatches>[0]) => groupMatches(g, rects, bMin, lens, lensSorted(h.variant)) &&
+      (!exactPaths || rects.some(r => g.dMax >= r.dLo && g.dMin <= r.dHi && g.pMax >= r.pLo && g.pMin <= r.pHi))
     const out = h.mode === 'blob' ? h.groups.filter(pass) : await pqGroups(h, pass)
     if (out.length > cap) throw new TooWide(`query too wide: >${cap} row groups (drill deeper or raise minArea)`)
     return out
@@ -2161,6 +2165,11 @@ export async function planRects(
   return [...byRg.values()].sort(bySpan).filter(s => !thrAt || s.bMax >= thrAt(Math.max(s.dMin, dMin)))
 }
 
+/** Whether a span plan fits the decoder's group and row limits, before fetching any data. */
+export function readFits(spans: Span[]): boolean {
+  return spans.length <= 250 && spans.reduce((n, s) => n + (s.rowEnd - s.rowStart), 0) <= 700_000
+}
+
 /** Decode a planned set of groups (cached per isolate, `GROUP_READS` in
  * flight) and keep the rows `keep` accepts — the tail shared by both sorts'
  * subtree reads. Caps the group count and the rows decoded: a broad lens (a
@@ -2169,9 +2178,7 @@ export async function planRects(
 /** `pre`: a cheap superset of `keep` on a row's raw `depth`, `path` and `size` (`Pre`): an interval store's groups
  *  shape only the rows it passes. */
 async function decodeSpans(h: IndexHandle, kept: Span[], keep: (r: Row) => boolean, stop?: () => boolean, pre?: Pre): Promise<Row[]> {
-  if (kept.length > 250) throw new Error('query too wide: drill deeper or raise minArea')
-  const totalRows = kept.reduce((n, s) => n + (s.rowEnd - s.rowStart), 0)
-  if (totalRows > 700_000) throw new Error('query too wide: drill deeper or raise minArea')
+  if (!readFits(kept)) throw new Error('query too wide: drill deeper or raise minArea')
   let t0 = now()
   if (h.runs?.length) {
     // Every tier's groups, every version of them, combined and then tested live.
@@ -2657,14 +2664,15 @@ export type Ask = ({ depth: number; path: string } | { depth: number; under: str
 const askRect = (a: Ask): Rect =>
   'path' in a
     ? { dLo: a.depth, dHi: a.depth, pLo: a.path, pHi: a.path }
-    : { dLo: a.depth, dHi: a.depth, pLo: a.under + '/', pHi: a.under + '0' } // '0' sorts just past '/'
+    : { dLo: a.depth, dHi: a.depth, pLo: a.under ? a.under + '/' : '', pHi: a.under ? a.under + '0' : '\uffff' } // '0' sorts just past '/'
 
 const groupMayHold = (g: Span & { vfMax?: number; vtMin?: number }, a: Ask): boolean => {
   if (g.dMax < a.depth || g.dMin > a.depth) return false
   if (a.vtLe != null && g.vtMin != null && g.vtMin > a.vtLe) return false
   if (a.vfGe != null && g.vfMax != null && g.vfMax < a.vfGe) return false
   if (g.dMin !== g.dMax) return true
-  return 'path' in a ? !(g.pMax < a.path || g.pMin > a.path) : !(g.pMax < a.under + '/' || g.pMin > a.under + '0')
+  const rect = askRect(a)
+  return !(g.pMax < rect.pLo || g.pMin > rect.pHi)
 }
 
 /** Point lookups: exact `(depth, path)` rows or `(depth, under-prefix)`
