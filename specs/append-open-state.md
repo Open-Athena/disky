@@ -1,6 +1,6 @@
 # Appends that cost O(the day's changes): carried open state
 
-Status: design, 2026-10-22. Item 3 of `specs/scan-cs3.md`.
+Status: 2026-10-22. Item 3 of `specs/scan-cs3.md`. Phase 2 (the catalog's carried counts) built and tested; not yet on gcs's image.
 
 ## What actually scales with the scans since the base
 
@@ -58,7 +58,7 @@ Unchanged: `cdelta/` stays on folded runs. It is O(changes) (~20–30 MB a scan 
 ## Phases
 
 1. This spec.
-2. Catalog `xcount` + run-tier history in `static_catalog.append` / `static_append.catalog_delta` / `catalog_cmd`; refold fallback. Tests: incremental vs refold byte-identical across several appends with a carry in between (a merged run as history), state equality, untrusted states (no json, wrong scan, wrong digest) fall back to identical output.
+2. **Built.** `static_catalog`: `RunTier`, `write_xcount` / `trusted_xcount` / `xcount_digest`, `_candidates_refold` / `_candidates_carried`, `append(state=, history=, state_out=, scan=)`. `static_append`: `run_tiers`, `carried_inputs`, `catalog_delta(..., state=, history=, state_out=, scan=)`, `runs catalog` reads and writes `state/<D>/catalog/` (`-R` forces the refold; `-S` the scratch bucket) and uploads `meta.json` last. Logs `catalog <D>: xcount carried from <prev> | refold`. `cloud/tests/test_catalog_state.py`: three appends past a two-scan base (a carry into a level-1 run before the third), V = 3 and 12, all three fixture flavors: each run's `cells.parquet` / `index.parquet` and `xcount` byte-identical to the refold's; the history reads exercised (prefixes first kept from the runs' shards at V = 12; new members); untrusted states refused (another scan, another window, parquet without JSON, JSON without parquet, a digest mismatch with Σ n unchanged, a truncated parquet); a rewrite killed midway leaves no JSON. Not covered by a fixture: a hex-run rule on the carried path (both paths expand with the same `kept_sql`, as the run's shards were cut).
 3. The local paths' carried open versions (static first, then interval).
 
 ## Expected effect on gcs
