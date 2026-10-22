@@ -77,13 +77,17 @@ export const isMaintenance = (kind: string): boolean => (MAINT_KINDS as readonly
 export const maintStore = (run: Pick<ScanRun, 'kind' | 'gen'>): string | null =>
   isMaintenance(run.kind) && run.gen?.includes('/') ? run.gen.split('/')[0] : null
 
-/** Seconds without a write after which a running maintenance run reads as quiet (its heartbeat is every 60 s). */
-export const QUIET_S = 600
+/** Seconds without a write after which a running run reads as quiet: five missed heartbeats. A running run's record
+ * is touched every 60 s (its job's `scan-run supervise -H`; each running phase's process, `$DT_HEARTBEAT_S`, with the
+ * phase's live note; a maintenance job's recorder), however long its phase, so a quiet run's job has likely stalled or
+ * died. */
+export const QUIET_S = 300
 
-/** Seconds without a write after which a running run reads as lost: its job most likely died without its exit trap
- * (Batch's maxRunDuration, a lost VM), and `scan-run reconcile` marks it failed once Batch confirms. Until then its
- * clock stops at its last write (`liveUntil`), so it never stretches a duration chart. */
-export const LOST_S = 7200
+/** Seconds without a write after which a running run reads as lost: thirty missed heartbeats, past any D1 or network
+ * hiccup, so its job most likely died without its exit trap (Batch's maxRunDuration, a lost VM), and `scan-run
+ * reconcile` (`RECONCILE_AFTER_S`, the same bound) marks it failed once Batch confirms. Until then its clock stops at
+ * its last write (`liveUntil`), so it never stretches a duration chart. */
+export const LOST_S = 1800
 
 export const isLost = (run: Pick<ScanRun, 'status' | 'updated_ts'>, now: number): boolean =>
   run.status === 'running' && now - run.updated_ts > LOST_S
@@ -92,14 +96,14 @@ export const isLost = (run: Pick<ScanRun, 'status' | 'updated_ts'>, now: number)
 export const liveUntil = (run: Pick<ScanRun, 'status' | 'updated_ts'>, now: number): number =>
   isLost(run, now) ? run.updated_ts : now
 
-/** What a running run is doing: its running phase (the newest-started, if several) and that phase's elapsed seconds
- * (null when none runs), how long since the run last wrote (`updated_ts`: a maintenance job's heartbeat) when that
- * exceeds `QUIET_S`, and whether that exceeds `LOST_S`. Null for a run that isn't running. */
-export function liveness(run: Pick<ScanRun, 'status' | 'updated_ts'>, spans: readonly PhaseSpan[], now: number): { phase: string | null; elapsed: number | null; quiet: number | null; lost: boolean } | null {
+/** What a running run is doing: its running phase (the newest-started, if several), that phase's elapsed seconds and
+ * its note (its heartbeat's live progress line; null when none runs), how long since the run last wrote (`updated_ts`:
+ * its heartbeat) when that exceeds `QUIET_S`, and whether that exceeds `LOST_S`. Null for a run that isn't running. */
+export function liveness(run: Pick<ScanRun, 'status' | 'updated_ts'>, spans: readonly PhaseSpan[], now: number): { phase: string | null; elapsed: number | null; note: string | null; quiet: number | null; lost: boolean } | null {
   if (run.status !== 'running') return null
   const cur = [...spans].filter(s => s.status === 'running').sort((a, b) => b.start - a.start)[0]
   const quiet = now - run.updated_ts
-  return { phase: cur?.phase ?? null, elapsed: cur ? cur.end - cur.start : null, quiet: quiet > QUIET_S ? quiet : null, lost: isLost(run, now) }
+  return { phase: cur?.phase ?? null, elapsed: cur ? cur.end - cur.start : null, note: cur?.note ?? null, quiet: quiet > QUIET_S ? quiet : null, lost: isLost(run, now) }
 }
 
 /** A key's structure: the key with its own scan id abstracted, so a per-scan
@@ -165,8 +169,10 @@ export function withDeltas(run: ScanRun, outputs: readonly ScanRunOutput[], inde
 /** A phase on the run's clock: seconds from the run's start. */
 export interface PhaseSpan { phase: string; start: number; end: number; status: ScanRunPhase['status']; note: string | null; lane: number; machine?: string | null; task?: string | null }
 
+/** A phase's status, a closed one's note naming a nonfatal failure (`failed (exit N)`, legacy `wall, failed …`) over
+ * its recorded `done`. A running phase stays running: its note is a heartbeat's live output line, whatever it says. */
 export function phaseStatus(p: Pick<ScanRunPhase, 'status' | 'note'>): ScanRunPhase['status'] {
-  return /(?:^|,\s*)failed\b/i.test(p.note ?? '') ? 'failed' : p.status
+  return p.status !== 'running' && /(?:^|,\s*)failed\b/i.test(p.note ?? '') ? 'failed' : p.status
 }
 
 export function phaseOutcome(p: Pick<ScanRunPhase, 'status' | 'note'>): string {

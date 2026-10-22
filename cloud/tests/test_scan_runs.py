@@ -759,7 +759,8 @@ def test_phase_sql_names_the_task_columns_only_when_known():
             "VALUES ('u1', 'list', 0, 1, 2, 'done', NULL{v}) ON CONFLICT(run_id, phase) DO UPDATE SET seq = excluded.seq, "
             "status = excluded.status, started_ts = COALESCE(excluded.started_ts, scan_run_phases.started_ts), "
             "finished_ts = COALESCE(excluded.finished_ts, scan_run_phases.finished_ts), "
-            "note = COALESCE(excluded.note, scan_run_phases.note){u}")
+            "note = CASE WHEN excluded.finished_ts IS NOT NULL AND scan_run_phases.finished_ts IS NULL THEN excluded.note "
+            "ELSE COALESCE(excluded.note, scan_run_phases.note) END{u}")
     assert scan_runs.phase_sql("u1", Phase("list", 0, 1, 2)) == head.format(c="", v="", u="")
     assert scan_runs.phase_sql("u1", Phase("list", 0, 1, 2, job_name="nf-1", machine="e2-standard-4")) == head.format(
         c=", job_name, machine", v=", 'nf-1', 'e2-standard-4'",
