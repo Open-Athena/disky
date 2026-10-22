@@ -238,3 +238,16 @@ def test_publish_scan_never_into_a_compacted_generation(tmp_path):
         ar.publish_scan(racing, "s2", new, doc, lambda runs: [])
     assert str(e.value) == ("manifests/s2.json published while generation h was compacted (successor.json appeared): when the "
                             "compaction kept its successor, that lacks scan s2; the rerun appends it there")
+
+
+def test_compact_now_skips_the_due_carries():
+    """`-K` with a carry due: the compaction folds every run, so the merge stage submits no carry (gcs, 2026-10-22: an L3
+    static carry's drill tier spilled 1.2 TiB and failed, then held the forced compaction behind its retries)."""
+    f = IvFake(["2026-08-03"], compact_level=5)
+    _two_l0(f)
+    r = f.runner(merge_wait=None)
+    r.compact_now = True
+    r.carries()
+    assert (f.calls(), [m for m in f.log if m.startswith("merge")]) == (
+        [("compact", f"compact -C level:5 -K -r -j 1 -M 90GB -p 16 {COMMON} -m /gcs/data")],
+        ["merge: compaction forced (-K): it folds every run, so the due carries are skipped (1 merge)"])
