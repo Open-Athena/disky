@@ -885,8 +885,8 @@ def test_non_live_measures_each_bucket_source(tmp_path, env):
     out = "<tmp>/data/l2/2026-10-16T1200/non-live"
     snap = "<tmp>/data/snapshots/sub/2026-10-16T1200/non-live.json"
     assert c.sh_impl.calls == [
-        f"dt-cloud non-live -c mpu -E https://s3.example.org -j {snap} -o {out}/a.parquet s3://a",
-        f"dt-cloud non-live -c mpu -E https://r2.example -j {snap} -o {out}/b.parquet r2://b",
+        f"dt-cloud non-live -c mpu -E https://s3.example.org -j {snap} -o {out}/{{bucket}}.parquet s3://a",
+        f"dt-cloud non-live -c mpu -E https://r2.example -j {snap} -o {out}/{{bucket}}.parquet r2://b",
     ]
     n = ctx(tmp_path, env, steps=["non-live"], options={"non-live": {"classes": []}, **NL_OPTS})
     S.non_live(n, None)
@@ -902,10 +902,23 @@ def test_non_live_passes_each_source_its_providers_classes(tmp_path, env):
     S.non_live(c, None)
     out = "<tmp>/data/l2/2026-10-16T1200/non-live"
     snap = "<tmp>/data/snapshots/sub/2026-10-16T1200/non-live.json"
+    assert c.sh_impl.calls == [
+        f"dt-cloud non-live -c soft-deleted -j {snap} -o {out}/{{bucket}}.parquet gcs://data",
+        f"dt-cloud non-live -c delete-marker -E https://s3.example.org -j {snap} -o {out}/{{bucket}}.parquet s3://v",
+    ]
+
+
+def test_non_live_measures_a_providers_buckets_in_one_call(tmp_path, env):
+    """Sources sharing classes and endpoint (gcs's GCS buckets) go in one `dt-cloud non-live` call, measured `-P` at
+    once, the JSON merged once; a different endpoint is its own call."""
+    sources = ["gcs://a", "gcs://b", "gcs://c", {"uri": "s3://v", "endpoint": "https://s3.example.org"}]
+    c = ctx(tmp_path, env, steps=["non-live"], sources=sources, options={"non-live": {"classes": ["soft-deleted", "delete-marker"]}, **NL_OPTS})
+    S.non_live(c, None)
+    out = "<tmp>/data/l2/2026-10-16T1200/non-live"
     snap = "<tmp>/data/snapshots/sub/2026-10-16T1200/non-live.json"
     assert c.sh_impl.calls == [
-        f"dt-cloud non-live -c soft-deleted -j {snap} -o {out}/data.parquet gcs://data",
-        f"dt-cloud non-live -c delete-marker -E https://s3.example.org -j {snap} -o {out}/v.parquet s3://v",
+        f"dt-cloud non-live -c soft-deleted -j {snap} -o {out}/{{bucket}}.parquet gcs://a gcs://b gcs://c",
+        f"dt-cloud non-live -c delete-marker -E https://s3.example.org -j {snap} -o {out}/{{bucket}}.parquet s3://v",
     ]
 
 

@@ -1,5 +1,7 @@
 # `/staged` deletes exactly what's selected, at each prefix's staging scan
 
+**Moved to `specs/done/` 2026-10-22** (gcs's spec sweep, Ryan's go): Done in code: `realRun` (`site/functions/_lib/executor.ts`, `executor.test.ts`), all four points. Not yet checked in a browser on a dev stack (a real delete can't be CIC'd).
+
 ## What went wrong (gcs, 2026-10-19 00:33Z)
 
 Ryan deselected `gs://marin-us-east5/tokenized/dclm_baseline-0206f1/` (read 5 days earlier, the one prefix with a recent read), left the other 9 of the batch checked ("9 selected · 45 T"), and clicked real delete. The run deleted all 10, including 60,348 objects / 15.6 TB of dclm (soft-deleted, restorable until 2026-10-26; left deleted: a byte-identical copy exists in us-central1).

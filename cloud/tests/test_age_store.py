@@ -73,7 +73,12 @@ def test_failed_verification_publishes_nothing(tmp_path: Path, monkeypatch) -> N
     assert Store(str(dst)).listing("") == {}
 
 
-def test_first_publication_can_retry_after_data_uploaded(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("retry_bytes", [1, 2])
+def test_first_publication_can_retry_after_data_uploaded(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    retry_bytes: int,
+) -> None:
     src, dst = tmp_path / "source", tmp_path / "age"
     source(src, "2026-10-01", [("", 0, 1, 1)])
     put = Store.put
@@ -93,9 +98,13 @@ def test_first_publication_can_retry_after_data_uploaded(tmp_path: Path, monkeyp
     assert Store(str(dst)).exists("interval-store/CURRENT.json") is False
     assert age.covered(str(dst), "2026-10-01") is False
     monkeypatch.setattr(Store, "put", put)
+    source(src, "2026-10-01", [("", 0, retry_bytes, 1)])
     result = age.update(str(src), LAYOUT, str(dst), "g", tmp_path / "build")
     assert result["added"] == [{"scan": "2026-10-01", "pass": True, "cells": 8}]
     assert age.covered(str(dst), "2026-10-01") is True
+    assert rows(dst, "2026-10-01", tmp_path / "retried") == sorted([
+        (f"{tier}/p=/0", retry_bytes, 1) for tier in age.BINS
+    ])
 
 
 def test_retirement_requires_marker_manifest_and_d1_before_deleting(tmp_path: Path, monkeypatch) -> None:
@@ -122,3 +131,16 @@ def test_retirement_requires_marker_manifest_and_d1_before_deleting(tmp_path: Pa
     result = age.retire(str(src), LAYOUT, str(dst), 2, execute=True, site_store=None)
     assert (result["scans"], result["files"]) == (["2026-10-01"], first_keys)
     assert sorted(Store(str(src)).listing("")) == sorted(set(before) - set(first_keys))
+
+
+@pytest.mark.parametrize("argv, threads, mem", [([], age.THREADS, age.MEM), (["-p", "16", "-M", "96GB"], 16, "96GB")])
+def test_cli_passes_duckdb_sizing_to_every_step(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, argv: list[str], threads: int, mem: str) -> None:
+    """`-p` / `-M` reach `update` (its cells, interval build / add and verification); the defaults stay hf's."""
+    from click.testing import CliRunner
+
+    got: list[dict] = []
+    monkeypatch.setattr(age, "update", lambda *a, **kw: got.append(kw) or {"gen": "g", "added": [], "files": 0})
+    res = CliRunner().invoke(age.age_store_cmd, ["-g", "g", "-L", LAYOUT, "-o", str(tmp_path / "o"), "-s", str(tmp_path / "s"),
+                                                 "-w", str(tmp_path / "w"), *argv], catch_exceptions=False)
+    assert res.exit_code == 0, res.output
+    assert got == [{"through": None, "compact": "level:5", "threads": threads, "mem": mem}]

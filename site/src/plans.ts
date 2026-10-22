@@ -226,7 +226,7 @@ export function useDispatch(planId: number | null) {
     mutationFn: ({ mode, date, items, buckets, machine }) => {
       if (planId == null) throw new Error('nothing staged')
       if (!items.length) throw new Error('nothing selected')
-      // `items`: exactly the rows checked (an object as `=<key>`); the run never acts on more (specs/delete-what-you-see.md)
+      // `items`: exactly the rows checked (an object as `=<key>`); the run never acts on more (specs/done/delete-what-you-see.md)
       return call(`${EXEC_API}/dispatch`, 'POST', { plan_id: planId, mode, date, items, ...(buckets ? { buckets } : {}), ...(machine ? { machine } : {}) })
     },
     onSuccess: () => { void qc.invalidateQueries({ queryKey: ['plans'] }); void qc.invalidateQueries({ queryKey: ['sweep-jobs'] }) },

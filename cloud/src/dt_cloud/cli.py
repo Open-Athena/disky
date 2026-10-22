@@ -414,7 +414,7 @@ def wandb_mine(
 @option("-p", "--part", "part_bucket", default=None, help="One part of a sharded index (`index_parts`): only this bucket's objects (`-K`: only those in a key range), written beside -P for `path-index-merge` (sorts without sidecars, `part.json`, `roots.parquet`, `age.parquet`, `pfx.parquet`); nothing under -o. Refused with -S (the merge writes the search sidecars)")
 @option("-K", "--key-range", default=None, help="With -p: only the objects whose first key segment is in LO:HI (`[LO, HI)`; an empty side is open): one of a big bucket's parts")
 @option("-r", "--row-group-rows", default=None, type=int, help="Parquet row-group size for the store's sorts (default 8192 — the reader decodes ~one group per depth of a drilled subtree, so 32768 pushed small drills past its decode cap; specs/done/path-store.md §1.6)")
-@option("-S", "--search", is_flag=True, help="Also write the search sidecars beside the `path` sort (`path-index.{rows,trigrams,rows-search}.parquet`: the filter view's segment-name index, specs/path-store-search.md); upload them with the generation dir")
+@option("-S", "--search", is_flag=True, help="Also write the search sidecars beside the `path` sort (`path-index.{rows,trigrams,rows-search}.parquet`: the filter view's segment-name index, specs/done/path-store-search.md); upload them with the generation dir")
 @option("-u", "--user-sort-tiers", default=None, help="Only these sorts get a `-by-user` copy, comma-separated (`bysize`: the copy a lens view reads; default every sort)")
 @option("-U", "--no-user-sorts", "user_sorts", is_flag=True, flag_value=False, default=True, help="Skip every `-by-user` sort copy (a lens then reads the mixed-user sorts, filtered per row — fine below the root, too wide at a user's root view; see -u)")
 @option("-P", "--path-index", "path_index", type=Path, default=None, help="Write the path store here (`<dir>/path-index.parquet`, the `path` sort; `path-index-bysize.parquet` and the by-user copies land beside it — specs/done/path-store.md §4.3)")
@@ -715,7 +715,7 @@ def bench_truth(append: bool, check: tuple[str, ...], only: tuple[str, ...], mem
     For each query × view root: the match roots (count, md5 of the sorted
     list, and the list with each root's net totals when ≤ 50k), the outermost
     excluded paths, and the net totals — the Worker's filter semantics
-    (specs/path-store-search.md §1). Heavy: run it on a VM beside the data
+    (specs/done/path-store-search.md §1). Heavy: run it on a VM beside the data
     (specs/done/filter-query-service.md §6 phase 1).
     """
     import time as _time
@@ -767,7 +767,7 @@ def bucket_sources(specs: tuple[str, ...], default_bucket: str) -> list[tuple[st
 @option("-m", "--mem", default="8GB", help="DuckDB memory limit")
 @option("-o", "--out", "out_dir", type=Path, required=True, help="Output dir: path-index.parquet + path-index-bysize.parquet (+ .groups.json sidecars) + age-pyramid-*.parquet")
 @option("-r", "--row-group-rows", default=8192, type=int, help="Parquet row-group size for the sorts — the range-read unit and the D1 footer's row count per sort (default 8192; a gcs-sized fleet uses 32768, specs/done/path-store.md §1.6)")
-@option("-S", "--search", is_flag=True, help="Also write the search sidecars beside the `path` sort (`path-index.{rows,trigrams,rows-search}.parquet`, specs/path-store-search.md)")
+@option("-S", "--search", is_flag=True, help="Also write the search sidecars beside the `path` sort (`path-index.{rows,trigrams,rows-search}.parquet`, specs/done/path-store-search.md)")
 @option("-t", "--threads", default=8, type=int, help="DuckDB threads")
 @option("-T", "--tmp", "tmp_dir", type=Path, default=None, help="DuckDB spill dir (default: <out>/.duckdb-tmp)")
 @argument("sources", nargs=-1, required=True)
@@ -1810,7 +1810,7 @@ def sweep_manifest(only_buckets: tuple[str, ...], date: str, iv_gen: str | None,
     summary: dict = {
         "date": date, "plan_id": sp.plan_id, "plan_name": sp.name,
         "approved": [a for b in buckets for a in sp.bands(b)],
-        # exact items (specs/file-assign.md): each matches its one key only,
+        # exact items (specs/done/file-assign.md): each matches its one key only,
         # and is its own band in the executor's accounting (absent when none,
         # so a prefix-only plan's summary is what it always was)
         **({"approved_objects": objs} if (objs := [a for b in buckets for a in sp.exact(b)]) else {}),

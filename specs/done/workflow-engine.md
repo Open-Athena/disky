@@ -1,5 +1,7 @@
 # Scan pipelines as declared DAGs: steps, executors, orchestrator
 
+**Moved to `specs/done/` 2026-10-22** (gcs's spec sweep, Ryan's go): Done: decided on Nextflow; every deployment's scan runs `dt-cloud scan head <profile>`. Phase 2 continues in `pipelines-everywhere.md`.
+
 Status: **decided: Nextflow** (2026-10-16), written from cw-s3. It covers every deployment's scan pipeline (gcs, cw-s3, m3, the r2 demo, hf). Ryan: Nextflow only; "no server" is the killer app, and nobody writes Batch bindings for fray or Dagster. A GCP Batch executor for DVX is specced separately, in that repo (`specs/gcp-batch-executor.md`). Phase 1 is in progress on cw ([§7](#7-phase-1-as-built-cw)).
 
 ## 1. Problem

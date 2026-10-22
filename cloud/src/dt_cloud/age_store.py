@@ -23,6 +23,10 @@ from .interval_export import export_scan, scan_entry, store_gen
 BINS = ("1h", "3h", "6h", "12h", "1d", "2d", "4d", "8d")
 INPUT_LAYOUT = "inputs/{id}/path-index.parquet"
 MARKERS = "verified"
+#: Every DuckDB step's default threads and memory: sized for hf (~270K cells); a deployment with a large finest tier
+#: (gcs: tens of millions) passes its own (`-p` / `-M`, the step's `options.age-store.threads` / `mem`).
+THREADS = 2
+MEM = "2GB"
 
 
 def cells(
@@ -30,9 +34,12 @@ def cells(
     key: str,
     output: Path,
     work: Path,
+    *,
+    threads: int = THREADS,
+    mem: str = MEM,
 ) -> int:
     """One scan's eight pyramids as canonical path rows; no row per scan is retained."""
-    con = sn.connect(2, "2GB", work / "duckdb")
+    con = sn.connect(threads, mem, work / "duckdb")
     try:
         queries = []
         for tier in BINS:
@@ -57,10 +64,13 @@ def verify(
     scan: str,
     expected: Path,
     work: Path,
+    *,
+    threads: int = THREADS,
+    mem: str = MEM,
 ) -> dict:
     """Exact multiset equality of every histogram cell, before publication."""
-    export_scan(root, scan, str(work / "export"), tiers=("path",), work=work / "read", threads=2, mem="2GB")
-    con = sn.connect(2, "2GB", work / "duckdb")
+    export_scan(root, scan, str(work / "export"), tiers=("path",), work=work / "read", threads=threads, mem=mem)
+    con = sn.connect(threads, mem, work / "duckdb")
     try:
         a = f"SELECT path, size, n_files FROM read_parquet({sn.q(str(expected))})"
         b = f"SELECT path, size, n_files FROM read_parquet({sn.q(str(work / 'export/path-index.parquet'))})"
@@ -143,8 +153,11 @@ def update(
     *,
     through: str | None = None,
     compact: str = "level:5",
+    threads: int = THREADS,
+    mem: str = MEM,
 ) -> dict:
-    """Catch up all available scans, verify locally, then publish data → manifests → pointer."""
+    """Catch up all available scans, verify locally, then publish data → manifests → pointer. `threads` / `mem`: every
+    DuckDB step's (the cells, the interval build or add, the verification)."""
     source, target = Store(source_root), Store(store_root)
     work.mkdir(parents=True, exist_ok=True)
     local = work / "store"
@@ -176,8 +189,8 @@ def update(
     inputs = work / "inputs"
     # find_scans reads the source root's keys; INPUT_LAYOUT is relative to work.
     for s in pending:
-        cells(source, s["src"], inputs / s["id"] / "path-index.parquet", work / "cells" / s["id"])
-    args = ["-L", INPUT_LAYOUT, "-s", str(work), "-o", str(local), "-w", str(work / "build"), "-p", "2", "-M", "2GB"]
+        cells(source, s["src"], inputs / s["id"] / "path-index.parquet", work / "cells" / s["id"], threads=threads, mem=mem)
+    args = ["-L", INPUT_LAYOUT, "-s", str(work), "-o", str(local), "-w", str(work / "build"), "-p", str(threads), "-M", mem]
     if current:
         il.add_cmd.main([*args, "-C", compact], standalone_mode=False)
     else:
@@ -185,13 +198,14 @@ def update(
     local_store = Store(str(local))
     results = []
     for s in pending:
-        marker = verify(str(local), s["id"], inputs / s["id"] / "path-index.parquet", work / "verify" / s["id"])
+        marker = verify(str(local), s["id"], inputs / s["id"] / "path-index.parquet", work / "verify" / s["id"], threads=threads, mem=mem)
         results.append(marker)
     for marker in results:
         target.write_bytes(f"{MARKERS}/{marker['scan']}.json", (json.dumps(marker) + "\n").encode())
     after = local_store.listing("interval-store")
     pointer = "interval-store/CURRENT.json"
-    changed = [k for k, n in after.items() if k != pointer and before.get(k) != n]
+    # Unpublished files are not trusted: corrected inputs can rebuild different bytes at the same size.
+    changed = [k for k, n in after.items() if k != pointer and (not current or before.get(k) != n)]
     def publish_rank(key: str) -> tuple[int, str]:
         name = key.rsplit("/", 1)[-1]
         rank = 4 if name == "successor.json" else 3 if "/manifests/" in key else 2 if name == "scans.json" else 1 if name == "meta.json" else 0
@@ -212,7 +226,9 @@ def update(
 @option("-g", "--gen", required=True, help="Initial generation (the current pointer is followed after bootstrap)")
 @option("-k", "--keep", default=2, type=int, help="Recent scans whose histogram inputs stay")
 @option("-L", "--layout", required=True, help="Finest pyramid key template, with {id} and optional {gen}")
+@option("-M", "--mem", default=MEM, help="DuckDB memory limit, every step (default sized for hf's ~270K cells; gcs's finest tier is far larger)")
 @option("-o", "--out", required=True, help="Independent age store root, e.g. r2://bucket/history/primary-age")
+@option("-p", "--threads", default=THREADS, type=int, help="DuckDB threads, every step")
 @option("-r", "--retire-root", multiple=True, help="Root whose verified histogram copies may retire, including the source")
 @option("-s", "--source", required=True, help="Root holding existing per-scan pyramids")
 @option("-T", "--site-store", default="primary", help="D1 site store key")
@@ -225,7 +241,9 @@ def age_store_cmd(
     gen: str,
     keep: int,
     layout: str,
+    mem: str,
     out: str,
+    threads: int,
     retire_root: tuple[str, ...],
     source: str,
     site_store: str,
@@ -234,7 +252,7 @@ def age_store_cmd(
     execute: bool,
 ) -> None:
     """Append age histogram changes using the canonical interval engine; verify before publishing."""
-    result = update(source, layout, out, gen, work, through=through, compact=compact)
+    result = update(source, layout, out, gen, work, through=through, compact=compact, threads=threads, mem=mem)
     result["retired"] = [retire(root, layout, out, keep, execute=execute,
                                 site_store=None if no_d1 or i else site_store)
                          for i, root in enumerate(dict.fromkeys(retire_root))]

@@ -1163,7 +1163,7 @@ def _age_check(p: ScanProfile) -> list[str]:
     return [f"options.age-store.{key}: required" for key in ("store", "gen") if not o.get(key)]
 
 
-@step("age-store", core=False, soft=True, options={"store": str, "gen": str, "keep": int, "execute": bool, "copies": list},
+@step("age-store", core=False, soft=True, options={"store": str, "gen": str, "keep": int, "execute": bool, "copies": list, "threads": int, "mem": str},
       requires=_age_check)
 def age_store(ctx: Ctx, arg: str | None) -> None:
     """Append verified histogram cells, then retire covered old pyramids on each copy. Runs before path retirement."""
@@ -1175,7 +1175,8 @@ def age_store(ctx: Ctx, arg: str | None) -> None:
     roots = list(dict.fromkeys([ctx.data_uri, *o.get("copies", [])]))
     argv = ["dt-cloud", "age-store", "-g", o["gen"], "-L", layout, "-o", o["store"], "-s", ctx.data_uri,
             "-T", ctx.profile.store, "-t", ctx.scan, "-w", ctx.work / "age-store", "-k", o.get("keep", 2),
-            *(a for root in roots for a in ("-r", root)), *(["-x"] if o.get("execute") else [])]
+            *(a for root in roots for a in ("-r", root)), *(["-x"] if o.get("execute") else []),
+            *(["-p", o["threads"]] if o.get("threads") else []), *(["-M", o["mem"]] if o.get("mem") else [])]
     with ctx.phase("age-store"), cleanup(ctx.work / "age-store"):
         if ctx.sh(argv, fatal=False, warn="age-store failed (uncovered histogram inputs stay)") is not None and o.get("execute"):
             ctx.sh(["dt-cloud", "store-gc", "-t", "interval-store", "-l", "-x", "-o", o["store"]], fatal=False,
@@ -1292,15 +1293,16 @@ def _snap_root(ctx: Ctx) -> str:
     return f"{ctx.env.get('R2_ARCHIVE') or ctx.data_uri}/{ctx.snapshots}"
 
 
-@step("non-live", core=False, stage="pre", soft=True, options={"classes": list})
+@step("non-live", core=False, stage="side", soft=True, options={"classes": list})
 def non_live(ctx: Ctx, arg: str | None) -> None:
     """Each source's non-live bytes (`dt-cloud non-live`, specs/non-live-bytes.md phase 1): per class of
     `options.non-live.classes` (each one the sources' provider has: `soft-deleted` on GCS, `noncurrent` /
     `delete-marker` on S3, `mpu`), the bytes the listing of current objects misses, totaled per bucket into
     `<layer2>non-live/<bucket>.parquet` (a few rows: kept per scan, the totals' history) and the scan's snapshot
-    `non-live.json` (every bucket's rows: what the site reads beside `meta.json`). A `pre` step, beside `list`: the
-    snapshot dir reaches R2 with the scan's others (`publish-r2`). Read-only; off unless the profile lists it in
-    `steps`. Never fatal: a failure warns, the scan's other outputs stand."""
+    `non-live.json` (every bucket's rows: what the site reads beside `meta.json`). A `side` step: its own task from the
+    scan's start, beside `list` and `index`, which never wait on it (gcs's soft-deleted listings take ~18 min); only
+    `publish-r2` (its snapshot dir reaches R2 with the scan's others) and the post steps do. Read-only; off unless the
+    profile lists it in `steps`. Never fatal: a failure warns, the scan's other outputs stand."""
     classes = ctx.opt("non-live", "classes", [])
     if not classes:
         err("non-live: no options.non-live.classes: nothing measured")
@@ -1308,17 +1310,21 @@ def non_live(ctx: Ctx, arg: str | None) -> None:
     from .non_live import PROVIDER_CLASSES, split_uri
 
     with ctx.phase("non-live"):
+        # each source measures the classes its provider has (an hf:// source none: the Hub's held bytes are in its
+        # listing, `@history`); a deployment of mixed providers lists the union. Sources sharing classes and endpoint
+        # go in one call, measured `-P` at once (gcs's buckets one after another took ~45 min of `pre`).
+        groups: dict[tuple[tuple[str, ...], str | None], list[str]] = {}
         for src in ctx.profile.sources:
-            # each source measures the classes its provider has (an hf:// source none: the Hub's held bytes are in
-            # its listing, `@history`); a deployment of mixed providers lists the union
             has = [] if src.kind == "hf" else [c for c in classes if c in PROVIDER_CLASSES[split_uri(src.uri)[0]]]
             if not has:
                 continue
             endpoint = src.endpoint or (ctx.env.get("R2_ENDPOINT") if src.kind == "r2" else None)
+            groups.setdefault((tuple(has), endpoint), []).append(src.uri)
+        for (has, endpoint), uris in groups.items():
             ctx.sh(["dt-cloud", "non-live", "-c", ",".join(has), *(["-E", endpoint] if endpoint else []),
                     "-j", ctx.data_root / ctx.snapshots / ctx.scan / "non-live.json",
-                    "-o", ctx.data_root / ctx.layer2 / "non-live" / f"{src.bucket}.parquet", src.uri],
-                   fatal=False, warn=f"non-live failed on {src.uri} (the scan's other outputs stand)")
+                    "-o", ctx.data_root / ctx.layer2 / "non-live" / "{bucket}.parquet", *uris],
+                   fatal=False, warn=f"non-live failed on {', '.join(uris)} (the scan's other outputs stand)")
 
 
 @step("healthcheck", core=False, soft=True)

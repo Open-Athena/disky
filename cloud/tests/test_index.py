@@ -288,7 +288,7 @@ def test_write_index_row_group_rows(tmp_path: Path):
 
 def test_write_index_search(tmp_path: Path):
     """`search=True` writes the search sidecars beside the `path` sort
-    (specs/path-store-search.md) and names them in the summary; the sorts are
+    (specs/done/path-store-search.md) and names them in the summary; the sorts are
     unchanged."""
     l2 = tmp_path / "l2.parquet"
     _write_l2(l2, L2)

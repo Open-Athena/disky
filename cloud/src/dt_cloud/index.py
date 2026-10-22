@@ -221,7 +221,7 @@ def write_sorts(
     two sorts × 120 scans under D1's 10 GB (specs/done/path-store.md §1.6).
 
     ``search``: also write the search sidecars beside the `path` sort
-    (`path-index.{rows,trigrams,rows-search}.parquet`, specs/path-store-search.md;
+    (`path-index.{rows,trigrams,rows-search}.parquet`, specs/done/path-store-search.md;
     ``search_opts`` passes `write_search`'s sizes) — reported as the `path`
     entry's ``search`` (names, rows, postings, files)."""
     import pyarrow.parquet as pq
