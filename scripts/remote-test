@@ -14,6 +14,7 @@
 # Paths under `cloud/` run in the dt-cloud suite (from `cloud/`, as CI does), others in the engine suite; with no
 # paths, both suites run. Options:
 #   -a        include `slow`-marked tests (default: `-m 'not slow'`)
+#   -c REV    only the tests affected by changes since REV (`scripts/affected-tests`; uncommitted changes count)
 #   -d DIR    remote dir (default `disky-test/<worktree name>`, relative to the remote home)
 #   -h HOST   ssh host (default `$REMOTE_TEST_HOST`, else `mgu`)
 #   -n N      xdist workers (default `auto`, `--dist loadgroup`; `0` = serial)
@@ -26,6 +27,7 @@ set -euo pipefail
 host=${REMOTE_TEST_HOST:-mgu}
 py=${REMOTE_TEST_PYTHON:-3.13}
 all=
+changed_since=
 rdir=
 workers=auto
 site=
@@ -38,6 +40,7 @@ while [ $# -gt 0 ]; do
     --site) site=1; shift ;;
     -a) all=1; shift ;;
     -s) sync_only=1; shift ;;
+    -c) need "$@"; changed_since=$2; shift 2 ;;
     -d) need "$@"; rdir=$2; shift 2 ;;
     -h) need "$@"; host=$2; shift 2 ;;
     -n) need "$@"; workers=$2; shift 2 ;;
@@ -84,7 +87,17 @@ if [ -z "$site" ]; then
     else engine+=("$a")
     fi
   done
-  if [ ${#engine[@]} -eq 0 ] && [ ${#cloud[@]} -eq 0 ]; then
+  if [ -n "$changed_since" ]; then
+    [ ${#engine[@]} -eq 0 ] && [ ${#cloud[@]} -eq 0 ] || { echo "remote-test: -c takes no paths" >&2; exit 2; }
+    while IFS= read -r t; do
+      if [ -z "$t" ]; then continue; elif [[ $t == cloud/* ]]; then cloud+=("${t#cloud/}"); else engine+=("$t"); fi
+    done < <(python3 scripts/affected-tests "$changed_since")
+    if [ ${#engine[@]} -eq 0 ] && [ ${#cloud[@]} -eq 0 ]; then
+      echo "remote-test: no tests affected by changes since $changed_since" >&2
+      exit 0
+    fi
+    echo "remote-test: $(( ${#engine[@]} + ${#cloud[@]} )) test files affected since $changed_since" >&2
+  elif [ ${#engine[@]} -eq 0 ] && [ ${#cloud[@]} -eq 0 ]; then
     engine=(tests); cloud=(tests)
   fi
   [ -n "$all" ] || opts=(-m 'not slow' "${opts[@]}")
