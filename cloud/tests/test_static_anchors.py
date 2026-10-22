@@ -248,7 +248,9 @@ def test_start_scoped_reads_and_the_decline_boundary(world):
     tiers = [world["base"], *world["runs"]]
     probe = _reader(tiers)
     seen = 0
-    for key in ["/tr", "/train", "/conf", "/b1", "/tomat", "/da", "/c", "/f", "/g"]:
+    # Keys of three characters or more: a shorter `^q`'s rows can span name shards, and `ShardSet.shard` (like the
+    # site's `shardFor`) reads the one shard holding its first characters.
+    for key in ["/tr", "/train", "/conf", "/b1", "/tomat", "/da"]:
         whole = sum(t.names.select(key, False)[2] for t in probe.anch)
         for P in _dirs(world["paths"]):
             if P == "" or an.term_in_path(key, P):
