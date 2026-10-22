@@ -21,7 +21,7 @@ replay exactly those requests without discovery. `-S` serializes them;
 otherwise they run concurrently. `-c` changes subtree/diff response-cache
 keys only: it does not flush underlying metadata/row-group caches or the
 series cache. Records retain the complete Server-Timing header and a bounded
-error-body excerpt for HTTP 5xx responses.
+error-body excerpt for failed responses.
 """
 
 from __future__ import annotations
@@ -195,7 +195,12 @@ def run(fetch: Fetch, scens: dict[str, list[str]], *, parallel: bool = True) -> 
     for name, paths in scens.items():
         with ThreadPoolExecutor(len(paths) if parallel else 1) as ex:
             for path, r in zip(paths, ex.map(fetch, paths)):
-                error = r.body.decode(errors="replace")[:1000] if r.status >= 500 else None
+                error = r.body.decode(errors="replace")[:1000] if r.status not in (200, 409) else None
+                if r.status == 200:
+                    try:
+                        json.loads(r.body)
+                    except (ValueError, UnicodeDecodeError):
+                        error = "invalid JSON response: " + r.body.decode(errors="replace")[:1000]
                 out.append(Result(name, path, r.status, r.ms, r.bytes, r.cache, r.server_ms, r.server_timing, error))
     return out
 
@@ -227,13 +232,12 @@ def compare_requests(fetch: Fetch, baseline: Fetch, paths: list[str], *, paralle
 
 
 def failed(r: Result) -> bool:
-    return r.status == 0 or r.status >= 500
+    return r.status not in (200, 409) or r.error is not None
 
 
 def summarize(results: list[Result], budget_ms: int | None = None) -> tuple[bool, list[str]]:
     """Per-scenario lines (the slowest request = the page's wall time) and
-    pass/fail: any 5xx or transport failure fails; with `budget_ms`, so does
-    a scenario slower than it."""
+    pass/fail: only 200 and the site's explicit view refusal (409) pass. With `budget_ms`, a slower scenario fails."""
     ok = True
     lines = []
     for name in dict.fromkeys(r.scenario for r in results):

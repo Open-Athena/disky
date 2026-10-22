@@ -600,7 +600,7 @@ def probe(against: str | None, budget: float | None, cold: bool, date: str | Non
 
     Each scenario's API requests go out concurrently, like the browser's, and
     each response's status, wall time, edge-cache tier and server time is
-    recorded. Exits nonzero on any 5xx or transport failure (and on a scenario
+    recorded. Exits nonzero on any HTTP error except the site's explicit view refusal (409), on transport failure, or a scenario
     over `--budget`). `-o` keeps the record, so a prefix of runs is a latency
     time series.
 
@@ -1493,7 +1493,8 @@ def warm_cache(date: str | None, jobs: int, dry_run: bool, root: str | None, tok
     page's default requests (one subtree, the diff span chips 1d/3d/7d/14d/30d
     and the previous-scan pair, each with its summary) at the common canvas
     widths, so the first viewer anywhere gets a cache hit (colo cache + global
-    KV). Non-fatal: a failed request just leaves that view cold."""
+    KV). Exits nonzero for failed requests; explicit view refusals (409) are reported separately. The pipeline may
+    continue with a failed warm-up phase, since the view can be computed on demand."""
     from . import warm as wm
 
     # Deployment config: SITE_URL, DATA_BUCKET, SNAPSHOTS_SUBDIR (the job exports them).
@@ -1531,6 +1532,8 @@ def warm_cache(date: str | None, jobs: int, dry_run: bool, root: str | None, tok
     headers = headers or auth()
     res = wm.warm(site_url, headers, paths, jobs=jobs)
     err(wm.summary(res, date))
+    if any(status not in (200, 409) for _, status, _, _ in res):
+        raise SystemExit(1)
 
 
 @main.group()
