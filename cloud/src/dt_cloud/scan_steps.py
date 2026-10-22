@@ -1309,17 +1309,21 @@ def non_live(ctx: Ctx, arg: str | None) -> None:
     from .non_live import PROVIDER_CLASSES, split_uri
 
     with ctx.phase("non-live"):
+        # each source measures the classes its provider has (an hf:// source none: the Hub's held bytes are in its
+        # listing, `@history`); a deployment of mixed providers lists the union. Sources sharing classes and endpoint
+        # go in one call, measured `-P` at once (gcs's buckets one after another took ~45 min of `pre`).
+        groups: dict[tuple[tuple[str, ...], str | None], list[str]] = {}
         for src in ctx.profile.sources:
-            # each source measures the classes its provider has (an hf:// source none: the Hub's held bytes are in
-            # its listing, `@history`); a deployment of mixed providers lists the union
             has = [] if src.kind == "hf" else [c for c in classes if c in PROVIDER_CLASSES[split_uri(src.uri)[0]]]
             if not has:
                 continue
             endpoint = src.endpoint or (ctx.env.get("R2_ENDPOINT") if src.kind == "r2" else None)
+            groups.setdefault((tuple(has), endpoint), []).append(src.uri)
+        for (has, endpoint), uris in groups.items():
             ctx.sh(["dt-cloud", "non-live", "-c", ",".join(has), *(["-E", endpoint] if endpoint else []),
                     "-j", ctx.data_root / ctx.snapshots / ctx.scan / "non-live.json",
-                    "-o", ctx.data_root / ctx.layer2 / "non-live" / f"{src.bucket}.parquet", src.uri],
-                   fatal=False, warn=f"non-live failed on {src.uri} (the scan's other outputs stand)")
+                    "-o", ctx.data_root / ctx.layer2 / "non-live" / "{bucket}.parquet", *uris],
+                   fatal=False, warn=f"non-live failed on {', '.join(uris)} (the scan's other outputs stand)")
 
 
 @step("healthcheck", core=False, soft=True)
