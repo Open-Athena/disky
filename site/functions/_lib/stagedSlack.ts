@@ -762,7 +762,7 @@ export async function announceFinished(env: NotifyEnv, db: D1Database, runs: rea
     const r = await db.prepare('SELECT * FROM deletion_runs WHERE run_id = ?').bind(run_id).first<RunRow & { plan_id: number | null }>()
     if (r?.plan_id == null) continue
     // What the run deleted leaves the queue before the thread re-renders.
-    await unstageDeleted(db, r.plan_id)
+    if (ok) await unstageDeleted(db, r.plan_id, [run_id])
     await notifyPlan(env, db, r.plan_id, siteUrl, { run: r, phase: ok ? 'finished' : 'failed' })
   }
 }

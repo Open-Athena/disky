@@ -54,6 +54,8 @@ export interface StageBatch { id: number; plan_id: number; note: string | null; 
 /** A stage batch with no items left, and what became of what it staged
  *  (`functions/_lib/plans.ts` `emptiedBatches`). */
 export interface EmptiedBatch extends StageBatch {
+  /** Original staged paths retained in the audit history. */
+  prefixes: string[]
   staged: number
   covered: number
   absorbed: { into: number; n: number }[]
@@ -140,12 +142,17 @@ export function useClosePlan() {
 }
 
 export interface RunBand { prefix: string; bytes: number; objects: number; gone: number; overwritten: number; drift_new_objects: number; undone_objects: number }
+export interface RunAnalytics {
+  review: { objects: number; bytes: number; as_of: Record<string, string>; skipped_after_as_of: { objects: number; bytes: number; new_objects?: number; changed_objects?: number } } | null
+  result: { delete_failed: number; preserved_breakdown?: { new_since_review: number; changed_since_review: number; new_since_scan: number; unclassified: number } } | null
+  analysis?: { method: 'review-snapshots'; scan: string; created_at: string; review_omissions: { objects: number; bytes: number; new_objects: number; changed_objects: number }; prefixes?: { prefix: string; objects: number; new_objects: number; changed_objects: number }[]; execution: { outside_review: number; keys_recorded: boolean } } | null
+}
 
 export function usePrefixHistory(planId: number | null, live: boolean) {
   return useQuery<{ bands: import('./prefixExecution').PrefixBandRecord[] }, Error>({
     queryKey: ['prefix-history', planId],
     queryFn: () => call(`/api/plans/prefix-history?id=${planId}`),
-    enabled: planId != null && CAPS.runFiles,
+    enabled: planId != null,
     refetchInterval: live ? 30_000 : false,
     staleTime: 20_000,
   })
@@ -157,7 +164,19 @@ export function useRunDetail(runId: string, enabled: boolean, live = false) {
     queryKey: ['run-detail', runId],
     queryFn: () => call(`/api/plans/run?id=${encodeURIComponent(runId)}`),
     enabled,
+    refetchInterval: q => live && !q.state.data?.run.finished_ts ? 30_000 : false,
+  })
+}
+
+/** Optional artifacts load independently; D1 totals and prefix outcomes stay immediately usable. */
+export function useRunAnalytics(runId: string, live: boolean) {
+  return useQuery<RunAnalytics, Error>({
+    queryKey: ['run-analytics', runId],
+    queryFn: () => call(`/api/plans/run-analytics?id=${encodeURIComponent(runId)}`),
+    enabled: DEFAULT_STORE.executor === 'plan-sweep',
+    staleTime: 30_000,
     refetchInterval: live ? 30_000 : false,
+    retry: 1,
   })
 }
 
@@ -199,9 +218,8 @@ export function useUnstage(planId: number | null) {
   })
 }
 
-/** Dispatch the plan to the deployment's executor (admin): a dry run reports
- *  what a real run would delete; a real run deletes, recoverably. A real run
- *  takes no `date`: the server runs it at its dry run's scan. */
+/** Dispatch the selected items to the deployment's executor (admin). A dry run
+ *  previews deletions and is optional; recovery depends on the store. */
 export function useDispatch(planId: number | null) {
   const qc = useQueryClient()
   return useMutation<{ job_id: string }, Error, { mode: 'dry' | 'real'; date?: string; items: string[]; buckets?: string[]; machine?: string }>({
