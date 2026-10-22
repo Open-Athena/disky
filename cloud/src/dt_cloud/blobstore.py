@@ -29,8 +29,9 @@ RETRY_BASE_S = 2.0
 
 
 def _retrying(op: Callable[[], None]) -> None:
-    """`op()`, retried on a transient error (a timeout, a dropped connection, an I/O error); a missing key or a
+    """`op()`, retried on a transient error (a timeout, a dropped or truncated response, an I/O error); a missing key or a
     refused credential is not transient and raises at once, as does the last attempt's error."""
+    from aiohttp import ClientPayloadError
     from fsspec.exceptions import FSTimeoutError
 
     for n in range(RETRIES):
@@ -38,7 +39,7 @@ def _retrying(op: Callable[[], None]) -> None:
             return op()
         except (FileNotFoundError, PermissionError):
             raise
-        except (FSTimeoutError, TimeoutError, OSError):
+        except (ClientPayloadError, FSTimeoutError, TimeoutError, OSError):
             if n == RETRIES - 1:
                 raise
             time.sleep(RETRY_BASE_S * 2**n)
@@ -70,11 +71,16 @@ class Store:
     """The keys under `root`: a local dir or a URL, taken as given (a profile's bucket goes through `store_url` first).
     `listing(prefix)` is `{key: size}` of the files under `prefix/`."""
 
-    def __init__(self, root: str):
+    def __init__(self, root: str, *, fs=None, base: str | None = None):
         from disk_tree.blobfs import fs_for, is_url
 
         self.root = root.rstrip("/") or "/"
         self.url = is_url(self.root)
+        if fs is not None:
+            if base is None or not self.url:
+                raise ValueError("an explicit filesystem requires a URL root and a base path")
+            self.fs, self.base = fs, base.rstrip("/")
+            return
         if self.url:
             self.fs, self.base = fs_for(self.root)
             self.base = self.base.rstrip("/")
