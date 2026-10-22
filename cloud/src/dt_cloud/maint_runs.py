@@ -80,6 +80,28 @@ class NullRecorder:
 NULL = NullRecorder()
 
 
+class Prefixed:
+    """`rec` with every phase name prefixed (`<prefix><phase>`): a step's sub-phases (a merge's tiers under its `carry L<n>`)."""
+
+    def __init__(self, rec: Recorder, prefix: str):
+        self.rec, self.prefix = rec, prefix
+
+    def start(self, scan: str, gen: str) -> None:
+        self.rec.start(scan, gen)
+
+    def begin(self, phase: str) -> None:
+        self.rec.begin(self.prefix + phase)
+
+    def note(self, phase: str, note: str) -> None:
+        self.rec.note(self.prefix + phase, note)
+
+    def end(self, phase: str, note: str | None = None, failed: bool = False) -> None:
+        self.rec.end(self.prefix + phase, note, failed)
+
+    def finish(self, status: str, error: str | None = None, gen: str | None = None) -> None:
+        self.rec.finish(status, error, gen)
+
+
 @dataclass
 class Slot:
     """`phase()`'s handle: the note its phase ends with (set by the body)."""
