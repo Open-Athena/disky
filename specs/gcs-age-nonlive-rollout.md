@@ -32,13 +32,13 @@ Each later meta scan appends one run (changed cells only) and retires one scan's
 
 Config: `gcs.yml` `steps += non-live`, `options.non-live.classes: [soft-deleted]`. No site change (the root view reads `snapshots/<scan>/non-live.json` through `/data`, and `publish-r2 -S` copies the snapshot dir to R2).
 
-What the next scan does differently: a `pre` task (`machines.pre`, n2-highmem-8) lists each marin bucket's soft-deleted objects, one bucket after another, at one list call per 1,000 objects. Its cost is the soft-deleted population of the last seven days, which tracks deletions, not the bucket's size. Measured from a laptop on 2026-10-22 (`gcloud storage ls --soft-deleted`, the same API): a few thousand objects a second, about a million soft-deleted objects in each of the busier buckets; the six buckets together took about 25 minutes serially (see the report in the handoff).
+What the next scan does differently: a `pre` task (`machines.pre`, n2-highmem-8) lists each marin bucket's soft-deleted objects, one bucket after another, at one list call per 1,000 objects. Its cost is the soft-deleted population of the last seven days, which tracks deletions, not the bucket's size. Measured from a laptop on 2026-10-22 (`gcloud storage ls --soft-deleted`, the same API): about 5,000 objects a second per bucket, one to five million soft-deleted objects in each of the four busier buckets, about eleven million in all; listed one bucket after another, that is about 45 minutes (the largest bucket alone took 18).
 
-Risk: `index` waits for every `pre` task (`scan.nf`: `pre` is gathered with `list`). Today the longest `list` task takes about 32 minutes, so the serial listing fits on a normal week, but a sweep week (tens of millions of objects soft-deleted at once) would hold `index` for hours. Before enabling it on the primary, a `[cloud]` change should take `non-live` off the index's path. Either:
+Risk: `index` waits for every `pre` task (`scan.nf`: `pre` is gathered with `list`). Today the longest `list` task takes about 32 minutes, so on an ordinary week the serial listing already holds `index` back by 10 to 15 minutes, and a sweep week (tens of millions of objects soft-deleted at once) would hold it for hours. Before enabling it on the primary, a `[cloud]` change should take `non-live` off the index's path. Either:
 - run it as its own DAG branch that joins at `publish-r2` (its only consumer is the snapshot's `non-live.json`), or
 - list the buckets concurrently (one thread per source) and bound the step with a deadline after which it writes what it has as a partial row.
 
-The parent session decides whether to ship Phase 2 before that change; it is committed separately so it can be held.
+Hold Phase 2 until that change lands; it is committed separately so it can be held. Concurrent listing alone brings it to the largest bucket's time (about 18 minutes), inside the `list` window.
 
 Verify: the run's `non-live` lines (`non-live <bucket> soft-deleted: … B in … , expiring by …`), `listing/<scan>/non-live/<bucket>.parquet` (6 files, one row each), `snapshots/<scan>/non-live.json` on GCS and R2, and the root view's "Not in this view" line on dev.gcs.oa.dev, then gcs.oa.dev.
 
