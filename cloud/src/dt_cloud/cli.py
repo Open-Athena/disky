@@ -2244,6 +2244,26 @@ def access() -> None:
     """Access-log ingest and provider diagnostics."""
 
 
+@access.command("r2-status")
+@option("-a", "--account", envvar="CLOUDFLARE_ACCOUNT_ID", required=True, help="Cloudflare account ID")
+@option("-b", "--bucket", required=True, help="Private collector archive bucket")
+def access_r2_status(
+    account: str,
+    bucket: str,
+) -> None:
+    """Read collector watermarks and the last published run's budget/errors, without raw events or archive listing."""
+    from .r2_access import collector_status
+
+    token = os.environ.get("CLOUDFLARE_API_TOKEN")
+    if not token:
+        raise UsageError("set CLOUDFLARE_API_TOKEN with R2 archive read permission")
+    try:
+        result = collector_status(account, token, bucket)
+    except (ValueError, RuntimeError) as exc:
+        raise UsageError(str(exc)) from exc
+    print(json.dumps(result, sort_keys=True))
+
+
 @access.command("r2-query")
 @option("-a", "--account", envvar="CLOUDFLARE_ACCOUNT_ID", required=True, help="Cloudflare account ID")
 @option("-b", "--bucket", required=True, help="Source R2 bucket")
