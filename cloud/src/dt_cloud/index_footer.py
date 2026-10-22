@@ -156,6 +156,13 @@ def exists(parquet_path: str) -> bool:
     return blobfs.exists(parquet_path)
 
 
+def blobfs_row_groups(path: str) -> list[int]:
+    """Rows per row group of the parquet at ``path`` (its footer only)."""
+    from disk_tree import blobfs
+
+    return blobfs.row_group_sizes(path)
+
+
 def not_uploaded(remote: str, names: list[str]) -> list[str]:
     """Of `names`, the files `remote` (the generation's dir where the site reads it) doesn't hold."""
     return [n for n in names if not exists(f"{remote}/{n}")]
@@ -502,6 +509,7 @@ def sync_d1(
     store: str = PRIMARY_STORE,
     rows_only: bool = False,
     started: str | None = None,
+    d1_rows: bool = True,
 ) -> int:
     """Extract the footer of ``parquet_path`` (one tier/sort ``variant`` of
     scan ``date``, generation ``gen``, living under the bucket-relative dir
@@ -534,7 +542,16 @@ def sync_d1(
     column set (which needs the store migration).
 
     ``started`` (ISO 8601) records the scan's start on the pointer row
-    (`_pointer_sql`); None keeps whatever start the row already holds."""
+    (`_pointer_sql`); None keeps whatever start the row already holds.
+
+    ``d1_rows=False`` (specs/lean-scans.md §1.4) writes the cold footer files
+    and no row group to D1: no INSERT, no footer LRU entry. The site then plans
+    this generation from `.groups.parquet` (`pq` mode), which is what a
+    deployment wants when its reads of the store are the interval store's and
+    a per-scan read is only a fallback. Only the rows half: the CLI flips the
+    pointer through `check_flip(d1_rows=False)`."""
+    if not d1_rows and not (rows_only and blob):
+        raise ValueError("d1_rows=False writes the cold footer only: pass rows_only=True and blob=True (flip with check_flip)")
     st, sc, sv = _scope(store)
     d1v = d1_variant(variant, store)
     schema, rows = extract(parquet_path)
@@ -542,11 +559,12 @@ def sync_d1(
         write_groups_parquet(parquet_path, schema, rows)
         write_groups_blob(parquet_path, schema, rows)
     # Leftovers from earlier flips (any gen that is neither the current pointer's
-    # nor this one) go first — they are unreachable by construction.
-    gc_sql = (
-        f"DELETE FROM index_row_groups WHERE {st}date='{date}' AND variant='{d1v}' AND gen <> '{_sql_escape(gen)}' "
-        f"AND gen <> COALESCE((SELECT gen FROM index_schema WHERE {st}date='{date}' AND variant='{d1v}'), '');"
-    )
+    # nor this one) go first — they are unreachable by construction. Without D1
+    # rows, this gen's own unpointed rows go too: a partial set left by an earlier
+    # rows phase would otherwise be trusted once the pointer names it.
+    this = f"AND gen <> '{_sql_escape(gen)}' " if d1_rows else ""
+    unpointed = f"{this}AND gen <> COALESCE((SELECT gen FROM index_schema WHERE {st}date='{date}' AND variant='{d1v}'), '')"
+    gc_sql = f"DELETE FROM index_row_groups WHERE {st}date='{date}' AND variant='{d1v}' {unpointed};"
     pointer_sql = [] if rows_only else _pointer_sql(date, variant, gen, key, schema, store, started)
 
     def group_values(r: dict) -> str:
@@ -562,7 +580,7 @@ def sync_d1(
     # re-sending it must be a no-op, not a PK collision (date, variant, gen, rg).
     head = f"INSERT OR REPLACE INTO index_row_groups {cols} VALUES "
     if not remote:  # dev: local wrangler D1
-        stmts = [gc_sql] + [f"{head}{group_values(r)};" for r in rows] + pointer_sql
+        stmts = [gc_sql] + [f"{head}{group_values(r)};" for r in (rows if d1_rows else [])] + pointer_sql
         site = _site_dir()
         for i in range(0, len(stmts), 300):
             with tempfile.NamedTemporaryFile("w", suffix=".sql", delete=False) as tf:
@@ -579,12 +597,10 @@ def sync_d1(
     track = cache and blob and variant in SORT_VARIANTS
     if cache:
         # The swept generations' entries go first: a fill guarded on its entry then lands nothing more.
-        _d1_query(
-            f"DELETE FROM footer_cache WHERE date='{date}' AND variant='{d1v}' AND gen <> '{_sql_escape(gen)}' "
-            f"AND gen <> COALESCE((SELECT gen FROM index_schema WHERE {st}date='{date}' AND variant='{d1v}'), '');",
-            acct, tok, db_id,
-        )
+        _d1_query(f"DELETE FROM footer_cache WHERE date='{date}' AND variant='{d1v}' {unpointed};", acct, tok, db_id)
     _d1_query(gc_sql, acct, tok, db_id)
+    if not d1_rows:
+        return len(rows)
     if track:
         _d1_query(_claim_sql(date, d1v, gen, now=_now()), acct, tok, db_id)
     for chunk in _pack(head, [group_values(r) for r in rows], insert_bytes):
@@ -607,6 +623,7 @@ def check_flip(
     db_id: str = "",
     store: str = PRIMARY_STORE,
     started: str | None = None,
+    d1_rows: bool = True,
 ) -> Flip:
     """The pointer phase's gate: read ``parquet_path``'s footer and check D1
     holds exactly its row groups under ``gen`` — ``rg`` 0..n-1, one row each
@@ -614,7 +631,14 @@ def check_flip(
     `IncompleteGeneration` otherwise. A pointer already naming (``gen``,
     ``key``) passes unchecked (``pointed``; retention may since have retired
     its rows to the cold tier) — and, given ``started``, is ``pointed`` only
-    once it records that start too (else the flip re-writes the row)."""
+    once it records that start too (else the flip re-writes the row).
+
+    ``d1_rows=False``: the generation is served from its cold footer
+    (`sync_d1(d1_rows=False)`), so D1 must hold **none** of its rows (or all
+    of them: a complete set is trusted as before), and the cold
+    `.groups.parquet` beside ``parquet_path`` must hold exactly the footer's
+    row groups. A partial set is refused: a reader trusts any rows of an
+    untracked generation (`footerCache.trusted`)."""
     st, _, _ = _scope(store)
     d1v = d1_variant(variant, store)
     schema, rows = extract(parquet_path)
@@ -632,6 +656,15 @@ def check_flip(
     )
     n, lo, hi = int(got["n"]), got["lo"], got["hi"]
     want_hi = len(rows) - 1 if rows else None
+    if not d1_rows and n == 0:
+        cold = groups_parquet_path(parquet_path)
+        have = sum(blobfs_row_groups(cold)) if exists(cold) else None
+        if have != len(rows):
+            raise IncompleteGeneration(
+                f"{date} [{d1v}] gen {gen}: the cold footer {cold} holds {'nothing' if have is None else f'{have} row groups'}, "
+                f"the footer {len(rows)} — not flipping; re-run the rows phase (`index-sync -r -R`)"
+            )
+        return flip
     if n != len(rows) or (rows and (lo != 0 or hi != want_hi)):
         raise IncompleteGeneration(
             f"{date} [{d1v}] gen {gen}: D1 holds {n} row groups (rg {lo}..{hi}), the footer {len(rows)} — "
