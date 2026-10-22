@@ -363,6 +363,74 @@ def test_parallel_tier_merges_write_the_same_bytes(chain, tmp_path):
     assert [(f, (one / f).read_bytes() == (two / f).read_bytes()) for f in files] == [(f, True) for f in files]
 
 
+class Rec:
+    """A `maint_runs.Recorder` that keeps its phase events: `(begin|note|end, phase, note)`."""
+
+    def __init__(self):
+        self.events: list[tuple[str, str, str | None]] = []
+
+    def start(self, scan, gen):
+        pass
+
+    def begin(self, phase):
+        self.events.append(("begin", phase, None))
+
+    def note(self, phase, note):
+        self.events.append(("note", phase, note))
+
+    def end(self, phase, note=None, failed=False):
+        self.events.append(("end" if not failed else "failed", phase, note))
+
+    def finish(self, status, error=None, gen=None):
+        pass
+
+
+def test_merge_tiers_are_phases_and_a_quiet_tier_logs_progress(chain, tmp_path, monkeypatch):
+    """One process: each tier is begun and ended in turn (its seconds the note); while one runs, a line every `TICK_S`."""
+    import time
+
+    a, b = chain["runs"][:2]
+    run = _merged(a, b, 1, [a, b])
+    dirs = [chain["gen"] / f"deltas/{s}" for s in (a, b)]
+    real = sm.merge_tier
+
+    def slow(*args):
+        if args[0] == "catalog":
+            time.sleep(0.35)
+        return real(*args)
+
+    monkeypatch.setattr(sm, "merge_tier", slow)
+    monkeypatch.setattr(sm, "TICK_S", 0.1)
+    logs: list[str] = []
+    rec = Rec()
+    sm.build_merged_run(dirs, run, tmp_path / "out", drilled=False, rule=None, tmp=tmp_path / "t", jobs=1, log=logs.append, rec=rec)
+    assert [(e[0], e[1]) for e in rec.events] == [("begin", "shards"), ("end", "shards"), ("begin", "catalog"), ("end", "catalog")]
+    ticks = [re.sub(r"\d+s", "<s>", m) for m in logs if ": running " in m]
+    # the slept 0.35 s of catalog ticks at least twice; shards (fast, timing-dependent) may tick too
+    line = f"merge {run['key']}: running {{}} <s>"
+    assert set(ticks) <= {line.format("shards"), line.format("catalog")}
+    assert ticks.count(line.format("catalog")) >= 2
+
+
+def test_a_failed_tier_fails_its_phase(chain, tmp_path, monkeypatch):
+    a, b = chain["runs"][:2]
+    run = _merged(a, b, 1, [a, b])
+    dirs = [chain["gen"] / f"deltas/{s}" for s in (a, b)]
+    real = sm.merge_tier
+
+    def boom(*args):
+        if args[0] == "catalog":
+            raise Boom("no catalog")
+        return real(*args)
+
+    monkeypatch.setattr(sm, "merge_tier", boom)
+    rec = Rec()
+    with pytest.raises(Boom):
+        sm.build_merged_run(dirs, run, tmp_path / "out", drilled=False, rule=None, tmp=tmp_path / "t", jobs=1, log=lambda m: None, rec=rec)
+    assert [(e[0], e[1]) for e in rec.events] == [("begin", "shards"), ("end", "shards"), ("begin", "catalog"), ("failed", "catalog")]
+    assert rec.events[-1][2] == "failed: Boom: no catalog"
+
+
 def test_a_tier_killed_in_the_pool_reruns_alone(chain, tmp_path, monkeypatch):
     """A tier whose process dies (`BrokenProcessPool`: OOM) is rerun in-process with the whole machine's resources, and
     the run is the same bytes as one process's; the tiers that finished in the pool aren't rerun."""
@@ -403,8 +471,13 @@ def test_a_tier_killed_in_the_pool_reruns_alone(chain, tmp_path, monkeypatch):
     monkeypatch.setattr(cf, "ProcessPoolExecutor", Pool)
     monkeypatch.setattr(sm, "merge_tier", alone)
     logs: list[str] = []
-    sm.build_merged_run(dirs, run, two, drilled=False, rule=None, tmp=tmp_path / "t2", jobs=2, log=logs.append)
+    rec = Rec()
+    sm.build_merged_run(dirs, run, two, drilled=False, rule=None, tmp=tmp_path / "t2", jobs=2, log=logs.append, rec=rec)
     assert calls == [("shards", True), ("catalog", False)]
+    # each tier a phase: begun at submit, the killed one noted and ended by its rerun
+    assert [(e[0], e[1], re.sub(r"\d+s", "<s>", e[2]) if e[2] else e[2]) for e in rec.events] == [
+        ("begin", "shards", None), ("begin", "catalog", None), ("end", "shards", "<s>"),
+        ("note", "catalog", "killed in the pool (out of memory?): rerunning alone"), ("end", "catalog", "<s> (alone)")]
     assert [re.sub(r"\d+s", "<s>", m) for m in logs] == [
         f"merge {run['key']}: shards in <s>",
         f"merge {run['key']}: catalog killed in the pool (out of memory?): rerunning one at a time with the whole machine",

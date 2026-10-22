@@ -75,7 +75,7 @@ def test_unbounded_carries_past_any_level():
 # ── `merge_pending`: every replanned carry stops below the level ───────────
 
 
-def _stub_build(dirs: list[Path], run: dict, outp: Path, *, drilled: bool, tmp: Path, log) -> dict:
+def _stub_build(dirs: list[Path], run: dict, outp: Path, *, drilled: bool, tmp: Path, log, rec=None) -> dict:
     outp.mkdir(parents=True)
     (outp / "meta.json").write_text(json.dumps({"scans": run["scans"]}) + "\n")
     return {"rows": None, "bytes": None, "s": {}}

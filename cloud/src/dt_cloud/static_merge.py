@@ -45,7 +45,7 @@ from .append_runner import (  # noqa: F401 — the shared names, as this module 
     plan_carries,
     rebase,
 )
-from .maint_runs import NULL, from_env
+from .maint_runs import NULL, Recorder, from_env
 from .static_names import PREFIX, connect, err
 from .static_profile import data_bucket, scratch_bucket
 from .resource_monitor import monitor_resources, resource_stage
@@ -68,6 +68,10 @@ def gcs_store(bucket: str, scratch: str | None, gen: str, client=None) -> ar.Gcs
 
 
 # ── Building a merged run ──────────────────────────────────────────────────
+
+
+#: How often a merge logs the tiers still running (`build_merged_run`).
+TICK_S = 30.0
 
 
 def tier_resources(tiers: list[str], ram: int, cpus: int, concurrent: bool) -> dict[str, dict]:
@@ -127,15 +131,39 @@ def run_tiers(dirs: list[Path], drilled: bool) -> list[str]:
 
 
 def build_merged_run(dirs: list[Path], run: dict, outp: Path, *, drilled: bool, rule, tmp: Path, jobs: int = 1,
-                     machine: tuple[int, int] | None = None, log: Callable[[str], None] = err) -> dict:
+                     machine: tuple[int, int] | None = None, log: Callable[[str], None] = err, rec: Recorder | None = None) -> dict:
     """The merged run `run` (`plan_carries`' output) of input dirs `dirs` into `outp`: its tiers (`run_tiers`), each in its
     own spawned process when `jobs` > 1 (DuckDB limits per `tier_resources`), then `meta.json` (`run` + the shards' doc).
     A tier whose process is killed (`BrokenProcessPool`: the OOM killer; cw's drill tier beside its anchors on a
     highmem-16, 2026-10-20, 4 attempts) is rerun here, one at a time, with the whole machine (`concurrent=False`).
-    Returns `{rows, bytes, …, "s": {tier: seconds}}`."""
-    from concurrent.futures import ProcessPoolExecutor
+    Each tier is a phase of `rec` (the run's record: begun as it starts, ended as it finishes, in either mode), and while
+    any runs a line every `TICK_S` names them and their seconds so far (gcs's 10-22 L3 carry logged nothing for its last
+    ~70 min, through drill and anchors). Returns `{rows, bytes, …, "s": {tier: seconds}}`."""
+    import threading
+    from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, wait
     from concurrent.futures.process import BrokenProcessPool
     from multiprocessing import get_context
+
+    rec = rec or NULL
+    running: dict[str, float] = {}
+    lock, stop = threading.Lock(), threading.Event()
+
+    def begin(t: str) -> None:
+        with lock:
+            running[t] = monotonic()
+        rec.begin(t)
+
+    def end(t: str, note: str, failed: bool = False) -> None:
+        with lock:
+            running.pop(t, None)
+        rec.end(t, note, failed)
+
+    def tick() -> None:
+        while not stop.wait(TICK_S):
+            with lock:
+                now, items = monotonic(), list(running.items())
+            if items:
+                log(f"merge {run['key']}: running {', '.join(f'{t} {now - t0:.0f}s' for t, t0 in items)}")
 
     shutil.rmtree(outp, ignore_errors=True)
     outp.mkdir(parents=True)
@@ -144,34 +172,64 @@ def build_merged_run(dirs: list[Path], run: dict, outp: Path, *, drilled: bool, 
     res = tier_resources(tiers, ram, cpus, concurrent=jobs > 1)
     args = [(t, dirs, outp, run, rule, tmp / f"merge-{t}", res.get(t, {}).get("mem"), res.get(t, {}).get("threads")) for t in tiers]
     got: dict[str, tuple[float, dict]] = {}
-    if jobs == 1:
-        for a in args:
+
+    def serial(a: tuple, suffix: str = "") -> None:
+        if a[0] not in running:
+            begin(a[0])
+        try:
             name, s, doc = merge_tier(*a)
-            got[name] = (s, doc)
-            log(f"merge {run['key']}: {name} in {s:.0f}s")
-    else:
-        with ProcessPoolExecutor(min(jobs, len(args)), mp_context=get_context("spawn")) as ex:
-            futures = [ex.submit(merge_tier, *a) for a in args]
-            errs, killed = [], []
-            for a, f in zip(args, futures):
-                try:
-                    name, s, doc = f.result()
-                    got[name] = (s, doc)
-                    log(f"merge {run['key']}: {name} in {s:.0f}s")
-                except BrokenProcessPool:
-                    killed.append(a[0])
-                except Exception as e:  # noqa: BLE001 — every tier runs to its end; then the first failure is raised
-                    errs.append(e)
-            if errs:
-                raise errs[0]
-        if killed:
-            log(f"merge {run['key']}: {', '.join(killed)} killed in the pool (out of memory?): rerunning one at a time with the whole machine")
-            alone = tier_resources(tiers, ram, cpus, concurrent=False)
+        except BaseException as e:
+            end(a[0], f"failed: {type(e).__name__}: {e}", failed=True)
+            raise
+        got[name] = (s, doc)
+        end(name, f"{s:.0f}s{suffix}")
+        log(f"merge {run['key']}: {name} in {s:.0f}s{suffix}")
+
+    ticker = threading.Thread(target=tick, daemon=True)
+    ticker.start()
+    try:
+        if jobs == 1:
             for a in args:
-                if a[0] in killed:
-                    name, s, doc = merge_tier(*a[:6], alone.get(a[0], {}).get("mem"), alone.get(a[0], {}).get("threads"))
-                    got[name] = (s, doc)
-                    log(f"merge {run['key']}: {name} in {s:.0f}s (alone)")
+                serial(a)
+        else:
+            with ProcessPoolExecutor(min(jobs, len(args)), mp_context=get_context("spawn")) as ex:
+                futures = {}
+                for a in args:
+                    begin(a[0])
+                    futures[ex.submit(merge_tier, *a)] = a[0]
+                errs, killed = [], []
+                pending = set(futures)
+                while pending:
+                    finished, pending = wait(pending, return_when=FIRST_COMPLETED)
+                    for f in sorted(finished, key=lambda f: tiers.index(futures[f])):
+                        t = futures[f]
+                        try:
+                            name, s, doc = f.result()
+                        except BrokenProcessPool:
+                            killed.append(t)
+                            rec.note(t, "killed in the pool (out of memory?): rerunning alone")
+                            continue
+                        except Exception as e:  # noqa: BLE001 — every tier runs to its end; then the first failure is raised
+                            errs.append(e)
+                            end(t, f"failed: {type(e).__name__}: {e}", failed=True)
+                            continue
+                        got[name] = (s, doc)
+                        end(name, f"{s:.0f}s")
+                        log(f"merge {run['key']}: {name} in {s:.0f}s")
+                if errs:
+                    for t in killed:
+                        end(t, "killed in the pool (out of memory?); not rerun: another tier failed", failed=True)
+                    raise errs[0]
+            if killed:
+                killed.sort(key=tiers.index)
+                log(f"merge {run['key']}: {', '.join(killed)} killed in the pool (out of memory?): rerunning one at a time with the whole machine")
+                alone = tier_resources(tiers, ram, cpus, concurrent=False)
+                for a in args:
+                    if a[0] in killed:
+                        serial((*a[:6], alone.get(a[0], {}).get("mem"), alone.get(a[0], {}).get("threads")), " (alone)")
+    finally:
+        stop.set()
+        ticker.join()
     doc = got["shards"][1]
     (outp / "meta.json").write_text(json.dumps({**run, **doc}, indent=1) + "\n")
     return {**doc, "s": {k: v[0] for k, v in got.items()}}
@@ -206,8 +264,8 @@ def refuse(store: RunStore, before: list[dict], after: list[dict]) -> str | None
 
 def carry(rule=None, jobs: int = 1, build: Callable[..., dict] = build_merged_run) -> Carry:
     """The static store's `Carry`: `build` (`build_merged_run`, `jobs` tiers at once, the generation's hex-run `rule`)."""
-    def b(dirs, run, outp, *, drilled, tmp, log):
-        return build(dirs, run, outp, drilled=drilled, rule=rule, tmp=tmp, jobs=jobs, log=log)
+    def b(dirs, run, outp, *, drilled, tmp, log, rec=None):
+        return build(dirs, run, outp, drilled=drilled, rule=rule, tmp=tmp, jobs=jobs, log=log, rec=rec)
     return Carry(build=b, missing=missing, drilled=drilled_runs, refuse=refuse)
 
 
