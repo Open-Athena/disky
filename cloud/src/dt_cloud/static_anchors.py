@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import json
 import sys
+from bisect import bisect_right
 from dataclasses import dataclass, field
 from functools import partial
 from pathlib import Path
@@ -433,6 +434,7 @@ class Tier:
     per-group key bounds by kind (`keys_table`), when precomputed (the base's `anchors/keys-<kind>.parquet`)."""
     root: Path
     keys: dict[str, str] = field(default_factory=dict)
+    _shards: dict[str, tuple[list[str], list[dict]]] = field(default_factory=dict, init=False, repr=False, compare=False)
 
     def shard_dir(self, kind: str) -> Path:
         return self.root if kind == "end" else self.root / NAMES
@@ -452,12 +454,18 @@ class Tier:
 
     def shard_file(self, kind: str, k: str) -> str | None:
         """The shard file holding key `k` (its first three characters in a shard's `[lo, hi)`), else None."""
-        plan = self.shard_dir(kind) / "shards.json"
-        if not plan.exists():
-            return None
+        if kind not in self._shards:
+            plan = self.shard_dir(kind) / "shards.json"
+            if not plan.exists():
+                return None
+            shards = json.loads(plan.read_text())["shards"]
+            self._shards[kind] = ([sh["lo"] for sh in shards], shards)
+        lower, shards = self._shards[kind]
         p3 = k[:3]
-        for sh in json.loads(plan.read_text())["shards"]:
-            if sh["lo"] <= p3 and (sh["hi"] is None or p3 < sh["hi"]):
+        index = bisect_right(lower, p3) - 1
+        if index >= 0:
+            sh = shards[index]
+            if sh["hi"] is None or p3 < sh["hi"]:
                 return str(self.shard_dir(kind) / "sx" / f"s{sh['i']:04d}.parquet")
         return None
 
@@ -534,15 +542,41 @@ def probe_prior_rows(
         for file, file_keys in by_file.items():
             for offset in range(0, len(file_keys), batch_keys):
                 selected = file_keys[offset:offset + batch_keys]
-                where = f"s IN ({', '.join(q(k) for k in selected)})"
+                key_list = ', '.join(q(k) for k in selected)
+                where = f"s IN ({key_list})"
                 resource_stage(f"anchors {mode}: prior probes", tier=ti, query=queries + 1, keys=len(selected))
                 con.execute(f"""INSERT INTO prows SELECT x.k, x.depth, x.path, x.usr, x.vf, x.vt, x.size, x.n_files, x.par
                     FROM ({shard_rows_sql([file], where)}) AS x
-                    ASOF JOIN probe_ranges AS p ON x.k = p.k AND x.path >= p.lo
+                    ASOF JOIN (SELECT * FROM probe_ranges WHERE k IN ({key_list})) AS p ON x.k = p.k AND x.path >= p.lo
                     WHERE p.hi IS NULL OR x.path < p.hi""")
                 queries += 1
     resource_stage(f"anchors {mode}: prior probes complete", queries=queries, keys=len(keys))
     return queries
+
+
+def near_candidates(con, R: int) -> None:
+    """Bound each candidate by overlapping groups, without enumerating their cross product.
+
+    A group's path interval overlaps [dir/, dir0) unless its maximum is below
+    the lower bound or its minimum is at/above the upper bound. Null statistics
+    never exclude a group. Prefix sums make both exclusions ASOF lookups.
+    """
+    con.execute("CREATE OR REPLACE TABLE kt_totals AS SELECT k, sum(rows)::BIGINT AS n FROM ktk GROUP BY k")
+    con.execute("""CREATE OR REPLACE TABLE kt_before AS SELECT k, p_max AS x,
+        sum(sum(rows)) OVER (PARTITION BY k ORDER BY p_max)::BIGINT AS n
+        FROM ktk WHERE p_max IS NOT NULL GROUP BY k, p_max""")
+    con.execute("""CREATE OR REPLACE TABLE kt_after AS SELECT k, p_min AS x,
+        sum(sum(rows)) OVER (PARTITION BY k ORDER BY p_min DESC)::BIGINT AS n
+        FROM ktk WHERE p_min IS NOT NULL GROUP BY k, p_min""")
+    con.execute(f"""CREATE OR REPLACE TABLE near AS SELECT * FROM (
+        SELECT c.k, c.lvl, c.dir, c.n, (coalesce(t.n, 0) - CASE WHEN c.dir = '' THEN 0
+            ELSE coalesce(b.n, 0) + coalesce(a.n, 0) END)::BIGINT AS bound
+        FROM cand AS c LEFT JOIN kt_totals AS t USING (k)
+        ASOF LEFT JOIN kt_before AS b ON c.k = b.k AND c.dir || '/' > b.x
+        ASOF LEFT JOIN kt_after AS a ON c.k = a.k AND c.dir || '0' <= a.x
+        ) WHERE n + bound > {R}""")
+    for table in ("kt_totals", "kt_before", "kt_after"):
+        con.execute(f"DROP TABLE {table}")
 
 
 def run_rollups(con, prior: list[Tier], run: Tier, D: int, mode: str, R: int, K: int, into: str, rule: HexRule | None = None) -> dict:
@@ -597,9 +631,7 @@ def run_rollups(con, prior: list[Tier], run: Tier, D: int, mode: str, R: int, K:
             con.execute(f"INSERT INTO kt SELECT {i}, * FROM kt_in")
             con.unregister("kt_in")
     con.execute("""CREATE OR REPLACE TABLE ktk AS SELECT ck.k, kt.* FROM ck JOIN kt ON kt.s_min <= ck.k AND ck.k <= kt.s_max""")
-    con.execute(f"""CREATE OR REPLACE TABLE near AS SELECT c.k, c.lvl, c.dir, c.n, coalesce(sum(g.rows), 0)::BIGINT AS bound
-        FROM cand AS c LEFT JOIN ktk AS g ON g.k = c.k AND (c.dir = '' OR ((g.p_max IS NULL OR g.p_max >= c.dir || '/') AND (g.p_min IS NULL OR g.p_min < c.dir || '0')))
-        GROUP BY c.k, c.lvl, c.dir, c.n HAVING c.n + coalesce(sum(g.rows), 0) > {R}""")
+    near_candidates(con, R)
     # The prior rows of each near (k, dir), exactly: per key one pushdown read of the tiers' files holding it.
     con.execute("CREATE OR REPLACE TABLE prows AS SELECT * FROM rr WHERE false")
     probe_prior_rows(con, prior, mode)
