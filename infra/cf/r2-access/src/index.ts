@@ -482,20 +482,24 @@ export async function collect(
       // Workers' fetch takes only `follow` / `manual` (`error` throws a TypeError: the first scheduled run, 10-17 04:13Z,
       // failed on it in 151 ms); a manual 3xx isn't `ok`, so it fails the run as `provider_http_3xx`.
       redirect: 'manual',
-    })
+    }).catch(() => { throw new CollectionError('provider_unreachable') })
     if (!response.ok) {
-      await response.body?.cancel()
-      throw new CollectionError(`provider_http_${response.status}`)
+      // The API envelope's numeric error code says which refusal it was (OA's 403s, 2026-10-22, came 6–8 minutes
+      // into runs whose pages a laptop replay fetched fine); only that number is kept, never the message.
+      const code = await response.text().then(text => JSON.parse(text).errors?.[0]?.code, () => undefined).catch(() => undefined)
+      throw new CollectionError(`provider_http_${response.status}${Number.isInteger(code) ? `_${code}` : ''}`)
     }
     return boundedText(response, config.maxBytes)
   }
   let pagesLeft = config.maxPages
   const superseded: string[] = []
   let hoursLeft = config.maxHours
+  // A provider failure (`provider_*`) mid-run stops scheduling windows; those already complete still publish.
+  let halted: string | null = null
 
   /** Drains one hour into `state.hours`, or returns 'wait' when it doesn't fit what's left of the budget. */
   const drain = async (bucket: string, state: BucketState, hour: number, phase: Phase, reports: HourReport[]): Promise<number | 'wait'> => {
-    if (!hoursLeft || performance.now() >= deadline) return 'wait'
+    if (halted || !hoursLeft || performance.now() >= deadline) return 'wait'
     hoursLeft--
     const windowed = state.window_from !== undefined && hour >= state.window_from
     const keyHour = hourKey(hour, windowed ? config.window : HOUR)
@@ -574,10 +578,17 @@ export async function collect(
     }
     return { bucket, planned, state, reports: [] as HourReport[], waiting: 0, error: null as string | null }
   })
+  /** `hour_over_cap` holds one bucket's watermark; a provider failure halts the run (the 13:13Z 10-22 OA run lost
+   * 8 minutes of drained windows to one `provider_http_403`). Either way completed windows publish and the run
+   * then fails with the code. Anything else fails before the publish. */
   const overCap = async <T>(run: typeof runs[number], body: () => Promise<T>): Promise<T | 'over_cap'> => {
     try { return await body() } catch (error) {
-      if (!(error instanceof CollectionError) || error.code !== 'hour_over_cap') throw error
-      run.error = error.code
+      if (!(error instanceof CollectionError)) throw error
+      if (error.code.startsWith('provider_')) {
+        if (!runs.some(r => r.reports.length)) throw error
+        halted = error.code
+      } else if (error.code !== 'hour_over_cap') throw error
+      run.error ??= error.code
       return 'over_cap'
     }
   }
@@ -639,7 +650,8 @@ export async function collect(
   // Replaced aggregates are unreachable once the state above names their successors: delete them in one batch
   // (at marin-na's volume each version is ~5 MB/hour). A failure here leaves orphans, never a dangling state.
   if (superseded.length) await env.ARCHIVE.delete(superseded)
-  if (runs.some(run => run.error)) throw new CollectionError('hour_over_cap')
+  const failed = halted ?? runs.find(run => run.error)?.error
+  if (failed) throw new CollectionError(failed)
   const reports = runs.flatMap(run => run.reports)
   return {
     run_id: runId, buckets: runs.length, hours: reports.length, pages: config.maxPages - pagesLeft,
