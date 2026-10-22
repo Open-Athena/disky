@@ -54,5 +54,7 @@ COPY cloud/src ./cloud/src
 RUN uv sync --frozen --no-dev --no-editable --package dt-cloud
 COPY --from=site /repo/site/dist ./dist
 COPY job ./job
+# the deployment's Pages config: `dt-cloud cf-usage` reads its resources (project, buckets, D1s, KV, dataset) from it
+COPY site/wrangler.toml ./site/wrangler.toml
 # `supervise` records a platform-terminated or OOM-killed run as failed (specs/scan-job-wrapper.md).
 ENTRYPOINT ["dt-cloud", "scan-run", "supervise", "--", "bash", "job/run.sh"]

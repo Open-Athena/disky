@@ -1345,6 +1345,32 @@ def _digest_root(ctx: Ctx) -> str:
     return root.format(snapshots=ctx.snapshots) if root else f"{ctx.data_uri}/{ctx.snapshots}"
 
 
+#: Where the daily usage snapshots go, under the data store (and the R2 archive): one key space per deployment, beside
+#: the scans' `snapshots/<subdir>/` (`usage` is never a scan id).
+USAGE_PREFIX = "snapshots/usage"
+
+
+@step("cf-usage", core=False, soft=True, options={"config": str, "days": int},
+      requires=primary_only("cf-usage", "the usage snapshots are the deployment's, written once by its primary"))
+def cf_usage(ctx: Ctx, arg: str | None) -> None:
+    """The deployment's Cloudflare usage per day (`dt-cloud cf-usage -o`, specs/usage-metrics.md): `<data>/snapshots/
+    usage/<date>.json` (+ the R2 archive's copy, which the site's `/admin/usage` reads under `SERVED_R2`) for each of
+    the `options.cf-usage.days` (7) whole UTC days before today that a copy lacks: a missed day is backfilled the next
+    run. `options.cf-usage.config`: the deployment's Pages wrangler config in the image (`site/wrangler.toml`). Skipped
+    without `CF_ANALYTICS_TOKEN` (Account Analytics: Read; the profile's `secrets`) or on REPROC; never fatal. Not core:
+    a deployment lists it in `steps` once its token is a secret (a core step would need every store profile to skip it)."""
+    if ctx.reproc or not ctx.has("CF_ANALYTICS_TOKEN"):
+        err("no CF_ANALYTICS_TOKEN, or REPROC: skipping the Cloudflare usage snapshots")
+        return
+    with ctx.phase("cf-usage"):
+        outs = [f"{ctx.data_uri}/{USAGE_PREFIX}"]
+        if ctx.env.get("R2_ARCHIVE"):
+            outs.append(f"{ctx.env['R2_ARCHIVE']}/{USAGE_PREFIX}")
+        ctx.sh(["dt-cloud", "cf-usage", "-c", ctx.opt("cf-usage", "config", "site/wrangler.toml"),
+                "-d", str(ctx.opt("cf-usage", "days", 7)), *(a for o in outs for a in ("-o", o))],
+               fatal=False, warn="cf-usage snapshots failed (the scan's outputs stand; the next run backfills)", fails_phase=True)
+
+
 #: Core steps a profile may `skip`.
 SKIPPABLE = tuple(n for n, s in STEPS.items() if s.core and s.skippable)
 

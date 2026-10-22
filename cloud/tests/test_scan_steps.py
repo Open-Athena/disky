@@ -1079,3 +1079,30 @@ def test_list_adopts_a_sources_listing_from_the_env(tmp_path, env, monkeypatch):
     with pytest.raises(S.StepFailed) as e:
         S.list_source(unset, "r2://disk-tree")
     assert str(e.value) == "{env:DT_CAPTURE}: $DT_CAPTURE unset"
+
+
+def test_cf_usage_snapshots_to_the_data_store_and_r2(tmp_path, env):
+    c = ctx(tmp_path, env)
+    S.cf_usage(c, None)
+    assert c.sh_impl.calls == []  # no token: skipped
+    env.update(CF_ANALYTICS_TOKEN="t", R2_ENDPOINT="https://r2.example.org", R2_BUCKET="r2b", R2_ACCESS_KEY_ID="k", R2_SECRET_ACCESS_KEY="s")
+    c = ctx(tmp_path, env, options={"cf-usage": {"days": 14, "config": "/app/site/wrangler.toml"},
+                                     "list": {"import": True}, "static-names": {"profile": "sn.json"}, "digest": {"template": "t", "config": "c.yml"}})
+    S.cf_usage(c, None)
+    assert c.sh_impl.calls == [
+        "dt-cloud cf-usage -c /app/site/wrangler.toml -d 14 -o <tmp>/data/snapshots/usage -o r2://r2b/snapshots/usage",
+    ]
+    c = ctx(tmp_path, {**env, "REPROC": "1"})
+    S.cf_usage(c, None)
+    assert c.sh_impl.calls == []
+
+
+def test_cf_usage_failure_fails_its_phase_not_the_run(tmp_path, env):
+    env.update(CF_ANALYTICS_TOKEN="t")
+    c = ctx(tmp_path, env, runner=Runner(tmp_path, fail=("dt-cloud cf-usage -c",)))
+    c.run = Ends()
+    S.cf_usage(c, None)
+    assert (c.run.calls, c.sh_impl.calls) == (
+        [("begin", "cf-usage"), ("end", "cf-usage", 1, True, "cf-usage snapshots failed (the scan's outputs stand; the next run backfills)")],
+        ["dt-cloud cf-usage -c site/wrangler.toml -d 7 -o <tmp>/data/snapshots/usage"],
+    )
