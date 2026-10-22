@@ -12,6 +12,7 @@ Status: tracking doc, opened 2026-10-22. This is the top priority for gcs (Ryan,
 | 10-19 | 19 | 45 | 262 | 28 | 0 | 344 |
 | 10-21 | 20 | 50 | 102 | 12 | 7 (failed) | 202 (failed) |
 | 10-22 | 30 | 45 | 129 | 3 (failed) | 37 | 277 |
+| 10-22T1545 (manual) | 30 | 46 | 107 | 24 | 44 | 289 (green) |
 
 Phases overlap (static-names runs beside interval-store and post), so the totals aren't sums. The total has grown from ~1 h to ~4.6 h in two weeks.
 
