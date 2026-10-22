@@ -125,8 +125,11 @@ def build_merged_run(dirs: list[Path], run: dict, outp: Path, *, drilled: bool, 
                      machine: tuple[int, int] | None = None, log: Callable[[str], None] = err) -> dict:
     """The merged run `run` (`plan_carries`' output) of input dirs `dirs` into `outp`: its tiers (`run_tiers`), each in its
     own spawned process when `jobs` > 1 (DuckDB limits per `tier_resources`), then `meta.json` (`run` + the shards' doc).
+    A tier whose process is killed (`BrokenProcessPool`: the OOM killer; cw's drill tier beside its anchors on a
+    highmem-16, 2026-10-20, 4 attempts) is rerun here, one at a time, with the whole machine (`concurrent=False`).
     Returns `{rows, bytes, …, "s": {tier: seconds}}`."""
     from concurrent.futures import ProcessPoolExecutor
+    from concurrent.futures.process import BrokenProcessPool
     from multiprocessing import get_context
 
     shutil.rmtree(outp, ignore_errors=True)
@@ -144,16 +147,26 @@ def build_merged_run(dirs: list[Path], run: dict, outp: Path, *, drilled: bool, 
     else:
         with ProcessPoolExecutor(min(jobs, len(args)), mp_context=get_context("spawn")) as ex:
             futures = [ex.submit(merge_tier, *a) for a in args]
-            errs = []
-            for f in futures:
+            errs, killed = [], []
+            for a, f in zip(args, futures):
                 try:
                     name, s, doc = f.result()
                     got[name] = (s, doc)
                     log(f"merge {run['key']}: {name} in {s:.0f}s")
+                except BrokenProcessPool:
+                    killed.append(a[0])
                 except Exception as e:  # noqa: BLE001 — every tier runs to its end; then the first failure is raised
                     errs.append(e)
             if errs:
                 raise errs[0]
+        if killed:
+            log(f"merge {run['key']}: {', '.join(killed)} killed in the pool (out of memory?): rerunning one at a time with the whole machine")
+            alone = tier_resources(tiers, ram, cpus, concurrent=False)
+            for a in args:
+                if a[0] in killed:
+                    name, s, doc = merge_tier(*a[:6], alone.get(a[0], {}).get("mem"), alone.get(a[0], {}).get("threads"))
+                    got[name] = (s, doc)
+                    log(f"merge {run['key']}: {name} in {s:.0f}s (alone)")
     doc = got["shards"][1]
     (outp / "meta.json").write_text(json.dumps({**run, **doc}, indent=1) + "\n")
     return {**doc, "s": {k: v[0] for k, v in got.items()}}
