@@ -1,6 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Fragment, useEffect, useState } from 'react'
 import { AvatarField } from '@open-athena/auth/react'
+import { Loading } from './Busy'
 import { Link, useSearchParams } from 'react-router-dom'
 import { SiteNav } from './SiteNav'
 import { DEFAULT_STORE, STORES } from './stores'
@@ -175,7 +176,7 @@ function GrantLog({ id }: { id: string }) {
     },
   })
   if (q.error) return <p className="err">{q.error.message}</p>
-  if (!q.data) return <p className="dim">loading…</p>
+  if (!q.data) return <Loading label="Loading admin data…" />
   const events = q.data.events
   if (!events.length) return <p className="dim">no events logged</p>
   const hasNetwork = events.some(e => e.asOrg != null)
