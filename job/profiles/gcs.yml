@@ -108,6 +108,8 @@ options:
   # the hourly poller (`gcs-access-ingest-hourly`, job/access-submit.sh) ingests the usage logs as they land; the scan
   # leaves `access-ingest` out and `index` reads `access/agg` as it stands (`meta.access.through`)
   access-ingest: {poller: true}
+  # the Nextflow task's cwd isn't the image's `/app`, so the relative default missed it (2026-10-22: exit 2)
+  cf-usage: {config: /app/site/wrangler.toml}
   # after each scan, the per-scan files the interval store + static index hold (specs/lean-scans.md §2) and the raw
   # listing shards (`layer1`, once the store's `generation` matches them), retired for real since the hand-run retires
   # of 2026-10-18/19; a scan without a verify marker is verified in the task first; dvx's 7-day soft delete is the undo
