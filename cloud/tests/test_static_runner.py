@@ -168,6 +168,8 @@ def _py(module: str, *args: str, mount: bool = True) -> str:
         diagnostics = """trap 'rc=$?; printf "DRILL_EXIT code=%s\\n" "$rc"; for f in /sys/fs/cgroup/memory.events /sys/fs/cgroup/memory.events.local /sys/fs/cgroup/memory/memory.failcnt /sys/fs/cgroup/memory/memory.oom_control; do if [ -r "$f" ]; then printf "DRILL_CGROUP %s\\n" "$f"; cat "$f"; fi; done' EXIT; """
     elif module == "static_anchors" and args[0] == "run":
         diagnostics = """trap 'rc=$?; printf "ANCHOR_EXIT code=%s\\n" "$rc"; for f in /sys/fs/cgroup/memory.events /sys/fs/cgroup/memory.events.local /sys/fs/cgroup/memory/memory.failcnt /sys/fs/cgroup/memory/memory.oom_control; do if [ -r "$f" ]; then printf "ANCHOR_CGROUP %s\\n" "$f"; cat "$f"; fi; done' EXIT; """
+    elif module == "static_merge" and args[0] in ("carry", "probe"):
+        diagnostics = """trap 'rc=$?; printf "MERGE_EXIT code=%s\\n" "$rc"; for f in /sys/fs/cgroup/memory.events /sys/fs/cgroup/memory.events.local /sys/fs/cgroup/memory/memory.failcnt /sys/fs/cgroup/memory/memory.oom_control; do if [ -r "$f" ]; then printf "MERGE_CGROUP %s\\n" "$f"; cat "$f"; fi; done' EXIT; """
     return f"set -euo pipefail; {diagnostics}mkdir -p /stage/tmp /stage/out && cd /stage && python3 -u -m dt_cloud.{module} {' '.join(args)}{m}"
 
 
