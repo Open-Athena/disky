@@ -39,5 +39,8 @@
   "compact",
   "drill"
  ],
- "drill_checkpoint": "oa-gcs-usage-scratch"
+ "drill_checkpoint": "oa-gcs-usage-scratch",
+ "record_secrets": {
+  "CLOUDFLARE_API_TOKEN": "cf-pages-token"
+ }
 }

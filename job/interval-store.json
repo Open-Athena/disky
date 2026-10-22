@@ -1,6 +1,6 @@
 {
   "name": "gcs",
-  "about": "The gcs deployment's interval-store settings: where its per-scan path sorts and the store live, and the scans the parity check samples (v1 indexes from the first scan, every v2 store generation's span, the newest). `append`: the per-scan append's (`interval_append`): the generation runs append to, the one holding its range files, and the Batch and R2 settings (`static_profile.Profile` fields; the R2 endpoint from $R2_ENDPOINT); `compact_level` L: carries stop below it, so a compaction into a new base generation is due after ~2^L scans (5: 32 scans, ~32 days).",
+  "about": "The gcs deployment's interval-store settings: where its per-scan path sorts and the store live, and the scans the parity check samples (v1 indexes from the first scan, every v2 store generation's span, the newest). `append`: the per-scan append's (`interval_append`): the generation runs append to, the one holding its range files, and the Batch and R2 settings (`static_profile.Profile` fields; the R2 endpoint from $R2_ENDPOINT); `compact_level` L: carries stop below it, so a compaction into a new base generation is due after ~2^L scans (5: 32 scans, ~32 days); `record_secrets`: the D1 token the merge and compaction jobs record their runs on /scans with (`maint_runs`).",
   "bucket": "oa-gcs-usage-dvx",
   "verify_scans": [
     "2026-07-30",
@@ -44,6 +44,7 @@
     "compact_level": 5,
     "machines": {"compact": "n2-highmem-32"},
     "ssd_gbs": {"compact": 1500},
-    "compact_jobs": 4
+    "compact_jobs": 4,
+    "record_secrets": {"CLOUDFLARE_API_TOKEN": "cf-pages-token"}
   }
 }
