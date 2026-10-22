@@ -11,6 +11,7 @@ import pytest
 
 from dt_cloud import append_runner as ar
 from dt_cloud import interval_compact as ic
+from dt_cloud import interval_store as ist
 from dt_cloud import maint_runs as mr
 from dt_cloud import scan_runs as sr
 from dt_cloud.blobstore import Store
@@ -90,6 +91,32 @@ def test_compaction_record_due(interval_store, tmp_path, monkeypatch):
         "pointer": "g/successor.json → g.c001; CURRENT.json → g.c001",
         "prune": "g: <n> objects, <GiB> kept (0h old)",
     }
+
+
+def test_compaction_record_superseded(interval_store, tmp_path, monkeypatch):
+    """A scan appended while the generation was folded (`compact_store`'s guard): nothing published, so the run
+    finishes `nop` (not `succeeded`, not `failed`), its gen naming the manifest that landed; no `prune`."""
+    monkeypatch.setattr(ar, "NOTE_S", 1e12)
+    world = make_world(tmp_path / "scans-race", False)
+    ar.set_current(Store(str(interval_store)), ist.PREFIX, "g")
+    c = ic.compactor(RG)
+
+    def fold(*a, **kw):
+        out = c.fold(*a, **kw)
+        add(world, interval_store, tmp_path / "wr", "-t", DATES[4], "-C", "none")
+        return out
+
+    rec = FakeRecorder()
+    doc = ar.run_compaction(Store(str(interval_store)), replace(c, fold=fold), "g", interval_store, tmp_path / "w",
+                            policy=ar.parse_policy("x", "every:2s"), threads=2, mem="1GB", log=lambda m: None, rec=rec)
+    sup = doc["compact"]["superseded"]
+    assert (sup.startswith(f"manifests/{DATES[4]}"), doc["predecessors"]) == (True, [])
+    assert rec.calls == [
+        ("start", DATES[3], "interval-store/g"),
+        *_phases("read", "due", "fold", "sorts", "upload", "pointer"),
+        ("finish", "nop", None, f"interval-store/g (superseded: {sup}, not published)"),
+    ]
+    assert rec.notes["pointer"] == f"superseded: {sup} landed on g during the fold; g.c001 deleted, not published"
 
 
 def test_compaction_record_not_due(interval_store, tmp_path):

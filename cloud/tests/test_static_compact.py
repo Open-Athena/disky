@@ -58,9 +58,9 @@ def world(fixture, tmp_path_factory):  # noqa: F811
         # A: two level-0 runs (level 1: never a carry; due once two runs are at level 0) → `add` compacts into g.c001;
         # then a scan appended to g.c001 (`-g g` follows the successor) and `-K` → g.c002.
         a = tmp / "a"
-        _build(root, scans, a, tmp / "wa0", through=ids[1])
+        _build(root, scans, a, tmp / "wa0", through=ids[1], extra=("-u", "static-names/primary-CURRENT.json"))
         out["a"] = [_add(root, scans, a, tmp / "wa1", ids[2], "-C", "1"), _add(root, scans, a, tmp / "wa2", ids[3], "-C", "1"),
-                    _add(root, scans, a, tmp / "wa3", ids[4], "-C", "1", "-K")]
+                    _add(root, scans, a, tmp / "wa3", ids[4], "-C", "1", "-K", "-u", "static-names/primary-CURRENT.json")]
         # B: one merged run (level 5: the two carry into an L1) → `static-names compact`.
         b = tmp / "b"
         _build(root, scans, b, tmp / "wb0", through=ids[1])
@@ -140,3 +140,24 @@ def test_store_gc_keeps_the_pointer_and_forwarding_records(world, tmp_path):
     root = tmp_path / "a" / sn.PREFIX
     assert sorted(p.relative_to(root).as_posix() for p in (root / "g.c001").rglob("*") if p.is_file()) == [f"g.c001/{ar.SUCCESSOR}"]
     assert ar.chain(store, sn.PREFIX, "g") == ["g", "g.c001", "g.c002"]
+
+
+def test_independent_static_pointers_and_gc_follow_both_lineages(world, tmp_path):
+    import shutil
+
+    from dt_cloud import store_gen_gc as gc
+    from dt_cloud.blobstore import Store
+
+    shutil.copytree(world["a_store"].parent, tmp_path / "a")
+    store = Store(str(tmp_path / "a"))
+    store.write_text("static-names/meta/scans.json", "{}\n")
+    store.write_text("static-names/meta/successor.json", '{"gen":"meta.c001"}\n')
+    store.write_text("static-names/meta.c001/scans.json", "{}\n")
+    sl.publish_current(store, "meta", "static-names/meta-CURRENT.json")
+    assert [store.read_json(k) for k in (
+        "static-names/CURRENT.json", "static-names/primary-CURRENT.json", "static-names/meta-CURRENT.json",
+    )] == [{"gen": "g.c002"}, {"gen": "g.c002"}, {"gen": "meta.c001"}]
+    plan = gc.plan(store, "static-names", ["g", "meta"], lineage_only=False, grace_s=0, now=4e9)
+    assert [(r["gen"], r["action"]) for r in plan] == [
+        ("g", "keep"), ("g.c001", "delete"), ("g.c002", "keep"), ("meta", "keep"), ("meta.c001", "keep"),
+    ]

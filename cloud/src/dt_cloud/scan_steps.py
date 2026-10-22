@@ -899,14 +899,14 @@ def _static_check(p: ScanProfile) -> list[str]:
     o = p.opts("static-names")
     if o.get("gen"):
         return [f"options.static-names.{k}: not with gen (the one-machine path)" for k in ("profile",) if k in o]
-    problems = [f"options.static-names.{k}: only with gen (the one-machine path)" for k in ("store", "mem", "build_args") if k in o]
+    problems = [f"options.static-names.{k}: only with gen (the one-machine path)" for k in ("store", "mem", "build_args", "current_key") if k in o]
     if not o.get("profile") and not p.env.get("STATIC_NAMES_PROFILE"):
         problems.append("options.static-names.profile: required (the deployment's static-names profile; or env STATIC_NAMES_PROFILE, "
                         "or gen: the one-machine path, or skip: [static-names])")
     return problems
 
 
-@step("static-names", stage="serve", soft=True, options={"profile": str, "gen": str, "store": str, "mem": str, "build_args": list},
+@step("static-names", stage="serve", soft=True, options={"profile": str, "gen": str, "store": str, "mem": str, "build_args": list, "current_key": str},
       requires=_static_check)
 def static_names(ctx: Ctx, arg: str | None) -> None:
     """Append this scan (and any earlier one still pending, in scan-id order) to the static name index as a run
@@ -929,9 +929,10 @@ def static_names(ctx: Ctx, arg: str | None) -> None:
         # a local data dir holds only this scan, so the store (where publish-r2 put it, before this step) is the source
         source = ctx.data_uri if urlparse(ctx.profile.data).scheme else store
         args = ["-g", gen, "-L", layout, "-s", source, "-o", store, "-w", ctx.work / "static-names", "-p", ctx.nproc,
+                *(["-u", ctx.opt("static-names", "current_key")] if ctx.opt("static-names", "current_key") else []),
                 *(["-M", ctx.opt("static-names", "mem")] if ctx.opt("static-names", "mem") else [])]
         with ctx.phase("static-names", note="overlapped"):
-            sub = (["add", *args] if ctx.store_has(store, f"static-names/{gen}/scans.json")
+            sub = (["add", *args] if ctx.store_has(store, f"static-names/{gen}/scans.json") or ctx.store_has(store, f"static-names/{gen}/successor.json")
                    else ["build", *args, *ctx.opt("static-names", "build_args", [])])
             ctx.sh(["dt-cloud", "static-names", *sub], fatal=False, warn=f"static-names {sub[0]} failed for {ctx.scan}")
         return
@@ -967,16 +968,14 @@ def publish_r2(ctx: Ctx, arg: str | None) -> None:
                                     "remains visible; repair the R2 copy, then resume", hard=True)
 
 
-_iv_primary = primary_only("interval-store", "the site serves another store's scans per scan, and the interval store's "
-                                            "`interval-store/CURRENT.json` is the primary's")
-
-
 def _iv_check(p: ScanProfile) -> list[str]:
     o = p.opts("interval-store")
     bad = [f"options.interval-store.source: {o['source']!r} (one of store, data)"] if o.get("source", "store") not in ("store", "data") else []
     if o.get("source") and o.get("profile"):
         bad.append("options.interval-store.source: only on the one-machine path (the staged one reads its profile's layouts)")
-    return _iv_primary(p) + bad
+    if not p.primary and not o.get("store"):
+        bad.append("options.interval-store.store: required for a secondary store (an independent namespace)")
+    return bad
 
 
 @step("interval-store", stage="serve", soft=True, options={"store": str, "timeout": str, "mem": str, "profile": str, "merge_wait": int,
@@ -1149,6 +1148,30 @@ def dups(ctx: Ctx, arg: str | None) -> None:
         copy_atomic(out / "dups.json", key_dir / "dups.json")
 
 
+def _age_check(p: ScanProfile) -> list[str]:
+    o = p.opts("age-store")
+    return [f"options.age-store.{key}: required" for key in ("store", "gen") if not o.get(key)]
+
+
+@step("age-store", core=False, soft=True, options={"store": str, "gen": str, "keep": int, "execute": bool, "copies": list},
+      requires=_age_check)
+def age_store(ctx: Ctx, arg: str | None) -> None:
+    """Append verified histogram cells, then retire covered old pyramids on each copy. Runs before path retirement."""
+    if ctx.reproc:
+        err("age-store off under REPROC")
+        return
+    o = ctx.profile.opts("age-store")
+    layout = ctx.profile.layout.layer2.replace("{scan}", "{id}") + "index/{gen}/age-pyramid-1h.parquet"
+    roots = list(dict.fromkeys([ctx.data_uri, *o.get("copies", [])]))
+    argv = ["dt-cloud", "age-store", "-g", o["gen"], "-L", layout, "-o", o["store"], "-s", ctx.data_uri,
+            "-T", ctx.profile.store, "-t", ctx.scan, "-w", ctx.work / "age-store", "-k", o.get("keep", 2),
+            *(a for root in roots for a in ("-r", root)), *(["-x"] if o.get("execute") else [])]
+    with ctx.phase("age-store"), cleanup(ctx.work / "age-store"):
+        if ctx.sh(argv, fatal=False, fails_phase=True, warn="age-store failed (uncovered histogram inputs stay)") is not None and o.get("execute"):
+            ctx.sh(["dt-cloud", "store-gc", "-t", "interval-store", "-l", "-x", "-o", o["store"]], fatal=False,
+                   warn="age-store generation cleanup failed (the next run retries)")
+
+
 def _retire_check(p: ScanProfile) -> list[str]:
     o = p.opts("retire")
     problems = [] if isinstance(o.get("keep"), int) and o["keep"] >= 1 else ["options.retire.keep: required, ≥ 1 (the newest scans never retired)"]
@@ -1222,13 +1245,14 @@ def retire(ctx: Ctx, arg: str | None) -> None:
                    warn=f"retire failed on {root} (its per-scan files stay; the next run retries)")
 
 
-@step("store-gc", core=False, soft=True, options={"execute": bool, "grace": int, "store": str})
+@step("store-gc", core=False, soft=True, options={"execute": bool, "grace": int, "store": str, "copies": list, "static_gens": list})
 def store_gc(ctx: Ctx, arg: str | None) -> None:
     """Superseded interval-store generations (`dt-cloud store-gc -l`): what the current generation was compacted or
     backfilled from, past the grace (`grace` seconds, default 3 days), its parity markers moved first; on the interval
     store (`store`, default the interval-store step's, else `$R2_ARCHIVE`) and on `$R2_ARCHIVE` when that's another
-    copy. Off unless the profile lists it in `steps`; a dry run unless `execute: true`. Static-names generations aren't
-    in it: which one each site reads isn't the job's to know (`store-gc -t static-names -k …` by hand)."""
+    copy. Off unless the profile lists it in `steps`; a dry run unless `execute: true`. Explicit `copies` overrides the
+    archive copy. Optional `static_gens` names every live static lineage root: cleanup protects each root and its
+    newest successor, plus the native current pointer, before collecting older generations past the grace."""
     if ctx.reproc:
         err("store-gc off under REPROC")
         return
@@ -1240,8 +1264,13 @@ def store_gc(ctx: Ctx, arg: str | None) -> None:
     args = ["-t", "interval-store", "-l", *(["-G", ctx.opt("store-gc", "grace")] if ctx.opt("store-gc", "grace") is not None else []),
             *(["-x"] if ctx.opt("store-gc", "execute") else [])]
     with ctx.phase("store-gc", note=None if ctx.opt("store-gc", "execute") else "dry run"):
-        for root in dict.fromkeys(r for r in (store, archive) if r):
+        for root in dict.fromkeys(r for r in [store, *ctx.opt("store-gc", "copies", [archive])] if r):
             ctx.sh(["dt-cloud", "store-gc", *args, "-o", root], fatal=False, warn=f"store-gc failed on {root} (the generations stay)")
+        if ctx.opt("store-gc", "static_gens") and archive:
+            static = ["-t", "static-names", *(a for g in ctx.opt("store-gc", "static_gens") for a in ("-k", g)),
+                      *(["-x"] if ctx.opt("store-gc", "execute") else [])]
+            ctx.sh(["dt-cloud", "store-gc", *static, "-o", archive], fatal=False,
+                   warn="static generation cleanup failed (the generations stay)")
 
 
 def store_args_t(ctx: Ctx) -> list[str]:

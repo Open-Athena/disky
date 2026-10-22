@@ -20,7 +20,7 @@ import { settleOpenPlan } from '../../_lib/plans.js'
 import { announceFinished } from '../../_lib/stagedSlack.js'
 import { isSweepJob, isUndoJob, jobIdOf, listSweepJobs, reflectSweepRuns, type SweepBatchJob } from '../../_lib/sweepReflect.js'
 import { S3Store } from '@rdub/file-tree/stores/s3'
-import { storeCreds, storeReady, storeTarget } from '../../_lib/index.js'
+import { storeCreds, storeReady, storeTarget, withPathStore } from '../../_lib/index.js'
 import { intentionalStop } from '../../_lib/sweepStop.js'
 
 type Env = AuthEnv & ExecEnv
@@ -101,7 +101,8 @@ export const onRequestGet = async (ctx: { request: Request; env: Env; waitUntil?
     const finished = await reflectSweepRuns(cfg, db, jobs)
     await settleOpenPlan(db)
     if (finished.length) {
-      const p = announceFinished(ctx.env, db, finished, new URL(ctx.request.url).origin)
+      // Sized from the interval store for the dates it holds (`withPathStore`), as the plans routes size them.
+      const p = withPathStore(ctx).then(c => announceFinished(c.env, db, finished, new URL(ctx.request.url).origin))
       if (ctx.waitUntil) ctx.waitUntil(p)
       else await p
     }

@@ -2011,8 +2011,11 @@ def run_compaction(store, c: Compactor, gen: str, mount: Path, work: Path, *, po
     except BaseException as e:
         rec.finish("failed", error=f"{type(e).__name__}: {e}")
         raise
-    new = doc["compact"]["gen"]
-    rec.finish("succeeded", gen=f"{prefix} → {new}" if not doc["compact"].get("superseded") else f"{prefix} (superseded: {new} not published)")
+    # Superseded: nothing published, and not an error (the guard working): `nop`, as a compaction that wasn't due.
+    if sup := doc["compact"].get("superseded"):
+        rec.finish("nop", gen=f"{prefix} (superseded: {sup}, not published)")
+    else:
+        rec.finish("succeeded", gen=f"{prefix} → {doc['compact']['gen']}")
     return doc
 
 

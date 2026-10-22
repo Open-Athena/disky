@@ -116,12 +116,18 @@ export interface Env {
   /** The interval store generation (`interval-store/<gen>/` on `INDEX_R2`), a pin; unset: the store's current one,
    *  `interval-store/CURRENT.json` (`index.ts` `ivGen`), which a compaction moves. */
   INTERVAL_STORE_GEN?: string
+  /** Store-relative namespace; secondary and age stores use independent pointers and generations. */
+  INTERVAL_STORE_PREFIX?: string
+  /** Root holding the age histogram's interval store (without the trailing `interval-store`). */
+  AGE_STORE_PREFIX?: string
   /** A revision of the generation's files (rewritten in place): keys every cache over them apart. */
   INTERVAL_STORE_REV?: string
   /** The static name index's generation in `INDEX_R2` (`static-names/<gen>/`): a pin; unset, the primary's is
    *  `static-names/CURRENT.json`'s (`index.ts` `withStaticGen`, resolved per request). Required (pinned or pointed) with
    *  `FILTER_STATIC` / `NAME_SUMMARY_STATIC`. */
   STATIC_GEN?: string
+  /** Optional independent pointer for this static lineage; a STATIC_GEN pin still wins. */
+  STATIC_CURRENT_KEY?: string
   STORE_ACCESS_KEY_ID?: string
   STORE_SECRET_ACCESS_KEY?: string
   /** Global second cache tier behind the colo cache (`_lib/edgeCache.ts`). */

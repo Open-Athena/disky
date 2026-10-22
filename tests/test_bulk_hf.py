@@ -112,6 +112,16 @@ def test_list_namespace():
     assert {h["Authorization"] for _, h in replay.calls} == {"Bearer t0k"}
 
 
+def test_bucket_uses_maximum_page_size_and_follows_server_pagination():
+    c, replay = client()
+    rows, totals = bulk_hf.list_bucket(c, "open-athena", "biotasks", False, 1110)
+    assert (rows, totals) == (EXPECTED_ROWS[:3], EXPECTED_TOTALS[0])
+    assert replay.calls == [
+        (f"{E}/api/buckets/open-athena/biotasks/tree?recursive=true&limit=5000", {"Authorization": "Bearer t0k"}),
+        (f"{E}/api/buckets/open-athena/biotasks/tree?limit=2&recursive=true&cursor=p2", {"Authorization": "Bearer t0k"}),
+    ]
+
+
 def test_list_namespace_logs_progress(capsys):
     # One line per finished unit (an interval of 0), the last excepted: its totals line follows from the caller.
     c, _ = client()

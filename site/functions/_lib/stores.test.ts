@@ -75,6 +75,15 @@ describe('secondaryStores', () => {
 })
 
 describe('storeEnv', () => {
+  it('clears primary history locations and permits explicitly independent secondary stores', () => {
+    const env = { ...PRIMARY, PATH_STORE: 'intervals', INTERVAL_STORE_GEN: 'primary', INTERVAL_STORE_PREFIX: 'history/primary', AGE_STORE_PREFIX: 'history/primary-age' } as Env
+    const own = { ...META, vars: { ...META.vars, PATH_STORE: 'intervals', INTERVAL_STORE_PREFIX: 'history/meta/interval-store', AGE_STORE_PREFIX: 'history/meta-age' } }
+    const keys = ['PATH_STORE', 'INTERVAL_STORE_GEN', 'INTERVAL_STORE_PREFIX', 'AGE_STORE_PREFIX'] as const
+    expect([META, own].map(config => keys.map(k => storeEnv(env, 'meta', config)[k]))).toEqual([
+      [undefined, undefined, undefined, undefined],
+      ['intervals', undefined, 'history/meta/interval-store', 'history/meta-age'],
+    ])
+  })
   it('clears every per-store var (and the GCS fallback creds), then applies the config and resolves secrets by name', () => {
     expect(storeEnv(PRIMARY, 'meta', META)).toEqual({
       BASE_SCOPE: 'cw',
