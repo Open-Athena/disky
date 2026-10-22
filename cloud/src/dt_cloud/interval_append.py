@@ -620,22 +620,24 @@ def store_runner(cfg: Config, *, dry_run: bool = False, merge: bool = True, merg
     def published(layouts, start):
         return [s["id"] for s in list_scans(store, layouts, start=start)["scans"]]
 
+    # the local stages read the runner's generation when they run: `follow` moves it to a compacted successor
     def prepare(d):
         try:
-            prepare_scan(p.bucket, p.gen, d, p.layouts)
+            prepare_scan(p.bucket, runner.p.gen, d, p.layouts)
         except SystemExit as e:
             raise ar.NotNext(str(e)) from e
 
     def prune(d):
-        k = store.read_json(f"{PREFIX}/{cfg.ranges_gen}/ranges.json")["k"]
-        sl = ist.sliced(store.read_json(f"{PREFIX}/{p.gen}/scans.json"))
-        doc = prune_state(client, p.gen, d, k, bucket=p.bucket, scratch=p.scratch, dry_run=dry_run, sliced=sl)
+        gen = runner.p.gen
+        k = store.read_json(f"{PREFIX}/{runner.cfg.ranges_gen}/ranges.json")["k"]
+        sl = ist.sliced(store.read_json(f"{PREFIX}/{gen}/scans.json"))
+        doc = prune_state(client, gen, d, k, bucket=p.bucket, scratch=p.scratch, dry_run=dry_run, sliced=sl)
         err(json.dumps({k_: v for k_, v in doc.items() if k_ != "delete"} | {"deleted_scans": [x["scan"] for x in doc["delete"]]}))
-        folded = ar.prune_folded(ar.GcsRunStore(gs_bucket(p.bucket), None, p.gen, prefix=PREFIX, client=client), retain=FOLDED_RETAIN, dry_run=dry_run,
+        folded = ar.prune_folded(ar.GcsRunStore(gs_bucket(p.bucket), None, gen, prefix=PREFIX, client=client), retain=FOLDED_RETAIN, dry_run=dry_run,
                                  where=" gcs")
         err(json.dumps(_summary(folded)))
 
-    return Runner(
+    runner = Runner(
         cfg=cfg,
         exists=store.exists,
         count=lambda prefix, suffix: sum(1 for k in store.keys(prefix) if k.endswith(suffix)),
@@ -649,6 +651,7 @@ def store_runner(cfg: Config, *, dry_run: bool = False, merge: bool = True, merg
         merge=merge,
         merge_wait=merge_wait,
     )
+    return runner
 
 
 # ── Store-side stages (local, or a Batch task) ─────────────────────────────
