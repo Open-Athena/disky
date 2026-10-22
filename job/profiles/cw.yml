@@ -71,6 +71,10 @@ pass: [DT_RECORD, DT_ALERTS]
 steps: [retire]
 labels: {deployment: cw}
 queue_size: 20
+# TEMPORARY (2026-10-22): the static name index is ~8 scans behind and one scan's anchors outlast the scan's 6 h
+# `static_names` task, so its catch-up runs on its own (`job/cw-static-submit.sh`). Two coordinators must never append at
+# once: drop this when that job has caught up.
+skip: [static-names]
 options:
   list:
     import: true
