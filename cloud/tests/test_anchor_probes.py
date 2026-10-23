@@ -231,3 +231,49 @@ def test_probe_batches_split_where_the_rows_between_keys_pass_the_gap(tmp_path):
     tier = SimpleNamespace(shard_file=lambda mode, key: file)
     assert an.probe_prior_rows(con, [tier], "end") == 1
     assert con.execute("SELECT k, count(*) FROM prows GROUP BY k ORDER BY k").fetchall() == [(k, 100) for k in keys]
+
+
+@pytest.mark.parametrize("runs", [False, True])
+def test_level_pruning_keeps_exactly_the_unpruned_near(runs):
+    """`near_candidates` bounds a level's candidates only under parents that can pass R (or weren't candidates: already
+    heavy); `n + bound` shrinks parent → child, so that prunes nothing that would pass. Random directory trees per key
+    (`cand` with the ancestors a run's rows give, some missing as already heavy), random groups (pure and mixed, null
+    statistics): equal to bounding every candidate."""
+    import random
+
+    rng = random.Random(7)
+    con = duckdb.connect()
+    con.execute("CREATE TABLE cand(k VARCHAR, lvl INTEGER, dir VARCHAR, n BIGINT)")
+    con.execute("CREATE TABLE ktk(k VARCHAR, t INTEGER, p_min VARCHAR, p_max VARCHAR, rows BIGINT)")
+    con.execute("CREATE TABLE rc(k VARCHAR, n BIGINT)")
+    for key in ("k1", "k2", "k3"):
+        dirs = {""}
+        for _ in range(60):
+            parts = [rng.choice("abc") for _ in range(rng.randint(1, 4))]
+            dirs |= {"/".join(parts[:i]) for i in range(1, len(parts) + 1)}
+        cand = [(key, 0 if d == "" else d.count("/") + 1, d, rng.randint(1, 40)) for d in sorted(dirs) if rng.random() > 0.1]
+        con.executemany("INSERT INTO cand VALUES (?, ?, ?, ?)", cand)
+        for _ in range(30):
+            lo, hi = sorted(rng.choice(sorted(dirs - {""})) + "/" + rng.choice("xyz") for _ in range(2))
+            lo, hi = (None if rng.random() < 0.05 else lo), (None if rng.random() < 0.05 else hi)
+            con.execute("INSERT INTO ktk VALUES (?, ?, ?, ?, ?)", (key, rng.choice([0, 1, 2]), lo, hi, rng.randint(1, 60)))
+        con.execute("INSERT INTO rc VALUES (?, ?)", (key, rng.randint(0, 100)))
+    rc = "rc" if runs else None
+    for R in (0, 50, 150, 400):
+        an.near_candidates(con, R, rc)
+        got = con.execute("SELECT * FROM near ORDER BY ALL").fetchall()
+        # unpruned: every candidate bounded
+        if runs:
+            an.group_prefix(con, "SELECT * FROM ktk WHERE t = 0", "gb")
+            an.group_prefix(con, "SELECT * FROM ktk WHERE t > 0", "gr")
+            an.group_bound(con, "gb", "cand", "wb")
+            an.group_bound(con, "gr", "cand", "wr")
+            want = con.execute(f"""SELECT b.k, b.lvl, b.dir, b.n, b.bound + least(r.bound, coalesce(rc.n, 0)) FROM wb AS b
+                JOIN wr AS r USING (k, lvl, dir) LEFT JOIN rc USING (k) WHERE b.n + b.bound + least(r.bound, coalesce(rc.n, 0)) > {R}
+                ORDER BY ALL""").fetchall()
+        else:
+            an.group_prefix(con, "SELECT * FROM ktk", "g")
+            an.group_bound(con, "g", "cand", "w")
+            want = con.execute(f"SELECT * FROM w WHERE n + bound > {R} ORDER BY ALL").fetchall()
+        assert got == want
+        assert got or R >= 150  # a vacuous comparison would prove nothing

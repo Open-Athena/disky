@@ -684,29 +684,33 @@ def prior_dir_counts(con) -> None:
         con.execute(f"DROP TABLE {t}")
 
 
-def group_bound(con, groups: str, into: str) -> None:
-    """Table `into (k, lvl, dir, n, bound)`: each candidate (`cand`) bounded by the rows of `groups` (`ktk`'s columns)
-    whose path interval overlaps [dir/, dir0), without enumerating their cross product.
+def group_prefix(con, groups: str, name: str) -> None:
+    """Per-key prefix sums of `groups` (a query of `ktk`'s columns) for `group_bound`: `{name}_t` (each key's rows),
+    `{name}_b` (rows of groups whose path maximum is at most `x`) and `{name}_a` (rows of groups whose path minimum is at
+    least `x`). Computed once per group set, however many candidates are bounded against them."""
+    con.execute(f"CREATE OR REPLACE TABLE {name}_t AS SELECT k, sum(rows)::BIGINT AS n FROM ({groups}) GROUP BY k")
+    con.execute(f"""CREATE OR REPLACE TABLE {name}_b AS SELECT k, p_max AS x,
+        sum(sum(rows)) OVER (PARTITION BY k ORDER BY p_max)::BIGINT AS n
+        FROM ({groups}) WHERE p_max IS NOT NULL GROUP BY k, p_max""")
+    con.execute(f"""CREATE OR REPLACE TABLE {name}_a AS SELECT k, p_min AS x,
+        sum(sum(rows)) OVER (PARTITION BY k ORDER BY p_min DESC)::BIGINT AS n
+        FROM ({groups}) WHERE p_min IS NOT NULL GROUP BY k, p_min""")
+
+
+def group_bound(con, name: str, cand: str, into: str) -> None:
+    """Table `into (k, lvl, dir, n, bound)`: each candidate of `cand` bounded by the rows of the groups (`group_prefix`
+    `name`) whose path interval overlaps [dir/, dir0), without enumerating their cross product.
 
     A group's path interval overlaps [dir/, dir0) unless its maximum is below
     the lower bound or its minimum is at/above the upper bound. Null statistics
     never exclude a group. Prefix sums make both exclusions ASOF lookups.
     """
-    con.execute(f"CREATE OR REPLACE TABLE kt_totals AS SELECT k, sum(rows)::BIGINT AS n FROM {groups} GROUP BY k")
-    con.execute(f"""CREATE OR REPLACE TABLE kt_before AS SELECT k, p_max AS x,
-        sum(sum(rows)) OVER (PARTITION BY k ORDER BY p_max)::BIGINT AS n
-        FROM {groups} WHERE p_max IS NOT NULL GROUP BY k, p_max""")
-    con.execute(f"""CREATE OR REPLACE TABLE kt_after AS SELECT k, p_min AS x,
-        sum(sum(rows)) OVER (PARTITION BY k ORDER BY p_min DESC)::BIGINT AS n
-        FROM {groups} WHERE p_min IS NOT NULL GROUP BY k, p_min""")
     con.execute(f"""CREATE OR REPLACE TABLE {into} AS
         SELECT c.k, c.lvl, c.dir, c.n, (coalesce(t.n, 0) - CASE WHEN c.dir = '' THEN 0
             ELSE coalesce(b.n, 0) + coalesce(a.n, 0) END)::BIGINT AS bound
-        FROM cand AS c LEFT JOIN kt_totals AS t USING (k)
-        ASOF LEFT JOIN kt_before AS b ON c.k = b.k AND c.dir || '/' > b.x
-        ASOF LEFT JOIN kt_after AS a ON c.k = a.k AND c.dir || '0' <= a.x""")
-    for table in ("kt_totals", "kt_before", "kt_after"):
-        con.execute(f"DROP TABLE {table}")
+        FROM {cand} AS c LEFT JOIN {name}_t AS t USING (k)
+        ASOF LEFT JOIN {name}_b AS b ON c.k = b.k AND c.dir || '/' > b.x
+        ASOF LEFT JOIN {name}_a AS a ON c.k = a.k AND c.dir || '0' <= a.x""")
 
 
 def near_candidates(con, R: int, run_counts: str | None = None) -> None:
@@ -718,20 +722,35 @@ def near_candidates(con, R: int, run_counts: str | None = None) -> None:
     group, each tier added up to a group's rows to every `(k, dir)` of the key (cw's 10-20T1806 `end`: 37M near, 7
     newly heavy). `run_counts` (`k, n`: each key's rows over the run tiers, every tier but the base `t = 0`, exactly;
     a key absent has none): the base is bounded by its groups, the run tiers by the lesser of their groups and the
-    key's rows there."""
+    key's rows there.
+
+    Level by level, top down: `n + bound` can only shrink from a directory to its child (fewer rows under it, and every
+    group meeting the child's range meets the parent's), so a candidate whose parent was a candidate that can't pass
+    `R` is never bounded. cw's 10-21T1801 bounded 320.9M candidates for 2.5M near (1,101 s of ASOF joins)."""
+    sets = ["kg"] if run_counts is None else ["kg_base", "kg_runs"]
     if run_counts is None:
-        group_bound(con, "ktk", "near")
+        group_prefix(con, "SELECT * FROM ktk", "kg")
     else:
-        con.execute("CREATE OR REPLACE TABLE ktk_base AS SELECT * FROM ktk WHERE t = 0")
-        con.execute("CREATE OR REPLACE TABLE ktk_runs AS SELECT * FROM ktk WHERE t > 0")
-        group_bound(con, "ktk_base", "nb_base")
-        group_bound(con, "ktk_runs", "nb_runs")
-        con.execute(f"""CREATE OR REPLACE TABLE near AS SELECT b.k, b.lvl, b.dir, b.n,
-                (b.bound + least(r.bound, coalesce(rc.n, 0)))::BIGINT AS bound
-            FROM nb_base AS b JOIN nb_runs AS r USING (k, lvl, dir) LEFT JOIN {run_counts} AS rc USING (k)""")
-        for table in ("ktk_base", "ktk_runs", "nb_base", "nb_runs"):
-            con.execute(f"DROP TABLE {table}")
-    con.execute(f"DELETE FROM near WHERE n + bound <= {R}")
+        group_prefix(con, "SELECT * FROM ktk WHERE t = 0", "kg_base")
+        group_prefix(con, "SELECT * FROM ktk WHERE t > 0", "kg_runs")
+    con.execute("CREATE OR REPLACE TABLE near (k VARCHAR, lvl INTEGER, dir VARCHAR, n BIGINT, bound BIGINT)")
+    con.execute("CREATE OR REPLACE TABLE near_cut (k VARCHAR, dir VARCHAR)")
+    parent = "CASE WHEN c.lvl <= 1 THEN '' ELSE left(c.dir, length(c.dir) - length(string_split(c.dir, '/')[-1]) - 1) END"
+    for (lvl,) in con.execute("SELECT DISTINCT lvl FROM cand ORDER BY lvl").fetchall():
+        con.execute(f"""CREATE OR REPLACE TABLE near_lvl AS SELECT c.* FROM cand AS c
+            ANTI JOIN near_cut AS x ON c.k = x.k AND {parent} = x.dir WHERE c.lvl = {lvl}""")
+        if run_counts is None:
+            group_bound(con, "kg", "near_lvl", "near_b")
+        else:
+            group_bound(con, "kg_base", "near_lvl", "nb_base")
+            group_bound(con, "kg_runs", "near_lvl", "nb_runs")
+            con.execute(f"""CREATE OR REPLACE TABLE near_b AS SELECT b.k, b.lvl, b.dir, b.n,
+                    (b.bound + least(r.bound, coalesce(rc.n, 0)))::BIGINT AS bound
+                FROM nb_base AS b JOIN nb_runs AS r USING (k, lvl, dir) LEFT JOIN {run_counts} AS rc USING (k)""")
+        con.execute(f"INSERT INTO near SELECT k, lvl, dir, n, bound FROM near_b WHERE n + bound > {R}")
+        con.execute(f"CREATE OR REPLACE TABLE near_cut AS SELECT k, dir FROM near_b WHERE n + bound <= {R}")
+    for table in ("near_cut", "near_lvl", "near_b", "nb_base", "nb_runs", *(f"{g}_{x}" for g in sets for x in "tba")):
+        con.execute(f"DROP TABLE IF EXISTS {table}")
 
 
 def run_rollups(con, prior: list[Tier], run: Tier, D: int, mode: str, R: int, K: int, into: str, rule: HexRule | None = None) -> dict:
