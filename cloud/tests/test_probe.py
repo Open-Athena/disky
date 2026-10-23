@@ -5,7 +5,22 @@ import random
 import pytest
 from click.testing import CliRunner
 
-from dt_cloud.probe import Resp, Result, Targets, cold_min_area, compare_requests, record, request_paths, resolve_targets, run, scenarios, server_total, summarize
+from dt_cloud.probe import (
+    Resp,
+    Result,
+    Targets,
+    cold_min_area,
+    compare_requests,
+    counts,
+    record,
+    request_paths,
+    resolve_targets,
+    run,
+    scenarios,
+    server_total,
+    summarize,
+    summary_line,
+)
 
 T = Targets(date="2026-10-01", prev="2026-09-30", bucket="bk-a", hit="ckpt")
 
@@ -136,13 +151,69 @@ def test_probe_rejects_non_json_success_and_records_http_failure_body(status, bo
     ])
 
 
+NOT_INDEXED = json.dumps({"error": "This scan is not in the static name index yet. This is not a zero-match result.", "code": "scan-not-indexed"}).encode()
+SKIP = "static-names skipped (busy): another coordinator holds the store's lease"
+
+
+def refused(body: bytes = NOT_INDEXED, status: int = 400) -> Resp:
+    return Resp(status, 300, len(body), None, None, body)
+
+
+def test_not_indexed_after_a_recorded_static_names_skip_is_skipped():
+    """The run's static-names step was skipped (its phase record's reason, `-i`): the search's `scan-not-indexed` refusal
+    is a skip, named, and the probe passes; it never counts as a pass."""
+    resp = {"/a": ok(ms=1000), "/q": refused(), "/q-full": refused()}
+    results = run(resp.__getitem__, {"bucket": ["/a"], "filter-hit": ["/q", "/q-full"]}, unindexed=SKIP)
+    assert results == [
+        Result("bucket", "/a", 200, 1000, 2, "miss", 80),
+        Result("filter-hit", "/q", 400, 300, len(NOT_INDEXED), None, None, error=NOT_INDEXED.decode(), skip=SKIP),
+        Result("filter-hit", "/q-full", 400, 300, len(NOT_INDEXED), None, None, error=NOT_INDEXED.decode(), skip=SKIP),
+    ]
+    assert summarize(results) == (True, [
+        "  ✓ bucket         1.00s  1 reqs, 0 cached",
+        "  – filter-hit     0.30s  2 reqs, 0 cached, 2 skipped",
+        f"      skipped 400 0.30s /q: {SKIP}",
+        f"      skipped 400 0.30s /q-full: {SKIP}",
+    ])
+    assert (counts(results), summary_line(results)) == ((1, 2, 0), f"1 passed, 2 skipped ({SKIP}), 0 failed")
+
+
+def test_not_indexed_without_a_recorded_skip_is_failed():
+    """No static-names skip in the run's record: the scan should be indexed, so its refusal is a failure."""
+    results = run({"/a": ok(ms=1000), "/q": refused()}.__getitem__, {"filter-hit": ["/a", "/q"]})
+    assert results == [
+        Result("filter-hit", "/a", 200, 1000, 2, "miss", 80),
+        Result("filter-hit", "/q", 400, 300, len(NOT_INDEXED), None, None, error=NOT_INDEXED.decode()),
+    ]
+    assert summarize(results) == (False, [
+        "  ✗ filter-hit     1.00s  2 reqs, 0 cached, 1 failed",
+        "      400 0.30s /q",
+    ])
+    assert summary_line(results) == "1 passed, 0 skipped, 1 failed"
+
+
+@pytest.mark.parametrize("resp", [
+    refused(b"error code: 1102", 503),
+    refused(status=500),
+    Resp(0, 120000, 0, None, None, b""),
+    refused(json.dumps({"error": "x", "code": "too-short"}).encode()),
+])
+def test_other_failures_stay_failed_beside_a_recorded_skip(resp):
+    """5xx, a transport timeout, any other refusal: failed, even when the run's static-names step was skipped."""
+    results = run(lambda path: resp, {"filter-hit": ["/q"]}, unindexed=SKIP)
+    assert [r.skip for r in results] == [None]
+    assert summary_line(results) == "0 passed, 0 skipped, 1 failed"
+    assert summarize(results)[0] is False
+
+
 def test_record():
     r = [Result("one", "/a", 200, 5, 2, None, None)]
     now = dt.datetime(2026, 10, 2, 1, 2, 3, tzinfo=dt.timezone.utc)
     assert record("https://x.test", T, r, now) == {
         "ts": "2026-10-02T01:02:03Z", "base": "https://x.test",
         "date": "2026-10-01", "prev": "2026-09-30", "bucket": "bk-a", "hit": "ckpt",
-        "results": [{"scenario": "one", "path": "/a", "status": 200, "ms": 5, "bytes": 2, "cache": None, "server_ms": None, "server_timing": None, "error": None}],
+        "results": [{"scenario": "one", "path": "/a", "status": 200, "ms": 5, "bytes": 2, "cache": None, "server_ms": None, "server_timing": None, "error": None, "skip": None}],
+        "summary": {"passed": 1, "skipped": 0, "failed": 0, "line": "1 passed, 0 skipped, 0 failed"},
     }
 
 
@@ -206,10 +277,30 @@ def test_exact_request_cli_skips_discovery_and_records_details(monkeypatch):
     assert dt.datetime.strptime(rec.pop("ts"), "%Y-%m-%dT%H:%M:%SZ").tzinfo is None
     assert rec == {
         "base": "https://gcs.test", "date": "2026-10-13T1300", "prev": None, "bucket": "", "hit": "", "cold": True,
-        "results": [{"scenario": "requests", "path": path, "status": 200, "ms": 12, "bytes": 2, "cache": "miss", "server_ms": 10, "server_timing": timing, "error": None} for path in calls],
+        "results": [{"scenario": "requests", "path": path, "status": 200, "ms": 12, "bytes": 2, "cache": "miss", "server_ms": 10, "server_timing": timing, "error": None, "skip": None} for path in calls],
+        "summary": {"passed": 2, "skipped": 0, "failed": 0, "line": "2 passed, 0 skipped, 0 failed"},
     }
-    assert logs == ["probe https://gcs.test: 2 exact requests; cold subtree/diff keys", "  ✓ requests       0.01s  2 reqs, 0 cached", "PASS"]
+    assert logs == ["probe https://gcs.test: 2 exact requests; cold subtree/diff keys", "  ✓ requests       0.01s  2 reqs, 0 cached", "PASS: 2 passed, 0 skipped, 0 failed"]
     assert result.stderr == ""
+
+
+@pytest.mark.parametrize("unindexed,code,verdict", [
+    ((), 1, "FAIL: 1 passed, 0 skipped, 1 failed"),
+    (("-i", SKIP), 0, f"PASS: 1 passed, 1 skipped ({SKIP}), 0 failed"),
+])
+def test_cli_not_indexed_verdict(monkeypatch, unindexed, code, verdict):
+    """`-i REASON` (the scan step passes its run's static-names skip): a `scan-not-indexed` refusal is skipped, named
+    in the verdict; without it, the refusal fails the probe."""
+    from dt_cloud.cli import probe
+    from dt_cloud import probe as lib, site
+
+    logs = []
+    resp = {"/api/series?path=": ok(ms=10), "/api/subtree?path=&q=ckpt": refused()}
+    monkeypatch.setattr(site, "creds", lambda token, url: ("https://gcs.test", None))
+    monkeypatch.setattr(lib, "http_fetch", lambda base, token: resp.__getitem__)
+    monkeypatch.setattr("dt_cloud.cli.err", logs.append)
+    result = CliRunner().invoke(probe, ["-S", *unindexed, *(a for p in resp for a in ("-R", p))])
+    assert (result.exit_code, logs[-1]) == (code, verdict)
 
 
 @pytest.mark.parametrize("option", ["-Q", "-T", "-x", "-k", "-q", "-s", "-r"])

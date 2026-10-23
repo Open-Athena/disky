@@ -186,12 +186,34 @@ export const phaseFill = (p: Pick<PhaseSpan, 'phase' | 'status' | 'note'>, color
 export const overlappingFailures = (spans: readonly PhaseSpan[]): PhaseSpan[] =>
   spans.filter(s => s.lane !== 0 && phaseStatus(s) === 'failed')
 
+/** A closed phase's explicit skip: its note's `skipped[ (kind)]: reason` clause (at the start or after a comma, e.g.
+ * `overlapped, skipped (busy): …`; `dt_cloud.scan_runs.phase_skip`), else null. The phase is done, its work is not.
+ * A verdict's `2 skipped (…)` is no skip clause, nor is a running phase's heartbeat line. */
+export function phaseSkip(p: Pick<ScanRunPhase, 'status' | 'note'>): string | null {
+  if (p.status === 'running') return null
+  return /(?:^|,\s*)(skipped(?: \([^)]*\))?: .+)$/.exec(p.note ?? '')?.[1] ?? null
+}
+
 export interface PhaseRecovery { run: ScanRun; phases: ScanRunPhase[]; secs: number | null }
-export interface PhaseIssue { phase: string; outcome: string; recovery: ScanRun | null }
+/** A phase attempt that left the run short: failed (`outcome` its `phaseOutcome`), or skipped (`outcome` `skipped`,
+ * `reason` its note's skip clause). */
+export interface PhaseIssue { phase: string; outcome: string; recovery: ScanRun | null; reason?: string }
 
 export function runOutcome(run: Pick<ScanRun, 'status'>, issues: readonly PhaseIssue[] = []): string {
   if (run.status === 'succeeded' && issues.length) return issues.every(i => i.recovery != null) ? 'recovered' : 'partial'
   return run.status === 'nop' ? 'no-op' : run.status
+}
+
+/** Why a `partial` run is partial, one line per unrecovered issue: `<phase> <skip clause>` for a skip (its recorded
+ * reason), `<phase> <outcome>` for a failure. */
+export function partialReasons(issues: readonly PhaseIssue[]): string[] {
+  return issues.filter(i => i.recovery == null).map(i => `${i.phase} ${i.reason ?? i.outcome}`)
+}
+
+/** `runOutcome`, a `partial` one with its reasons: `partial: static-names skipped (busy): …`. */
+export function runOutcomeLine(run: Pick<ScanRun, 'status'>, issues: readonly PhaseIssue[] = []): string {
+  const outcome = runOutcome(run, issues)
+  return outcome === 'partial' ? `partial: ${partialReasons(issues).join('; ')}` : outcome
 }
 
 export function phaseRecoveries(run: ScanRun, runs: readonly ScanRun[], phases: readonly ScanRunPhase[], now: number): PhaseRecovery[] {
@@ -200,10 +222,12 @@ export function phaseRecoveries(run: ScanRun, runs: readonly ScanRun[], phases: 
 }
 
 export function phaseIssues(run: ScanRun, runs: readonly ScanRun[], phases: readonly ScanRunPhase[]): PhaseIssue[] {
-  return phases.filter(p => p.run_id === run.run_id && phaseStatus(p) === 'failed').map(p => {
+  return phases.filter(p => p.run_id === run.run_id && (phaseStatus(p) === 'failed' || phaseSkip(p) != null)).map(p => {
     const retries = phaseRecoveries(run, runs, phases, 0).filter(r => r.run.status === 'succeeded' && r.phases.some(a =>
-      a.phase === p.phase && phaseStatus(a) === 'done' && a.finished_ts != null && p.finished_ts != null && a.finished_ts > p.finished_ts))
-    return { phase: p.phase, outcome: phaseOutcome(p), recovery: retries.at(-1)?.run ?? null }
+      a.phase === p.phase && phaseStatus(a) === 'done' && phaseSkip(a) == null && a.finished_ts != null && p.finished_ts != null && a.finished_ts > p.finished_ts))
+    const recovery = retries.at(-1)?.run ?? null
+    const reason = phaseStatus(p) === 'failed' ? null : phaseSkip(p)
+    return reason ? { phase: p.phase, outcome: 'skipped', recovery, reason } : { phase: p.phase, outcome: phaseOutcome(p), recovery }
   })
 }
 

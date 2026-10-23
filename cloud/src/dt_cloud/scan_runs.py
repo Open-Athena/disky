@@ -101,6 +101,14 @@ def phase_status(note: str | None) -> str:
     return "failed" if re.search(r"(?:^|,\s*)failed\b", note or "", re.IGNORECASE) else "done"
 
 
+def phase_skip(note: str | None) -> str | None:
+    """A phase's explicit skip: its note's `skipped[ (kind)]: reason` clause (at the start or after a comma, e.g.
+    `overlapped, skipped (busy): …`), or None. The phase is done, but its work is not: the run reads `partial` with
+    this reason on /scans (`scanRunsModel.phaseSkip`), and a later step may act on it (the probe's `-i`)."""
+    m = re.search(r"(?:^|,\s*)(skipped(?: \([^)]*\))?: .+)$", note or "")
+    return m[1] if m else None
+
+
 @dataclass(frozen=True)
 class Output:
     key: str
@@ -1409,6 +1417,17 @@ class JobRun:
     def sink(self) -> Sink:
         """The run's sink: `-n`, `-s`, else D1 (`-d`, else this job's `$D1_DB_ID`)."""
         return sink_for(self.dry_run, self.sqlite, self.d1 or (self.env.get("D1_DB_ID") or "").strip() or None)
+
+    def phases(self) -> list[dict]:
+        """This run's phase rows as recorded so far (by `seq`; a Nextflow run's other tasks' too). [] when nothing is
+        recorded or the read fails (printed): a step reading them then acts as if no phase said anything."""
+        if not self.recording or not self.run_id:
+            return []
+        try:
+            return stored(self.sink(), self.run_id)[1]
+        except Exception as e:  # noqa: BLE001 — reading the record must never fail the scan
+            report_failure(e)
+            return []
 
     def touch(self, phase: str, note: str | None, at: int | None = None) -> None:
         """One phase heartbeat (`phase_beat_sql`): the running `phase`'s live note, the run's `updated_ts`. Raises on a
