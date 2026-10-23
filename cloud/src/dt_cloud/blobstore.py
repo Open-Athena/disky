@@ -241,7 +241,7 @@ class Store:
             dst.parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(src, dst)
 
-    def put_tree(self, local: Path, prefix: str, *, last: tuple[str, ...] = (), workers: int = 8) -> list[dict]:
+    def put_tree(self, local: Path, prefix: str, *, last: tuple[str, ...] = (), workers: int = 32) -> list[dict]:
         """Every file under `local` → `prefix/<rel>`, the `last` (relative paths, in that order) after all the others
         (completeness markers); `{key, size}` per file."""
         files = sorted(p for p in local.rglob("*") if p.is_file() and p.relative_to(local).as_posix() not in last)
@@ -274,18 +274,51 @@ def mirror(store: Store, prefix: str, local: Path, keep: Callable[[str], bool] =
     return listing
 
 
-def upload_new(store: Store, local: Path, prefix: str, before: dict[str, int], order: Callable[[list[str]], list[str]] = sorted) -> list[str]:
+#: Files `upload_new` (and `put_tree`) keep in flight within one parallel tier: a compacted generation is ~300 GiB in
+#: thousands of files, and one stream to GCS or R2 carries ~100 MB/s.
+UPLOAD_WORKERS = 32
+
+
+def upload_new(store: Store, local: Path, prefix: str, before: dict[str, int], order: Callable[[list[str]], list[str]] = sorted,
+               *, tier: Callable[[str], object] | None = None, workers: int = UPLOAD_WORKERS) -> list[str]:
     """Every file under `local` (the mirror of `prefix`) not in `before` → `store`, in `order` (the store's publish order:
     data, then liveness markers, then manifests). Files in `before` are never rewritten (a generation's files are written
-    once)."""
+    once).
+
+    `tier(key)`: consecutive keys (in `order`) of one tier other than None go up together, `workers` at a time, and all of
+    them before the next key starts; a key of tier None goes up alone, after every key before it and before any after it
+    (a liveness marker, a manifest). Without `tier`, every key is its own step: one at a time, in order."""
     keys = [p.relative_to(local).as_posix() for p in local.rglob("*") if p.is_file()]
     new = order([k for k in keys if f"{prefix}/{k}" not in before])
     prog = Progress(f"upload {prefix}", len(new), total_bytes=sum((local / k).stat().st_size for k in new), unit="files")
-    for k in new:
+
+    def one(k: str) -> None:
         store.put(local / k, f"{prefix}/{k}")
         prog.tick(nbytes=(local / k).stat().st_size)
+
+    with ThreadPoolExecutor(max(1, workers)) as ex:
+        for step in publish_steps(new, tier):
+            if len(step) == 1:
+                one(step[0])
+            else:
+                list(ex.map(one, step))  # every one up (a failure raises) before the next step
     prog.done()
     return new
+
+
+def publish_steps(keys: list[str], tier: Callable[[str], object] | None) -> list[list[str]]:
+    """`keys` (in publish order) as `upload_new`'s steps: maximal runs of consecutive keys of one tier other than None,
+    and each key of tier None alone."""
+    steps: list[list[str]] = []
+    last = None
+    for k in keys:
+        t = tier(k) if tier is not None else None
+        if t is not None and steps and t == last:
+            steps[-1].append(k)
+        else:
+            steps.append([k])
+        last = t
+    return steps
 
 
 class RunStore:

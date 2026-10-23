@@ -9,6 +9,7 @@ import json
 from contextlib import contextmanager
 from pathlib import Path
 
+import duckdb
 import fsspec
 import pyarrow.parquet as pq
 import pytest
@@ -206,6 +207,43 @@ def test_build_chunked_drill_is_the_unchunked_one(built, tmp_path):
     assert summary["drill"]["pieces"] > files
 
 
+def test_parallel_tail_is_the_serial_one(built, tmp_path, monkeypatch):
+    """The drill's tail over process pools — each `q` range measured in a process of its own (`MEASURE_THREADS` 1 at
+    `-p 4`: 4 at a time), the anchors' rollups and starts-with catalog shard by shard (`ANCHOR_THREADS` 1; `write_kind`'s
+    file pool: `test_writing_sorted_chunks_writes_the_same_bytes`) — writes `drill/`, `roots-measure/`, `names/` and
+    `anchors/` byte for byte as the build at `-p 2` (one range, file and kind at a time on one database)."""
+    from dt_cloud import static_drill as sd
+
+    monkeypatch.setattr(sl, "MEASURE_THREADS", 1)
+    monkeypatch.setattr(an, "ANCHOR_THREADS", 1)
+    monkeypatch.setattr(sd, "WRITE_JOBS", 3)
+    root, scans, gen = built["root"], built["scans"], built["gen"]
+    with _small_groups():
+        summary = _build(root, scans, tmp_path / "store", tmp_path / "work", extra=("-c", "1", "-p", "4"))
+    par = tmp_path / "store" / sn.PREFIX / "g"
+    for sub in ("drill", "roots-measure", an.NAMES, an.ANCHORS):
+        assert _files(par / sub) == _files(gen / sub), sub
+    assert len(list((gen / "sx").glob("*.parquet"))) > 1  # the anchors' `end` rollups really ran per shard
+    assert min(summary["drill"]["groups"].values()) > 1  # and the measurement per range
+
+
+@pytest.mark.parametrize("target_rows", [1, 7])
+def test_parallel_names_are_the_streamed_ones(built, tmp_path, target_rows):
+    """`write_names` at `jobs` 3 (shards planned from the prefixes' rows, spilled by shard, written in processes): the
+    stream's shards, sidecars, `sidecar.parquet` and `shards.json`, byte for byte, with shards cut at `target_rows`."""
+    cint = sorted(str(f) for f in (built["gen"] / "cintervals").glob("*.parquet"))
+    con = sn.connect(4, "1GB", tmp_path / "duckdb")
+    got = {}
+    with _small_groups():
+        for jobs in (1, 3):
+            doc = an.write_names(con, an.files_sql(cint, an.VERSION_COLS), tmp_path / f"names{jobs}", target_rows, jobs=jobs)
+            got[jobs] = (doc, _files(tmp_path / f"names{jobs}"))
+    con.close()
+    assert got[3] == got[1]
+    assert got[1][0]["shards"] > 1
+    assert sorted(p.name for p in tmp_path.joinpath("duckdb").iterdir() if p.name.startswith("names-shards-")) == []
+
+
 def test_build_anchors_are_the_staged_anchors(built):
     """`names/` and `anchors/` (with `anchors/start/`): the base builders' over the staged generation's versions and suffix
     shards, byte for byte."""
@@ -370,6 +408,19 @@ def test_add_anchored_views_equal_brute_force(appended, stack):
     tiers = [gen / sa.run_key(d, d) for d in ids[-K:]] if stack == "level0" else [gen / sa.run_key(ids[-K], ids[-1])]
     markers = [sorted(p.relative_to(t).as_posix() for p in (t / an.ANCHORS).rglob("meta.json")) for t in tiers]
     assert markers == [["anchors/meta.json", "anchors/start/meta.json"]] * len(tiers)
+    # each run tier's census: a level-0 run's is its shards' rows per key, exactly; a merged run's sums its inputs', so it
+    # bounds its rows from above (the merge drops rows a later run closed)
+    con = duckdb.connect()
+    for t in tiers:
+        for kind in an.KINDS:
+            census = con.execute(f"SELECT s, n FROM read_parquet({an.q(str(an.Tier(t).census(kind)))})").fetchall()
+            rows = dict(con.execute(f"SELECT s, count(*) FROM ({an.files_sql(an.Tier(t).files(kind), 's, depth')}) WHERE depth >= 1 GROUP BY s").fetchall())
+            assert census
+            if stack == "level0":
+                assert census == sorted(rows.items())
+            else:
+                assert [(s, n >= rows.get(s, 0)) for s, n in census] == [(s, True) for s, _ in census]
+                assert sorted(rows) == sorted(s for s, n in census if s in rows)
     w = _world(appended)
     for kw in ({}, {"max_rows": 0, "start_max_rows": 0}):
         got, want, sources = _views(w, [gen, *tiers], ids, keys=AKEYS, **kw)
@@ -524,6 +575,55 @@ def test_publish_order():
             "deltas/a/names/sidecar.parquet", "deltas/a/names/sx/s0000.parquet", "deltas/a/drill/meta.json", "manifests/a.json"]
     assert sl.publish_order(keys) == ["deltas/a/anchors/rollups/end-s0000.parquet", "deltas/a/names/sidecar.parquet", "deltas/a/names/sx/s0000.parquet",
                                       "deltas/a/anchors/start/meta.json", "deltas/a/anchors/meta.json", "deltas/a/drill/meta.json", "manifests/a.json"]
+
+
+def test_publish_steps():
+    """`upload_new`'s steps over `publish_order`: the data files (and only they) together; each marker, `scans.json` and
+    each manifest a step of its own, in order."""
+    from dt_cloud.blobstore import publish_steps
+
+    keys = ["drill/long/roots/r0000.parquet", "drill/long/roots/r0001.parquet", "scans.json", "sx/s0000.parquet", "catalog/meta.json",
+            "deltas/a/meta.json", "drill/meta.json", "manifests/a.json", "manifests/b.json"]
+    assert publish_steps(sl.publish_order(keys), sl.publish_tier) == [
+        ["drill/long/roots/r0000.parquet", "drill/long/roots/r0001.parquet"], ["scans.json"], ["sx/s0000.parquet"],
+        ["catalog/meta.json"], ["deltas/a/meta.json"], ["drill/meta.json"], ["manifests/a.json"], ["manifests/b.json"]]
+    assert publish_steps(["a", "b"], None) == [["a"], ["b"]]
+
+
+def test_upload_new_puts_each_step_after_the_last(tmp_path):
+    """`upload_new` with a tier: a step's files are all up before the next step's first starts (data in parallel, a marker
+    after every data file before it), and every new file goes up once."""
+    import threading
+    import time
+
+    from dt_cloud import blobstore as bs
+
+    local = tmp_path / "gen"
+    data = [f"drill/long/roots/r{i:04d}.parquet" for i in range(12)]
+    for k in [*data, "drill/meta.json", "manifests/a.json", "old.parquet"]:
+        (local / k).parent.mkdir(parents=True, exist_ok=True)
+        (local / k).write_text(k)
+    events, lock, live, peak = [], threading.Lock(), [0], [0]
+
+    class Rec:
+        def put(self, src, key):
+            with lock:
+                live[0] += 1
+                peak[0] = max(peak[0], live[0])
+                events.append(("start", key))
+            time.sleep(0.02)
+            with lock:
+                live[0] -= 1
+                events.append(("end", key))
+
+    got = bs.upload_new(Rec(), local, "p", {"p/old.parquet": 1}, sl.publish_order, tier=sl.publish_tier, workers=4)
+    assert got == [*data, "drill/meta.json", "manifests/a.json"]
+    starts = [k for e, k in events if e == "start"]
+    assert sorted(starts) == sorted(f"p/{k}" for k in got)
+    pos = {(e, k): i for i, (e, k) in enumerate(events)}
+    assert max(pos[("end", f"p/{k}")] for k in data) < pos[("start", "p/drill/meta.json")]
+    assert pos[("end", "p/drill/meta.json")] < pos[("start", "p/manifests/a.json")]
+    assert peak[0] == 4
 
 
 

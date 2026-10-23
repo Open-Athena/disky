@@ -125,17 +125,24 @@ def first_hit_sql(mode: str, key: str = "s", par: str = "par", rule: HexRule | N
     return f"(({name_hit_sql(mode, key, rule)}) AND ({par_hit_sql(mode, key, par, rule)}))"
 
 
-def first_hits_sql(rows: str, mode: str, rule: HexRule | None = None) -> str:
-    """The rows of `rows` (a query of `AR_COLS`) passing `first_hit_sql` on `k`, each test run once per distinct value it
-    depends on rather than per row: the ancestor test per `(k, par)` (a directory's rows share it; under a hex-run rule
-    a lambda over every segment) and the name test per `(k, name)` (a path's versions share it). cw's 10-21T0602 `end`
-    fold spent 5,631 cpu-s filtering 27.5M rows per row; 10-21T1202, with only the ancestor test deduplicated, 1,239."""
-    hits = f"""SELECT r.* FROM r SEMI JOIN (SELECT k, par FROM (SELECT DISTINCT k, par FROM r) WHERE {par_hit_sql(mode, 'k', rule=rule)}) AS h
-        USING (k, par)"""
-    if name_hit_sql(mode, "k", rule) == "true":
-        return f"WITH r AS MATERIALIZED ({rows}) {hits}"
-    return f"""WITH r AS MATERIALIZED (SELECT *, {NAME} AS nm FROM ({rows})) SELECT * EXCLUDE (nm) FROM ({hits}) AS x
-        SEMI JOIN (SELECT k, nm FROM (SELECT DISTINCT k, nm FROM r) WHERE {name_hit_sql(mode, 'k', rule, 'nm')}) AS n USING (k, nm)"""
+def first_hits(con, rows: str, into: str, mode: str, rule: HexRule | None = None) -> None:
+    """Table `into`: the rows of `rows` (a query of `AR_COLS`) passing `first_hit_sql` on `k`, each test run once per
+    distinct value it depends on rather than per row: the ancestor test per `(k, par)` (a directory's rows share it;
+    under a hex-run rule a lambda over every segment) and the name test per `(k, name)` (a path's versions share it).
+    Each distinct set is its own table: in one statement, even through materialized CTEs, DuckDB pushes a filter on the
+    grouped columns below the `DISTINCT`, onto every row (cw's 10-21T1801 `nroots`: 10,243 cpu-s over 89M rows)."""
+    named = name_hit_sql(mode, "k", rule) != "true"
+    con.execute(f"CREATE OR REPLACE TABLE fh_r AS SELECT *{f', {NAME} AS nm' if named else ''} FROM ({rows})")
+    con.execute("CREATE OR REPLACE TABLE fh_kp0 AS SELECT DISTINCT k, par FROM fh_r")
+    con.execute(f"CREATE OR REPLACE TABLE fh_kp AS SELECT k, par FROM fh_kp0 WHERE {par_hit_sql(mode, 'k', rule=rule)}")
+    sql = "SELECT r.* FROM fh_r AS r SEMI JOIN fh_kp USING (k, par)"
+    if named:
+        con.execute("CREATE OR REPLACE TABLE fh_kn0 AS SELECT DISTINCT k, nm FROM fh_r")
+        con.execute(f"CREATE OR REPLACE TABLE fh_kn AS SELECT k, nm FROM fh_kn0 WHERE {name_hit_sql(mode, 'k', rule, 'nm')}")
+        sql = f"SELECT * EXCLUDE (nm) FROM ({sql}) AS x SEMI JOIN fh_kn USING (k, nm)"
+    con.execute(f"CREATE OR REPLACE TABLE {into} AS {sql}")
+    for t in ("fh_r", "fh_kp0", "fh_kp", "fh_kn0", "fh_kn"):
+        con.execute(f"DROP TABLE IF EXISTS {t}")
 
 
 # ── The name index ─────────────────────────────────────────────────────────
@@ -146,13 +153,112 @@ def names_sql(versions_sql: str) -> str:
     return f"""SELECT '/' || {NAME} AS s, depth, path, usr, vf, vt, size, n_files FROM ({versions_sql}) WHERE depth >= 1"""
 
 
-def write_names(con, versions_sql: str, out: Path, target_rows: int = NAME_SHARD_ROWS) -> dict:
+def write_names(con, versions_sql: str, out: Path, target_rows: int = NAME_SHARD_ROWS, jobs: int = 1, work: Path | None = None) -> dict:
     """The name index of `versions_sql`'s versions (coalesced intervals, or a run's `cdelta`) under `out` (`names/`):
-    sorted `(s, path, usr, vf)` by DuckDB, cut into shards (`static_append.write_run_shards`)."""
+    sorted `(s, path, usr, vf)` by DuckDB, cut into shards (`static_append.write_run_shards`).
+
+    `jobs` > 1: the shards planned from each three-character prefix's rows (`write_run_shards`' cut: a shard closes at
+    the first prefix after `target_rows`), the rows spilled once by shard (at most `NAME_SPILL_PARTS` partitions of
+    consecutive shards, under `work`, default a new dir in DuckDB's `temp_directory`), then each shard sorted and written
+    in a process of its own (`static_names.ConPool`); `shards.json` and `sidecar.parquet` as the stream writes them.
+    The same files."""
     from .static_append import write_run_shards
 
+    if jobs > 1:
+        return _write_names_parallel(con, versions_sql, out, target_rows, jobs, work)
     sql = f"SELECT * FROM ({names_sql(versions_sql)}) ORDER BY s, path, usr, vf"
     return write_run_shards((_sx_cast(b) for b in _batches(con, sql)), out, target_rows)
+
+
+#: Partitions the parallel name index spills its rows into (consecutive shards each; under DuckDB's 100 open files).
+NAME_SPILL_PARTS = 64
+
+
+def name_plan(counts: list[tuple[str, int]], target_rows: int) -> list[dict]:
+    """`write_run_shards`' shards over `counts` `(p3, rows)` (each three-character prefix's rows, in order): a shard
+    closes at the first prefix after it holds `target_rows` rows. `{i, lo, hi, rows, prefixes}` each (`hi`: the next
+    shard's `lo`)."""
+    shards: list[dict] = []
+    n = 0
+    for p3, c in counts:
+        if not shards or n >= target_rows:
+            shards.append({"i": len(shards), "lo": p3, "rows": 0, "prefixes": 0})
+            n = 0
+        shards[-1]["rows"] += c
+        shards[-1]["prefixes"] += 1
+        n += c
+    for k, sh in enumerate(shards):
+        sh["hi"] = shards[k + 1]["lo"] if k + 1 < len(shards) else None
+    return shards
+
+
+def _name_shard_task(files: list[str], i: int, out: str, rg_rows: int, threads: int, mem: str, tmp: str) -> int:
+    """Name shard `i` from its spilled partition `files`: its rows sorted `(s, path, usr, vf)` → `sx/s####.parquet` and
+    its sidecar (`static_append._write_shard`); its rows."""
+    import shutil
+
+    from .static_append import _write_shard
+
+    con = connect(threads, mem, tmp)
+    rows = [0]
+
+    def counted():
+        for b in _batches(con, f"SELECT s, depth, path, usr, vf, vt, size, n_files FROM ({files_sql(files)}) WHERE sh = {i} ORDER BY s, path, usr, vf"):
+            rows[0] += b.num_rows
+            yield _sx_cast(b)
+
+    try:
+        _write_shard(counted(), Path(out), i, rg_rows)
+        return rows[0]
+    finally:
+        con.close()
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def _write_names_parallel(con, versions_sql: str, out: Path, target_rows: int, jobs: int, work: Path | None) -> dict:
+    import shutil
+
+    from . import static_append as sa
+    from .static_names import ConPool
+
+    rows_sql = names_sql(versions_sql)
+    counts = con.execute(f"SELECT left(s, 3) AS p3, count(*) FROM ({rows_sql}) GROUP BY 1 ORDER BY 1").fetchall()
+    shards = name_plan(counts, target_rows)
+    out.mkdir(parents=True, exist_ok=True)
+    (out / "sidecar").mkdir(parents=True, exist_ok=True)
+    if not shards:
+        return sa._finish_shards(out, [], target_rows, None)
+    work = work or _scratch(con, "names-shards-")
+    n, parts = len(shards), min(NAME_SPILL_PARTS, len(shards))
+    con.execute("CREATE OR REPLACE TABLE nm_p3 (p3 VARCHAR, sh INTEGER)")
+    shard_of = [k for k, sh in enumerate(shards) for _ in range(sh["prefixes"])]  # each prefix's shard, in `counts`' order
+    con.register("nm_in", pa.table({"p3": [p3 for p3, _ in counts], "sh": pa.array(shard_of, pa.int32())}))
+    con.execute("INSERT INTO nm_p3 SELECT p3, sh FROM nm_in")
+    con.unregister("nm_in")
+    con.execute(f"""COPY (SELECT r.*, m.sh, (m.sh * {parts} // {n})::INTEGER AS sp FROM ({rows_sql}) AS r JOIN nm_p3 AS m ON left(r.s, 3) = m.p3)
+        TO {q(str(work / 'spill'))} (FORMAT parquet, PARTITION_BY (sp), COMPRESSION zstd)""")
+    con.execute("DROP TABLE nm_p3")
+    with ConPool(con, jobs, "names") as pool:
+        futs = []
+        for sh in sorted(shards, key=lambda x: -x["rows"]):
+            files = [str(f) for f in sorted((work / "spill" / f"sp={sh['i'] * parts // n}").glob("*.parquet"))]
+            futs.append((sh, pool.submit(_name_shard_task, files, sh["i"], str(out), sa.SX_RG, pool.task_threads, pool.mem,
+                                         str(work / "tmp" / f"s{sh['i']:04d}"))))
+        for sh, fut in futs:
+            if (got := fut.result()) != sh["rows"]:
+                raise RuntimeError(f"names shard {sh['i']}: {got:,} rows written, {sh['rows']:,} planned")
+    shutil.rmtree(work)
+    return sa._finish_shards(out, [{k: sh[k] for k in ("i", "lo", "rows", "prefixes")} for sh in shards], target_rows, None)
+
+
+def _scratch(con, prefix: str) -> Path:
+    """A new dir beside DuckDB's spill (`temp_directory`: the job's work disk), never inside a generation being written."""
+    import tempfile
+
+    tmp = con.execute("SELECT current_setting('temp_directory')").fetchone()[0]
+    if tmp:
+        Path(tmp).mkdir(parents=True, exist_ok=True)
+    return Path(tempfile.mkdtemp(prefix=prefix, dir=tmp or None))
 
 
 #: The version columns the name index reads from coalesced versions (`cintervals/`) or a run's `cdelta/`.
@@ -241,7 +347,7 @@ def base_rollups(con, files: list[str], mode: str, R: int, K: int, into: str, ru
     con.execute(f"CREATE OR REPLACE TABLE hk AS SELECT s AS k FROM ({files_sql(files, 's')}) GROUP BY s HAVING count(*) > {R}")
     con.execute(f"CREATE OR REPLACE TABLE ar AS SELECT x.* FROM ({shard_rows_sql(files)}) AS x SEMI JOIN hk USING (k)")
     heavy_dirs(con, "ar", R)
-    con.execute(f"CREATE OR REPLACE TABLE rt AS {first_hits_sql('SELECT * FROM ar', mode, rule)}")
+    first_hits(con, "SELECT * FROM ar", "rt", mode, rule)
     con.execute("DROP TABLE ar; DROP TABLE hk")
     rollup_cells(con, "rt", "hv", K, into, closed=True)
     keys, dirs = con.execute("SELECT count(DISTINCT k), count(*) FROM hv").fetchone()
@@ -284,11 +390,99 @@ def anchors_meta(R: int, K: int, sets: dict, scans: list[str] | None = None, **e
             **({"scans": scans} if scans is not None else {}), **extra}
 
 
+#: DuckDB threads per shard process when `build_tier_local` builds a tier's rollups shard by shard (`jobs` > 1).
+ANCHOR_THREADS = 4
+
+
+def _sorted_cells(con, table: str, out: str) -> None:
+    con.execute(f"COPY (SELECT q, dir, kind, child, vf, b, o FROM {table} ORDER BY q, dir, kind, child, vf) TO {q(out)} (FORMAT parquet, COMPRESSION zstd)")
+
+
+def _shard_task(kind: str, files: list[str], R: int, K: int, rule: HexRule | None, out: str, threads: int, mem: str, tmp: str) -> dict:
+    """One shard's rollups of `kind` (`end`, `exact`: `base_rollups`; `start`: `start_base` over its own prefix census),
+    sorted → parquet `out`, on a database of its own. A key (`s`; a `^q` prefix, ≥ 3 characters) lies in one shard, so a
+    shard's cells are exactly the tier's cells of its keys."""
+    import shutil
+
+    con = connect(threads, mem, tmp)
+    try:
+        if kind == START:
+            doc = start_base(con, files, start_heads_sql(prefix_counts_sql(files), R), R, K, "cells")
+        else:
+            doc = base_rollups(con, files, kind, R, K, "cells", rule)
+        con.execute("CREATE TABLE IF NOT EXISTS cells (q VARCHAR, dir VARCHAR, kind TINYINT, child VARCHAR, vf BIGINT, b BIGINT, o BIGINT)")
+        _sorted_cells(con, "cells", out)
+        return doc
+    finally:
+        con.close()
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def write_rollup_parts(parts: list[str], out: Path, name: str) -> tuple[int, pa.Table]:
+    """Sorted cell files (`_shard_task`'s, key-disjoint and in key order) streamed in turn → `out/<name>` with its group
+    index: what `write_rollups` writes of their union."""
+    from .static_roots import ROLLUP_SCHEMA, write_indexed
+
+    def batches():
+        for f in parts:
+            yield from pq.ParquetFile(f).iter_batches(batch_size=1 << 17)
+
+    return write_indexed(batches(), out / name, ROLLUP_SCHEMA, "dir", name, ["q", "dir", "child"], ROLLUP_RG)
+
+
+def _tier_parallel(con, sx_files: list[str], names_files: list[str], out: Path, R: int, K: int, rule: HexRule | None, jobs: int,
+                   work: Path) -> tuple[dict, dict]:
+    """`build_tier_local`'s rollups shard by shard over `jobs` processes (`static_names.ConPool`), biggest shards first:
+    each kind's sorted cell files in shard order, and its docs summed. Returns `({kind: parts}, {kind: doc})`."""
+    import os
+
+    from .static_names import ConPool
+
+    tasks = [(kind, i, f) for kind, files in (("end", sx_files), ("exact", names_files), (START, names_files)) for i, f in enumerate(files)]
+    parts: dict[str, list[str]] = {kind: [""] * len(files) for kind, files in (("end", sx_files), ("exact", names_files), (START, names_files))}
+    docs: dict[str, dict] = {}
+    work.mkdir(parents=True, exist_ok=True)
+    with ConPool(con, jobs, "anchors") as pool:
+        futs = []
+        for kind, i, f in sorted(tasks, key=lambda t: -os.path.getsize(t[2])):
+            parts[kind][i] = str(work / f"{kind}-{i:05d}.parquet")
+            futs.append((kind, pool.submit(_shard_task, kind, [f], R, K, rule, parts[kind][i], pool.task_threads, pool.mem,
+                                           str(work / "tmp" / f"{kind}-{i:05d}"))))
+        for kind, fut in futs:
+            d = fut.result()
+            docs[kind] = {k: docs.get(kind, {}).get(k, 0) + v for k, v in d.items()}
+    return parts, docs
+
+
 def build_tier_local(con, sx_files: list[str], names_files: list[str], out: Path, R: int, K: int, scans: list[str] | None = None,
-                     rule: HexRule | None = None) -> dict:
+                     rule: HexRule | None = None, jobs: int | None = None, work: Path | None = None) -> dict:
     """A whole tier's `anchors/` locally from its shard files (the base path in tests; on Batch per shard), under the
-    generation's hex-run `rule` (recorded in `meta.json`)."""
+    generation's hex-run `rule` (recorded in `meta.json`).
+
+    `jobs` > 1 (default: `con`'s threads over `ANCHOR_THREADS`, at most the shards): the shards in parallel, each in a
+    process of its own (a key lies in one shard: the staged path's per-shard build), their sorted cells (under `work`,
+    default a new dir in DuckDB's `temp_directory`) streamed in shard order into the same files, so the same bytes; 1:
+    each kind over all its shards at once on `con`."""
+    import shutil
+
+    from .static_names import pool_jobs
+
     out.mkdir(parents=True, exist_ok=True)
+    jobs = pool_jobs(con, max(len(sx_files), len(names_files), 1), ANCHOR_THREADS) if jobs is None else jobs
+    if jobs > 1:
+        work = work or _scratch(con, "anchors-shards-")
+        parts, pdocs = _tier_parallel(con, sx_files, names_files, out, R, K, rule, jobs, work)
+        sets, docs = {}, {}
+        for kind, files in (("end", sx_files), ("exact", names_files)):
+            docs[kind] = pdocs.get(kind, {}) if files else {}
+            _, idx = write_rollup_parts(parts[kind], out, f"rollups/{kind}-s0000.parquet")
+            sets[kind] = write_index([idx], out, kind)
+        (out / "meta.json").write_text(json.dumps(anchors_meta(R, K, sets, scans, **rule_json(rule)), indent=1) + "\n")
+        if names_files:
+            docs[START] = pdocs[START]
+            sets[START] = write_start_parts(parts[START], out / START, R, K, scans)
+        shutil.rmtree(work)
+        return {"sets": sets, "docs": docs}
     sets, docs = {}, {}
     for kind, files in (("end", sx_files), ("exact", names_files)):
         con.execute("DROP TABLE IF EXISTS cells")
@@ -373,6 +567,15 @@ def write_start(con, table: str, out: Path, R: int, K: int, scans: list[str] | N
     _, idx = write_rollups(con, table, out, f"rollups/{START}-{name}.parquet")
     doc = write_index([idx], out, START)
     (out / "meta.json").write_text(json.dumps(start_meta(R, K, doc, scans, **extra), indent=1) + "\n")
+    return doc
+
+
+def write_start_parts(parts: list[str], out: Path, R: int, K: int, scans: list[str] | None = None, name: str = "s0000") -> dict:
+    """`write_start` from sorted cell files (`write_rollup_parts`), not a table: the same files."""
+    out.mkdir(parents=True, exist_ok=True)
+    _, idx = write_rollup_parts(parts, out, f"rollups/{START}-{name}.parquet")
+    doc = write_index([idx], out, START)
+    (out / "meta.json").write_text(json.dumps(start_meta(R, K, doc, scans), indent=1) + "\n")
     return doc
 
 
@@ -469,6 +672,11 @@ class Tier:
 
     def rollup_files(self, kind: str) -> list[str]:
         return [str(f) for f in sorted((self.root / ANCHORS / "rollups").glob(f"{kind}-*.parquet"))]
+
+    def census(self, kind: str) -> Path | None:
+        """The tier's per-key row counts of `kind` (`write_census`), if it was built with them."""
+        f = self.root / ANCHORS / f"census-{kind}.parquet"
+        return f if f.exists() else None
 
     def start_files(self) -> list[str]:
         return [str(f) for f in sorted((self.root / START_DIR / "rollups").glob(f"{START}-*.parquet"))]
@@ -672,29 +880,33 @@ def prior_dir_counts(con) -> None:
         con.execute(f"DROP TABLE {t}")
 
 
-def group_bound(con, groups: str, into: str) -> None:
-    """Table `into (k, lvl, dir, n, bound)`: each candidate (`cand`) bounded by the rows of `groups` (`ktk`'s columns)
-    whose path interval overlaps [dir/, dir0), without enumerating their cross product.
+def group_prefix(con, groups: str, name: str) -> None:
+    """Per-key prefix sums of `groups` (a query of `ktk`'s columns) for `group_bound`: `{name}_t` (each key's rows),
+    `{name}_b` (rows of groups whose path maximum is at most `x`) and `{name}_a` (rows of groups whose path minimum is at
+    least `x`). Computed once per group set, however many candidates are bounded against them."""
+    con.execute(f"CREATE OR REPLACE TABLE {name}_t AS SELECT k, sum(rows)::BIGINT AS n FROM ({groups}) GROUP BY k")
+    con.execute(f"""CREATE OR REPLACE TABLE {name}_b AS SELECT k, p_max AS x,
+        sum(sum(rows)) OVER (PARTITION BY k ORDER BY p_max)::BIGINT AS n
+        FROM ({groups}) WHERE p_max IS NOT NULL GROUP BY k, p_max""")
+    con.execute(f"""CREATE OR REPLACE TABLE {name}_a AS SELECT k, p_min AS x,
+        sum(sum(rows)) OVER (PARTITION BY k ORDER BY p_min DESC)::BIGINT AS n
+        FROM ({groups}) WHERE p_min IS NOT NULL GROUP BY k, p_min""")
+
+
+def group_bound(con, name: str, cand: str, into: str) -> None:
+    """Table `into (k, lvl, dir, n, bound)`: each candidate of `cand` bounded by the rows of the groups (`group_prefix`
+    `name`) whose path interval overlaps [dir/, dir0), without enumerating their cross product.
 
     A group's path interval overlaps [dir/, dir0) unless its maximum is below
     the lower bound or its minimum is at/above the upper bound. Null statistics
     never exclude a group. Prefix sums make both exclusions ASOF lookups.
     """
-    con.execute(f"CREATE OR REPLACE TABLE kt_totals AS SELECT k, sum(rows)::BIGINT AS n FROM {groups} GROUP BY k")
-    con.execute(f"""CREATE OR REPLACE TABLE kt_before AS SELECT k, p_max AS x,
-        sum(sum(rows)) OVER (PARTITION BY k ORDER BY p_max)::BIGINT AS n
-        FROM {groups} WHERE p_max IS NOT NULL GROUP BY k, p_max""")
-    con.execute(f"""CREATE OR REPLACE TABLE kt_after AS SELECT k, p_min AS x,
-        sum(sum(rows)) OVER (PARTITION BY k ORDER BY p_min DESC)::BIGINT AS n
-        FROM {groups} WHERE p_min IS NOT NULL GROUP BY k, p_min""")
     con.execute(f"""CREATE OR REPLACE TABLE {into} AS
         SELECT c.k, c.lvl, c.dir, c.n, (coalesce(t.n, 0) - CASE WHEN c.dir = '' THEN 0
             ELSE coalesce(b.n, 0) + coalesce(a.n, 0) END)::BIGINT AS bound
-        FROM cand AS c LEFT JOIN kt_totals AS t USING (k)
-        ASOF LEFT JOIN kt_before AS b ON c.k = b.k AND c.dir || '/' > b.x
-        ASOF LEFT JOIN kt_after AS a ON c.k = a.k AND c.dir || '0' <= a.x""")
-    for table in ("kt_totals", "kt_before", "kt_after"):
-        con.execute(f"DROP TABLE {table}")
+        FROM {cand} AS c LEFT JOIN {name}_t AS t USING (k)
+        ASOF LEFT JOIN {name}_b AS b ON c.k = b.k AND c.dir || '/' > b.x
+        ASOF LEFT JOIN {name}_a AS a ON c.k = a.k AND c.dir || '0' <= a.x""")
 
 
 def near_candidates(con, R: int, run_counts: str | None = None) -> None:
@@ -706,20 +918,35 @@ def near_candidates(con, R: int, run_counts: str | None = None) -> None:
     group, each tier added up to a group's rows to every `(k, dir)` of the key (cw's 10-20T1806 `end`: 37M near, 7
     newly heavy). `run_counts` (`k, n`: each key's rows over the run tiers, every tier but the base `t = 0`, exactly;
     a key absent has none): the base is bounded by its groups, the run tiers by the lesser of their groups and the
-    key's rows there."""
+    key's rows there.
+
+    Level by level, top down: `n + bound` can only shrink from a directory to its child (fewer rows under it, and every
+    group meeting the child's range meets the parent's), so a candidate whose parent was a candidate that can't pass
+    `R` is never bounded. cw's 10-21T1801 bounded 320.9M candidates for 2.5M near (1,101 s of ASOF joins)."""
+    sets = ["kg"] if run_counts is None else ["kg_base", "kg_runs"]
     if run_counts is None:
-        group_bound(con, "ktk", "near")
+        group_prefix(con, "SELECT * FROM ktk", "kg")
     else:
-        con.execute("CREATE OR REPLACE TABLE ktk_base AS SELECT * FROM ktk WHERE t = 0")
-        con.execute("CREATE OR REPLACE TABLE ktk_runs AS SELECT * FROM ktk WHERE t > 0")
-        group_bound(con, "ktk_base", "nb_base")
-        group_bound(con, "ktk_runs", "nb_runs")
-        con.execute(f"""CREATE OR REPLACE TABLE near AS SELECT b.k, b.lvl, b.dir, b.n,
-                (b.bound + least(r.bound, coalesce(rc.n, 0)))::BIGINT AS bound
-            FROM nb_base AS b JOIN nb_runs AS r USING (k, lvl, dir) LEFT JOIN {run_counts} AS rc USING (k)""")
-        for table in ("ktk_base", "ktk_runs", "nb_base", "nb_runs"):
-            con.execute(f"DROP TABLE {table}")
-    con.execute(f"DELETE FROM near WHERE n + bound <= {R}")
+        group_prefix(con, "SELECT * FROM ktk WHERE t = 0", "kg_base")
+        group_prefix(con, "SELECT * FROM ktk WHERE t > 0", "kg_runs")
+    con.execute("CREATE OR REPLACE TABLE near (k VARCHAR, lvl INTEGER, dir VARCHAR, n BIGINT, bound BIGINT)")
+    con.execute("CREATE OR REPLACE TABLE near_cut (k VARCHAR, dir VARCHAR)")
+    parent = "CASE WHEN c.lvl <= 1 THEN '' ELSE left(c.dir, length(c.dir) - length(string_split(c.dir, '/')[-1]) - 1) END"
+    for (lvl,) in con.execute("SELECT DISTINCT lvl FROM cand ORDER BY lvl").fetchall():
+        con.execute(f"""CREATE OR REPLACE TABLE near_lvl AS SELECT c.* FROM cand AS c
+            ANTI JOIN near_cut AS x ON c.k = x.k AND {parent} = x.dir WHERE c.lvl = {lvl}""")
+        if run_counts is None:
+            group_bound(con, "kg", "near_lvl", "near_b")
+        else:
+            group_bound(con, "kg_base", "near_lvl", "nb_base")
+            group_bound(con, "kg_runs", "near_lvl", "nb_runs")
+            con.execute(f"""CREATE OR REPLACE TABLE near_b AS SELECT b.k, b.lvl, b.dir, b.n,
+                    (b.bound + least(r.bound, coalesce(rc.n, 0)))::BIGINT AS bound
+                FROM nb_base AS b JOIN nb_runs AS r USING (k, lvl, dir) LEFT JOIN {run_counts} AS rc USING (k)""")
+        con.execute(f"INSERT INTO near SELECT k, lvl, dir, n, bound FROM near_b WHERE n + bound > {R}")
+        con.execute(f"CREATE OR REPLACE TABLE near_cut AS SELECT k, dir FROM near_b WHERE n + bound <= {R}")
+    for table in ("near_cut", "near_lvl", "near_b", "nb_base", "nb_runs", *(f"{g}_{x}" for g in sets for x in "tba")):
+        con.execute(f"DROP TABLE IF EXISTS {table}")
 
 
 def run_rollups(con, prior: list[Tier], run: Tier, D: int, mode: str, R: int, K: int, into: str, rule: HexRule | None = None) -> dict:
@@ -775,9 +1002,13 @@ def run_rollups(con, prior: list[Tier], run: Tier, D: int, mode: str, R: int, K:
             con.unregister("kt_in")
     con.execute("""CREATE OR REPLACE TABLE ktk AS SELECT ck.k, kt.* FROM ck JOIN kt ON kt.s_min <= ck.k AND ck.k <= kt.s_max""")
     # each key's rows over the run tiers, exactly (their `s` column only): their groups mix keys, so bound them by this
+    # (from the tier's census where it has one; a tier built before censuses reads its `s` column: cw's 10-21T1202 spent
+    # 73 s reading two merged runs' 173M rows for these counts)
     con.execute("CREATE OR REPLACE TABLE rc (k VARCHAR, n BIGINT)")
     for t in prior[1:]:
-        if fs := t.files(mode):
+        if census := t.census(mode):
+            con.execute(f"INSERT INTO rc SELECT x.s, x.n FROM read_parquet({q(str(census))}) AS x SEMI JOIN ck ON x.s = ck.k")
+        elif fs := t.files(mode):
             con.execute(f"""INSERT INTO rc SELECT x.s, count(*)::BIGINT FROM ({files_sql(fs, "s, depth")}) AS x SEMI JOIN ck ON x.s = ck.k
                 WHERE x.depth >= 1 GROUP BY x.s""")
     con.execute("CREATE OR REPLACE TABLE rc AS SELECT k, sum(n)::BIGINT AS n FROM rc GROUP BY k")
@@ -799,7 +1030,7 @@ def run_rollups(con, prior: list[Tier], run: Tier, D: int, mode: str, R: int, K:
         # `rollup_cells` reads only the heads' keys' roots
         roots = """SELECT k, any_value(depth) AS depth, path, usr, vf, min(vt) AS vt, any_value(size) AS size, any_value(n_files) AS n_files, any_value(par) AS par
             FROM (SELECT * FROM prows SEMI JOIN (SELECT DISTINCT k FROM nh) USING (k) UNION ALL SELECT * FROM rr) GROUP BY k, path, usr, vf"""
-        con.execute(f"CREATE OR REPLACE TABLE nroots AS {first_hits_sql(roots, mode, rule)}")
+        first_hits(con, roots, "nroots", mode, rule)
         rollup_cells(con, "nroots", "nh", K, into)
     # 4. Delta headers and cells at D for the heavy (k, dir) the run touches.
     doc["delta"] = delta_cells(con, mode, D, K, into, rule)
@@ -833,11 +1064,11 @@ def delta_cells(con, mode: str, D: int, K: int, into: str, rule: HexRule | None 
     con.execute("CREATE OR REPLACE TABLE pkid AS SELECT DISTINCT q, dir, child FROM ps WHERE kind = 1")
     con.execute("CREATE OR REPLACE TABLE plast AS SELECT q, dir, kind, child, arg_max(b, vf) AS b, arg_max(o, vf) AS o FROM ps WHERE kind IN (1, 2) GROUP BY ALL")
     # each first hit under each of its ancestors: an equi-join on (k, dir), not a `starts_with` per (row, dir) of its key
-    hits = first_hits_sql("SELECT * FROM rr SEMI JOIN (SELECT DISTINCT q AS k FROM dt) USING (k)", mode, rule)
+    first_hits(con, "SELECT * FROM rr SEMI JOIN (SELECT DISTINCT q AS k FROM dt) USING (k)", "evh", mode, rule)
     con.execute(f"""CREATE OR REPLACE TABLE ev AS SELECT dt.q, dt.dir, {_child('x.path', 'dt.dir')} AS child,
             sum(CASE WHEN x.vf = {D} THEN x.size ELSE 0 END - CASE WHEN x.vt = {D} THEN x.size ELSE 0 END)::BIGINT AS db,
             sum(CASE WHEN x.vf = {D} THEN x.n_files ELSE 0 END - CASE WHEN x.vt = {D} THEN x.n_files ELSE 0 END)::BIGINT AS dn
-        FROM dt JOIN ({_level_dirs(f"({hits})")}) AS x ON x.k = dt.q AND x.dir = dt.dir
+        FROM dt JOIN ({_level_dirs("evh")}) AS x ON x.k = dt.q AND x.dir = dt.dir
         GROUP BY ALL""")
     # New kept children: not kept in any tier, while the kept count is under K, by name.
     con.execute(f"""CREATE OR REPLACE TABLE nk AS SELECT q, dir, child FROM (
@@ -853,7 +1084,7 @@ def delta_cells(con, mode: str, D: int, K: int, into: str, rule: HexRule | None 
     con.execute(f"""INSERT INTO {into} SELECT s.q, s.dir, s.kind, s.child, {D}, (coalesce(l.b, 0) + s.db)::BIGINT, (coalesce(l.o, 0) + s.dn)::BIGINT
         FROM (SELECT q, dir, kind, child, sum(db) AS db, sum(dn) AS dn FROM ser GROUP BY ALL HAVING sum(db) <> 0 OR sum(dn) <> 0) AS s
         LEFT JOIN plast AS l USING (q, dir, kind, child)""")
-    for t in ("ph", "dt", "pkid", "plast", "ev", "nk", "ser"):
+    for t in ("ph", "dt", "pkid", "plast", "evh", "ev", "nk", "ser"):
         con.execute(f"DROP TABLE IF EXISTS {t}")
     return n
 
@@ -873,6 +1104,16 @@ def merge_rollups(con, files_by_tier: list[list[str]], into: str) -> None:
     con.execute("DROP TABLE mr; DROP TABLE ms")
 
 
+def write_census(con, rows_sql: str, out: Path) -> None:
+    """A run tier's census: `(s, n)`, each key's rows (`n`) in `rows_sql` (`s, n` pairs, summed per `s`), sorted by `s`.
+    The anchors read it for a key's rows over the run tiers (`run_rollups`' `rc`) instead of the tier's `s` column. A
+    level-0 run counts its shards' rows (depth ≥ 1); a merged run sums its inputs' censuses, an upper bound if the
+    merge drops any row, which is all `rc` needs."""
+    tmp = out.with_suffix(".tmp")
+    con.execute(f"COPY (SELECT s, sum(n)::BIGINT AS n FROM ({rows_sql}) GROUP BY s ORDER BY s) TO {q(str(tmp))} (FORMAT PARQUET)")
+    tmp.replace(out)
+
+
 def build_run_local(con, prior: list[Tier], run: Tier, D: int, R: int, K: int, scans: list[str], versions_sql: str | None = None,
                     names_rows: int = NAME_SHARD_ROWS, rule: HexRule | None = None) -> dict:
     """A level-0 run's `names/` (from `versions_sql`, its `cdelta`, unless already there) and `anchors/` (both kinds,
@@ -887,6 +1128,9 @@ def build_run_local(con, prior: list[Tier], run: Tier, D: int, R: int, K: int, s
         docs[kind] = run_rollups(con, prior, run, D, kind, R, K, "cells", rule)
         _, idx = write_rollups(con, "cells", out, f"rollups/{kind}-s0000.parquet")
         sets[kind] = write_index([idx], out, kind)
+        fs = run.files(kind)
+        rows = f"SELECT s, 1 AS n FROM ({files_sql(fs, 's, depth')}) WHERE depth >= 1" if fs else "SELECT NULL::VARCHAR AS s, 0 AS n WHERE false"
+        write_census(con, rows, out / f"census-{kind}.parquet")
     (out / "meta.json").write_text(json.dumps(anchors_meta(R, K, sets, scans, **rule_json(rule)), indent=1) + "\n")
     if all(t.has_start for t in prior):
         docs[START], sets[START] = build_run_start(con, prior, run, D, R, K, scans)
@@ -918,6 +1162,9 @@ def merge_run_local(con, runs: list[Tier], out: Tier, R: int, K: int, scans: lis
         merge_rollups(con, [r.rollup_files(kind) for r in runs], "cells")
         _, idx = write_rollups(con, "cells", dst, f"rollups/{kind}-s0000.parquet")
         sets[kind] = write_index([idx], dst, kind)
+        # a census only when every input has one: a missing one leaves the merged run to its `s` column, as before
+        if (cs := [r.census(kind) for r in runs]) and all(cs):
+            write_census(con, files_sql([str(c) for c in cs], "s, n"), dst / f"census-{kind}.parquet")
     (dst / "meta.json").write_text(json.dumps(anchors_meta(R, K, sets, scans, **rule_json(rule)), indent=1) + "\n")
     # The starts-with catalog: merged when every input carries one (else the merged run has none, and it is cut there).
     if all(r.has_start for r in runs):
