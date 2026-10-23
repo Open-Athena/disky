@@ -95,7 +95,9 @@ export function Status({ run, failedAt, issues = [], cell, lost }: { run: ScanRu
   }
   if (run.status === 'succeeded' && issues.length) {
     const outcome = runOutcome(run, issues)
-    return <Tooltip cell={cell} content={<><div>Batch job succeeded, but {issues.length} phase attempt{issues.length === 1 ? '' : 's'} failed.</div>{issues.map(i => <div key={i.phase}>{i.phase}: {i.outcome}{i.recovery ? ' · recovered by a subsequent attempt' : ' · no successful recovery recorded'}</div>)}</>}>
+    const failed = issues.filter(i => !i.reason).length, skipped = issues.length - failed
+    const what = [failed && `${failed} phase attempt${failed === 1 ? '' : 's'} failed`, skipped && `${skipped} phase${skipped === 1 ? ' was' : 's were'} skipped`].filter(Boolean).join(' and ')
+    return <Tooltip cell={cell} content={<><div>Batch job succeeded, but {what}.</div>{issues.map(i => <div key={i.phase}>{i.phase}: {i.reason ?? i.outcome}{i.recovery ? ' · recovered by a subsequent attempt' : ' · no successful recovery recorded'}</div>)}</>}>
       <span className={`sr-status ${outcome === 'recovered' ? 'succeeded' : 'warn'}`}>{outcome}</span>
     </Tooltip>
   }

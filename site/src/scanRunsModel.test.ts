@@ -2,7 +2,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   batchHref, failedAt, logsHref, mapHref, metaHref, outputIndex, phaseIssues, phaseOutcome, phaseOrder, phaseSpans, runTime, type ScanRun, type ScanRunOutput,
-  type ScanRunPhase, manualScans, scanRunOf, structureOf, summarize, withDeltas, runOutcome, overlappingFailures, runTasks, taskLogsHref,
+  type ScanRunPhase, manualScans, scanRunOf, structureOf, summarize, withDeltas, runOutcome, runOutcomeLine, phaseSkip, overlappingFailures, runTasks, taskLogsHref,
   isMaintenance, liveness, LOST_S, maintStore, phaseStatus, QUIET_S,
 } from './scanRunsModel'
 
@@ -148,6 +148,37 @@ describe('phase spans', () => {
     const ps = [failed, ...candidates.map(r => phase(r.run_id, 'names', 0, r.started_ts!, r.finished_ts!))]
     expect(phaseIssues(RUNS[2], [RUNS[2], ...candidates], ps)).toEqual([{ phase: 'names', outcome: 'timed out', recovery: good }])
     expect(phaseIssues(RUNS[2], candidates.slice(1), ps)).toEqual([{ phase: 'names', outcome: 'timed out', recovery: null }])
+  })
+  it('a skipped static-names step makes the run partial, with its recorded reason; the probe\'s skips that follow do not', () => {
+    const skip = 'skipped (busy): another coordinator or a compaction holds the static-names store\'s lease; search for this scan comes with its append or the next run'
+    const ps: ScanRunPhase[] = [
+      phase('b', 'listing', 0, 2000, 2300),
+      { ...phase('b', 'static-names', 1, 2300, 2310), note: `overlapped, ${skip}` },
+      { ...phase('b', 'probe', 2, 2400, 2500), note: `4 passed, 2 skipped (static-names ${skip}), 0 failed` },
+    ]
+    const issues = phaseIssues(RUNS[2], [RUNS[2]], ps)
+    expect(issues).toEqual([{ phase: 'static-names', outcome: 'skipped', recovery: null, reason: skip }])
+    expect([runOutcome(RUNS[2], issues), runOutcomeLine(RUNS[2], issues)]).toEqual(['partial', `partial: static-names ${skip}`])
+    expect(phaseSpans(RUNS[2], ps).map(s => s.status)).toEqual(['done', 'done', 'done'])
+  })
+  it('a skip clause only at a closed note\'s start or after a comma', () => {
+    expect([
+      phaseSkip({ status: 'done', note: 'overlapped, skipped (busy): held' }),
+      phaseSkip({ status: 'done', note: 'skipped: no current generation' }),
+      phaseSkip({ status: 'done', note: 'overlapped' }),
+      phaseSkip({ status: 'done', note: '4 passed, 2 skipped (static-names skipped (busy): held), 0 failed' }),
+      phaseSkip({ status: 'running', note: 'skipped: a heartbeat line' }),
+      phaseSkip({ status: 'done', note: null }),
+    ]).toEqual(['skipped (busy): held', 'skipped: no current generation', null, null, null, null])
+  })
+  it('a failed probe stays a failure beside nothing skipped', () => {
+    const ps: ScanRunPhase[] = [
+      { ...phase('b', 'static-names', 0, 2300, 2310), note: 'overlapped' },
+      { ...phase('b', 'probe', 1, 2400, 2500), note: 'failed (exit 1), 4 passed, 0 skipped, 2 failed' },
+    ]
+    const issues = phaseIssues(RUNS[2], [RUNS[2]], ps)
+    expect(issues).toEqual([{ phase: 'probe', outcome: 'failed', recovery: null }])
+    expect(runOutcomeLine(RUNS[2], issues)).toEqual('partial: probe failed')
   })
   it('puts an overlapped phase on its own lane, on the run clock', () => {
     expect(phaseSpans(RUNS[2], PHASES.filter(p => p.run_id === 'b')).map(s => [s.phase, s.start, s.end, s.lane])).toEqual([

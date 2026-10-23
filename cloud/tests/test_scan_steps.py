@@ -2,6 +2,7 @@
 dispatcher's fake / fail / soft semantics."""
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 from dataclasses import replace
@@ -163,7 +164,7 @@ def test_serving_steps_commands(tmp_path, env):
         "dt-cloud over-time-groups -g G1 -o <tmp>/t/dt-scan/2026-10-16T1200/over-time -p r2://r2b",
         "dt-cloud index-gc -R -m 2d -F <tmp>/data -F r2",
         "dt-cloud warm-cache -d 2026-10-16T1200 -r r2://r2b/snapshots/sub",
-        "dt-cloud probe -c -u https://site.example.org -o <tmp>/data/probes/sub/",
+        "dt-cloud probe -c -u https://site.example.org -o <tmp>/data/probes/sub/ -j",
         "dt-cloud digest -T t -C c.yml -P slack -r <tmp>/data/snapshots/sub",
     ]
     assert (tmp_path / "home/.config/disk-tree/buckets.yml").read_text() == (
@@ -201,9 +202,55 @@ def test_static_names_busy_is_not_a_failure(tmp_path, env, monkeypatch):
     c.run.end = lambda name, rc=0, **kw: phases.append(("end", name, rc, kw))
     monkeypatch.setattr(S, "load_profile_env", lambda *a: c.profile)
     monkeypatch.setattr(S, "make_ctx", lambda *a: c)
+    c.run.alert = lambda level, msg: phases.append(("alert", level, msg))
     assert S.run_step("static-names", None, env) == 0
-    assert phases == [("begin", "static-names"), ("end", "static-names", 0, {"note": "overlapped"})]
+    assert phases == [
+        ("begin", "static-names"),
+        ("end", "static-names", 0, {"note": f"overlapped, skipped (busy): {BUSY_REASON}"}),
+        ("alert", "warn", f"static-names skipped (busy): {BUSY_REASON}"),
+    ]
     assert c.sh_impl.calls == ["dt-cloud static-names runs add -c 2026-10-16T1200"]
+
+
+BUSY_REASON = ("another coordinator or a compaction holds the static-names store's lease; search for this scan comes "
+               "with its append or the next run")
+
+
+def probe_ctx(tmp_path, env, stored, code=0, summary="3 passed, 0 skipped, 0 failed"):
+    """A probe step whose run's record holds the phases `stored` (`(phase, note)`), its probe exiting `code` with
+    `summary` as the record's verdict line."""
+    env.update(SITE_TOKEN="st", SITE_URL="https://site.example.org")
+    rec = json.dumps({"results": [], "summary": {"line": summary}})
+    c = ctx(tmp_path, env, runner=Runner(tmp_path, stdout={"dt-cloud probe -c": rec}, codes={"dt-cloud probe -c": code}))
+    calls = []
+    c.run.phases = lambda: [{"phase": p, "seq": i, "status": "done", "note": n} for i, (p, n) in enumerate(stored)]
+    c.run.begin = lambda name: calls.append(("begin", name))
+    c.run.end = lambda name, rc=0, **kw: calls.append(("end", name, rc, kw))
+    return c, calls
+
+
+def test_probe_skip_reason_comes_from_the_record(tmp_path, env):
+    """The run's own static-names phase record says it was skipped: the probe gets that reason (`-i`), so the scan's
+    `scan-not-indexed` refusals count as skipped; the phase's note is the verdict, skips named; the phase is not failed."""
+    skip = f"skipped (busy): {BUSY_REASON}"
+    verdict = f"2 passed, 2 skipped (static-names {skip}), 0 failed"
+    c, calls = probe_ctx(tmp_path, env, [("list", None), ("static-names", f"overlapped, {skip}")], summary=verdict)
+    S.probe(c, None)
+    assert c.sh_impl.calls == [
+        f"dt-cloud probe -c -u https://site.example.org -o <tmp>/data/probes/sub/ -j -i static-names {skip}",
+    ]
+    assert calls == [("begin", "probe"), ("end", "probe", 0, {"note": verdict})]
+
+
+def test_probe_without_a_recorded_skip_fails_on_a_refusal(tmp_path, env):
+    """static-names ran (its `overlapped` lane note is no skip): no `-i`, so a `scan-not-indexed` refusal fails the
+    probe, and the phase fails with the verdict."""
+    verdict = "2 passed, 0 skipped, 2 failed"
+    c, calls = probe_ctx(tmp_path, env, [("static-names", "overlapped")], code=1, summary=verdict)
+    S.probe(c, None)
+    assert c.sh_impl.calls == ["dt-cloud probe -c -u https://site.example.org -o <tmp>/data/probes/sub/ -j"]
+    assert calls == [("begin", "probe"), ("end", "probe", 1, {
+        "warn": True, "msg": f"serving probe failed for 2026-10-16T1200: {verdict}", "note": verdict})]
 
 
 def test_interval_store_without_a_generation(tmp_path, env):
