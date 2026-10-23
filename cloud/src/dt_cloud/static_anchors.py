@@ -125,17 +125,24 @@ def first_hit_sql(mode: str, key: str = "s", par: str = "par", rule: HexRule | N
     return f"(({name_hit_sql(mode, key, rule)}) AND ({par_hit_sql(mode, key, par, rule)}))"
 
 
-def first_hits_sql(rows: str, mode: str, rule: HexRule | None = None) -> str:
-    """The rows of `rows` (a query of `AR_COLS`) passing `first_hit_sql` on `k`, each test run once per distinct value it
-    depends on rather than per row: the ancestor test per `(k, par)` (a directory's rows share it; under a hex-run rule
-    a lambda over every segment) and the name test per `(k, name)` (a path's versions share it). cw's 10-21T0602 `end`
-    fold spent 5,631 cpu-s filtering 27.5M rows per row; 10-21T1202, with only the ancestor test deduplicated, 1,239."""
-    hits = f"""SELECT r.* FROM r SEMI JOIN (SELECT k, par FROM (SELECT DISTINCT k, par FROM r) WHERE {par_hit_sql(mode, 'k', rule=rule)}) AS h
-        USING (k, par)"""
-    if name_hit_sql(mode, "k", rule) == "true":
-        return f"WITH r AS MATERIALIZED ({rows}) {hits}"
-    return f"""WITH r AS MATERIALIZED (SELECT *, {NAME} AS nm FROM ({rows})) SELECT * EXCLUDE (nm) FROM ({hits}) AS x
-        SEMI JOIN (SELECT k, nm FROM (SELECT DISTINCT k, nm FROM r) WHERE {name_hit_sql(mode, 'k', rule, 'nm')}) AS n USING (k, nm)"""
+def first_hits(con, rows: str, into: str, mode: str, rule: HexRule | None = None) -> None:
+    """Table `into`: the rows of `rows` (a query of `AR_COLS`) passing `first_hit_sql` on `k`, each test run once per
+    distinct value it depends on rather than per row: the ancestor test per `(k, par)` (a directory's rows share it;
+    under a hex-run rule a lambda over every segment) and the name test per `(k, name)` (a path's versions share it).
+    Each distinct set is its own table: in one statement, even through materialized CTEs, DuckDB pushes a filter on the
+    grouped columns below the `DISTINCT`, onto every row (cw's 10-21T1801 `nroots`: 10,243 cpu-s over 89M rows)."""
+    named = name_hit_sql(mode, "k", rule) != "true"
+    con.execute(f"CREATE OR REPLACE TABLE fh_r AS SELECT *{f', {NAME} AS nm' if named else ''} FROM ({rows})")
+    con.execute("CREATE OR REPLACE TABLE fh_kp0 AS SELECT DISTINCT k, par FROM fh_r")
+    con.execute(f"CREATE OR REPLACE TABLE fh_kp AS SELECT k, par FROM fh_kp0 WHERE {par_hit_sql(mode, 'k', rule=rule)}")
+    sql = "SELECT r.* FROM fh_r AS r SEMI JOIN fh_kp USING (k, par)"
+    if named:
+        con.execute("CREATE OR REPLACE TABLE fh_kn0 AS SELECT DISTINCT k, nm FROM fh_r")
+        con.execute(f"CREATE OR REPLACE TABLE fh_kn AS SELECT k, nm FROM fh_kn0 WHERE {name_hit_sql(mode, 'k', rule, 'nm')}")
+        sql = f"SELECT * EXCLUDE (nm) FROM ({sql}) AS x SEMI JOIN fh_kn USING (k, nm)"
+    con.execute(f"CREATE OR REPLACE TABLE {into} AS {sql}")
+    for t in ("fh_r", "fh_kp0", "fh_kp", "fh_kn0", "fh_kn"):
+        con.execute(f"DROP TABLE IF EXISTS {t}")
 
 
 # ── The name index ─────────────────────────────────────────────────────────
@@ -241,7 +248,7 @@ def base_rollups(con, files: list[str], mode: str, R: int, K: int, into: str, ru
     con.execute(f"CREATE OR REPLACE TABLE hk AS SELECT s AS k FROM ({files_sql(files, 's')}) GROUP BY s HAVING count(*) > {R}")
     con.execute(f"CREATE OR REPLACE TABLE ar AS SELECT x.* FROM ({shard_rows_sql(files)}) AS x SEMI JOIN hk USING (k)")
     heavy_dirs(con, "ar", R)
-    con.execute(f"CREATE OR REPLACE TABLE rt AS {first_hits_sql('SELECT * FROM ar', mode, rule)}")
+    first_hits(con, "SELECT * FROM ar", "rt", mode, rule)
     con.execute("DROP TABLE ar; DROP TABLE hk")
     rollup_cells(con, "rt", "hv", K, into, closed=True)
     keys, dirs = con.execute("SELECT count(DISTINCT k), count(*) FROM hv").fetchone()
@@ -808,7 +815,7 @@ def run_rollups(con, prior: list[Tier], run: Tier, D: int, mode: str, R: int, K:
         # `rollup_cells` reads only the heads' keys' roots
         roots = """SELECT k, any_value(depth) AS depth, path, usr, vf, min(vt) AS vt, any_value(size) AS size, any_value(n_files) AS n_files, any_value(par) AS par
             FROM (SELECT * FROM prows SEMI JOIN (SELECT DISTINCT k FROM nh) USING (k) UNION ALL SELECT * FROM rr) GROUP BY k, path, usr, vf"""
-        con.execute(f"CREATE OR REPLACE TABLE nroots AS {first_hits_sql(roots, mode, rule)}")
+        first_hits(con, roots, "nroots", mode, rule)
         rollup_cells(con, "nroots", "nh", K, into)
     # 4. Delta headers and cells at D for the heavy (k, dir) the run touches.
     doc["delta"] = delta_cells(con, mode, D, K, into, rule)
@@ -842,11 +849,11 @@ def delta_cells(con, mode: str, D: int, K: int, into: str, rule: HexRule | None 
     con.execute("CREATE OR REPLACE TABLE pkid AS SELECT DISTINCT q, dir, child FROM ps WHERE kind = 1")
     con.execute("CREATE OR REPLACE TABLE plast AS SELECT q, dir, kind, child, arg_max(b, vf) AS b, arg_max(o, vf) AS o FROM ps WHERE kind IN (1, 2) GROUP BY ALL")
     # each first hit under each of its ancestors: an equi-join on (k, dir), not a `starts_with` per (row, dir) of its key
-    hits = first_hits_sql("SELECT * FROM rr SEMI JOIN (SELECT DISTINCT q AS k FROM dt) USING (k)", mode, rule)
+    first_hits(con, "SELECT * FROM rr SEMI JOIN (SELECT DISTINCT q AS k FROM dt) USING (k)", "evh", mode, rule)
     con.execute(f"""CREATE OR REPLACE TABLE ev AS SELECT dt.q, dt.dir, {_child('x.path', 'dt.dir')} AS child,
             sum(CASE WHEN x.vf = {D} THEN x.size ELSE 0 END - CASE WHEN x.vt = {D} THEN x.size ELSE 0 END)::BIGINT AS db,
             sum(CASE WHEN x.vf = {D} THEN x.n_files ELSE 0 END - CASE WHEN x.vt = {D} THEN x.n_files ELSE 0 END)::BIGINT AS dn
-        FROM dt JOIN ({_level_dirs(f"({hits})")}) AS x ON x.k = dt.q AND x.dir = dt.dir
+        FROM dt JOIN ({_level_dirs("evh")}) AS x ON x.k = dt.q AND x.dir = dt.dir
         GROUP BY ALL""")
     # New kept children: not kept in any tier, while the kept count is under K, by name.
     con.execute(f"""CREATE OR REPLACE TABLE nk AS SELECT q, dir, child FROM (
@@ -862,7 +869,7 @@ def delta_cells(con, mode: str, D: int, K: int, into: str, rule: HexRule | None 
     con.execute(f"""INSERT INTO {into} SELECT s.q, s.dir, s.kind, s.child, {D}, (coalesce(l.b, 0) + s.db)::BIGINT, (coalesce(l.o, 0) + s.dn)::BIGINT
         FROM (SELECT q, dir, kind, child, sum(db) AS db, sum(dn) AS dn FROM ser GROUP BY ALL HAVING sum(db) <> 0 OR sum(dn) <> 0) AS s
         LEFT JOIN plast AS l USING (q, dir, kind, child)""")
-    for t in ("ph", "dt", "pkid", "plast", "ev", "nk", "ser"):
+    for t in ("ph", "dt", "pkid", "plast", "evh", "ev", "nk", "ser"):
         con.execute(f"DROP TABLE IF EXISTS {t}")
     return n
 
