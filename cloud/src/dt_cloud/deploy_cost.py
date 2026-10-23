@@ -2,12 +2,13 @@
 
 Read-only, from measurements:
 1. Storage: Cloud Monitoring's `storage.googleapis.com/storage/v2/total_bytes` per bucket, daily means over the
-   window, split by its `type` (live vs soft-deleted objects) and `storage_class` labels. Live bytes grow at their
-   least-squares slope, except in a bucket a lifecycle `Delete` rule bounds (`age: N` over the whole bucket: its
+   window, split by its `type` (live vs soft-deleted objects) and `storage_class` labels. Live bytes grow at the
+   median of their daily deltas (step-robust: a one-off cleanup or fill doesn't set the rate), except in a bucket a lifecycle `Delete` rule bounds (`age: N` over the whole bucket: its
    steady state is ~N days of writes), where they are held at their current level. A prefix- or otherwise-scoped
    `Delete` rule can't be separated from the bucket-level metric: the bucket is marked partially TTL'd and keeps its
    slope. Soft-deleted bytes track churn, not growth, so they are held at their current level (or at zero for a
-   bucket whose soft-delete retention is off: they drain).
+   bucket whose soft-delete retention is off: they drain). A bucket with fewer than `MIN_POINTS` daily points is a
+   short window, and the summary calls the projection provisional.
 2. Compute: the Batch jobs (every location, or `-L`) created in the window whose labels match a selector. A job's
    VM-hours are its `runDuration` × min(`taskCount`, `parallelism`) (its first task group), priced by its machine
    type and provisioning model (SPOT × `spot_factor`). The window's $ / its days is the rate, projected flat.
@@ -23,6 +24,7 @@ from __future__ import annotations
 
 import json
 import re
+from statistics import median
 from collections import defaultdict
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
@@ -42,6 +44,8 @@ GB = 1e9
 GIB = 2**30
 YEAR_DAYS = 365.25
 MONTH_DAYS = YEAR_DAYS / 12
+#: Fewer daily points than this: a short window, its projection provisional.
+MIN_POINTS = 14
 
 #: $/vCPU-hour and $/GB-hour (on-demand, US regions) per machine family; a predefined type's price is their sum
 #: over its vCPUs and memory, which is how GCP prices them.
@@ -165,15 +169,11 @@ def parse_series(pages: Iterable[Mapping]) -> list[Series]:
 
 
 def slope_per_day(points: Sequence[tuple[float, float]]) -> float:
-    """Least-squares slope of bytes over days; 0 with fewer than two points."""
+    """Bytes/day: the median of the consecutive points' deltas (each per day of its gap), so a one-off step (a
+    cleanup, an initial fill) doesn't set the rate; 0 with fewer than two points."""
     if len(points) < 2:
         return 0.0
-    xs = [t / DAY for t, _ in points]
-    ys = [v for _, v in points]
-    mx = sum(xs) / len(xs)
-    my = sum(ys) / len(ys)
-    den = sum((x - mx) ** 2 for x in xs)
-    return sum((x - mx) * (y - my) for x, y in zip(xs, ys)) / den if den else 0.0
+    return median((v1 - v0) / ((t1 - t0) / DAY) for (t0, v0), (t1, v1) in zip(points, points[1:]))
 
 
 #: Lifecycle conditions that confine a rule to noncurrent versions: such a rule never bounds live bytes.
@@ -283,6 +283,7 @@ def storage_report(
         b_ = buckets.setdefault(s.bucket, {"points": 0, "soft_delete_off": pol.soft_delete_off,
                                            "ttl_days": pol.ttl_days, "partial_ttl": pol.partial_ttl})
         b_["points"] = max(b_["points"], len(s.points))
+        b_["short"] = b_["points"] < MIN_POINTS
         slope = slope_per_day(s.points) if live else 0.0
         price = prices.storage.get(s.storage_class)
         if price is None:
@@ -402,13 +403,16 @@ def summary(doc: Mapping) -> str:
     """"We can leave NAME running for 1y/2y for X→Y GB of storage ($A→$B/mo) and $C→$D/mo on compute.\""""
     hs = list(doc["horizons"])
     parts = []
+    provisional = ""
     if (s := doc["storage"]) is not None:
+        if short := [k for k, b in s["buckets"].items() if b["short"]]:
+            provisional = f"; provisional: short window (< {MIN_POINTS} daily points) for {', '.join(short)}"
         ys = "/".join(_gb(s["horizons"][h]["bytes"]) for h in hs)
         bs = "/".join(_usd(s["horizons"][h]["usd_per_month"]) for h in hs)
         parts.append(f"{_gb(s['bytes'])}→{ys} GB of storage ({_usd(s['usd_per_month'])}→{bs}/mo)")
     if (c := doc["compute"]) is not None:
         parts.append(f"{_usd(c['usd_per_month'])}→{_usd(c['usd_per_month'])}/mo on compute")
-    return f"We can leave {doc['name']} running for {'/'.join(hs)} for {' and '.join(parts)} (list-price estimates)."
+    return f"We can leave {doc['name']} running for {'/'.join(hs)} for {' and '.join(parts)} (list-price estimates{provisional})."
 
 
 def render(doc: Mapping) -> str:
@@ -429,7 +433,7 @@ def render(doc: Mapping) -> str:
             at = s["horizons"][h]
             lines.append(f"  {h}: {_gb(at['bytes'])} GB, {_usd(at['usd_per_month'])}/mo")
         for name, b in s["buckets"].items():
-            notes = [f"{b['points']} daily points"]
+            notes = [f"short window ({b['points']} pts)" if b["short"] else f"{b['points']} daily points"]
             if b["ttl_days"] is not None:
                 notes.append(f"lifecycle Delete at {b['ttl_days']:g}d: live bytes held flat")
             elif b["partial_ttl"]:
