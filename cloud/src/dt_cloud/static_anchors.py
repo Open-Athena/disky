@@ -470,6 +470,11 @@ class Tier:
     def rollup_files(self, kind: str) -> list[str]:
         return [str(f) for f in sorted((self.root / ANCHORS / "rollups").glob(f"{kind}-*.parquet"))]
 
+    def census(self, kind: str) -> Path | None:
+        """The tier's per-key row counts of `kind` (`write_census`), if it was built with them."""
+        f = self.root / ANCHORS / f"census-{kind}.parquet"
+        return f if f.exists() else None
+
     def start_files(self) -> list[str]:
         return [str(f) for f in sorted((self.root / START_DIR / "rollups").glob(f"{START}-*.parquet"))]
 
@@ -775,9 +780,13 @@ def run_rollups(con, prior: list[Tier], run: Tier, D: int, mode: str, R: int, K:
             con.unregister("kt_in")
     con.execute("""CREATE OR REPLACE TABLE ktk AS SELECT ck.k, kt.* FROM ck JOIN kt ON kt.s_min <= ck.k AND ck.k <= kt.s_max""")
     # each key's rows over the run tiers, exactly (their `s` column only): their groups mix keys, so bound them by this
+    # (from the tier's census where it has one; a tier built before censuses reads its `s` column: cw's 10-21T1202 spent
+    # 73 s reading two merged runs' 173M rows for these counts)
     con.execute("CREATE OR REPLACE TABLE rc (k VARCHAR, n BIGINT)")
     for t in prior[1:]:
-        if fs := t.files(mode):
+        if census := t.census(mode):
+            con.execute(f"INSERT INTO rc SELECT x.s, x.n FROM read_parquet({q(str(census))}) AS x SEMI JOIN ck ON x.s = ck.k")
+        elif fs := t.files(mode):
             con.execute(f"""INSERT INTO rc SELECT x.s, count(*)::BIGINT FROM ({files_sql(fs, "s, depth")}) AS x SEMI JOIN ck ON x.s = ck.k
                 WHERE x.depth >= 1 GROUP BY x.s""")
     con.execute("CREATE OR REPLACE TABLE rc AS SELECT k, sum(n)::BIGINT AS n FROM rc GROUP BY k")
@@ -873,6 +882,16 @@ def merge_rollups(con, files_by_tier: list[list[str]], into: str) -> None:
     con.execute("DROP TABLE mr; DROP TABLE ms")
 
 
+def write_census(con, rows_sql: str, out: Path) -> None:
+    """A run tier's census: `(s, n)`, each key's rows (`n`) in `rows_sql` (`s, n` pairs, summed per `s`), sorted by `s`.
+    The anchors read it for a key's rows over the run tiers (`run_rollups`' `rc`) instead of the tier's `s` column. A
+    level-0 run counts its shards' rows (depth ≥ 1); a merged run sums its inputs' censuses, an upper bound if the
+    merge drops any row, which is all `rc` needs."""
+    tmp = out.with_suffix(".tmp")
+    con.execute(f"COPY (SELECT s, sum(n)::BIGINT AS n FROM ({rows_sql}) GROUP BY s ORDER BY s) TO {q(str(tmp))} (FORMAT PARQUET)")
+    tmp.replace(out)
+
+
 def build_run_local(con, prior: list[Tier], run: Tier, D: int, R: int, K: int, scans: list[str], versions_sql: str | None = None,
                     names_rows: int = NAME_SHARD_ROWS, rule: HexRule | None = None) -> dict:
     """A level-0 run's `names/` (from `versions_sql`, its `cdelta`, unless already there) and `anchors/` (both kinds,
@@ -887,6 +906,9 @@ def build_run_local(con, prior: list[Tier], run: Tier, D: int, R: int, K: int, s
         docs[kind] = run_rollups(con, prior, run, D, kind, R, K, "cells", rule)
         _, idx = write_rollups(con, "cells", out, f"rollups/{kind}-s0000.parquet")
         sets[kind] = write_index([idx], out, kind)
+        fs = run.files(kind)
+        rows = f"SELECT s, 1 AS n FROM ({files_sql(fs, 's, depth')}) WHERE depth >= 1" if fs else "SELECT NULL::VARCHAR AS s, 0 AS n WHERE false"
+        write_census(con, rows, out / f"census-{kind}.parquet")
     (out / "meta.json").write_text(json.dumps(anchors_meta(R, K, sets, scans, **rule_json(rule)), indent=1) + "\n")
     if all(t.has_start for t in prior):
         docs[START], sets[START] = build_run_start(con, prior, run, D, R, K, scans)
@@ -918,6 +940,9 @@ def merge_run_local(con, runs: list[Tier], out: Tier, R: int, K: int, scans: lis
         merge_rollups(con, [r.rollup_files(kind) for r in runs], "cells")
         _, idx = write_rollups(con, "cells", dst, f"rollups/{kind}-s0000.parquet")
         sets[kind] = write_index([idx], dst, kind)
+        # a census only when every input has one: a missing one leaves the merged run to its `s` column, as before
+        if (cs := [r.census(kind) for r in runs]) and all(cs):
+            write_census(con, files_sql([str(c) for c in cs], "s, n"), dst / f"census-{kind}.parquet")
     (dst / "meta.json").write_text(json.dumps(anchors_meta(R, K, sets, scans, **rule_json(rule)), indent=1) + "\n")
     # The starts-with catalog: merged when every input carries one (else the merged run has none, and it is cut there).
     if all(r.has_start for r in runs):
