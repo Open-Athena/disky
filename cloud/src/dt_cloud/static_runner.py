@@ -136,7 +136,8 @@ class Runner(ar.Runner):
 
     def compact_jobs(self, scan: str) -> list[tuple[str, dict]]:
         r2 = self.merge_r2()
-        out = [self.job("compact", scan, 1, "static_merge", ["compact", "-g", self.cfg.gen, "-C", str(self.cfg.policy), *(["-K"] if self.compact_now else []), *self.read_args(),
+        out = [self.job("compact", scan, 1, "static_merge", ["compact", "-g", self.cfg.gen, *(["-S", self.cfg.scratch] if self.cfg.scratch else []),
+                                                           "-C", str(self.cfg.policy), *(["-K"] if self.compact_now else []), *self.read_args(),
                                                            *(["-r"] if r2 else []), *duckdb_args(self.cfg.machine_for("compact"))], r2=r2)]
         if not r2:
             out.append(self.job("compact-r2", scan, 1, "static_merge", ["compact-r2", "-g", self.cfg.gen], r2=True, mount=False))
@@ -384,6 +385,7 @@ def gcs_runner(cfg: Profile, *, dry_run: bool = False, verify_terms: str | None 
         merge_wait=merge_wait,
         list_keys=lambda prefix: [x.name for x in client.list_blobs(cfg.bucket, prefix=prefix)],
         coordination=None if dry_run else lambda: ar.gcs_coordinator_lease(cfg.scratch, PREFIX, client),
+        compacting=None if dry_run or not cfg.scratch else lambda: ar.gcs_compaction_lease_file(cfg.scratch, PREFIX, client),
     )
     return runner
 

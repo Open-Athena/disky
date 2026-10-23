@@ -82,7 +82,7 @@ def test_static_compact_jobs_split_by_account():
     jobs = r.compact_jobs("2026-10-10")
     assert [(spec["labels"]["stage"], spec["taskGroups"][0]["taskSpec"]["runnables"][0]["container"]["commands"][1],
              spec["allocationPolicy"]["serviceAccount"]["email"]) for _, spec in jobs] == [
-        ("compact", _py("static_merge", "compact", "-g", GEN, "-C", "level:1", "-M", "90GB", "-p", "16"), "build@proj"),
+        ("compact", _py("static_merge", "compact", "-g", GEN, "-S", "scr", "-C", "level:1", "-M", "90GB", "-p", "16"), "build@proj"),
         ("compact-r2", _py("static_merge", "compact-r2", "-g", GEN, mount=False), "copy@proj"),
     ]
     assert r.with_gen(f"{GEN}.c001").gen == f"{GEN}.c001"
