@@ -29,7 +29,7 @@ So a key touched by the scan with a few tens of thousands of rows overall gets e
 
 - **Step 2 is done** (`near_candidates(con, R, run_counts)`). The base is bounded by its groups. The run tiers are bounded by the lesser of their groups and the key's exact rows over them (`rc`, from their `s` column only). Measure it on the next cw scan: compare its `anchors <mode>: near … prior rows …` line with the 10-20T1806 numbers above.
 - **Step 1** (`near-probe`) is skipped unless that line shows the base is the slack.
-- **Step 3** (`start`) is open.
+- **Step 3 is done** (`start_run`'s `ck`). A prefix's prior rows are bounded by the base's groups over its range plus the run tiers' rows under it, counted from their `s` column (`rcs`). Before, every tier's two partial end groups were counted whole, so almost every prefix passed R. Measure it with the scan's `start` probes and probe_rows.
 
 ## Plan
 
