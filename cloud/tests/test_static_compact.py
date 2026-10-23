@@ -72,14 +72,17 @@ def world(fixture, tmp_path_factory):  # noqa: F811
         _build(root, scans, c, tmp / "wc0", through=ids[1])
         _add(root, scans, c, tmp / "wc1", ids[3])
         out["c"] = _compact(c, tmp / "wc2", "-c", "3")
-        # D, E: C again with the runs' chunk spill in 2 partitions, then 1 (each split by chunk on reading): the same bytes
-        for name, parts in (("d", 2), ("e", 1)):
+        # D, E: C again with the runs' chunk spill in 2 partitions, then 1 (each split by chunk on reading); F, H: C and E
+        # with 4 chunks folded at a time (`-j 4`): the same bytes
+        for name, parts, jobs in (("d", 2, 1), ("e", 1, 1), ("f", None, 4), ("h", 1, 4)):
             d = tmp / name
             _build(root, scans, d, tmp / f"w{name}0", through=ids[1])
             _add(root, scans, d, tmp / f"w{name}1", ids[3])
-            old, sr.SPILL_PARTS, sr.SPILL_DIRECT = (sr.SPILL_PARTS, sr.SPILL_DIRECT), parts, 0
+            old = sr.SPILL_PARTS, sr.SPILL_DIRECT
+            if parts is not None:
+                sr.SPILL_PARTS, sr.SPILL_DIRECT = parts, 0
             try:
-                out[name] = _compact(d, tmp / f"w{name}2", "-c", "3")
+                out[name] = _compact(d, tmp / f"w{name}2", "-c", "3", "-j", str(jobs))
             finally:
                 sr.SPILL_PARTS, sr.SPILL_DIRECT = old
             out[f"{name}_store"] = d / sn.PREFIX
@@ -108,7 +111,8 @@ def test_add_compacts_when_due_then_appends_to_the_successor(world):
 
 
 @pytest.mark.parametrize("store, gen, ref", [("a_store", "g.c001", "g.c001"), ("a_store", "g.c002", "g.c002"), ("b_store", "g.c001", "g.c001"),
-                                             ("c_store", "g.c001", "g.c001"), ("d_store", "g.c001", "g.c001"), ("e_store", "g.c001", "g.c001")])
+                                             ("c_store", "g.c001", "g.c001"), ("d_store", "g.c001", "g.c001"), ("e_store", "g.c001", "g.c001"),
+                                             ("f_store", "g.c001", "g.c001"), ("h_store", "g.c001", "g.c001")])
 def test_compacted_generation_is_the_rebuild(world, store, gen, ref):
     got, want = world[store] / gen, world["tmp"] / f"ref-{ref}" / sn.PREFIX / ref
     g, w = _md5s(got), _md5s(want)
@@ -189,10 +193,12 @@ class _Stop(Exception):
 STEPS = ["intervals", "shards", "catalog", "fold/long-roots-tables", "fold/long-roots", "fold/spilled-tables", "fold/spilled", "drill", "anchors"]
 
 
+@pytest.mark.parametrize("jobs", [1, 4])
 @pytest.mark.parametrize("stop", ["shards", "fold/long-roots", "fold/spilled", "drill"])
-def test_a_fold_stopped_after_a_saved_step_resumes_there_to_the_same_bytes(world, tmp_path, stop):
+def test_a_fold_stopped_after_a_saved_step_resumes_there_to_the_same_bytes(world, tmp_path, stop, jobs):
     """C's fold (chunks of 3 roots), stopped right after a step is saved: the rerun restores what was saved, saves only
-    the steps after it, and writes the uninterrupted fold's files."""
+    the steps after it, and writes the uninterrupted fold's files. The stopped fold runs `jobs` chunks at a time, the
+    rerun the other count (1 ↔ 4): a checkpoint doesn't depend on it."""
     gen_dir = world["c_store"] / "g"
     _, runs = ar.newest_runs(gen_dir)
     ck_root = str(tmp_path / "scratch")
@@ -206,7 +212,8 @@ def test_a_fold_stopped_after_a_saved_step_resumes_there_to_the_same_bytes(world
         ck = sk.compact_checkpoint(ck_root, "g", "g.c001", runs, on_save=on_save, work=tmp_path / f"ck{i}")
         try:
             with _small_groups():
-                return sk.fold_gen(gen_dir, out, tmp_path / f"w{i}", gen="g", new_gen="g.c001", runs=runs, threads=2, mem="1GB", chunk_rows=3, ck=ck)
+                return sk.fold_gen(gen_dir, out, tmp_path / f"w{i}", gen="g", new_gen="g.c001", runs=runs, threads=2, mem="1GB", chunk_rows=3,
+                                   jobs=jobs if i == 0 else 5 - jobs, ck=ck)
         finally:
             ck.close()
 

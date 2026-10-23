@@ -77,14 +77,18 @@ def test_interval_follows_the_successor():
 
 def test_static_compact_jobs_split_by_account():
     """The static profile's R2 account differs from the stages': `compact` (GCS only), then `compact-r2` as the R2
-    account (no mount); the successor's generation is the runner's next."""
+    account (no mount); the successor's generation is the runner's next. The drill fold runs a chunk per 6 vCPUs at once
+    (`-j 2` on the 16-vCPU machine) unless the profile's `fold_jobs` says otherwise."""
     r = _static_runner(1)
     jobs = r.compact_jobs("2026-10-10")
     assert [(spec["labels"]["stage"], spec["taskGroups"][0]["taskSpec"]["runnables"][0]["container"]["commands"][1],
              spec["allocationPolicy"]["serviceAccount"]["email"]) for _, spec in jobs] == [
-        ("compact", _py("static_merge", "compact", "-g", GEN, "-S", "scr", "-C", "level:1", "-M", "90GB", "-p", "16"), "build@proj"),
+        ("compact", _py("static_merge", "compact", "-g", GEN, "-S", "scr", "-C", "level:1", "-j", "2", "-M", "90GB", "-p", "16"), "build@proj"),
         ("compact-r2", _py("static_merge", "compact-r2", "-g", GEN, mount=False), "copy@proj"),
     ]
+    r.cfg = replace(r.cfg, fold_jobs=5)
+    assert r.compact_jobs("2026-10-10")[0][1]["taskGroups"][0]["taskSpec"]["runnables"][0]["container"]["commands"][1] == _py(
+        "static_merge", "compact", "-g", GEN, "-S", "scr", "-C", "level:1", "-j", "5", "-M", "90GB", "-p", "16")
     assert r.with_gen(f"{GEN}.c001").gen == f"{GEN}.c001"
     assert ROOT == f"static-names/{GEN}"
 
