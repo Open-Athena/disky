@@ -263,6 +263,11 @@ def test_publish_order():
             "manifests/a.m001.json", "deltas/a_b/meta.json"]
     assert il.publish_order(keys) == ["deltas/a/scans.json", "deltas/a/served/path.parquet", "served/path.parquet", "deltas/a/meta.json",
                                       "deltas/a_b/meta.json", "scans.json", "manifests/a.json", "manifests/a.m001.json"]
+    from dt_cloud.blobstore import publish_steps
+
+    assert publish_steps(il.publish_order(keys), il.publish_tier) == [
+        ["deltas/a/scans.json", "deltas/a/served/path.parquet", "served/path.parquet"], ["deltas/a/meta.json"], ["deltas/a_b/meta.json"],
+        ["scans.json"], ["manifests/a.json"], ["manifests/a.m001.json"]]
 
 
 def test_open_state_is_the_staged_state(world, local, staged):

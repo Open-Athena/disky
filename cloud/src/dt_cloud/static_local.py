@@ -161,6 +161,15 @@ def publish_order(keys: list[str]) -> list[str]:
     return sorted(keys, key=rank)
 
 
+def publish_tier(key: str) -> int | None:
+    """`blobstore.upload_new`'s tier of a key in `publish_order`: the data files (rank 0) go up together; a liveness marker,
+    a manifest, and the generation's `scans.json` (what a reader opens the generation by) each go up alone, after
+    everything before it in `publish_order`."""
+    if key == "scans.json" or key.split("/", 1)[0] == "manifests" or key.rsplit("/", 1)[-1] == "meta.json":
+        return None
+    return 0
+
+
 def read_gen(store: Store, read_from: str | None, prefix: str, gen_dir: Path, keep=lambda rel: True, *, label: str = "read") -> tuple[dict, dict[str, int]]:
     """The generation `prefix` of `store` mirrored into `gen_dir` (what `keep` takes), from `store` itself or (`read_from`,
     `-F`) another copy of it (refused when the copy lacks a file `store` has: `append_runner.read_tree`). Returns the
@@ -179,8 +188,8 @@ def read_gen(store: Store, read_from: str | None, prefix: str, gen_dir: Path, ke
 
 
 def upload_new(store: Store, local: Path, prefix: str, before: dict[str, int]) -> list[str]:
-    """`blobstore.upload_new` in this store's `publish_order`."""
-    return _upload_new(store, local, prefix, before, publish_order)
+    """`blobstore.upload_new` in this store's `publish_order` (its data files in parallel: `publish_tier`)."""
+    return _upload_new(store, local, prefix, before, publish_order, tier=publish_tier)
 
 
 # ── Scans ──────────────────────────────────────────────────────────────────
