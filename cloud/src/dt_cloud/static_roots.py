@@ -1134,9 +1134,10 @@ class ChunkSpill:
         """Partition `part`'s chunks."""
         return range(-(-part * self.n // self.p), -(-(part + 1) * self.n // self.p))
 
-    def write(self, sql: str, name: str) -> None:
-        """Query `sql`'s rows (with `ch`) → `root/in/<name>/` by partition."""
-        self.con.execute(f"""COPY (SELECT *, (ch * {self.p} // {self.n})::INTEGER AS sp FROM ({sql})) TO {q(str(self.root / 'in' / name))}
+    def write(self, sql: str, name: str, con=None) -> None:
+        """Query `sql`'s rows (with `ch`) → `root/in/<name>/` by partition (on `con`, default the spill's: writes to distinct
+        names may run concurrently, each on its own cursor)."""
+        (con or self.con).execute(f"""COPY (SELECT *, (ch * {self.p} // {self.n})::INTEGER AS sp FROM ({sql})) TO {q(str(self.root / 'in' / name))}
             (FORMAT parquet, PARTITION_BY (sp), COMPRESSION zstd)""")
 
     def files(self, k: int) -> list[Path]:
