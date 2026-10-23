@@ -2,7 +2,7 @@ import { Explain } from './Help'
 import { useEffect, useRef, useSyncExternalStore } from 'react'
 import type { Tiling } from '@disk-tree/react'
 import { Tooltip } from './Tooltip'
-import { TitleSpaceToggle } from '@disk-tree/react'
+import { BorderStepToggle, TitleSpaceToggle } from '@disk-tree/react'
 import { DEFAULT_STORE } from './stores'
 
 // Treemap rendering preferences — per-browser, persisted in localStorage,
@@ -44,6 +44,9 @@ const tiling = pref<Tiling>('tiling', ['shared', 'gaps'], 'shared')
 const renderer = pref<Renderer>('renderer', ['dom', 'canvas'], 'dom')
 const titleSpace = pref<'reclaim' | 'full'>('title-space', ['reclaim', 'full'], DEFAULT_STORE.reclaimTitleSpace ? 'reclaim' : 'full')
 export const useTitleSpace = titleSpace.use
+// Whole-pixel seams, each parent's ≥1px wider than its children's (`<Treemap borderStep>`); off by default.
+const borderStep = pref<'on' | 'off'>('border-step', ['on', 'off'], 'off')
+export const useBorderStep = borderStep.use
 // The help line (specs/done/edu-drawer.md): on until the reader turns it off.
 const help = pref<'on' | 'off'>('help', ['on', 'off'], 'on')
 export const useHelpPref = help.use
@@ -65,6 +68,7 @@ export function SettingsMenu() {
   const [t, setT] = useTiling()
   const [r, setR] = useRenderer()
   const [space, setSpace] = useTitleSpace()
+  const [step, setStep] = useBorderStep()
   // A native <details> only closes on its own summary; close it on any click
   // outside too, like a menu.
   const ref = useRef<HTMLDetailsElement | null>(null)
@@ -86,6 +90,9 @@ export function SettingsMenu() {
       <div className="menu" onClick={e => e.stopPropagation()} onPointerDown={e => e.stopPropagation()} onMouseDown={e => e.stopPropagation()} onTouchStart={e => e.stopPropagation()} onTouchEnd={e => e.stopPropagation()}>
         <Explain text="Let complete columns to the right of a parent's label use its empty title strip. Sibling areas keep the same bytes-per-pixel scale. Off: reserve a full-width title bar.">
           <span className="row"><TitleSpaceToggle checked={space === 'reclaim'} onChange={checked => setSpace(checked ? 'reclaim' : 'full')} /></span>
+        </Explain>
+        <Explain text="Seams widen one whole pixel per level up, so a parent's outline always reads thicker than the lines between its children. Off: thinner, size-capped seams that keep more of each cell's area.">
+          <span className="row"><BorderStepToggle checked={step === 'on'} onChange={checked => setStep(checked ? 'on' : 'off')} /></span>
         </Explain>
         <Explain text={TILING_TIP}>
           <label className="row">

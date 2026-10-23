@@ -19,7 +19,7 @@ import type { OwnerIndex } from './owners'
 import { ClassMixTip, Tooltip } from './Tooltip'
 import type { ColorMode, Pricing, TreeNode } from './types'
 import { CLASS_NAMES, classMix, fmtN, fmtUsd, ratePerByte, unownedBytes } from './types'
-import { SettingsMenu, useRenderer, useTiling, useTitleSpace } from './prefs'
+import { SettingsMenu, useBorderStep, useRenderer, useTiling, useTitleSpace } from './prefs'
 import { useStore } from './store'
 import { useUnits } from './units'
 import { usePerfCommit } from './perf'
@@ -252,6 +252,7 @@ export function Treemap({ root, mode, shade = 'none', userIdx, dateRange, readRa
   const store = useStore()
   const [renderer] = useRenderer()
   const [titleSpace] = useTitleSpace()
+  const [borderStep] = useBorderStep()
   // Macro/micro hue for a cell, relative to the drilled root (see childRanks).
   // Every cell path starts with the drilled path, so the view root sits at a
   // fixed index — NOT `len - 2 - depth`: a collapsed chain (`run/…/checkpoints`
@@ -758,6 +759,7 @@ export function Treemap({ root, mode, shade = 'none', userIdx, dateRange, readRa
       formatSize={fmtBytes}
       collapseChains
       reclaimTitleSpace={titleSpace === 'reclaim'}
+      borderStep={borderStep === 'on'}
       branchOutline="color-mix(in oklab, var(--ink) 30%, transparent)"
       mergeSmall={mergeSmall}
       colorForCell={colorForCell}
@@ -780,7 +782,9 @@ export function Treemap({ root, mode, shade = 'none', userIdx, dateRange, readRa
         // Width alone is a blunt cue: the top seam gets 3px and one step down
         // 2px, the rest hairlines — nesting reads from the edge color (page
         // background at the top, fill-tinted deeper) and the header bars.
-        const base = below >= 2 ? 3 : below === 1 ? 2 : 1
+        // Stepped (`borderStep`): one more pixel per level below, rounded and
+        // clamped under each parent's by the core, so every level's seam differs.
+        const base = borderStep === 'on' ? below + 1 : below >= 2 ? 3 : below === 1 ? 2 : 1
         return Math.min(base, Math.max(1, Math.min(w, h) / 16))
       }}
       tiling={tiling}

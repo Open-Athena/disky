@@ -37,7 +37,8 @@ So a key touched by the scan with a few tens of thousands of rows overall gets e
   | `start` | — | 16 probes | 3,841,634 | 20 | 1 min |
 
   Old bound, 10-21T0002: `end` 52.4M near, 5.19M keys, 504M rows, 31 newly heavy; `exact` 3.2M, 271K, 14.8M, 2; `start` 1,961, 231M, 23.
-- **Step 1** (`near-probe`) waits on the per-query timings (`ANCHOR_QUERY` lines) of the 10-21T0602 run. It goes ahead only if the probe dominates `end`'s 30 min. 17M near over 483 keys suggests the base's groups are the slack.
+- **Step 1** (`near-probe`) is not needed. The per-query timings (`ANCHOR_QUERY`) showed that the probe dominated, but not because of the bound: a batch read `s` from its first key to its last, so 483 sparse keys read nearly the whole shard. The fix is `key_clusters` (1cad878e, gap 4M since 509cbb60). With it and the fold fixes (4f978b55, 509cbb60), 10-21T1202's anchors took 1,155 s, with `end` near 6.8M over 430 keys and 46M rows probed.
+- **Left:** `rc` reads the large run tiers' `s` in full (~73 s on 10-21T1202). Its fix is step 2's per-tier census, taken only if `rc` stays a top cost.
 - **Step 3 is done** (`start_run`'s `ck`). A prefix's prior rows are bounded by the base's groups over its range plus the run tiers' rows under it, counted from their `s` column (`rcs`). Before, every tier's two partial end groups were counted whole, so almost every prefix passed R. Measure it with the scan's `start` probes and probe_rows.
 
 ## Plan

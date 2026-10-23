@@ -390,3 +390,22 @@ def test_backup_within_one_store_copies_server_side(monkeypatch, tmp_path):
 ])
 def test_classify(name, cls):
     assert sr.classify(name) == cls
+
+
+def test_an_earlier_generations_failed_marker_is_verified_again(fx, d1, tmp_path):
+    """08-03's marker failed in `g0`, the generation `g` was backfilled from; `g` has none. The fail doesn't hold for
+    `g`: the scan is verified against it (a pass), where a fail in the current generation keeps it (08-02's)."""
+    iv = fx["store"] / "interval-store"
+    (iv / "g0" / "verify").mkdir(parents=True)
+    failed = {"scan": "2026-08-03", "gen": "g0", "pass": False, "views": 9, "view_eq": 7, "diffs": 0, "diff_eq": 0}
+    (iv / "g0" / "verify" / "2026-08-03.json").write_text(json.dumps(failed))
+    (iv / "g" / "backfill.json").write_text(json.dumps({"from": "g0"}) + "\n")
+    assert [r for r in _statuses(_run(fx)) if r[0] in ("2026-08-02", "2026-08-03")] == [
+        ("2026-08-02", "skip", "verify failed (7/9 views, 0/0 diffs equal)", "fail"),
+        ("2026-08-03", "needs-verify", "verify failed in g0, none in g", "stale-fail")]
+    assert [r for r in _statuses(_run(fx, "-m")) if r[0] == "2026-08-03"] == [
+        ("2026-08-03", "skip", "verify failed in g0, none in g", "stale-fail")]
+    rep = _run(fx, "-x", "-b", str(tmp_path / "backup"), "-w", str(tmp_path / "work"))
+    assert [r for r in _statuses(rep) if r[0] == "2026-08-03"] == [("2026-08-03", "retire", None, "verified")]
+    marker = json.loads((iv / "g" / "verify" / "2026-08-03.json").read_text())
+    assert (marker["scan"], marker["gen"], marker["pass"]) == ("2026-08-03", "g", True)
