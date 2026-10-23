@@ -86,6 +86,13 @@ def world(fixture, tmp_path_factory):  # noqa: F811
             finally:
                 sr.SPILL_PARTS, sr.SPILL_DIRECT = old
             out[f"{name}_store"] = d / sn.PREFIX
+        # I: two level-0 runs (`add -N`: no carry), folded 4 chunks (and both runs' spills) at a time: the same bytes
+        i = tmp / "i"
+        _build(root, scans, i, tmp / "wi0", through=ids[1])
+        _add(root, scans, i, tmp / "wi1", ids[3], "-N")
+        out["i_runs"] = [r["key"] for r in ar.newest_runs(i / sn.PREFIX / "g")[1]]
+        out["i"] = _compact(i, tmp / "wi2", "-c", "3", "-j", "4")
+        out["i_store"] = i / sn.PREFIX
         ranges = str(a / sn.PREFIX / "g" / "ranges.json")
         for gen, through in (("g.c001", ids[3]), ("g.c002", ids[4])):
             _build(root, scans, tmp / f"ref-{gen}", tmp / f"wr-{gen}", gen=gen, through=through, extra=("-r", ranges))
@@ -112,7 +119,7 @@ def test_add_compacts_when_due_then_appends_to_the_successor(world):
 
 @pytest.mark.parametrize("store, gen, ref", [("a_store", "g.c001", "g.c001"), ("a_store", "g.c002", "g.c002"), ("b_store", "g.c001", "g.c001"),
                                              ("c_store", "g.c001", "g.c001"), ("d_store", "g.c001", "g.c001"), ("e_store", "g.c001", "g.c001"),
-                                             ("f_store", "g.c001", "g.c001"), ("h_store", "g.c001", "g.c001")])
+                                             ("f_store", "g.c001", "g.c001"), ("h_store", "g.c001", "g.c001"), ("i_store", "g.c001", "g.c001")])
 def test_compacted_generation_is_the_rebuild(world, store, gen, ref):
     got, want = world[store] / gen, world["tmp"] / f"ref-{ref}" / sn.PREFIX / ref
     g, w = _md5s(got), _md5s(want)
@@ -183,6 +190,13 @@ def test_independent_static_pointers_and_gc_follow_both_lineages(world, tmp_path
     assert [(r["gen"], r["action"]) for r in plan] == [
         ("g", "keep"), ("g.c001", "delete"), ("g.c002", "keep"), ("meta", "keep"), ("meta.c001", "keep"),
     ]
+
+
+def test_two_runs_folded_concurrently(world):
+    """World I folds two level-0 runs (both spilled at once at `-j 4`)."""
+    ids = world["ids"]
+    two = [ar.run_key(ids[2], ids[2]), ar.run_key(ids[3], ids[3])]
+    assert (world["i_runs"], world["i"]["runs"]) == (two, two)
 
 
 def test_compact_probe_folds_read_only_to_the_published_bytes(world, tmp_path):

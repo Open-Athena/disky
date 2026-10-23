@@ -243,10 +243,19 @@ def _long_roots(con, tiers: list[sd.Tier], out: Path, work: Path, *, chunk_rows:
         GROUP BY ch ORDER BY ch""").fetchall()
     t = step("drill/fold/plan", t, tuples=sl.count(con, "tup"), chunks=len(chunks))
     runs = sr.ChunkSpill(con, work / "runs", len(chunks))
-    for i in range(1, n):
-        if long_files[i]:
-            runs.write(f"""SELECT c.ch, t.tid, r.path, r.usr, r.vf, r.vt, r.size, r.n_files FROM ({_roots_sql(long_files[i])}) AS r
-                JOIN tup AS t ON t.c{i} = r.q JOIN tch AS c USING (tid)""", f"t{i:03d}")
+    spills = [i for i in range(1, n) if long_files[i]]
+    k = max(1, min(jobs, len(spills)))
+    # a partitioned write keeps per-thread, per-partition buffers outside `memory_limit` (gcs 10-08c: RSS past `-M` here),
+    # so the runs written at once split its flush threshold (a connection's own setting) between them
+    flush = con.execute("SELECT current_setting('partitioned_write_flush_threshold')").fetchone()[0]
+
+    def spill(cur, i: int) -> tuple[int, None]:
+        cur.execute(f"SET partitioned_write_flush_threshold = {max(1, int(flush) // k)}")
+        runs.write(f"""SELECT c.ch, t.tid, r.path, r.usr, r.vf, r.vt, r.size, r.n_files FROM ({_roots_sql(long_files[i])}) AS r
+            JOIN tup AS t ON t.c{i} = r.q JOIN tch AS c USING (tid)""", f"t{i:03d}", con=cur)
+        return 0, None
+
+    _pool(con, spill, spills, k, sn.Progress("drill/fold/runs-spill", len(spills), log))
     t = step("drill/fold/runs-spill", t, runs=n - 1, parts=runs.p)
     spans = q_spans(long_files[0])
     troots = work / "troots"
