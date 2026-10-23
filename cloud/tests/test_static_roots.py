@@ -390,3 +390,9 @@ def test_chunk_spill_reads_each_chunk_exactly(tmp_path, parts):
     sp.close()
     assert not (tmp_path / "s").exists()
     con.close()
+
+
+def test_chunk_spill_defaults_to_one_partition_per_chunk_up_to_spill_direct(tmp_path):
+    """Up to `SPILL_DIRECT` chunks each gets its own partition (no split pass on reading); past it, `SPILL_PARTS`."""
+    sizes = [1, sr.SPILL_DIRECT, sr.SPILL_DIRECT + 1, 4858]
+    assert [sr.ChunkSpill(None, tmp_path / f"s{n}", n).p for n in sizes] == [1, sr.SPILL_DIRECT, sr.SPILL_PARTS, sr.SPILL_PARTS]

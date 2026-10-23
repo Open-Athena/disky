@@ -1105,18 +1105,21 @@ def index_estimates(con, index_files: list[str], keys: str, into: str) -> None:
 #: thread) outside its memory limit and reopens files past `partitioned_write_max_open_files` (100); gcs's 10-08c
 #: compaction spilled its runs into 4,858 chunk partitions and its RSS went from 174 to 272 GiB there, past `-M`.
 SPILL_PARTS = 64
+#: Chunks up to this many are spilled one partition each (no split pass), as `PARTITION_BY (ch)` was: gcs's 10-22 L3
+#: carry (251 ranges) read 28 → 47 min with 64 partitions split on reading; its partitioned write held well under `-M`.
+SPILL_DIRECT = 512
 
 
 class ChunkSpill:
-    """Rows spilled by chunk (column `ch`, 0 … `n` − 1) into at most `parts` (default `SPILL_PARTS`) partitions of
-    consecutive chunks (`root/in/<name>/sp=<p>/`), and read back chunk by chunk in order (`files`): a partition holding
+    """Rows spilled by chunk (column `ch`, 0 … `n` − 1) into at most `parts` (default: one per chunk up to `SPILL_DIRECT`
+    chunks, else `SPILL_PARTS`) partitions of consecutive chunks (`root/in/<name>/sp=<p>/`), and read back chunk by chunk in order (`files`): a partition holding
     several chunks is split by chunk (`root/by-chunk/sp=<p>/ch=<k>/`: one more pass over its rows, a fan-out of at most
     ⌈n / parts⌉) when the reader first reaches it, and removed when the reader moves on. Each chunk's files hold exactly
     its rows, whatever `parts` (the files keep `ch`, which readers don't select)."""
 
     def __init__(self, con, root: Path, n: int, parts: int | None = None):
         self.con, self.root, self.n = con, root, n
-        self.p = max(1, min(parts or SPILL_PARTS, n))
+        self.p = max(1, min(parts or (n if n <= SPILL_DIRECT else SPILL_PARTS), n))
         self.cur: int | None = None
         self.held: list[Path] = []
         self.split, self.src = False, []

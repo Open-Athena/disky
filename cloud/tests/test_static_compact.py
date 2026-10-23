@@ -77,11 +77,11 @@ def world(fixture, tmp_path_factory):  # noqa: F811
             d = tmp / name
             _build(root, scans, d, tmp / f"w{name}0", through=ids[1])
             _add(root, scans, d, tmp / f"w{name}1", ids[3])
-            old, sr.SPILL_PARTS = sr.SPILL_PARTS, parts
+            old, sr.SPILL_PARTS, sr.SPILL_DIRECT = (sr.SPILL_PARTS, sr.SPILL_DIRECT), parts, 0
             try:
                 out[name] = _compact(d, tmp / f"w{name}2", "-c", "3")
             finally:
-                sr.SPILL_PARTS = old
+                sr.SPILL_PARTS, sr.SPILL_DIRECT = old
             out[f"{name}_store"] = d / sn.PREFIX
         ranges = str(a / sn.PREFIX / "g" / "ranges.json")
         for gen, through in (("g.c001", ids[3]), ("g.c002", ids[4])):
