@@ -101,9 +101,22 @@ def test_slope():
     assert dc.slope_per_day([(day, 5.0)]) == 0.0
 
 
-@pytest.mark.parametrize("drains, bytes_, usd", [((), 27 * G, 13.0), (("bkt-a",), 23 * G, 11.0)])
-def test_storage_report(drains, bytes_, usd):
-    s = dc.storage_report(dc.parse_series(PAGES), PRICES, {"10d": 10.0}, drains)
+def bucket(points: int, policy: dc.BucketPolicy = dc.BucketPolicy()) -> dict:
+    return {"points": points, "soft_delete_off": policy.soft_delete_off, "ttl_days": policy.ttl_days, "partial_ttl": policy.partial_ttl}
+
+
+@pytest.mark.parametrize("policies, bytes_, usd", [
+    # bkt-a live 12 → 22 GiB; bkt-b's coldline would go negative: floored at 0; WEIRD (flat) is counted, unpriced
+    ({}, 27 * G, 13.0),
+    # soft delete off: bkt-a's soft-deleted 4 GiB drain
+    ({"bkt-a": dc.BucketPolicy(soft_delete_off=True)}, 23 * G, 11.0),
+    # bkt-b TTL'd: its coldline held at 8 GiB, not sloped to 0
+    ({"bkt-b": dc.BucketPolicy(ttl_days=7.0)}, 35 * G, 15.0),
+    # a partial TTL keeps the slope
+    ({"bkt-b": dc.BucketPolicy(partial_ttl=True)}, 27 * G, 13.0),
+])
+def test_storage_report(policies, bytes_, usd):
+    s = dc.storage_report(dc.parse_series(PAGES), PRICES, {"10d": 10.0}, policies)
     assert s == {
         "rows": [
             {"bucket": "bkt-a", "type": "live-object", "storage_class": "REGIONAL", "days": 3, "bytes": 12 * G, "slope_bytes_per_day": G, "usd_per_month": 6.0},
@@ -115,11 +128,36 @@ def test_storage_report(drains, bytes_, usd):
         "bytes_by_type": {"live-object": 21 * G, "soft-deleted-object": 4 * G},
         "live_slope_bytes_per_day": -G,
         "usd_per_month": 10.0,
-        "drains": list(drains),
+        "buckets": {"bkt-a": bucket(3, policies.get("bkt-a", dc.BucketPolicy())), "bkt-b": bucket(3, policies.get("bkt-b", dc.BucketPolicy()))},
         "unpriced_bytes": {"WEIRD": G},
-        # bkt-a live 12 → 22 GiB; bkt-b's coldline would go negative: floored at 0; WEIRD (flat) is counted, unpriced
         "horizons": {"10d": {"bytes": bytes_, "usd_per_month": usd}},
     }
+
+
+def delete(**condition) -> dict:
+    return {"action": {"type": "Delete"}, "condition": condition}
+
+
+@pytest.mark.parametrize("meta, policy", [
+    ({}, dc.BucketPolicy(soft_delete_off=True)),
+    ({"softDeletePolicy": {"retentionDurationSeconds": "604800"}}, dc.BucketPolicy()),
+    # whole-bucket Delete rules: the shortest age bounds the live bytes
+    ({"softDeletePolicy": {"retentionDurationSeconds": "0"}, "lifecycle": {"rule": [delete(age=30), delete(age=7, isLive=True)]}},
+     dc.BucketPolicy(soft_delete_off=True, ttl_days=7.0)),
+    # scoped only: not separable from the bucket-level metric
+    ({"softDeletePolicy": {"retentionDurationSeconds": "604800"}, "lifecycle": {"rule": [delete(age=7, matchesPrefix=["tmp/"])]}},
+     dc.BucketPolicy(partial_ttl=True)),
+    # a whole-bucket rule subsumes a scoped one
+    ({"softDeletePolicy": {"retentionDurationSeconds": "604800"}, "lifecycle": {"rule": [delete(age=3, matchesSuffix=[".tmp"]), delete(age=14)]}},
+     dc.BucketPolicy(ttl_days=14.0)),
+    # noncurrent-only Deletes and non-Delete actions bound nothing live
+    ({"softDeletePolicy": {"retentionDurationSeconds": "604800"}, "lifecycle": {"rule": [
+        delete(age=7, isLive=False), delete(age=1, numNewerVersions=2),
+        {"action": {"type": "SetStorageClass", "storageClass": "COLDLINE"}, "condition": {"age": 30}},
+    ]}}, dc.BucketPolicy()),
+])
+def test_bucket_policy(meta, policy):
+    assert dc.bucket_policy(meta) == policy
 
 
 def test_job_usage():
@@ -180,7 +218,10 @@ def fake_gcp(monkeypatch, tmp_path):
     calls = []
     monkeypatch.setattr(dc, "clock", lambda: NOW)
     monkeypatch.setattr(dc, "select_buckets", lambda *a: calls.append(("select_buckets", *a)) or ["bkt-b"])
-    monkeypatch.setattr(dc, "soft_delete_off", lambda *a: calls.append(("soft_delete_off", *a)) or ["bkt-a"])
+    monkeypatch.setattr(dc, "fetch_buckets", lambda *a: calls.append(("fetch_buckets", *a)) or {
+        "bkt-a": {"softDeletePolicy": {"retentionDurationSeconds": "0"}},
+        "bkt-b": {"softDeletePolicy": {"retentionDurationSeconds": "604800"}, "lifecycle": {"rule": [delete(age=7)]}},
+    })
     monkeypatch.setattr(dc, "fetch_series", lambda *a: calls.append(("fetch_series", *a)) or PAGES)
     monkeypatch.setattr(dc, "fetch_jobs", lambda *a: calls.append(("fetch_jobs", *a)) or JOBS)
     prices = tmp_path / "prices.yml"
@@ -190,7 +231,7 @@ def fake_gcp(monkeypatch, tmp_path):
     return calls, args
 
 
-SUMMARY = "We can leave D running for 10d for 26.8→24.7 GB of storage ($10.00→$11.00/mo) and $41.85→$41.85/mo on compute (list-price estimates)."
+SUMMARY = "We can leave D running for 10d for 26.8→33.3 GB of storage ($10.00→$13.00/mo) and $41.85→$41.85/mo on compute (list-price estimates)."
 
 
 def test_cli(fake_gcp):
@@ -201,7 +242,7 @@ def test_cli(fake_gcp):
     assert calls == [
         ("select_buckets", "p", {"deployment": "d"}),
         ("fetch_series", "p", ["bkt-a", "bkt-b"], start, NOW),
-        ("soft_delete_off", "p", ["bkt-a", "bkt-b"]),
+        ("fetch_buckets", ["bkt-a", "bkt-b"]),
         ("fetch_jobs", "p", (), start),
     ]
     # Column padding aside, every line exactly.
@@ -209,14 +250,15 @@ def test_cli(fake_gcp):
         "D · p · 2-day window to 2026-10-23T12:00:00Z · approximate US list prices; estimates, not billed cost",
         "",
         "Storage (Cloud Monitoring `storage/v2/total_bytes`, daily means):",
-        "bucket type class days GB GB/day $/mo",
+        "bucket type class pts GB GB/day $/mo",
         "bkt-a live-object REGIONAL 3 12.9 +1.07 $6.00",
         "bkt-a soft-deleted-object REGIONAL 2 4.3 - $2.00",
         "bkt-b live-object COLDLINE 3 8.6 -2.15 $2.00",
         "bkt-b live-object WEIRD 1 1.1 +0.00 unpriced",
         "now: 26.8 GB (live-object 22.5 GB, soft-deleted-object 4.3 GB), $10.00/mo; live -1.07 GB/day",
-        "10d: 24.7 GB, $11.00/mo",
-        "(soft-deleted bytes held at their current level, except bkt-a (soft delete off: they drain))",
+        "10d: 33.3 GB, $13.00/mo",
+        "bkt-a: 3 daily points; soft delete off: soft-deleted bytes drain",
+        "bkt-b: 3 daily points; lifecycle Delete at 7d: live bytes held flat; soft-deleted bytes held",
         "UNPRICED: 1.1 GB of storage class WEIRD",
         "",
         "Compute (Batch jobs labeled app=disky,deployment=d|d-old, created in the window; VM-h = runDuration × min(taskCount, parallelism)):",
@@ -242,8 +284,11 @@ def test_cli_json(fake_gcp):
     r = CliRunner().invoke(main, [*args, "-j"])
     assert r.exit_code == 0, r.output
     doc = json.loads(r.output)
-    assert (doc["summary"], doc["storage"]["drains"], doc["storage"]["horizons"], doc["compute"]["usd_per_month"]) == (
-        SUMMARY, ["bkt-a"], {"10d": {"bytes": 23 * G, "usd_per_month": 11.0}}, 41.8515625,
+    assert (doc["summary"], doc["storage"]["buckets"], doc["storage"]["horizons"], doc["compute"]["usd_per_month"]) == (
+        SUMMARY,
+        {"bkt-a": bucket(3, dc.BucketPolicy(soft_delete_off=True)), "bkt-b": bucket(3, dc.BucketPolicy(ttl_days=7.0))},
+        {"10d": {"bytes": 31 * G, "usd_per_month": 13.0}},
+        41.8515625,
     )
 
 
