@@ -57,6 +57,7 @@ from typing import Any, ClassVar, Protocol
 
 from click import ParamType
 
+from . import heartbeat as hb
 from .cost_labels import label_batch_spec
 from .maint_runs import Recorder
 from .scan_id import SCAN_ID
@@ -1749,7 +1750,9 @@ class Runner:
             self.check_lease()
         t = monotonic()
         self.log(f"{name}: start")
+        hb.set_stage(name)
         fn()
+        hb.after(name)
         self.timings[name] = round(monotonic() - t, 1)
         if self.check_lease:
             self.check_lease()

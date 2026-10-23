@@ -9,17 +9,21 @@ phase (static-names, path-index: an hour or two between phase boundaries) from a
   `<elapsed> · [<stage> · ]<latest line>[ (<age> ago): two beats, and a minute, old]`, secrets scrubbed (`scrub`). Best-effort: a failed write is
   counted, logged once per `warn_every` failures, and never reaches the step.
 - `run_teed`: `subprocess.run`'s shape (the scan steps' `sh_impl`), its output also fed to a `Tail`.
+- `Liveness` / `start_liveness`: a Batch task's own `[alive] …` stderr line every interval (its stage, RSS, work disk,
+  CPU), and `Progress`: a long loop's rate-limited progress lines (the section at the end).
 
 The record writes themselves (`scan_runs.phase_beat_sql`, `JobRun.heartbeat`) live with the recorder; the run-level
 beat between phases is `scan-run supervise -H` (`JobRun.beat`)."""
 from __future__ import annotations
 
+import os
 import re
+import shutil
 import subprocess
 import sys
 import threading
 import time
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from functools import partial
 from typing import IO
 
@@ -119,7 +123,7 @@ class Tail:
 
     def feed(self, text: str) -> None:
         line = clean_line(text)
-        if not line:
+        if not line or line.startswith(LIVE_TAG):
             return
         with self._lock:
             self._line, self._at = line, self.clock()
@@ -279,3 +283,231 @@ def pump_all(p: subprocess.Popen, tail: Tail | None) -> list[threading.Thread]:
 def join_all(pumps: Sequence[threading.Thread]) -> None:
     for t in pumps:
         t.join(PUMP_JOIN_S)
+
+
+# ── A process's liveness line and its loops' progress ──────────────────────
+#
+# A dt-cloud process running as a Batch task (`$BATCH_TASK_INDEX` set; `$DT_LIVENESS` `1` forces it, `0` disables it)
+# prints `LIVE_TAG …` to stderr every `$DT_HEARTBEAT_S` (`Liveness`, started on import by `dt_cloud/__init__.py`): the
+# current stage (`set_stage`: `append_runner.Runner.stage`, the builds' and folds' `step`/`done` markers, every
+# `Progress`), how long it has been in it, RSS (and peak), the work disk's used bytes and CPU%. Stderr only: no output
+# byte changes. A long loop's `Progress` logs `label k/n …` at most every `PROGRESS_S` (and a final line).
+
+#: A liveness line's first token; a `Tail` skips such lines, so a phase's note keeps the command's own latest line.
+LIVE_TAG = "[alive]"
+LIVENESS_ENV = "DT_LIVENESS"
+#: Set in the environment by the process that started a `Liveness`: its children (a spawn pool's workers, a nested
+#: `dt-cloud`) don't start their own, so a pool doesn't print one line per worker per interval.
+LIVENESS_PID_ENV = "DT_LIVENESS_PID"
+#: The work disk whose used bytes the liveness line shows: `$DT_WORK_DISK`, else Batch's local SSD (`/stage`, where
+#: `append_runner.job_spec` mounts it) when there is one, else the temp dir.
+WORK_DISK_ENV = "DT_WORK_DISK"
+BATCH_STAGE_DIR = "/stage"
+#: Seconds between a loop's progress lines (`Progress`).
+PROGRESS_S = 60.0
+GiB = 1 << 30
+
+_stage_lock = threading.Lock()
+_stage: dict = {"label": None, "detail": None, "since": time.monotonic()}
+
+
+def set_stage(label: str | None, clock: Callable[[], float] = time.monotonic) -> None:
+    """The process's current stage (what its liveness line names), from now; clears the detail."""
+    with _stage_lock:
+        _stage.update(label=label, detail=None, since=clock())
+
+
+def after(name: str, clock: Callable[[], float] = time.monotonic) -> None:
+    """The stage once step `name` ended (a build's `step`/`done` markers, which log a step at its end): `after <name>`,
+    so a silent stretch reads as the time since the last step logged."""
+    set_stage(f"after {name}", clock)
+
+
+def set_detail(detail: str | None) -> None:
+    """The current stage's detail (a loop's `k/n`), its start time kept."""
+    with _stage_lock:
+        _stage["detail"] = detail
+
+
+def current_stage() -> tuple[str | None, str | None, float]:
+    """(label, detail, since)."""
+    with _stage_lock:
+        return _stage["label"], _stage["detail"], _stage["since"]
+
+
+def fmt_bytes(n: float) -> str:
+    """`512 B`, `3.0 MiB`, `1.25 GiB`, `2.10 TiB`."""
+    for unit, k in (("TiB", 1 << 40), ("GiB", GiB), ("MiB", 1 << 20), ("KiB", 1 << 10)):
+        if n >= k:
+            return f"{n / k:.2f} {unit}" if unit in ("TiB", "GiB") else f"{n / k:.1f} {unit}"
+    return f"{int(n)} B"
+
+
+def rss_bytes() -> int | None:
+    """This process's current RSS (Linux `/proc/self/statm`; None elsewhere)."""
+    try:
+        with open("/proc/self/statm") as f:
+            return int(f.read().split()[1]) * os.sysconf("SC_PAGE_SIZE")
+    except (OSError, ValueError, IndexError):
+        return None
+
+
+def rss_peak_bytes() -> int:
+    """This process's peak RSS so far (`ru_maxrss`: bytes on macOS, KiB on Linux)."""
+    import resource
+
+    m = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    return m if sys.platform == "darwin" else m << 10
+
+
+def work_disk(env: Mapping[str, str]) -> str:
+    if v := (env.get(WORK_DISK_ENV) or "").strip():
+        return v
+    if os.path.isdir(BATCH_STAGE_DIR):
+        return BATCH_STAGE_DIR
+    import tempfile
+
+    return tempfile.gettempdir()
+
+
+def disk_used(path: str) -> int | None:
+    try:
+        return shutil.disk_usage(path).used
+    except OSError:
+        return None
+
+
+class Liveness(Heartbeat):
+    """`Heartbeat`'s thread writing `LIVE_TAG <elapsed> · <stage>[ <detail>] (<in stage>) · RSS … · <disk> … · CPU …%`
+    (`write`: a stderr line). The probes (`rss() -> (current | None, peak)`, `disk() -> used | None`, `cpu()`: the
+    process's CPU seconds, all threads) and `stage()` are parameters, so a test fakes them; CPU% is over the interval
+    since the previous line (all threads: past 100% on a busy multi-core sort)."""
+
+    def __init__(self, write: Callable[[str], None], interval: float, *, disk_path: str, clock: Callable[[], float] = time.monotonic,
+                 wait: Callable[[float], bool] | None = None,
+                 stage: Callable[[], tuple[str | None, str | None, float]] = current_stage,
+                 rss: Callable[[], tuple[int | None, int]] = lambda: (rss_bytes(), rss_peak_bytes()),
+                 disk: Callable[[], int | None] | None = None,
+                 cpu: Callable[[], float] = time.process_time):
+        super().__init__(write, interval, clock=clock, wait=wait, log=err, label="liveness")
+        self.disk_path, self.stage, self.rss, self.cpu = disk_path, stage, rss, cpu
+        self.disk = disk or (lambda: disk_used(disk_path))
+        self._last = (clock(), cpu())
+
+    def start(self) -> Liveness:
+        self._last = (self.clock(), self.cpu())
+        super().start()
+        return self
+
+    def note(self) -> str:
+        now, cpu = self.clock(), self.cpu()
+        (t0, c0), self._last = self._last, (now, cpu)
+        label, detail, since = self.stage()
+        stage = "-" if label is None else clip(label, STAGE_CHARS) + (f" {detail}" if detail else "")
+        parts = [LIVE_TAG, fmt_secs(now - self.started), "·", f"{stage} ({fmt_secs(now - since)})"]
+        cur, peak = self.rss()
+        parts += ["·", f"RSS {fmt_bytes(cur)} (peak {fmt_bytes(peak)})" if cur is not None else f"RSS peak {fmt_bytes(peak)}"]
+        used = self.disk()
+        if used is not None:
+            parts += ["·", f"{self.disk_path} {fmt_bytes(used)} used"]
+        parts += ["·", f"CPU {100 * (cpu - c0) / (now - t0):.0f}%" if now > t0 else "CPU -"]
+        return " ".join(parts)
+
+
+_liveness: Liveness | None = None
+
+
+def start_liveness(env: Mapping[str, str] | None = None) -> Liveness | None:
+    """This process's `Liveness`, started once: when it runs as a Batch task (`$BATCH_TASK_INDEX`) or `$DT_LIVENESS` is
+    on, unless `$DT_LIVENESS` is off, the heartbeat is off (`$DT_HEARTBEAT_S=0`), or a parent process already beats
+    (`$DT_LIVENESS_PID`). Never raises: liveness never fails a job."""
+    global _liveness
+    try:
+        env = os.environ if env is None else env
+        if _liveness is not None:
+            return _liveness
+        flag = (env.get(LIVENESS_ENV) or "").strip().lower()
+        if flag in ("0", "off", "false", "no") or not (flag in ("1", "on", "true", "yes") or env.get("BATCH_TASK_INDEX") is not None):
+            return None
+        if (pid := env.get(LIVENESS_PID_ENV)) and pid != str(os.getpid()):
+            return None
+        interval = interval_of(env)
+        if interval is None:
+            return None
+        os.environ[LIVENESS_PID_ENV] = str(os.getpid())
+        _liveness = Liveness(lambda s: print(s, file=sys.stderr, flush=True), interval, disk_path=work_disk(env)).start()
+        return _liveness
+    except Exception as e:  # noqa: BLE001 — liveness never fails a job
+        err(f"liveness: not started: {type(e).__name__}: {e}")
+        return None
+
+
+class Progress:
+    """A long loop's progress lines: `<label> k/n[ <unit>][, rows][, bytes of total] in <elapsed> (≈<eta> left)`, at
+    most one per `every_s` (`PROGRESS_S`), then the last (`done()`, once the loop has run that long). `total` counts items (`tick(n)`),
+    `total_bytes` bytes (`tick(nbytes=)`), `total_rows` rows (`tick(rows=)`, an estimate): the ETA comes from the first
+    known fraction of bytes, items, rows. Thread-safe (a pool's workers tick it). Sets the process's stage to `label`
+    and its detail to `k/n` (or the rows so far): what the liveness line names."""
+
+    def __init__(self, label: str, total: int | None = None, *, total_bytes: int | None = None, total_rows: int | None = None,
+                 unit: str = "", log: Callable[[str], None] = err, every_s: float = PROGRESS_S,
+                 clock: Callable[[], float] = time.monotonic, stage: bool = True):
+        self.label, self.total, self.total_bytes, self.total_rows, self.unit = label, total, total_bytes, total_rows, unit
+        self.log, self.every_s, self.clock, self.stage = log, every_s, clock, stage
+        self.t0 = self.last = clock()
+        self.n = self.rows = self.nbytes = 0
+        self._lock = threading.Lock()
+        if stage:
+            set_stage(label, clock)
+            set_detail(self._detail())
+
+    def _detail(self) -> str | None:
+        return f"{self.n}/{self.total}" if self.total is not None else f"{self.rows:,} rows" if self.rows else None
+
+    def _frac(self) -> float | None:
+        for done, tot in ((self.nbytes, self.total_bytes), (self.n, self.total), (self.rows, self.total_rows)):
+            if tot:
+                return done / tot
+        return None
+
+    def line(self, now: float, final: bool = False) -> str:
+        s = now - self.t0
+        head = f"{self.label} {self.n}/{self.total}" if self.total is not None else self.label
+        bits = [head + (f" {self.unit}" if self.unit and self.total is not None else "")]
+        if self.rows or self.total_rows:
+            bits.append(f"{self.rows:,}" + (f" of ≈{self.total_rows:,}" if self.total_rows else "") + " rows")
+        if self.nbytes or self.total_bytes:
+            bits.append(fmt_bytes(self.nbytes) + (f" of {fmt_bytes(self.total_bytes)}" if self.total_bytes else ""))
+        out = ", ".join(bits) + f" in {fmt_secs(s)}"
+        if final:
+            return out + " (done)"
+        f = self._frac()
+        return out + (f" (≈{fmt_secs(s / f * (1 - f))} left)" if f and f < 1 else "")
+
+    def tick(self, n: int = 1, *, rows: int = 0, nbytes: int = 0) -> None:
+        with self._lock:
+            self.n, self.rows, self.nbytes = self.n + n, self.rows + rows, self.nbytes + nbytes
+            if self.stage:
+                set_detail(self._detail())
+            now = self.clock()
+            if now - self.last < self.every_s:
+                return
+            self.last = now
+            msg = self.line(now)
+        self.log(msg)
+
+    def batches(self, it: Iterable) -> Iterator:
+        """`it`'s items (Arrow batches / tables) passed through, each ticking its rows."""
+        for b in it:
+            self.tick(0, rows=b.num_rows)
+            yield b
+
+    def done(self) -> None:
+        """The final line, when the loop ran for `every_s` or more (a short one stays quiet: it needed no progress)."""
+        with self._lock:
+            now = self.clock()
+            msg = self.line(now, final=True) if now - self.t0 >= self.every_s else None
+        if msg is not None:
+            self.log(msg)
+        if self.stage:
+            after(self.label, self.clock)

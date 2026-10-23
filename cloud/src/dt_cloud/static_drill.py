@@ -24,6 +24,7 @@ import pyarrow.parquet as pq
 from pyarrow.compute import and_, greater_equal, less
 from click import Choice, group, option
 
+from . import heartbeat
 from . import static_names as sn
 from . import static_roots as sr
 from .checkpoint import Checkpoint, code_version, Parts
@@ -1700,11 +1701,13 @@ def write_kind(con, out: Path, kind: str, roots: str = "dr", rollups: str = "rup
                                                ("rollups", rollups, "q, dir, kind, child, vf", sr.ROLLUP_SCHEMA, "dir", ["q", "dir", "child"])):
         cols = ", ".join(schema.names)
         idx, rows, nbytes = [], 0, 0
+        heartbeat.set_stage(f"drill/write/{kind}/{sub}: cut")
         if chunks is not None and sub in chunks:
             counts, spans = _sorted_chunks(con, chunks[sub])
             cuts = _cut_counts(counts, file_rows)
         else:
             cuts = _cut(con, table, file_rows)
+        prog = heartbeat.Progress(f"drill/write/{kind}/{sub}", len(cuts), unit="files")
         for i, (lo, hi) in enumerate(cuts):
             name = f"{kind}/{sub}/r{i:04d}.parquet"
             if chunks is not None and sub in chunks:
@@ -1712,10 +1715,12 @@ def write_kind(con, out: Path, kind: str, roots: str = "dr", rollups: str = "rup
             else:
                 where = " AND ".join(x for x in (f"q >= {q(lo)}" if lo is not None else "", f"q < {q(hi)}" if hi is not None else "") if x) or "true"
                 batches = _batches(con, f"SELECT {cols} FROM {table} WHERE {where} ORDER BY {order}")
-            n, t = sr.write_indexed(batches, out / name, schema, key, name, dic, rg)
+            n, t = sr.write_indexed(prog.batches(batches), out / name, schema, key, name, dic, rg)
             rows += n
             nbytes += (out / name).stat().st_size
             idx.append(t)
+            prog.tick(nbytes=(out / name).stat().st_size)
+        prog.done()
         t = pa.concat_tables(idx) if idx else sr.GROUP_INDEX_SCHEMA.empty_table()
         top = sr.write_index_levels(t, out / f"{kind}-{sub}-index.parquet")
         pq.write_table(top, out / f"{kind}-{sub}-index.top.parquet", compression=CODEC)

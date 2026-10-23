@@ -31,6 +31,7 @@ from time import monotonic
 import pyarrow.parquet as pq
 from click import IntRange, argument, command, option
 
+from . import heartbeat as hb
 from . import interval_compact as ic
 from . import interval_store as ist
 from . import static_names as sn
@@ -105,14 +106,19 @@ def listing_files(root: Store, template: str, scan: str, local: Path, keys: list
         return [str(Path(root.root) / k) for k in keys]
     from concurrent.futures import ThreadPoolExecutor
 
+    prog = hb.Progress(f"backfill: {scan}: copy", len(keys), unit="shards")
+
     def one(k: str) -> str:
         dst = local / k
         if not (dst.is_file() and dst.stat().st_size == root.size(k)):
             root.get(k, dst)
         watch.beat()
+        prog.tick(nbytes=dst.stat().st_size)
         return str(dst)
     with ThreadPoolExecutor(IO_WORKERS) as ex:
-        return list(ex.map(one, keys))
+        out = list(ex.map(one, keys))
+    prog.done()
+    return out
 
 
 def _has_generation(root: Store, key: str) -> bool:
@@ -171,6 +177,7 @@ def gen_index(con, root: Store, template: str, scans: list[dict], work: Path, *,
                 skipped.append(s["id"])
                 continue
             t0 = monotonic()
+            hb.set_stage(f"backfill: {s['id']}: fold")
             src = prepare_listing(con, (files,))  # one source: per-file sources would keep each bucket's first shard only
             g = ist.GENERATION
             n = con.execute(f"""INSERT INTO lg SELECT c.path, c.{g}, {int(s['ts'])} FROM (
@@ -183,6 +190,7 @@ def gen_index(con, root: Store, template: str, scans: list[dict], work: Path, *,
     out = work / GEN_INDEX
     t0 = monotonic()
     err(f"backfill: writing {GEN_INDEX} ({len(read)} scans folded; sorting)")
+    hb.set_stage(f"backfill: write {GEN_INDEX}")
     con.execute(f"""COPY (SELECT len(string_split(path, '/'))::UTINYINT AS depth, path, generation, first_ts
         FROM lg ORDER BY depth, path, first_ts) TO {q(str(out))} (FORMAT PARQUET, ROW_GROUP_SIZE 65536)""")
     err(f"backfill: {GEN_INDEX} written in {monotonic() - t0:.0f}s")

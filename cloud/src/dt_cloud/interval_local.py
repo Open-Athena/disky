@@ -46,6 +46,7 @@ from time import monotonic
 from click import IntRange, command, option
 
 from . import append_runner as ar
+from . import heartbeat as hb
 from . import interval_append as ia
 from . import interval_compact as ic
 from . import interval_store as ist
@@ -95,6 +96,7 @@ def build_gen(scans: dict, mount: str, gen_dir: Path, work: Path, *, gen: str, k
         times[stage] = round(monotonic() - t, 1)
         peaks[stage] = {"disk_gb": disk.take(), "rss_gb": rss_peak_gb()}
         err(f"build {gen}: {stage} in {times[stage]}s (work disk peak {peaks[stage]['disk_gb']} GiB, RSS peak {peaks[stage]['rss_gb']} GiB)")
+        hb.after(stage)
         return monotonic()
 
     con = sn.connect(threads, mem, work / "duckdb")

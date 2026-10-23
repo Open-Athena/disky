@@ -34,6 +34,7 @@ import pyarrow.parquet as pq
 from click import IntRange, command, option
 
 from . import append_runner as ar
+from . import heartbeat as hb
 from . import static_anchors as an
 from . import static_append as sa
 from . import static_catalog as sc
@@ -243,6 +244,7 @@ def fold_drill(con, tiers: list[sd.Tier], out: Path, work: Path, *, R: int, K: i
         con.execute(f"DROP TABLE ta{i}; DROP TABLE tc{i}")
     t = step("drill/fold/canonical-roots", t, lcan=n_long, groups=long_groups)
     short_files = [tr.files("short", "roots") for tr in tiers]
+    hb.set_stage("drill/fold/short-roots: count")
     counts = con.execute(f"""SELECT q, sum(n)::BIGINT FROM ({' UNION ALL '.join(f'SELECT q, count(*) AS n FROM ({_roots_sql(fs)}) GROUP BY q' for fs in short_files)})
         GROUP BY q ORDER BY q""").fetchall()
     bounds = sl.q_bounds(counts, chunk_rows)
@@ -316,6 +318,7 @@ def fold_gen(gen_dir: Path, out: Path, work: Path, *, gen: str, new_gen: str, ru
         times[part] = round(monotonic() - t, 1)
         peaks[part] = {"disk_gb": disk.take(), "rss_gb": sl.rss_peak_gb()}
         log(f"compact {gen} → {new_gen}: {part} in {times[part]}s (work disk peak {peaks[part]['disk_gb']} GiB, RSS peak {peaks[part]['rss_gb']} GiB)")
+        hb.after(f"compact/{part}")
         if progress is not None:
             progress("; ".join(f"{p} {s}s (disk {peaks[p]['disk_gb']} GiB, RSS {peaks[p]['rss_gb']} GiB)" for p, s in times.items()))
         return monotonic()
@@ -324,6 +327,7 @@ def fold_gen(gen_dir: Path, out: Path, work: Path, *, gen: str, new_gen: str, ru
         steps[name] = round(monotonic() - t, 1)
         n = "".join(f", {k} {v:,}" for k, v in counts.items())
         log(f"compact {gen} → {new_gen}: {name} in {steps[name]}s (work disk peak {disk.take_step()} GiB, RSS peak {sl.rss_peak_gb()} GiB{n})")
+        hb.after(name)
         return monotonic()
 
     con = sn.connect(threads, mem, work / "duckdb")
