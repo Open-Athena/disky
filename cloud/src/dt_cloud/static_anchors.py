@@ -33,7 +33,7 @@ from __future__ import annotations
 
 import json
 import sys
-from bisect import bisect_right
+from bisect import bisect_left, bisect_right
 from dataclasses import dataclass, field
 from functools import partial
 from pathlib import Path
@@ -532,6 +532,34 @@ def _child(path: str, dir_: str) -> str:
 
 #: Keys per prior-probe query (`probe_prior_rows`): one shard read per batch, so fewer is slower, not leaner.
 PROBE_BATCH_KEYS = 1 << 16
+#: A probe batch's keys are split where the shard rows between two of them pass this (`key_clusters`).
+PROBE_GAP_ROWS = 1 << 20
+
+
+def key_clusters(con, file: str, keys: list[str], gap_rows: int = PROBE_GAP_ROWS, batch_keys: int = PROBE_BATCH_KEYS) -> list[list[str]]:
+    """`keys` (sorted, all in `file`) in runs read as one `s` range each: a run ends where the rows of `file`'s groups
+    strictly between its last key's and the next key's would pass `gap_rows`, or at `batch_keys` keys. A range from a
+    batch's first key to its last reads every key between: cw's 10-21T0602 `end` probed 483 keys spread over its
+    shards, ~45M rows read per query to keep a few million. Without `s` statistics, `batch_keys` alone splits."""
+    groups = con.execute(f"""SELECT row_group_num_rows, stats_min_value, stats_max_value FROM parquet_metadata({q(file)})
+        WHERE path_in_schema = 's' ORDER BY row_group_id""").fetchall()
+    if not groups or any(lo is None or hi is None for _, lo, hi in groups):
+        return [keys[i:i + batch_keys] for i in range(0, len(keys), batch_keys)]
+    los, his = [lo for _, lo, _ in groups], [hi for _, _, hi in groups]
+    cum = [0]
+    for n, _, _ in groups:
+        cum.append(cum[-1] + n)
+    runs: list[list[str]] = []
+    end = -1  # the last group the current run's keys can be in
+    for k in keys:
+        first, last = bisect_left(his, k), bisect_right(los, k) - 1
+        if runs and len(runs[-1]) < batch_keys and cum[max(first, end + 1)] - cum[end + 1] <= gap_rows:
+            runs[-1].append(k)
+            end = max(end, last)
+        else:
+            runs.append([k])
+            end = last
+    return runs
 
 
 def probe_prior_rows(
@@ -570,8 +598,7 @@ def probe_prior_rows(
             if file := tier.shard_file(mode, key):
                 by_file.setdefault(file, []).append(key)
         for file, file_keys in by_file.items():
-            for offset in range(0, len(file_keys), batch_keys):
-                selected = file_keys[offset:offset + batch_keys]
+            for selected in key_clusters(con, file, file_keys, batch_keys=batch_keys):
                 values = ", ".join(f"({q(k)})" for k in selected)
                 con.execute(f"CREATE OR REPLACE TABLE pkeys AS SELECT * FROM (VALUES {values}) AS t(k)")
                 where = f"s >= {q(selected[0])} AND s <= {q(selected[-1])}"
@@ -604,8 +631,7 @@ def probe_start_rows(con, prior: list, keys: list[str], batch_keys: int = PROBE_
             if file := tier.shard_file("exact", key):
                 by_file.setdefault(file, []).append(key)
         for file, file_keys in by_file.items():
-            for offset in range(0, len(file_keys), batch_keys):
-                selected = file_keys[offset:offset + batch_keys]
+            for selected in key_clusters(con, file, file_keys, batch_keys=batch_keys):
                 values = ", ".join(f"({q(k)})" for k in selected)
                 con.execute(f"CREATE OR REPLACE TABLE pkeys AS SELECT * FROM (VALUES {values}) AS t(k)")
                 where = f"s >= {q(selected[0])} AND s < {q(selected[-1] + chr(0x10FFFF))}"
