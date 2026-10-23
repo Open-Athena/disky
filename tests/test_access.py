@@ -626,6 +626,49 @@ def test_r2_state_aggs_names_each_hours_current_aggregate():
     ]
 
 
+def test_r2_state_aggs_reads_mixed_hourly_and_minute_windows_with_as_of_cut():
+    from datetime import datetime, timezone
+
+    from disk_tree.access.parsers.r2 import state_aggs
+
+    state = _r2_state(b={'frozen': {'2026-10-10T23:55': 'old-window'}, 'hours': {
+        '2026-10-11T00': {'agg': 'hour'},
+        '2026-10-11T01:00': {'agg': 'first-window'},
+        '2026-10-11T01:02': {'agg': 'second-window'},
+        '2026-10-11T01:05': {'agg': 'third-window'},
+    }})
+    assert state_aggs(state) == ['old-window', 'hour', 'first-window', 'second-window', 'third-window']
+    assert state_aggs(state, before=datetime(2026, 10, 11, 1, 2, tzinfo=timezone.utc)) == ['old-window', 'hour', 'first-window']
+
+
+def test_r2_parse_sums_disjoint_hourly_and_adaptive_windows_once(tmp_path: Path):
+    from json import dumps
+
+    from disk_tree.access.parsers.r2 import parse
+
+    files = []
+    for i, (start, end, count, last) in enumerate([
+        ('07:00', '08:00', 2, '07:59'),
+        ('08:00', '08:02', 4, '08:01'),
+        ('08:02', '08:05', 3, '08:04'),
+    ]):
+        path = tmp_path / f'{i}.json'
+        start_iso = f'2026-10-12T{start}:00.000Z'
+        path.write_text(dumps({
+            'schema_version': 4, 'bucket': 'b', 'hour': start_iso,
+            **({'window_end': f'2026-10-12T{end}:00.000Z'} if i else {}),
+            'sampling': {'capture': 'unsampled'},
+            'rows': [['data/a', 'HeadObject', count, _ms(start_iso), _ms(f'2026-10-12T{last}:00Z')]],
+        }) + '\n')
+        files.append(str(path))
+    con = duckdb.connect()
+    rel = parse(files, con=con)
+    assert rel.order('hour').project("strftime(hour, '%H:%M'), n_ops").fetchall() == [('07:00', 2), ('08:00', 4), ('08:02', 3)]
+    assert rel.aggregate('sum(n_ops), count(*)').fetchone() == (9, 3)
+    cut = parse(files, con=con, as_of='2026-10-12T08:02:00Z')
+    assert cut.order('hour').project("strftime(hour, '%H:%M'), n_ops").fetchall() == [('07:00', 2), ('08:00', 4)]
+
+
 @pytest.mark.parametrize('state, message', [
     ({'schema_version': 1, 'buckets': {}}, 'r2 state: unknown schema_version 1'),
     (_r2_state(b={'hours': {}, 'legacy_days': {'2026-10-10': 'agg/b/2026-10-10/r.json'}}),

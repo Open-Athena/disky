@@ -212,7 +212,7 @@ def r2_client() -> "S3Client":
 
     endpoint = os.environ.get("R2_ENDPOINT")
     if not endpoint:
-        raise SystemExit("publish-r2: need $R2_ENDPOINT (https://<account id>.r2.cloudflarestorage.com)")
+        raise SystemExit("R2: need $R2_ENDPOINT (https://<account id>.r2.cloudflarestorage.com)")
     return boto3.client(
         "s3",
         endpoint_url=endpoint,
@@ -226,7 +226,7 @@ def r2_client() -> "S3Client":
 def r2_bucket() -> str:
     b = os.environ.get("R2_BUCKET")
     if not b:
-        raise SystemExit("publish-r2: need $R2_BUCKET (the serving bucket)")
+        raise SystemExit("R2: need $R2_BUCKET (the serving bucket)")
     return b
 
 

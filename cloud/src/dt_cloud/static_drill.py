@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import shutil
 from collections import Counter, OrderedDict
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from time import monotonic
 
@@ -56,6 +57,9 @@ SETTLE_CHUNK_ROWS = 1 << 22
 #: Concurrent ranged reads when the builder prefetches the groups its loops will read (`build -j`); ≤ 1: no prefetch, the
 #: loops fetch each miss in turn.
 FETCH_THREADS = 64
+#: Files `write_kind` writes at once from sorted chunks (each a pure function of its `q` range; the same bytes at any count):
+#: the carry was write-bound after its reads were (gcs's 10-22 L3 carry: long 41–53 min, short 18).
+WRITE_THREADS = 8
 #: Prefetched raw bytes held at most, as a fraction of the machine's RAM (`build -C` overrides): beyond it, the loops run in
 #: windows (each prefetched in turn) and the byte cache evicts least recently used.
 CACHE_RAM_FRACTION = 1 / 8
@@ -1689,13 +1693,20 @@ def _chunk_batches(spans: list[tuple[Path, str, str]], names: list[str], lo: str
                 yield b
 
 
+def _write_chunk_file(spans, schema: pa.Schema, lo: str | None, hi: str | None, out: Path, name: str, key: str, dic: list[str],
+                      rg: int | None) -> tuple[int, pa.Table, int]:
+    """One `write_kind` file from sorted chunks: rows, its group index, bytes."""
+    n, t = sr.write_indexed(_chunk_batches(spans, schema.names, lo, hi), out / name, schema, key, name, dic, rg)
+    return n, t, (out / name).stat().st_size
+
+
 def write_kind(con, out: Path, kind: str, roots: str = "dr", rollups: str = "rup", file_rows: int = FILE_ROWS, rg: int | None = None,
-               chunks: dict[str, list[Path]] | None = None) -> dict:
+               chunks: dict[str, list[Path]] | None = None, threads: int = WRITE_THREADS) -> dict:
     """Tables `roots` (`ROOT_COLS`) and `rollups` (`ROLLUP_COLS`) → `out/<kind>/{roots,rollups}/r####.parquet` (sorted, `ROOT_RG`-row
     groups, files cut at `q` boundaries) and the two-level indexes `out/<kind>-{roots,rollups}-index{,.top}.parquet`.
     `chunks` `{sub: files}`: a sub's rows as files already in its order, `q`-disjoint and in `q` order (`merge_tiers`' folded
-    ranges), streamed in turn instead of sorted again (gcs's 10-22 L3 carry: 69 of its drill's 185 min in this sort); the
-    same bytes."""
+    ranges), streamed in turn instead of sorted again (gcs's 10-22 L3 carry: 69 of its drill's 185 min in this sort), `threads`
+    files at a time (each reads only its own `q` range of the chunks); the same bytes."""
     doc = {}
     for sub, table, order, schema, key, dic in (("roots", roots, "q, path, usr, vf", sr.ROOT_SCHEMA, "path", ["q", "usr"]),
                                                ("rollups", rollups, "q, dir, kind, child, vf", sr.ROLLUP_SCHEMA, "dir", ["q", "dir", "child"])):
@@ -1708,18 +1719,24 @@ def write_kind(con, out: Path, kind: str, roots: str = "dr", rollups: str = "rup
         else:
             cuts = _cut(con, table, file_rows)
         prog = heartbeat.Progress(f"drill/write/{kind}/{sub}", len(cuts), unit="files")
-        for i, (lo, hi) in enumerate(cuts):
-            name = f"{kind}/{sub}/r{i:04d}.parquet"
-            if chunks is not None and sub in chunks:
-                batches = _chunk_batches(spans, schema.names, lo, hi)
-            else:
+        names = [f"{kind}/{sub}/r{i:04d}.parquet" for i in range(len(cuts))]
+        if chunks is not None and sub in chunks:
+            with ThreadPoolExecutor(max(1, min(threads, len(cuts)))) as pool:
+                futs = [pool.submit(_write_chunk_file, spans, schema, lo, hi, out, name, key, dic, rg) for (lo, hi), name in zip(cuts, names)]
+                for f in futs:
+                    n, t, size = f.result()
+                    rows, nbytes = rows + n, nbytes + size
+                    idx.append(t)
+                    prog.tick(rows=n, nbytes=size)
+        else:
+            for (lo, hi), name in zip(cuts, names):
                 where = " AND ".join(x for x in (f"q >= {q(lo)}" if lo is not None else "", f"q < {q(hi)}" if hi is not None else "") if x) or "true"
                 batches = _batches(con, f"SELECT {cols} FROM {table} WHERE {where} ORDER BY {order}")
-            n, t = sr.write_indexed(prog.batches(batches), out / name, schema, key, name, dic, rg)
-            rows += n
-            nbytes += (out / name).stat().st_size
-            idx.append(t)
-            prog.tick(nbytes=(out / name).stat().st_size)
+                n, t = sr.write_indexed(prog.batches(batches), out / name, schema, key, name, dic, rg)
+                rows += n
+                nbytes += (out / name).stat().st_size
+                idx.append(t)
+                prog.tick(nbytes=(out / name).stat().st_size)
         prog.done()
         t = pa.concat_tables(idx) if idx else sr.GROUP_INDEX_SCHEMA.empty_table()
         top = sr.write_index_levels(t, out / f"{kind}-{sub}-index.parquet")

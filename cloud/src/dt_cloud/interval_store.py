@@ -1084,8 +1084,9 @@ R2_SERVED = ("scans.json", "served/path.", "served/bysize.", "served/reads.", "s
 @option("-w", "--workers", default=8, type=int, help="Parallel copies")
 @option("-P", "--profile", help="Deployment profile JSON (default $INTERVAL_STORE_PROFILE)")
 def r2_copy_cmd(bucket, profile, gen, mount, dry_run, workers) -> None:
-    """Copy the generation's served files GCS → R2 under the same keys (`static-names r2-copy`'s streaming
-    copy: objects already there with the same size and md5 are skipped). R2 via `R2_ENDPOINT`,
+    """Copy the generation's files the Worker reads (`R2_SERVED`: `scans.json` and the served sorts; not
+    `served/stats.json` or `ranges.json`, which only the jobs read, from GCS) GCS → R2 under the same keys
+    (`static-names r2-copy`'s streaming copy: objects already there with the same size and md5 are skipped). R2 via `R2_ENDPOINT`,
     `R2_BUCKET` and AWS_* keys. A no-op when the store is the serving R2 bucket itself."""
     from .append_runner import r2_copy, r2_objects
     from .blobstore import gs_bucket, serves
