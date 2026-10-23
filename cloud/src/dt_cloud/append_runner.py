@@ -2439,7 +2439,7 @@ def compact_options(fn):
         option("-C", "--compact", "policy", type=PolicyType(), default=str(COMPACT_LEVEL), help=POLICY_HELP),
         option("-F", "--read-from", type=Choice(READ_FROM), default="gcs", help="Read the generation from the data bucket's mount (gcs) or the R2 copy (r2, mirrored locally; the job's R2 env)"),
         option("-G", "--grace-s", default=GRACE_S, type=int, help=f"Keep a compacted predecessor this many seconds (default {GRACE_S})"),
-        option("-j", "--jobs", default=1, type=int, help="Key ranges / sorts folded at a time (the interval store's fold)"),
+        option("-j", "--jobs", default=1, type=int, help="Folded at a time: the interval store's key ranges / sorts; the static store's drill-fold chunks"),
         option("-K", "--compact-now", "force", is_flag=True, help="Compact whatever the policy says (when the generation has runs)"),
         option("-m", "--mount", required=True, help="Local mount of the data bucket (the fold reads the generation from it)"),
         option("-M", "--mem", default="100GB", help="DuckDB memory limit"),
