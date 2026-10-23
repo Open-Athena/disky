@@ -358,6 +358,73 @@ def each(con, fn, items: list, jobs: int = 1) -> list:
         return [f.result() for f in futures]
 
 
+_UNITS = {"b": 1, "bytes": 1, "kb": 10**3, "mb": 10**6, "gb": 10**9, "tb": 10**12, "kib": 1 << 10, "mib": 1 << 20, "gib": 1 << 30,
+          "tib": 1 << 40}
+
+
+def mem_bytes(text: str) -> int:
+    """A DuckDB memory size (`'4GB'`, `current_setting('memory_limit')`'s `'3.7 GiB'`) in bytes."""
+    m = re.fullmatch(r"\s*([0-9.]+)\s*([A-Za-z]*)\s*", text)
+    if not m or m.group(2).lower() not in _UNITS:
+        raise ValueError(f"a memory size: {text!r}")
+    return int(float(m.group(1)) * _UNITS[m.group(2).lower()])
+
+
+def pool_jobs(con, tasks: int, per: int) -> int:
+    """Processes for `tasks` independent tasks over `con`'s threads, `per` DuckDB threads each (at least 1, at most
+    `tasks`)."""
+    threads = int(con.execute("SELECT current_setting('threads')").fetchone()[0])
+    return max(1, min(tasks, threads // max(1, per)))
+
+
+class ConPool:
+    """`jobs` spawned processes, each task on a DuckDB database of its own (`connect(threads, mem, tmp)`: `con`'s threads
+    and memory limit split `jobs` + 1 ways), `con`'s own limit lowered to the remaining share meanwhile (restored on
+    exit; a database holding more than the share keeps its limit, logged). `jobs` 1: an inline pool, `con` untouched (the
+    tasks then run in this process on databases of their own, as in the pool)."""
+
+    def __init__(self, con, jobs: int, label: str):
+        self.con, self.jobs, self.label = con, jobs, label
+        self.threads = int(con.execute("SELECT current_setting('threads')").fetchone()[0])
+        self.was = con.execute("SELECT current_setting('memory_limit')").fetchone()[0]
+        share = max(mem_bytes(self.was) // (jobs + 1), 1 << 30) if jobs > 1 else mem_bytes(self.was)
+        self.mem = f"{share // (1 << 20)}MiB"
+        self.task_threads = max(1, self.threads // jobs)
+        self.lowered = False
+
+    def __enter__(self):
+        from concurrent.futures import ProcessPoolExecutor
+        from multiprocessing import get_context
+
+        if self.jobs == 1:
+            from .static_append import _Inline
+
+            self.ex = _Inline()
+            return self
+        try:
+            self.con.execute(f"SET memory_limit='{self.mem}'")
+            self.lowered = True
+        except Exception as e:  # noqa: BLE001 — legitimate: a database holding more than its share can't shrink; it keeps its limit
+            err(f"{self.label}: memory limit {self.was} kept ({type(e).__name__}: {e})")
+        self.ex = ProcessPoolExecutor(self.jobs, mp_context=get_context("spawn"), initializer=_pool_init)
+        return self
+
+    def submit(self, fn, *args):
+        return self.ex.submit(fn, *args)
+
+    def __exit__(self, *exc) -> None:
+        try:
+            if self.jobs > 1:
+                self.ex.shutdown(wait=True, cancel_futures=exc[0] is not None)
+        finally:
+            if self.lowered:
+                self.con.execute(f"SET memory_limit='{mem_bytes(self.was) // (1 << 20)}MiB'")
+
+
+def _pool_init() -> None:
+    pa.set_cpu_count(1)
+
+
 def write_sorted(batches: Iterable[pa.RecordBatch], out: Path, schema: pa.Schema, rg_rows: int,
                  on_group=None, dictionary: list[str] | bool = False) -> int:
     """Write already-ordered batches as exact `rg_rows`-row groups (the last may be short), so the file's

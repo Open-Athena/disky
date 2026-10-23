@@ -207,6 +207,26 @@ def test_build_chunked_drill_is_the_unchunked_one(built, tmp_path):
     assert summary["drill"]["pieces"] > files
 
 
+def test_parallel_tail_is_the_serial_one(built, tmp_path, monkeypatch):
+    """The drill's tail over process pools — each `q` range measured in a process of its own (`MEASURE_THREADS` 1 at
+    `-p 4`: 4 at a time), the anchors' rollups and starts-with catalog shard by shard (`ANCHOR_THREADS` 1; `write_kind`'s
+    file pool: `test_writing_sorted_chunks_writes_the_same_bytes`) — writes `drill/`, `roots-measure/`, `names/` and
+    `anchors/` byte for byte as the build at `-p 2` (one range, file and kind at a time on one database)."""
+    from dt_cloud import static_drill as sd
+
+    monkeypatch.setattr(sl, "MEASURE_THREADS", 1)
+    monkeypatch.setattr(an, "ANCHOR_THREADS", 1)
+    monkeypatch.setattr(sd, "WRITE_JOBS", 3)
+    root, scans, gen = built["root"], built["scans"], built["gen"]
+    with _small_groups():
+        summary = _build(root, scans, tmp_path / "store", tmp_path / "work", extra=("-c", "1", "-p", "4"))
+    par = tmp_path / "store" / sn.PREFIX / "g"
+    for sub in ("drill", "roots-measure", an.NAMES, an.ANCHORS):
+        assert _files(par / sub) == _files(gen / sub), sub
+    assert len(list((gen / "sx").glob("*.parquet"))) > 1  # the anchors' `end` rollups really ran per shard
+    assert min(summary["drill"]["groups"].values()) > 1  # and the measurement per range
+
+
 def test_build_anchors_are_the_staged_anchors(built):
     """`names/` and `anchors/` (with `anchors/start/`): the base builders' over the staged generation's versions and suffix
     shards, byte for byte."""
