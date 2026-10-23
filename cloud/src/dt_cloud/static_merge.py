@@ -406,17 +406,22 @@ def compact_cmd(bucket, chunk_rows, gen, scratch, policy, read_from, grace_s, jo
     generation's base and runs folded into `<gen>.c<NNN>` (a rebuild's bytes), published on GCS (`compaction.json`
     last, `successor.json`, `static-names/CURRENT.json`), then with `-r` on R2 (its pointer last). The old generation
     stays (readers pin `STATIC_GEN`; `store-gc -k`). With `-S`, holds the compaction lease (`static-names/compacting.lease.json`)
-    throughout: appends to the generation wait; exit 4 (`BUSY`) while another compaction holds it. Prints a JSON summary."""
+    throughout: appends to the generation wait; exit 4 (`BUSY`) while another compaction holds it. With `-S`, the fold is also
+    checkpointed there part by part (`static_compact.compact_checkpoint`): a resubmitted job resumes it; cleared once the new
+    generation is published (or superseded). Prints a JSON summary."""
     from .blobstore import Store
-    from .static_compact import compactor
+    from .static_compact import clear_checkpoints, compactor
 
     try:
-        doc = ar.run_compaction(Store(f"gs://{bucket}"), compactor(chunk_rows), gen, Path(mount), Path(tmp), lease=ar.gcs_compaction_lease_file(scratch, PREFIX),
-                                policy=policy, force=force, r2_bucket=bucket if to_r2 else None, grace_s=grace_s, threads=threads, mem=mem, jobs=jobs,
-                                read_from=read_from, rec=from_env("compact"))
+        doc = ar.run_compaction(Store(f"gs://{bucket}"), compactor(chunk_rows, checkpoint=scratch), gen, Path(mount), Path(tmp),
+                                lease=ar.gcs_compaction_lease_file(scratch, PREFIX), policy=policy, force=force, r2_bucket=bucket if to_r2 else None,
+                                grace_s=grace_s, threads=threads, mem=mem, jobs=jobs, read_from=read_from, rec=from_env("compact"))
     except ar.Busy as e:
         err(f"compact: {e}")
         raise SystemExit(ar.BUSY)
+    if scratch and doc.get("compact"):
+        n = clear_checkpoints(scratch, doc["compact"]["gen"])
+        err(f"compact: {n} checkpoint files of {doc['compact']['gen']}'s fold cleared")
     print(json.dumps(doc, indent=1))
 
 

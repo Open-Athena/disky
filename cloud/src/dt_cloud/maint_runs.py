@@ -31,6 +31,8 @@ from dataclasses import dataclass, field
 from functools import partial
 from typing import Protocol
 
+from .heartbeat import set_stage
+
 err = partial(print, file=sys.stderr)
 
 MAINT_KINDS = ("compact", "merge")
@@ -113,6 +115,7 @@ def phase(rec: Recorder, name: str) -> Iterator[Slot]:
     """Phase `name` of `rec`'s run around the body: begun, then ended with the body's `slot.note`, or failed (its note
     the exception) when the body raises (re-raised)."""
     rec.begin(name)
+    set_stage(name)
     slot = Slot()
     try:
         yield slot

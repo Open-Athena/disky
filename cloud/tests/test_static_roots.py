@@ -3,6 +3,9 @@ literal's (from the coalesced versions) are exactly its first-hit versions, and 
 equal brute force."""
 from __future__ import annotations
 
+import re
+
+import duckdb
 import pytest
 
 from dt_cloud import static_catalog as sc
@@ -312,3 +315,29 @@ def test_drill_verify(built, tmp_path, small, monkeypatch):  # noqa: F811
     (tmp_path / "r.jsonl").write_text("".join(json.dumps(r) + "\n" for r in refs))
     res = CliRunner().invoke(sr.drill_verify_cmd, [str(tmp_path / "r.jsonl"), str(tmp_path / "a.jsonl")])
     assert (res.exit_code, list(json.loads(res.output)["diff"])) == (1, [f"{bad['q']} {bad['P']} {bad['date']}"])
+
+
+@pytest.mark.parametrize("n_bounds", [1, 3, 100])
+def test_ranged_assigns_the_asof_ranges(tmp_path, n_bounds):
+    """`ranged`: every row with the range an ASOF join over every row assigns it (the last `lo <= q`), the same rows, at a
+    bound count under and over DuckDB's loop-join threshold; and over a given key query (`keys`) holding every `q`."""
+    import random
+
+    con = sn.connect(2, "256MB", tmp_path / "spill")
+    rnd = random.Random(3)
+    lits = sorted({"".join(rnd.choice("abcé'") for _ in range(rnd.randrange(1, 5))) for _ in range(300)})
+    con.execute("CREATE TABLE rt (q VARCHAR, x BIGINT)")
+    con.executemany("INSERT INTO rt VALUES (?, ?)", [(rnd.choice(lits), i) for i in range(2000)])
+    bounds = ["", *sorted(rnd.sample(lits, n_bounds - 1))]
+    con.execute("CREATE TABLE qg (lo VARCHAR, grp INTEGER)")
+    con.executemany("INSERT INTO qg VALUES (?, ?)", [(lo, g) for g, lo in enumerate(bounds)])
+    want = con.execute("SELECT r.*, g.grp FROM rt AS r ASOF JOIN qg AS g ON r.q >= g.lo ORDER BY x").fetchall()
+    assert len(want) == 2000
+    assert con.execute(f"SELECT * FROM ({sr.ranged('rt', 'qg', 'grp')}) ORDER BY x").fetchall() == want
+    con.execute("CREATE TABLE qk AS SELECT DISTINCT q FROM rt")
+    assert con.execute(f"SELECT * FROM ({sr.ranged('(SELECT * FROM rt)', 'qg', 'grp', keys='SELECT q FROM qk')}) ORDER BY x").fetchall() == want
+    # a row whose `q` the keys miss fails the query (the per-row ASOF join kept it): never a silently smaller spill
+    miss = con.execute("SELECT q FROM rt ORDER BY x LIMIT 1").fetchone()[0]
+    with pytest.raises(duckdb.InvalidInputException, match=f"^Invalid Input Error: ranged: q '{re.escape(miss)}' has no range$"):
+        con.execute(f"SELECT * FROM ({sr.ranged('rt', 'qg', 'grp', keys=f'SELECT q FROM qk WHERE q <> {sn.q(miss)}')})").fetchall()
+    con.close()

@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import shutil
 from collections import Counter, OrderedDict
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from time import monotonic
 
@@ -24,6 +25,7 @@ import pyarrow.parquet as pq
 from pyarrow.compute import and_, greater_equal, less
 from click import Choice, group, option
 
+from . import heartbeat
 from . import static_names as sn
 from . import static_roots as sr
 from .checkpoint import Checkpoint, code_version, Parts
@@ -55,6 +57,9 @@ SETTLE_CHUNK_ROWS = 1 << 22
 #: Concurrent ranged reads when the builder prefetches the groups its loops will read (`build -j`); ≤ 1: no prefetch, the
 #: loops fetch each miss in turn.
 FETCH_THREADS = 64
+#: Files `write_kind` writes at once from sorted chunks (each a pure function of its `q` range; the same bytes at any count):
+#: the carry was write-bound after its reads were (gcs's 10-22 L3 carry: long 41–53 min, short 18).
+WRITE_THREADS = 8
 #: Prefetched raw bytes held at most, as a fraction of the machine's RAM (`build -C` overrides): beyond it, the loops run in
 #: windows (each prefetched in turn) and the byte cache evicts least recently used.
 CACHE_RAM_FRACTION = 1 / 8
@@ -1688,34 +1693,51 @@ def _chunk_batches(spans: list[tuple[Path, str, str]], names: list[str], lo: str
                 yield b
 
 
+def _write_chunk_file(spans, schema: pa.Schema, lo: str | None, hi: str | None, out: Path, name: str, key: str, dic: list[str],
+                      rg: int | None) -> tuple[int, pa.Table, int]:
+    """One `write_kind` file from sorted chunks: rows, its group index, bytes."""
+    n, t = sr.write_indexed(_chunk_batches(spans, schema.names, lo, hi), out / name, schema, key, name, dic, rg)
+    return n, t, (out / name).stat().st_size
+
+
 def write_kind(con, out: Path, kind: str, roots: str = "dr", rollups: str = "rup", file_rows: int = FILE_ROWS, rg: int | None = None,
-               chunks: dict[str, list[Path]] | None = None) -> dict:
+               chunks: dict[str, list[Path]] | None = None, threads: int = WRITE_THREADS) -> dict:
     """Tables `roots` (`ROOT_COLS`) and `rollups` (`ROLLUP_COLS`) → `out/<kind>/{roots,rollups}/r####.parquet` (sorted, `ROOT_RG`-row
     groups, files cut at `q` boundaries) and the two-level indexes `out/<kind>-{roots,rollups}-index{,.top}.parquet`.
     `chunks` `{sub: files}`: a sub's rows as files already in its order, `q`-disjoint and in `q` order (`merge_tiers`' folded
-    ranges), streamed in turn instead of sorted again (gcs's 10-22 L3 carry: 69 of its drill's 185 min in this sort); the
-    same bytes."""
+    ranges), streamed in turn instead of sorted again (gcs's 10-22 L3 carry: 69 of its drill's 185 min in this sort), `threads`
+    files at a time (each reads only its own `q` range of the chunks); the same bytes."""
     doc = {}
     for sub, table, order, schema, key, dic in (("roots", roots, "q, path, usr, vf", sr.ROOT_SCHEMA, "path", ["q", "usr"]),
                                                ("rollups", rollups, "q, dir, kind, child, vf", sr.ROLLUP_SCHEMA, "dir", ["q", "dir", "child"])):
         cols = ", ".join(schema.names)
         idx, rows, nbytes = [], 0, 0
+        heartbeat.set_stage(f"drill/write/{kind}/{sub}: cut")
         if chunks is not None and sub in chunks:
             counts, spans = _sorted_chunks(con, chunks[sub])
             cuts = _cut_counts(counts, file_rows)
         else:
             cuts = _cut(con, table, file_rows)
-        for i, (lo, hi) in enumerate(cuts):
-            name = f"{kind}/{sub}/r{i:04d}.parquet"
-            if chunks is not None and sub in chunks:
-                batches = _chunk_batches(spans, schema.names, lo, hi)
-            else:
+        prog = heartbeat.Progress(f"drill/write/{kind}/{sub}", len(cuts), unit="files")
+        names = [f"{kind}/{sub}/r{i:04d}.parquet" for i in range(len(cuts))]
+        if chunks is not None and sub in chunks:
+            with ThreadPoolExecutor(max(1, min(threads, len(cuts)))) as pool:
+                futs = [pool.submit(_write_chunk_file, spans, schema, lo, hi, out, name, key, dic, rg) for (lo, hi), name in zip(cuts, names)]
+                for f in futs:
+                    n, t, size = f.result()
+                    rows, nbytes = rows + n, nbytes + size
+                    idx.append(t)
+                    prog.tick(rows=n, nbytes=size)
+        else:
+            for (lo, hi), name in zip(cuts, names):
                 where = " AND ".join(x for x in (f"q >= {q(lo)}" if lo is not None else "", f"q < {q(hi)}" if hi is not None else "") if x) or "true"
                 batches = _batches(con, f"SELECT {cols} FROM {table} WHERE {where} ORDER BY {order}")
-            n, t = sr.write_indexed(batches, out / name, schema, key, name, dic, rg)
-            rows += n
-            nbytes += (out / name).stat().st_size
-            idx.append(t)
+                n, t = sr.write_indexed(prog.batches(batches), out / name, schema, key, name, dic, rg)
+                rows += n
+                nbytes += (out / name).stat().st_size
+                idx.append(t)
+                prog.tick(nbytes=(out / name).stat().st_size)
+        prog.done()
         t = pa.concat_tables(idx) if idx else sr.GROUP_INDEX_SCHEMA.empty_table()
         top = sr.write_index_levels(t, out / f"{kind}-{sub}-index.parquet")
         pq.write_table(top, out / f"{kind}-{sub}-index.top.parquet", compression=CODEC)
@@ -1969,9 +1991,11 @@ def merge_tiers(con, tiers: list[Tier], out: Path, tier: dict, file_rows: int = 
         kw = work / kind
         for sub in ("roots", "rollups", "dcount"):
             (kw / sub).mkdir(parents=True, exist_ok=True)
+        # every source row's `q` is a merged canonical (`cmap.c`): their ranges, assigned once
+        con.execute("CREATE OR REPLACE TABLE qk AS SELECT DISTINCT c AS q FROM cmap")
         for sub, i, sql in sources:
             resource_stage(f"merge/{kind}/read/{sub}", tier=i, inputs=len(tiers))
-            con.execute(f"""COPY (SELECT r.*, g.ch FROM ({sql}) AS r ASOF JOIN qb AS g ON r.q >= g.lo)
+            con.execute(f"""COPY ({sr.ranged(f'({sql})', 'qb', 'ch', keys='SELECT q FROM qk')})
                 TO {q(str(kw / sub / f't{i:03d}'))} (FORMAT parquet, PARTITION_BY (ch), COMPRESSION zstd)""")
         folded = kw / "folded"
         for d in ("roots", "rollups", "dcount"):
@@ -2016,7 +2040,7 @@ def merge_tiers(con, tiers: list[Tier], out: Path, tier: dict, file_rows: int = 
         resource_stage(f"merge/{kind}/state")
         write_state(con, out, kind, queries=[f"SELECT q, dir, rows FROM read_parquet({q(str(f))}) ORDER BY q, dir"
                                              for f in sorted((folded / "dcount").glob("*.parquet"))])
-        for t in ("dr", "ru", "rup", "dcnt", "cmap", "lit", "qb"):
+        for t in ("dr", "ru", "rup", "dcnt", "cmap", "lit", "qb", "qk"):
             con.execute(f"DROP TABLE IF EXISTS {t}")
         shutil.rmtree(kw)
     con.execute("DROP TABLE IF EXISTS cls")
@@ -2033,13 +2057,15 @@ def _count(con, table: str) -> int:
     return con.execute(f"SELECT count(*) FROM {table}").fetchone()[0]
 
 
-def build_drill(con, out: Path, *, long_roots: str, short_roots: str, aliases: pa.Table, R: int, K: int, meta: dict | None = None,
-                rollups: dict[str, str] | None = None, step=None) -> dict:
+def build_drill(con, out: Path, *, long_roots: str | None, short_roots: str | None, aliases: pa.Table, R: int, K: int, meta: dict | None = None,
+                rollups: dict[str, str] | None = None, sorted_roots: dict[str, list[Path]] | None = None, step=None) -> dict:
     """A tier holding every root: tables `long_roots` (canonical members only) and `short_roots` (`ROOT_COLS`) → `out`
     (`static_roots.build_roots` per kind, its rows written as `write_kind` writes them), with `aliases` and `meta.json`.
     `rollups` `{kind: table}` (`ROLLUP_COLS`): a kind's rollup cells already cut (by `q` range, as `static_local`'s
-    chunked build does), written as they are. `step(name, t, **counts)` (optional) reports each kind's rollup and write
-    (`drill/rollup/<kind>`, `drill/write/<kind>`)."""
+    chunked build does), written as they are. `sorted_roots` `{kind: files}` (with that kind's `rollups`): its roots as
+    files each sorted, `q`-disjoint and in `q` order (`static_local.measure_ranges`'), streamed (`write_kind`'s `chunks`)
+    instead of sorting a roots table again; the same bytes. `step(name, t, **counts)` (optional) reports each kind's
+    rollup and write (`drill/rollup/<kind>`, `drill/write/<kind>`)."""
     out.mkdir(parents=True, exist_ok=True)
     doc = {**base_meta(R, K), **(meta or {})}
     con.register("al_in", aliases)
@@ -2049,7 +2075,8 @@ def build_drill(con, out: Path, *, long_roots: str, short_roots: str, aliases: p
     t = monotonic()
     for kind, table in (("long", long_roots), ("short", short_roots)):
         if rollups and kind in rollups:
-            doc.update(write_kind(con, out, kind, roots=table, rollups=rollups[kind]))
+            chunks = {"roots": sorted_roots[kind]} if sorted_roots and kind in sorted_roots else None
+            doc.update(write_kind(con, out, kind, roots=table, rollups=rollups[kind], chunks=chunks))
             if step:
                 t = step(f"drill/write/{kind}", t)
             continue

@@ -26,6 +26,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 from click import Choice, IntRange, group, option
 
+from . import heartbeat as hb
 from . import static_names as sn
 from .blobstore import Store, store_url
 from .static_names import OPEN, U64, connect, q, range_preds, write_sorted
@@ -633,13 +634,13 @@ def _bounds(t: pa.Table, seg: int, size_col: str | None) -> dict:
 
 
 def write_served(con, src: str, sort: str, out: Path, schema: pa.Schema, *, rg_rows: int = SERVED_RG,
-                 stamps: list[int] | None = None) -> dict:
+                 stamps: list[int] | None = None, est_rows: int | None = None) -> dict:
     """One served sort of `src` (a relation of `schema` rows) to `out`: its segments in order (`seg_sql`:
     the open versions, then the closed ones — one segment, or with `stamps` one per dyadic block of
     scans), each in the sort's order and cut in `rg_rows`-row groups (a segment's last may be short, so
     no group mixes segments), zstd. Writes `<out stem>.groups.parquet` beside it (`GROUPS_SCHEMA`: per
     group the exact bounds of its rows — never truncated statistics — and the compact metadata the
-    Worker revives)."""
+    Worker revives). Logs the rows written (of `est_rows`, when known) at most once a minute."""
     import pyarrow.compute as pc
 
     _, order, size_col = SORTS[sort]
@@ -668,7 +669,8 @@ def write_served(con, src: str, sort: str, out: Path, schema: pa.Schema, *, rg_r
             pending, n = ([rest] if rest.num_rows else []), rest.num_rows
 
         sql = f"SELECT {cols}, {seg_sql(stamps)} AS __seg FROM {src} ORDER BY __seg, {order}"
-        for b in sn._batches(con, sql):
+        prog = hb.Progress(f"cut {sort}", total_rows=est_rows)
+        for b in prog.batches(sn._batches(con, sql)):
             if not b.num_rows:
                 continue
             segs = b.column("__seg")
@@ -692,6 +694,7 @@ def write_served(con, src: str, sort: str, out: Path, schema: pa.Schema, *, rg_r
                 if n >= rg_rows:
                     flush(False)
         flush(True)
+        hb.after(f"cut {sort}")
         err(f"  {sort}: {sum(seg_rows.values()):,} rows in {len(seg_rows)} segments (open {seg_rows.get(0, 0):,})")
         w.add_key_value_metadata({"store": "interval", "version": str(STORE_VERSION), "sort": sort, "order": order,
                                   "segments": "open,dyadic" if stamps else "open,hist", "open": str(OPEN)})
@@ -737,8 +740,9 @@ def cut_gen(con, gen_dir: Path, scans: dict, *, rg_rows: int = SERVED_RG, jobs: 
     def one(cur, sort: str) -> dict:
         sub, _, _ = SORTS[sort]
         t1 = monotonic()
+        est = sum(pq.read_metadata(p).num_rows for p in (gen_dir / sub).glob("r*.parquet"))
         sd = write_served(cur, f"read_parquet({q(str(gen_dir / sub / 'r*.parquet'))})", sort, served / f"{sort}.parquet", served_schema(sort, gen),
-                          rg_rows=rg_rows, stamps=stamps)
+                          rg_rows=rg_rows, stamps=stamps, est_rows=est)
         sd["s"] = round(monotonic() - t1, 1)
         (served / f"{sort}.json").write_text(json.dumps(sd, sort_keys=True) + "\n")
         return sd
@@ -1080,8 +1084,9 @@ R2_SERVED = ("scans.json", "served/path.", "served/bysize.", "served/reads.", "s
 @option("-w", "--workers", default=8, type=int, help="Parallel copies")
 @option("-P", "--profile", help="Deployment profile JSON (default $INTERVAL_STORE_PROFILE)")
 def r2_copy_cmd(bucket, profile, gen, mount, dry_run, workers) -> None:
-    """Copy the generation's served files GCS → R2 under the same keys (`static-names r2-copy`'s streaming
-    copy: objects already there with the same size and md5 are skipped). R2 via `R2_ENDPOINT`,
+    """Copy the generation's files the Worker reads (`R2_SERVED`: `scans.json` and the served sorts; not
+    `served/stats.json` or `ranges.json`, which only the jobs read, from GCS) GCS → R2 under the same keys
+    (`static-names r2-copy`'s streaming copy: objects already there with the same size and md5 are skipped). R2 via `R2_ENDPOINT`,
     `R2_BUCKET` and AWS_* keys. A no-op when the store is the serving R2 bucket itself."""
     from .append_runner import r2_copy, r2_objects
     from .blobstore import gs_bucket, serves

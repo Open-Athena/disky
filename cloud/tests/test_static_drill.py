@@ -60,10 +60,11 @@ def test_state_writer_streams_with_the_same_parquet_bytes(tmp_path, monkeypatch,
     assert pq.read_table(actual).to_pylist() == [{"q": "q", "dir": f"dir/{i:03d}", "rows": i} for i in range(n)]
 
 
+@pytest.mark.parametrize("threads", [1, 4])
 @pytest.mark.parametrize("file_rows", [1, 7, 1000])
-def test_writing_sorted_chunks_writes_the_same_bytes(tmp_path, file_rows):
+def test_writing_sorted_chunks_writes_the_same_bytes(tmp_path, file_rows, threads):
     """`write_kind` over `merge_tiers`' folded ranges (files each sorted, `q`-disjoint, in `q` order) streams them: the same
-    files and index as sorting their union, with files cut inside, at and across the ranges."""
+    files and index as sorting their union, with files cut inside, at and across the ranges, one file at a time or several."""
     con = sn.connect(2, "256MB", tmp_path / "spill")
     rnd = random.Random(7)
     lits = ["a", "ab", "b", "bé", "c", "d'x", "e"]
@@ -85,7 +86,7 @@ def test_writing_sorted_chunks_writes_the_same_bytes(tmp_path, file_rows):
             con.execute(f"COPY (SELECT * FROM {table} WHERE {where} ORDER BY {order}) TO '{f}' (FORMAT parquet, COMPRESSION zstd)")
             chunks[d].append(f)
     sorted_doc = sd.write_kind(con, tmp_path / "sorted", "long", roots="dr1", rollups="rup", file_rows=file_rows, rg=3)
-    chunk_doc = sd.write_kind(con, tmp_path / "chunks", "long", file_rows=file_rows, rg=3, chunks=chunks)
+    chunk_doc = sd.write_kind(con, tmp_path / "chunks", "long", file_rows=file_rows, rg=3, chunks=chunks, threads=threads)
     assert chunk_doc == sorted_doc
     files = sorted(p.relative_to(tmp_path / "sorted").as_posix() for p in (tmp_path / "sorted").rglob("*") if p.is_file())
     assert sorted(p.relative_to(tmp_path / "chunks").as_posix() for p in (tmp_path / "chunks").rglob("*") if p.is_file()) == files

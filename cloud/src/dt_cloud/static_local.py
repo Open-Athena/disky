@@ -44,6 +44,7 @@ from time import monotonic
 import pyarrow.parquet as pq
 from click import IntRange, command, option
 
+from . import heartbeat as hb
 from . import static_anchors as an
 from . import static_append as sa
 from . import static_catalog as sc
@@ -235,6 +236,7 @@ def build_gen(scans: dict, mount: str, gen_dir: Path, work: Path, *, gen: str, r
         times[stage] = round(monotonic() - t, 1)
         peaks[stage] = {"disk_gb": disk.take(), "rss_gb": rss_peak_gb()}
         err(f"build {gen}: {stage} in {times[stage]}s (work disk peak {peaks[stage]['disk_gb']} GiB, RSS peak {peaks[stage]['rss_gb']} GiB)")
+        hb.after(stage)
         return monotonic()
 
     steps: dict[str, float] = {}
@@ -244,6 +246,7 @@ def build_gen(scans: dict, mount: str, gen_dir: Path, work: Path, *, gen: str, r
         steps[name] = round(monotonic() - t, 1)
         n = "".join(f", {k} {v:,}" for k, v in counts.items())
         err(f"build {gen}: {name} in {steps[name]}s (work disk peak {disk.take_step()} GiB, RSS peak {rss_peak_gb()} GiB{n})")
+        hb.after(name)
         return monotonic()
 
     tmp = work / "duckdb"
@@ -335,8 +338,7 @@ def q_bounds(counts: list[tuple[str, int]], chunk_rows: int) -> list[str]:
 def spill_roots(con, table: str, out: Path) -> None:
     """Table `table`'s roots (`ROOT_COLS`) → `out/grp=<g>/*.parquet` by `q` range (table `qg (lo, grp)`)."""
     out.parent.mkdir(parents=True, exist_ok=True)
-    con.execute(f"""COPY (SELECT r.*, g.grp FROM {table} AS r ASOF JOIN qg AS g ON r.q >= g.lo)
-        TO {q(str(out))} (FORMAT parquet, PARTITION_BY (grp), COMPRESSION zstd)""")
+    con.execute(f"COPY ({sr.ranged(table, 'qg', 'grp')}) TO {q(str(out))} (FORMAT parquet, PARTITION_BY (grp), COMPRESSION zstd)")
 
 
 def read_roots(files: list[Path]) -> str:
@@ -371,23 +373,36 @@ def plan_groups(con, counts: list[tuple[str, int]], chunk_rows: int) -> int:
     return len(bounds)
 
 
-def measure_ranges(con, work: Path, kind: str, n: int, dirs_into: str, rup_into: str, *, floor: int, R: int, K: int) -> tuple[str, dict]:
+def measure_ranges(con, work: Path, kind: str, n: int, dirs_into: str, rup_into: str, *, floor: int, R: int, K: int) -> tuple[list[Path], dict]:
     """Measure and roll up each of `kind`'s spilled `q` ranges (`work/<kind>/*/grp=<g>/`) into tables `dirs_into` and
-    `rup_into`; the query of all its roots."""
+    `rup_into`, and write each range's roots sorted (`work/<kind>-sorted/g<g>.parquet`, its spill removed): the ranges
+    are `q`-disjoint and in `q` order, so the files are what `static_drill.write_kind` streams (`chunks`) instead of
+    sorting every root again. The sorted files, in `q` order."""
     doc = {"groups": 0, "measure_s": 0.0, "rollup_s": 0.0}
     for tb, cols in ((dirs_into, "q VARCHAR, k INTEGER, dir VARCHAR, rows BIGINT"), (rup_into, sd.ROLLUP_COLS)):
         con.execute(f"CREATE OR REPLACE TABLE {tb} ({cols})")
+    out = work / f"{kind}-sorted"
+    out.mkdir(parents=True, exist_ok=True)
+    sorted_files = []
+    prog = hb.Progress(f"drill/measure/{kind}", n, unit="ranges")
     for g in range(n):
         files = sorted((work / kind).glob(f"*/grp={g}/*.parquet"))
         if not files:
+            prog.tick()
             continue
         con.execute(f"CREATE OR REPLACE TABLE qg_roots AS {read_roots(files)}")
         m = measure_rollups(con, "qg_roots", floor=floor, R=R, K=K, dirs_into=dirs_into, rup_into=rup_into)
         doc = {"groups": doc["groups"] + 1, **{k: doc[k] + m[k] for k in m}}
+        nbytes = sum(p.stat().st_size for p in files)
+        f = out / f"g{g:06d}.parquet"
+        con.execute(f"COPY (SELECT {', '.join(sr.ROOT_SCHEMA.names)} FROM qg_roots ORDER BY q, path, usr, vf) TO {q(str(f))} (FORMAT parquet, COMPRESSION zstd)")
+        sorted_files.append(f)
+        for d in {p.parent for p in files}:
+            shutil.rmtree(d)
+        prog.tick(nbytes=nbytes)
+    prog.done()
     con.execute("DROP TABLE IF EXISTS qg_roots")
-    files = sorted((work / kind).glob("*/grp=*/*.parquet"))
-    return (read_roots(files) if files else f"SELECT * FROM (SELECT NULL::VARCHAR AS q, NULL::UTINYINT AS depth, NULL::VARCHAR AS path, "
-            "NULL::VARCHAR AS usr, NULL::BIGINT AS vf, NULL::BIGINT AS vt, NULL::BIGINT AS size, NULL::BIGINT AS n_files) WHERE false"), doc
+    return sorted_files, doc
 
 
 def finish_drill(con, gen_dir: Path, work: Path, *, aliases, long_groups: int, short_groups: int, R: int, K: int, floor: int,
@@ -412,11 +427,8 @@ def finish_drill(con, gen_dir: Path, work: Path, *, aliases, long_groups: int, s
         (meas / sub).mkdir(parents=True, exist_ok=True)
         pq.write_table(con.execute(f"SELECT * FROM ({sql}) ORDER BY q, k, dir").to_arrow_table(), meas / sub / "s0000.parquet", compression=sn.CODEC)
     t = step("drill/write/measure", t)
-    con.execute(f"CREATE OR REPLACE VIEW lcan AS {lcan}")
-    con.execute(f"CREATE OR REPLACE VIEW sall AS {sall}")
-    meta = sd.build_drill(con, gen_dir / "drill", long_roots="lcan", short_roots="sall", aliases=aliases, R=R, K=K,
-                          meta={"floor": floor}, rollups={"long": "lrup", "short": "srup"}, step=step)
-    con.execute("DROP VIEW lcan; DROP VIEW sall")
+    meta = sd.build_drill(con, gen_dir / "drill", long_roots=None, short_roots=None, aliases=aliases, R=R, K=K, meta={"floor": floor},
+                          rollups={"long": "lrup", "short": "srup"}, sorted_roots={"long": lcan, "short": sall}, step=step)
     for tb in ("dmem", "dg", "dgq", "al", "canon", "qg", "ldirs", "sdirs", "lrup", "srup", "mem"):
         con.execute(f"DROP TABLE IF EXISTS {tb}")
     shutil.rmtree(work)
@@ -566,6 +578,7 @@ def append_scan(con, gen_dir: Path, scan: dict, mount: str, work: Path, *, gen: 
         """A drill sub-step's line (`drill/<step>/<kind>`, as `build_gen`'s): its seconds, work-disk and RSS peaks, and counts."""
         n = "".join(f", {k} {v:,}" for k, v in counts.items())
         err(f"add {d}: {name} in {round(monotonic() - t, 1)}s (work disk peak {disk.take_step()} GiB, RSS peak {rss_peak_gb()} GiB{n})")
+        hb.after(name)
         return monotonic()
 
     drill = run_drill(con, gen_dir, run, scan, runs, days, gen=gen, rule=rule, step=step)
