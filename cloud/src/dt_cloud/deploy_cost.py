@@ -3,8 +3,11 @@
 Read-only, from measurements:
 1. Storage: Cloud Monitoring's `storage.googleapis.com/storage/v2/total_bytes` per bucket, daily means over the
    window, split by its `type` (live vs soft-deleted objects) and `storage_class` labels. Live bytes grow at their
-   least-squares slope; soft-deleted bytes track churn, not growth, so they are held at their current level (or at
-   zero for a bucket whose soft-delete retention is off: they drain).
+   least-squares slope, except in a bucket a lifecycle `Delete` rule bounds (`age: N` over the whole bucket: its
+   steady state is ~N days of writes), where they are held at their current level. A prefix- or otherwise-scoped
+   `Delete` rule can't be separated from the bucket-level metric: the bucket is marked partially TTL'd and keeps its
+   slope. Soft-deleted bytes track churn, not growth, so they are held at their current level (or at zero for a
+   bucket whose soft-delete retention is off: they drain).
 2. Compute: the Batch jobs (every location, or `-L`) created in the window whose labels match a selector. A job's
    VM-hours are its `runDuration` × min(`taskCount`, `parallelism`) (its first task group), priced by its machine
    type and provisioning model (SPOT × `spot_factor`). The window's $ / its days is the rate, projected flat.
@@ -13,7 +16,7 @@ Prices are approximate US list prices (`PRICES`), overridable by a YAML file (`l
 invoices; no discounts, disks, network or operations. A machine type or storage class with no price is reported
 as unpriced, never dropped.
 
-The fetchers (`fetch_series`, `fetch_jobs`, `select_buckets`, `soft_delete_off`) are the only network calls; the
+The fetchers (`fetch_series`, `fetch_jobs`, `select_buckets`, `fetch_buckets`) are the only network calls; the
 rest takes the APIs' JSON as given, so tests inject fake series and jobs.
 """
 from __future__ import annotations
@@ -173,6 +176,42 @@ def slope_per_day(points: Sequence[tuple[float, float]]) -> float:
     return sum((x - mx) * (y - my) for x, y in zip(xs, ys)) / den if den else 0.0
 
 
+#: Lifecycle conditions that confine a rule to noncurrent versions: such a rule never bounds live bytes.
+NONCURRENT = {"numNewerVersions", "daysSinceNoncurrentTime", "noncurrentTimeBefore"}
+
+
+@dataclass(frozen=True)
+class BucketPolicy:
+    """What bounds a bucket's bytes: soft delete off (soft-deleted bytes drain), a whole-bucket lifecycle `Delete`
+    at `ttl_days` (live bytes plateau), or only scoped `Delete` rules (`partial_ttl`: not separable)."""
+
+    soft_delete_off: bool = False
+    ttl_days: float | None = None
+    partial_ttl: bool = False
+
+
+def bucket_policy(meta: Mapping) -> BucketPolicy:
+    """A Storage JSON API bucket resource (`softDeletePolicy`, `lifecycle`) → `BucketPolicy`."""
+    whole: list[float] = []
+    partial = False
+    for rule in meta.get("lifecycle", {}).get("rule", []):
+        cond = rule.get("condition", {})
+        if rule.get("action", {}).get("type") != "Delete" or "age" not in cond:
+            continue
+        if cond.get("isLive") is False or NONCURRENT & set(cond):
+            continue
+        if set(cond) - {"age", "isLive"}:
+            partial = True
+        else:
+            whole.append(float(cond["age"]))
+    retention = int(meta.get("softDeletePolicy", {}).get("retentionDurationSeconds", 0))
+    return BucketPolicy(
+        soft_delete_off=retention == 0,
+        ttl_days=min(whole) if whole else None,
+        partial_ttl=partial and not whole,
+    )
+
+
 @dataclass(frozen=True)
 class JobUsage:
     name: str
@@ -224,12 +263,15 @@ def storage_report(
     series: Sequence[Series],
     prices: Prices,
     horizons: Mapping[str, float],
-    drains: Iterable[str] = (),
+    policies: Mapping[str, BucketPolicy] | None = None,
 ) -> dict:
-    """Per (bucket, type, class): current bytes (the newest daily mean), live bytes' slope, $/mo; totals now and at
-    each horizon (live bytes extrapolated, floored at 0; soft-deleted held, or 0 in a `drains` bucket)."""
-    drained = set(drains)
+    """Per (bucket, type, class): current bytes (the newest daily mean), live bytes' slope, $/mo; per bucket its
+    daily points and policy; totals now and at each horizon (live bytes extrapolated, floored at 0, or held in a
+    TTL'd bucket; soft-deleted held, or 0 where soft delete is off)."""
+    policies = policies or {}
+    none = BucketPolicy()
     rows: list[dict[str, Any]] = []
+    buckets: dict[str, dict[str, Any]] = {}
     unpriced: dict[str, float] = defaultdict(float)
     at: dict[str, dict[str, float]] = {h: {"bytes": 0.0, "usd_per_month": 0.0} for h in horizons}
     for s in series:
@@ -237,6 +279,10 @@ def storage_report(
             continue
         current = s.points[-1][1]
         live = s.type == LIVE
+        pol = policies.get(s.bucket, none)
+        b_ = buckets.setdefault(s.bucket, {"points": 0, "soft_delete_off": pol.soft_delete_off,
+                                           "ttl_days": pol.ttl_days, "partial_ttl": pol.partial_ttl})
+        b_["points"] = max(b_["points"], len(s.points))
         slope = slope_per_day(s.points) if live else 0.0
         price = prices.storage.get(s.storage_class)
         if price is None:
@@ -252,9 +298,9 @@ def storage_report(
         })
         for h, days in horizons.items():
             if live:
-                b = max(0.0, current + slope * days)
+                b = current if pol.ttl_days is not None else max(0.0, current + slope * days)
             else:
-                b = 0.0 if s.bucket in drained else current
+                b = 0.0 if pol.soft_delete_off else current
             at[h]["bytes"] += b
             if price is not None:
                 at[h]["usd_per_month"] += b / GIB * price
@@ -265,7 +311,7 @@ def storage_report(
         "bytes_by_type": by_type,
         "live_slope_bytes_per_day": sum(r["slope_bytes_per_day"] for r in rows),
         "usd_per_month": sum(r["usd_per_month"] or 0.0 for r in rows),
-        "drains": sorted(drained & {r["bucket"] for r in rows}),
+        "buckets": dict(sorted(buckets.items())),
         "unpriced_bytes": dict(sorted(unpriced.items())),
         "horizons": at,
     }
@@ -326,7 +372,7 @@ def report(
     horizons: Mapping[str, float],
     prices: Prices,
     series: Sequence[Series] | None,
-    drains: Iterable[str] = (),
+    policies: Mapping[str, BucketPolicy] | None = None,
     jobs: Sequence[Mapping] | None = None,
     selector: Mapping[str, str] | None = None,
 ) -> dict:
@@ -337,7 +383,7 @@ def report(
         "window_days": window_days,
         "horizons": dict(horizons),
         "basis": "approximate US list prices; estimates, not billed cost",
-        "storage": None if series is None else storage_report(series, prices, horizons, drains),
+        "storage": None if series is None else storage_report(series, prices, horizons, policies),
         "compute": None if jobs is None else compute_report(jobs, selector or {}, prices, window_days),
     }
     doc["summary"] = summary(doc)
@@ -372,7 +418,7 @@ def render(doc: Mapping) -> str:
     ]
     if (s := doc["storage"]) is not None:
         lines += ["", "Storage (Cloud Monitoring `storage/v2/total_bytes`, daily means):",
-                  f"  {'bucket':<32} {'type':<20} {'class':<15} {'days':>4} {'GB':>12} {'GB/day':>9} {'$/mo':>10}"]
+                  f"  {'bucket':<32} {'type':<20} {'class':<15} {'pts':>4} {'GB':>12} {'GB/day':>9} {'$/mo':>10}"]
         for r in s["rows"]:
             usd = "unpriced" if r["usd_per_month"] is None else _usd(r["usd_per_month"])
             slope = f"{r['slope_bytes_per_day'] / GB:+,.2f}" if r["type"] == LIVE else "-"
@@ -382,10 +428,14 @@ def render(doc: Mapping) -> str:
         for h in hs:
             at = s["horizons"][h]
             lines.append(f"  {h}: {_gb(at['bytes'])} GB, {_usd(at['usd_per_month'])}/mo")
-        held = "soft-deleted bytes held at their current level"
-        if s["drains"]:
-            held += f", except {', '.join(s['drains'])} (soft delete off: they drain)"
-        lines.append(f"  ({held})")
+        for name, b in s["buckets"].items():
+            notes = [f"{b['points']} daily points"]
+            if b["ttl_days"] is not None:
+                notes.append(f"lifecycle Delete at {b['ttl_days']:g}d: live bytes held flat")
+            elif b["partial_ttl"]:
+                notes.append("partially TTL'd (scoped Delete rules): live slope kept")
+            notes.append("soft delete off: soft-deleted bytes drain" if b["soft_delete_off"] else "soft-deleted bytes held")
+            lines.append(f"  {name}: {'; '.join(notes)}")
         for cls, b in s["unpriced_bytes"].items():
             lines.append(f"  UNPRICED: {_gb(b)} GB of storage class {cls}")
     if (c := doc["compute"]) is not None:
@@ -428,17 +478,12 @@ def select_buckets(project: str, selector: Mapping[str, str]) -> list[str]:
     return sorted(b.name for b in Client(project=project).list_buckets() if matches(b.labels or {}, selector))
 
 
-def soft_delete_off(project: str, buckets: Sequence[str]) -> list[str]:
-    """Those of `buckets` whose soft-delete retention is 0 (off)."""
-    from google.cloud.storage import Client
+def fetch_buckets(buckets: Sequence[str]) -> dict[str, dict]:
+    """Each bucket's JSON API resource (its `softDeletePolicy` and `lifecycle`)."""
+    from .gcp import _get
 
-    client = Client(project=project)
-    out = []
-    for name in buckets:
-        policy = client.get_bucket(name).soft_delete_policy
-        if not policy.retention_duration_seconds:
-            out.append(name)
-    return out
+    return {name: _get(f"https://storage.googleapis.com/storage/v1/b/{name}", fields="softDeletePolicy,lifecycle")
+            for name in buckets}
 
 
 def fetch_series(project: str, buckets: Sequence[str], start: float, end: float) -> list[dict]:
@@ -508,19 +553,20 @@ def cost_cmd(
     spans = {h.strip(): parse_span(h) for h in horizons.split(",") if h.strip()}
     now = clock()
     start = now - window_days * DAY
-    series = drains = None
+    series = None
+    policies: dict[str, BucketPolicy] = {}
     if buckets or bucket_labels:
         names = sorted({*buckets, *(select_buckets(project, parse_selector(bucket_labels)) if bucket_labels else [])})
         if not names:
             raise UsageError(f"no bucket in {project} matches {bucket_labels}")
         series = parse_series(fetch_series(project, names, start, now))
-        drains = soft_delete_off(project, names)
+        policies = {k: bucket_policy(v) for k, v in fetch_buckets(names).items()}
     selector = parse_selector(job_labels)
     jobs = fetch_jobs(project, locations, start) if job_labels else None
     label = name or " / ".join(x for x in (job_labels, bucket_labels) if x) or ", ".join(buckets)
     doc = report(
         name=label, project=project, now=now, window_days=window_days, horizons=spans, prices=prices,
-        series=series, drains=drains or (), jobs=jobs, selector=selector,
+        series=series, policies=policies, jobs=jobs, selector=selector,
     )
     print(json.dumps(doc, indent=2) if as_json else render(doc), end="\n" if as_json else "")
 
