@@ -390,3 +390,19 @@ def test_backup_within_one_store_copies_server_side(monkeypatch, tmp_path):
 ])
 def test_classify(name, cls):
     assert sr.classify(name) == cls
+
+
+def test_an_earlier_generations_failed_marker_is_verified_again(fx, d1, tmp_path):
+    """08-02's marker failed in `g`; `g2` (backfilled from `g`) has none. The fail doesn't hold for `g2`: the scan is
+    verified against it (a pass), where a fail in the current generation would keep it (08-02 under `g`, above)."""
+    iv = fx["store"] / "interval-store"
+    shutil.copytree(iv / "g", iv / "g2", ignore=shutil.ignore_patterns("verify"))
+    (iv / "g2" / "backfill.json").write_text(json.dumps({"from": "g"}) + "\n")
+    assert [r for r in _statuses(_run(fx, "-g", "g2")) if r[0] == "2026-08-02"] == [
+        ("2026-08-02", "needs-verify", "verify failed in g, none in g2", "stale-fail")]
+    assert [r for r in _statuses(_run(fx, "-g", "g2", "-m")) if r[0] == "2026-08-02"] == [
+        ("2026-08-02", "skip", "verify failed in g, none in g2", "stale-fail")]
+    rep = _run(fx, "-g", "g2", "-x", "-b", str(tmp_path / "backup"), "-w", str(tmp_path / "work"))
+    assert [r for r in _statuses(rep) if r[0] == "2026-08-02"] == [("2026-08-02", "retire", None, "verified")]
+    marker = json.loads((iv / "g2" / "verify" / "2026-08-02.json").read_text())
+    assert (marker["scan"], marker["gen"], marker["pass"]) == ("2026-08-02", "g2", True)

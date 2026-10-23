@@ -227,11 +227,17 @@ def generation_vouched(marker: dict) -> bool:
 
 
 def find_marker(store: Store, gens: list[str], scan: str) -> dict | None:
+    found = find_marker_in(store, gens, scan)
+    return found[1] if found else None
+
+
+def find_marker_in(store: Store, gens: list[str], scan: str) -> tuple[str, dict] | None:
+    """The newest generation of `gens` holding `scan`'s verify marker, and the marker."""
     from .interval_verify import marker_key
 
     for g in gens:
         if store.exists(key := marker_key(f"{PREFIX}/{g}", scan)):
-            return store.read_json(key)
+            return g, store.read_json(key)
     return None
 
 
@@ -386,19 +392,24 @@ def retire(scans_root: str, layouts: list[str], *, iv_root: str, static_gen: str
             r.update(status="skip", reason=f"not in the static index's {static_gen}")
         elif not s.deletable():
             r.update(status="clean", reason="nothing to delete")
-        elif (m := find_marker(iv, gens, sid)) is not None:
-            markers[sid] = m
+        # A pass in any generation of the lineage holds (the same versions); a fail only in the current one: an earlier
+        # generation's (gcs's depth-3 gap under c001, fixed by g3) is re-verified against the current, which writes its marker.
+        elif (found := find_marker_in(iv, gens, sid)) is not None and (found[1]["pass"] or found[0] == iv_gen):
+            m = markers[sid] = found[1]
             r["marker"] = "pass" if m["pass"] else "fail"
             if not m["pass"]:
                 from .interval_verify import failure
 
                 r.update(status="skip", reason=f"verify failed ({failure(m)})")
-        elif markers_only:
-            r.update(status="skip", reason="no verify marker", marker="missing")
-        elif s.src is None:
-            r.update(status="skip", reason="no verify marker, and no per-scan `path` sort to verify against", marker="missing")
         else:
-            r.update(status="needs-verify", marker="missing")
+            none = "no verify marker" if found is None else f"verify failed in {found[0]}, none in {iv_gen}"
+            marker = "missing" if found is None else "stale-fail"
+            if markers_only:
+                r.update(status="skip", reason=none, marker=marker)
+            elif s.src is None:
+                r.update(status="skip", reason=f"{none}, and no per-scan `path` sort to verify against", marker=marker)
+            else:
+                r.update(status="needs-verify", reason=None if found is None else none, marker=marker)
         rows.append(r)
 
     own = work is None
@@ -416,7 +427,7 @@ def retire(scans_root: str, layouts: list[str], *, iv_root: str, static_gen: str
             for r in todo:
                 m = verified.get(r["id"])
                 if m and m["pass"]:
-                    r.update(status="retire", marker="verified")
+                    r.update(status="retire", reason=None, marker="verified")
                 else:
                     r.update(status="skip", marker="fail", reason="verify failed" if m else "verify gave no result")
         for r in rows:
