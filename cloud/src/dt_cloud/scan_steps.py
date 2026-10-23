@@ -55,7 +55,7 @@ from urllib.parse import urlparse
 
 from disk_tree.env import name as env_name
 
-from .heartbeat import Tail, run_teed
+from .heartbeat import Tail, run_teed, set_stage
 from .index_parts import PART_JSON, Part, part_ids, split_parts
 from .scan_profile import ScanProfile
 
@@ -310,6 +310,7 @@ class Ctx:
         """A `scan_runs` phase: begun, then ended (failed, with the exit code, when the body raises; failed with a warn
         alert after a nonfatal command's failure)."""
         self.run.begin(name)
+        set_stage(name)
         self.failure = None
         try:
             with self.beating(name):

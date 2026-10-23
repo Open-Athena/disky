@@ -44,6 +44,7 @@ from time import monotonic
 import pyarrow.parquet as pq
 from click import IntRange, command, option
 
+from . import heartbeat as hb
 from . import static_anchors as an
 from . import static_append as sa
 from . import static_catalog as sc
@@ -235,6 +236,7 @@ def build_gen(scans: dict, mount: str, gen_dir: Path, work: Path, *, gen: str, r
         times[stage] = round(monotonic() - t, 1)
         peaks[stage] = {"disk_gb": disk.take(), "rss_gb": rss_peak_gb()}
         err(f"build {gen}: {stage} in {times[stage]}s (work disk peak {peaks[stage]['disk_gb']} GiB, RSS peak {peaks[stage]['rss_gb']} GiB)")
+        hb.after(stage)
         return monotonic()
 
     steps: dict[str, float] = {}
@@ -244,6 +246,7 @@ def build_gen(scans: dict, mount: str, gen_dir: Path, work: Path, *, gen: str, r
         steps[name] = round(monotonic() - t, 1)
         n = "".join(f", {k} {v:,}" for k, v in counts.items())
         err(f"build {gen}: {name} in {steps[name]}s (work disk peak {disk.take_step()} GiB, RSS peak {rss_peak_gb()} GiB{n})")
+        hb.after(name)
         return monotonic()
 
     tmp = work / "duckdb"
@@ -377,13 +380,17 @@ def measure_ranges(con, work: Path, kind: str, n: int, dirs_into: str, rup_into:
     doc = {"groups": 0, "measure_s": 0.0, "rollup_s": 0.0}
     for tb, cols in ((dirs_into, "q VARCHAR, k INTEGER, dir VARCHAR, rows BIGINT"), (rup_into, sd.ROLLUP_COLS)):
         con.execute(f"CREATE OR REPLACE TABLE {tb} ({cols})")
+    prog = hb.Progress(f"drill/measure/{kind}", n, unit="ranges")
     for g in range(n):
         files = sorted((work / kind).glob(f"*/grp={g}/*.parquet"))
         if not files:
+            prog.tick()
             continue
         con.execute(f"CREATE OR REPLACE TABLE qg_roots AS {read_roots(files)}")
         m = measure_rollups(con, "qg_roots", floor=floor, R=R, K=K, dirs_into=dirs_into, rup_into=rup_into)
         doc = {"groups": doc["groups"] + 1, **{k: doc[k] + m[k] for k in m}}
+        prog.tick(nbytes=sum(f.stat().st_size for f in files))
+    prog.done()
     con.execute("DROP TABLE IF EXISTS qg_roots")
     files = sorted((work / kind).glob("*/grp=*/*.parquet"))
     return (read_roots(files) if files else f"SELECT * FROM (SELECT NULL::VARCHAR AS q, NULL::UTINYINT AS depth, NULL::VARCHAR AS path, "
@@ -566,6 +573,7 @@ def append_scan(con, gen_dir: Path, scan: dict, mount: str, work: Path, *, gen: 
         """A drill sub-step's line (`drill/<step>/<kind>`, as `build_gen`'s): its seconds, work-disk and RSS peaks, and counts."""
         n = "".join(f", {k} {v:,}" for k, v in counts.items())
         err(f"add {d}: {name} in {round(monotonic() - t, 1)}s (work disk peak {disk.take_step()} GiB, RSS peak {rss_peak_gb()} GiB{n})")
+        hb.after(name)
         return monotonic()
 
     drill = run_drill(con, gen_dir, run, scan, runs, days, gen=gen, rule=rule, step=step)
