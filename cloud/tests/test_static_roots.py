@@ -392,6 +392,28 @@ def test_chunk_spill_reads_each_chunk_exactly(tmp_path, parts):
     con.close()
 
 
+@pytest.mark.parametrize("parts", [1, 2, 3, 7])
+def test_chunk_spill_prepared_partitions_read_in_any_order(tmp_path, parts):
+    """`ChunkSpill.prepare`: a partition's chunks' files, read in any order (here: last chunk first), hold exactly each
+    chunk's rows; `release` removes that partition only."""
+    con = sn.connect(2, "256MB", tmp_path / "spill")
+    n = 7
+    con.execute("CREATE TABLE a AS SELECT (x % 7)::BIGINT AS ch, x FROM range(200) AS t(x)")
+    sp = sr.ChunkSpill(con, tmp_path / "s", n, parts)
+    sp.write("SELECT * FROM a", "t000")
+    got = {}
+    for g in range(sp.p):
+        files = sp.prepare(g)
+        assert sorted(files) == list(sp.chunks(g))
+        for k in reversed(sorted(files)):
+            got[k] = con.execute(f"SELECT x FROM read_parquet([{', '.join(sn.q(str(f)) for f in files[k])}], hive_partitioning = false) ORDER BY x").fetchall()
+        sp.release(g)
+        assert sorted({x for f in (tmp_path / "s").rglob("*.parquet") for x in f.parts if x.startswith("sp=")}) == [f"sp={h}" for h in range(g + 1, sp.p)]
+    assert got == {k: [(x,) for x in range(k, 200, 7)] for k in range(n)}
+    sp.close()
+    con.close()
+
+
 def test_chunk_spill_defaults_to_one_partition_per_chunk_up_to_spill_direct(tmp_path):
     """Up to `SPILL_DIRECT` chunks each gets its own partition (no split pass on reading); past it, `SPILL_PARTS`."""
     sizes = [1, sr.SPILL_DIRECT, sr.SPILL_DIRECT + 1, 4858]

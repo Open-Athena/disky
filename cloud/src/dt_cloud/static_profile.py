@@ -90,6 +90,9 @@ class Profile:
     #: Key ranges, then served sorts, the interval store's compaction folds at a time (`compact -j`: cursors of one DuckDB
     #: database sharing its memory and threads). The served sorts are each ~35 min at gcs's size, so 1 runs them in series.
     compact_jobs: int = 1
+    #: The static store's compaction: its drill fold's chunks folded at a time (`static_merge compact -j`: cursors of one
+    #: DuckDB database sharing its `-M` and `-p`). 0: sized from the compact machine (`static_runner.fold_jobs`).
+    fold_jobs: int = 0
     #: Env var → Secret Manager secret name, for the merge and compaction jobs to record their runs on `/scans` with
     #: (`maint_runs`): `{"CLOUDFLARE_API_TOKEN": <the D1 token's secret>}`, with the submitter's `$D1_DB_ID` and
     #: `$CLOUDFLARE_ACCOUNT_ID` passed through (`append_runner.Runner.record_env`). Empty: the jobs run unrecorded.
@@ -157,7 +160,7 @@ ENV = {
     "standard_stages": "STATIC_NAMES_STANDARD_STAGES",
     "append_tasks": "STATIC_NAMES_APPEND_TASKS", "drill": "STATIC_NAMES_DRILL", "drill_checkpoint": "STATIC_NAMES_DRILL_CHECKPOINT", "anchors": "STATIC_NAMES_ANCHORS", "src": "STATIC_NAMES_SRC",
     "hex_runs": "STATIC_NAMES_HEX_RUNS", "compact_level": "STATIC_NAMES_COMPACT_LEVEL", "compact": "STATIC_NAMES_COMPACT", "read_from": "STATIC_NAMES_READ_FROM",
-    "compact_jobs": "STATIC_NAMES_COMPACT_JOBS", "record_secrets": "STATIC_NAMES_RECORD_SECRETS",
+    "compact_jobs": "STATIC_NAMES_COMPACT_JOBS", "fold_jobs": "STATIC_NAMES_FOLD_JOBS", "record_secrets": "STATIC_NAMES_RECORD_SECRETS",
 }
 
 
@@ -204,7 +207,7 @@ def _parse(name: str, raw: str):
         from .append_runner import parse_policy
 
         return parse_policy(ENV[name], raw)
-    if name in ("ssd_gb", "append_tasks", "compact_jobs"):
+    if name in ("ssd_gb", "append_tasks", "compact_jobs", "fold_jobs"):
         return int(raw)
     if name in ("spot", "drill", "anchors"):
         return raw.strip() not in ("0", "false", "")
