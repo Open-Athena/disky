@@ -19,6 +19,8 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
 
+from .heartbeat import Progress
+
 #: A bare bucket name's scheme (the profiles predating URL stores name a GCS bucket).
 DEFAULT_SCHEME = "gs"
 
@@ -244,26 +246,31 @@ class Store:
         (completeness markers); `{key, size}` per file."""
         files = sorted(p for p in local.rglob("*") if p.is_file() and p.relative_to(local).as_posix() not in last)
         tail = [local / r for r in last if (local / r).is_file()]
+        prog = Progress(f"upload {self.uri(prefix)}", len(files) + len(tail), total_bytes=sum(p.stat().st_size for p in [*files, *tail]), unit="files")
 
         def one(p: Path) -> dict:
             key = f"{prefix}/{p.relative_to(local).as_posix()}"
             self.put(p, key)
+            prog.tick(nbytes=p.stat().st_size)
             return {"key": key, "size": p.stat().st_size}
 
         with ThreadPoolExecutor(workers) as ex:
             out = list(ex.map(one, files))
-        return out + [one(p) for p in tail]
+        out += [one(p) for p in tail]
+        prog.done()
+        return out
 
 
 def mirror(store: Store, prefix: str, local: Path, keep: Callable[[str], bool] = lambda rel: True) -> dict[str, int]:
     """`prefix` (a generation) copied into `local` (files already there with the same size are kept; `keep(rel)` false:
     not copied); returns the whole listing."""
     listing = store.listing(prefix)
-    for key, size in listing.items():
-        rel = key[len(prefix) + 1:]
-        dst = local / rel
-        if keep(rel) and not (dst.is_file() and dst.stat().st_size == size):
-            store.get(key, dst)
+    todo = {k: n for k, n in listing.items() if keep(rel := k[len(prefix) + 1:]) and not ((dst := local / rel).is_file() and dst.stat().st_size == n)}
+    prog = Progress(f"mirror {prefix}", len(todo), total_bytes=sum(todo.values()), unit="files")
+    for key, size in todo.items():
+        store.get(key, local / key[len(prefix) + 1:])
+        prog.tick(nbytes=size)
+    prog.done()
     return listing
 
 
@@ -273,8 +280,11 @@ def upload_new(store: Store, local: Path, prefix: str, before: dict[str, int], o
     once)."""
     keys = [p.relative_to(local).as_posix() for p in local.rglob("*") if p.is_file()]
     new = order([k for k in keys if f"{prefix}/{k}" not in before])
+    prog = Progress(f"upload {prefix}", len(new), total_bytes=sum((local / k).stat().st_size for k in new), unit="files")
     for k in new:
         store.put(local / k, f"{prefix}/{k}")
+        prog.tick(nbytes=(local / k).stat().st_size)
+    prog.done()
     return new
 
 

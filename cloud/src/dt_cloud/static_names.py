@@ -41,6 +41,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 from click import IntRange, argument, group, option
 
+from . import heartbeat as hb
 from .hex_runs import HexRule, first_occurrence, kept_sql, occurs, rule_from_json
 from .scan_id import SCAN_ID, check_order, scan_epoch, scan_label  # noqa: F401 (re-exported: the stages' scan-id helpers)
 from .static_profile import data_bucket, layouts as profile_layouts, profile, scratch_bucket
@@ -296,15 +297,19 @@ def rss_peak_gb() -> float:
 
 class Progress:
     """A loop's progress lines: `label k/n`, rows so far, seconds, and the rest's estimate, at most one per `every_s`
-    (and the last), so a stalled fold shows within minutes instead of at the end of its sub-step."""
+    (and the last), so a stalled fold shows within minutes instead of at the end of its sub-step. The process's stage
+    (`heartbeat.set_stage`: its liveness line) is `label`, its detail `k/n`."""
 
-    def __init__(self, label: str, n: int, log: Callable[[str], None], every_s: float = 30.0):
+    def __init__(self, label: str, n: int, log: Callable[[str], None], every_s: float = hb.PROGRESS_S):
         self.label, self.n, self.log, self.every_s = label, n, log, every_s
         self.t0 = self.last = monotonic()
         self.rows = 0
+        hb.set_stage(label)
+        hb.set_detail(f"0/{n}")
 
     def tick(self, k: int, rows: int) -> None:
         self.rows += rows
+        hb.set_detail(f"{k + 1}/{self.n}")
         now = monotonic()
         if now - self.last < self.every_s and k + 1 < self.n:
             return

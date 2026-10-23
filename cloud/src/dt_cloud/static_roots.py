@@ -1067,6 +1067,19 @@ def _group_table(con, plan: dict) -> None:
     con.executemany("INSERT INTO qg VALUES (?, ?)", [(g["lo"], k) for k, g in enumerate(plan["groups"])])
 
 
+def ranged(rows: str, bounds: str, col: str, keys: str | None = None) -> str:
+    """Query `rows`' rows (a table or a parenthesized query with a `q` column) with `col`: the `q` range of table `bounds`
+    (`lo`, `col`) each falls in (the last `lo <= q`), as `rows ASOF JOIN bounds ON q >= lo` assigns it. The ASOF join runs
+    over the distinct `q`s only (`keys`: a query of them, default `rows`' own), and the rows take theirs by a hash join:
+    an ASOF join with no equality key sorts its whole left side in one partition, so over every row it was a global sort
+    of each spill's input (gcs's 10-22 L3 carry: 60 min reading 2 B long rows). A row whose `q` has no range (not in
+    `keys`, or below every `lo`) fails the query, never drops."""
+    keys = keys if keys is not None else f"SELECT DISTINCT q FROM {rows}"
+    return f"""SELECT r.*, CASE WHEN g.q IS NULL THEN error('ranged: q ' || coalesce('''' || r.q || '''', 'NULL') || ' has no range')
+            ELSE g.{col} END AS {col}
+        FROM {rows} AS r LEFT JOIN (SELECT k.q, b.{col} FROM ({keys}) AS k ASOF JOIN {bounds} AS b ON k.q >= b.lo) AS g ON r.q = g.q"""
+
+
 @cli.command("short-map")
 @option("-b", "--bucket", default=data_bucket, help="Bucket")
 @option("-g", "--gen", required=True, help="Generation (its `cintervals/`, `drill/short-plan.json`)")
@@ -1104,7 +1117,7 @@ def short_map_cmd(bucket, gen, index, mount, mem, parts, threads, pieces, scratc
         short_roots(con, f"SELECT * FROM ({versions}) WHERE hash(path) % {pieces} = {k}", "rt", rule=gen_rule_at(bucket, gen))
         part = Path(tmp) / "smap"
         shutil.rmtree(part, ignore_errors=True)
-        con.execute(f"COPY (SELECT rt.*, qg.grp FROM rt ASOF JOIN qg ON rt.q >= qg.lo) TO {q(str(part))} (FORMAT parquet, PARTITION_BY (grp), COMPRESSION zstd)")
+        con.execute(f"COPY ({ranged('rt', 'qg', 'grp')}) TO {q(str(part))} (FORMAT parquet, PARTITION_BY (grp), COMPRESSION zstd)")
         n += con.execute("SELECT count(*) FROM rt").fetchone()[0]
         for d in sorted(part.glob("grp=*")):
             g = int(d.name.split("=")[1])

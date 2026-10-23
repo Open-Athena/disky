@@ -174,6 +174,12 @@ def test_build_drill_is_the_reference_drill(built):
     for sub, kind in (("dirs", "long"), ("short/dirs", "short")):
         got_meas = pq.read_table(gen / "roots-measure" / sub / "s0000.parquet").to_pylist()
         assert got_meas == sorted(pq.read_table(meas[kind]).to_pylist(), key=lambda r: (r["q"], r["k"], r["dir"])), kind
+    # The fixture's preconditions for that comparison to cover the roots' sort (`measure_ranges`' per range,
+    # `write_kind`'s over the table): rows tying on `(q, path, usr)` (a path's versions) and a unique full key.
+    for kind in ("long", "short"):
+        keys = [tuple(r.values()) for r in pq.read_table(gen / "drill" / kind / "roots", columns=["q", "path", "usr", "vf"]).to_pylist()]
+        assert len(set(keys)) == len(keys), kind
+        assert len({k[:3] for k in keys}) < len(keys), kind
 
 
 def test_build_chunked_drill_is_the_unchunked_one(built, tmp_path):

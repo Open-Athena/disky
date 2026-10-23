@@ -396,16 +396,7 @@ def start_run(con, prior: list[Tier], run: Tier, D: int, R: int, K: int, into: s
     con.execute("CREATE OR REPLACE TABLE near AS SELECT rd.* FROM rd ANTI JOIN (SELECT DISTINCT q FROM ps) AS h ON rd.k = h.q")
     con.execute("CREATE OR REPLACE TABLE prows AS SELECT * FROM rr WHERE false")
     nk = [k for (k,) in con.execute("SELECT k FROM near ORDER BY k").fetchall()]
-    for t in prior:
-        by_file: dict[str, list[str]] = {}
-        for k in nk:
-            if f := t.shard_file("exact", k):
-                by_file.setdefault(f, []).append(k)
-        for f, ks in by_file.items():
-            rng = " OR ".join(f"(s >= {q(k)} AND s < {q(k + chr(0x10FFFF))})" for k in ks)
-            con.execute(f"""INSERT INTO prows SELECT n.k, x.depth, x.path, x.usr, x.vf, x.vt, x.size, x.n_files, x.par
-                FROM ({shard_rows_sql([f], rng)}) AS x JOIN near AS n ON starts_with(x.k, n.k)""")
-            doc["probes"] += 1
+    doc["probes"] = probe_start_rows(con, prior, nk)
     doc["probe_rows"] = con.execute("SELECT count(*) FROM prows").fetchone()[0]
     con.execute("""CREATE OR REPLACE TABLE pv AS SELECT k, any_value(depth) AS depth, path, usr, vf, min(vt) AS vt, any_value(size) AS size,
             any_value(n_files) AS n_files, any_value(par) AS par FROM prows GROUP BY k, path, usr, vf""")
@@ -562,6 +553,41 @@ def probe_prior_rows(
                 queries += 1
     con.execute("DROP TABLE IF EXISTS pkeys")
     resource_stage(f"anchors {mode}: prior probes complete", queries=queries, keys=len(keys))
+    return queries
+
+
+def probe_start_rows(con, prior: list, keys: list[str], batch_keys: int = PROBE_BATCH_KEYS) -> int:
+    """`prows`: every prior row whose name starts with one of `keys` (sorted near prefixes, ≥ 3 characters, so each
+    lies in one shard), once per (key, row) per tier, read in bounded key batches as `probe_prior_rows` does.
+
+    A batch's keys go into `pkeys`; the shard is read over `[first, last + U+10FFFF)` (every batched key's rows lie in
+    it, being sorted), and each row joins its own prefixes (`left(k, L)`, L over the batch's key lengths) to the batch's
+    keys: an equi-join, nested keys (`abc`, `abcd`) each getting their rows. Rows between sparse keys are dropped by their
+    3-character prefix before the prefixes are expanded. One `OR` of every near key's range plus a `starts_with` join
+    froze cw's backlogged 10-20 18:06 scan's `start` probes twice (one core, no spill writes, an hour+ silent)."""
+    if batch_keys <= 0:
+        raise ValueError("batch_keys must be positive")
+    queries = 0
+    for ti, tier in enumerate(prior):
+        by_file: dict[str, list[str]] = {}
+        for key in keys:
+            if file := tier.shard_file("exact", key):
+                by_file.setdefault(file, []).append(key)
+        for file, file_keys in by_file.items():
+            for offset in range(0, len(file_keys), batch_keys):
+                selected = file_keys[offset:offset + batch_keys]
+                values = ", ".join(f"({q(k)})" for k in selected)
+                con.execute(f"CREATE OR REPLACE TABLE pkeys AS SELECT * FROM (VALUES {values}) AS t(k)")
+                where = f"s >= {q(selected[0])} AND s < {q(selected[-1] + chr(0x10FFFF))}"
+                resource_stage("anchors start: prior probes", tier=ti, query=queries + 1, keys=len(selected))
+                lo, hi = min(len(k) for k in selected), max(len(k) for k in selected)
+                con.execute(f"""INSERT INTO prows SELECT p.k, x.depth, x.path, x.usr, x.vf, x.vt, x.size, x.n_files, x.par
+                    FROM (SELECT *, left(k, L) AS kp FROM (SELECT *, unnest(range({lo}, least(length(k), {hi}) + 1)) AS L
+                        FROM ({shard_rows_sql([file], where)}) WHERE left(k, 3) IN (SELECT DISTINCT left(k, 3) FROM pkeys))) AS x
+                    JOIN pkeys AS p ON x.kp = p.k""")
+                queries += 1
+    con.execute("DROP TABLE IF EXISTS pkeys")
+    resource_stage("anchors start: prior probes complete", queries=queries, keys=len(keys))
     return queries
 
 
