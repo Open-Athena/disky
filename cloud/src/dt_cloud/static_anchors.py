@@ -561,8 +561,9 @@ def probe_start_rows(con, prior: list, keys: list[str], batch_keys: int = PROBE_
     lies in one shard), once per (key, row) per tier, read in bounded key batches as `probe_prior_rows` does.
 
     A batch's keys go into `pkeys`; the shard is read over `[first, last + U+10FFFF)` (every batched key's rows lie in
-    it, being sorted), and each row joins its own prefixes (`left(k, L)`, L ≥ 3) to the batch's keys: an equi-join,
-    nested keys (`abc`, `abcd`) each getting their rows. One `OR` of every near key's range plus a `starts_with` join
+    it, being sorted), and each row joins its own prefixes (`left(k, L)`, L over the batch's key lengths) to the batch's
+    keys: an equi-join, nested keys (`abc`, `abcd`) each getting their rows. Rows between sparse keys are dropped by their
+    3-character prefix before the prefixes are expanded. One `OR` of every near key's range plus a `starts_with` join
     froze cw's backlogged 10-20 18:06 scan's `start` probes twice (one core, no spill writes, an hour+ silent)."""
     if batch_keys <= 0:
         raise ValueError("batch_keys must be positive")
@@ -579,9 +580,10 @@ def probe_start_rows(con, prior: list, keys: list[str], batch_keys: int = PROBE_
                 con.execute(f"CREATE OR REPLACE TABLE pkeys AS SELECT * FROM (VALUES {values}) AS t(k)")
                 where = f"s >= {q(selected[0])} AND s < {q(selected[-1] + chr(0x10FFFF))}"
                 resource_stage("anchors start: prior probes", tier=ti, query=queries + 1, keys=len(selected))
+                lo, hi = min(len(k) for k in selected), max(len(k) for k in selected)
                 con.execute(f"""INSERT INTO prows SELECT p.k, x.depth, x.path, x.usr, x.vf, x.vt, x.size, x.n_files, x.par
-                    FROM (SELECT *, left(k, L) AS kp FROM (SELECT *, unnest(range(3, length(k) + 1)) AS L
-                        FROM ({shard_rows_sql([file], where)}))) AS x
+                    FROM (SELECT *, left(k, L) AS kp FROM (SELECT *, unnest(range({lo}, least(length(k), {hi}) + 1)) AS L
+                        FROM ({shard_rows_sql([file], where)}) WHERE left(k, 3) IN (SELECT DISTINCT left(k, 3) FROM pkeys))) AS x
                     JOIN pkeys AS p ON x.kp = p.k""")
                 queries += 1
     con.execute("DROP TABLE IF EXISTS pkeys")
