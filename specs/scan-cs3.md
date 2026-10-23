@@ -13,6 +13,7 @@ Status: tracking doc, opened 2026-10-22. This is the top priority for gcs (Ryan,
 | 10-21 | 20 | 50 | 102 | 12 | 7 (failed) | 202 (failed) |
 | 10-22 | 30 | 45 | 129 | 3 (failed) | 37 | 277 |
 | 10-22T1545 (manual) | 30 | 46 | 107 | 24 | 44 | 289 (green) |
+| 10-22T2316 (manual) | 21 | 48 | skipped (compaction held the store) | 15 | 41 | 157 (green; marker failed, probe refused search) |
 
 Phases overlap (static-names runs beside interval-store and post), so the totals aren't sums. The total has grown from ~1 h to ~4.6 h in two weeks.
 
@@ -25,6 +26,8 @@ Phases overlap (static-names runs beside interval-store and post), so the totals
 | 10-22 | interval-store | `prepare` wrote under the pre-compaction generation (`follow` bug) | 599893e7 |
 | 10-22 | static L3 carry | drill merge spilled 1.2 TiB of DuckDB temp | chunked by `q` range (f4653462) |
 | 10-22 | cf-usage | relative `site/wrangler.toml` outside `/app` | 58f4ccb7 |
+| 10-22 | interval-store marker | the append's exact check found 196,021 depth-3 objects with no `generation` in the base's range files, lost by the 10-09 `backfill-generation` (the served sorts have them, so the old check passed) | in progress: backfill RC + the append fills a NULL generation |
+| 10-23 | static compaction | the laptop driver died on a connection reset and released the coordinator lease while the compaction ran; the 07:00 append would have superseded it | lease held by hand; in progress: a running compaction holds the store itself |
 | 10-08…10-22 | static compaction | drill fold ran 6 h silent and was killed; level 6 stopgap | chunked fold (70ed412a); re-trial running |
 
 ## What each phase scales with
