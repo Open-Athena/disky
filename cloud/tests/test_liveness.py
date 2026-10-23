@@ -70,7 +70,7 @@ def test_liveness_without_a_stage_or_current_rss_or_disk():
     live._last = (clock(), 0.0)
     clock.t += 90
     live.tick()
-    assert lines == ["[alive] 1m · - (1m) · RSS peak 2.00 GiB · CPU 0%"]
+    assert lines == ["[alive] 1m · - · RSS peak 2.00 GiB · CPU 0%"]
 
 
 def test_tail_skips_liveness_lines():

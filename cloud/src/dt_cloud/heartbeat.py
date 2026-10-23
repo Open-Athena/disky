@@ -379,6 +379,7 @@ def disk_used(path: str) -> int | None:
 
 class Liveness(Heartbeat):
     """`Heartbeat`'s thread writing `LIVE_TAG <elapsed> · <stage>[ <detail>] (<in stage>) · RSS … · <disk> … · CPU …%`
+    (`-` for the stage, with no time, before any is set)
     (`write`: a stderr line). The probes (`rss() -> (current | None, peak)`, `disk() -> used | None`, `cpu()`: the
     process's CPU seconds, all threads) and `stage()` are parameters, so a test fakes them; CPU% is over the interval
     since the previous line (all threads: past 100% on a busy multi-core sort)."""
@@ -403,8 +404,9 @@ class Liveness(Heartbeat):
         now, cpu = self.clock(), self.cpu()
         (t0, c0), self._last = self._last, (now, cpu)
         label, detail, since = self.stage()
-        stage = "-" if label is None else clip(label, STAGE_CHARS) + (f" {detail}" if detail else "")
-        parts = [LIVE_TAG, fmt_secs(now - self.started), "·", f"{stage} ({fmt_secs(now - since)})"]
+        # No stage set yet: `-`, with no time in it (the elapsed already says how long the process has run).
+        stage = "-" if label is None else clip(label, STAGE_CHARS) + (f" {detail}" if detail else "") + f" ({fmt_secs(now - since)})"
+        parts = [LIVE_TAG, fmt_secs(now - self.started), "·", stage]
         cur, peak = self.rss()
         parts += ["·", f"RSS {fmt_bytes(cur)} (peak {fmt_bytes(peak)})" if cur is not None else f"RSS peak {fmt_bytes(peak)}"]
         used = self.disk()
