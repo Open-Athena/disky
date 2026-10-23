@@ -1929,7 +1929,7 @@ def _spilled(files: list[Path], cols: str) -> str:
 
 
 def merge_tiers(con, tiers: list[Tier], out: Path, tier: dict, file_rows: int = FILE_ROWS, *, work: Path | None = None,
-                chunk_rows: int = MERGE_CHUNK_ROWS, log=err) -> dict:
+                chunk_rows: int = MERGE_CHUNK_ROWS, spill_parts: int | None = None, log=err) -> dict:
     """Runs' drills (oldest first) merged into one tier in `out`: the newest alias map; each input's rows re-keyed to the
     merged canonicals (a class only splits, so its canonical at an input holds the merged canonical's rows there); roots
     combined (smallest `vt`), rollups by the newest-full-header rule (the merged header full if an included input's was),
@@ -1938,9 +1938,11 @@ def merge_tiers(con, tiers: list[Tier], out: Path, tier: dict, file_rows: int = 
     Chunked by merged `q` range, so the working set is `chunk_rows` rows, not the inputs' (gcs's 10-22 L3 carry, 8 runs
     / 78.5 GiB, spilled 1.2 TiB and filled its SSD folding them in one table): every fold is per `q` (roots per
     `(q, path, usr, vf)`, rollups per `(q, dir)`, `dcount` per `(q, dir)` against that `q`'s rollups), so each input's
-    re-keyed rows are spilled once by range (zstd parquet under `work`), each range folded on its own, and the writers
-    read the folded ranges (`write_kind` per file range, `write_state` range by range, in `q` order). Byte-identical at
-    any `chunk_rows`. `log`: a progress line per range at most every 30 s."""
+    re-keyed rows are spilled once by range (zstd parquet under `work`, in at most `spill_parts` partitions of
+    consecutive ranges: `static_roots.ChunkSpill`), each range folded on its own, and the writers read the folded ranges
+    (`write_kind` per file range, `write_state` range by range, in `q` order). The ranges are planned from the inputs'
+    roots and rollups indexes (`static_roots.index_estimates`), not by counting their rows. Byte-identical at any
+    `chunk_rows` and `spill_parts`. `log`: a progress line per range at most every 30 s."""
     out.mkdir(parents=True, exist_ok=True)
     if len({t.rg for t in tiers}) != 1:
         raise ValueError(f"inputs' row groups differ: {[t.rg for t in tiers]}")
@@ -1957,10 +1959,11 @@ def merge_tiers(con, tiers: list[Tier], out: Path, tier: dict, file_rows: int = 
     for kind in KINDS:
         resource_stage(f"merge/{kind}/classes", inputs=len(tiers))
         con.execute("CREATE OR REPLACE TABLE cmap (c VARCHAR, tier INTEGER, ci VARCHAR)")
-        lits = [f"SELECT DISTINCT q FROM read_parquet([{', '.join(q(f) for f in t.files(kind, s))}])" for t in tiers for s in ("roots", "rollups")
-                if t.files(kind, s)]
-        lits += [f"SELECT DISTINCT q FROM read_parquet({q(t.dcount(kind))})" for t in tiers if t.dcount(kind)]
-        con.execute(f"CREATE OR REPLACE TABLE lit AS {' UNION '.join(lits) if lits else 'SELECT NULL::VARCHAR AS q WHERE false'}")
+        if kind != "long":  # the short literals (the long kind's classes come from the alias maps)
+            lits = [f"SELECT DISTINCT q FROM read_parquet([{', '.join(q(f) for f in t.files(kind, s))}])" for t in tiers for s in ("roots", "rollups")
+                    if t.files(kind, s)]
+            lits += [f"SELECT DISTINCT q FROM read_parquet({q(t.dcount(kind))})" for t in tiers if t.dcount(kind)]
+            con.execute(f"CREATE OR REPLACE TABLE lit AS {' UNION '.join(lits) if lits else 'SELECT NULL::VARCHAR AS q WHERE false'}")
         for i, t in enumerate(tiers):
             if kind == "long":
                 con.register("al_in", t.alias_table())
@@ -1983,20 +1986,25 @@ def merge_tiers(con, tiers: list[Tier], out: Path, tier: dict, file_rows: int = 
                 sources.append(("dcount", i, f"""SELECT m.c AS q, r.dir, r.rows FROM read_parquet({q(t.dcount(kind))}) AS r
                     JOIN cmap AS m ON m.tier = {i} AND m.ci = r.q"""))
         resource_stage(f"merge/{kind}/plan", inputs=len(tiers))
-        counts = con.execute(f"""SELECT q, sum(n)::BIGINT FROM ({' UNION ALL '.join(f'SELECT q, count(*) AS n FROM ({sql}) GROUP BY q' for sub, _, sql in sources if sub != 'dcount') or 'SELECT NULL::VARCHAR AS q, 0 AS n WHERE false'})
-            GROUP BY q ORDER BY q""").fetchall()
+        # each input's rows per class estimated from its indexes, then per merged `q` (`cmap`, as the sources re-key them)
+        con.execute("CREATE OR REPLACE TABLE mest (tier INTEGER, q VARCHAR, n BIGINT)")
+        for i, t in enumerate(tiers):
+            sr.index_estimates(con, [t.local(f"{kind}-{sub}-index.parquet") for sub in ("roots", "rollups") if t.files(kind, sub)],
+                               f"SELECT ci AS q FROM cmap WHERE tier = {i}", "mest_i")
+            con.execute(f"INSERT INTO mest SELECT {i}, q, n FROM mest_i")
+        counts = con.execute("""SELECT m.c, sum(e.n)::BIGINT FROM mest AS e JOIN cmap AS m ON m.tier = e.tier AND m.ci = e.q
+            GROUP BY m.c ORDER BY m.c""").fetchall()
+        con.execute("DROP TABLE mest; DROP TABLE IF EXISTS mest_i")
         bounds = _bounds(counts, chunk_rows)
         con.execute("CREATE OR REPLACE TABLE qb (lo VARCHAR, ch INTEGER)")
         con.executemany("INSERT INTO qb VALUES (?, ?)", [(lo, k) for k, lo in enumerate(bounds)])
         kw = work / kind
-        for sub in ("roots", "rollups", "dcount"):
-            (kw / sub).mkdir(parents=True, exist_ok=True)
+        spills = {sub: sr.ChunkSpill(con, kw / sub, len(bounds), spill_parts) for sub in ("roots", "rollups", "dcount")}
         # every source row's `q` is a merged canonical (`cmap.c`): their ranges, assigned once
         con.execute("CREATE OR REPLACE TABLE qk AS SELECT DISTINCT c AS q FROM cmap")
         for sub, i, sql in sources:
             resource_stage(f"merge/{kind}/read/{sub}", tier=i, inputs=len(tiers))
-            con.execute(f"""COPY ({sr.ranged(f'({sql})', 'qb', 'ch', keys='SELECT q FROM qk')})
-                TO {q(str(kw / sub / f't{i:03d}'))} (FORMAT parquet, PARTITION_BY (ch), COMPRESSION zstd)""")
+            spills[sub].write(sr.ranged(f"({sql})", "qb", "ch", keys="SELECT q FROM qk"), f"t{i:03d}")
         folded = kw / "folded"
         for d in ("roots", "rollups", "dcount"):
             (folded / d).mkdir(parents=True)
@@ -2004,7 +2012,7 @@ def merge_tiers(con, tiers: list[Tier], out: Path, tier: dict, file_rows: int = 
         n_rows = 0
         for k in range(len(bounds)):
             resource_stage(f"merge/{kind}/fold", chunk=k, chunks=len(bounds))
-            got = {sub: sorted(kw.glob(f"{sub}/t*/ch={k}/*.parquet")) for sub in ("roots", "rollups", "dcount")}
+            got = {sub: sp.files(k) for sub, sp in spills.items()}
             dr = _spilled(got["roots"], f"q, depth, path, usr, vf, vt, size, n_files")
             con.execute(f"""CREATE OR REPLACE TABLE dr AS SELECT q, any_value(depth) AS depth, path, usr, vf, min(vt) AS vt, any_value(size) AS size,
                 any_value(n_files) AS n_files FROM ({dr or f'SELECT * FROM (SELECT NULL::VARCHAR AS q, 0::UTINYINT AS depth, NULL::VARCHAR AS path, NULL::VARCHAR AS usr, NULL::BIGINT AS vf, NULL::BIGINT AS vt, NULL::BIGINT AS size, NULL::BIGINT AS n_files) WHERE false'}) GROUP BY q, path, usr, vf""")
@@ -2030,9 +2038,8 @@ def merge_tiers(con, tiers: list[Tier], out: Path, tier: dict, file_rows: int = 
                 rows += c
             n_rows += rows
             prog.tick(k, rows)
-        shutil.rmtree(kw / "roots", ignore_errors=True)
-        shutil.rmtree(kw / "rollups", ignore_errors=True)
-        shutil.rmtree(kw / "dcount", ignore_errors=True)
+        for sp in spills.values():
+            sp.close()
         resource_stage(f"merge/{kind}/write")
         # each range's folded files are sorted and the ranges in `q` order (`c{k:06d}`): streamed in turn, not sorted again
         meta.update(write_kind(con, out, kind, file_rows=file_rows, rg=meta["rg"],

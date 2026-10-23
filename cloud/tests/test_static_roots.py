@@ -341,3 +341,58 @@ def test_ranged_assigns_the_asof_ranges(tmp_path, n_bounds):
     with pytest.raises(duckdb.InvalidInputException, match=f"^Invalid Input Error: ranged: q '{re.escape(miss)}' has no range$"):
         con.execute(f"SELECT * FROM ({sr.ranged('rt', 'qg', 'grp', keys=f'SELECT q FROM qk WHERE q <> {sn.q(miss)}')})").fetchall()
     con.close()
+
+
+def test_index_estimates_spread_each_group_over_its_keys(tmp_path):
+    """`index_estimates`: a group's rows over the keys in its `[q_min, q_max]`, evenly, the remainder to the first; a group
+    of one `q` exact; a group holding no key dropped; a key no group covers absent. Over several index files."""
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    groups = [("A", "A", 3), ("a", "a", 10), ("a", "c", 7), ("bb", "bc", 4), ("c", "c", 5), ("d", "z", 9)]
+    files = []
+    for k, part in enumerate((groups[:3], groups[3:])):
+        f = tmp_path / f"i{k}.parquet"
+        pq.write_table(pa.table({"q_min": [g[0] for g in part], "q_max": [g[1] for g in part], "rows": pa.array([g[2] for g in part], pa.int32())}), f)
+        files.append(str(f))
+    con = sn.connect(2, "256MB", tmp_path / "spill")
+    con.execute("CREATE TABLE ks AS SELECT unnest(['a', 'b', 'c', 'd', 'e', 'f', 'zz', NULL]) AS q")
+    sr.index_estimates(con, files, "SELECT q FROM ks", "est")
+    assert con.execute("SELECT q, n FROM est ORDER BY q").fetchall() == [("a", 13), ("b", 2), ("c", 7), ("d", 3), ("e", 3), ("f", 3)]
+    sr.index_estimates(con, [], "SELECT q FROM ks", "none")
+    assert con.execute("SELECT q, n FROM none").fetchall() == []
+    con.close()
+
+
+@pytest.mark.parametrize("parts", [1, 2, 3, 7, 64])
+def test_chunk_spill_reads_each_chunk_exactly(tmp_path, parts):
+    """`ChunkSpill`: at most `parts` partitions of consecutive chunks, and each chunk's files hold exactly its rows (both
+    inputs'), read in order; a partition is removed once the reader passes it."""
+    con = sn.connect(2, "256MB", tmp_path / "spill")
+    n = 7
+    con.execute("CREATE TABLE a AS SELECT (x % 7)::BIGINT AS ch, x, 'a' AS src FROM range(200) AS t(x)")
+    con.execute("CREATE TABLE b AS SELECT ((x * 3) % 7)::BIGINT AS ch, x, 'b' AS src FROM range(50) AS t(x)")
+    sp = sr.ChunkSpill(con, tmp_path / "s", n, parts)
+    sp.write("SELECT * FROM a", "t000")
+    sp.write("SELECT * FROM b", "t001")
+    p = min(parts, n)
+    assert (sp.p, [sp.part(k) for k in range(n)]) == (p, [k * p // n for k in range(n)])
+    assert [list(sp.chunks(g)) for g in range(p)] == [[k for k in range(n) if k * p // n == g] for g in range(p)]
+    assert sorted(d.name for d in (tmp_path / "s" / "in" / "t000").iterdir()) == sorted(f"sp={g}" for g in range(p))
+    got = {}
+    for k in range(n):
+        files = sp.files(k)
+        got[k] = con.execute(f"SELECT src, x FROM read_parquet([{', '.join(sn.q(str(f)) for f in files)}], hive_partitioning = false) ORDER BY src, x").fetchall()
+        # the partitions before this chunk's are gone; its own and the later ones are held
+        assert sorted({x for f in (tmp_path / "s").rglob("*.parquet") for x in f.parts if x.startswith("sp=")}) == [f"sp={g}" for g in range(sp.part(k), p)]
+    want = {k: con.execute(f"SELECT src, x FROM (SELECT * FROM a UNION ALL SELECT * FROM b) WHERE ch = {k} ORDER BY src, x").fetchall() for k in range(n)}
+    assert got == want
+    sp.close()
+    assert not (tmp_path / "s").exists()
+    con.close()
+
+
+def test_chunk_spill_defaults_to_one_partition_per_chunk_up_to_spill_direct(tmp_path):
+    """Up to `SPILL_DIRECT` chunks each gets its own partition (no split pass on reading); past it, `SPILL_PARTS`."""
+    sizes = [1, sr.SPILL_DIRECT, sr.SPILL_DIRECT + 1, 4858]
+    assert [sr.ChunkSpill(None, tmp_path / f"s{n}", n).p for n in sizes] == [1, sr.SPILL_DIRECT, sr.SPILL_PARTS, sr.SPILL_PARTS]

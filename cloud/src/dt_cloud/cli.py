@@ -3521,5 +3521,9 @@ from .cf_usage import cli as _cf_usage  # noqa: E402
 
 main.add_command(_cf_usage)
 
+from .deploy_cost import cost_cmd as _deploy_cost  # noqa: E402
+
+main.add_command(_deploy_cost)
+
 if __name__ == "__main__":
     main()

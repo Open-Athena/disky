@@ -105,6 +105,31 @@ def test_candidate_bounds_include_unknown_statistics_and_exact_edges():
     ]
 
 
+def test_run_tiers_bound_by_the_lesser_of_their_groups_and_the_keys_rows():
+    """The base by its groups; the run tiers by their groups or the key's rows over them, whichever is less: a run
+    group holding other keys spans their paths, so it meets every `dir`, but `foo` has only 3 rows there."""
+    con = duckdb.connect()
+    con.execute('CREATE TABLE cand(k VARCHAR, lvl INTEGER, dir VARCHAR, n BIGINT)')
+    con.executemany('INSERT INTO cand VALUES (?, ?, ?, ?)', [('foo', 0, '', 1), ('foo', 1, 'a', 1), ('foo', 1, 'b', 1), ('big', 1, 'b', 1)])
+    con.execute('CREATE TABLE ktk(k VARCHAR, t INTEGER, p_min VARCHAR, p_max VARCHAR, rows BIGINT)')
+    con.executemany('INSERT INTO ktk VALUES (?, ?, ?, ?, ?)', [
+        ('foo', 0, 'a/a', 'a/m', 200),   # the base: only foo's rows, under a/
+        ('foo', 1, 'a', 'z/z', 8000),    # a run: a group of many keys
+        ('foo', 2, 'a', 'z/z', 8000),    # another
+        ('big', 1, 'b/a', 'b/z', 300),   # a run group of big's own rows: tighter than its count
+    ])
+    con.execute('CREATE TABLE rc(k VARCHAR, n BIGINT)')
+    con.executemany('INSERT INTO rc VALUES (?, ?)', [('foo', 3), ('big', 5000)])
+    an.near_candidates(con, 100, "rc")
+    assert con.execute('SELECT * FROM near ORDER BY k, lvl, dir').fetchall() == [
+        ('big', 1, 'b', 1, 300), ('foo', 0, '', 1, 203), ('foo', 1, 'a', 1, 203),
+    ]
+    an.near_candidates(con, 100, None)
+    assert con.execute('SELECT k, dir, bound FROM near ORDER BY k, lvl, dir').fetchall() == [
+        ('big', 'b', 300), ('foo', '', 16200), ('foo', 'a', 16200), ('foo', 'b', 16000),
+    ]
+
+
 def test_candidate_bounds_scale_with_many_directories_of_one_key():
     con = duckdb.connect()
     con.execute("CREATE TABLE cand AS SELECT 'key' AS k, 1 AS lvl, printf('b/%06d', i) AS dir, 1::BIGINT AS n FROM range(20000) AS r(i)")
