@@ -95,11 +95,11 @@ def term_key(text: str, mode: str | None) -> str:
     return {"start": f"/{text}", "end": f"{text}/", "exact": f"/{text}/", None: text}[mode]
 
 
-def name_hit_sql(mode: str, key: str = "s", rule: HexRule | None = None) -> str:
-    """`first_hit_sql`'s test of the row's own name: under a hex-run rule a `q$` row matches only where the rule keeps
-    its occurrence (the name from the row's `path`); otherwise every row passes."""
+def name_hit_sql(mode: str, key: str = "s", rule: HexRule | None = None, name: str = NAME) -> str:
+    """`first_hit_sql`'s test of the row's own name (`name`, by default from its `path`): under a hex-run rule a `q$`
+    row matches only where the rule keeps its occurrence; otherwise every row passes."""
     if mode == "end" and rule is not None:
-        return f"NOT {end_dropped_sql(NAME, key, rule)}"
+        return f"NOT {end_dropped_sql(name, key, rule)}"
     return "true"
 
 
@@ -126,12 +126,16 @@ def first_hit_sql(mode: str, key: str = "s", par: str = "par", rule: HexRule | N
 
 
 def first_hits_sql(rows: str, mode: str, rule: HexRule | None = None) -> str:
-    """The rows of `rows` (a query of `AR_COLS`) passing `first_hit_sql` on `k`, the ancestor test run once per distinct
-    `(k, par)` rather than per row: a directory's rows share it, and under a hex-run rule it is a lambda over every
-    segment (cw's 10-21T0602 `end` fold: 5,631 cpu-s filtering 27.5M rows)."""
-    return f"""WITH r AS MATERIALIZED ({rows})
-        SELECT r.* FROM r SEMI JOIN (SELECT k, par FROM (SELECT DISTINCT k, par FROM r) WHERE {par_hit_sql(mode, 'k', rule=rule)}) AS h USING (k, par)
-        WHERE {name_hit_sql(mode, 'k', rule)}"""
+    """The rows of `rows` (a query of `AR_COLS`) passing `first_hit_sql` on `k`, each test run once per distinct value it
+    depends on rather than per row: the ancestor test per `(k, par)` (a directory's rows share it; under a hex-run rule
+    a lambda over every segment) and the name test per `(k, name)` (a path's versions share it). cw's 10-21T0602 `end`
+    fold spent 5,631 cpu-s filtering 27.5M rows per row; 10-21T1202, with only the ancestor test deduplicated, 1,239."""
+    hits = f"""SELECT r.* FROM r SEMI JOIN (SELECT k, par FROM (SELECT DISTINCT k, par FROM r) WHERE {par_hit_sql(mode, 'k', rule=rule)}) AS h
+        USING (k, par)"""
+    if name_hit_sql(mode, "k", rule) == "true":
+        return f"WITH r AS MATERIALIZED ({rows}) {hits}"
+    return f"""WITH r AS MATERIALIZED (SELECT *, {NAME} AS nm FROM ({rows})) SELECT * EXCLUDE (nm) FROM ({hits}) AS x
+        SEMI JOIN (SELECT k, nm FROM (SELECT DISTINCT k, nm FROM r) WHERE {name_hit_sql(mode, 'k', rule, 'nm')}) AS n USING (k, nm)"""
 
 
 # ── The name index ─────────────────────────────────────────────────────────
@@ -533,7 +537,7 @@ def _child(path: str, dir_: str) -> str:
 #: Keys per prior-probe query (`probe_prior_rows`): one shard read per batch, so fewer is slower, not leaner.
 PROBE_BATCH_KEYS = 1 << 16
 #: A probe batch's keys are split where the shard rows between two of them pass this (`key_clusters`).
-PROBE_GAP_ROWS = 1 << 20
+PROBE_GAP_ROWS = 1 << 22
 
 
 def key_clusters(con, file: str, keys: list[str], gap_rows: int = PROBE_GAP_ROWS, batch_keys: int = PROBE_BATCH_KEYS) -> list[list[str]]:
