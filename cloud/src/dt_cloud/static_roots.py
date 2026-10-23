@@ -1080,6 +1080,92 @@ def ranged(rows: str, bounds: str, col: str, keys: str | None = None) -> str:
         FROM {rows} AS r LEFT JOIN (SELECT k.q, b.{col} FROM ({keys}) AS k ASOF JOIN {bounds} AS b ON k.q >= b.lo) AS g ON r.q = g.q"""
 
 
+def index_estimates(con, index_files: list[str], keys: str, into: str) -> None:
+    """Table `into (q, n)`: each `q` of query `keys`' rows in the `q`-sorted files indexed by `index_files`
+    (`GROUP_INDEX_SCHEMA`: per row group its first and last `q` and rows), estimated from the indexes alone: a group's
+    rows are spread evenly over the keys in its `[q_min, q_max]` (the remainder to the first of them); a group holding
+    no key is dropped. Exact for a group of one `q`, so off by at most two groups' rows for a `q` spanning several. What
+    chunk planning reads instead of counting every row (gcs's 10-08c compaction: 60 min counting the base's 40 B long
+    roots from the bucket mount): chunk sizes never change a drill's bytes. Every `q` with an estimate is listed (rows
+    `n` ≥ 0), in no order."""
+    if not index_files:
+        con.execute(f"CREATE OR REPLACE TABLE {into} (q VARCHAR, n BIGINT)")
+        return
+    files = ", ".join(q(f) for f in index_files)
+    con.execute(f"""CREATE OR REPLACE TABLE {into} AS
+        WITH k AS (SELECT q, (row_number() OVER (ORDER BY q) - 1)::BIGINT AS pos FROM (SELECT DISTINCT q FROM ({keys}) WHERE q IS NOT NULL)),
+             g AS (SELECT q_min, q_max, rows::BIGINT AS rows FROM read_parquet([{files}])),
+             ga AS (SELECT g.q_max, g.rows, coalesce(k.pos + 1, 0)::BIGINT AS a FROM g ASOF LEFT JOIN k ON g.q_min > k.q),
+             gb AS (SELECT ga.rows, ga.a, coalesce(k.pos + 1, 0)::BIGINT AS b FROM ga ASOF LEFT JOIN k ON ga.q_max >= k.q),
+             e AS (SELECT unnest(range(a, b)) AS pos, a, b - a AS w, rows FROM gb WHERE b > a)
+        SELECT k.q, sum(e.rows // e.w + CASE WHEN e.pos = e.a THEN e.rows % e.w ELSE 0 END)::BIGINT AS n FROM e JOIN k USING (pos) GROUP BY k.q""")
+
+
+#: A chunked spill's partitions at most (`ChunkSpill`): DuckDB's partitioned write keeps buffers per partition (and per
+#: thread) outside its memory limit and reopens files past `partitioned_write_max_open_files` (100); gcs's 10-08c
+#: compaction spilled its runs into 4,858 chunk partitions and its RSS went from 174 to 272 GiB there, past `-M`.
+SPILL_PARTS = 64
+
+
+class ChunkSpill:
+    """Rows spilled by chunk (column `ch`, 0 … `n` − 1) into at most `parts` (default `SPILL_PARTS`) partitions of
+    consecutive chunks (`root/in/<name>/sp=<p>/`), and read back chunk by chunk in order (`files`): a partition holding
+    several chunks is split by chunk (`root/by-chunk/sp=<p>/ch=<k>/`: one more pass over its rows, a fan-out of at most
+    ⌈n / parts⌉) when the reader first reaches it, and removed when the reader moves on. Each chunk's files hold exactly
+    its rows, whatever `parts` (the files keep `ch`, which readers don't select)."""
+
+    def __init__(self, con, root: Path, n: int, parts: int | None = None):
+        self.con, self.root, self.n = con, root, n
+        self.p = max(1, min(parts or SPILL_PARTS, n))
+        self.cur: int | None = None
+        self.held: list[Path] = []
+        self.split, self.src = False, []
+        for d in ("in", "by-chunk"):
+            (root / d).mkdir(parents=True, exist_ok=True)
+
+    def part(self, k: int) -> int:
+        """Chunk `k`'s partition."""
+        return k * self.p // self.n
+
+    def chunks(self, part: int) -> range:
+        """Partition `part`'s chunks."""
+        return range(-(-part * self.n // self.p), -(-(part + 1) * self.n // self.p))
+
+    def write(self, sql: str, name: str) -> None:
+        """Query `sql`'s rows (with `ch`) → `root/in/<name>/` by partition."""
+        self.con.execute(f"""COPY (SELECT *, (ch * {self.p} // {self.n})::INTEGER AS sp FROM ({sql})) TO {q(str(self.root / 'in' / name))}
+            (FORMAT parquet, PARTITION_BY (sp), COMPRESSION zstd)""")
+
+    def files(self, k: int) -> list[Path]:
+        """Chunk `k`'s files (chunks are read in order: the previous partition's files are removed on reaching the next)."""
+        part = self.part(k)
+        if part != self.cur:
+            self._drop()
+            self.cur = part
+            src = sorted(self.root.glob(f"in/*/sp={part}/*.parquet"))
+            self.held = sorted({f.parent for f in src})
+            self.split = len(self.chunks(part)) > 1 and bool(src)
+            if self.split:
+                out = self.root / "by-chunk" / f"sp={part}"
+                self.con.execute(f"""COPY (SELECT * FROM read_parquet([{', '.join(q(str(f)) for f in src)}], hive_partitioning = false))
+                    TO {q(str(out))} (FORMAT parquet, PARTITION_BY (ch), COMPRESSION zstd)""")
+                self._drop()
+                self.held = [out]
+            else:
+                self.src = src
+        if not self.split:
+            return self.src
+        return sorted((self.root / "by-chunk" / f"sp={part}" / f"ch={k}").glob("*.parquet"))
+
+    def _drop(self) -> None:
+        for d in self.held:
+            shutil.rmtree(d, ignore_errors=True)
+        self.held = []
+
+    def close(self) -> None:
+        shutil.rmtree(self.root, ignore_errors=True)
+
+
 @cli.command("short-map")
 @option("-b", "--bucket", default=data_bucket, help="Bucket")
 @option("-g", "--gen", required=True, help="Generation (its `cintervals/`, `drill/short-plan.json`)")

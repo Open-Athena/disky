@@ -16,6 +16,7 @@ from dt_cloud import append_runner as ar
 from dt_cloud import static_compact as sk
 from dt_cloud import static_local as sl
 from dt_cloud import static_names as sn
+from dt_cloud import static_roots as sr
 
 from test_static_local import _build, _layout, _small_groups
 from test_static_names import fixture, scan_ids  # noqa: F401
@@ -71,6 +72,17 @@ def world(fixture, tmp_path_factory):  # noqa: F811
         _build(root, scans, c, tmp / "wc0", through=ids[1])
         _add(root, scans, c, tmp / "wc1", ids[3])
         out["c"] = _compact(c, tmp / "wc2", "-c", "3")
+        # D, E: C again with the runs' chunk spill in 2 partitions, then 1 (each split by chunk on reading): the same bytes
+        for name, parts in (("d", 2), ("e", 1)):
+            d = tmp / name
+            _build(root, scans, d, tmp / f"w{name}0", through=ids[1])
+            _add(root, scans, d, tmp / f"w{name}1", ids[3])
+            old, sr.SPILL_PARTS = sr.SPILL_PARTS, parts
+            try:
+                out[name] = _compact(d, tmp / f"w{name}2", "-c", "3")
+            finally:
+                sr.SPILL_PARTS = old
+            out[f"{name}_store"] = d / sn.PREFIX
         ranges = str(a / sn.PREFIX / "g" / "ranges.json")
         for gen, through in (("g.c001", ids[3]), ("g.c002", ids[4])):
             _build(root, scans, tmp / f"ref-{gen}", tmp / f"wr-{gen}", gen=gen, through=through, extra=("-r", ranges))
@@ -96,7 +108,7 @@ def test_add_compacts_when_due_then_appends_to_the_successor(world):
 
 
 @pytest.mark.parametrize("store, gen, ref", [("a_store", "g.c001", "g.c001"), ("a_store", "g.c002", "g.c002"), ("b_store", "g.c001", "g.c001"),
-                                             ("c_store", "g.c001", "g.c001")])
+                                             ("c_store", "g.c001", "g.c001"), ("d_store", "g.c001", "g.c001"), ("e_store", "g.c001", "g.c001")])
 def test_compacted_generation_is_the_rebuild(world, store, gen, ref):
     got, want = world[store] / gen, world["tmp"] / f"ref-{ref}" / sn.PREFIX / ref
     g, w = _md5s(got), _md5s(want)

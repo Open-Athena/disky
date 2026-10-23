@@ -42,6 +42,7 @@ from . import static_catalog as sc
 from . import static_drill as sd
 from . import static_local as sl
 from . import static_names as sn
+from . import static_roots as sr
 from .checkpoint import Checkpoint, code_version
 from .static_names import CINTERVAL_SCHEMA, CODEC, INTERVAL_RG, PREFIX, err, q
 
@@ -133,9 +134,9 @@ def q_spans(files: list[str]) -> list[tuple[str, str | None, str | None]]:
     return out
 
 
-def overlapping(spans: list[tuple[str, str | None, str | None]], lo: str, hi: str) -> list[str]:
-    """The files of `spans` that may hold a `q` in `[lo, hi]`."""
-    return [f for f, a, b in spans if a is None or (a <= hi and b >= lo)]
+def overlapping(spans: list[tuple[str, str | None, str | None]], lo: str, hi: str | None) -> list[str]:
+    """The files of `spans` that may hold a `q` in `[lo, hi]` (`hi` None: no upper bound)."""
+    return [f for f, a, b in spans if a is None or ((hi is None or a <= hi) and b >= lo)]
 
 
 def fold_drill(con, tiers: list[sd.Tier], out: Path, work: Path, *, R: int, K: int, floor: int, chunk_rows: int = sl.CHUNK_ROWS,
@@ -150,11 +151,13 @@ def fold_drill(con, tiers: list[sd.Tier], out: Path, work: Path, *, R: int, K: i
     Chunked, so the working set is `chunk_rows` roots, not the corpus (gcs's first compaction ran one aggregate over all
     299 GB of roots and logged nothing for 6 h): members with equal tuples of classes (one per tier) hold equal rows, so
     the tuples (`tid`, ordered by the base's class) are cut into chunks of about `chunk_rows` rows (each tier's rows per
-    class, summed). The runs' rows are spilled once by chunk; the base's are read per chunk by its classes' `q` span
-    (the roots files are sorted by `q`, so a chunk reads the files, and row groups, that span overlaps). Each chunk's
-    combined roots and digests are exact (a tuple's rows are all in its chunk); the canonical members' roots are then
-    spilled by `q` range chunk by chunk, and the short literals' by `q` range, as the build's. `log`: a progress line per
-    chunk (at most one per 30 s).
+    class, summed, as its roots index estimates them: `static_roots.index_estimates`). The runs' rows are spilled once
+    by chunk, into at most `static_roots.SPILL_PARTS` partitions of consecutive chunks (`static_roots.ChunkSpill`); the
+    base's are read per chunk by its classes' `q` span (the roots files are sorted by `q`, so a chunk reads the files,
+    and row groups, that span overlaps). Each chunk's combined roots and digests are exact (a tuple's rows are all in its chunk);
+    the canonical members' roots are then spilled by `q` range chunk by chunk, and the short literals' by `q` range
+    (planned from their roots indexes too), as the build's. The chunks and partitions never change the bytes. `log`: a
+    progress line per chunk (at most one per 30 s).
 
     `ck`: saved after the long roots (`long-roots`: their digests and files) and after every root is spilled (`spilled`:
     the classes and the spills), so a resubmitted job resumes past the last one saved."""
@@ -222,22 +225,23 @@ def _long_roots(con, tiers: list[sd.Tier], out: Path, work: Path, *, chunk_rows:
     on = " AND ".join(f"t.c{i} IS NOT DISTINCT FROM mt.c{i}" for i in range(n))
     con.execute(f"CREATE OR REPLACE TABLE mtid AS SELECT mt.q, t.tid FROM mt JOIN tup AS t ON {on}")
     long_files = [tr.files("long", "roots") for tr in tiers]
-    for i in range(n):
-        con.execute(f"CREATE OR REPLACE TABLE tc{i} AS SELECT q, count(*)::BIGINT AS n FROM ({_roots_sql(long_files[i])}) GROUP BY q")
+    # each tier's rows per class, estimated from its roots index (`static_roots.index_estimates`): chunk sizes only
+    for i, tr in enumerate(tiers):
+        sr.index_estimates(con, [tr.local("long-roots-index.parquet")] if long_files[i] else [], f"SELECT canonical AS q FROM ta{i}", f"tc{i}")
     est = " + ".join(f"coalesce(tc{i}.n, 0)" for i in range(n))
     cjoin = " ".join(f"LEFT JOIN tc{i} ON tc{i}.q = t.c{i}" for i in range(n))
-    con.execute(f"""CREATE OR REPLACE TABLE tch AS SELECT tid, ((sum(est) OVER (ORDER BY tid ROWS UNBOUNDED PRECEDING) - est) // {chunk_rows})::BIGINT AS ch
-        FROM (SELECT t.tid, {est} AS est FROM tup AS t {cjoin})""")
+    con.execute(f"""CREATE OR REPLACE TABLE tch AS SELECT tid, (dense_rank() OVER (ORDER BY ch) - 1)::BIGINT AS ch FROM (
+        SELECT tid, ((sum(est) OVER (ORDER BY tid ROWS UNBOUNDED PRECEDING) - est) // {chunk_rows})::BIGINT AS ch
+        FROM (SELECT t.tid, {est} AS est FROM tup AS t {cjoin}))""")
     chunks = con.execute("""SELECT ch, min(tid), max(tid), min(t.c0), max(t.c0) FROM tch JOIN tup AS t USING (tid)
         GROUP BY ch ORDER BY ch""").fetchall()
     t = step("drill/fold/plan", t, tuples=sl.count(con, "tup"), chunks=len(chunks))
-    runs = work / "runs"
-    runs.mkdir()
+    runs = sr.ChunkSpill(con, work / "runs", len(chunks))
     for i in range(1, n):
         if long_files[i]:
-            con.execute(f"""COPY (SELECT c.ch, t.tid, r.path, r.usr, r.vf, r.vt, r.size, r.n_files FROM ({_roots_sql(long_files[i])}) AS r
-                JOIN tup AS t ON t.c{i} = r.q JOIN tch AS c USING (tid)) TO {q(str(runs / f't{i:03d}'))} (FORMAT parquet, PARTITION_BY (ch), COMPRESSION zstd)""")
-    t = step("drill/fold/runs-spill", t, runs=n - 1)
+            runs.write(f"""SELECT c.ch, t.tid, r.path, r.usr, r.vf, r.vt, r.size, r.n_files FROM ({_roots_sql(long_files[i])}) AS r
+                JOIN tup AS t ON t.c{i} = r.q JOIN tch AS c USING (tid)""", f"t{i:03d}")
+    t = step("drill/fold/runs-spill", t, runs=n - 1, parts=runs.p)
     spans = q_spans(long_files[0])
     troots = work / "troots"
     troots.mkdir()
@@ -250,7 +254,7 @@ def _long_roots(con, tiers: list[sd.Tier], out: Path, work: Path, *, chunk_rows:
         if base:
             parts.append(f"""SELECT t.tid, r.path, r.usr, r.vf, r.vt, r.size, r.n_files FROM ({_roots_sql(base)}) AS r
                 JOIN tup AS t ON t.c0 = r.q WHERE r.q BETWEEN {q(lo)} AND {q(hi)} AND t.tid BETWEEN {a} AND {b}""")
-        spilled = sorted(str(f) for f in runs.glob(f"t*/ch={ch}/*.parquet"))
+        spilled = [str(f) for f in runs.files(ch)]
         if spilled:
             parts.append(f"SELECT tid, path, usr, vf, vt, size, n_files FROM read_parquet([{', '.join(q(f) for f in spilled)}], hive_partitioning = false)")
         if not parts:
@@ -266,7 +270,7 @@ def _long_roots(con, tiers: list[sd.Tier], out: Path, work: Path, *, chunk_rows:
         total += rows
         prog.tick(k, rows)
     con.execute("DROP TABLE IF EXISTS ct")
-    shutil.rmtree(runs, ignore_errors=True)
+    runs.close()
     return step("drill/fold/long-roots", t, tuples=sl.count(con, "tup"), rows=total, chunks=len(chunks))
 
 
@@ -301,9 +305,13 @@ def _spill_roots(con, tiers: list[sd.Tier], work: Path, *, chunk_rows: int, step
         con.execute(f"DROP TABLE IF EXISTS {tb}")
     t = step("drill/fold/canonical-roots", t, lcan=n_long, groups=long_groups)
     short_files = [tr.files("short", "roots") for tr in tiers]
-    hb.set_stage("drill/fold/short-roots: count")
-    counts = con.execute(f"""SELECT q, sum(n)::BIGINT FROM ({' UNION ALL '.join(f'SELECT q, count(*) AS n FROM ({_roots_sql(fs)}) GROUP BY q' for fs in short_files)})
-        GROUP BY q ORDER BY q""").fetchall()
+    hb.set_stage("drill/fold/short-roots: plan")
+    # the q ranges planned from the tiers' roots indexes (the literals: every group's first and last `q`), not counted
+    idx = [tr.local("short-roots-index.parquet") for tr, fs in zip(tiers, short_files) if fs]
+    keys = " UNION ".join(f"SELECT q_min AS q FROM read_parquet({q(f)}) UNION SELECT q_max FROM read_parquet({q(f)})" for f in idx)
+    sr.index_estimates(con, idx, keys, "sest")
+    counts = con.execute("SELECT q, n FROM sest ORDER BY q").fetchall()
+    con.execute("DROP TABLE sest")
     bounds = sl.q_bounds(counts, chunk_rows)
     short_groups = sl.plan_groups(con, counts, chunk_rows)
     short_spans = [q_spans(fs) for fs in short_files]
@@ -311,12 +319,11 @@ def _spill_roots(con, tiers: list[sd.Tier], work: Path, *, chunk_rows: int, step
     n_short = 0
     for g, lo in enumerate(bounds):
         hi = bounds[g + 1] if g + 1 < len(bounds) else None
-        last = [qq for qq, _ in counts if qq >= lo and (hi is None or qq < hi)]
-        if not last:
+        where = f"q >= {q(lo)}" + (f" AND q < {q(hi)}" if hi is not None else "")
+        parts = [f"SELECT * FROM ({_roots_sql(fs)}) WHERE {where}" for sp in short_spans if (fs := overlapping(sp, lo, hi))]
+        if not parts:
             prog.tick(g, 0)
             continue
-        where = f"q >= {q(lo)}" + (f" AND q < {q(hi)}" if hi is not None else "")
-        parts = [f"SELECT * FROM ({_roots_sql(fs)}) WHERE {where}" for sp in short_spans if (fs := overlapping(sp, last[0], last[-1]))]
         con.execute(f"""CREATE OR REPLACE TABLE rt AS SELECT q, {DEPTH} AS depth, path, usr, vf, min(vt) AS vt, any_value(size) AS size,
                 any_value(n_files) AS n_files FROM ({' UNION ALL '.join(parts)}) GROUP BY q, path, usr, vf""")
         rows = sl.count(con, "rt")
