@@ -25,6 +25,12 @@ So a key touched by the scan with a few tens of thousands of rows overall gets e
 
 `start` has no bound at all: every touched prefix not already heavy is probed (`near = rd ANTI JOIN ps`).
 
+## Status
+
+- **Step 2 is done** (`near_candidates(con, R, run_counts)`). The base is bounded by its groups. The run tiers are bounded by the lesser of their groups and the key's exact rows over them (`rc`, from their `s` column only). Measure it on the next cw scan: compare its `anchors <mode>: near … prior rows …` line with the 10-20T1806 numbers above.
+- **Step 1** (`near-probe`) is skipped unless that line shows the base is the slack.
+- **Step 3** (`start`) is open.
+
 ## Plan
 
 1. **Measure (read-only).** Add `dt-cloud static-names anchors near-probe -g GEN -d SCAN -m MOUNT -o OUT`: run steps 1–3 of `run_rollups` for one mode over a published generation's tiers and the scan's run, writing nothing to the store, and report:
