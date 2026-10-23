@@ -185,6 +185,28 @@ def test_independent_static_pointers_and_gc_follow_both_lineages(world, tmp_path
     ]
 
 
+def test_compact_probe_folds_read_only_to_the_published_bytes(world, tmp_path):
+    """`static_merge compact-probe` over C's store as the mount (4 chunks at a time): the published `g.c001`'s files, md5
+    for md5, in its report (stdout without the files, the report beside OUT and at `-u`); the mount is untouched."""
+    from dt_cloud import static_merge as sm
+
+    mount = world["c_store"].parent
+    before = _md5s(mount)
+    with _small_groups():
+        res = CliRunner().invoke(sm.cli, ["compact-probe", "-m", str(mount), "-g", "g", "-o", str(tmp_path / "out"), "-T", str(tmp_path / "w"),
+                                          "-c", "3", "-j", "4", "-M", "1GB", "-p", "2", "-u", str(tmp_path / "reports" / "p.json")], catch_exceptions=False)
+    assert res.exit_code == 0, res.output
+    head = json.loads(res.stdout)
+    doc = json.loads((tmp_path / "out.probe.json").read_text())
+    assert json.loads((tmp_path / "reports" / "p.json").read_text()) == doc
+    assert (head["new_gen"], head["jobs"], head["n_files"], head["runs"]) == ("g.c001", 4, len(doc["files"]), doc["runs"])
+    got = {k: v["md5"] for k, v in doc["files"].items() if not k.startswith(OWN)}
+    assert got == _md5s(world["c_store"] / "g.c001")
+    assert {k: v["size"] for k, v in doc["files"].items()} == {p.relative_to(tmp_path / "out").as_posix(): p.stat().st_size
+                                                              for p in (tmp_path / "out").rglob("*") if p.is_file()}
+    assert _md5s(mount) == before
+
+
 class _Stop(Exception):
     pass
 
