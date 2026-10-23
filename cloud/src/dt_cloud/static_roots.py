@@ -1072,10 +1072,12 @@ def ranged(rows: str, bounds: str, col: str, keys: str | None = None) -> str:
     (`lo`, `col`) each falls in (the last `lo <= q`), as `rows ASOF JOIN bounds ON q >= lo` assigns it. The ASOF join runs
     over the distinct `q`s only (`keys`: a query of them, default `rows`' own), and the rows take theirs by a hash join:
     an ASOF join with no equality key sorts its whole left side in one partition, so over every row it was a global sort
-    of each spill's input (gcs's 10-22 L3 carry: 60 min reading 2 B long rows)."""
+    of each spill's input (gcs's 10-22 L3 carry: 60 min reading 2 B long rows). A row whose `q` has no range (not in
+    `keys`, or below every `lo`) fails the query, never drops."""
     keys = keys if keys is not None else f"SELECT DISTINCT q FROM {rows}"
-    return f"""SELECT r.*, g.{col} FROM {rows} AS r JOIN (SELECT k.q, b.{col} FROM ({keys}) AS k ASOF JOIN {bounds} AS b ON k.q >= b.lo) AS g
-        ON r.q = g.q"""
+    return f"""SELECT r.*, CASE WHEN g.q IS NULL THEN error('ranged: q ' || coalesce('''' || r.q || '''', 'NULL') || ' has no range')
+            ELSE g.{col} END AS {col}
+        FROM {rows} AS r LEFT JOIN (SELECT k.q, b.{col} FROM ({keys}) AS k ASOF JOIN {bounds} AS b ON k.q >= b.lo) AS g ON r.q = g.q"""
 
 
 @cli.command("short-map")
