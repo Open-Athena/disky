@@ -1,0 +1,252 @@
+import json
+
+import pytest
+from click import UsageError
+from click.testing import CliRunner
+
+from dt_cloud import deploy_cost as dc
+from dt_cloud.cli import main
+from dt_cloud.scan_cost import timestamp
+
+G = 2**30
+NOW = timestamp("2026-10-23T12:00:00Z")
+PRICES = dc.Prices(
+    storage={"REGIONAL": 0.5, "COLDLINE": 0.25},
+    machines={"n2-highmem-16": 1.0, "e2-standard-2": 0.5},
+    spot_factor=0.25,
+)
+
+
+def point(day: int, value, kind: str = "doubleValue") -> dict:
+    t = f"2026-10-{day}T12:00:00Z"
+    return {"interval": {"startTime": t, "endTime": t}, "value": {kind: value}}
+
+
+def series(bucket: str, type_: str, cls: str, points: list[dict]) -> dict:
+    return {
+        "metric": {"type": dc.METRIC, "labels": {"type": type_, "storage_class": cls}},
+        "resource": {"labels": {"project_id": "p", "bucket_name": bucket, "location": "us-east1"}},
+        "points": points,
+    }
+
+
+# Monitoring answers newest point first.
+PAGES = [
+    {"timeSeries": [
+        series("bkt-b", "live-object", "COLDLINE", [point(23, 8 * G), point(22, 10 * G), point(21, 12 * G)]),
+        series("bkt-a", "soft-deleted-object", "REGIONAL", [point(23, 4 * G), point(22, 2 * G)]),
+    ], "nextPageToken": "t"},
+    {"timeSeries": [
+        series("bkt-a", "live-object", "REGIONAL", [point(23, 12 * G), point(22, 11 * G), point(21, 10 * G)]),
+        series("bkt-b", "live-object", "WEIRD", [point(23, str(G), "int64Value")]),
+    ]},
+]
+
+
+def job(
+    name: str,
+    labels: dict,
+    run_s: int,
+    machine: str | None = "n2-highmem-16",
+    model: str | None = None,
+    tasks: int = 1,
+    parallelism: int | None = None,
+    alloc_labels: dict | None = None,
+    status_machine: str | None = None,
+) -> dict:
+    group: dict = {"name": f"projects/p/locations/us-east1/jobs/{name}/taskGroups/group0", "taskCount": str(tasks)}
+    if parallelism is not None:
+        group["parallelism"] = str(parallelism)
+    policy = {k: v for k, v in (("machineType", machine), ("provisioningModel", model)) if v}
+    status: dict = {"state": "SUCCEEDED", "runDuration": f"{run_s}.0s"}
+    if status_machine:
+        status["taskGroups"] = {"group0": {"instances": [{"machineType": status_machine, "provisioningModel": "STANDARD"}]}}
+    return {
+        "name": f"projects/p/locations/us-east1/jobs/{name}",
+        "labels": labels,
+        "allocationPolicy": {"labels": alloc_labels or {}, "instances": [{"policy": policy}] if policy else []},
+        "taskGroups": [group],
+        "status": status,
+    }
+
+
+SEL = {"app": "disky", "deployment": "d|d-old"}
+JOBS = [
+    # 4 tasks, 2 at a time: 2 VMs × 1 h
+    job("scan-1", {"app": "disky", "deployment": "d", "component": "scan"}, 3600, tasks=4, parallelism=2),
+    # labels on the allocation policy count; `d-old` is one of the selector's alternatives
+    job("drill-1", {"app": "disky", "component": "drill"}, 7200, model="SPOT", alloc_labels={"deployment": "d-old"}),
+    # no policy: the machine its status reports
+    job("nf-1", {"app": "disky", "deployment": "d", "component": "scan"}, 1800, machine=None, status_machine="e2-standard-2"),
+    job("odd-1", {"app": "disky", "deployment": "d", "component": "scan"}, 3600, machine="c3-standard-4"),
+    job("other-1", {"app": "disky", "deployment": "other", "component": "scan"}, 3600),
+    job("sn-drill-1", {}, 3600),
+    job("sn-x-2", {"component": "x"}, 1800, tasks=2),
+]
+
+
+def test_parse_series():
+    assert dc.parse_series(PAGES) == [
+        dc.Series("bkt-a", "live-object", "REGIONAL", ((timestamp("2026-10-21T12:00:00Z"), 10 * G), (timestamp("2026-10-22T12:00:00Z"), 11 * G), (NOW, 12 * G))),
+        dc.Series("bkt-a", "soft-deleted-object", "REGIONAL", ((timestamp("2026-10-22T12:00:00Z"), 2 * G), (NOW, 4 * G))),
+        dc.Series("bkt-b", "live-object", "COLDLINE", ((timestamp("2026-10-21T12:00:00Z"), 12 * G), (timestamp("2026-10-22T12:00:00Z"), 10 * G), (NOW, 8 * G))),
+        dc.Series("bkt-b", "live-object", "WEIRD", ((NOW, G),)),
+    ]
+
+
+def test_slope():
+    day = dc.DAY
+    assert dc.slope_per_day([(0, 10.0), (day, 11.0), (2 * day, 12.0)]) == 1.0
+    assert dc.slope_per_day([(0, 10.0), (day, 14.0), (2 * day, 12.0), (3 * day, 16.0)]) == 1.6
+    assert dc.slope_per_day([(day, 5.0)]) == 0.0
+
+
+@pytest.mark.parametrize("drains, bytes_, usd", [((), 27 * G, 13.0), (("bkt-a",), 23 * G, 11.0)])
+def test_storage_report(drains, bytes_, usd):
+    s = dc.storage_report(dc.parse_series(PAGES), PRICES, {"10d": 10.0}, drains)
+    assert s == {
+        "rows": [
+            {"bucket": "bkt-a", "type": "live-object", "storage_class": "REGIONAL", "days": 3, "bytes": 12 * G, "slope_bytes_per_day": G, "usd_per_month": 6.0},
+            {"bucket": "bkt-a", "type": "soft-deleted-object", "storage_class": "REGIONAL", "days": 2, "bytes": 4 * G, "slope_bytes_per_day": 0.0, "usd_per_month": 2.0},
+            {"bucket": "bkt-b", "type": "live-object", "storage_class": "COLDLINE", "days": 3, "bytes": 8 * G, "slope_bytes_per_day": -2 * G, "usd_per_month": 2.0},
+            {"bucket": "bkt-b", "type": "live-object", "storage_class": "WEIRD", "days": 1, "bytes": G, "slope_bytes_per_day": 0.0, "usd_per_month": None},
+        ],
+        "bytes": 25 * G,
+        "bytes_by_type": {"live-object": 21 * G, "soft-deleted-object": 4 * G},
+        "live_slope_bytes_per_day": -G,
+        "usd_per_month": 10.0,
+        "drains": list(drains),
+        "unpriced_bytes": {"WEIRD": G},
+        # bkt-a live 12 → 22 GiB; bkt-b's coldline would go negative: floored at 0; WEIRD (flat) is counted, unpriced
+        "horizons": {"10d": {"bytes": bytes_, "usd_per_month": usd}},
+    }
+
+
+def test_job_usage():
+    assert [dc.job_usage(j) for j in JOBS[:3]] == [
+        dc.JobUsage("scan-1", "us-east1", "scan", "n2-highmem-16", False, 2.0),
+        dc.JobUsage("drill-1", "us-east1", "drill", "n2-highmem-16", True, 2.0),
+        dc.JobUsage("nf-1", "us-east1", "scan", "e2-standard-2", False, 0.5),
+    ]
+
+
+def test_compute_report():
+    assert dc.compute_report(JOBS, dc.parse_selector("app=disky,deployment=d|d-old"), PRICES, 2.0) == {
+        "selector": SEL,
+        "jobs": 4,
+        "vm_hours": 5.5,
+        "usd": 2.75,
+        "usd_per_day": 1.375,
+        "usd_per_month": 41.8515625,
+        "components": {
+            "drill": {"jobs": 1, "vm_hours": 2.0, "usd": 0.5, "usd_per_month": 7.609375},
+            "scan": {"jobs": 3, "vm_hours": 3.5, "usd": 2.25, "usd_per_month": 34.2421875},
+        },
+        "machines": {
+            "c3-standard-4": {"jobs": 1, "vm_hours": 1.0, "usd": 0.0, "usd_per_month": 0.0},
+            "e2-standard-2": {"jobs": 1, "vm_hours": 0.5, "usd": 0.25, "usd_per_month": 3.8046875},
+            "n2-highmem-16": {"jobs": 1, "vm_hours": 2.0, "usd": 2.0, "usd_per_month": 30.4375},
+            "n2-highmem-16 spot": {"jobs": 1, "vm_hours": 2.0, "usd": 0.5, "usd_per_month": 7.609375},
+        },
+        "unpriced_vm_hours": {"c3-standard-4": 1.0},
+        "unlabeled": {"sn": {"jobs": 2, "vm_hours": 2.0, "usd": 2.0, "usd_per_month": 30.4375}},
+    }
+
+
+def test_spans_and_selectors():
+    assert [dc.parse_span(s) for s in ("30d", "2w", "6m", "1y", "1.5y")] == [30.0, 14.0, 182.625, 365.25, 547.875]
+    with pytest.raises(UsageError):
+        dc.parse_span("3x")
+    assert dc.parse_selector("app=disky, deployment=a|b") == {"app": "disky", "deployment": "a|b"}
+    assert dc.parse_selector(None) == {}
+    with pytest.raises(UsageError):
+        dc.parse_selector("app")
+    assert [dc.matches(l, {"deployment": "a|b"}) for l in ({"deployment": "a"}, {"deployment": "b"}, {"deployment": "c"}, {})] == [True, True, False, False]
+
+
+def test_prices(tmp_path):
+    assert (dc.PRICES.machines["e2-standard-2"], dc.PRICES.machines["n2-highmem-8"], dc.PRICES.machines["n2d-highmem-8"]) == (0.067006, 0.524056, 0.45592)
+    p = tmp_path / "prices.yml"
+    p.write_text("storage: {REGIONAL: 0.5}\nmachines: {c3-standard-4: 0.2}\nspot_factor: 0.5\n")
+    got = dc.load_prices(p)
+    assert (got.storage["REGIONAL"], got.storage["COLDLINE"], got.machines["c3-standard-4"], got.machines["e2-standard-2"], got.spot_factor) == (0.5, 0.004, 0.2, 0.067006, 0.5)
+    p.write_text("disks: {}\n")
+    with pytest.raises(UsageError):
+        dc.load_prices(p)
+
+
+@pytest.fixture
+def fake_gcp(monkeypatch, tmp_path):
+    calls = []
+    monkeypatch.setattr(dc, "clock", lambda: NOW)
+    monkeypatch.setattr(dc, "select_buckets", lambda *a: calls.append(("select_buckets", *a)) or ["bkt-b"])
+    monkeypatch.setattr(dc, "soft_delete_off", lambda *a: calls.append(("soft_delete_off", *a)) or ["bkt-a"])
+    monkeypatch.setattr(dc, "fetch_series", lambda *a: calls.append(("fetch_series", *a)) or PAGES)
+    monkeypatch.setattr(dc, "fetch_jobs", lambda *a: calls.append(("fetch_jobs", *a)) or JOBS)
+    prices = tmp_path / "prices.yml"
+    prices.write_text("storage: {REGIONAL: 0.5, COLDLINE: 0.25}\nmachines: {n2-highmem-16: 1.0, e2-standard-2: 0.5}\nspot_factor: 0.25\n")
+    args = ["cost", "-b", "bkt-a", "-H", "10d", "-J", "app=disky,deployment=d|d-old", "-l", "deployment=d", "-n", "D",
+            "-p", "p", "-P", str(prices), "-w", "2d"]
+    return calls, args
+
+
+SUMMARY = "We can leave D running for 10d for 26.8→24.7 GB of storage ($10.00→$11.00/mo) and $41.85→$41.85/mo on compute (list-price estimates)."
+
+
+def test_cli(fake_gcp):
+    calls, args = fake_gcp
+    r = CliRunner().invoke(main, args)
+    assert r.exit_code == 0, r.output
+    start = NOW - 2 * dc.DAY
+    assert calls == [
+        ("select_buckets", "p", {"deployment": "d"}),
+        ("fetch_series", "p", ["bkt-a", "bkt-b"], start, NOW),
+        ("soft_delete_off", "p", ["bkt-a", "bkt-b"]),
+        ("fetch_jobs", "p", (), start),
+    ]
+    # Column padding aside, every line exactly.
+    assert [" ".join(line.split()) for line in r.output.splitlines()] == [
+        "D · p · 2-day window to 2026-10-23T12:00:00Z · approximate US list prices; estimates, not billed cost",
+        "",
+        "Storage (Cloud Monitoring `storage/v2/total_bytes`, daily means):",
+        "bucket type class days GB GB/day $/mo",
+        "bkt-a live-object REGIONAL 3 12.9 +1.07 $6.00",
+        "bkt-a soft-deleted-object REGIONAL 2 4.3 - $2.00",
+        "bkt-b live-object COLDLINE 3 8.6 -2.15 $2.00",
+        "bkt-b live-object WEIRD 1 1.1 +0.00 unpriced",
+        "now: 26.8 GB (live-object 22.5 GB, soft-deleted-object 4.3 GB), $10.00/mo; live -1.07 GB/day",
+        "10d: 24.7 GB, $11.00/mo",
+        "(soft-deleted bytes held at their current level, except bkt-a (soft delete off: they drain))",
+        "UNPRICED: 1.1 GB of storage class WEIRD",
+        "",
+        "Compute (Batch jobs labeled app=disky,deployment=d|d-old, created in the window; VM-h = runDuration × min(taskCount, parallelism)):",
+        "component jobs VM-h $/mo",
+        "drill 1 2.0 $7.61",
+        "scan 3 3.5 $34.24",
+        "machine jobs VM-h $/mo",
+        "c3-standard-4 1 1.0 $0.00",
+        "e2-standard-2 1 0.5 $3.80",
+        "n2-highmem-16 1 2.0 $30.44",
+        "n2-highmem-16 spot 1 2.0 $7.61",
+        "total: 4 jobs, 5.5 VM-h, $2.75 = $1.38/day = $41.85/mo (flat)",
+        "UNPRICED: 1.0 VM-h on c3-standard-4",
+        "NOT COUNTED: 2 jobs in the window (2.0 VM-h, $30.44/mo) carry none of the selector's keys; by name prefix:",
+        "sn 2 2.0 $30.44",
+        "",
+        SUMMARY,
+    ]
+
+
+def test_cli_json(fake_gcp):
+    _, args = fake_gcp
+    r = CliRunner().invoke(main, [*args, "-j"])
+    assert r.exit_code == 0, r.output
+    doc = json.loads(r.output)
+    assert (doc["summary"], doc["storage"]["drains"], doc["storage"]["horizons"], doc["compute"]["usd_per_month"]) == (
+        SUMMARY, ["bkt-a"], {"10d": {"bytes": 23 * G, "usd_per_month": 11.0}}, 41.8515625,
+    )
+
+
+def test_cli_needs_a_target():
+    r = CliRunner().invoke(main, ["cost", "-p", "p"])
+    assert (r.exit_code, r.output.splitlines()[-1]) == (2, "Error: nothing to measure: pass -b / -l (storage) and/or -J (compute)")
