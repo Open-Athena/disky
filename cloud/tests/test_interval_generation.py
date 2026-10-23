@@ -74,11 +74,10 @@ def _ts(sec: int) -> dt.datetime:
     return dt.datetime.fromtimestamp(T0 + sec, dt.timezone.utc)
 
 
-@pytest.fixture(scope="module")
-def world(tmp_path_factory):
-    root = tmp_path_factory.mktemp("ivg")
+def _write_world(root: Path, obj: dict) -> Path:
+    """Each scan's raw listing (`generation` from `GEN_FROM` on) and its `ON` / `OFF` sorts under `root`."""
     for j, d in enumerate(SCANS):
-        rows = sorted((name, *v[j]) for name, v in OBJ.items() if v[j] is not None)
+        rows = sorted((name, *v[j]) for name, v in obj.items() if v[j] is not None)
         cols = {
             "bucket": pa.array([B] * len(rows)), "name": pa.array([r[0] for r in rows]),
             "size_bytes": pa.array([r[1] for r in rows], pa.int64()),
@@ -94,6 +93,11 @@ def world(tmp_path_factory):
         for layout, gen in ((ON, True), (OFF, False)):
             write_path_index((str(shard),), root / "snap" / layout.split("/")[0] / d, d, path_index=root / layout.replace("{id}", d), generation=gen)
     return root
+
+
+@pytest.fixture(scope="module")
+def world(tmp_path_factory):
+    return _write_world(tmp_path_factory.mktemp("ivg"), OBJ)
 
 
 def _build(world: Path, store: Path, work: Path, layout: str, through: int, gen: str = "g") -> dict:
@@ -324,7 +328,50 @@ def test_backfill_refuses_an_existing_generation_or_one_that_has_it(world, backf
     res = CliRunner().invoke(ib.backfill_cmd, args)
     assert (res.exit_code, res.output.strip().splitlines()[-1]) == (1, f"{backfilled['store']}/{ist.PREFIX}/g2/ exists: a generation is never rewritten")
     res = CliRunner().invoke(ib.backfill_cmd, [*args[:2], "-g", "g2", "-O", "g3", *args[4:]])
-    assert (res.exit_code, res.output.strip().splitlines()[-1]) == (1, f"{backfilled['store']}/{ist.PREFIX}/g2: already carries `generation`")
+    assert (res.exit_code, res.output.strip().splitlines()[-1]) == (
+        1, f"{backfilled['store']}/{ist.PREFIX}/g2: already carries `generation` (-N fills only its NULLs)")
+    res = CliRunner().invoke(ib.backfill_cmd, [*args[:2], "-g", "g", "-O", "g3", *args[4:], "-N"])
+    assert (res.exit_code, res.output.strip().splitlines()[-1]) == (
+        1, f"{backfilled['store']}/{ist.PREFIX}/g: carries no `generation` to fill the NULLs of (drop -N)")
+
+
+#: `OBJ` plus an object listed without its generation until scan 5, though the column is there from `GEN_FROM` (gcs's
+#: shallow objects: discovery recorded none until 2026-10-22). Its version opens at scan 0 with none, and an append
+#: carries that on (a continuing version keeps its own), so the store holds NULL where later scans have one.
+LATE = {**OBJ, "d/late.bin": [(10, 100, 100, None)] * 5 + [(10, 100, 100, 91)] * 2}
+
+
+@pytest.fixture(scope="module")
+def late(tmp_path_factory):
+    """A store over `LATE`'s generation-bearing sorts: the base built over five scans, two added."""
+    root = _write_world(tmp_path_factory.mktemp("ivg-late"), LATE)
+    _build(root, root / "store", root / "w-build", ON, 4)
+    _add(root, root / "store", root / "w-add", ON, 6)
+    return root
+
+
+def test_backfill_nulls_repairs_versions_their_listings_lacked(late, tmp_path):
+    """`-N`: a generation carrying `generation` refolded into a new one where each NULL object version takes the first
+    generation listed within it (`-S`: from the scans whose listings have them all); every other version is unchanged
+    and the source untouched. The appends' markers failed on the object; the new generation verifies."""
+    store = tmp_path / "store"
+    shutil.copytree(late / "store", store)
+    g = store / ist.PREFIX / "g"
+    before = _parquets(g)
+    assert _versions(g) == sorted([*_through(6), ("b/d/late.bin", 0, None, None)])
+    marks = {p.stem: json.loads(p.read_text()) for p in sorted((g / "verify").glob("*.json"))}
+    assert {d: (m["pass"], m["generation"]) for d, m in marks.items()} == {
+        SCANS[5]: (False, {"objects": 7, "equal": 6}), SCANS[6]: (False, {"objects": 8, "equal": 7})}
+    out = _backfill(store, tmp_path / "w", late, "g2", "-N", "-S", SCANS[5])
+    g2 = store / ist.PREFIX / "g2"
+    assert _versions(g2) == sorted([*_through(6), ("b/d/late.bin", 0, None, 91)])
+    assert json.loads((g2 / ib.BACKFILL).read_text()) == {
+        "from": "g", "manifest": f"manifests/{SCANS[6]}.m001.json", "runs": [f"deltas/{SCANS[5]}_{SCANS[6]}"], "scans": 7,
+        "listings": SCANS[5:], "listed": 8, "filled": 1, "nulls": True}
+    assert (out["skipped"], out["filled"]) == (SCANS[:5], 1)
+    assert (_parquets(g), json.loads((store / ic.CURRENT).read_text())) == (before, {"gen": "g"})
+    m = _verify(store, "g2", late, 6, tmp_path / "verify")
+    assert (m["pass"], m["generation"]) == (True, {"objects": 8, "equal": 8})
 
 
 def test_backfill_refuses_a_template_matching_files_with_and_without_generation(world, off, tmp_path):
