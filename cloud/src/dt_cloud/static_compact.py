@@ -28,6 +28,7 @@ import hashlib
 import json
 import shutil
 from collections.abc import Callable
+from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 from time import monotonic
 
@@ -55,36 +56,54 @@ U64 = 1 << 64
 def fold_range(con, base_file: str, cdelta_files: list[str], out: Path, name: str, rule=None) -> int:
     """Key range `name`'s coalesced versions through the last scan: `G`'s (`base_file`) and every scan's `cdelta`
     (oldest first), one row per `(depth, path, usr, vf)` with the smallest `vt` → `out/cintervals/<name>.parquet` and
-    `out/chist/<name>.parquet`, as `build_range(coalesced=True)` writes them. Returns the versions."""
+    `out/chist/<name>.parquet`, as `build_range(coalesced=True)` writes them. Returns the versions. Its table is named for
+    the range, so ranges fold at once on cursors of one database (`fold_ranges`)."""
     cols = ", ".join(CINTERVAL_SCHEMA.names)
     parts = [f"SELECT {cols} FROM read_parquet({q(f)})" for f in [base_file, *cdelta_files]]
-    con.execute(f"""CREATE OR REPLACE TABLE civ AS SELECT depth, path, usr, vf, min(vt) AS vt, any_value(size) AS size,
+    civ = f"civ_{name}"
+    con.execute(f"""CREATE OR REPLACE TABLE {civ} AS SELECT depth, path, usr, vf, min(vt) AS vt, any_value(size) AS size,
             any_value(n_files) AS n_files FROM ({' UNION ALL '.join(parts)}) GROUP BY depth, path, usr, vf""")
-    rows = sn.write_sorted(sn._batches(con, "SELECT * FROM civ ORDER BY depth, path, usr, vf"), out / "cintervals" / f"{name}.parquet",
+    rows = sn.write_sorted(sn._batches(con, f"SELECT * FROM {civ} ORDER BY depth, path, usr, vf"), out / "cintervals" / f"{name}.parquet",
                            CINTERVAL_SCHEMA, INTERVAL_RG, dictionary=["usr"])
     (out / "chist").mkdir(parents=True, exist_ok=True)
-    pq.write_table(con.execute(sn.hist_sql("civ", rule)).to_arrow_table(), out / "chist" / f"{name}.parquet", compression=CODEC)
-    con.execute("DROP TABLE civ")
+    pq.write_table(con.execute(sn.hist_sql(civ, rule)).to_arrow_table(), out / "chist" / f"{name}.parquet", compression=CODEC)
+    con.execute(f"DROP TABLE {civ}")
     return rows
+
+
+def fold_ranges(con, gen_dir: Path, days: list[str], ranges: dict, out: Path, rule=None, jobs: int = 1) -> int:
+    """Every key range of `ranges` folded (`fold_range`: `gen_dir`'s base and the scans `days`' `cdelta`s), `jobs` at a time
+    on cursors of `con` (`static_names.each`: one `threads` pool and `memory_limit` across them). Each range's files depend
+    only on its own rows, so the bytes don't depend on `jobs`. Returns the versions."""
+    def one(cur, r: dict) -> int:
+        name = f"r{r['i']:04d}"
+        return fold_range(cur, str(gen_dir / "cintervals" / f"{name}.parquet"),
+                          [str(gen_dir / ar.run_key(d, d) / "cdelta" / f"{name}.parquet") for d in days], out, name, rule)
+    return sum(sn.each(con, one, ranges["ranges"], jobs))
 
 
 # ── Light: the catalog ─────────────────────────────────────────────────────
 
 
-def fold_catalog(con, tiers: list[Path], out: Path, work: Path, *, new_gen: str, plan: dict, membership: dict, rule) -> dict:
+def fold_catalog(con, tiers: list[Path], out: Path, work: Path, *, new_gen: str, plan: dict, membership: dict, rule, jobs: int = 1,
+                 merged: Callable[[], dict] | None = None) -> dict:
     """`G`'s and the runs' catalogs merged into `out/catalog` (`merge_catalogs`: the rebuild's cells and index), the
     members cut by the build's census over `out`'s new shards (`members.parquet`, `members.json`), and `meta.json` as
-    the build's `catalog_meta` (its `s`: this fold's seconds)."""
+    the build's `catalog_meta` (its `s`: this fold's seconds). The census runs `jobs` shards at a time on cursors of
+    `con` (each shard's census file depends only on its rows). `merged`: the merge's doc, when it was started earlier
+    (it reads only the tiers' catalogs: `fold_gen` runs it beside the intervals and shards); else merged here."""
     t0 = monotonic()
     cat = out / "catalog"
-    doc = sa.merge_catalogs(tiers, cat)
     census = work / "census"
     shutil.rmtree(census, ignore_errors=True)
     census.mkdir(parents=True)
-    for s in plan["shards"]:
+
+    def one(cur, s: dict) -> None:
         name = f"s{s['i']:04d}"
-        pq.write_table(sc.census(con, f"read_parquet({q(str(out / 'sx' / f'{name}.parquet'))})", membership["max_rows"] + 1), census / f"{name}.parquet",
-                       compression=CODEC)
+        pq.write_table(sc.census(cur, f"read_parquet({q(str(out / 'sx' / f'{name}.parquet'))})", membership["max_rows"] + 1, tag=f"_{name}"),
+                       census / f"{name}.parquet", compression=CODEC)
+    sn.each(con, one, plan["shards"], jobs)
+    doc = merged() if merged is not None else sa.merge_catalogs(tiers, cat)
     members = sc.cut_members(census, cat / "members.parquet", gen=new_gen, max_rows=membership["max_rows"])
     (cat / "members.json").write_text(json.dumps(members, indent=1) + "\n")
     shutil.rmtree(census)
@@ -354,7 +373,7 @@ def run_scans(gen_dir: Path, gen: str, runs: list[dict]) -> list[dict]:
 
 
 def fold_gen(gen_dir: Path, out: Path, work: Path, *, gen: str, new_gen: str, runs: list[dict], threads: int = 4, mem: str = "4GB",
-             chunk_rows: int = sl.CHUNK_ROWS, log: Callable[[str], None] = err, progress: Callable[..., None] | None = None,
+             chunk_rows: int = sl.CHUNK_ROWS, jobs: int = 1, log: Callable[[str], None] = err, progress: Callable[..., None] | None = None,
              ck: Checkpoint | None = None) -> dict:
     """Generation `gen` (its base in `gen_dir`, the runs `runs`: the newest manifest's, oldest first) folded into `new_gen`
     in `out` (every part but `compaction.json`); its `manifests/<last>.json` lists no runs. Returns a summary (rows, and
@@ -363,7 +382,21 @@ def fold_gen(gen_dir: Path, out: Path, work: Path, *, gen: str, new_gen: str, ru
 
     `ck` (`compact_checkpoint`): each part's files in `out` saved as it ends (the drill's also within it, `fold_drill`),
     so a resubmitted job restores the parts saved and folds from the first that wasn't (gcs's 10-08c compaction ran 16 h
-    and was killed in its drill's write with nothing kept)."""
+    and was killed in its drill's write with nothing kept). Each save runs beside the next part (in part order, one at a
+    time; the drill, which saves its own steps, starts once the saves before it ended).
+
+    `jobs`: key ranges (`fold_ranges`) and census shards (`fold_catalog`) at a time, on cursors of one DuckDB database
+    (`threads` and `mem` shared). The catalogs' merge needs no other part and runs beside the intervals and shards. The
+    shards need every range's histogram (their plan), the census the shards, the drill the members: those stay in order."""
+    with ThreadPoolExecutor(2, thread_name_prefix="compact") as bg:
+        return _fold_gen(gen_dir, out, work, gen=gen, new_gen=new_gen, runs=runs, threads=threads, mem=mem, chunk_rows=chunk_rows, jobs=jobs,
+                         log=log, progress=progress, ck=ck, bg=bg)
+
+
+def _fold_gen(gen_dir: Path, out: Path, work: Path, *, gen: str, new_gen: str, runs: list[dict], threads: int, mem: str, chunk_rows: int, jobs: int,
+              log: Callable[[str], None], progress: Callable[..., None] | None, ck: Checkpoint | None, bg: ThreadPoolExecutor) -> dict:
+    """`fold_gen`, its background work (the catalogs' merge, the parts' saves) on `bg` (waited on as `fold_gen` returns or
+    fails)."""
     t0, times, peaks = monotonic(), {}, {}
     if not runs:
         raise SystemExit(f"{gen}: no runs to compact")
@@ -397,13 +430,26 @@ def fold_gen(gen_dir: Path, out: Path, work: Path, *, gen: str, new_gen: str, ru
         hb.after(name)
         return monotonic()
 
-    def resumed(part: str, subs: tuple[str, ...], run: Callable[[], dict]) -> dict:
-        """`run()`'s doc, its files (`out`'s `subs`) saved as `part`; or, saved by an earlier attempt, restored."""
+    # In the background: the catalogs' merge (it reads only the tiers' catalogs) and each part's checkpoint save, one at a
+    # time and in part order (a part's save overlaps the next part's work; it ends before the next part's save starts).
+    saving: list[Future] = []
+
+    def saved() -> None:
+        while saving:
+            saving.pop().result()
+
+    def resumed(part: str, subs: tuple[str, ...], run: Callable[[], dict], *, after_saves: bool = False) -> dict:
+        """`run()`'s doc, its files (`out`'s `subs`) saved as `part` in the background once the previous part's save
+        ended; or, saved by an earlier attempt, restored. `after_saves`: run only once the saves before it ended (a part
+        with checkpoints of its own, which would otherwise land before the previous part's marker)."""
         if ck is not None and ck.done(part):
             return ck.load_files(part, out)
+        if after_saves:
+            saved()
         doc = run()
+        saved()
         if ck is not None:
-            ck.save_files(part, out, _files(out, *subs), doc)
+            saving.append(bg.submit(ck.save_files, part, out, _files(out, *subs), doc))
         return doc
 
     con = sn.connect(threads, mem, work / "duckdb")
@@ -412,16 +458,16 @@ def fold_gen(gen_dir: Path, out: Path, work: Path, *, gen: str, new_gen: str, ru
     (out / "scans.json").write_text(json.dumps(doc, indent=1) + "\n")
     shutil.copyfile(gen_dir / "ranges.json", out / "ranges.json")
     ranges = json.loads((out / "ranges.json").read_text())
+    merging: Future | None = None
+    if ck is None or not ck.done("catalog"):
+        def merge() -> dict:
+            tm = monotonic()
+            m = sa.merge_catalogs([gen_dir / "catalog", *(d / "catalog" for d in run_dirs)], out / "catalog")
+            log(f"compact {gen} → {new_gen}: catalog merge in {monotonic() - tm:.1f}s ({m['cells_rows']:,} cells; beside the intervals and shards)")
+            return m
+        merging = bg.submit(merge)
     t = monotonic()
-
-    def intervals() -> dict:
-        versions = 0
-        for r in ranges["ranges"]:
-            name = f"r{r['i']:04d}"
-            versions += fold_range(con, str(gen_dir / "cintervals" / f"{name}.parquet"),
-                                   [str(gen_dir / ar.run_key(d, d) / "cdelta" / f"{name}.parquet") for d in days], out, name, rule)
-        return {"versions": versions}
-    versions = resumed("intervals", ("cintervals", "chist"), intervals)["versions"]
+    versions = resumed("intervals", ("cintervals", "chist"), lambda: {"versions": fold_ranges(con, gen_dir, days, ranges, out, rule, jobs)})["versions"]
     t = done("intervals", t)
 
     def shards() -> dict:
@@ -437,13 +483,14 @@ def fold_gen(gen_dir: Path, out: Path, work: Path, *, gen: str, new_gen: str, ru
     t = done("shards", t)
     membership = json.loads((gen_dir / "catalog" / "meta.json").read_text())["membership"]
     cat = resumed("catalog", ("catalog",), lambda: fold_catalog(con, [gen_dir / "catalog", *(d / "catalog" for d in run_dirs)], out, work,
-                                                                new_gen=new_gen, plan=plan, membership=membership, rule=rule))
+                                                                new_gen=new_gen, plan=plan, membership=membership, rule=rule, jobs=jobs,
+                                                                merged=merging.result if merging is not None else None))
     t = done("catalog", t)
     dm = json.loads((gen_dir / "drill" / "meta.json").read_text())
     tiers = [sd.Tier(gen_dir / "drill", "base"), *(sd.Tier(d / "drill", r["key"]) for d, r in zip(run_dirs, runs))]
     drill = resumed("drill", ("drill", "roots-measure"), lambda: fold_drill(
         con, tiers, out, work / "drill", R=dm["R"], K=dm["K"], floor=dm.get("floor", sl.FLOOR), chunk_rows=chunk_rows, step=step,
-        log=lambda s: log(f"compact {gen} → {new_gen}: {s}"), ck=ck.sub("fold") if ck is not None else None))
+        log=lambda s: log(f"compact {gen} → {new_gen}: {s}"), ck=ck.sub("fold") if ck is not None else None), after_saves=True)
     t = done("drill", t)
     anchors = None
     if (gen_dir / an.ANCHORS / "meta.json").is_file():
@@ -454,6 +501,7 @@ def fold_gen(gen_dir: Path, out: Path, work: Path, *, gen: str, new_gen: str, ru
     (out / "manifests").mkdir()
     ids = [s["id"] for s in doc["scans"]]
     (out / "manifests" / f"{ids[-1]}.json").write_text(json.dumps(sa.manifest(new_gen, ids, []), indent=1) + "\n")
+    saved()
     disk.close()
     return {"from": gen, "gen": new_gen, "runs": [r["key"] for r in runs], "base_scans": len(base["scans"]), "scans": len(ids),
             "versions": versions, "suffix_rows": suffix_rows, "shards": len(plan["shards"]),
@@ -463,12 +511,12 @@ def fold_gen(gen_dir: Path, out: Path, work: Path, *, gen: str, new_gen: str, ru
 
 def fold(gen_dir: Path, out: Path, work: Path, *, gen: str, new_gen: str, runs: list[dict], threads: int = 4, mem: str = "4GB",
          chunk_rows: int = sl.CHUNK_ROWS, jobs: int = 1, progress: Callable[..., None] | None = None, checkpoint: str | None = None) -> dict:
-    """`append_runner.Compactor.fold` for the static store (`fold_gen`; `jobs` unused: one range at a time). `checkpoint`:
-    a store root (the scratch bucket) for `compact_checkpoint`."""
+    """`append_runner.Compactor.fold` for the static store (`fold_gen`; `jobs`: key ranges and census shards at a time).
+    `checkpoint`: a store root (the scratch bucket) for `compact_checkpoint`."""
     ck = compact_checkpoint(checkpoint, gen, new_gen, runs, work=work / "ckpt") if checkpoint else None
     try:
-        return fold_gen(gen_dir, out, work, gen=gen, new_gen=new_gen, runs=runs, threads=threads, mem=mem, chunk_rows=chunk_rows, progress=progress,
-                        ck=ck)
+        return fold_gen(gen_dir, out, work, gen=gen, new_gen=new_gen, runs=runs, threads=threads, mem=mem, chunk_rows=chunk_rows, jobs=jobs,
+                        progress=progress, ck=ck)
     finally:
         if ck is not None:
             ck.close()
@@ -519,11 +567,12 @@ def reads(rel: str) -> bool:
 @command("compact")
 @option("-c", "--chunk-rows", default=sl.CHUNK_ROWS, type=IntRange(min=1), help="The drill's chunks: roots per measurement / rollup q range")
 @option("-g", "--gen", required=True, help="The generation (`<store>/static-names/GEN/`); one compacted already is followed to its newest successor")
+@option("-j", "--jobs", default=1, type=IntRange(min=1), help="Key ranges and census shards folded at a time (DuckDB threads and memory shared)")
 @option("-M", "--mem", default="4GB", help="DuckDB memory limit")
 @option("-o", "--out", "store_root", required=True, help="The store: a dir or URL (`r2://bucket[/prefix]`, `s3://…`, `gs://…`)")
 @option("-p", "--threads", default=4, type=IntRange(min=1), help="DuckDB threads")
 @option("-w", "--work", help="Local work dir (default: a temporary one, removed after); the generation is mirrored into it")
-def compact_cmd(chunk_rows, gen, mem, store_root, threads, work) -> None:
+def compact_cmd(chunk_rows, gen, jobs, mem, store_root, threads, work) -> None:
     """Fold the generation's base and its newest manifest's runs into a new generation now (`<gen>.c<NNN>`, equal to
     `build -r <gen>/ranges.json` through the last scan), whatever the compaction policy says; published (data, then
     `compaction.json`), then `successor.json` in the old generation and `static-names/CURRENT.json` when it named it (or
@@ -540,5 +589,5 @@ def compact_cmd(chunk_rows, gen, mem, store_root, threads, work) -> None:
         why = ar.forced(gen_dir, "forced (compact)")
         if why is None:
             raise SystemExit(f"{store.root}/{prefix}: no runs to compact")
-        out = ar.compact_store(store, compactor(chunk_rows), gen, gen_dir, w, policy=ar.NEVER, why=why, threads=threads, mem=mem)
+        out = ar.compact_store(store, compactor(chunk_rows), gen, gen_dir, w, policy=ar.NEVER, why=why, threads=threads, mem=mem, jobs=jobs)
     print(json.dumps(out, indent=1))

@@ -98,6 +98,12 @@ def drill_duckdb_args(machine: str) -> list[str]:
     return ["-M", f"{vcpus * 7700 // 2 // 1024}GB", "-p", str(vcpus)]
 
 
+def compact_jobs_args(machine: str) -> list[str]:
+    """`-j`: the compaction's key ranges and census shards folded at a time (`static_compact.fold`), one per 4 vCPUs (each
+    a DuckDB query over the shared pool, ending in its own serial pyarrow writer)."""
+    return ["-j", str(max(1, int(machine.rsplit("-", 1)[-1]) // 4))]
+
+
 # ── The chain ──────────────────────────────────────────────────────────────
 
 
@@ -138,7 +144,8 @@ class Runner(ar.Runner):
         r2 = self.merge_r2()
         out = [self.job("compact", scan, 1, "static_merge", ["compact", "-g", self.cfg.gen, *(["-S", self.cfg.scratch] if self.cfg.scratch else []),
                                                            "-C", str(self.cfg.policy), *(["-K"] if self.compact_now else []), *self.read_args(),
-                                                           *(["-r"] if r2 else []), *duckdb_args(self.cfg.machine_for("compact"))], r2=r2)]
+                                                           *(["-r"] if r2 else []), *duckdb_args(self.cfg.machine_for("compact")),
+                                                           *compact_jobs_args(self.cfg.machine_for("compact"))], r2=r2)]
         if not r2:
             out.append(self.job("compact-r2", scan, 1, "static_merge", ["compact-r2", "-g", self.cfg.gen], r2=True, mount=False))
         return out

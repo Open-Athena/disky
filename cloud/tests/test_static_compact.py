@@ -72,6 +72,12 @@ def world(fixture, tmp_path_factory):  # noqa: F811
         _build(root, scans, c, tmp / "wc0", through=ids[1])
         _add(root, scans, c, tmp / "wc1", ids[3])
         out["c"] = _compact(c, tmp / "wc2", "-c", "3")
+        # F: C again, its key ranges and census shards 4 at a time (`-j 4`): the same bytes
+        f = tmp / "f"
+        _build(root, scans, f, tmp / "wf0", through=ids[1])
+        _add(root, scans, f, tmp / "wf1", ids[3])
+        out["f"] = _compact(f, tmp / "wf2", "-c", "3", "-j", "4")
+        out["f_store"] = f / sn.PREFIX
         # D, E: C again with the runs' chunk spill in 2 partitions, then 1 (each split by chunk on reading): the same bytes
         for name, parts in (("d", 2), ("e", 1)):
             d = tmp / name
@@ -108,7 +114,8 @@ def test_add_compacts_when_due_then_appends_to_the_successor(world):
 
 
 @pytest.mark.parametrize("store, gen, ref", [("a_store", "g.c001", "g.c001"), ("a_store", "g.c002", "g.c002"), ("b_store", "g.c001", "g.c001"),
-                                             ("c_store", "g.c001", "g.c001"), ("d_store", "g.c001", "g.c001"), ("e_store", "g.c001", "g.c001")])
+                                             ("c_store", "g.c001", "g.c001"), ("d_store", "g.c001", "g.c001"), ("e_store", "g.c001", "g.c001"),
+                                             ("f_store", "g.c001", "g.c001")])
 def test_compacted_generation_is_the_rebuild(world, store, gen, ref):
     got, want = world[store] / gen, world["tmp"] / f"ref-{ref}" / sn.PREFIX / ref
     g, w = _md5s(got), _md5s(want)
@@ -189,10 +196,12 @@ class _Stop(Exception):
 STEPS = ["intervals", "shards", "catalog", "fold/long-roots-tables", "fold/long-roots", "fold/spilled-tables", "fold/spilled", "drill", "anchors"]
 
 
-@pytest.mark.parametrize("stop", ["shards", "fold/long-roots", "fold/spilled", "drill"])
-def test_a_fold_stopped_after_a_saved_step_resumes_there_to_the_same_bytes(world, tmp_path, stop):
+@pytest.mark.parametrize("jobs", [1, 4])
+@pytest.mark.parametrize("stop", ["intervals", "shards", "catalog", "fold/long-roots", "fold/spilled", "drill"])
+def test_a_fold_stopped_after_a_saved_step_resumes_there_to_the_same_bytes(world, tmp_path, stop, jobs):
     """C's fold (chunks of 3 roots), stopped right after a step is saved: the rerun restores what was saved, saves only
-    the steps after it, and writes the uninterrupted fold's files."""
+    the steps after it, and writes the uninterrupted fold's files. A part's save runs beside the next part, so a failed
+    save surfaces once that part ends, and no later step is saved; at `jobs` 1 and 4."""
     gen_dir = world["c_store"] / "g"
     _, runs = ar.newest_runs(gen_dir)
     ck_root = str(tmp_path / "scratch")
@@ -206,7 +215,8 @@ def test_a_fold_stopped_after_a_saved_step_resumes_there_to_the_same_bytes(world
         ck = sk.compact_checkpoint(ck_root, "g", "g.c001", runs, on_save=on_save, work=tmp_path / f"ck{i}")
         try:
             with _small_groups():
-                return sk.fold_gen(gen_dir, out, tmp_path / f"w{i}", gen="g", new_gen="g.c001", runs=runs, threads=2, mem="1GB", chunk_rows=3, ck=ck)
+                return sk.fold_gen(gen_dir, out, tmp_path / f"w{i}", gen="g", new_gen="g.c001", runs=runs, threads=2, mem="1GB", chunk_rows=3, jobs=jobs,
+                                   ck=ck)
         finally:
             ck.close()
 
