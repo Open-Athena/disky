@@ -167,3 +167,46 @@ def test_independent_static_pointers_and_gc_follow_both_lineages(world, tmp_path
     assert [(r["gen"], r["action"]) for r in plan] == [
         ("g", "keep"), ("g.c001", "delete"), ("g.c002", "keep"), ("meta", "keep"), ("meta.c001", "keep"),
     ]
+
+
+class _Stop(Exception):
+    pass
+
+
+#: The fold's checkpoint steps, in order (`fold_gen`'s parts, the drill's own within it).
+STEPS = ["intervals", "shards", "catalog", "fold/long-roots-tables", "fold/long-roots", "fold/spilled-tables", "fold/spilled", "drill", "anchors"]
+
+
+@pytest.mark.parametrize("stop", ["shards", "fold/long-roots", "fold/spilled", "drill"])
+def test_a_fold_stopped_after_a_saved_step_resumes_there_to_the_same_bytes(world, tmp_path, stop):
+    """C's fold (chunks of 3 roots), stopped right after a step is saved: the rerun restores what was saved, saves only
+    the steps after it, and writes the uninterrupted fold's files."""
+    gen_dir = world["c_store"] / "g"
+    _, runs = ar.newest_runs(gen_dir)
+    ck_root = str(tmp_path / "scratch")
+    saved: list[list[str]] = [[], []]
+
+    def fold(i: int, out: Path) -> dict:
+        def on_save(name: str) -> None:
+            saved[i].append(name)
+            if i == 0 and name == stop:
+                raise _Stop(name)
+        ck = sk.compact_checkpoint(ck_root, "g", "g.c001", runs, on_save=on_save, work=tmp_path / f"ck{i}")
+        try:
+            with _small_groups():
+                return sk.fold_gen(gen_dir, out, tmp_path / f"w{i}", gen="g", new_gen="g.c001", runs=runs, threads=2, mem="1GB", chunk_rows=3, ck=ck)
+        finally:
+            ck.close()
+
+    with pytest.raises(_Stop):
+        fold(0, tmp_path / "out0")
+    fold(1, tmp_path / "out1")
+    k = STEPS.index(stop) + 1
+    assert saved == [STEPS[:k], STEPS[k:]]
+    got, want = _md5s(tmp_path / "out1"), _md5s(world["c_store"] / "g.c001")
+    assert sorted(got) == sorted(want)
+    assert got == want
+    assert _meta(tmp_path / "out1") == _meta(world["c_store"] / "g.c001")
+    # cleared once published: nothing of the new generation's folds is left
+    assert sk.clear_checkpoints(ck_root, "g.c001") > 0
+    assert sorted(p.relative_to(tmp_path / "scratch").as_posix() for p in (tmp_path / "scratch").rglob("*") if p.is_file()) == []
