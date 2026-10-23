@@ -292,6 +292,28 @@ class _FakeLister:
         return []
 
 
+def test_generic_discover_keeps_shallow_objects_generation():
+    """The objects discovery finds itself (a bucket's top two levels: `<bucket>/<name>`, `<bucket>/<dir>/<name>`) keep
+    their GCS `generation` (gcsfs gives it as a string) into the listing. Until 2026-10-22 they were written NULL, so
+    every scan's listing, and the interval store backfilled from them, lacked it at depths 2 and 3."""
+    ts = "2026-08-05T00:00:00Z"
+    fs = _FakeFs(tree={
+        'b1/': [
+            {'name': 'b1/top.txt', 'type': 'file', 'size': 1, 'timeCreated': ts, 'storageClass': 'STANDARD', 'generation': '11'},
+            {'name': 'b1/d', 'type': 'directory'},
+        ],
+        'b1/d/': [
+            {'name': 'b1/d/f.json', 'type': 'file', 'size': 2, 'timeCreated': ts, 'storageClass': 'NEARLINE', 'generation': '22'},
+            {'name': 'b1/d/sub', 'type': 'directory'},
+        ],
+    })
+    shallow, prefixes, self_dirs = bulk.generic_discover(fs, 'b1')
+    assert (shallow, prefixes, self_dirs) == (
+        [('top.txt', 1, ts, 'STANDARD', '11', None, None), ('d/f.json', 2, ts, 'NEARLINE', '22', None, None)], ['d/sub/'], [])
+    df = bulk.entries_to_frame('b1', shallow)
+    assert (df['name'].tolist(), df['generation'].tolist(), df['version'].tolist()) == (['top.txt', 'd/f.json'], [11, 22], ['11', '22'])
+
+
 def test_end_to_end_bulk_list_shards_and_writes_success(tmp_path: Path):
     """Fake lister + fake fs → sharded listing parquet + success marker."""
     # Two depth-2 prefixes under bucket root; both stream single-file bodies.
