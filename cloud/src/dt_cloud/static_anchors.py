@@ -353,8 +353,8 @@ def write_start(con, table: str, out: Path, R: int, K: int, scans: list[str] | N
 def start_run(con, prior: list[Tier], run: Tier, D: int, R: int, K: int, into: str) -> dict:
     """One level-0 run's starts-with catalog at scan `D` into table `into` (the fleet root's rollups, as `run_rollups`
     for a key's `''` directory): candidates are every prefix (≥ 2 characters) of the run's names whose rows over every
-    tier can pass R (the run's count plus each prior tier's name-index bound over the prefix's range); a prefix heavy
-    before gets a delta header and cells at D (`delta_cells`), one the run makes heavy a full restatement from every
+    tier can pass R (the run's count, the base's name-index bound over the prefix's range, and the run tiers' rows
+    under it, counted); a prefix heavy before gets a delta header and cells at D (`delta_cells`), one the run makes heavy a full restatement from every
     tier's first hits (its prior rows ≤ R, read exactly)."""
     con.execute(f"CREATE TABLE IF NOT EXISTS {into} (q VARCHAR, dir VARCHAR, kind TINYINT, child VARCHAR, vf BIGINT, b BIGINT, o BIGINT)")
     doc = {"keys": 0, "delta": 0, "new_heavy": 0, "probes": 0, "probe_rows": 0}
@@ -364,10 +364,18 @@ def start_run(con, prior: list[Tier], run: Tier, D: int, R: int, K: int, into: s
     con.execute(f"CREATE OR REPLACE TABLE rr0 AS {shard_rows_sql(files)}")
     con.execute("""CREATE OR REPLACE TABLE rk AS SELECT left(s, L) AS k, sum(n)::BIGINT AS n
         FROM (SELECT s, n, unnest(range(3, length(s) + 1)) AS L FROM (SELECT k AS s, count(*)::BIGINT AS n FROM rr0 GROUP BY k)) GROUP BY ALL""")
-    # Each prior tier's bound over `[k, k + U+10FFFF)`: its groups from the first with `s_max ≥ k` through the last with
-    # `s_min` under the range's end (cumulative rows).
+    # The base's bound over `[k, k + U+10FFFF)`: its groups from the first with `s_max ≥ k` through the last with `s_min`
+    # under the range's end (cumulative rows). The run tiers' rows under each prefix exactly, from their `s` column: a
+    # tier's two partial groups at the range's ends counted whole, over every run tier, passed R for almost any prefix
+    # (cw's 10-20T1806: 208M prior rows probed, none newly heavy).
     con.execute("CREATE OR REPLACE TABLE pb (k VARCHAR, n BIGINT)")
-    for t in prior:
+    con.execute("CREATE OR REPLACE TABLE rcs (s VARCHAR, n BIGINT)")
+    for t in prior[1:]:
+        if fs := t.files("exact"):
+            con.execute(f"INSERT INTO rcs SELECT s, count(*)::BIGINT FROM ({files_sql(fs, 's, depth')}) WHERE depth >= 1 GROUP BY s")
+    con.execute("""INSERT INTO pb SELECT k, sum(n)::BIGINT FROM (SELECT left(s, L) AS k, n
+            FROM (SELECT s, n, unnest(range(3, length(s) + 1)) AS L FROM (SELECT s, sum(n) AS n FROM rcs GROUP BY s))) SEMI JOIN rk USING (k) GROUP BY k""")
+    for t in prior[:1]:
         side = t.shard_dir("exact") / "sidecar.parquet"
         if not side.exists():
             continue
@@ -411,7 +419,7 @@ def start_run(con, prior: list[Tier], run: Tier, D: int, R: int, K: int, into: s
         rollup_cells(con, "nroots", "nh", K, into)
     doc["delta"] = delta_cells(con, "start", D, K, into)
     doc["keys"] = con.execute(f"SELECT count(DISTINCT q) FROM {into}").fetchone()[0]
-    for t in ("rr0", "rk", "pb", "sc", "sca", "scb", "ck", "rr", "rd", "pr", "ps", "near", "prows", "pv", "nh", "nroots"):
+    for t in ("rr0", "rk", "pb", "rcs", "sc", "sca", "scb", "ck", "rr", "rd", "pr", "ps", "near", "prows", "pv", "nh", "nroots"):
         con.execute(f"DROP TABLE IF EXISTS {t}")
     return doc
 
