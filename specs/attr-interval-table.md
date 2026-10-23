@@ -1,6 +1,6 @@
 # Attribution history as an interval-store table
 
-**Status:** v2, 2026-10-23. Reviewed by root (v1 `d8069b00`: approved with the decisions in §8); implemented behind the profile flag `append.attribution` (§3.2), off everywhere until gcs's rollout (§7). Cross-deployment: the code is `[cloud]`; only gcs attributes today.
+**Status:** v2, 2026-10-23. Reviewed by root (v1 `d8069b00`: approved with the decisions in §8); implemented behind the profile flag `append.attribution` (§3.2), off everywhere until gcs's rollout (§7). Cross-deployment: the code is `[cloud]`; only gcs attributes today. **Not built yet** (the spec moves to `done/` when both land): the staged base build (`build-ranges`) of the table, which a staged generation gets from `backfill-attribution` meanwhile (§2); and §7 step 5, stopping the per-scan `attr.tsv` writes once the table-reading site is on prod.
 
 **Goal (Ryan, 2026-10-23):** stop writing a full `attr.tsv` (+ `attr.tsv.idx.json`) per scan. It maps every attributing prefix to `(user, source, evidence)`, and after `scan retire` it is the last per-scan copy whose cost grows with the number of scans ([lean-scans] §2 kept it, `scan_retire.py` class `extras`). Its history goes into the [interval store] as one more versioned table, sharing the store's key ranges, generations, appends, carries and compaction.
 
