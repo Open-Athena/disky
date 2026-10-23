@@ -399,18 +399,24 @@ def _summary(doc: dict) -> dict:
 @option("-b", "--bucket", default=data_bucket, help="Data bucket")
 @option("-c", "--chunk-rows", default=1 << 22, type=IntRange(min=1), help="The drill fold's chunks: roots per measurement / rollup q range")
 @option("-g", "--gen", required=True, help="Base generation (followed to its newest successor)")
+@option("-S", "--scratch", help="Scratch bucket: the compaction lease, held throughout (none: appends aren't held off)")
 @ar.compact_options
-def compact_cmd(bucket, chunk_rows, gen, policy, read_from, grace_s, jobs, force, mount, mem, threads, to_r2, tmp) -> None:
+def compact_cmd(bucket, chunk_rows, gen, scratch, policy, read_from, grace_s, jobs, force, mount, mem, threads, to_r2, tmp) -> None:
     """The compaction stage (`append_runner.run_compaction` with `static_compact`): when the policy fires (or `-K`), the
     generation's base and runs folded into `<gen>.c<NNN>` (a rebuild's bytes), published on GCS (`compaction.json`
     last, `successor.json`, `static-names/CURRENT.json`), then with `-r` on R2 (its pointer last). The old generation
-    stays (readers pin `STATIC_GEN`; `store-gc -k`). Prints a JSON summary."""
+    stays (readers pin `STATIC_GEN`; `store-gc -k`). With `-S`, holds the compaction lease (`static-names/compacting.lease.json`)
+    throughout: appends to the generation wait; exit 4 (`BUSY`) while another compaction holds it. Prints a JSON summary."""
     from .blobstore import Store
     from .static_compact import compactor
 
-    doc = ar.run_compaction(Store(f"gs://{bucket}"), compactor(chunk_rows), gen, Path(mount), Path(tmp), policy=policy, force=force,
-                            r2_bucket=bucket if to_r2 else None, grace_s=grace_s, threads=threads, mem=mem, jobs=jobs, read_from=read_from,
-                            rec=from_env("compact"))
+    try:
+        doc = ar.run_compaction(Store(f"gs://{bucket}"), compactor(chunk_rows), gen, Path(mount), Path(tmp), lease=ar.gcs_compaction_lease_file(scratch, PREFIX),
+                                policy=policy, force=force, r2_bucket=bucket if to_r2 else None, grace_s=grace_s, threads=threads, mem=mem, jobs=jobs,
+                                read_from=read_from, rec=from_env("compact"))
+    except ar.Busy as e:
+        err(f"compact: {e}")
+        raise SystemExit(ar.BUSY)
     print(json.dumps(doc, indent=1))
 
 

@@ -9,6 +9,9 @@ listed by immutable manifests:
   published yet or an earlier published scan is pending; `-c` catches up every pending scan in order.
 - **One coordinator** per store (`Runner.coordination`, `coordinator_lease`; specs/done/append-coordinator-lease.md): a lease
   in the scratch bucket, held for the whole run and renewed by a heartbeat; another `run` meanwhile exits `BUSY` (4).
+- **A compaction holds off appends** to its generation (`compaction_lease`, beside the coordinator lease): written for
+  the `compact` job when it's submitted, adopted and renewed by the job until it ends, whoever submitted it; a `run`
+  meanwhile exits `BUSY`, and once the successor is written it follows there.
 - **Stages** (`Runner`): each skipped when its output exists, so a rerun resumes at the first missing one; Batch jobs
   submitted over the API and polled (`BatchRunner`, at most every 30 s), several at once where they're independent
   (`Runner.concurrently`), labelled for cost attribution (`job_spec`, `cost_labels`).
@@ -568,16 +571,22 @@ class GcsLeaseFile:
 
 class CoordinatorLease:
     """The coordinator lease on `file`, for one run (`owner`, a fresh uuid): `take` it (or raise `Busy`), `renew` it
-    (the heartbeat; a renewal that finds it changed marks it lost), `check` (raises `LeaseLost` once lost), `release`."""
+    (the heartbeat; a renewal that finds it changed marks it lost), `check` (raises `LeaseLost` once lost), `release`.
 
-    def __init__(self, file: LeaseFile, *, holder: str, now: Callable[[], datetime], ttl_s: int = COORD_TTL_S):
+    `extra`: more fields in the record (the compaction lease's `gen`). `adopt`: `take` a record whose `holder` is this
+    one's, live or not (the compaction lease its submitter wrote for the job, `Runner.compact_stage`). `tolerate_errors`:
+    a renewal that raises is retried at the next beat instead of losing the lease (its TTL spans three beats)."""
+
+    def __init__(self, file: LeaseFile, *, holder: str, now: Callable[[], datetime], ttl_s: int = COORD_TTL_S, extra: dict | None = None,
+                 adopt: bool = False, tolerate_errors: bool = False, what: str = "coordinator lease", log: Callable[[str], None] = err):
         from uuid import uuid4
 
         self.file, self.holder, self.now, self.ttl_s = file, holder, now, ttl_s
+        self.extra, self.adopt, self.tolerate_errors, self.what, self.log = extra or {}, adopt, tolerate_errors, what, log
         self.owner, self.token, self.lost = uuid4().hex, None, None
 
     def record(self) -> str:
-        return json.dumps({"owner": self.owner, "holder": self.holder, "at": self.now().isoformat(), "ttl_s": self.ttl_s}) + "\n"
+        return json.dumps({"owner": self.owner, "holder": self.holder, "at": self.now().isoformat(), "ttl_s": self.ttl_s, **self.extra}) + "\n"
 
     def take(self) -> None:
         for _ in range(3):
@@ -587,10 +596,15 @@ class CoordinatorLease:
             if (cur := self.file.read()) is None:
                 continue
             held, token = cur
+            if self.adopt and held.get("holder") == self.holder:
+                if (new := self.file.replace(self.record(), token)) is not None:
+                    self.token = new
+                    return
+                continue
             if not lease_stale(held, self.now(), self.ttl_s):
-                raise Busy(f"the coordinator lease is held by {held.get('holder', held['owner'])} (since {held['at']})")
+                raise Busy(f"the {self.what} is held by {held.get('holder', held['owner'])} (since {held['at']})")
             self.file.delete(token)
-        raise Busy("the coordinator lease changed hands while being taken")
+        raise Busy(f"the {self.what} changed hands while being taken")
 
     def renew(self) -> None:
         if self.lost is not None:
@@ -598,6 +612,9 @@ class CoordinatorLease:
         try:
             token = self.file.replace(self.record(), self.token)
         except Exception as e:
+            if self.tolerate_errors:
+                self.log(f"{self.what}: renewing it failed (retried at the next beat): {type(e).__name__}: {e}")
+                return
             self.lost = f"renewing it failed: {e}"
             return
         if token is None:
@@ -620,19 +637,30 @@ def coordinator_lease(file: LeaseFile, *, holder: str | None = None, now: Callab
                       ttl_s: int = COORD_TTL_S, heartbeat_s: float = HEARTBEAT_S) -> Iterator[Callable[[], None]]:
     """Hold the coordinator lease on `file` (`holder`: `$DT_JOB_NAME`, else host:pid), renewed every `heartbeat_s` on a
     thread; yields its `check`. Raises `Busy` when another holds it. Released on the way out, unless it was lost."""
-    lease = CoordinatorLease(file, holder=holder or os.environ.get(JOB_NAME_VAR) or f"{socket.gethostname()}:{os.getpid()}",
-                             now=now, ttl_s=ttl_s)
+    lease = CoordinatorLease(file, holder=holder or default_holder(), now=now, ttl_s=ttl_s)
     lease.take()
+    with heartbeat(lease, heartbeat_s):
+        yield lease.check
+
+
+def default_holder() -> str:
+    """A lease's `holder`: `$DT_JOB_NAME` (a Batch job's name), else host:pid."""
+    return os.environ.get(JOB_NAME_VAR) or f"{socket.gethostname()}:{os.getpid()}"
+
+
+@contextmanager
+def heartbeat(lease: CoordinatorLease, heartbeat_s: float) -> Iterator[None]:
+    """`lease` (taken) renewed every `heartbeat_s` on a thread; released on the way out, unless it was lost."""
     stop = threading.Event()
 
     def beat():
         while not stop.wait(heartbeat_s):
             lease.renew()
 
-    t = threading.Thread(target=beat, daemon=True, name="coordinator-lease")
+    t = threading.Thread(target=beat, daemon=True, name=lease.what.replace(" ", "-"))
     t.start()
     try:
-        yield lease.check
+        yield
     finally:
         stop.set()
         t.join(timeout=30)
@@ -642,6 +670,50 @@ def coordinator_lease(file: LeaseFile, *, holder: str | None = None, now: Callab
 def gcs_coordinator_lease(scratch: str, prefix: str, client=None) -> AbstractContextManager[Callable[[], None]]:
     """`coordinator_lease` at `gs://<scratch>/<prefix>/coordinator.lease.json`."""
     return coordinator_lease(GcsLeaseFile(scratch, f"{prefix}/{COORD_LEASE}", client))
+
+
+# ── The compaction lease: a running compaction holds off appends to its generation ──
+#
+# A compaction (hours) folds the generation's runs as its job finds them; a scan appended to that generation meanwhile
+# supersedes it (`compact_store`'s guard discards the new generation). So a compaction holds its own lease for its whole
+# run, whoever submitted it and whether or not the submitter still waits: `Runner.compact_stage` writes the record for
+# its job before submitting it (`holder` = the job's name, alive `COMPACT_START_S` while Batch schedules it); the job
+# adopts it (`run_compaction`) before reading the generation and renews it every `HEARTBEAT_S` (alive `COORD_TTL_S`: a
+# crashed job's lapses within ~15 min) until it ends. `Runner.append` refuses (`Busy`, exit 4) while a live one names
+# the generation it would append to; once the compaction wrote its successor, the append follows there.
+
+#: The compaction lease's name under the store's prefix in the scratch bucket (`<prefix>/compacting.lease.json`): per
+#: store, its record naming the generation being compacted (`gen`).
+COMPACT_LEASE = "compacting.lease.json"
+#: How long the submitter's record lives before its job adopts it: Batch's scheduling of a STANDARD VM, with margin. A
+#: job that never starts holds appends off this long.
+COMPACT_START_S = 3600
+
+
+def compaction_holds(file: LeaseFile, gen: str, now: datetime) -> dict | None:
+    """The compaction lease's record, when a live one (within its `ttl_s`) is compacting generation `gen`; else None."""
+    if (cur := file.read()) is None:
+        return None
+    held = cur[0]
+    return held if held.get("gen") == gen and not lease_stale(held, now, COORD_TTL_S) else None
+
+
+@contextmanager
+def compaction_lease(file: LeaseFile, gen: str, *, holder: str | None = None, now: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
+                     ttl_s: int = COORD_TTL_S, heartbeat_s: float = HEARTBEAT_S, log: Callable[[str], None] = err) -> Iterator[CoordinatorLease]:
+    """Hold the compaction lease on `file` for generation `gen` (`holder`: `$DT_JOB_NAME`, else host:pid), adopting the
+    record its submitter wrote for it, renewed every `heartbeat_s` (a failed renewal retried at the next); raises `Busy`
+    when another live compaction holds it. Released on the way out."""
+    lease = CoordinatorLease(file, holder=holder or default_holder(), now=now, ttl_s=ttl_s, extra={"gen": gen}, adopt=True,
+                             tolerate_errors=True, what="compaction lease", log=log)
+    lease.take()
+    with heartbeat(lease, heartbeat_s):
+        yield lease
+
+
+def gcs_compaction_lease_file(scratch: str | None, prefix: str, client=None) -> LeaseFile | None:
+    """The compaction lease's file at `gs://<scratch>/<prefix>/compacting.lease.json` (None without a scratch bucket)."""
+    return GcsLeaseFile(scratch, f"{prefix}/{COMPACT_LEASE}", client) if scratch else None
 
 
 class LocalRunStore:
@@ -1212,8 +1284,25 @@ def job_id(prefix: str, stage: str, scan_id: str, now: datetime | None = None) -
     return f"{prefix}-{stage}-{scan_id.lower().replace('t', '-')}-{t}"
 
 
+#: A poll of a Batch job that fails transiently (`transient`) is retried this many times in a row, backing off from the
+#: poll delay up to `POLL_RETRY_MAX_S`, before the stage fails (2026-10-22: one `ConnectionResetError` polling a 7 h
+#: compaction failed its submitter's stage and dropped the coordinator lease).
+POLL_RETRIES = 5
+POLL_RETRY_MAX_S = 120
+
+
+def transient(e: BaseException) -> bool:
+    """Whether `e` (from an HTTP call) may pass on a retry: a connection / timeout error (`OSError`, which `requests`'
+    exceptions are), unless it carries an HTTP response that isn't 429 or 5xx."""
+    if not isinstance(e, OSError):
+        return False
+    status = getattr(getattr(e, "response", None), "status_code", None)
+    return status is None or status == 429 or status >= 500
+
+
 class BatchRunner:
-    """Submit a Batch job and wait for it (REST over ADC, `batch.submit_job` / `gcp.batch_job`)."""
+    """Submit a Batch job and wait for it (REST over ADC, `batch.submit_job` / `gcp.batch_job`); a transient poll error is
+    retried (`POLL_RETRIES`)."""
 
     def __init__(self, p: Profile, log: Callable[[str], None], *, delay: float = 10, max_delay: float = 30):
         """Polls every `delay` s, doubling up to `max_delay`: each stage's end is noticed up to one poll late, so the cap
@@ -1228,11 +1317,21 @@ class BatchRunner:
 
         submit_job(spec, name, region=self.p.region)
         self.log(f"submitted {name}")
-        delay, t0 = self.delay, monotonic()
+        delay, t0, fails = self.delay, monotonic(), 0
         while True:
             if wait is not None and monotonic() - t0 >= wait:
                 raise StillRunning(f"Batch job {name}: still running after {wait:.0f}s")
-            st = batch_job(name, project=self.p.project, region=self.p.region).get("status", {})
+            try:
+                st = batch_job(name, project=self.p.project, region=self.p.region).get("status", {})
+            except Exception as e:
+                if not transient(e) or fails >= POLL_RETRIES:
+                    raise
+                fails += 1
+                back = min(self.delay * 2 ** (fails - 1), POLL_RETRY_MAX_S)
+                self.log(f"{name}: polling failed ({type(e).__name__}: {e}): retry {fails}/{POLL_RETRIES} in {back:.0f}s")
+                time.sleep(back)
+                continue
+            fails = 0
             state = st.get("state", "?")
             counts = " ".join(f"{k}={v}" for g in (st.get("taskGroups") or {}).values() for k, v in sorted(g.get("counts", {}).items()))
             self.log(f"{name} {state} {counts}")
@@ -1550,6 +1649,9 @@ class Runner:
     #: after each stage. None: no lease (dry runs, tests).
     coordination: Callable[[], AbstractContextManager[Callable[[], None]]] | None = None
     check_lease: Callable[[], None] | None = None
+    #: The compaction lease's file (`compaction_lease`): `append` waits (`Busy`) while a live compaction holds the
+    #: generation, and `compact_stage` writes it for its job. None: no lease (dry runs, tests).
+    compacting: Callable[[], LeaseFile] | None = None
 
     store_prefix: ClassVar[str]
     job_prefix: ClassVar[str]
@@ -1597,6 +1699,7 @@ class Runner:
 
     def append(self, scan_id: str, catch_up: bool) -> list[str]:
         self.follow()
+        self.wait_compaction()
         have, layouts = self.have()
         todo = pending_scans(have, self.published(layouts, have[-1]), scan_id, catch_up)
         # Every listed run's missing tiers first (a scan's own build reads its earlier runs').
@@ -1612,9 +1715,16 @@ class Runner:
         if len(todo) > 1:
             self.log(f"catching up {len(todo)} scans: {', '.join(todo)}")
         for s in todo:
+            self.wait_compaction()
             self.one(s)
         self.carries()
         return todo
+
+    def wait_compaction(self) -> None:
+        """`Busy` while a live compaction holds the generation (`compaction_holds`): a scan appended to it would supersede
+        the compaction; once it wrote its successor, the next run appends there (`follow`)."""
+        if self.compacting is not None and (held := compaction_holds(self.compacting(), self.p.gen, self.now())):
+            raise Busy(f"generation {self.p.gen} is being compacted by {held['holder']} (since {held['at']}): the append waits for its successor")
 
     def one(self, d: str) -> None:
         raise NotImplementedError
@@ -1777,11 +1887,23 @@ class Runner:
     def compact_stage(self, scan: str) -> None:
         """The compaction stage (`compaction` says why): its Batch jobs (`compact_jobs`), the last waited on up to
         `merge_wait` s; they publish the new generation on GCS, then R2 (its pointer last), so the next run appends to it
-        (`follow`). Non-fatal, as the merge stage: a rerun resumes (the job follows a finished compaction's successor)."""
+        (`follow`). Non-fatal, as the merge stage: a rerun resumes (the job follows a finished compaction's successor).
+
+        Before submitting, the compaction lease (`compacting`) is written for the `compact` job (its `holder`, which the
+        job adopts): appends to the generation wait from then on, whether or not this run stays to watch the job. None is
+        submitted while another live compaction holds it."""
         jobs = self.compact_jobs(scan)
         if jobs:
             # the first job folds and publishes: its run is recorded (`compact-r2`, the R2 account's, isn't)
             jobs[0] = (jobs[0][0], self.record_env(*jobs[0]))
+            if self.compacting is not None and not self.dry_run:
+                lease = CoordinatorLease(self.compacting(), holder=jobs[0][0], now=self.now, ttl_s=COMPACT_START_S, extra={"gen": self.p.gen},
+                                         what="compaction lease", log=self.log)
+                try:
+                    lease.take()
+                except Busy as e:
+                    self.log(f"compact: {e}: not submitting another")
+                    return
         try:
             for i, (name, spec) in enumerate(jobs):
                 wait = self.merge_wait if i == len(jobs) - 1 else None
@@ -2209,9 +2331,21 @@ def r2_publish_gen(bucket: str, prefix: str, new: str, old: str, *, last: tuple[
     return {"objects": len(objs), "copied": doc["copied"] + len(tail), "bytes": doc["bytes"] + sum(o.size for o in tail), "s": round(monotonic() - t0, 1)}
 
 
-def run_compaction(store, c: Compactor, gen: str, mount: Path, work: Path, *, policy: Policy | int | None, force: bool = False,
-                   r2_bucket: str | None = None, grace_s: float = GRACE_S, now: float | None = None, threads: int = 4, mem: str = "4GB",
-                   jobs: int = 1, read_from: str = "gcs", source=None, rec: Recorder | None = None, log: Callable[[str], None] = err) -> dict:
+def run_compaction(store, c: Compactor, gen: str, mount: Path, work: Path, *, lease: LeaseFile | None = None, log: Callable[[str], None] = err,
+                   **kw) -> dict:
+    """`compact_generation` (`kw` its options) holding the compaction lease (`lease`, `compaction_lease`) on the
+    generation, followed to its newest successor, from before it is read until the job ends: appends to it wait meanwhile
+    (`Runner.wait_compaction`). Raises `Busy` while another live compaction holds the lease."""
+    if lease is None:
+        return compact_generation(store, c, gen, mount, work, log=log, **kw)
+    gen = resolve_gen(store, c.prefix, gen, log)
+    with compaction_lease(lease, gen, log=log):
+        return compact_generation(store, c, gen, mount, work, log=log, **kw)
+
+
+def compact_generation(store, c: Compactor, gen: str, mount: Path, work: Path, *, policy: Policy | int | None, force: bool = False,
+                       r2_bucket: str | None = None, grace_s: float = GRACE_S, now: float | None = None, threads: int = 4, mem: str = "4GB",
+                       jobs: int = 1, read_from: str = "gcs", source=None, rec: Recorder | None = None, log: Callable[[str], None] = err) -> dict:
     """The Batch `compact` stage (both stores): generation `gen` of `store` (the data bucket, a `blobstore.Store`)
     followed to its newest successor; when `policy` fires (or `force`, with runs), folded into the next one and published
     (`compact_store`) — GCS first, then, with `r2_bucket` (the data bucket the R2 copy mirrors), R2 (`r2_publish_gen`:

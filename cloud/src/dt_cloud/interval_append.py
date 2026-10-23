@@ -776,6 +776,7 @@ def store_runner(cfg: Config, *, dry_run: bool = False, merge: bool = True, merg
         merge=merge,
         merge_wait=merge_wait,
         coordination=None if dry_run else lambda: ar.gcs_coordinator_lease(gs_bucket(p.scratch), PREFIX, client),
+        compacting=None if dry_run or not gs_bucket(p.scratch) else lambda: ar.gcs_compaction_lease_file(gs_bucket(p.scratch), PREFIX, client),
     )
     return runner
 
@@ -1047,14 +1048,19 @@ def compact_cmd(bucket, gen, ranges_gen, scratch, policy, read_from, grace_s, jo
     """The compaction stage (`append_runner.run_compaction` with `interval_compact`): when the policy fires (or `-K`),
     the generation's base and runs folded into `<gen>.c<NNN>` (a fresh build's bytes), published on GCS (`scans.json`,
     then `compaction.json`, `successor.json`, `interval-store/CURRENT.json`), then with `--r2` on R2 (its pointer last);
-    predecessors past the grace leave GCS. Prints a JSON summary."""
+    predecessors past the grace leave GCS. Holds the compaction lease (the scratch bucket's `interval-store/compacting.lease.json`)
+    throughout: appends to the generation wait; exit 4 (`BUSY`) while another compaction holds it. Prints a JSON summary."""
     from . import interval_compact as ic
 
     if (b := gs_bucket(bucket)) is None:
         raise SystemExit(f"interval store: the staged compaction reads a mounted GCS bucket; {bucket!r} is not one")
-    doc = ar.run_compaction(Store(f"gs://{b}"), ic.compactor(rg_rows), gen, Path(mount), Path(tmp), policy=policy, force=force,
-                            r2_bucket=b if to_r2 else None, grace_s=grace_s, threads=threads, mem=mem, jobs=jobs, read_from=read_from,
-                            rec=from_env("compact"))
+    try:
+        doc = ar.run_compaction(Store(f"gs://{b}"), ic.compactor(rg_rows), gen, Path(mount), Path(tmp), lease=ar.gcs_compaction_lease_file(gs_bucket(scratch), PREFIX),
+                                policy=policy, force=force, r2_bucket=b if to_r2 else None, grace_s=grace_s, threads=threads, mem=mem, jobs=jobs,
+                                read_from=read_from, rec=from_env("compact"))
+    except ar.Busy as e:
+        err(f"compact: {e}")
+        raise SystemExit(ar.BUSY)
     print(json.dumps(doc, indent=1))
 
 
