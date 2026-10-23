@@ -190,6 +190,11 @@ class Checkpoint:
         self._saved(f"{step}#{n_parts}")
         return n_parts + 1
 
+    def drop(self, step: str) -> int:
+        """Delete step `step` (superseded by a later step that holds what it did); returns the files deleted."""
+        under = self.key(step) + "/"
+        return self.store.delete(sorted(k for k in self.store.listing(self.key(step)) if k.startswith(under)))
+
     def clear(self) -> int:
         """Delete every saved step (the job's output is published); returns the files deleted."""
         n = self.store.delete(self.store.listing(self.prefix))

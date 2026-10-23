@@ -171,6 +171,11 @@ def fold_drill(con, tiers: list[sd.Tier], out: Path, work: Path, *, R: int, K: i
             _save(con, ck, "long-roots", work, tables=("dmem", "mtid", "tdig"), subs=("troots",))
         t, groups = _spill_roots(con, tiers, work, chunk_rows=chunk_rows, step=step, log=log, t=t)
         _save(con, ck, "spilled", work, tables=("al",), subs=("long", "short"), doc=groups)
+    if ck is not None:
+        # the spills hold every long root again: the chunks' roots are no longer needed to resume (an attempt stopped
+        # right after saving the spills left them)
+        ck.drop("long-roots-tables")
+        ck.drop("long-roots")
     aliases = con.execute("SELECT q, canonical FROM al ORDER BY q").to_arrow_table()
     done = sl.finish_drill(con, out, work, aliases=aliases, long_groups=groups["long"], short_groups=groups["short"], R=R, K=K, floor=floor,
                            step=step, t=t)

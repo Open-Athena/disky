@@ -207,6 +207,10 @@ def test_a_fold_stopped_after_a_saved_step_resumes_there_to_the_same_bytes(world
     assert sorted(got) == sorted(want)
     assert got == want
     assert _meta(tmp_path / "out1") == _meta(world["c_store"] / "g.c001")
+    # once every root is spilled, the long roots' steps are dropped (the spills hold those roots again)
+    scratch = tmp_path / "scratch"
+    rels = [p.relative_to(scratch).parts for p in scratch.rglob("*") if p.is_file()]
+    assert sorted({r[5] for r in rels if r[4] == "fold"}) == ["spilled", "spilled-tables"]
     # cleared once published: nothing of the new generation's folds is left
     assert sk.clear_checkpoints(ck_root, "g.c001") > 0
     assert sorted(p.relative_to(tmp_path / "scratch").as_posix() for p in (tmp_path / "scratch").rglob("*") if p.is_file()) == []
