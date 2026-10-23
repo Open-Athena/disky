@@ -1969,9 +1969,11 @@ def merge_tiers(con, tiers: list[Tier], out: Path, tier: dict, file_rows: int = 
         kw = work / kind
         for sub in ("roots", "rollups", "dcount"):
             (kw / sub).mkdir(parents=True, exist_ok=True)
+        # every source row's `q` is a merged canonical (`cmap.c`): their ranges, assigned once
+        con.execute("CREATE OR REPLACE TABLE qk AS SELECT DISTINCT c AS q FROM cmap")
         for sub, i, sql in sources:
             resource_stage(f"merge/{kind}/read/{sub}", tier=i, inputs=len(tiers))
-            con.execute(f"""COPY (SELECT r.*, g.ch FROM ({sql}) AS r ASOF JOIN qb AS g ON r.q >= g.lo)
+            con.execute(f"""COPY ({sr.ranged(f'({sql})', 'qb', 'ch', keys='SELECT q FROM qk')})
                 TO {q(str(kw / sub / f't{i:03d}'))} (FORMAT parquet, PARTITION_BY (ch), COMPRESSION zstd)""")
         folded = kw / "folded"
         for d in ("roots", "rollups", "dcount"):
@@ -2016,7 +2018,7 @@ def merge_tiers(con, tiers: list[Tier], out: Path, tier: dict, file_rows: int = 
         resource_stage(f"merge/{kind}/state")
         write_state(con, out, kind, queries=[f"SELECT q, dir, rows FROM read_parquet({q(str(f))}) ORDER BY q, dir"
                                              for f in sorted((folded / "dcount").glob("*.parquet"))])
-        for t in ("dr", "ru", "rup", "dcnt", "cmap", "lit", "qb"):
+        for t in ("dr", "ru", "rup", "dcnt", "cmap", "lit", "qb", "qk"):
             con.execute(f"DROP TABLE IF EXISTS {t}")
         shutil.rmtree(kw)
     con.execute("DROP TABLE IF EXISTS cls")
@@ -2033,13 +2035,15 @@ def _count(con, table: str) -> int:
     return con.execute(f"SELECT count(*) FROM {table}").fetchone()[0]
 
 
-def build_drill(con, out: Path, *, long_roots: str, short_roots: str, aliases: pa.Table, R: int, K: int, meta: dict | None = None,
-                rollups: dict[str, str] | None = None, step=None) -> dict:
+def build_drill(con, out: Path, *, long_roots: str | None, short_roots: str | None, aliases: pa.Table, R: int, K: int, meta: dict | None = None,
+                rollups: dict[str, str] | None = None, sorted_roots: dict[str, list[Path]] | None = None, step=None) -> dict:
     """A tier holding every root: tables `long_roots` (canonical members only) and `short_roots` (`ROOT_COLS`) → `out`
     (`static_roots.build_roots` per kind, its rows written as `write_kind` writes them), with `aliases` and `meta.json`.
     `rollups` `{kind: table}` (`ROLLUP_COLS`): a kind's rollup cells already cut (by `q` range, as `static_local`'s
-    chunked build does), written as they are. `step(name, t, **counts)` (optional) reports each kind's rollup and write
-    (`drill/rollup/<kind>`, `drill/write/<kind>`)."""
+    chunked build does), written as they are. `sorted_roots` `{kind: files}` (with that kind's `rollups`): its roots as
+    files each sorted, `q`-disjoint and in `q` order (`static_local.measure_ranges`'), streamed (`write_kind`'s `chunks`)
+    instead of sorting a roots table again; the same bytes. `step(name, t, **counts)` (optional) reports each kind's
+    rollup and write (`drill/rollup/<kind>`, `drill/write/<kind>`)."""
     out.mkdir(parents=True, exist_ok=True)
     doc = {**base_meta(R, K), **(meta or {})}
     con.register("al_in", aliases)
@@ -2049,7 +2053,8 @@ def build_drill(con, out: Path, *, long_roots: str, short_roots: str, aliases: p
     t = monotonic()
     for kind, table in (("long", long_roots), ("short", short_roots)):
         if rollups and kind in rollups:
-            doc.update(write_kind(con, out, kind, roots=table, rollups=rollups[kind]))
+            chunks = {"roots": sorted_roots[kind]} if sorted_roots and kind in sorted_roots else None
+            doc.update(write_kind(con, out, kind, roots=table, rollups=rollups[kind], chunks=chunks))
             if step:
                 t = step(f"drill/write/{kind}", t)
             continue
