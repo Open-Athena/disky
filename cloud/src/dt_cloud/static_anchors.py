@@ -153,13 +153,112 @@ def names_sql(versions_sql: str) -> str:
     return f"""SELECT '/' || {NAME} AS s, depth, path, usr, vf, vt, size, n_files FROM ({versions_sql}) WHERE depth >= 1"""
 
 
-def write_names(con, versions_sql: str, out: Path, target_rows: int = NAME_SHARD_ROWS) -> dict:
+def write_names(con, versions_sql: str, out: Path, target_rows: int = NAME_SHARD_ROWS, jobs: int = 1, work: Path | None = None) -> dict:
     """The name index of `versions_sql`'s versions (coalesced intervals, or a run's `cdelta`) under `out` (`names/`):
-    sorted `(s, path, usr, vf)` by DuckDB, cut into shards (`static_append.write_run_shards`)."""
+    sorted `(s, path, usr, vf)` by DuckDB, cut into shards (`static_append.write_run_shards`).
+
+    `jobs` > 1: the shards planned from each three-character prefix's rows (`write_run_shards`' cut: a shard closes at
+    the first prefix after `target_rows`), the rows spilled once by shard (at most `NAME_SPILL_PARTS` partitions of
+    consecutive shards, under `work`, default a new dir in DuckDB's `temp_directory`), then each shard sorted and written
+    in a process of its own (`static_names.ConPool`); `shards.json` and `sidecar.parquet` as the stream writes them.
+    The same files."""
     from .static_append import write_run_shards
 
+    if jobs > 1:
+        return _write_names_parallel(con, versions_sql, out, target_rows, jobs, work)
     sql = f"SELECT * FROM ({names_sql(versions_sql)}) ORDER BY s, path, usr, vf"
     return write_run_shards((_sx_cast(b) for b in _batches(con, sql)), out, target_rows)
+
+
+#: Partitions the parallel name index spills its rows into (consecutive shards each; under DuckDB's 100 open files).
+NAME_SPILL_PARTS = 64
+
+
+def name_plan(counts: list[tuple[str, int]], target_rows: int) -> list[dict]:
+    """`write_run_shards`' shards over `counts` `(p3, rows)` (each three-character prefix's rows, in order): a shard
+    closes at the first prefix after it holds `target_rows` rows. `{i, lo, hi, rows, prefixes}` each (`hi`: the next
+    shard's `lo`)."""
+    shards: list[dict] = []
+    n = 0
+    for p3, c in counts:
+        if not shards or n >= target_rows:
+            shards.append({"i": len(shards), "lo": p3, "rows": 0, "prefixes": 0})
+            n = 0
+        shards[-1]["rows"] += c
+        shards[-1]["prefixes"] += 1
+        n += c
+    for k, sh in enumerate(shards):
+        sh["hi"] = shards[k + 1]["lo"] if k + 1 < len(shards) else None
+    return shards
+
+
+def _name_shard_task(files: list[str], i: int, out: str, rg_rows: int, threads: int, mem: str, tmp: str) -> int:
+    """Name shard `i` from its spilled partition `files`: its rows sorted `(s, path, usr, vf)` → `sx/s####.parquet` and
+    its sidecar (`static_append._write_shard`); its rows."""
+    import shutil
+
+    from .static_append import _write_shard
+
+    con = connect(threads, mem, tmp)
+    rows = [0]
+
+    def counted():
+        for b in _batches(con, f"SELECT s, depth, path, usr, vf, vt, size, n_files FROM ({files_sql(files)}) WHERE sh = {i} ORDER BY s, path, usr, vf"):
+            rows[0] += b.num_rows
+            yield _sx_cast(b)
+
+    try:
+        _write_shard(counted(), Path(out), i, rg_rows)
+        return rows[0]
+    finally:
+        con.close()
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def _write_names_parallel(con, versions_sql: str, out: Path, target_rows: int, jobs: int, work: Path | None) -> dict:
+    import shutil
+
+    from . import static_append as sa
+    from .static_names import ConPool
+
+    rows_sql = names_sql(versions_sql)
+    counts = con.execute(f"SELECT left(s, 3) AS p3, count(*) FROM ({rows_sql}) GROUP BY 1 ORDER BY 1").fetchall()
+    shards = name_plan(counts, target_rows)
+    out.mkdir(parents=True, exist_ok=True)
+    (out / "sidecar").mkdir(parents=True, exist_ok=True)
+    if not shards:
+        return sa._finish_shards(out, [], target_rows, None)
+    work = work or _scratch(con, "names-shards-")
+    n, parts = len(shards), min(NAME_SPILL_PARTS, len(shards))
+    con.execute("CREATE OR REPLACE TABLE nm_p3 (p3 VARCHAR, sh INTEGER)")
+    shard_of = [k for k, sh in enumerate(shards) for _ in range(sh["prefixes"])]  # each prefix's shard, in `counts`' order
+    con.register("nm_in", pa.table({"p3": [p3 for p3, _ in counts], "sh": pa.array(shard_of, pa.int32())}))
+    con.execute("INSERT INTO nm_p3 SELECT p3, sh FROM nm_in")
+    con.unregister("nm_in")
+    con.execute(f"""COPY (SELECT r.*, m.sh, (m.sh * {parts} // {n})::INTEGER AS sp FROM ({rows_sql}) AS r JOIN nm_p3 AS m ON left(r.s, 3) = m.p3)
+        TO {q(str(work / 'spill'))} (FORMAT parquet, PARTITION_BY (sp), COMPRESSION zstd)""")
+    con.execute("DROP TABLE nm_p3")
+    with ConPool(con, jobs, "names") as pool:
+        futs = []
+        for sh in sorted(shards, key=lambda x: -x["rows"]):
+            files = [str(f) for f in sorted((work / "spill" / f"sp={sh['i'] * parts // n}").glob("*.parquet"))]
+            futs.append((sh, pool.submit(_name_shard_task, files, sh["i"], str(out), sa.SX_RG, pool.task_threads, pool.mem,
+                                         str(work / "tmp" / f"s{sh['i']:04d}"))))
+        for sh, fut in futs:
+            if (got := fut.result()) != sh["rows"]:
+                raise RuntimeError(f"names shard {sh['i']}: {got:,} rows written, {sh['rows']:,} planned")
+    shutil.rmtree(work)
+    return sa._finish_shards(out, [{k: sh[k] for k in ("i", "lo", "rows", "prefixes")} for sh in shards], target_rows, None)
+
+
+def _scratch(con, prefix: str) -> Path:
+    """A new dir beside DuckDB's spill (`temp_directory`: the job's work disk), never inside a generation being written."""
+    import tempfile
+
+    tmp = con.execute("SELECT current_setting('temp_directory')").fetchone()[0]
+    if tmp:
+        Path(tmp).mkdir(parents=True, exist_ok=True)
+    return Path(tempfile.mkdtemp(prefix=prefix, dir=tmp or None))
 
 
 #: The version columns the name index reads from coalesced versions (`cintervals/`) or a run's `cdelta/`.
@@ -371,13 +470,7 @@ def build_tier_local(con, sx_files: list[str], names_files: list[str], out: Path
     out.mkdir(parents=True, exist_ok=True)
     jobs = pool_jobs(con, max(len(sx_files), len(names_files), 1), ANCHOR_THREADS) if jobs is None else jobs
     if jobs > 1:
-        if work is None:  # beside DuckDB's spill (the job's work disk), never inside the generation being written
-            import tempfile
-
-            tmp = con.execute("SELECT current_setting('temp_directory')").fetchone()[0]
-            if tmp:
-                Path(tmp).mkdir(parents=True, exist_ok=True)
-            work = Path(tempfile.mkdtemp(prefix="anchors-shards-", dir=tmp or None))
+        work = work or _scratch(con, "anchors-shards-")
         parts, pdocs = _tier_parallel(con, sx_files, names_files, out, R, K, rule, jobs, work)
         sets, docs = {}, {}
         for kind, files in (("end", sx_files), ("exact", names_files)):
