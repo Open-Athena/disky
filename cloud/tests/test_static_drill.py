@@ -286,6 +286,11 @@ def world(request, tmp_path_factory):
                 chunked.append((out, root / "chunked" / m["key"] / "drill"))
                 sd.merge_tiers(con, [tiers[r["key"]] for r in ins], chunked[-1][1], tier={k: m[k] for k in ("key", "first", "last", "level", "scans")},
                                chunk_rows=2)
+                # and with those ranges spilled into 1, then 2 partitions (each split by range on reading)
+                for parts in (1, 2):
+                    chunked.append((out, root / f"chunked-p{parts}" / m["key"] / "drill"))
+                    sd.merge_tiers(con, [tiers[r["key"]] for r in ins], chunked[-1][1], tier={k: m[k] for k in ("key", "first", "last", "level", "scans")},
+                                   chunk_rows=2, spill_parts=parts)
                 tiers[m["key"]] = sd.Tier(out, m["key"])
             counter = [(r, tiers[r["key"]]) for r in after]
             counter_stacks[j] = [prior[0], *(t for _, t in counter)]

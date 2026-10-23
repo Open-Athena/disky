@@ -1,6 +1,7 @@
 from types import SimpleNamespace
 
 import duckdb
+import pyarrow.parquet as pq
 import pytest
 
 from dt_cloud import static_anchors as an
@@ -209,3 +210,24 @@ def test_start_probes_read_every_row_under_each_near_prefix_in_key_batches(tmp_p
 def test_start_probe_batch_size_must_be_positive():
     with pytest.raises(ValueError, match="^batch_keys must be positive$"):
         an.probe_start_rows(None, [], [], batch_keys=0)
+
+
+def test_probe_batches_split_where_the_rows_between_keys_pass_the_gap(tmp_path):
+    """Keys `k00`..`k99`, 100 rows each, one 100-row group per key: near keys within `gap_rows` of each other share a
+    query's `s` range, farther ones get their own, so a batch never reads the shard between sparse keys."""
+    con = duckdb.connect()
+    con.execute("""CREATE TABLE source AS SELECT printf('k%02d', i // 100) AS s, 3::UTINYINT AS depth, printf('b/a/%04d', i) AS path,
+        NULL::VARCHAR AS usr, TIMESTAMP '2026-10-01' AS vf, TIMESTAMP '2027-01-01' AS vt, 1::BIGINT AS size, 1::BIGINT AS n_files
+        FROM range(10000) AS r(i) ORDER BY s, path""")
+    file = str(tmp_path / "source.parquet")
+    pq.write_table(con.execute("SELECT * FROM source").to_arrow_table(), file, row_group_size=100)  # DuckDB's COPY rounds groups up to its vectors
+    keys = ["k00", "k01", "k03", "k10", "k11", "k50", "k99"]
+    assert an.key_clusters(con, file, keys, gap_rows=100) == [["k00", "k01", "k03"], ["k10", "k11"], ["k50"], ["k99"]]
+    assert an.key_clusters(con, file, keys, gap_rows=0) == [["k00", "k01"], ["k03"], ["k10", "k11"], ["k50"], ["k99"]]
+    assert an.key_clusters(con, file, keys, gap_rows=100, batch_keys=2) == [["k00", "k01"], ["k03"], ["k10", "k11"], ["k50"], ["k99"]]
+    assert an.key_clusters(con, file, keys, gap_rows=10_000) == [keys]
+    con.execute("CREATE TABLE near AS SELECT unnest(?) AS k, 'b/a' AS dir", [keys])
+    con.execute(f"CREATE TABLE prows({an.AR_COLS})")
+    tier = SimpleNamespace(shard_file=lambda mode, key: file)
+    assert an.probe_prior_rows(con, [tier], "end") == 1
+    assert con.execute("SELECT k, count(*) FROM prows GROUP BY k ORDER BY k").fetchall() == [(k, 100) for k in keys]

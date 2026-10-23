@@ -28,7 +28,16 @@ So a key touched by the scan with a few tens of thousands of rows overall gets e
 ## Status
 
 - **Step 2 is done** (`near_candidates(con, R, run_counts)`). The base is bounded by its groups. The run tiers are bounded by the lesser of their groups and the key's exact rows over them (`rc`, from their `s` column only). Measure it on the next cw scan: compare its `anchors <mode>: near … prior rows …` line with the 10-20T1806 numbers above.
-- **Step 1** (`near-probe`) is skipped unless that line shows the base is the slack.
+- **Measured on cw's 10-21T0602** (image 09a0fbe6, through 14581b65): 2,699 s in all, against 10,048 s for 10-21T0002 on the old bound. The probes dropped by about 10,000×, and the rows read from 750M to 87M.
+
+  | mode | near `(k, dir)` | keys probed | prior rows read | newly heavy | wall |
+  |---|---|---|---|---|---|
+  | `end` | 17,034,425 | 483 | 78,405,326 | 164 | 30 min |
+  | `exact` | 1,949,780 | 30 | 4,416,997 | 15 | 14 min |
+  | `start` | — | 16 probes | 3,841,634 | 20 | 1 min |
+
+  Old bound, 10-21T0002: `end` 52.4M near, 5.19M keys, 504M rows, 31 newly heavy; `exact` 3.2M, 271K, 14.8M, 2; `start` 1,961, 231M, 23.
+- **Step 1** (`near-probe`) waits on the per-query timings (`ANCHOR_QUERY` lines) of the 10-21T0602 run. It goes ahead only if the probe dominates `end`'s 30 min. 17M near over 483 keys suggests the base's groups are the slack.
 - **Step 3 is done** (`start_run`'s `ck`). A prefix's prior rows are bounded by the base's groups over its range plus the run tiers' rows under it, counted from their `s` column (`rcs`). Before, every tier's two partial end groups were counted whole, so almost every prefix passed R. Measure it with the scan's `start` probes and probe_rows.
 
 ## Plan
