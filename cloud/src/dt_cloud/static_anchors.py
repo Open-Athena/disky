@@ -125,17 +125,24 @@ def first_hit_sql(mode: str, key: str = "s", par: str = "par", rule: HexRule | N
     return f"(({name_hit_sql(mode, key, rule)}) AND ({par_hit_sql(mode, key, par, rule)}))"
 
 
-def first_hits_sql(rows: str, mode: str, rule: HexRule | None = None) -> str:
-    """The rows of `rows` (a query of `AR_COLS`) passing `first_hit_sql` on `k`, each test run once per distinct value it
-    depends on rather than per row: the ancestor test per `(k, par)` (a directory's rows share it; under a hex-run rule
-    a lambda over every segment) and the name test per `(k, name)` (a path's versions share it). cw's 10-21T0602 `end`
-    fold spent 5,631 cpu-s filtering 27.5M rows per row; 10-21T1202, with only the ancestor test deduplicated, 1,239."""
-    hits = f"""SELECT r.* FROM r SEMI JOIN (SELECT k, par FROM (SELECT DISTINCT k, par FROM r) WHERE {par_hit_sql(mode, 'k', rule=rule)}) AS h
-        USING (k, par)"""
-    if name_hit_sql(mode, "k", rule) == "true":
-        return f"WITH r AS MATERIALIZED ({rows}) {hits}"
-    return f"""WITH r AS MATERIALIZED (SELECT *, {NAME} AS nm FROM ({rows})) SELECT * EXCLUDE (nm) FROM ({hits}) AS x
-        SEMI JOIN (SELECT k, nm FROM (SELECT DISTINCT k, nm FROM r) WHERE {name_hit_sql(mode, 'k', rule, 'nm')}) AS n USING (k, nm)"""
+def first_hits(con, rows: str, into: str, mode: str, rule: HexRule | None = None) -> None:
+    """Table `into`: the rows of `rows` (a query of `AR_COLS`) passing `first_hit_sql` on `k`, each test run once per
+    distinct value it depends on rather than per row: the ancestor test per `(k, par)` (a directory's rows share it;
+    under a hex-run rule a lambda over every segment) and the name test per `(k, name)` (a path's versions share it).
+    Each distinct set is its own table: in one statement, even through materialized CTEs, DuckDB pushes a filter on the
+    grouped columns below the `DISTINCT`, onto every row (cw's 10-21T1801 `nroots`: 10,243 cpu-s over 89M rows)."""
+    named = name_hit_sql(mode, "k", rule) != "true"
+    con.execute(f"CREATE OR REPLACE TABLE fh_r AS SELECT *{f', {NAME} AS nm' if named else ''} FROM ({rows})")
+    con.execute("CREATE OR REPLACE TABLE fh_kp0 AS SELECT DISTINCT k, par FROM fh_r")
+    con.execute(f"CREATE OR REPLACE TABLE fh_kp AS SELECT k, par FROM fh_kp0 WHERE {par_hit_sql(mode, 'k', rule=rule)}")
+    sql = "SELECT r.* FROM fh_r AS r SEMI JOIN fh_kp USING (k, par)"
+    if named:
+        con.execute("CREATE OR REPLACE TABLE fh_kn0 AS SELECT DISTINCT k, nm FROM fh_r")
+        con.execute(f"CREATE OR REPLACE TABLE fh_kn AS SELECT k, nm FROM fh_kn0 WHERE {name_hit_sql(mode, 'k', rule, 'nm')}")
+        sql = f"SELECT * EXCLUDE (nm) FROM ({sql}) AS x SEMI JOIN fh_kn USING (k, nm)"
+    con.execute(f"CREATE OR REPLACE TABLE {into} AS {sql}")
+    for t in ("fh_r", "fh_kp0", "fh_kp", "fh_kn0", "fh_kn"):
+        con.execute(f"DROP TABLE IF EXISTS {t}")
 
 
 # ── The name index ─────────────────────────────────────────────────────────
@@ -241,7 +248,7 @@ def base_rollups(con, files: list[str], mode: str, R: int, K: int, into: str, ru
     con.execute(f"CREATE OR REPLACE TABLE hk AS SELECT s AS k FROM ({files_sql(files, 's')}) GROUP BY s HAVING count(*) > {R}")
     con.execute(f"CREATE OR REPLACE TABLE ar AS SELECT x.* FROM ({shard_rows_sql(files)}) AS x SEMI JOIN hk USING (k)")
     heavy_dirs(con, "ar", R)
-    con.execute(f"CREATE OR REPLACE TABLE rt AS {first_hits_sql('SELECT * FROM ar', mode, rule)}")
+    first_hits(con, "SELECT * FROM ar", "rt", mode, rule)
     con.execute("DROP TABLE ar; DROP TABLE hk")
     rollup_cells(con, "rt", "hv", K, into, closed=True)
     keys, dirs = con.execute("SELECT count(DISTINCT k), count(*) FROM hv").fetchone()
@@ -470,6 +477,11 @@ class Tier:
     def rollup_files(self, kind: str) -> list[str]:
         return [str(f) for f in sorted((self.root / ANCHORS / "rollups").glob(f"{kind}-*.parquet"))]
 
+    def census(self, kind: str) -> Path | None:
+        """The tier's per-key row counts of `kind` (`write_census`), if it was built with them."""
+        f = self.root / ANCHORS / f"census-{kind}.parquet"
+        return f if f.exists() else None
+
     def start_files(self) -> list[str]:
         return [str(f) for f in sorted((self.root / START_DIR / "rollups").glob(f"{START}-*.parquet"))]
 
@@ -672,29 +684,33 @@ def prior_dir_counts(con) -> None:
         con.execute(f"DROP TABLE {t}")
 
 
-def group_bound(con, groups: str, into: str) -> None:
-    """Table `into (k, lvl, dir, n, bound)`: each candidate (`cand`) bounded by the rows of `groups` (`ktk`'s columns)
-    whose path interval overlaps [dir/, dir0), without enumerating their cross product.
+def group_prefix(con, groups: str, name: str) -> None:
+    """Per-key prefix sums of `groups` (a query of `ktk`'s columns) for `group_bound`: `{name}_t` (each key's rows),
+    `{name}_b` (rows of groups whose path maximum is at most `x`) and `{name}_a` (rows of groups whose path minimum is at
+    least `x`). Computed once per group set, however many candidates are bounded against them."""
+    con.execute(f"CREATE OR REPLACE TABLE {name}_t AS SELECT k, sum(rows)::BIGINT AS n FROM ({groups}) GROUP BY k")
+    con.execute(f"""CREATE OR REPLACE TABLE {name}_b AS SELECT k, p_max AS x,
+        sum(sum(rows)) OVER (PARTITION BY k ORDER BY p_max)::BIGINT AS n
+        FROM ({groups}) WHERE p_max IS NOT NULL GROUP BY k, p_max""")
+    con.execute(f"""CREATE OR REPLACE TABLE {name}_a AS SELECT k, p_min AS x,
+        sum(sum(rows)) OVER (PARTITION BY k ORDER BY p_min DESC)::BIGINT AS n
+        FROM ({groups}) WHERE p_min IS NOT NULL GROUP BY k, p_min""")
+
+
+def group_bound(con, name: str, cand: str, into: str) -> None:
+    """Table `into (k, lvl, dir, n, bound)`: each candidate of `cand` bounded by the rows of the groups (`group_prefix`
+    `name`) whose path interval overlaps [dir/, dir0), without enumerating their cross product.
 
     A group's path interval overlaps [dir/, dir0) unless its maximum is below
     the lower bound or its minimum is at/above the upper bound. Null statistics
     never exclude a group. Prefix sums make both exclusions ASOF lookups.
     """
-    con.execute(f"CREATE OR REPLACE TABLE kt_totals AS SELECT k, sum(rows)::BIGINT AS n FROM {groups} GROUP BY k")
-    con.execute(f"""CREATE OR REPLACE TABLE kt_before AS SELECT k, p_max AS x,
-        sum(sum(rows)) OVER (PARTITION BY k ORDER BY p_max)::BIGINT AS n
-        FROM {groups} WHERE p_max IS NOT NULL GROUP BY k, p_max""")
-    con.execute(f"""CREATE OR REPLACE TABLE kt_after AS SELECT k, p_min AS x,
-        sum(sum(rows)) OVER (PARTITION BY k ORDER BY p_min DESC)::BIGINT AS n
-        FROM {groups} WHERE p_min IS NOT NULL GROUP BY k, p_min""")
     con.execute(f"""CREATE OR REPLACE TABLE {into} AS
         SELECT c.k, c.lvl, c.dir, c.n, (coalesce(t.n, 0) - CASE WHEN c.dir = '' THEN 0
             ELSE coalesce(b.n, 0) + coalesce(a.n, 0) END)::BIGINT AS bound
-        FROM cand AS c LEFT JOIN kt_totals AS t USING (k)
-        ASOF LEFT JOIN kt_before AS b ON c.k = b.k AND c.dir || '/' > b.x
-        ASOF LEFT JOIN kt_after AS a ON c.k = a.k AND c.dir || '0' <= a.x""")
-    for table in ("kt_totals", "kt_before", "kt_after"):
-        con.execute(f"DROP TABLE {table}")
+        FROM {cand} AS c LEFT JOIN {name}_t AS t USING (k)
+        ASOF LEFT JOIN {name}_b AS b ON c.k = b.k AND c.dir || '/' > b.x
+        ASOF LEFT JOIN {name}_a AS a ON c.k = a.k AND c.dir || '0' <= a.x""")
 
 
 def near_candidates(con, R: int, run_counts: str | None = None) -> None:
@@ -706,20 +722,35 @@ def near_candidates(con, R: int, run_counts: str | None = None) -> None:
     group, each tier added up to a group's rows to every `(k, dir)` of the key (cw's 10-20T1806 `end`: 37M near, 7
     newly heavy). `run_counts` (`k, n`: each key's rows over the run tiers, every tier but the base `t = 0`, exactly;
     a key absent has none): the base is bounded by its groups, the run tiers by the lesser of their groups and the
-    key's rows there."""
+    key's rows there.
+
+    Level by level, top down: `n + bound` can only shrink from a directory to its child (fewer rows under it, and every
+    group meeting the child's range meets the parent's), so a candidate whose parent was a candidate that can't pass
+    `R` is never bounded. cw's 10-21T1801 bounded 320.9M candidates for 2.5M near (1,101 s of ASOF joins)."""
+    sets = ["kg"] if run_counts is None else ["kg_base", "kg_runs"]
     if run_counts is None:
-        group_bound(con, "ktk", "near")
+        group_prefix(con, "SELECT * FROM ktk", "kg")
     else:
-        con.execute("CREATE OR REPLACE TABLE ktk_base AS SELECT * FROM ktk WHERE t = 0")
-        con.execute("CREATE OR REPLACE TABLE ktk_runs AS SELECT * FROM ktk WHERE t > 0")
-        group_bound(con, "ktk_base", "nb_base")
-        group_bound(con, "ktk_runs", "nb_runs")
-        con.execute(f"""CREATE OR REPLACE TABLE near AS SELECT b.k, b.lvl, b.dir, b.n,
-                (b.bound + least(r.bound, coalesce(rc.n, 0)))::BIGINT AS bound
-            FROM nb_base AS b JOIN nb_runs AS r USING (k, lvl, dir) LEFT JOIN {run_counts} AS rc USING (k)""")
-        for table in ("ktk_base", "ktk_runs", "nb_base", "nb_runs"):
-            con.execute(f"DROP TABLE {table}")
-    con.execute(f"DELETE FROM near WHERE n + bound <= {R}")
+        group_prefix(con, "SELECT * FROM ktk WHERE t = 0", "kg_base")
+        group_prefix(con, "SELECT * FROM ktk WHERE t > 0", "kg_runs")
+    con.execute("CREATE OR REPLACE TABLE near (k VARCHAR, lvl INTEGER, dir VARCHAR, n BIGINT, bound BIGINT)")
+    con.execute("CREATE OR REPLACE TABLE near_cut (k VARCHAR, dir VARCHAR)")
+    parent = "CASE WHEN c.lvl <= 1 THEN '' ELSE left(c.dir, length(c.dir) - length(string_split(c.dir, '/')[-1]) - 1) END"
+    for (lvl,) in con.execute("SELECT DISTINCT lvl FROM cand ORDER BY lvl").fetchall():
+        con.execute(f"""CREATE OR REPLACE TABLE near_lvl AS SELECT c.* FROM cand AS c
+            ANTI JOIN near_cut AS x ON c.k = x.k AND {parent} = x.dir WHERE c.lvl = {lvl}""")
+        if run_counts is None:
+            group_bound(con, "kg", "near_lvl", "near_b")
+        else:
+            group_bound(con, "kg_base", "near_lvl", "nb_base")
+            group_bound(con, "kg_runs", "near_lvl", "nb_runs")
+            con.execute(f"""CREATE OR REPLACE TABLE near_b AS SELECT b.k, b.lvl, b.dir, b.n,
+                    (b.bound + least(r.bound, coalesce(rc.n, 0)))::BIGINT AS bound
+                FROM nb_base AS b JOIN nb_runs AS r USING (k, lvl, dir) LEFT JOIN {run_counts} AS rc USING (k)""")
+        con.execute(f"INSERT INTO near SELECT k, lvl, dir, n, bound FROM near_b WHERE n + bound > {R}")
+        con.execute(f"CREATE OR REPLACE TABLE near_cut AS SELECT k, dir FROM near_b WHERE n + bound <= {R}")
+    for table in ("near_cut", "near_lvl", "near_b", "nb_base", "nb_runs", *(f"{g}_{x}" for g in sets for x in "tba")):
+        con.execute(f"DROP TABLE IF EXISTS {table}")
 
 
 def run_rollups(con, prior: list[Tier], run: Tier, D: int, mode: str, R: int, K: int, into: str, rule: HexRule | None = None) -> dict:
@@ -775,9 +806,13 @@ def run_rollups(con, prior: list[Tier], run: Tier, D: int, mode: str, R: int, K:
             con.unregister("kt_in")
     con.execute("""CREATE OR REPLACE TABLE ktk AS SELECT ck.k, kt.* FROM ck JOIN kt ON kt.s_min <= ck.k AND ck.k <= kt.s_max""")
     # each key's rows over the run tiers, exactly (their `s` column only): their groups mix keys, so bound them by this
+    # (from the tier's census where it has one; a tier built before censuses reads its `s` column: cw's 10-21T1202 spent
+    # 73 s reading two merged runs' 173M rows for these counts)
     con.execute("CREATE OR REPLACE TABLE rc (k VARCHAR, n BIGINT)")
     for t in prior[1:]:
-        if fs := t.files(mode):
+        if census := t.census(mode):
+            con.execute(f"INSERT INTO rc SELECT x.s, x.n FROM read_parquet({q(str(census))}) AS x SEMI JOIN ck ON x.s = ck.k")
+        elif fs := t.files(mode):
             con.execute(f"""INSERT INTO rc SELECT x.s, count(*)::BIGINT FROM ({files_sql(fs, "s, depth")}) AS x SEMI JOIN ck ON x.s = ck.k
                 WHERE x.depth >= 1 GROUP BY x.s""")
     con.execute("CREATE OR REPLACE TABLE rc AS SELECT k, sum(n)::BIGINT AS n FROM rc GROUP BY k")
@@ -799,7 +834,7 @@ def run_rollups(con, prior: list[Tier], run: Tier, D: int, mode: str, R: int, K:
         # `rollup_cells` reads only the heads' keys' roots
         roots = """SELECT k, any_value(depth) AS depth, path, usr, vf, min(vt) AS vt, any_value(size) AS size, any_value(n_files) AS n_files, any_value(par) AS par
             FROM (SELECT * FROM prows SEMI JOIN (SELECT DISTINCT k FROM nh) USING (k) UNION ALL SELECT * FROM rr) GROUP BY k, path, usr, vf"""
-        con.execute(f"CREATE OR REPLACE TABLE nroots AS {first_hits_sql(roots, mode, rule)}")
+        first_hits(con, roots, "nroots", mode, rule)
         rollup_cells(con, "nroots", "nh", K, into)
     # 4. Delta headers and cells at D for the heavy (k, dir) the run touches.
     doc["delta"] = delta_cells(con, mode, D, K, into, rule)
@@ -833,11 +868,11 @@ def delta_cells(con, mode: str, D: int, K: int, into: str, rule: HexRule | None 
     con.execute("CREATE OR REPLACE TABLE pkid AS SELECT DISTINCT q, dir, child FROM ps WHERE kind = 1")
     con.execute("CREATE OR REPLACE TABLE plast AS SELECT q, dir, kind, child, arg_max(b, vf) AS b, arg_max(o, vf) AS o FROM ps WHERE kind IN (1, 2) GROUP BY ALL")
     # each first hit under each of its ancestors: an equi-join on (k, dir), not a `starts_with` per (row, dir) of its key
-    hits = first_hits_sql("SELECT * FROM rr SEMI JOIN (SELECT DISTINCT q AS k FROM dt) USING (k)", mode, rule)
+    first_hits(con, "SELECT * FROM rr SEMI JOIN (SELECT DISTINCT q AS k FROM dt) USING (k)", "evh", mode, rule)
     con.execute(f"""CREATE OR REPLACE TABLE ev AS SELECT dt.q, dt.dir, {_child('x.path', 'dt.dir')} AS child,
             sum(CASE WHEN x.vf = {D} THEN x.size ELSE 0 END - CASE WHEN x.vt = {D} THEN x.size ELSE 0 END)::BIGINT AS db,
             sum(CASE WHEN x.vf = {D} THEN x.n_files ELSE 0 END - CASE WHEN x.vt = {D} THEN x.n_files ELSE 0 END)::BIGINT AS dn
-        FROM dt JOIN ({_level_dirs(f"({hits})")}) AS x ON x.k = dt.q AND x.dir = dt.dir
+        FROM dt JOIN ({_level_dirs("evh")}) AS x ON x.k = dt.q AND x.dir = dt.dir
         GROUP BY ALL""")
     # New kept children: not kept in any tier, while the kept count is under K, by name.
     con.execute(f"""CREATE OR REPLACE TABLE nk AS SELECT q, dir, child FROM (
@@ -853,7 +888,7 @@ def delta_cells(con, mode: str, D: int, K: int, into: str, rule: HexRule | None 
     con.execute(f"""INSERT INTO {into} SELECT s.q, s.dir, s.kind, s.child, {D}, (coalesce(l.b, 0) + s.db)::BIGINT, (coalesce(l.o, 0) + s.dn)::BIGINT
         FROM (SELECT q, dir, kind, child, sum(db) AS db, sum(dn) AS dn FROM ser GROUP BY ALL HAVING sum(db) <> 0 OR sum(dn) <> 0) AS s
         LEFT JOIN plast AS l USING (q, dir, kind, child)""")
-    for t in ("ph", "dt", "pkid", "plast", "ev", "nk", "ser"):
+    for t in ("ph", "dt", "pkid", "plast", "evh", "ev", "nk", "ser"):
         con.execute(f"DROP TABLE IF EXISTS {t}")
     return n
 
@@ -873,6 +908,16 @@ def merge_rollups(con, files_by_tier: list[list[str]], into: str) -> None:
     con.execute("DROP TABLE mr; DROP TABLE ms")
 
 
+def write_census(con, rows_sql: str, out: Path) -> None:
+    """A run tier's census: `(s, n)`, each key's rows (`n`) in `rows_sql` (`s, n` pairs, summed per `s`), sorted by `s`.
+    The anchors read it for a key's rows over the run tiers (`run_rollups`' `rc`) instead of the tier's `s` column. A
+    level-0 run counts its shards' rows (depth ≥ 1); a merged run sums its inputs' censuses, an upper bound if the
+    merge drops any row, which is all `rc` needs."""
+    tmp = out.with_suffix(".tmp")
+    con.execute(f"COPY (SELECT s, sum(n)::BIGINT AS n FROM ({rows_sql}) GROUP BY s ORDER BY s) TO {q(str(tmp))} (FORMAT PARQUET)")
+    tmp.replace(out)
+
+
 def build_run_local(con, prior: list[Tier], run: Tier, D: int, R: int, K: int, scans: list[str], versions_sql: str | None = None,
                     names_rows: int = NAME_SHARD_ROWS, rule: HexRule | None = None) -> dict:
     """A level-0 run's `names/` (from `versions_sql`, its `cdelta`, unless already there) and `anchors/` (both kinds,
@@ -887,6 +932,9 @@ def build_run_local(con, prior: list[Tier], run: Tier, D: int, R: int, K: int, s
         docs[kind] = run_rollups(con, prior, run, D, kind, R, K, "cells", rule)
         _, idx = write_rollups(con, "cells", out, f"rollups/{kind}-s0000.parquet")
         sets[kind] = write_index([idx], out, kind)
+        fs = run.files(kind)
+        rows = f"SELECT s, 1 AS n FROM ({files_sql(fs, 's, depth')}) WHERE depth >= 1" if fs else "SELECT NULL::VARCHAR AS s, 0 AS n WHERE false"
+        write_census(con, rows, out / f"census-{kind}.parquet")
     (out / "meta.json").write_text(json.dumps(anchors_meta(R, K, sets, scans, **rule_json(rule)), indent=1) + "\n")
     if all(t.has_start for t in prior):
         docs[START], sets[START] = build_run_start(con, prior, run, D, R, K, scans)
@@ -918,6 +966,9 @@ def merge_run_local(con, runs: list[Tier], out: Tier, R: int, K: int, scans: lis
         merge_rollups(con, [r.rollup_files(kind) for r in runs], "cells")
         _, idx = write_rollups(con, "cells", dst, f"rollups/{kind}-s0000.parquet")
         sets[kind] = write_index([idx], dst, kind)
+        # a census only when every input has one: a missing one leaves the merged run to its `s` column, as before
+        if (cs := [r.census(kind) for r in runs]) and all(cs):
+            write_census(con, files_sql([str(c) for c in cs], "s, n"), dst / f"census-{kind}.parquet")
     (dst / "meta.json").write_text(json.dumps(anchors_meta(R, K, sets, scans, **rule_json(rule)), indent=1) + "\n")
     # The starts-with catalog: merged when every input carries one (else the merged run has none, and it is cut there).
     if all(r.has_start for r in runs):
