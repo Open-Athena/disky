@@ -3,6 +3,9 @@ literal's (from the coalesced versions) are exactly its first-hit versions, and 
 equal brute force."""
 from __future__ import annotations
 
+import re
+
+import duckdb
 import pytest
 
 from dt_cloud import static_catalog as sc
@@ -333,4 +336,8 @@ def test_ranged_assigns_the_asof_ranges(tmp_path, n_bounds):
     assert con.execute(f"SELECT * FROM ({sr.ranged('rt', 'qg', 'grp')}) ORDER BY x").fetchall() == want
     con.execute("CREATE TABLE qk AS SELECT DISTINCT q FROM rt")
     assert con.execute(f"SELECT * FROM ({sr.ranged('(SELECT * FROM rt)', 'qg', 'grp', keys='SELECT q FROM qk')}) ORDER BY x").fetchall() == want
+    # a row whose `q` the keys miss fails the query (the per-row ASOF join kept it): never a silently smaller spill
+    miss = con.execute("SELECT q FROM rt ORDER BY x LIMIT 1").fetchone()[0]
+    with pytest.raises(duckdb.InvalidInputException, match=f"^Invalid Input Error: ranged: q '{re.escape(miss)}' has no range$"):
+        con.execute(f"SELECT * FROM ({sr.ranged('rt', 'qg', 'grp', keys=f'SELECT q FROM qk WHERE q <> {sn.q(miss)}')})").fetchall()
     con.close()
