@@ -880,6 +880,30 @@ def _r2(d: str, manifest: str | None = None) -> tuple[str, str]:
 MERGE = ("merge", f"carry -L 5 -M 90GB -p 16 {COMMON} -m /gcs/data")
 
 
+def test_a_generation_with_its_own_ranges_never_appends_from_the_profiles_ranges_gen(tmp_path):
+    """A profile's `ranges_gen` (g0) names its own generation's range files. A generation pinned past it that holds its own
+    (a compaction's, a backfill's: g1 with `ranges.json`) appends from those: the stages get `-R g1`, and a stage handed
+    another `-R` refuses (gcs 2026-10-23: a backfilled generation's run cut from the profile's older base)."""
+    f = Fake(["2026-08-03", "2026-08-04"])
+    f.keys[f"{G1}/ranges.json"] = {"k": 4}
+    f.runner().run("2026-08-04")
+    own = COMMON.replace("-R g0", "-R g1")
+    assert [(st, c.split(" -m ")[0].split(" ; ")[0]) for st, c in f.calls()[:2]] == [
+        ("ranges", f"ranges -d 2026-08-04 -n 2 -M 90GB -p 16 {own}"), ("publish", f"publish -d 2026-08-04 -M 90GB -p 16 -s {own}")]
+    assert [x for x in f.log if x.startswith("g1 holds")] == ["g1 holds its own key ranges and base: reading them, not g0's"]
+    for g in ("g0", "g1"):
+        (tmp_path / ist.PREFIX / g).mkdir(parents=True)
+        (tmp_path / ist.PREFIX / g / "ranges.json").write_text('{"k": 4}\n')
+    store = ia.Store(str(tmp_path))
+    ia.check_ranges_gen(store, "g1", "g1")
+    with pytest.raises(SystemExit) as e:
+        ia.check_ranges_gen(store, "g1", "g0")
+    assert str(e.value) == (f"{tmp_path}/{ist.PREFIX}/g1/ranges.json: the generation holds its own ranges and base; -R g0 would append onto "
+                            "another's (use -R g1)")
+    (tmp_path / ist.PREFIX / "g1" / "ranges.json").unlink()
+    ia.check_ranges_gen(store, "g1", "g0")
+
+
 def test_the_chain_appends_strictly_in_scan_id_order():
     f = Fake(["2026-08-03", "2026-08-04", "2026-08-04T1236"])
     with pytest.raises(ar.NotNext, match=r"1 earlier published scan\(s\) pending: 2026-08-04"):

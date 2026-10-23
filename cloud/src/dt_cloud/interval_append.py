@@ -675,6 +675,14 @@ class Runner(ar.Runner):
         """A compacted generation holds its own range files and `ranges.json`."""
         return Config(replace(self.p, gen=gen), gen)
 
+    def follow(self) -> None:
+        """`append_runner.Runner.follow`, then the generation's own ranges over the profile's `ranges_gen` when it holds
+        them (`own_ranges`: a generation pinned by `INTERVAL_STORE_GEN` past the profile's)."""
+        super().follow()
+        if (own := own_ranges(self.p.gen, self.cfg.ranges_gen, self.exists)) != self.cfg.ranges_gen:
+            self.log(f"{self.p.gen} holds its own key ranges and base: reading them, not {self.cfg.ranges_gen}'s")
+            self.cfg = Config(self.p, own)
+
     def one(self, d: str) -> None:
         run = f"{self.root}/deltas/{d}"
         self.log(f"{d}: interval store {self.p.gen}")
@@ -815,6 +823,22 @@ def _latest_manifest(store: Store, gen: str, before: str | None = None) -> dict 
     return store.read_json(f"{prefix}{key}") if key else None
 
 
+def own_ranges(gen: str, ranges_gen: str, exists: Callable[[str], bool]) -> str:
+    """The generation holding `gen`'s base range files: `gen` itself when it has its own `ranges.json` (a compacted or
+    backfilled generation always does; only a staged build's borrows its `ranges_gen`'s), else `ranges_gen`. A profile's
+    `ranges_gen` names its own `gen`'s, so a generation pinned past it (`INTERVAL_STORE_GEN`) must not read it: gcs
+    2026-10-23 appended onto a backfilled generation from the profile's older one's base, every pre-backfill version
+    and its NULL `generation` with it."""
+    return gen if exists(f"{PREFIX}/{gen}/ranges.json") else ranges_gen
+
+
+def check_ranges_gen(store: Store, gen: str, ranges_gen: str) -> None:
+    """Refuse (SystemExit) a stage's `-R` other than `gen` when `gen` holds its own ranges (`own_ranges`)."""
+    if (own := own_ranges(gen, ranges_gen, store.exists)) != ranges_gen:
+        raise SystemExit(f"{store.root}/{PREFIX}/{gen}/ranges.json: the generation holds its own ranges and base; -R {ranges_gen} "
+                         f"would append onto another's (use -R {own})")
+
+
 def _state(store: Store, gen: str, scan: str) -> tuple[dict, list[dict]]:
     """The generation's base `scans.json` and the runs live before `scan` (the newest earlier manifest's)."""
     base = store.read_json(f"{PREFIX}/{gen}/scans.json")
@@ -892,6 +916,7 @@ def ranges_cmd(bucket, gen, ranges_gen, scratch, scan, force, index, mount, mem,
     prefix = f"{PREFIX}/{gen}"
     run = f"{prefix}/{run_key(scan, scan)}"
     store, sstore = Store(store_url(bucket)), Store(store_url(scratch))
+    check_ranges_gen(store, gen, ranges_gen)
     doc_scan = store.read_json(f"{run}/scans.json")
     s = doc_scan["scans"][0]
     ranges = store.read_json(f"{PREFIX}/{ranges_gen}/ranges.json")
@@ -957,6 +982,7 @@ def publish_cmd(bucket, gen, ranges_gen, scratch, scan, compact_level, mount, me
         return
     if store.exists(key):
         raise SystemExit(f"{prefix}/{key} exists: manifests are never rewritten")
+    check_ranges_gen(st, gen, ranges_gen)
     k = Store(store_url(bucket)).read_json(f"{PREFIX}/{ranges_gen}/ranges.json")["k"]
     rk = run_key(scan, scan)
     done = len(store.keys(f"{rk}/ranges/"))
@@ -1024,6 +1050,7 @@ def carry_cmd(bucket, gen, ranges_gen, scratch, read_from, compact_level, mount,
     per generation (a lease in the scratch bucket, mirrored to R2's `interval-store/<gen>/merging.json` for /health when the
     job has the R2 env); resumable."""
     store = run_store(bucket, scratch, gen, prefix=PREFIX)
+    check_ranges_gen(Store(store_url(bucket)), gen, ranges_gen)
     k = Store(store_url(bucket)).read_json(f"{PREFIX}/{ranges_gen}/ranges.json")["k"]
     base = Store(store_url(bucket)).read_json(f"{PREFIX}/{gen}/scans.json")
     sl = ist.sliced(base)
