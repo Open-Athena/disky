@@ -250,6 +250,26 @@ scratch = gcp.storage.Bucket(
 )
 grant_bucket(f"{SCRATCH_BUCKET}-job", bucket=scratch.name, role="roles/storage.objectAdmin", member=job.member, member_email=job.email_literal, adopt=adopt)
 
+# What can't be regenerated (D1 exports taken before a destructive migration, a
+# `scan retire -b` target): soft delete kept (7 days), public access off. The job
+# may add and read backups, never overwrite or delete them (`objectCreator` +
+# `objectViewer`); deleting one is a human's call.
+BACKUPS_BUCKET = "oa-gcs-usage-backups"
+backups = gcp.storage.Bucket(
+    BACKUPS_BUCKET,
+    project=project,
+    name=BACKUPS_BUCKET,
+    location="US-EAST1",
+    storage_class="STANDARD",
+    uniform_bucket_level_access=True,
+    public_access_prevention="enforced",
+    labels={"deployment": "shared", "component": "backups"},
+    soft_delete_policy=gcp.storage.BucketSoftDeletePolicyArgs(retention_duration_seconds=604800),
+    opts=pulumi.ResourceOptions(protect=True),
+)
+for role in ["roles/storage.objectCreator", "roles/storage.objectViewer"]:
+    grant_bucket(f"{BACKUPS_BUCKET}-job-{role.split('.')[-1]}", bucket=backups.name, role=role, member=job.member, member_email=job.email_literal, adopt=adopt)
+
 # The scanned fleet (Marin's buckets, another project): the job lists and reads
 # every bucket and deletes from the swept ones (`objectUser`); the browser reads.
 FLEET = {
