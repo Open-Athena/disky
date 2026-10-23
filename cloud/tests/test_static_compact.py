@@ -72,17 +72,27 @@ def world(fixture, tmp_path_factory):  # noqa: F811
         _build(root, scans, c, tmp / "wc0", through=ids[1])
         _add(root, scans, c, tmp / "wc1", ids[3])
         out["c"] = _compact(c, tmp / "wc2", "-c", "3")
-        # D, E: C again with the runs' chunk spill in 2 partitions, then 1 (each split by chunk on reading): the same bytes
-        for name, parts in (("d", 2), ("e", 1)):
+        # D, E: C again with the runs' chunk spill in 2 partitions, then 1 (each split by chunk on reading); F, H: C and E
+        # with 4 chunks folded at a time (`-j 4`): the same bytes
+        for name, parts, jobs in (("d", 2, 1), ("e", 1, 1), ("f", None, 4), ("h", 1, 4)):
             d = tmp / name
             _build(root, scans, d, tmp / f"w{name}0", through=ids[1])
             _add(root, scans, d, tmp / f"w{name}1", ids[3])
-            old, sr.SPILL_PARTS, sr.SPILL_DIRECT = (sr.SPILL_PARTS, sr.SPILL_DIRECT), parts, 0
+            old = sr.SPILL_PARTS, sr.SPILL_DIRECT
+            if parts is not None:
+                sr.SPILL_PARTS, sr.SPILL_DIRECT = parts, 0
             try:
-                out[name] = _compact(d, tmp / f"w{name}2", "-c", "3")
+                out[name] = _compact(d, tmp / f"w{name}2", "-c", "3", "-j", str(jobs))
             finally:
                 sr.SPILL_PARTS, sr.SPILL_DIRECT = old
             out[f"{name}_store"] = d / sn.PREFIX
+        # I: two level-0 runs (`add -N`: no carry), folded 4 chunks (and both runs' spills) at a time: the same bytes
+        i = tmp / "i"
+        _build(root, scans, i, tmp / "wi0", through=ids[1])
+        _add(root, scans, i, tmp / "wi1", ids[3], "-N")
+        out["i_runs"] = [r["key"] for r in ar.newest_runs(i / sn.PREFIX / "g")[1]]
+        out["i"] = _compact(i, tmp / "wi2", "-c", "3", "-j", "4")
+        out["i_store"] = i / sn.PREFIX
         ranges = str(a / sn.PREFIX / "g" / "ranges.json")
         for gen, through in (("g.c001", ids[3]), ("g.c002", ids[4])):
             _build(root, scans, tmp / f"ref-{gen}", tmp / f"wr-{gen}", gen=gen, through=through, extra=("-r", ranges))
@@ -108,7 +118,8 @@ def test_add_compacts_when_due_then_appends_to_the_successor(world):
 
 
 @pytest.mark.parametrize("store, gen, ref", [("a_store", "g.c001", "g.c001"), ("a_store", "g.c002", "g.c002"), ("b_store", "g.c001", "g.c001"),
-                                             ("c_store", "g.c001", "g.c001"), ("d_store", "g.c001", "g.c001"), ("e_store", "g.c001", "g.c001")])
+                                             ("c_store", "g.c001", "g.c001"), ("d_store", "g.c001", "g.c001"), ("e_store", "g.c001", "g.c001"),
+                                             ("f_store", "g.c001", "g.c001"), ("h_store", "g.c001", "g.c001"), ("i_store", "g.c001", "g.c001")])
 def test_compacted_generation_is_the_rebuild(world, store, gen, ref):
     got, want = world[store] / gen, world["tmp"] / f"ref-{ref}" / sn.PREFIX / ref
     g, w = _md5s(got), _md5s(want)
@@ -181,6 +192,35 @@ def test_independent_static_pointers_and_gc_follow_both_lineages(world, tmp_path
     ]
 
 
+def test_two_runs_folded_concurrently(world):
+    """World I folds two level-0 runs (both spilled at once at `-j 4`)."""
+    ids = world["ids"]
+    two = [ar.run_key(ids[2], ids[2]), ar.run_key(ids[3], ids[3])]
+    assert (world["i_runs"], world["i"]["runs"]) == (two, two)
+
+
+def test_compact_probe_folds_read_only_to_the_published_bytes(world, tmp_path):
+    """`static_merge compact-probe` over C's store as the mount (4 chunks at a time): the published `g.c001`'s files, md5
+    for md5, in its report (stdout without the files, the report beside OUT and at `-u`); the mount is untouched."""
+    from dt_cloud import static_merge as sm
+
+    mount = world["c_store"].parent
+    before = _md5s(mount)
+    with _small_groups():
+        res = CliRunner().invoke(sm.cli, ["compact-probe", "-m", str(mount), "-g", "g", "-o", str(tmp_path / "out"), "-T", str(tmp_path / "w"),
+                                          "-c", "3", "-j", "4", "-M", "1GB", "-p", "2", "-u", str(tmp_path / "reports" / "p.json")], catch_exceptions=False)
+    assert res.exit_code == 0, res.output
+    head = json.loads(res.stdout)
+    doc = json.loads((tmp_path / "out.probe.json").read_text())
+    assert json.loads((tmp_path / "reports" / "p.json").read_text()) == doc
+    assert (head["new_gen"], head["jobs"], head["n_files"], head["runs"]) == ("g.c001", 4, len(doc["files"]), doc["runs"])
+    got = {k: v["md5"] for k, v in doc["files"].items() if not k.startswith(OWN)}
+    assert got == _md5s(world["c_store"] / "g.c001")
+    assert {k: v["size"] for k, v in doc["files"].items()} == {p.relative_to(tmp_path / "out").as_posix(): p.stat().st_size
+                                                              for p in (tmp_path / "out").rglob("*") if p.is_file()}
+    assert _md5s(mount) == before
+
+
 class _Stop(Exception):
     pass
 
@@ -189,10 +229,13 @@ class _Stop(Exception):
 STEPS = ["intervals", "shards", "catalog", "fold/long-roots-tables", "fold/long-roots", "fold/spilled-tables", "fold/spilled", "drill", "anchors"]
 
 
-@pytest.mark.parametrize("stop", ["shards", "fold/long-roots", "fold/spilled", "drill"])
-def test_a_fold_stopped_after_a_saved_step_resumes_there_to_the_same_bytes(world, tmp_path, stop):
+@pytest.mark.parametrize("jobs", [1, 4])
+@pytest.mark.parametrize("stop", ["intervals", "shards", "catalog", "fold/long-roots", "fold/spilled", "drill"])
+def test_a_fold_stopped_after_a_saved_step_resumes_there_to_the_same_bytes(world, tmp_path, stop, jobs):
     """C's fold (chunks of 3 roots), stopped right after a step is saved: the rerun restores what was saved, saves only
-    the steps after it, and writes the uninterrupted fold's files."""
+    the steps after it, and writes the uninterrupted fold's files. A part's save runs beside the next part, so a failed
+    save surfaces once that part ends, and no later step is saved. The stopped fold runs `jobs` (1 or 4) at a time, the
+    rerun the other count: a checkpoint doesn't depend on it."""
     gen_dir = world["c_store"] / "g"
     _, runs = ar.newest_runs(gen_dir)
     ck_root = str(tmp_path / "scratch")
@@ -206,7 +249,8 @@ def test_a_fold_stopped_after_a_saved_step_resumes_there_to_the_same_bytes(world
         ck = sk.compact_checkpoint(ck_root, "g", "g.c001", runs, on_save=on_save, work=tmp_path / f"ck{i}")
         try:
             with _small_groups():
-                return sk.fold_gen(gen_dir, out, tmp_path / f"w{i}", gen="g", new_gen="g.c001", runs=runs, threads=2, mem="1GB", chunk_rows=3, ck=ck)
+                return sk.fold_gen(gen_dir, out, tmp_path / f"w{i}", gen="g", new_gen="g.c001", runs=runs, threads=2, mem="1GB", chunk_rows=3,
+                                   jobs=jobs if i == 0 else 5 - jobs, ck=ck)
         finally:
             ck.close()
 

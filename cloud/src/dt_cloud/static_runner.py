@@ -98,6 +98,15 @@ def drill_duckdb_args(machine: str) -> list[str]:
     return ["-M", f"{vcpus * 7700 // 2 // 1024}GB", "-p", str(vcpus)]
 
 
+#: vCPUs per chunk the compaction's drill fold runs at once: one chunk's query kept ~9 of 48 cores busy (gcs 10-23).
+FOLD_VCPUS = 6
+
+
+def fold_jobs(machine: str) -> int:
+    """The compaction's `-j` on `machine` (`static_merge compact -j`): key ranges, census shards and drill-fold chunks at a time, one per `FOLD_VCPUS`."""
+    return max(1, int(machine.rsplit("-", 1)[-1]) // FOLD_VCPUS)
+
+
 # ── The chain ──────────────────────────────────────────────────────────────
 
 
@@ -138,7 +147,8 @@ class Runner(ar.Runner):
         r2 = self.merge_r2()
         out = [self.job("compact", scan, 1, "static_merge", ["compact", "-g", self.cfg.gen, *(["-S", self.cfg.scratch] if self.cfg.scratch else []),
                                                            "-C", str(self.cfg.policy), *(["-K"] if self.compact_now else []), *self.read_args(),
-                                                           *(["-r"] if r2 else []), *duckdb_args(self.cfg.machine_for("compact"))], r2=r2)]
+                                                           *(["-r"] if r2 else []), "-j", str(self.cfg.fold_jobs or fold_jobs(self.cfg.machine_for("compact"))),
+                                                           *duckdb_args(self.cfg.machine_for("compact"))], r2=r2)]
         if not r2:
             out.append(self.job("compact-r2", scan, 1, "static_merge", ["compact-r2", "-g", self.cfg.gen], r2=True, mount=False))
         return out
