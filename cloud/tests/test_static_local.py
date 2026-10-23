@@ -540,6 +540,55 @@ def test_publish_order():
                                       "deltas/a/anchors/start/meta.json", "deltas/a/anchors/meta.json", "deltas/a/drill/meta.json", "manifests/a.json"]
 
 
+def test_publish_steps():
+    """`upload_new`'s steps over `publish_order`: the data files (and only they) together; each marker, `scans.json` and
+    each manifest a step of its own, in order."""
+    from dt_cloud.blobstore import publish_steps
+
+    keys = ["drill/long/roots/r0000.parquet", "drill/long/roots/r0001.parquet", "scans.json", "sx/s0000.parquet", "catalog/meta.json",
+            "deltas/a/meta.json", "drill/meta.json", "manifests/a.json", "manifests/b.json"]
+    assert publish_steps(sl.publish_order(keys), sl.publish_tier) == [
+        ["drill/long/roots/r0000.parquet", "drill/long/roots/r0001.parquet"], ["scans.json"], ["sx/s0000.parquet"],
+        ["catalog/meta.json"], ["deltas/a/meta.json"], ["drill/meta.json"], ["manifests/a.json"], ["manifests/b.json"]]
+    assert publish_steps(["a", "b"], None) == [["a"], ["b"]]
+
+
+def test_upload_new_puts_each_step_after_the_last(tmp_path):
+    """`upload_new` with a tier: a step's files are all up before the next step's first starts (data in parallel, a marker
+    after every data file before it), and every new file goes up once."""
+    import threading
+    import time
+
+    from dt_cloud import blobstore as bs
+
+    local = tmp_path / "gen"
+    data = [f"drill/long/roots/r{i:04d}.parquet" for i in range(12)]
+    for k in [*data, "drill/meta.json", "manifests/a.json", "old.parquet"]:
+        (local / k).parent.mkdir(parents=True, exist_ok=True)
+        (local / k).write_text(k)
+    events, lock, live, peak = [], threading.Lock(), [0], [0]
+
+    class Rec:
+        def put(self, src, key):
+            with lock:
+                live[0] += 1
+                peak[0] = max(peak[0], live[0])
+                events.append(("start", key))
+            time.sleep(0.02)
+            with lock:
+                live[0] -= 1
+                events.append(("end", key))
+
+    got = bs.upload_new(Rec(), local, "p", {"p/old.parquet": 1}, sl.publish_order, tier=sl.publish_tier, workers=4)
+    assert got == [*data, "drill/meta.json", "manifests/a.json"]
+    starts = [k for e, k in events if e == "start"]
+    assert sorted(starts) == sorted(f"p/{k}" for k in got)
+    pos = {(e, k): i for i, (e, k) in enumerate(events)}
+    assert max(pos[("end", f"p/{k}")] for k in data) < pos[("start", "p/drill/meta.json")]
+    assert pos[("end", "p/drill/meta.json")] < pos[("start", "p/manifests/a.json")]
+    assert peak[0] == 4
+
+
 
 def test_disk_peak_per_stage(monkeypatch, tmp_path):
     """`DiskPeak`: each `take()` is the peak above the starting level since the previous one; `close()` the run's peak."""

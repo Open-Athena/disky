@@ -500,7 +500,8 @@ def compactor(chunk_rows: int = sl.CHUNK_ROWS, checkpoint: str | None = None) ->
     predecessors are left to `store-gc -k` (readers pin `STATIC_GEN`, so a compacted generation may still be served).
     `checkpoint`: the folds' checkpoint root (`fold`)."""
     return ar.Compactor(prefix=PREFIX, fold=lambda *a, **kw: fold(*a, **kw, chunk_rows=chunk_rows, checkpoint=checkpoint), publish_order=sl.publish_order,
-                        last=("scans.json", "catalog/meta.json", "drill/meta.json", f"{an.ANCHORS}/meta.json"), prune=False, md5s=True, keep=reads)
+                        last=("scans.json", "catalog/meta.json", "drill/meta.json", f"{an.ANCHORS}/meta.json"), prune=False, md5s=True, keep=reads,
+                        publish_tier=sl.publish_tier)
 
 
 #: What the fold never reads of the base: the anchored search and the measurement (rebuilt), the parity markers.

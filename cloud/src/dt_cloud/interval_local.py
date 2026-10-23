@@ -76,6 +76,14 @@ def publish_order(keys: list[str]) -> list[str]:
     return sorted(keys, key=rank)
 
 
+def publish_tier(key: str) -> int | None:
+    """`blobstore.upload_new`'s tier of a key in `publish_order`: the data files go up together; a run's `meta.json`, the
+    base's `scans.json` and each manifest alone, after everything before it."""
+    if key == "scans.json" or key.split("/", 1)[0] == "manifests" or key.rsplit("/", 1)[-1] == "meta.json":
+        return None
+    return 0
+
+
 # ── build: a base generation ───────────────────────────────────────────────
 
 
@@ -249,7 +257,7 @@ def build_cmd(gen, jobs, k, layouts, mem, store_root, threads, rg_rows, scans_ro
         if gen_dir.exists():
             shutil.rmtree(gen_dir)
         summary = build_gen(scans, scans["mount"], gen_dir, w / "build", gen=gen, k=k, rg_rows=rg_rows, threads=threads, mem=mem, jobs=jobs)
-        summary["files"] = len(upload_new(store, gen_dir, prefix, {}, publish_order))
+        summary["files"] = len(upload_new(store, gen_dir, prefix, {}, publish_order, tier=publish_tier))
     if ic.current(store) is None:
         ic.set_current(store, gen)  # the store's first generation: what unpinned readers and `add` follow
         summary["current"] = True
@@ -321,7 +329,7 @@ def add_cmd(compact, read_from, gen, grace_s, compact_now, jobs, layouts, mem, p
                                                                 threads=threads, mem=mem)
         ours = {f"{prefix}/{p.relative_to(gen_dir).as_posix()}" for p in gen_dir.rglob("*") if p.is_file()}
         store.delete([key for key in stale if key not in ours])
-        uploaded = upload_new(store, gen_dir, prefix, before, publish_order)
+        uploaded = upload_new(store, gen_dir, prefix, before, publish_order, tier=publish_tier)
         prune = ar.prune_folded(GenStore(store, prefix), now=sl.now(), grace_s=grace_s, retain=ia.FOLDED_RETAIN, dry_run=prune_dry_run, log=err)
         if not prune_dry_run:
             ar.rm_local(gen_dir, prune["keys"])  # the mirror too: a later `add` over this work dir must not upload them again
