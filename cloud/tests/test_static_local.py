@@ -227,6 +227,23 @@ def test_parallel_tail_is_the_serial_one(built, tmp_path, monkeypatch):
     assert min(summary["drill"]["groups"].values()) > 1  # and the measurement per range
 
 
+@pytest.mark.parametrize("target_rows", [1, 7])
+def test_parallel_names_are_the_streamed_ones(built, tmp_path, target_rows):
+    """`write_names` at `jobs` 3 (shards planned from the prefixes' rows, spilled by shard, written in processes): the
+    stream's shards, sidecars, `sidecar.parquet` and `shards.json`, byte for byte, with shards cut at `target_rows`."""
+    cint = sorted(str(f) for f in (built["gen"] / "cintervals").glob("*.parquet"))
+    con = sn.connect(4, "1GB", tmp_path / "duckdb")
+    got = {}
+    with _small_groups():
+        for jobs in (1, 3):
+            doc = an.write_names(con, an.files_sql(cint, an.VERSION_COLS), tmp_path / f"names{jobs}", target_rows, jobs=jobs)
+            got[jobs] = (doc, _files(tmp_path / f"names{jobs}"))
+    con.close()
+    assert got[3] == got[1]
+    assert got[1][0]["shards"] > 1
+    assert sorted(p.name for p in tmp_path.joinpath("duckdb").iterdir() if p.name.startswith("names-shards-")) == []
+
+
 def test_build_anchors_are_the_staged_anchors(built):
     """`names/` and `anchors/` (with `anchors/start/`): the base builders' over the staged generation's versions and suffix
     shards, byte for byte."""
