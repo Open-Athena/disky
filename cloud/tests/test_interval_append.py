@@ -124,7 +124,7 @@ def versions(base: Path, run_dirs: list[Path], t: str) -> list[dict]:
     return combine([_rows(base, t), *(_rows(d, t) for d in run_dirs)], t)
 
 
-@pytest.mark.parametrize("t", ia.TABLES)
+@pytest.mark.parametrize("t", ia.tables())
 def test_each_run_alone_plus_the_base_is_a_full_rebuild(world, t):
     """Base + the level-0 runs through scan D (no merges) equals `build`/`fold` over every scan through D, row for
     row (the exact `wts` carried as the build carries it)."""
@@ -135,7 +135,7 @@ def test_each_run_alone_plus_the_base_is_a_full_rebuild(world, t):
         assert got == want, (t, d)
 
 
-@pytest.mark.parametrize("t", ia.TABLES)
+@pytest.mark.parametrize("t", ia.tables())
 def test_merged_runs_plus_the_base_are_a_full_rebuild(world, t):
     """…and with the runs merged on the binary counter, as each scan's manifest lists them."""
     shapes = {}
@@ -157,7 +157,7 @@ def test_a_merged_run_is_its_inputs_combined(world):
     stack = world["stacks"]["2026-08-07"]
     (_, merged), = stack
     ins = [world["runs"][s["id"]] for s in world["scans"][BASE:]]
-    for t in ia.TABLES:
+    for t in ia.tables():
         cols = ia.DELTA_SCHEMA[t].names
         rows = lambda d: pa.concat_tables([pq.read_table(p) for p in sorted((d / t).glob("r*.parquet"))]).select(cols).to_pylist()  # noqa: E731
         want: dict[tuple, dict] = {}
@@ -174,7 +174,7 @@ def test_runs_hold_the_scans_changes_only(world):
     and its counts say so; the open state is the scan's rows (`append_range` checks it, or raises)."""
     for s in world["scans"][BASE:]:
         D = s["ts"]
-        for t in ia.TABLES:
+        for t in ia.tables():
             rows = pa.concat_tables([pq.read_table(p) for p in sorted((world["runs"][s["id"]] / t).glob("r*.parquet"))]).to_pylist()
             assert sorted({(r["op"], r["vf"] == D, r["vt"] == D, r["vt"] == sn.OPEN) for r in rows}) == [(-1, False, True, False), (1, True, False, True)]
             doc = [x[t] for x in world["docs"][s["id"]]]
@@ -205,7 +205,7 @@ def test_slices_live_at_each_scan_are_the_scans_owner_slices(world):
 def _live_counts(world, d: str, ts: int) -> list[dict[str, int]]:
     """Per key range, per table: the versions the full rebuild through scan `d` has live at it (the scan's rows)."""
     return [{t: sum(1 for r in pq.read_table(world["full"][d] / t / f"{name}.parquet", columns=["vf", "vt"]).to_pylist() if r["vf"] <= ts < r["vt"])
-             for t in ia.TABLES} for name in NAMES]
+             for t in ia.tables()} for name in NAMES]
 
 
 def _equal(counts: dict[str, int]) -> dict[str, dict[str, int]]:
@@ -318,18 +318,18 @@ def test_the_cut_check_compares_each_served_sort_with_its_deltas(world, tmp_path
     run = world["runs"][world["scans"][BASE]["id"]]
     served = _cut(run, tmp_path / "served")
     con = duckdb.connect()
-    n = {sort: sum(pq.read_metadata(p).num_rows for p in sorted((run / ist.SORTS[sort][0]).glob("r*.parquet"))) for sort in ia.RUN_SORTS}
-    assert ia.check_cut(con, str(run), served) == {sort: {"rows": n[sort], "missing": 0, "extra": 0} for sort in ia.RUN_SORTS}
+    n = {sort: sum(pq.read_metadata(p).num_rows for p in sorted((run / ist.SORTS[sort][0]).glob("r*.parquet"))) for sort in ia.run_sorts()}
+    assert ia.check_cut(con, str(run), served) == {sort: {"rows": n[sort], "missing": 0, "extra": 0} for sort in ia.run_sorts()}
     t = pq.read_table(served / "path.parquet")
     pq.write_table(t.slice(1), served / "path.parquet")
     assert ia.check_cut(con, str(run), served)["path"] == {"rows": n["path"] - 1, "missing": 1, "extra": 0}
 
 
 def _doc(runs: list[str], **tables) -> dict:
-    return {"check": {"runs": runs, **{t: {"rows": 5, "store": 5, "missing": 0, "extra": 0, **tables.get(t, {})} for t in ia.TABLES}, "s": 0.1}}
+    return {"check": {"runs": runs, **{t: {"rows": 5, "store": 5, "missing": 0, "extra": 0, **tables.get(t, {})} for t in ia.tables()}, "s": 0.1}}
 
 
-CUT = {s: {"rows": 3, "missing": 0, "extra": 0} for s in ia.RUN_SORTS}
+CUT = {s: {"rows": 3, "missing": 0, "extra": 0} for s in ia.run_sorts()}
 MANIFEST = {"runs": [{"key": "deltas/a_b"}, {"key": "deltas/c"}, {"key": "deltas/d"}]}
 
 
@@ -338,7 +338,7 @@ def test_the_marker_sums_the_ranges_checks():
 
     m = ia.append_marker("g", "d", MANIFEST, [_doc(["deltas/a_b", "deltas/c"])] * 2, CUT)
     assert m == {"scan": "d", "gen": "g", "how": "append", "pass": True, "manifest": "manifests/d.json", "runs": ["deltas/a_b", "deltas/c"],
-                 "ranges": 2, "tables": {t: {"rows": 10, "store": 10, "missing": 0, "extra": 0} for t in ia.TABLES}, "cut": CUT}
+                 "ranges": 2, "tables": {t: {"rows": 10, "store": 10, "missing": 0, "extra": 0} for t in ia.tables()}, "cut": CUT}
     bad = ia.append_marker("g", "d", MANIFEST, [_doc(["deltas/a_b", "deltas/c"]), _doc(["deltas/a_b", "deltas/c"], sv={"store": 4, "missing": 1})],
                            {**CUT, "slices": {"rows": 2, "missing": 1, "extra": 0}})
     assert (bad["pass"], failure(bad)) == (False, "sv 1 missing, 0 extra; cut slices 1 missing, 0 extra")
@@ -380,7 +380,7 @@ def _mutate(rows: list[dict], how: str, D: int) -> list[dict]:
 
 
 @pytest.mark.parametrize("how", ["drop-a-close-record", "drop-an-opened-version", "close-a-day-late", "wts-of-the-new-scan"])
-@pytest.mark.parametrize("t", ia.TABLES)
+@pytest.mark.parametrize("t", ia.tables())
 def test_a_mutated_run_is_caught(world, t, how):
     s = world["scans"][BASE + 1]
     appended = [x["id"] for x in world["scans"][BASE:BASE + 2]]
@@ -396,7 +396,7 @@ def test_a_mutated_run_is_caught(world, t, how):
 
 def _cut(rel_root: Path, out: Path) -> Path:
     con = duckdb.connect()
-    for sort in ia.RUN_SORTS:
+    for sort in ia.run_sorts():
         sub, _, _ = ist.SORTS[sort]
         ist.write_served(con, ia.delta_relation(str(rel_root), sub), sort, out / f"{sort}.parquet", ist.SUB_SCHEMA[sub], rg_rows=4)
     return out
@@ -461,7 +461,7 @@ def test_a_view_over_runs_missing_a_close_record_differs(world, served, tmp_path
 
     s = world["scans"][BASE]
     bad = tmp_path / "bad"
-    for t in ia.TABLES:
+    for t in ia.tables():
         for p in sorted((world["runs"][s["id"]] / t).glob("r*.parquet")):
             tb = pq.read_table(p)
             (bad / t).mkdir(parents=True, exist_ok=True)
@@ -490,7 +490,7 @@ def laid(world, tmp_path_factory) -> Path:
     for s in world["scans"][BASE:]:
         run = {"key": run_key(s["id"], s["id"]), "first": s["id"], "last": s["id"], "level": 0, "scans": [s["id"]]}
         d = gen / run["key"]
-        for t in ia.TABLES:
+        for t in ia.tables():
             shutil.copytree(world["runs"][s["id"]] / t, d / t)
         docs = ia.cut_run(con, str(d), d / "served", rg_rows=RG)
         (d / "meta.json").write_text(json.dumps(ia.run_meta("g", run, {s["id"]: s["ts"]}, docs), indent=1) + "\n")
@@ -527,7 +527,7 @@ def _run_files(d: Path) -> dict[str, bytes]:
 def _pairwise_files(world, served, key: str) -> dict[str, bytes]:
     """The old inline pairwise carries' run `key` (`world`'s `push_run` stacks: deltas merged two at a time, then cut)."""
     d = next(p for st in world["stacks"].values() for r, p in st if r["key"] == key)
-    deltas = {f.relative_to(d).as_posix(): f.read_bytes() for t in ia.TABLES for f in sorted((d / t).glob("r*.parquet"))}
+    deltas = {f.relative_to(d).as_posix(): f.read_bytes() for t in ia.tables() for f in sorted((d / t).glob("r*.parquet"))}
     cut = served["cut"][key]
     return {**deltas, **{f"served/{f.name}": f.read_bytes() for f in sorted(cut.glob("*.parquet"))}}
 
@@ -759,7 +759,7 @@ def test_publish_refuses_a_rewrite_an_old_scan_and_a_run_without_its_files(world
 
 def test_prune_plan_keeps_the_newest_complete_state_only():
     pre = "interval-store/g"
-    objs = [(f"{pre}/state/{s}/{t}/r{i:04d}.parquet", 10) for s in ("2026-08-04", "2026-08-05") for t in ia.TABLES for i in range(2)]
+    objs = [(f"{pre}/state/{s}/{t}/r{i:04d}.parquet", 10) for s in ("2026-08-04", "2026-08-05") for t in ia.tables() for i in range(2)]
     plan = ia.prune_plan(objs, pre, 2, True, "2026-08-05")
     assert {k: plan[k] for k in ("keep", "delete")} == {"keep": ["2026-08-05"], "delete": [{"scan": "2026-08-04", "objects": 6, "bytes": 60}]}
     assert plan["names"] == sorted(n for n, _ in objs if "/2026-08-04/" in n)
@@ -1153,7 +1153,7 @@ def test_ranges_are_assigned_longest_first_to_the_least_loaded_task():
 
 
 def test_a_ranges_cost_is_its_open_rows_from_the_previous_scans_docs():
-    doc = lambda n: {t: {"opened": 0, "closed": 0, "delta": 0, "open": n * (j + 1)} for j, t in enumerate(ia.TABLES)}  # noqa: E731
+    doc = lambda n: {t: {"opened": 0, "closed": 0, "delta": 0, "open": n * (j + 1)} for j, t in enumerate(ia.tables())}  # noqa: E731
     docs = {"r0000": doc(1), "r0001": doc(10), "r0002": doc(100)}
     assert ia.open_counts(docs, 3) == [6, 60, 600]
     assert ia.open_counts({k: v for k, v in docs.items() if k != "r0001"}, 3) is None
@@ -1163,7 +1163,7 @@ def test_a_ranges_cost_is_its_open_rows_from_the_previous_scans_docs():
 def test_prev_open_counts_reads_the_previous_runs_range_docs(tmp_path):
     """`prev_open_counts`: the previous scan's `ranges/r####.json` from the store (`blobstore.Store`), or None while any
     range lacks its doc."""
-    doc = lambda n: {t: {"opened": 0, "closed": 0, "delta": 0, "open": n * (j + 1)} for j, t in enumerate(ia.TABLES)}  # noqa: E731
+    doc = lambda n: {t: {"opened": 0, "closed": 0, "delta": 0, "open": n * (j + 1)} for j, t in enumerate(ia.tables())}  # noqa: E731
     store = ia.Store(str(tmp_path))
     for name, n in (("r0000", 1), ("r0001", 10), ("r0002", 100)):
         store.write_text(f"interval-store/g1/deltas/2026-08-04T1236/ranges/{name}.json", json.dumps(doc(n)))
@@ -1219,7 +1219,7 @@ def test_prune_deletes_the_earlier_states_in_parallel():
     """Only the scratch bucket's earlier states: the merge lease beside them stays, and a merge's revision of the scan's
     manifest changes nothing (the scan's own manifest says it is published)."""
     pre = "interval-store/g1"
-    objs = [f"{pre}/state/{s}/{t}/r{i:04d}.parquet" for s in ("2026-08-03", "2026-08-04", "2026-08-05") for t in ia.TABLES for i in range(4)]
+    objs = [f"{pre}/state/{s}/{t}/r{i:04d}.parquet" for s in ("2026-08-03", "2026-08-04", "2026-08-05") for t in ia.tables() for i in range(4)]
     g = PruneGcs([*objs, f"{pre}/merge.lease.json"], [f"{pre}/manifests/2026-08-05.json", f"{pre}/manifests/2026-08-05.m001.json"], barrier=4,
                  gone={f"{pre}/state/2026-08-03/sv/r0002.parquet"})
     doc = ia.prune_state(g, "g1", "2026-08-05", 4, bucket="data", scratch="scr", workers=4)

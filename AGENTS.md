@@ -133,6 +133,13 @@ dt-cloud interval-store add [-g GEN] -L LAYOUT -s SCANS -o STORE  # Append every
                           # base + runs into a new generation (`interval_compact`: a fresh build's bytes), then moves
                           # `interval-store/CURRENT.json` to it (the site follows it when `INTERVAL_STORE_GEN` is unset);
                           # `-g` defaults to that pointer. `interval-store current -o STORE [-s GEN]` prints / sets it
+dt-cloud interval-store backfill-attribution -O NEW -o STORE [-s ROOT]  # The roster attribution table
+                          # (specs/attr-interval-table.md): each scan's `attribution.parquet` (`path-index -a` writes it
+                          # beside the sorts; key `(depth, path)`, change columns `user`, `source`, `evidence`) versioned
+                          # in the store's ranges, runs (`append.attribution` / `build|add -A`; a scan without one is
+                          # uncovered), carries and compaction; served sort `attribution` `(path, vf)` (`extras.ts`). This
+                          # folds GEN into NEW with the table over every scan, checked against GEN's runs' table;
+                          # `attribution-convert` first writes the parquet beside older scans' `attr.tsv`
 dt-cloud interval-store backfill-generation -O NEW -o STORE -s ROOT -l TEMPLATE  # A generation folded into NEW (a dir or
                           # URL store; never over one) whose object versions carry their GCS `generation`, read once from
                           # the raw listings (`{id}` templates under ROOT): each version the first listed within it, earlier

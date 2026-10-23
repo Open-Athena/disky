@@ -36,7 +36,7 @@ def calls(monkeypatch):
 
 
 def test_interval_stages_use_the_followed_generation(monkeypatch, calls):
-    monkeypatch.setattr(ia, "prepare_scan", lambda bucket, gen, d, layouts: calls.append(("prepare", gen, d)))
+    monkeypatch.setattr(ia, "prepare_scan", lambda bucket, gen, d, layouts, attribution=False: calls.append(("prepare", gen, d)))
     monkeypatch.setattr(ia, "prune_state", lambda client, gen, d, k, **kw: calls.append(("prune", gen, d)) or {"delete": []})
     keys = {"interval-store/g1.c001/ranges.json": {"k": 4}, "interval-store/g1.c001/scans.json": {"scans": []}}
 

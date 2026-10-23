@@ -251,7 +251,7 @@ def served(built, tmp_path_factory):
     out, scans, _, _ = built
     dst = tmp_path_factory.mktemp("served")
     con = duckdb.connect()
-    for sort, (sub, _, _) in ist.SORTS.items():
+    for sort, (sub, _, _) in ((s, ist.SORTS[s]) for s in ist.served_sorts(True)):
         schema = ist.SUB_SCHEMA[sub]
         ist.write_served(con, f"read_parquet('{out}/{sub}/r*.parquet')", sort, dst / f"{sort}.parquet", schema, rg_rows=4,
                          stamps=[x["ts"] for x in scans["scans"]])

@@ -2,7 +2,9 @@
 one row per `(depth, path)` — objects and dirs, owner slices folded into `us` — with `[vf, vt)` validity,
 instead of a full per-scan copy. The build reuses the static name index's key ranges and pyrmts'
 gaps-and-islands kernel (`static_names`); `cut` lays the versions out as the served sorts (`path`,
-`bysize`, `reads`) with a `.groups.parquet` beside each, which a reader plans its range reads from.
+`bysize`, `reads`) with a `.groups.parquet` beside each, which a reader plans its range reads from. A generation built
+with the attribution table (`ATTRIBUTION`, specs/attr-interval-table.md) also versions each covered scan's roster
+attribution map and serves it as the `attribution` sort.
 
     dt-cloud interval-store build-ranges -g GEN [-i TASK -n PER_TASK | -r RANGES]   # per range: pv/, rd/, digest/
     dt-cloud interval-store cut -g GEN [-s SORT]                                    # served/{path,bysize,reads}.parquet + .groups.parquet
@@ -134,6 +136,62 @@ SV_KEY = ["depth", "path", "usr"]
 SV_CHANGE = [c for c in CHANGE_COLS if c != "us"] + ["last_read"]
 SV_STATE = [*SV_CHANGE, "wts"]
 SV_HASH = f"hash(depth, path, usr, kind, size, n_files, n_children, n_desc, mtime, dr, wb, {', '.join(CLS)}, last_read)"
+
+#: The roster attribution table (specs/attr-interval-table.md): every attributing prefix's `(user, source, evidence)`
+#: as versions, keyed `(depth, path)` as the path versions (so it shares their key ranges), from each covered scan's
+#: `attribution.parquet` (`extras.ATTRIBUTION_FILE`). Opt-in per generation: a base built with it says
+#: `"attribution": true` in `scans.json` (each covered scan's entry naming its file, `ATTRIBUTION_SRC`); a run of a
+#: generation without it in the base opens it (the manifests' `"attribution"`: the run scans it covers). A scan without
+#: a file is *uncovered*: it adds no input, so a version runs on across it, and readers answer "unknown" there.
+ATTRIBUTION = "attribution"
+ATTRIBUTION_SRC = "attribution_src"
+ATTRIBUTION_CHANGE = ["user", "source", "evidence"]
+AT_SCHEMA = pa.schema([
+    pa.field("depth", pa.uint8(), nullable=False),
+    pa.field("path", pa.string(), nullable=False),
+    pa.field("vf", pa.int64(), nullable=False),
+    pa.field("vt", pa.int64(), nullable=False),
+    pa.field("user", pa.string()),  # NULL: a rule attributing the prefix to nobody
+    pa.field("source", pa.string()),
+    pa.field("evidence", pa.string()),
+])
+#: What a version and a scan's row are compared by (`user` quoted wherever SQL names it).
+AT_HASH = 'hash(depth, path, "user", source, evidence)'
+
+
+def ident(name: str) -> str:
+    """A quoted DuckDB identifier."""
+    return '"' + name.replace('"', '""') + '"'
+
+
+def qcols(names) -> str:
+    """Column names as a quoted DuckDB select list (`user` is a keyword)."""
+    return ", ".join(ident(c) for c in names)
+
+
+def attributed(scans: dict) -> bool:
+    """Whether a generation's base (its `scans.json`) has the attribution table."""
+    return bool(scans.get(ATTRIBUTION))
+
+
+def attribution_src(scan: dict) -> str | None:
+    """A scan's `attribution.parquet` beside its `path` sort (`<dir>/path-index.parquet` → `<dir>/attribution.parquet`)."""
+    from .extras import ATTRIBUTION_FILE
+
+    d = scan["src"].rsplit("/", 1)[0] if "/" in scan["src"] else ""
+    return f"{d}/{ATTRIBUTION_FILE}" if d else ATTRIBUTION_FILE
+
+
+def attribution_rows_sql(src: str, preds: list[str]) -> str:
+    """A covered scan's attributing prefixes in the range (`preds`): `(depth, path, "user", source, evidence)`."""
+    cols = 'depth::UTINYINT AS depth, path, "user", source, evidence'
+    return " UNION ALL ".join(f"SELECT {cols} FROM read_parquet({q(src)}) WHERE {p}" for p in preds)
+
+
+def empty_sql(schema: pa.Schema) -> str:
+    """A relation of `schema`'s columns with no rows (a table's input where none exists yet)."""
+    duck = {pa.uint8(): "UTINYINT", pa.int8(): "TINYINT", pa.int32(): "INTEGER", pa.int64(): "BIGINT", pa.float64(): "DOUBLE", pa.string(): "VARCHAR"}
+    return "SELECT " + ", ".join(f"NULL::{duck[f.type]} AS {ident(f.name)}" for f in schema) + " WHERE false"
 
 
 def with_generation(schema: pa.Schema, generation: Identity) -> pa.Schema:
@@ -403,6 +461,49 @@ def build_slices_range(scans: dict, ranges: dict, i: int, out: Path, con, *, mou
     return doc
 
 
+def build_attribution_range(scans: dict, ranges: dict, i: int, out: Path, con, *, mount: str | None) -> dict:
+    """Range `i`'s attribution versions over the covered scans (those whose entry names an `attribution.parquet`,
+    `ATTRIBUTION_SRC`): `attribution/r####.parquet` (`AT_SCHEMA`, sorted `(depth, path, vf)`) and
+    `attribution-digest/r####.json` — per covered scan the rows and Σ hash of its prefixes in the range next to those of
+    the versions live at it (equal iff every covered scan reconstructs). The kernel sees the covered scans alone,
+    consecutive, so a version runs on across an uncovered scan, and closes at the next covered scan where it changes or
+    is gone; an append does the same (`interval_append.append_range`)."""
+    from pyrmts.intervals import islands_sql, stamped_sql
+
+    t0 = monotonic()
+    r = ranges["ranges"][i]
+    preds = range_preds(r)
+    covered = [s for s in scans["scans"] if s.get(ATTRIBUTION_SRC)]
+    stamps = [s["ts"] for s in covered]
+    for t in ("attr_long", "attr_versions"):
+        con.execute(f"DROP TABLE IF EXISTS {t}")
+    inputs = [f"SELECT {n}::BIGINT AS __scan, * FROM ({attribution_rows_sql(sn._src(scans['bucket'], s[ATTRIBUTION_SRC], mount), preds)})"
+              for n, s in enumerate(covered)]
+    con.execute(f"CREATE TABLE attr_long AS {' UNION ALL '.join(inputs) if inputs else 'SELECT 0::BIGINT AS __scan, * EXCLUDE (vf, vt) FROM (' + empty_sql(AT_SCHEMA) + ')'}")
+    src_dig = {n: [c, int(h) % U64] for n, c, h in con.execute(f"SELECT __scan, count(*), sum({AT_HASH}::HUGEINT) FROM attr_long GROUP BY __scan").fetchall()}
+    if covered:
+        runs = islands_sql("SELECT * FROM attr_long", KEY_COLS, ATTRIBUTION_CHANGE)
+        con.execute(f"CREATE TABLE attr_versions AS {stamped_sql(runs, KEY_COLS, ATTRIBUTION_CHANGE, stamps, OPEN)}")
+    else:
+        con.execute(f"CREATE TABLE attr_versions AS {empty_sql(AT_SCHEMA)}")
+    con.execute("DROP TABLE attr_long")
+    dig = _prefix_digests(con, "attr_versions", AT_HASH, stamps)
+    per_scan = []
+    for n, s in enumerate(covered):
+        a, b = src_dig.get(n, [0, 0]), dig[n]
+        per_scan.append({"id": s["id"], "rows": a[0], "live": b[0], "eq": a == b})
+    name = f"r{i:04d}"
+    n_at = write_sorted(sn._batches(con, f"SELECT {qcols(AT_SCHEMA.names)} FROM attr_versions ORDER BY depth, path, vf"), out / ATTRIBUTION / f"{name}.parquet",
+                        AT_SCHEMA, RANGE_RG, dictionary=["user", "source"])
+    doc = {"range": r, "i": i, "versions": n_at, "open": con.execute(f"SELECT count(*) FROM attr_versions WHERE vt = {OPEN}").fetchone()[0],
+           "scans": per_scan, "eq": all(x["eq"] for x in per_scan), "s": round(monotonic() - t0, 1)}
+    con.execute("DROP TABLE attr_versions")
+    (out / "attribution-digest").mkdir(parents=True, exist_ok=True)
+    (out / "attribution-digest" / f"{name}.json").write_text(json.dumps(doc, sort_keys=True) + "\n")
+    err(f"attribution {i}: {n_at:,} versions ({doc['open']:,} open) over {len(covered)} covered scans, eq={doc['eq']} in {doc['s']}s")
+    return doc
+
+
 # ── Read days folded into the path versions ──────────────────────────────
 
 
@@ -501,9 +602,16 @@ SORTS = {
     # Keyed on the path's total (`bysize-path-total.md`): a path's slices sit together, `b_max` = MAX(tot).
     "slices-bytotal": ("svt", f"({BUCKET.replace('size', 'tot')}) DESC NULLS LAST, path, usr NULLS FIRST, vf", "tot"),
     "slices-bysize-user": ("sv", f"usr NULLS FIRST, ({BUCKET}) DESC NULLS LAST, path, vf", "size"),
+    # Roster attribution (`ATTRIBUTION`), path first: a subtree's prefixes are one span per segment, an ancestor a point.
+    ATTRIBUTION: (ATTRIBUTION, "path, vf", None),
 }
 #: Each range-file dir's schema.
-SUB_SCHEMA = {"pv": PV_SCHEMA, "pvl": PVL_SCHEMA, "rd": RD_SCHEMA, "sv": SV_SCHEMA, "svt": SVT_SCHEMA}
+SUB_SCHEMA = {"pv": PV_SCHEMA, "pvl": PVL_SCHEMA, "rd": RD_SCHEMA, "sv": SV_SCHEMA, "svt": SVT_SCHEMA, ATTRIBUTION: AT_SCHEMA}
+#: The attribution range files, and the sort cut from them: only in a generation with the table (`attributed`).
+ATTRIBUTION_SUBS = (ATTRIBUTION,)
+#: The staged `cut`'s tasks by index (`-i`): every sort, then `stats`, then the attribution sort (after `stats`, so the
+#: indices a staged build has always used hold).
+CUT_TASKS = [*(s for s in SORTS if s != ATTRIBUTION), "stats", ATTRIBUTION]
 #: The owner-slice range files (`build -S`, `fold -S`), and the sorts cut from them. A generation whose scans name no
 #: owner (`usr` NULL or '' on every row: cw-s3, r2.rbw.sh) has no owner axis and builds none of them: its slices would
 #: be its path rows again, each slice sort about the size of `path`.
@@ -531,9 +639,10 @@ def sliced(scans: dict) -> bool:
     return bool(scans.get("slices", True))
 
 
-def served_sorts(has_slices: bool) -> list[str]:
-    """The sorts a generation serves: every `SORTS` entry, the slice sorts only with the owner axis."""
-    return [s for s, (sub, _, _) in SORTS.items() if has_slices or sub not in SLICE_SUBS]
+def served_sorts(has_slices: bool, has_attribution: bool = False) -> list[str]:
+    """The sorts a generation serves: every `SORTS` entry, the slice sorts only with the owner axis, the attribution sort
+    only with its table."""
+    return [s for s, (sub, _, _) in SORTS.items() if (has_slices or sub not in SLICE_SUBS) and (has_attribution or sub not in ATTRIBUTION_SUBS)]
 
 
 def owners_refused(scan: str) -> str:
@@ -644,10 +753,10 @@ def write_served(con, src: str, sort: str, out: Path, schema: pa.Schema, *, rg_r
     import pyarrow.compute as pc
 
     _, order, size_col = SORTS[sort]
-    cols = ", ".join(schema.names)
+    cols = qcols(schema.names)
     bounds: list[dict] = []
     out.parent.mkdir(parents=True, exist_ok=True)
-    dictionary = [c for c in ("kind", "us", "usr") if c in schema.names]
+    dictionary = [c for c in ("kind", "us", "usr", "user", "source") if c in schema.names]
     seg_rows: dict[int, int] = {}
     with pq.ParquetWriter(out, schema, compression=sn.CODEC, use_dictionary=dictionary, write_statistics=["depth", "vf", "vt"]) as w:
         pending: list[pa.Table] = []
@@ -726,7 +835,8 @@ def write_served(con, src: str, sort: str, out: Path, schema: pa.Schema, *, rg_r
 
 
 def cut_gen(con, gen_dir: Path, scans: dict, *, rg_rows: int = SERVED_RG, jobs: int = 1) -> tuple[dict, dict]:
-    """A generation's served sorts from its range files under `gen_dir` (every `served_sorts(scans["slices"])` entry,
+    """A generation's served sorts from its range files under `gen_dir` (every `served_sorts` entry of its owner axis and
+    attribution table,
     dyadic segments over `scans`' stamps): `served/<sort>.parquet` + `.groups.parquet` + `<sort>.json`, then its churn
     (`served/stats.json`). What a base build (`interval_local.build_gen`) and a compaction (`interval_compact`) cut.
     `jobs` sorts at a time (`static_names.each`, the largest sources first): each is a parallel DuckDB sort, then a
@@ -734,7 +844,7 @@ def cut_gen(con, gen_dir: Path, scans: dict, *, rg_rows: int = SERVED_RG, jobs: 
     stamps = [s["ts"] for s in scans["scans"]]
     served = gen_dir / "served"
     gen = has_generation(scans)
-    todo = served_sorts(scans["slices"])
+    todo = served_sorts(scans["slices"], attributed(scans))
     size = {sub: sum(p.stat().st_size for p in (gen_dir / sub).glob("r*.parquet")) for sub in {SORTS[s][0] for s in todo}}
 
     def one(cur, sort: str) -> dict:
@@ -918,7 +1028,7 @@ def cut_cmd(bucket, no_dyadic, profile, gen, index, mount, mem, out, to_gen, thr
     store = Store(_bucket(bucket, profile))
     prefix = f"{PREFIX}/{gen}"
     dst_prefix = f"{PREFIX}/{to_gen or gen}"
-    todo = list(sorts) or [[*SORTS, "stats"][sn._task(index)]]
+    todo = list(sorts) or [CUT_TASKS[sn._task(index)]]
     con = connect(threads, mem, tmp)
     root = _root(store, prefix, mount)
     scans = store.read_json(f"{prefix}/scans.json")
@@ -941,7 +1051,10 @@ def cut_cmd(bucket, no_dyadic, profile, gen, index, mount, mem, out, to_gen, thr
     stamps = None if no_dyadic else [s["ts"] for s in scans["scans"]]
     for sort in todo:
         sub, _, _ = SORTS[sort]
-        if sort not in served_sorts(has_slices):
+        if sub in ATTRIBUTION_SUBS and not attributed(scans):
+            err(f"cut {sort}: {prefix} has no attribution table")
+            continue
+        if sort not in served_sorts(has_slices, True):
             err(f"cut {sort}: {prefix} names no owner; no slice sorts")
             continue
         schema = served_schema(sort, has_gen)
@@ -1066,14 +1179,20 @@ def verify_cmd(bucket, changes, profile, gen, index, mount, tasks, out, scan_ids
         store.write_text(f"{prefix}/verify/{tag}.json", json.dumps(done, indent=1) + "\n")
         store.put(outp / f"{tag}.jsonl", f"{prefix}/verify/{tag}.jsonl")
 
+    from .append_runner import latest_key
+    from .interval_append import covered_scans
+
+    newest = latest_key([k.removeprefix(f"{prefix}/") for k in store.keys(f"{prefix}/manifests/")])
+    covered = covered_scans(store.read_json(f"{prefix}/scans.json"), store.read_json(f"{prefix}/{newest}") if newest else None)
     summaries = iv.verify_task(sampled, t, tasks, str(tmp / "served"), scans, outp / f"{tag}.jsonl", tmp, mount, runs, on_summary=publish,
-                                 changes=changes)
+                                 changes=changes, covered=covered)
     (outp / f"{tag}.json").write_text(json.dumps(summaries, indent=1) + "\n")
     print(json.dumps(summaries), flush=True)
 
 
 #: What the Worker reads: the scans and the served sorts with their group indexes.
-R2_SERVED = ("scans.json", "served/path.", "served/bysize.", "served/reads.", "served/slices.", "served/slices-bysize-user.", "served/slices-bytotal.")
+R2_SERVED = ("scans.json", "served/path.", "served/bysize.", "served/reads.", "served/slices.", "served/slices-bysize-user.", "served/slices-bytotal.",
+             f"served/{ATTRIBUTION}.")
 
 
 @cli.command("r2-copy")
