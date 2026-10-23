@@ -55,6 +55,7 @@ from urllib.parse import urlparse
 
 from disk_tree.env import name as env_name
 
+from .heartbeat import Tail, run_teed
 from .index_parts import PART_JSON, Part, part_ids, split_parts
 from .scan_profile import ScanProfile
 
@@ -166,9 +167,13 @@ class Ctx:
     env: dict[str, str]
     work: Path
     run: object
-    sh_impl: Callable[..., subprocess.CompletedProcess] = subprocess.run
+    #: How `sh` runs a command (`subprocess.run`'s shape; tests pass a fake). The default, `run_teed`, also feeds the
+    #: open phase's heartbeat `tail` its output.
+    sh_impl: Callable[..., subprocess.CompletedProcess] = run_teed
     #: The open phase's first nonfatal command failure (exit code, warning): the phase ends failed with a warn alert
     failure: tuple[int, str] | None = None
+    #: The open phase's heartbeat line source (`beating`); None outside a phase or without a recorded run
+    tail: Tail | None = None
 
     # layout
 
@@ -288,7 +293,8 @@ class Ctx:
         accepts only documented expected nonzero results, such as exit 1 for attribution-rule findings."""
         argv = [str(a) for a in argv]
         err("+ " + " ".join(argv))
-        r = self.sh_impl(argv, env={**self.env, **(env or {})}, stdout=subprocess.PIPE if capture else None, text=True)
+        teed = {"tail": self.tail} if self.tail is not None and self.sh_impl is run_teed else {}
+        r = self.sh_impl(argv, env={**self.env, **(env or {})}, stdout=subprocess.PIPE if capture else None, text=True, **teed)
         if r.returncode and r.returncode not in allowed_codes:
             if fatal:
                 raise StepFailed(r.returncode, f"exit {r.returncode}: {' '.join(argv[:3])}")
@@ -306,7 +312,8 @@ class Ctx:
         self.run.begin(name)
         self.failure = None
         try:
-            yield
+            with self.beating(name):
+                yield
         except StepFailed as e:
             self.run.end(name, e.rc or 1)
             raise
@@ -319,6 +326,22 @@ class Ctx:
             self.run.end(name, failure[0], warn=True, msg=failure[1], note=note)
         else:
             self.run.end(name, 0, note=note)
+
+    @contextmanager
+    def beating(self, name: str) -> Iterator[Tail | None]:
+        """Phase `name`'s heartbeat around the body (`JobRun.heartbeat`): every command `sh` runs meanwhile feeds its
+        note. Stopped when the body exits, before the phase's end is written. A recorder without a heartbeat
+        (`_Printer`: no run recorded) runs the body as is."""
+        heartbeat = getattr(self.run, "heartbeat", None)
+        if heartbeat is None:
+            yield None
+            return
+        with heartbeat(name) as tail:
+            prev, self.tail = self.tail, tail
+            try:
+                yield tail
+            finally:
+                self.tail = prev
 
     def done(self, path: Path, what: str | None = None) -> bool:
         """Whether `path` exists; logs the skip when it does."""
@@ -1015,7 +1038,8 @@ def interval_store(ctx: Ctx, arg: str | None) -> None:
             env["INTERVAL_STORE_IMAGE"] = ctx.env["JOB_IMAGE"]
         ctx.run.begin("interval-store")
         err("+ " + " ".join(cmd))
-        ran = run_grouped(cmd, duration(timeout) if timeout else None, 30.0, env={**ctx.env, **env})
+        with ctx.beating("interval-store") as tail:
+            ran = run_grouped(cmd, duration(timeout) if timeout else None, 30.0, env={**ctx.env, **env}, tail=tail)
         if ran.rc == BUSY:
             ctx.run.end("interval-store", 0, note="another coordinator holds the store's lease; it appends this scan")
             return
@@ -1041,7 +1065,8 @@ def interval_store(ctx: Ctx, arg: str | None) -> None:
     cmd = ["dt-cloud", "interval-store", "add", "-L", layout, "-s", source, "-o", store, "-w", str(ctx.work / "interval-store"),
            *(["-M", ctx.opt("interval-store", "mem")] if ctx.opt("interval-store", "mem") else []), "-p", str(ctx.nproc)]
     err("+ " + " ".join(cmd))
-    ran = run_grouped(cmd, duration(timeout) if timeout else None, 30.0, env=ctx.env)
+    with ctx.beating("interval-store") as tail:
+        ran = run_grouped(cmd, duration(timeout) if timeout else None, 30.0, env=ctx.env, tail=tail)
     ctx.run.end("interval-store", ran.rc, warn=True, msg="the scan reads per-scan until a later run appends it",
                 timed_out=timeout if ran.timed_out else None, terminated=ran.signal if ran.rc else None)
 

@@ -32,6 +32,8 @@ LEVEL = 2
 LAYOUT = "listing/{id}/path-index.parquet"
 RG = 4
 #: The generation each appended scan's `add` appends to, and the one it compacts into.
+#: The generation each appended scan was appended to (where its append wrote its parity marker).
+APPENDED_TO = {d: "g" if j < 4 else "g.c001" for j, d in enumerate(DATES[BASE:])}
 EXPECT = [("g", None), ("g", None), ("g", None), ("g", "g.c001"), ("g.c001", None), ("g.c001", None), ("g.c001", None), ("g.c001", "g.c002")]
 
 
@@ -165,7 +167,9 @@ def test_compacted_generations_leave_after_the_grace(run, tmp_path, monkeypatch)
     out = add(run["world"], store, tmp_path / "work")
     assert [(p["gen"], p["objects"] == p["deleted"] > 0) for p in out["predecessors"]] == [("g.c001", True), ("g", True)]
     assert [sorted(files(root / g)) for g in ("g", "g.c001")] == [["successor.json"], ["successor.json"]]
-    assert files(root / "g.c002") == newest
+    # The predecessors' parity markers (each appended scan's, from its append) moved in with it.
+    assert files(root / "g.c002") == {**newest, **{f"verify/{d}.json": (run["store"] / ist.PREFIX / APPENDED_TO[d] / "verify" / f"{d}.json").read_bytes()
+                                                    for d in DATES[BASE:]}}
     assert json.loads((root / "CURRENT.json").read_text()) == {"gen": "g.c002"}
     assert add(run["world"], store, tmp_path / "work")["predecessors"] == []
 
@@ -185,7 +189,7 @@ def test_a_pruned_generations_verify_markers_move_to_its_successor(run, tmp_path
     monkeypatch.setattr(sl, "now", lambda: t + ar.GRACE_S)
     add(run["world"], store, tmp_path / "work")
     assert {p.stem: json.loads(p.read_text())["gen"] for p in sorted((root / "g.c002" / "verify").glob("*.json"))} == {
-        DATES[0]: "g", DATES[1]: "g.c002", DATES[2]: "g.c001"}
+        **APPENDED_TO, DATES[0]: "g", DATES[1]: "g.c002", DATES[2]: "g.c001"}
     assert [sorted(files(root / g)) for g in ("g", "g.c001")] == [["successor.json"], ["successor.json"]]
 
 
@@ -213,10 +217,10 @@ def test_store_gc_deletes_superseded_generations_past_the_grace(run, tmp_path):
         ("g", "keep"), ("g.c001", "keep"), ("g.c002", "keep"), ("old", "keep")]
     assert acts(sg.run(st, "interval-store", [], lineage_only=True, now=later)) == [
         ("g", "delete"), ("g.c001", "delete"), ("g.c002", "keep"), ("old", "keep")]
-    assert sorted(files(root / "g")) == sorted(files(run["store"] / ist.PREFIX / "g")) + ["verify/2026-07-30.json"]  # dry run
+    assert sorted(files(root / "g")) == sorted([*files(run["store"] / ist.PREFIX / "g"), "verify/2026-07-30.json"])  # dry run
     recs = sg.run(st, "interval-store", ["old"], now=later, execute=True)
     assert ([(r["gen"], r["action"], r.get("markers")) for r in recs], [sorted(files(root / g)) for g in ("g", "g.c001")]) == (
-        [("g", "delete", 1), ("g.c001", "delete", 0), ("g.c002", "keep", None), ("old", "keep", None)], [["successor.json"], ["successor.json"]])
+        [("g", "delete", 1 + 4), ("g.c001", "delete", 4), ("g.c002", "keep", None), ("old", "keep", None)], [["successor.json"], ["successor.json"]])
     assert json.loads((root / "g.c002" / "verify" / f"{DATES[0]}.json").read_text())["gen"] == "g"
     assert acts(sg.run(st, "interval-store", [], now=later)) == [("g.c002", "keep"), ("old", "delete")]
     with pytest.raises(SystemExit):

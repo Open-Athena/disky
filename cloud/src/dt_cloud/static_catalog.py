@@ -355,35 +355,84 @@ def _insert(con, table: str, rows: list[tuple]) -> None:
         con.executemany(f"INSERT INTO {table} VALUES ({', '.join('?' * len(rows[0]))})", rows)
 
 
-def append(con, *, prev: Path, base: BaseShards, deltas: list[list[str]], V: int, out: Path, rule: HexRule | None = None) -> dict:
-    """The catalog of `base` plus the scans of `deltas` (each a scan's coalesced delta files, oldest first), from
-    `prev` (`cells.parquet`: the catalog of `base` plus all but the last delta) — equal to rebuilding it.
+XCOUNT_SCHEMA = pa.schema([pa.field("q", pa.string(), nullable=False), pa.field("n", pa.int64(), nullable=False)])
 
-    Membership: a literal of three or more characters is a member iff its range rows — `base`'s plus every
-    delta's opened versions' — exceed `V`. Every prefix whose rows could (`base.upper` + delta rows > `V`) is
-    found level by level over the deltas' opened suffix rows; for those not already members, `base.exact`
-    decides. A new member's cells are built from its whole history (`base`'s rows in its range as intervals,
-    every delta's opens and closes as point events); an existing one's get the last scan's events added;
-    every one- and two-character literal gets the last scan's events, and those first seen there join."""
-    t0 = monotonic()
-    last = deltas[-1]
-    # previous state: members (header rows) and their cells as events
-    con.execute("DROP TABLE IF EXISTS pc")
-    con.execute(f"CREATE TABLE pc AS SELECT * FROM read_parquet({q(str(prev / 'cells.parquet'))})")
-    con.execute("CREATE OR REPLACE TABLE pmem AS SELECT q, b AS rows FROM pc WHERE bucket = ''")
-    con.execute("""CREATE OR REPLACE TABLE pev AS SELECT q, bucket, vf AS t, (b - coalesce(lag(b) OVER w, 0))::HUGEINT AS db,
-            (o - coalesce(lag(o) OVER w, 0))::HUGEINT AS dn FROM pc WHERE bucket <> '' WINDOW w AS (PARTITION BY q, bucket ORDER BY vf)""")
-    # every delta's opened suffix rows: who could cross V
+
+class RunTier:
+    """A live run's suffix shards (`sx/` through its `sidecar.parquet`) as the catalog's history past the base: its rows
+    in given literals' ranges (whole row groups, `BaseShards.rows`). A row is an open of the run iff `vf` ≥ `first` (the
+    epoch of the run's first scan) and a close iff `vt` isn't OPEN: a run's shards are its scans' `cdelta` suffix rows
+    merged by `(s, path, usr, vf)` with the smallest `vt`, so a merged run's open and close of one version are one row."""
+
+    def __init__(self, root: str, sidecar: pa.Table, first: int):
+        self.shards, self.first = BaseShards(root, sidecar), first
+
+    def rows(self, keys: list[str]) -> pa.Table:
+        return self.shards.rows(keys)
+
+
+def _tier_rows(con, tiers: list[RunTier], keys: list[str], name: str) -> list[tuple[str, int]]:
+    """Each tier's rows spanning `keys`, registered as `<name><i>`; returns `(relation, first)` per tier."""
+    out = []
+    for i, t in enumerate(tiers):
+        con.register(f"{name}{i}", t.rows(keys))
+        out.append((f"{name}{i}", t.first))
+    return out
+
+
+def _unregister(con, rels: list[tuple[str, int]]) -> None:
+    for rel, _ in rels:
+        con.unregister(rel)
+
+
+def xcount_digest(con, file: Path) -> dict:
+    """`xcount.parquet`'s rows, Σ n and an order-free digest of its `(q, n)` rows."""
+    rows, n, h = con.execute(f"""SELECT count(*), coalesce(sum(n), 0)::BIGINT, coalesce(bit_xor(hash(q, n)), 0)::UBIGINT
+        FROM read_parquet({q(str(file))})""").fetchone()
+    return {"rows": int(rows), "n_sum": int(n), "digest": int(h)}
+
+
+def write_xcount(con, table: str, out: Path, scan: str | None, scans_since_base: int) -> dict:
+    """The evaluated prefixes `table (q, n)` → `out/xcount.parquet` (sorted), then `out/xcount.json` (its scan, how many
+    scans past the base it covers, its digest), written last: a parquet without its JSON is never trusted."""
+    out.mkdir(parents=True, exist_ok=True)
+    for f in ("xcount.json", "xcount.parquet"):
+        (out / f).unlink(missing_ok=True)
+    write_sorted(_batches(con, f"SELECT q, n::BIGINT AS n FROM {table} ORDER BY q"), out / "xcount.parquet", XCOUNT_SCHEMA, 1 << 16)
+    doc = {"scan": scan, "scans_since_base": scans_since_base, **xcount_digest(con, out / "xcount.parquet")}
+    (out / "xcount.json").write_text(json.dumps(doc) + "\n")
+    return doc
+
+
+def trusted_xcount(con, d: Path, scan: str, scans_since_base: int) -> Path | None:
+    """`d/xcount.parquet` when `d/xcount.json` says it covers `scan`, `scans_since_base` scans past the base, and the
+    parquet's rows, Σ n and digest match it; else None (missing, partial, stale or corrupt: the caller refolds)."""
+    meta, file = d / "xcount.json", d / "xcount.parquet"
+    if not meta.exists() or not file.exists():
+        return None
+    try:
+        doc = json.loads(meta.read_text())
+        if doc.get("scan") != scan or doc.get("scans_since_base") != scans_since_base:
+            return None
+        got = xcount_digest(con, file)
+    except Exception as e:  # noqa: BLE001 — an unreadable state is untrusted, never an error: the caller refolds
+        err(f"xcount {d}: untrusted ({type(e).__name__}: {e})")
+        return None
+    return file if all(doc.get(k) == v for k, v in got.items()) else None
+
+
+def _candidates_refold(con, deltas: list[list[str]], last_rows: str, base: BaseShards, V: int, rule: HexRule | None) -> list[tuple[str, int, int]]:
+    """Every delta's opened suffix rows, level by level: the prefixes that could cross `V` as `(q, rows over all deltas,
+    rows of the last)`; every evaluated prefix (each level's, kept or not) with its rows → table `xn (q, n)`."""
     all_files = [f for d in deltas for f in d]
     con.execute(f"CREATE OR REPLACE TABLE xo AS SELECT s, t0 FROM ({expand_sql(delta_versions_sql(all_files, point=False), rule)})")
-    # The last scan's stamp; None when its delta opens and closes nothing (a scan identical to the one before it).
-    D = con.execute(f"SELECT max(CASE WHEN op = 1 THEN vf ELSE vt END) FROM read_parquet([{', '.join(q(f) for f in last)}])").fetchone()[0]
-    last_rows = "0" if D is None else f"count(*) FILTER (WHERE t0 = {D})"
-    cand: list[tuple[str, int, int]] = []  # (q, rows over all deltas, rows of the last)
+    con.execute("CREATE OR REPLACE TABLE xn (q VARCHAR, n BIGINT)")
+    cand: list[tuple[str, int, int]] = []
     L = 3
     while True:
         lvl = con.execute(f"""SELECT left(s, {L}) AS q, count(*), {last_rows} FROM xo WHERE length(s) >= {L}
             GROUP BY q""").fetchall()
+        _insert(con, "xn", [(k, n) for k, n, _ in lvl])
         keep = [(k, n, nl) for k, n, nl in lvl if base.upper(k) + n > V]
         if not keep:
             break
@@ -392,6 +441,85 @@ def append(con, *, prev: Path, base: BaseShards, deltas: list[list[str]], V: int
         con.executemany("INSERT INTO ck VALUES (?)", [(k,) for k, _, _ in keep])
         con.execute(f"CREATE OR REPLACE TABLE xo AS SELECT s, t0 FROM xo SEMI JOIN ck ON left(xo.s, {L}) = ck.q WHERE length(s) > {L}")
         L += 1
+    return cand
+
+
+def _candidates_carried(con, last: list[str], state: Path, history: list[RunTier], base: BaseShards, V: int,
+                        rule: HexRule | None) -> list[tuple[str, int, int]]:
+    """`_candidates_refold`'s output (and `xn`) from the previous scan's evaluated prefixes (`state`), the last delta's
+    opened suffix rows and, for a prefix first kept now that was evaluated before, its earlier rows from the runs'
+    shards (`history`; their children were never counted). The previous scan's length-`L` keys are the children of the
+    prefixes it kept, all still kept (rows only grow), so each level is the state's keys plus the rows' counts."""
+    con.execute(f"CREATE OR REPLACE TABLE xr AS SELECT s, false AS h FROM ({expand_sql(delta_versions_sql(last, point=False), rule)})")
+    con.execute(f"CREATE OR REPLACE TABLE xs AS SELECT q, n FROM read_parquet({q(str(state))})")
+    con.execute("CREATE OR REPLACE TABLE xn (q VARCHAR, n BIGINT)")
+    cand: list[tuple[str, int, int]] = []
+    fetched = 0
+    L = 3
+    while True:
+        lvl = con.execute(f"""SELECT q, (coalesce(p.n, 0) + coalesce(c.nh, 0) + coalesce(c.nt, 0))::BIGINT, coalesce(c.nt, 0)::BIGINT, p.n
+            FROM (SELECT q, n FROM xs WHERE length(q) = {L}) AS p FULL OUTER JOIN (
+                SELECT left(s, {L}) AS q, count(*) FILTER (WHERE h) AS nh, count(*) FILTER (WHERE NOT h) AS nt FROM xr
+                WHERE length(s) >= {L} GROUP BY q) AS c USING (q)""").fetchall()
+        _insert(con, "xn", [(k, n) for k, n, _, _ in lvl])
+        keep = [(k, n, nl, p) for k, n, nl, p in lvl if base.upper(k) + n > V]
+        if not keep:
+            break
+        cand += [(k, n, nl) for k, n, nl, _ in keep]
+        new = [k for k, _, _, p in keep if p is not None and base.upper(k) + p <= V]
+        if new and history:
+            rels = _tier_rows(con, history, new, "xh")
+            con.execute("CREATE OR REPLACE TABLE ckn (q VARCHAR)")
+            con.executemany("INSERT INTO ckn VALUES (?)", [(k,) for k in new])
+            for rel, first in rels:
+                con.execute(f"""INSERT INTO xr SELECT s, true FROM {rel} SEMI JOIN ckn ON left({rel}.s, {L}) = ckn.q
+                    WHERE epoch({rel}.vf)::BIGINT >= {first}""")
+            _unregister(con, rels)
+            fetched += len(new)
+        con.execute("CREATE OR REPLACE TABLE ck (q VARCHAR)")
+        con.executemany("INSERT INTO ck VALUES (?)", [(k,) for k, _, _, _ in keep])
+        con.execute(f"CREATE OR REPLACE TABLE xr AS SELECT s, h FROM xr SEMI JOIN ck ON left(xr.s, {L}) = ck.q WHERE length(s) > {L}")
+        L += 1
+    err(f"xcount: carried ({fetched} prefixes first kept, their history from {len(history)} runs)")
+    return cand
+
+
+def append(con, *, prev: Path, base: BaseShards, deltas: list[list[str]], V: int, out: Path, rule: HexRule | None = None,
+           state: Path | None = None, history: list[RunTier] | None = None, state_out: Path | None = None,
+           scan: str | None = None) -> dict:
+    """The catalog of `base` plus the scans of `deltas` (each a scan's coalesced delta files, oldest first), from
+    `prev` (`cells.parquet`: the catalog of `base` plus all but the last delta) — equal to rebuilding it.
+
+    Membership: a literal of three or more characters is a member iff its range rows — `base`'s plus every
+    delta's opened versions' — exceed `V`. Every prefix whose rows could (`base.upper` + delta rows > `V`) is
+    found level by level over the deltas' opened suffix rows; for those not already members, `base.exact`
+    decides. A new member's cells are built from its whole history (`base`'s rows in its range as intervals,
+    every delta's opens and closes as point events); an existing one's get the last scan's events added;
+    every one- and two-character literal gets the last scan's events, and those first seen there join.
+
+    Carried state (specs/append-open-state.md): given `state` (the previous scan's `xcount.parquet`, already checked by
+    `trusted_xcount`) and `history` (one `RunTier` per live run: every delta but the last), only the last delta is
+    expanded; the earlier deltas' rows per prefix come from `state`, and a new member's earlier events from the runs'
+    shards. The cells are the same either way. `state_out`: where this scan's `xcount` goes (`scan`, its id)."""
+    t0 = monotonic()
+    last = deltas[-1]
+    carried = state is not None and history is not None
+    # previous state: members (header rows) and their cells as events
+    con.execute("DROP TABLE IF EXISTS pc")
+    con.execute(f"CREATE TABLE pc AS SELECT * FROM read_parquet({q(str(prev / 'cells.parquet'))})")
+    con.execute("CREATE OR REPLACE TABLE pmem AS SELECT q, b AS rows FROM pc WHERE bucket = ''")
+    con.execute("""CREATE OR REPLACE TABLE pev AS SELECT q, bucket, vf AS t, (b - coalesce(lag(b) OVER w, 0))::HUGEINT AS db,
+            (o - coalesce(lag(o) OVER w, 0))::HUGEINT AS dn FROM pc WHERE bucket <> '' WINDOW w AS (PARTITION BY q, bucket ORDER BY vf)""")
+    # The last scan's stamp; None when its delta opens and closes nothing (a scan identical to the one before it).
+    D = con.execute(f"SELECT max(CASE WHEN op = 1 THEN vf ELSE vt END) FROM read_parquet([{', '.join(q(f) for f in last)}])").fetchone()[0]
+    last_rows = "0" if D is None else f"count(*) FILTER (WHERE t0 = {D})"
+    # who could cross V: every delta's opened suffix rows, or the carried counts plus the last delta's
+    if carried:
+        cand = _candidates_carried(con, last, state, history, base, V, rule)
+    else:
+        cand = _candidates_refold(con, deltas, last_rows, base, V, rule)
+    if state_out is not None:
+        write_xcount(con, "xn", state_out, scan, len(deltas))
     prev_rows = dict(con.execute("SELECT q, rows FROM pmem").fetchall())
     new_members: list[tuple[str, int]] = []
     rows_now: dict[str, int] = {}
@@ -414,9 +542,20 @@ def append(con, *, prev: Path, base: BaseShards, deltas: list[list[str]], V: int
     # new long members: their whole history
     if new_members:
         con.register("base_rows", base.rows([k for k, _ in new_members]))
-        hist = f"""{sx_rows_sql('base_rows')} UNION ALL {expand_sql(delta_versions_sql(all_files, point=True), rule)}"""
+        if carried:
+            # the runs' rows in the new members' ranges as the deltas' point events, then the last delta's
+            rels = _tier_rows(con, history, [k for k, _ in new_members], "hr")
+            runs = "".join(f""" UNION ALL SELECT s, depth, path, epoch(vf)::BIGINT AS t0, NULL::BIGINT AS t1, size, n_files, 1::BIGINT AS sign
+                    FROM {rel} WHERE epoch(vf)::BIGINT >= {first}
+                UNION ALL SELECT s, depth, path, epoch(vt)::BIGINT AS t0, NULL::BIGINT AS t1, size, n_files, -1::BIGINT AS sign
+                    FROM {rel} WHERE epoch(vt)::BIGINT <> {OPEN}""" for rel, first in rels)
+            hist = f"""{sx_rows_sql('base_rows')}{runs} UNION ALL {expand_sql(point_last, rule)}"""
+        else:
+            rels = []
+            hist = f"""{sx_rows_sql('base_rows')} UNION ALL {expand_sql(delta_versions_sql([f for d in deltas for f in d], point=True), rule)}"""
         member_events(con, hist, "nmem", rule=rule)
         con.unregister("base_rows")
+        _unregister(con, rels)
     else:
         con.execute("DELETE FROM ev")
     con.execute("CREATE OR REPLACE TABLE nev AS SELECT * FROM ev")
@@ -431,7 +570,9 @@ def append(con, *, prev: Path, base: BaseShards, deltas: list[list[str]], V: int
     pq.write_table(index, out / "index.parquet", compression=CODEC)
     doc = {"scan": None if D is None else int(D), "cells_rows": rows, "candidates": len(cand), "new_members": len(new_members),
            "members": con.execute("SELECT count(*) FROM amem").fetchone()[0], "s": round(monotonic() - t0, 1)}
-    for t in ("pc", "pmem", "pev", "xo", "ck", "nmem", "lmem", "lev", "nev", "amem", "aev", "ev", "sev"):
+    err(f"catalog append: xcount {'carried' if carried else 'refold'} over {len(deltas)} scans, {len(cand):,} candidates, "
+        f"{len(new_members)} new members in {doc['s']}s")
+    for t in ("pc", "pmem", "pev", "xo", "xr", "xs", "xn", "ck", "ckn", "nmem", "lmem", "lev", "nev", "amem", "aev", "ev", "sev"):
         con.execute(f"DROP TABLE IF EXISTS {t}")
     return doc
 

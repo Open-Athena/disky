@@ -824,22 +824,36 @@ def under_range(P: str) -> tuple[str, str]:
     return ("", "\U0010ffff") if P == "" else (P + "/", P + "0")
 
 
+#: The most shards one key selects in (`staticNames.ts` `MAX_SHARDS`): past it the key is bounded by the shards'
+#: planned rows, unselected, so a row bound refuses it; a read under that bound selects them all.
+MAX_SHARDS = 8
+
+#: One selection: per shard `(i, groups)` (None: wide, unselected) and the rows the groups hold.
+Selection = tuple[list[tuple[int, list[int]]] | None, int]
+
+
+def shards_for(plan: list[dict], k: str, exact: bool = False) -> list[dict]:
+    """The shards (`shards.json`'s, in `lo` order) key `k`'s rows can lie in, in order (`staticNames.ts` `shardsFor`):
+    the one whose `[lo, hi)` holds `k[:3]` when the rows are `s == k` (`exact`) or `k` has three or more characters
+    (a three-character prefix is never split); else every shard meeting the prefixes starting with `k`,
+    `[k, k + U+10FFFF)` — a one-character `^q` (`/q`) can span many."""
+    if exact or len(k) >= 3:
+        p3 = k[:3]
+        return [sh for sh in plan if sh["lo"] <= p3 and (sh["hi"] is None or p3 < sh["hi"])][:1]
+    top = k + "\U0010ffff"
+    return [sh for sh in plan if sh["lo"] < top and (sh["hi"] is None or sh["hi"] > k)]
+
+
 class ShardSet:
     """A tier's suffix shards (`sx/`) or name index (`names/`), local or over fsspec: `select` bounds a key's rows by
-    whole row groups (`s` and `path` statistics), `read` decodes groups."""
+    whole row groups (`s` and `path` statistics) in each shard they can lie in (`shards_for`), `read` decodes them."""
 
-    def __init__(self, fs, root: str):
+    def __init__(self, fs, root: str, max_shards: int = MAX_SHARDS):
         self.fs, self.root = fs, root.rstrip("/")
         with fs.open(f"{self.root}/shards.json") as f:
             self.plan = json.load(f)["shards"]
+        self.max_shards = max_shards
         self._md: dict[int, pq.FileMetaData] = {}
-
-    def shard(self, k: str) -> int | None:
-        p3 = k[:3]
-        for sh in self.plan:
-            if sh["lo"] <= p3 and (sh["hi"] is None or p3 < sh["hi"]):
-                return sh["i"]
-        return None
 
     def path(self, i: int) -> str:
         return f"{self.root}/sx/s{i:04d}.parquet"
@@ -850,34 +864,47 @@ class ShardSet:
                 self._md[i] = pq.ParquetFile(f).metadata
         return self._md[i]
 
-    def select(self, k: str, exact: bool, under: str | None = None) -> tuple[int | None, list[int], int]:
-        i = self.shard(k)
-        if i is None:
-            return None, [], 0
-        md = self.md(i)
-        si, pi = md.schema.names.index("s"), md.schema.names.index("path")
+    def select(self, k: str, exact: bool, under: str | None = None, all: bool = False) -> Selection:
+        """`(parts, rows)`: per shard `k`'s rows can lie in, `(i, groups)`, and the rows those groups hold (an upper
+        bound on the matching rows). Past `max_shards` shards (`all` unset): `(None, their planned rows)`."""
+        shards = shards_for(self.plan, k, exact)
+        if not all and len(shards) > self.max_shards:
+            return None, sum(sh["rows"] for sh in shards)
         lo, hi = under_range(under) if under else ("", "\U0010ffff")
-        out, rows = [], 0
-        for g in range(md.num_row_groups):
-            rg = md.row_group(g)
-            st = rg.column(si).statistics
-            if st.max < k or (st.min > k if exact else st.min >= k + "\U0010ffff"):
-                continue
-            ps = rg.column(pi).statistics if under else None
-            if ps is not None and ps.has_min_max and (ps.max < lo or ps.min >= hi):
-                continue
-            out.append(g)
-            rows += rg.num_rows
-        return i, out, rows
+        parts, rows = [], 0
+        for sh in shards:
+            md = self.md(sh["i"])
+            si, pi = md.schema.names.index("s"), md.schema.names.index("path")
+            out = []
+            for g in range(md.num_row_groups):
+                rg = md.row_group(g)
+                st = rg.column(si).statistics
+                if st.max < k or (st.min > k if exact else st.min >= k + "\U0010ffff"):
+                    continue
+                ps = rg.column(pi).statistics if under else None
+                if ps is not None and ps.has_min_max and (ps.max < lo or ps.min >= hi):
+                    continue
+                out.append(g)
+                rows += rg.num_rows
+            parts.append((sh["i"], out))
+        return parts, rows
 
-    def read(self, i: int, groups: list[int]) -> list[dict]:
-        if not groups:
-            return []
-        with self.fs.open(self.path(i)) as f:
-            t = pq.ParquetFile(f).read_row_groups(groups)
-        t = t.set_column(t.schema.get_field_index("vf"), "vf", t.column("vf").cast(pa.int64()))
-        t = t.set_column(t.schema.get_field_index("vt"), "vt", t.column("vt").cast(pa.int64()))
-        return t.to_pylist()
+    def read(self, parts: list[tuple[int, list[int]]]) -> list[dict]:
+        """The selected groups' rows, in shard then group order."""
+        out = []
+        for i, groups in parts:
+            if not groups:
+                continue
+            with self.fs.open(self.path(i)) as f:
+                t = pq.ParquetFile(f).read_row_groups(groups)
+            t = t.set_column(t.schema.get_field_index("vf"), "vf", t.column("vf").cast(pa.int64()))
+            t = t.set_column(t.schema.get_field_index("vt"), "vt", t.column("vt").cast(pa.int64()))
+            out += t.to_pylist()
+        return out
+
+    def fetch(self, sel: Selection, k: str, exact: bool, under: str | None = None) -> list[dict]:
+        """`select(k, exact, under)`'s rows (`sel`); a wide one is selected whole first."""
+        return self.read(sel[0] if sel[0] is not None else self.select(k, exact, under, all=True)[0])
 
 
 def fold(rows: list[dict], key: str, under: str | None = None, rule: HexRule | None = None) -> list[dict]:
@@ -1040,8 +1067,8 @@ class AnchoredReader:
         sels = [s.select(k, exact) for s in sets]
         bound = self.start_max_rows if mode == "start" else self.max_rows
         hits = None
-        if sum(x[2] for x in sels) <= bound:
-            hits = combine([fold(s.read(i, g), key, rule=self.rule) for s, (i, g, _) in zip(sets, sels) if i is not None])
+        if sum(x[1] for x in sels) <= bound:
+            hits = combine([fold(s.fetch(x, k, exact), key, rule=self.rule) for s, x in zip(sets, sels)])
             if mode == "start" and len(hits) > self.start_max_hits:
                 hits = None
         if hits is not None:
@@ -1054,10 +1081,10 @@ class AnchoredReader:
         sets = [t.sx for t in self.anch] if mode == "end" else [t.names for t in self.anch]
         bound = self.anch[0].meta["R"] + 4 * sum(t.meta["rg"] for t in self.anch)
         sels = [s.select(k, True, P) for s in sets]
-        upper = sum(x[2] for x in sels)
+        upper = sum(x[1] for x in sels)
         out.update(upper=upper, tiers=len(self.anch))
         if upper <= bound:
-            hits = combine([fold(s.read(i, g), key, P, self.rule) for s, (i, g, _) in zip(sets, sels) if i is not None])
+            hits = combine([fold(s.fetch(x, k, True, P), key, P, self.rule) for s, x in zip(sets, sels)])
             return {**out, "source": "roots", "answers": {d: child_sums(hits, P, D) for d, D in Ds.items()}}
         got = stack([t.rollups[mode].rows(k, P) for t in self.anch])
         if got is None:
@@ -1074,10 +1101,10 @@ class AnchoredReader:
                 return {"source": "declined", "why": "no-catalog"}
             return {"source": "catalog", "tiers": len(self.start), **rollup_answers(*got, Ds)}
         sels = [t.names.select(k, False, P) for t in self.anch]
-        upper = sum(x[2] for x in sels)
+        upper = sum(x[1] for x in sels)
         if upper > self.start_max_rows:
             return {"source": "declined", "upper": upper}
-        hits = combine([fold(t.names.read(i, g), key, P, self.rule) for t, (i, g, _) in zip(self.anch, sels) if i is not None])
+        hits = combine([fold(t.names.fetch(x, k, False, P), key, P, self.rule) for t, x in zip(self.anch, sels)])
         if len(hits) > self.start_max_hits:
             return {"source": "declined", "upper": upper, "hits": len(hits)}
         return {"source": "scoped", "upper": upper, "tiers": len(self.anch), "answers": {d: child_sums(hits, P, D) for d, D in Ds.items()}}

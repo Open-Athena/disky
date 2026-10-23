@@ -54,6 +54,8 @@ from .resource_monitor import monitor_resources, resource_stage
 MEM_FRACTION = 0.75
 #: Memory set aside per streaming (non-DuckDB) tier merge: `pyrmts.runs` holds a few batches per input.
 STREAM_RESERVE = 4 << 30
+#: Memory per `static_append.merge_shards` worker process (peak ≈1 GiB measured merging 7 real inputs, 2026-10-22).
+SHARD_JOB_MEM = 3 << 29
 #: Tiers merged by DuckDB (each gets a memory limit and threads); the others stream through `pyrmts.runs`.
 DUCKDB_TIERS = ("drill", "anchors")
 #: What a folded run keeps where scans are appended (GCS, `static-names add`'s store; `append_runner.plan_prune`'s
@@ -75,16 +77,25 @@ TICK_S = 30.0
 
 
 def tier_resources(tiers: list[str], ram: int, cpus: int, concurrent: bool) -> dict[str, dict]:
-    """Each DuckDB tier merge's `mem` (GB, whole) and `threads`: concurrently, `MEM_FRACTION` of `ram` less a
-    `STREAM_RESERVE` per streaming tier, split evenly, and the CPUs likewise; one at a time, each gets all of it."""
+    """Each DuckDB tier merge's `mem` (GB, whole) and `threads`, and the shards merge's worker processes (`threads`):
+    concurrently, the shards tier gets an even share of the CPUs among itself and the DuckDB tiers, the DuckDB tiers
+    `MEM_FRACTION` of `ram` less a `STREAM_RESERVE` per streaming tier (the shards tier's at least `SHARD_JOB_MEM` per
+    worker), split evenly, and the CPUs likewise; one at a time, each gets all of it (the shards tier as many workers
+    as `SHARD_JOB_MEM` each fit in `MEM_FRACTION` of `ram`)."""
     duck = [t for t in tiers if t in DUCKDB_TIERS]
-    if not duck:
-        return {}
     budget = int(ram * MEM_FRACTION)
+    out: dict[str, dict] = {}
+    if "shards" in tiers:
+        jobs = max(1, cpus // (1 + len(duck))) if concurrent else max(1, min(cpus, budget // SHARD_JOB_MEM))
+        out["shards"] = {"threads": jobs}
+    if not duck:
+        return out
     if concurrent:
-        budget = (budget - STREAM_RESERVE * (len(tiers) - len(duck))) // len(duck)
+        reserve = sum(max(STREAM_RESERVE, out["shards"]["threads"] * SHARD_JOB_MEM) if t == "shards" else STREAM_RESERVE
+                      for t in tiers if t not in duck)
+        budget = (budget - reserve) // len(duck)
         cpus = max(1, cpus // len(duck))
-    return {t: {"mem": f"{max(1, budget >> 30)}GB", "threads": cpus} for t in duck}
+    return {**out, **{t: {"mem": f"{max(1, budget >> 30)}GB", "threads": cpus} for t in duck}}
 
 
 def _machine() -> tuple[int, int]:
@@ -103,7 +114,7 @@ def merge_tier(name: str, dirs: list[Path], outp: Path, run: dict, rule, tmp: Pa
     t0 = monotonic()
     resource_stage(f"merge/{name}", inputs=len(dirs), output=run["key"], mem=mem, threads=threads)
     if name == "shards":
-        doc = sa.merge_shards(dirs, outp)
+        doc = sa.merge_shards(dirs, outp, jobs=threads, tmp=tmp)
     elif name == "catalog":
         membership = json.loads((dirs[-1] / "catalog" / "meta.json").read_text())["membership"]
         doc = sa.merge_catalogs([d / "catalog" for d in dirs], outp / "catalog", membership, rule)
@@ -262,11 +273,17 @@ def refuse(store: RunStore, before: list[dict], after: list[dict]) -> str | None
     return None
 
 
+#: Input rows (the runs' suffix rows) from which a merge job runs long (`append_runner.merge_is_long`): gcs's level-3
+#: carry (2026-10-22, 2.03 B rows from 4 runs) took 3 h 7 min on a spot n2-highmem-32, its drill 3 h 5 min, close to
+#: `MAX_RUN_S`, and a reclaimed or killed spot task restarts from zero.
+LONG_ROWS = 1_000_000_000
+
+
 def carry(rule=None, jobs: int = 1, build: Callable[..., dict] = build_merged_run) -> Carry:
     """The static store's `Carry`: `build` (`build_merged_run`, `jobs` tiers at once, the generation's hex-run `rule`)."""
     def b(dirs, run, outp, *, drilled, tmp, log, rec=None):
         return build(dirs, run, outp, drilled=drilled, rule=rule, tmp=tmp, jobs=jobs, log=log, rec=rec)
-    return Carry(build=b, missing=missing, drilled=drilled_runs, refuse=refuse)
+    return Carry(build=b, missing=missing, drilled=drilled_runs, refuse=refuse, long_rows=LONG_ROWS)
 
 
 def complete(store: RunStore, run: dict) -> bool:
@@ -382,18 +399,24 @@ def _summary(doc: dict) -> dict:
 @option("-b", "--bucket", default=data_bucket, help="Data bucket")
 @option("-c", "--chunk-rows", default=1 << 22, type=IntRange(min=1), help="The drill fold's chunks: roots per measurement / rollup q range")
 @option("-g", "--gen", required=True, help="Base generation (followed to its newest successor)")
+@option("-S", "--scratch", help="Scratch bucket: the compaction lease, held throughout (none: appends aren't held off)")
 @ar.compact_options
-def compact_cmd(bucket, chunk_rows, gen, policy, read_from, grace_s, jobs, force, mount, mem, threads, to_r2, tmp) -> None:
+def compact_cmd(bucket, chunk_rows, gen, scratch, policy, read_from, grace_s, jobs, force, mount, mem, threads, to_r2, tmp) -> None:
     """The compaction stage (`append_runner.run_compaction` with `static_compact`): when the policy fires (or `-K`), the
     generation's base and runs folded into `<gen>.c<NNN>` (a rebuild's bytes), published on GCS (`compaction.json`
     last, `successor.json`, `static-names/CURRENT.json`), then with `-r` on R2 (its pointer last). The old generation
-    stays (readers pin `STATIC_GEN`; `store-gc -k`). Prints a JSON summary."""
+    stays (readers pin `STATIC_GEN`; `store-gc -k`). With `-S`, holds the compaction lease (`static-names/compacting.lease.json`)
+    throughout: appends to the generation wait; exit 4 (`BUSY`) while another compaction holds it. Prints a JSON summary."""
     from .blobstore import Store
     from .static_compact import compactor
 
-    doc = ar.run_compaction(Store(f"gs://{bucket}"), compactor(chunk_rows), gen, Path(mount), Path(tmp), policy=policy, force=force,
-                            r2_bucket=bucket if to_r2 else None, grace_s=grace_s, threads=threads, mem=mem, jobs=jobs, read_from=read_from,
-                            rec=from_env("compact"))
+    try:
+        doc = ar.run_compaction(Store(f"gs://{bucket}"), compactor(chunk_rows), gen, Path(mount), Path(tmp), lease=ar.gcs_compaction_lease_file(scratch, PREFIX),
+                                policy=policy, force=force, r2_bucket=bucket if to_r2 else None, grace_s=grace_s, threads=threads, mem=mem, jobs=jobs,
+                                read_from=read_from, rec=from_env("compact"))
+    except ar.Busy as e:
+        err(f"compact: {e}")
+        raise SystemExit(ar.BUSY)
     print(json.dumps(doc, indent=1))
 
 

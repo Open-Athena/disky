@@ -20,7 +20,8 @@ import os
 import re
 import sqlite3
 import sys
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field, fields, replace
 from functools import partial
 from pathlib import Path
@@ -28,6 +29,8 @@ from typing import Protocol
 
 from . import run_dag
 from .d1_schema import table_ddl
+from .heartbeat import Heartbeat, Tail, interval_of, join_all, pipe_kwargs, pump_all
+from .heartbeat import scrub as scrub_secrets
 from .scan_id import check_scan_id
 
 err = partial(print, file=sys.stderr)
@@ -158,6 +161,13 @@ def heartbeat_sql(run_id: str, now: int) -> str:
     return f"UPDATE scan_runs SET updated_ts = {lit(now)} WHERE run_id = {lit(run_id)} AND status = 'running'"
 
 
+#: A phase write's note: a closing write (its `finished_ts`, over a running row's NULL) states the phase's final note,
+#: replacing a phase heartbeat's live progress line (`phase_beat_sql`) even with NULL; any other write keeps the
+#: stored note unless it names one.
+NOTE_UPSERT = ("CASE WHEN excluded.finished_ts IS NOT NULL AND scan_run_phases.finished_ts IS NULL THEN excluded.note "
+               "ELSE COALESCE(excluded.note, scan_run_phases.note) END")
+
+
 def phase_sql(run_id: str, p: Phase) -> str:
     cols = ["run_id", "phase", "seq", "started_ts", "finished_ts", "status", "note"]
     vals = [run_id, p.phase, p.seq, p.started_ts, p.finished_ts, p.status, p.note]
@@ -170,8 +180,15 @@ def phase_sql(run_id: str, p: Phase) -> str:
             "ON CONFLICT(run_id, phase) DO UPDATE SET seq = excluded.seq, status = excluded.status, "
             "started_ts = COALESCE(excluded.started_ts, scan_run_phases.started_ts), "
             "finished_ts = COALESCE(excluded.finished_ts, scan_run_phases.finished_ts), "
-            "note = COALESCE(excluded.note, scan_run_phases.note)"
+            f"note = {NOTE_UPSERT}"
             + "".join(f", {c} = COALESCE(excluded.{c}, scan_run_phases.{c})" for c, _ in task))
+
+
+def phase_beat_sql(run_id: str, phase: str, note: str | None, now: int) -> list[str]:
+    """A running phase's heartbeat (`JobRun.heartbeat`): its live `note`, then the run's `heartbeat_sql`. Each touches
+    only a row still running, so a beat racing the phase's end or the run's finish never reopens or rewrites it."""
+    return [f"UPDATE scan_run_phases SET note = {lit(note)} WHERE run_id = {lit(run_id)} AND phase = {lit(phase)} "
+            "AND status = 'running' AND finished_ts IS NULL", heartbeat_sql(run_id, now)]
 
 
 def output_sql(run_id: str, o: Output) -> str:
@@ -851,8 +868,9 @@ def recovery_record(
 
 # ── Reconciling lost runs: a `running` row whose job Batch ended without its exit trap (maxRunDuration, a lost VM) ──
 
-#: How long a `running` row goes without a write (a phase, a heartbeat) before `reconcile` asks Batch about its job.
-RECONCILE_AFTER_S = 3600
+#: How long a `running` row goes without a write (a phase, a heartbeat) before `reconcile` asks Batch about its job:
+#: 30 missed heartbeats (`heartbeat.HEARTBEAT_S`), the site's `LOST_S`. Batch decides; this only bounds how soon.
+RECONCILE_AFTER_S = 1800
 #: Batch states after which the job writes nothing more: DELETION_IN_PROGRESS is a deleted (cancelled) job's.
 BATCH_ENDED = ("SUCCEEDED", "FAILED", "CANCELLED", "DELETION_IN_PROGRESS")
 
@@ -1115,7 +1133,7 @@ def recovery_cmd(
 
 
 @cli.command("reconcile")
-@option("-a", "--after", default="1h", help="Reconcile `running` rows with no write (phase, heartbeat) for this long (N[s|m|h|d]; default 1h)")
+@option("-a", "--after", default="30m", help="Reconcile `running` rows with no write (phase, heartbeat) for this long (N[s|m|h|d]; default 30m: 30 missed heartbeats)")
 @option("-c", "--profile", "profile_path", default=None, help=f"The deployment's profile JSON (default ${PROFILE_ENV})")
 @option("-d", "--d1", default=None, help="D1 database id (default $D1_DB_ID)")
 @option("-K", "--store", "store_key", default=None, help="The store whose runs to reconcile (default the profile's `store`)")
@@ -1193,6 +1211,10 @@ RECORD_ENV = "DT_RECORD"
 SUPERVISE_ENV = "DT_SUPERVISE"
 #: Set by `supervise`: the most a `phase -T` group gets after a received TERM/INT before KILL (inside the supervisor's).
 TERM_GRACE_ENV = "DT_TERM_GRACE"
+#: What `start` tells `supervise` from the job's env (never a secret: the token is in both envs): the job script may
+#: set them after `supervise` started it (gcs's `run.sh` exports `$D1_DB_ID`), and its `-H` beat and finish write the
+#: same D1.
+POINTER_ENV = (ALERTS_ENV, "SCAN_ID", "D1_DB_ID")
 #: The container's cgroup (default `/sys/fs/cgroup`), where `finish` reads the memory limit, peak and OOM kills.
 CGROUP_ENV = "DT_CGROUP"
 #: An alert's ERR-trap text past this many characters keeps its head and its `(file:line)`.
@@ -1324,6 +1346,7 @@ class JobRun:
         key = self.run_id or f"local-{self.env.get(JOB_START_ENV, '').strip() or 'run'}"
         self.key = re.sub(r"[^\w.-]", "_", key)
         self.dir = Path(self.env.get("TMPDIR") or "/tmp") / "dt-scan-run"
+        self._beat_sink: Sink | None = None
 
     # state shared across the job's processes
 
@@ -1376,7 +1399,43 @@ class JobRun:
     def redact(self, text: str) -> str:
         return redact(text, self.profile.secrets, self.env)
 
+    def scrub(self, text: str) -> str:
+        """`redact`, and anything secret-shaped (`heartbeat.scrub`): for text the job didn't write itself (a
+        command's output in a heartbeat's note)."""
+        return scrub_secrets(text, self.env, self.profile.secrets)
+
     # the record
+
+    def sink(self) -> Sink:
+        """The run's sink: `-n`, `-s`, else D1 (`-d`, else this job's `$D1_DB_ID`)."""
+        return sink_for(self.dry_run, self.sqlite, self.d1 or (self.env.get("D1_DB_ID") or "").strip() or None)
+
+    def touch(self, phase: str, note: str | None, at: int | None = None) -> None:
+        """One phase heartbeat (`phase_beat_sql`): the running `phase`'s live note, the run's `updated_ts`. Raises on a
+        failed write (the `Heartbeat` counts it); nothing without a recorded run."""
+        if not self.recording or not self.run_id:
+            return
+        if self._beat_sink is None:
+            self._beat_sink = self.sink()
+        self._beat_sink.execute(phase_beat_sql(self.run_id, phase, note, _now() if at is None else at))
+
+    @contextmanager
+    def heartbeat(self, phase: str, **kw) -> Iterator[Tail | None]:
+        """While the body runs, touch the record every `$DT_HEARTBEAT_S` (`heartbeat.Heartbeat`; `kw` its options):
+        `phase`'s note from the `Tail` yielded (feed it the phase's command output: `run_teed`, `run_grouped`), the
+        run's `updated_ts`. Yields None (no heartbeat) when nothing is recorded or the heartbeat is off. The thread is
+        stopped before the body's exit continues, so the phase's end is the last write.
+
+        `supervise -H` beats the run itself (`beat`); this is the phase's process (a Nextflow step's task, on its own
+        VM, or `phase -- CMD`), the one that sees the phase's output."""
+        interval = interval_of(self.env) if self.recording and self.run_id else None
+        if interval is None:
+            yield None
+            return
+        tail = Tail()
+        label = f"scan-run heartbeat ({phase})"
+        with Heartbeat(lambda note: self.touch(phase, note), interval, tail, scrub=self.scrub, label=label, **kw):
+            yield tail
 
     def write(self, at: int | None = None, **kw) -> Record | None:
         """One `record` write of this run, at `at` (epoch s; default now). Never raises: a failure is printed, the job
@@ -1388,7 +1447,7 @@ class JobRun:
             profile = replace(self.profile, store=st["store"]) if st.get("store") else self.profile
             if kw.get("gen") is None:
                 kw["gen"] = st.get("gen")
-            rec = record(sink_for(self.dry_run, self.sqlite, self.d1), profile, self.scan or "", self.run_id, _now() if at is None else at,
+            rec = record(self.sink(), profile, self.scan or "", self.run_id, _now() if at is None else at,
                          kind=st.get("kind", "scan"), parent=st.get("parent"), **kw)
             report_record(rec, kw.get("phase"))
             return rec
@@ -1404,7 +1463,7 @@ class JobRun:
         if not self.recording or not self.run_id:
             return
         try:
-            sink_for(self.dry_run, self.sqlite, self.d1).execute([heartbeat_sql(self.run_id, _now())])
+            self.sink().execute([heartbeat_sql(self.run_id, _now())])
         except (Exception, SystemExit) as e:  # noqa: BLE001 — a heartbeat never fails the job
             report_failure(e)
 
@@ -1510,7 +1569,7 @@ class JobRun:
             return
         ptr = dict(run_id=self.run_id, recording=self.recording, profile=profile_path or self.env.get(PROFILE_ENV),
                    d1=d1, dry_run=dry_run, sqlite=str(Path(sqlite).absolute()) if sqlite else None, dir=str(self.dir),
-                   key=self.key, env={k: self.env[k] for k in (ALERTS_ENV, "SCAN_ID") if k in self.env})
+                   key=self.key, env={k: self.env[k] for k in POINTER_ENV if k in self.env})
         try:
             Path(path).parent.mkdir(parents=True, exist_ok=True)
             Path(path).write_text(json.dumps(ptr))
@@ -1607,14 +1666,16 @@ def signame(sig: int) -> str:
 
 
 def run_grouped(cmd: Sequence[str], timeout: float | None, grace: float, session: bool | None = None,
-                signal_grace: float | None = None, env: Mapping[str, str] | None = None) -> Ran:
+                signal_grace: float | None = None, env: Mapping[str, str] | None = None, tail: Tail | None = None) -> Ran:
     """Run `cmd`, in its own session when `session` (default: with `timeout`). Past `timeout`, TERM its whole process
     group, wait `grace` for the group to empty, then KILL what's left (coreutils `timeout -k`, but group-wide:
     multiprocessing spawn workers and Batch submitters must not outlive it); a timeout is rc 124, a missing CMD 127.
 
     A SIGTERM / SIGINT this process receives is forwarded at once: to CMD's group when it has its own session (nothing
     else can reach it), else to CMD (whose group the sender is presumably signalling already). With its own session,
-    the group is then given `signal_grace` (default `grace`) and KILLed; without one, the sender owns escalation."""
+    the group is then given `signal_grace` (default `grace`) and KILLed; without one, the sender owns escalation.
+
+    `tail`: CMD's stdout and stderr are piped through it on their way to ours (a phase's heartbeat note)."""
     import signal
     import subprocess
     import time
@@ -1641,10 +1702,11 @@ def run_grouped(cmd: Sequence[str], timeout: float | None, grace: float, session
     prev = {s: signal.signal(s, handle) for s in (signal.SIGTERM, signal.SIGINT)}
     try:
         try:
-            p = subprocess.Popen(list(cmd), start_new_session=session, env=None if env is None else dict(env))
+            p = subprocess.Popen(list(cmd), start_new_session=session, env=None if env is None else dict(env), **pipe_kwargs(tail))
         except OSError as e:
             err(f"scan-run: {cmd[0]}: {e.strerror or e}")
             return Ran(127, signal=got[0] if got else None)
+        pumps = pump_all(p, tail)
         if got:  # arrived before CMD existed
             send(got[0])
 
@@ -1685,6 +1747,7 @@ def run_grouped(cmd: Sequence[str], timeout: float | None, grace: float, session
                     pass
             else:
                 time.sleep(0.05)
+        join_all(pumps)
         raw = p.returncode
         rc = 124 if timed_out else (128 - raw if raw < 0 else raw)
         return Ran(rc, timed_out, got[0] if got else None, killed, -raw if raw < 0 else None)
@@ -1818,7 +1881,8 @@ def phase_cmd(msg, no_measure, outputs, note, resume, warn, gen, grace, timeout,
         sys.exit(2)
     j.begin(name, gen=gen)
     sig_grace = j.env.get(TERM_GRACE_ENV)
-    ran = run_grouped(cmd, limit, grace_s, signal_grace=float(sig_grace) if sig_grace else None)
+    with j.heartbeat(name) as tail:
+        ran = run_grouped(cmd, limit, grace_s, signal_grace=float(sig_grace) if sig_grace else None, tail=tail)
     sys.exit(j.end(name, ran.rc, warn, msg, resume, note, outputs, not no_measure, timeout if ran.timed_out else None,
                    ran.signal if ran.rc else None))
 

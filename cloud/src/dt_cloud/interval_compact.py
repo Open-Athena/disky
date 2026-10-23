@@ -130,20 +130,22 @@ def _islands_sql(src: str, same: list[str], keep: list[str], where: str = "true"
         SELECT depth, path, min(vf) AS vf, max(vt) AS vt, {first} FROM g GROUP BY depth, path, __run"""
 
 
-#: A `compact_range` hook: `(con, name)` sets `GENERATION` on table `pv` (the range's path versions, the column added
-#: NULL), which the folded pieces (`pvl`) then take from their path version (`interval_backfill`).
+#: A `compact_range` hook: `(con, name)` sets `GENERATION` on table `pv`'s versions where it is NULL (the range's path
+#: versions: the column added NULL, or read from a source that carries it), which the folded pieces (`pvl`) without one
+#: then take from their path version (`interval_backfill`).
 Fill = Callable[[object, str], None]
 
 
 def compact_range(con, base: str, runs: list[str], name: str, out: Path, sliced: bool = True, generation: ist.Identity = False,
-                  fill: Fill | None = None) -> dict:
+                  fill: Fill | None = None, fill_nulls: bool = False) -> dict:
     """Key range `name` of the generation folded from the base under `base` and the runs `runs` (dirs, oldest first) into
     `out`'s range files, as `build` writes them: `pvl/`, `pv/` and `rd/` (the islands of `pvl`'s pieces), and with the
     owner axis `sv/` and `svt/`. `generation`: the path versions carry `GENERATION` — read from the inputs, or, with
-    `fill`, set by it on the path versions and taken by their pieces. Its tables are `con`'s temp tables, so ranges
+    `fill`, set by it on the path versions and taken by their pieces (`fill_nulls`: the inputs carry it, and only its NULLs
+    are filled). Its tables are `con`'s temp tables, so ranges
     run concurrently on cursors of one database (`fold_gen` `jobs`). Returns their row counts."""
     rf = lambda sub: out / sub / f"{name}.parquet"
-    gen_in = generation if fill is None else False
+    gen_in = generation if fill is None or fill_nulls else False
     gcol = [ist.identity_column(gen_in)] if gen_in else []
     con.execute(f"CREATE OR REPLACE TEMP TABLE pvl AS {_versions_sql(base, runs, 'pvl', name, gen_in)}")
     # A path version is the run of its pieces with equal change columns (`dr` as `build` derives it); `wts` (and
@@ -152,11 +154,13 @@ def compact_range(con, base: str, runs: list[str], name: str, out: Path, sliced:
     pv_src = f"SELECT *, {ia.DR} AS dr FROM pvl"
     con.execute(f"CREATE OR REPLACE TEMP TABLE pv AS {_islands_sql(pv_src, ist.change_cols(gen_in), list(dict.fromkeys([*change, 'wts', *gcol])))}")
     if fill is not None:
-        for t in ("pv", "pvl"):
-            con.execute(f"ALTER TABLE {t} ADD COLUMN {ist.GENERATION} BIGINT")
+        if not fill_nulls:
+            for t in ("pv", "pvl"):
+                con.execute(f"ALTER TABLE {t} ADD COLUMN {ist.GENERATION} BIGINT")
         fill(con, name)
-        con.execute(f"""UPDATE pvl SET {ist.GENERATION} = p.{ist.GENERATION} FROM pv p
-            WHERE p.depth = pvl.depth AND p.path = pvl.path AND p.vf <= pvl.vf AND pvl.vf < p.vt""")
+        g = ist.GENERATION
+        con.execute(f"""UPDATE pvl SET {g} = p.{g} FROM pv p
+            WHERE p.depth = pvl.depth AND p.path = pvl.path AND p.vf <= pvl.vf AND pvl.vf < p.vt AND pvl.{g} IS NULL AND p.{g} IS NOT NULL""")
     pvl_schema, pv_schema = (ist.with_generation(s, generation) for s in (ist.PVL_SCHEMA, ist.PV_SCHEMA))
     doc = {"pvl": sn.write_sorted(sn._batches(con, f"SELECT {', '.join(pvl_schema.names)} FROM pvl ORDER BY depth, path, vf"), rf("pvl"),
                                   pvl_schema, ist.RANGE_RG, dictionary=["kind", "us"])}
@@ -199,7 +203,7 @@ def fold_gen(gen_dir: Path, out: Path, work: Path, *, gen: str, runs: list[dict]
     """The generation `gen` (its base in `gen_dir` and the runs `runs`) folded into a new one in `out`: its range files
     (`compact_range` over the old `ranges.json`), served sorts and churn (`interval_store.cut_gen`), and `scans.json`
     (the base's, every run scan's entry; `GENERATION` recorded when the result carries it). With `fill`, the result
-    carries `GENERATION` as the hook sets it. `jobs` ranges, then `jobs` sorts, at a time (`static_names.each`: cursors
+    carries `GENERATION` as the hook sets it: on every version, or, when `gen` carries it, on those where it is NULL. `jobs` ranges, then `jobs` sorts, at a time (`static_names.each`: cursors
     of one DuckDB database, `threads` and `mem` shared): each ends in a serial pyarrow writer, the bulk of a range's
     time; the output's bytes don't depend on it. Logs a line per range as it ends (`i/k`, its rows, seconds, how many
     are done) and around the served sorts' cut: an hour of silence on gcs read as a hang. `on_range(i, k)` after each
@@ -209,6 +213,7 @@ def fold_gen(gen_dir: Path, out: Path, work: Path, *, gen: str, runs: list[dict]
     base = json.loads((gen_dir / "scans.json").read_text())
     sliced = ist.sliced(base)
     generation = (ist.has_generation(base) or fill is not None) if identity is None else identity
+    fill_nulls = fill is not None and ist.has_generation(base) is True
     doc = {**{k: v for k, v in base.items() if k not in ("scans", "slices", ist.GENERATION)},
            "scans": [*base["scans"], *run_scans(gen_dir, gen, runs)], "slices": sliced}
     doc = ist.record_generation(doc, generation)
@@ -224,7 +229,7 @@ def fold_gen(gen_dir: Path, out: Path, work: Path, *, gen: str, runs: list[dict]
 
     def one(cur, i: int) -> dict:
         t0 = monotonic()
-        got = compact_range(cur, str(gen_dir), run_dirs, f"r{i:04d}", out, sliced, generation, fill)
+        got = compact_range(cur, str(gen_dir), run_dirs, f"r{i:04d}", out, sliced, generation, fill, fill_nulls)
         with lock:
             done[0] += 1
             err(f"fold {gen}: range {i + 1}/{k}: {sum(got.values()):,} rows in {monotonic() - t0:.1f}s "

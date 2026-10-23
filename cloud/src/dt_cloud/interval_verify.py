@@ -540,6 +540,27 @@ def marker(summary: dict, gen: str) -> dict:
             **({"generation": g} if g is not None else {})}
 
 
+def rows_pass(m: dict) -> bool:
+    """Whether a marker's comparison, its objects' `generation` aside, passed: the sampled verify's views and diffs, or
+    the append check's tables and cut."""
+    if m.get("how") != "append":
+        return m["views"] > 0 and m["views"] == m["view_eq"] and m["diffs"] == m["diff_eq"]
+    return m["tables"].get("pvl", {}).get("rows", 0) > 0 and all(v["missing"] == v["extra"] == 0 for v in (*m["tables"].values(), *m["cut"].values()))
+
+
+def failure(m: dict) -> str:
+    """Why a failing marker failed: the sampled verify's views and diffs equal (`marker`), or the append check's rows
+    missing and extra per table and served sort, and objects' generations equal (`interval_append.append_marker`)."""
+    if m.get("how") != "append":
+        return f"{m['view_eq']}/{m['views']} views, {m['diff_eq']}/{m['diffs']} diffs equal"
+    bad = [] if m["tables"].get("pvl", {}).get("rows") else ["no rows"]
+    bad += [f"{t} {v['missing']} missing, {v['extra']} extra" for t, v in m["tables"].items() if v["missing"] or v["extra"]]
+    bad += [f"cut {s} {v['missing']} missing, {v['extra']} extra" for s, v in m["cut"].items() if v["missing"] or v["extra"]]
+    if (g := m.get("generation")) and g["equal"] != g["objects"]:
+        bad.append(f"generation {g['equal']}/{g['objects']} equal")
+    return "; ".join(bad)
+
+
 def verify_scans(store, gen: str, root: str, scans: list[dict], tmp: Path, *, changes: bool = False) -> dict[str, dict]:
     """Parity of `scans` (`{id, src, ts, version}`, oldest first; `src` under `root`, a dir or URL) against generation
     `gen` of `store` (a `blobstore.Store`: base + the newest manifest's runs, as the reader serves them), each scan's

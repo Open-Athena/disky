@@ -18,7 +18,64 @@ import pytest
 
 environ['DISKY_ROOT'] = mkdtemp(prefix='disky-test-root-')
 
+
+def _cap_threads_per_worker() -> None:
+    """Under pytest-xdist, each worker's DuckDB connections and pyarrow pools get the cores ÷ workers (≥ 2), so
+    `-n 16` doesn't run 16 × cores threads. A connection given `threads` (a config or `SET threads`) keeps it."""
+    n_workers = int(environ.get('PYTEST_XDIST_WORKER_COUNT') or 0)
+    if not n_workers:
+        return
+    from os import cpu_count
+
+    import duckdb
+    import pyarrow
+
+    threads = max(2, (cpu_count() or 1) // n_workers)
+    pyarrow.set_cpu_count(threads)
+    pyarrow.set_io_thread_count(max(threads, 2))
+    connect = duckdb.connect
+
+    def capped(database=':memory:', read_only=False, config=None, **kw):
+        config = dict(config or {})
+        config.setdefault('threads', threads)
+        return connect(database, read_only, config, **kw)
+
+    duckdb.connect = capped
+    duckdb.execute(f'SET threads = {threads}')
+
+
+_cap_threads_per_worker()
+
 from dt_cloud.d1_schema import replay, schema_file  # noqa: E402 (after the root is set)
+
+
+#: Tests per xdist group sharing one build of a module-scoped fixture (`pytest_collection_modifyitems`); `slow` ones
+#: (minutes each) in pairs, apart from the rest.
+XDIST_CHUNK = 16
+XDIST_CHUNK_SLOW = 2
+
+
+@pytest.hookimpl(tryfirst=True)  # before xdist's own, which reads the groups into the node ids
+def pytest_collection_modifyitems(config, items):
+    """Under `--dist loadgroup`, the tests that share a module-scoped fixture (and its params) go to one worker in
+    groups of `XDIST_CHUNK`: each worker would otherwise build the fixture for itself (`test_static_drill.py`'s `world`
+    takes a minute per config, and 16 workers built it 32 times); in chunks, it is built a few times, in parallel. A
+    `slow` test takes minutes: those go in pairs, so no chunk holds a long run of them."""
+    if not config.pluginmanager.hasplugin("xdist"):
+        return
+    seen: dict[tuple, int] = {}
+    for item in items:
+        defs = getattr(item, "_fixtureinfo", None)
+        shared = sorted(n for n, fd in (defs.name2fixturedefs.items() if defs else ()) if fd and fd[-1].scope == "module")
+        if not shared:
+            continue
+        slow = item.get_closest_marker("slow") is not None
+        params = getattr(item, "callspec", None)
+        key = (item.path.name, *(f"{n}={params.params[n]!r}" for n in shared if params and n in params.params), *(["slow"] if slow else []))
+        i = seen[key] = seen.get(key, -1) + 1
+        # no `]` in the name: xdist takes a node id's `@<group>` only after its last `]`
+        name = ":".join(key).replace("[", "(").replace("]", ")")
+        item.add_marker(pytest.mark.xdist_group(f"{name}#{i // (XDIST_CHUNK_SLOW if slow else XDIST_CHUNK)}"))
 
 
 @pytest.fixture

@@ -137,15 +137,18 @@ def test_rebase():
 
 
 def test_tier_resources_sum_to_three_quarters_of_memory():
-    """At once, the DuckDB tiers split 75% of the machine less 4 GiB per streaming tier, and its CPUs; one at a time, each
-    gets all of it. n2-highmem-16: 128 GiB, 16 vCPUs."""
+    """At once, the shards merge takes an even share of the CPUs with the DuckDB tiers, and the DuckDB tiers split 75%
+    of the machine less 4 GiB per streaming tier (the shards tier's 1.5 GiB per worker when more), and its CPUs; one at
+    a time, each gets all of it. n2-highmem-16: 128 GiB, 16 vCPUs."""
     ram = 128 << 30
     assert sm.tier_resources(["shards", "catalog", "drill", "anchors"], ram, 16, concurrent=True) == {
-        "drill": {"mem": "44GB", "threads": 8}, "anchors": {"mem": "44GB", "threads": 8}}
-    assert sm.tier_resources(["shards", "catalog", "drill"], ram, 16, concurrent=True) == {"drill": {"mem": "88GB", "threads": 16}}
+        "shards": {"threads": 5}, "drill": {"mem": "42GB", "threads": 8}, "anchors": {"mem": "42GB", "threads": 8}}
+    assert sm.tier_resources(["shards", "catalog", "drill"], ram, 16, concurrent=True) == {
+        "shards": {"threads": 8}, "drill": {"mem": "80GB", "threads": 16}}
     assert sm.tier_resources(["shards", "catalog", "drill", "anchors"], ram, 16, concurrent=False) == {
-        "drill": {"mem": "96GB", "threads": 16}, "anchors": {"mem": "96GB", "threads": 16}}
-    assert sm.tier_resources(["shards", "catalog"], ram, 16, concurrent=True) == {}
+        "shards": {"threads": 16}, "drill": {"mem": "96GB", "threads": 16}, "anchors": {"mem": "96GB", "threads": 16}}
+    assert sm.tier_resources(["shards", "catalog"], ram, 16, concurrent=True) == {"shards": {"threads": 16}}
+    assert sm.tier_resources(["shards", "catalog"], 8 << 30, 16, concurrent=False) == {"shards": {"threads": 4}}
 
 
 def test_run_tiers(tmp_path):

@@ -277,6 +277,30 @@ def echo_task_logs(trace: Path, work: Path, out=err) -> int:
     return n
 
 
+def head_beat(env: Mapping[str, str], run_id: str, clock=time.monotonic):
+    """The head's run heartbeat, for its poll loop: `JobRun.beat` (the run row's `updated_ts`) at most every
+    `$DT_HEARTBEAT_S` (default 60 s; first at once), so `/scans` reads a run whose steps wait on Batch VMs as alive. None
+    when `scan-run supervise -H` already beats it (`$DT_SUPERVISE`: its entrypoint) or the heartbeat is off; a gcs-style
+    submit that runs `scan head` as the container's entrypoint has no supervisor, and this is its beat."""
+    from .heartbeat import interval_of
+    from .scan_runs import SUPERVISE_ENV, JobRun
+
+    interval = interval_of(env)
+    if interval is None or (env.get(SUPERVISE_ENV) or "").strip():
+        return None
+    run = JobRun(None, None, False, run_id, None, env=env)
+    last: list[float] = []
+
+    def beat() -> None:
+        now = clock()
+        if last and now - last[0] < interval:
+            return
+        last[:] = [now]
+        run.beat()
+
+    return beat
+
+
 def _record(cmd, args: list[str]) -> None:
     """A `scan-run` subcommand, in-process (they never fail the job)."""
     try:
@@ -483,7 +507,10 @@ def head(profile_path: Path, nf_dir: Path, launch: Path | None, *, reproc: bool 
         from .scan_runs import dag_cmd
 
         seen_cached: tuple[str, ...] = ()
+        beat = head_beat(env, run_id) if recording and run_id else None
         while True:
+            if beat is not None:
+                beat()
             if recording and trace.exists():
                 cached = cached_tasks(trace.read_text())
                 dag = launch / 'dag.mmd'

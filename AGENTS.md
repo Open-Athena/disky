@@ -138,6 +138,8 @@ dt-cloud interval-store backfill-generation -O NEW -o STORE -s ROOT -l TEMPLATE 
                           # the raw listings (`{id}` templates under ROOT): each version the first listed within it, earlier
                           # ones NULL. Source and `CURRENT.json` untouched: verify, then `current -s NEW`. Opt-in per
                           # deployment (gcs: `path-index -G`); off, no file carries the column (specs/lean-scans.md §3.1).
+                          # `-N` (a repair): GEN already carries it; only its NULL object versions are filled (with `-S`,
+                          # from the scans whose listings have them all: gcs's depth-2/3 objects had none before 2026-10-22)
                           # `-j N` (also `add`'s compaction; `build`'s cut): N key ranges, then N served sorts, at a time on
                           # cursors of one DuckDB database (`-p`/`-M` shared; each ends in a serial pyarrow writer), same bytes
 disk-tree tiers plan SIDECAR P THR  # The reader's span selection run offline over a tier's `.groups.json`

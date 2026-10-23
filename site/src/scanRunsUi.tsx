@@ -83,7 +83,7 @@ const PALETTE = ['--s1', '--s2', '--s4', '--s7', '--s5', '--s6', '--s3', '--s8']
 export const colorer = (order: string[]) => (phase: string) => `var(${PALETTE[Math.max(0, order.indexOf(phase)) % PALETTE.length]})`
 
 /** The tip on a quiet run's warning (and a lost run's status). */
-export const QUIET_TIP = "The run hasn't written its record (phases, heartbeat) for this long: its job may have died. Check its Batch job."
+export const QUIET_TIP = "The run hasn't written its record (phases, its once-a-minute heartbeat) for this long: its job may have stalled or died. Check its Batch job."
 
 /** `cell`: rendered as a table cell's content (`Tooltip`'s `cell`: the cell is the hover target, the tip to its right).
  * `lost`: a running run quiet past `LOST_S` (`liveness`), shown `lost?` until `scan-run reconcile` settles it. */

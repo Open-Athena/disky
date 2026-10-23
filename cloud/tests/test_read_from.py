@@ -82,7 +82,12 @@ def _copy(stores: dict, dst: Path) -> Path:
 
 
 def _gen_files(d: Path) -> dict[str, bytes]:
-    return {p.relative_to(d).as_posix(): p.read_bytes() for p in sorted(d.rglob("*")) if p.is_file() and p.name != ar.COMPACTION}
+    """A generation's files but its compaction record, each served sort's record without its seconds (`s`, a wall time
+    that rounds to 0.1 on a loaded machine)."""
+    out = {p.relative_to(d).as_posix(): p.read_bytes() for p in sorted(d.rglob("*")) if p.is_file() and p.name != ar.COMPACTION}
+    for k in [k for k in out if k.startswith("served/") and k.endswith(".json") and k != "served/stats.json"]:
+        out[k] = json.dumps({**json.loads(out[k]), "s": None}, sort_keys=True).encode()
+    return out
 
 
 def test_compaction_reads_the_copy(stores, tmp_path):
@@ -134,7 +139,9 @@ def test_add_reads_the_copy(stores, tmp_path):
         res = CliRunner().invoke(il.add_cmd, [*args, "-o", str(store), "-w", str(tmp_path / f"w-{store.name}"), *extra], catch_exceptions=False)
         assert res.exit_code == 0, res.output
     run = ist.PREFIX + "/g/" + ar.run_key(DATES[4], DATES[4])
-    served = lambda d: {p.relative_to(d).as_posix(): p.read_bytes() for p in sorted((d / run / "served").rglob("*")) if p.is_file()}  # noqa: E731
+    # Every served file, a sort's `<sort>.json` without its cut's wall-clock seconds (`s`)
+    served = lambda d: {p.relative_to(d).as_posix(): {k: v for k, v in json.loads(p.read_text()).items() if k != "s"} if p.suffix == ".json" else p.read_bytes()  # noqa: E731
+                        for p in sorted((d / run / "served").rglob("*")) if p.is_file()}
     assert served(a) == served(b)
     assert (r2 / run).exists() is False
     (r2 / ist.PREFIX / "g" / "scans.json").unlink()

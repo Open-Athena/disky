@@ -186,6 +186,17 @@ def test_merges_reaching_the_long_level_run_long():
     assert [(ar.merge_is_long(ar.plan_carries(runs, max_level=6)[1]), ar.merge_ttl(ar.plan_carries(runs, max_level=6)[1])) for runs in (l4, l3)] == [
         (True, ar.LONG_RUN_S), (False, ar.LEASE_S)]
 
+    # gcs's 10-22 level-3 carry: 2.03 B rows from runs at levels 2, 1, 0, 0, a 3 h job on spot
+    l3_rows = [{**_level_run(2, "2026-10-17", "2026-10-19"), "rows": 1_327_236_295}, {**_level_run(1, "2026-10-20", "2026-10-21"), "rows": 545_854_432},
+               {**_level_run(0, "2026-10-21T1439", "2026-10-21T1439"), "rows": 47_390_347}, {**_level_run(0, "2026-10-22", "2026-10-22"), "rows": 109_655_551}]
+    small = [{**r, "rows": 1000} for r in l3_rows]
+    plan = lambda runs: ar.plan_carries(runs, max_level=6)[1]  # noqa: E731
+    assert [len(plan(runs)) for runs in (l3_rows, small)] == [1, 1]
+    assert [(ar.merge_is_long(plan(runs), long_rows), ar.merge_ttl(plan(runs), long_rows))
+            for runs in (l3_rows, small) for long_rows in (None, sm.LONG_ROWS)] == [
+        (False, ar.LEASE_S), (True, ar.LONG_RUN_S), (False, ar.LEASE_S), (False, ar.LEASE_S)]
+    assert (sd.Runner.long_merge_rows, sm.carry().long_rows, ar.Runner.long_merge_rows) == (sm.LONG_ROWS, sm.LONG_ROWS, None)
+
     def shape(spec: dict) -> tuple:
         ts = spec["taskGroups"][0]["taskSpec"]
         return ts["maxRunDuration"], ts["maxRetryCount"], spec["allocationPolicy"]["instances"][0]["policy"]["provisioningModel"]

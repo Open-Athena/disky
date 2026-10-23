@@ -26,9 +26,14 @@ second: its D1 rows are gone). Deletion is a whitelist: a file no class names st
 **Selection**, oldest first, every scan found but the newest `-k` (so an append or a catch-up always has its inputs):
 1. listed by the IS's newest manifest (the generation `-g`, default `interval-store/CURRENT.json`, followed to its
    newest successor; the base's `scans.json` when no manifest) **and** by the static index's (`-G`), else skipped;
-2. a passing parity marker `interval-store/<gen>/verify/<id>.json` (`interval_verify.marker`), in the generation or one
-   it was compacted or backfilled from; else, executing without `-m`, `interval-store verify` runs for it now (against its newest
-   per-scan `path` sort) and writes one. A dry run never verifies: such a scan is `needs-verify`.
+2. a passing parity marker `interval-store/<gen>/verify/<id>.json`, in the generation or one it was compacted or
+   backfilled from. The append writes it (`interval_append.append_marker`): every key range's answer at the scan over the
+   published store (base range files + the manifest's runs + the scan's deltas) equal to the scan's rows, row for row,
+   for the path versions and both owner-slice tables; every served sort of the scan's run equal to the deltas it was cut
+   from; and every object's `generation` equal. That is constant work here. A scan without one (appended before the
+   check, or `interval-store verify`'s sampled marker): executing without `-m`, `interval-store verify` runs for it now
+   (against its newest per-scan `path` sort, downloading the served generation) and writes one. A dry run never
+   verifies: such a scan is `needs-verify`.
 
 A scan's raw listing shards carrying a (non-null) `generation` go only when its marker compared the objects' generations
 and every one was equal (`interval_verify.generation_parity`): else they hold information the IS doesn't (yet), and stay
@@ -385,7 +390,9 @@ def retire(scans_root: str, layouts: list[str], *, iv_root: str, static_gen: str
             markers[sid] = m
             r["marker"] = "pass" if m["pass"] else "fail"
             if not m["pass"]:
-                r.update(status="skip", reason=f"verify failed ({m['view_eq']}/{m['views']} views, {m['diff_eq']}/{m['diffs']} diffs equal)")
+                from .interval_verify import failure
+
+                r.update(status="skip", reason=f"verify failed ({failure(m)})")
         elif markers_only:
             r.update(status="skip", reason="no verify marker", marker="missing")
         elif s.src is None:

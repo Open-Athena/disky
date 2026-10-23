@@ -444,7 +444,7 @@ def test_interval_store_staged_append(tmp_path, env, monkeypatch):
 
     ran = []
 
-    def run_grouped(cmd, timeout, grace, session=None, signal_grace=None, env=None):
+    def run_grouped(cmd, timeout, grace, session=None, signal_grace=None, env=None, tail=None):
         ran.append((cmd, timeout, env["INTERVAL_STORE_PROFILE"], env["INTERVAL_STORE_IMAGE"]))
         return scan_runs.Ran(0, False, None)
 
