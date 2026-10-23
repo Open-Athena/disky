@@ -144,7 +144,7 @@ def _deleted(fx, d: str) -> dict[str, list[int]]:
     return {k: v for k, v in sorted(out.items()) if v}
 
 
-KEPT = {"age": [2, 10], "extras": [1, 5], "snapshot": [1, 2]}
+KEPT = {"age": [2, 10], "attribution": [1, 5], "snapshot": [1, 2]}
 
 
 def test_static_coverage_follows_a_compacted_generation(fx, d1):
@@ -229,7 +229,9 @@ def test_execute_backs_up_verifies_and_deletes(fx, d1, tmp_path, monkeypatch, ro
         ("2026-07-30", "retire", "pass"), ("2026-08-03", "retire", "verified"), ("2026-08-04", "retire", "pass"), ("2026-08-04T1236", "retire", "pass")]
     marker = json.loads((fx["store"] / "interval-store" / "g" / "verify" / "2026-08-03.json").read_text())
     assert (marker["scan"], marker["gen"], marker["pass"], marker["views"] == marker["view_eq"] > 0) == ("2026-08-03", "g", True, True)
-    gone = {k: n for k, n in before.items() if any(k.startswith(f"idx/{d}/") for d in retired) and sr.classify(k.rsplit("/", 1)[-1]) in sr.DELETE
+    # (`attr.tsv` stays: the store has no attribution table to answer for it)
+    gone = {k: n for k, n in before.items() if any(k.startswith(f"idx/{d}/") for d in retired)
+            and sr.classify(k.rsplit("/", 1)[-1]) in sr.DELETE and sr.classify(k.rsplit("/", 1)[-1]) != "attribution"
             or k in ("idx/2026-07-30/b1.parquet", "idx/2026-08-04T1236/b1.parquet")}
     assert _files(fx["root"]) == {k: n for k, n in before.items() if k not in gone}
     assert _files(backup) == gone
@@ -283,8 +285,9 @@ def test_a_corrupted_store_file_fails_the_append_check_and_blocks_deletion(world
     ]
     after = _files(fx["root"])
     assert {k: n for k, n in before.items() if k.startswith(f"idx/{bad}/")} == {k: n for k, n in after.items() if k.startswith(f"idx/{bad}/")}
+    # (its `attr.tsv` stays: the store has no attribution table)
     assert sorted(k for k in before if k not in after) == sorted(
-        k for k in before if k.startswith("idx/2026-08-04/") and sr.classify(k.rsplit("/", 1)[-1]) in sr.DELETE)
+        k for k in before if k.startswith("idx/2026-08-04/") and sr.classify(k.rsplit("/", 1)[-1]) in sr.DELETE and not k.endswith("attr.tsv"))
 
 
 def test_drop_path_pointer(fx, d1):
@@ -321,16 +324,36 @@ def test_layer1_goes_unless_it_carries_generation_no_marker_vouches_for(fx, d1):
     m = verify / "2026-08-04T1236.json"
     m.write_text(json.dumps({**json.loads(m.read_text()), "generation": {"objects": 2, "equal": 2}}))
     rep = _run(fx, "-m", "-1", LAYER1)
-    held = "layer1: its listing has `generation`, which its marker didn't compare equal"
+    # every scan's `attr.tsv` stays too: the store has no attribution table
+    at = "attribution: the interval store's attribution table doesn't cover the scan"
+    held = f"layer1: its listing has `generation`, which its marker didn't compare equal; {at}"
     assert {r["id"]: (r["delete"].get("layer1"), r["keep"].get("layer1"), r.get("held")) for r in rep["scans"] if r["status"] == "retire"} == {
-        "2026-07-30": ([1, sizes["2026-07-30"]], None, None),
+        "2026-07-30": ([1, sizes["2026-07-30"]], None, at),
         "2026-08-04": (None, [1, sizes["2026-08-04"]], held),
-        "2026-08-04T1236": ([1, sizes["2026-08-04T1236"]], None, None),
+        "2026-08-04T1236": ([1, sizes["2026-08-04T1236"]], None, at),
     }
     before = _files(root)
     _run(fx, "-x", "-m", "-1", LAYER1)
     assert sorted(k for k in before if k.startswith("listing/") and k not in _files(root)) == [
         "listing/2026-07-30/b/shard-000.parquet", "listing/2026-08-04T1236/b/shard-000.parquet"]
+
+
+def test_the_attribution_map_goes_only_covered_and_vouched_for(fx, d1, monkeypatch):
+    """A scan's `attr.tsv` (and `attribution.parquet`) retire only when the interval store's attribution table covers the
+    scan and its marker compared the table with the scan's map, equal; else they stay (`held`) while the rest retires."""
+    root, verify = fx["root"], fx["store"] / "interval-store" / "g" / "verify"
+    monkeypatch.setattr(sr, "attribution_covered", lambda store, gen: {"2026-07-30", "2026-08-04"})
+    m = verify / "2026-07-30.json"
+    m.write_text(json.dumps({**json.loads(m.read_text()), "attribution": {"rows": 1, "store": 1, "missing": 0, "extra": 0}}))
+    rep = _run(fx, "-m")
+    assert {r["id"]: (r["delete"].get("attribution"), r["keep"].get("attribution"), r.get("held")) for r in rep["scans"] if r["status"] == "retire"} == {
+        "2026-07-30": ([1, 5], None, None),
+        "2026-08-04": (None, [1, 5], "attribution: its marker didn't compare the attribution table equal"),
+        "2026-08-04T1236": (None, [1, 5], "attribution: the interval store's attribution table doesn't cover the scan"),
+    }
+    before = _files(root)
+    _run(fx, "-x", "-m")
+    assert sorted(k for k in before if k.endswith("attr.tsv") and k not in _files(root)) == ["idx/2026-07-30/index/g1/attr.tsv"]
 
 
 def test_cache_goes_with_its_scan(fx, d1):
@@ -385,7 +408,7 @@ def test_backup_within_one_store_copies_server_side(monkeypatch, tmp_path):
     ("path-index-coarse20.parquet", "coarse"), ("path-index-coarse20.groups.json", "coarse"),
     ("path-index.rows-search.parquet", "search"), ("path-index.rows.groups.parquet", "search"),
     ("age-pyramid-8d.parquet", "age"), ("age-pyramid-8d.groups.json", "age"), ("age-index.parquet", "age"),
-    ("attr.tsv", "extras"), ("attr.tsv.gz", "extras"), ("ck.txt", "extras"), ("meta.json", "snapshot"),
+    ("attr.tsv", "attribution"), ("attr.tsv.gz", "attribution"), ("attribution.parquet", "attribution"), ("ck.txt", "extras"), ("meta.json", "snapshot"),
     ("verification.json", "snapshot"), ("over-time.parquet", "over-time"), ("shard-000.parquet", "other"), ("path-index.txt", "other"),
 ])
 def test_classify(name, cls):

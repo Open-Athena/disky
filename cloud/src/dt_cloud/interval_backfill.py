@@ -46,7 +46,7 @@ BACKFILL = "backfill.json"
 #: Where the listings' `(path, generation)` table lands in the work dir.
 GEN_INDEX = "gen-index.parquet"
 #: What the fold never reads from the source (`interval_local.UNREAD`).
-UNREAD = ("served/", "rd/", "digest/", "sv-digest/", "verify/")
+UNREAD = ("served/", "rd/", "digest/", "sv-digest/", "attribution-digest/", "verify/")
 
 
 #: Concurrent footer reads / shard copies per scan (a URL root's: each a ranged read or a whole-object GET).
@@ -223,17 +223,10 @@ def filler(index: str, ranges: dict, counts: dict[str, int]) -> ic.Fill:
     return fill
 
 
-def backfill(store: Store, gen: str, new_gen: str, listing_root: str, template: str, work: Path, *, ranges_gen: str | None = None,
-             since: str | None = None, nulls: bool = False,
-             stall_s: float = STALL_S, rg_rows: int = ist.SERVED_RG,
-             threads: int = 4, mem: str = "4GB", jobs: int = 1) -> dict:
-    """Generation `gen` of `store` folded into `new_gen` with the objects' `generation` from the raw listings (`template`
-    under `listing_root`), published to the store (data first, `scans.json` last; `CURRENT.json` untouched). A staged
-    build's generation may borrow its key ranges and base range files from `ranges_gen` (its deployment's `ranges_gen`):
-    those are mirrored in beside its own, and the new generation holds its own copies. `nulls`: `gen` already carries
-    `generation`, and only its NULL object versions are filled (the repair of a generation whose listings lacked some
-    objects' generations: gcs's shallow objects before 2026-10-22); refused on a source without it. Returns a summary."""
-    t0 = monotonic()
+def mirror_source(store: Store, gen: str, new_gen: str, work: Path, ranges_gen: str | None = None) -> Path:
+    """Generation `gen` of `store` mirrored into `work/store/` for a fold into `new_gen` (refused when `new_gen` exists:
+    a generation is never rewritten), but for what no fold reads (`UNREAD`). A staged build's generation may borrow its
+    key ranges and base range files from `ranges_gen`: those are mirrored in beside its own. Returns its dir."""
     prefix, new_prefix = f"{PREFIX}/{gen}", f"{PREFIX}/{new_gen}"
     if store.listing(new_prefix):
         raise SystemExit(f"{store.root}/{new_prefix}/ exists: a generation is never rewritten")
@@ -249,6 +242,22 @@ def backfill(store: Store, gen: str, new_gen: str, listing_root: str, template: 
             raise SystemExit(f"{store.root}/{PREFIX}/{ranges_gen}/ranges.json: no such ranges generation")
     elif f"{prefix}/ranges.json" not in before:
         raise SystemExit(f"{store.root}/{prefix}/ranges.json: none; a staged build's generation names its ranges with -R")
+    return gen_dir
+
+
+def backfill(store: Store, gen: str, new_gen: str, listing_root: str, template: str, work: Path, *, ranges_gen: str | None = None,
+             since: str | None = None, nulls: bool = False,
+             stall_s: float = STALL_S, rg_rows: int = ist.SERVED_RG,
+             threads: int = 4, mem: str = "4GB", jobs: int = 1) -> dict:
+    """Generation `gen` of `store` folded into `new_gen` with the objects' `generation` from the raw listings (`template`
+    under `listing_root`), published to the store (data first, `scans.json` last; `CURRENT.json` untouched). A staged
+    build's generation may borrow its key ranges and base range files from `ranges_gen` (its deployment's `ranges_gen`):
+    those are mirrored in beside its own, and the new generation holds its own copies. `nulls`: `gen` already carries
+    `generation`, and only its NULL object versions are filled (the repair of a generation whose listings lacked some
+    objects' generations: gcs's shallow objects before 2026-10-22); refused on a source without it. Returns a summary."""
+    t0 = monotonic()
+    prefix, new_prefix = f"{PREFIX}/{gen}", f"{PREFIX}/{new_gen}"
+    gen_dir = mirror_source(store, gen, new_gen, work, ranges_gen)
     base = json.loads((gen_dir / "scans.json").read_text())
     has = ist.has_generation(base)
     if has and not nulls:

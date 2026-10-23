@@ -104,7 +104,7 @@ Branch refs (`job/*.sh`, m3 files) are on the deployment branches (`gcs`, `cw-s3
 | `/api/path-index` (`api/path-index.ts`) | ranged raw download of a scan's per-scan `path` sort | **landed (2026-10-18):** a scan the deployment's interval store holds (`ivHolder`, `_lib/index.ts:705`: `PATH_STORE=intervals` or `opt-in`, the primary store, a cut-out scan included) is a 410 naming the export (`pathIndexGone`: `dt-cloud interval-store export -g GEN -d ID -o <path>`), before any per-scan read and whether or not its file still exists. No on-demand export here. Other scans serve as before |
 | age pyramids (`api/age-pyramid.ts:116`, `:133`) | per-scan `age-pyramid-<bin>` through D1 pointers, now via `perScan(ctx.env)` (2026-10-18) so `openIndex`'s held-date refusal never applies | stay per-scan until an interval age index replaces them. They're small, live in the same `index/<gen>/` dir, and §2 keeps them |
 | over time (`_lib/overTime.ts:67`) | an archive-level `over-time` variant, not per scan; read via `perScan(env)` (2026-10-18) | unaffected |
-| extras `attr.tsv` (`_lib/extras.ts:129`, gcs) | per-scan provenance sidecar beside the sorts | keep. It can't be derived later: attribution inputs are mutable (`job/run.sh:292`, `attribution-wandb.parquet`). §2 keeps it |
+| extras `attr.tsv` (`_lib/extras.ts:129`, gcs) | per-scan provenance sidecar beside the sorts | can't be derived later: attribution inputs are mutable (`job/run.sh:292`, `attribution-wandb.parquet`). Its history moves into the interval store's attribution table ([attr-interval-table.md]); retire's `attribution` class deletes a covered, vouched scan's map |
 | lens, owner pool, owner totals, prefixes (`_lib/ownerTotals.ts:74`, `:148`; `_lib/prefixes.ts:62`) | `slices(env)` → the store's slice sorts | already the store wherever the generation is sliced (`IV_SLICE_SORTS`) |
 | `user` / `coarse*` variants (`_lib/view.ts:365-385`, `_lib/index.ts:749-752`) | v1-era tiers | the store's slice sorts. A held date with slices refuses the old variant (`:751`) |
 
@@ -331,4 +331,5 @@ The one thing an open plan needs from a raw listing is each object's identity at
 - Age pyramids: an interval age index (the store has `wts`/`mtime_mean` per version), so `index_schema`, `index-sync` and the last per-scan files go entirely.
 
 [interval-store.md]: interval-store.md
+[attr-interval-table.md]: attr-interval-table.md
 [d1-migrations.md]: d1-migrations.md

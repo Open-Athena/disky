@@ -451,6 +451,30 @@ def _footers(src, key: str, version: int) -> dict[str, Footer]:
     return out
 
 
+def attribution_of(con, s: dict, src, mount: str | None, tmp: Path, served: str, runs: list[str]) -> dict:
+    """Scan `s`'s attribution table against its own `attribution.parquet` (beside its `path` sort, under `mount` or
+    through `src`), copied to `tmp` first; a covered scan without its file is every row missing (`rows` -1)."""
+    import shutil
+
+    from .interval_attribution import attribution_parity
+    from .interval_store import attribution_src
+
+    key = s.get("attribution_src") or attribution_src(s)
+    local = tmp / f"{s['id']}.attribution.parquet"
+    if mount:
+        if not Path(f"{mount}/{key}").is_file():
+            return {"rows": -1, "store": -1, "missing": 1, "extra": 0}
+        shutil.copyfile(f"{mount}/{key}", local)
+    elif src.exists(key):
+        src.get(key, local)
+    else:
+        return {"rows": -1, "store": -1, "missing": 1, "extra": 0}
+    try:
+        return attribution_parity(con, str(local), served, runs, s["ts"])
+    finally:
+        local.unlink(missing_ok=True)
+
+
 #: Verify's DuckDB memory on a dedicated verify VM (`interval-store verify` on Batch).
 VERIFY_MEM = 80 << 30
 VERIFY_THREADS = 16
@@ -464,13 +488,15 @@ def verify_budget(ram: int, cpus: int) -> tuple[int, int]:
 
 
 def verify_task(sampled: list[str], task: int, tasks: int, served: str, scans: dict, out_path: Path, tmp: Path, mount: str | None,
-                runs: list[str] = (), on_summary=None, *, changes: bool = False) -> list[dict]:
+                runs: list[str] = (), on_summary=None, *, changes: bool = False, covered: set[str] = frozenset()) -> list[dict]:
     """This task's share of the `sampled` scan ids (contiguous, so each diff's previous scan is local),
     each scan's per-scan `path` sort copied to local disk first: from `mount`, else through the scans' root (`scans["bucket"]`:
     a URL, a dir, or a bare GCS bucket name), then loaded into a table of a DuckDB database under `tmp` (`Scan`'s `table`;
     two scans' at a time at most: the diffs' `from` and the scan). `runs`: the newest manifest's runs' served dirs, read
     beside the base. `on_summary(summary)` runs as each scan completes (its marker written then: a later scan killed
-    mid-task loses only itself). `changes`: `run_date`'s."""
+    mid-task loses only itself). `changes`: `run_date`'s. `covered`: the scans the store's attribution table covers
+    (`interval_append.covered_scans`): each one's table is compared with its own `attribution.parquet`, whole
+    (`interval_attribution.attribution_parity`)."""
     import duckdb
 
     from .blobstore import Store, store_url
@@ -510,6 +536,10 @@ def verify_task(sampled: list[str], task: int, tasks: int, served: str, scans: d
                 if (g := generation_parity(con, str(local), served, list(runs), s["ts"])) is not None:
                     summary["generation"] = g
                     err(f"  {date} generation: {g['equal']:,} of {g['objects']:,} objects equal")
+                if date in covered:
+                    summary["attribution"] = attribution_of(con, s, src, mount, tmp, served, list(runs))
+                    a = summary["attribution"]
+                    err(f"  {date} attribution: {a['rows']:,} prefixes, the store {a['store']:,}; {a['missing']:,} missing, {a['extra']:,} extra")
                 summaries.append(summary)
                 if on_summary is not None:
                     on_summary(summary)
@@ -536,15 +566,20 @@ def marker(summary: dict, gen: str) -> dict:
     g = summary.get("generation")
     if g is not None:
         ok = ok and g["objects"] == g["equal"]
+    a = summary.get("attribution")
+    if a is not None:
+        ok = ok and a["missing"] == a["extra"] == 0
     return {"scan": summary["date"], "gen": gen, "pass": ok, **{k: summary[k] for k in ("views", "view_eq", "diffs", "diff_eq")},
-            **({"generation": g} if g is not None else {})}
+            **({"generation": g} if g is not None else {}), **({"attribution": a} if a is not None else {})}
 
 
 def rows_pass(m: dict) -> bool:
-    """Whether a marker's comparison, its objects' `generation` aside, passed: the sampled verify's views and diffs, or
-    the append check's tables and cut."""
+    """Whether a marker's comparison, its objects' `generation` aside, passed: the sampled verify's views and diffs (and
+    the attribution table, where it was compared), or the append check's tables (the attribution table's among them) and
+    cut."""
     if m.get("how") != "append":
-        return m["views"] > 0 and m["views"] == m["view_eq"] and m["diffs"] == m["diff_eq"]
+        a = m.get("attribution")
+        return m["views"] > 0 and m["views"] == m["view_eq"] and m["diffs"] == m["diff_eq"] and (a is None or a["missing"] == a["extra"] == 0)
     return m["tables"].get("pvl", {}).get("rows", 0) > 0 and all(v["missing"] == v["extra"] == 0 for v in (*m["tables"].values(), *m["cut"].values()))
 
 
@@ -552,7 +587,9 @@ def failure(m: dict) -> str:
     """Why a failing marker failed: the sampled verify's views and diffs equal (`marker`), or the append check's rows
     missing and extra per table and served sort, and objects' generations equal (`interval_append.append_marker`)."""
     if m.get("how") != "append":
-        return f"{m['view_eq']}/{m['views']} views, {m['diff_eq']}/{m['diffs']} diffs equal"
+        a = m.get("attribution")
+        return f"{m['view_eq']}/{m['views']} views, {m['diff_eq']}/{m['diffs']} diffs equal" + (
+            f"; attribution {a['missing']} missing, {a['extra']} extra" if a and (a["missing"] or a["extra"]) else "")
     bad = [] if m["tables"].get("pvl", {}).get("rows") else ["no rows"]
     bad += [f"{t} {v['missing']} missing, {v['extra']} extra" for t, v in m["tables"].items() if v["missing"] or v["extra"]]
     bad += [f"cut {s} {v['missing']} missing, {v['extra']} extra" for s, v in m["cut"].items() if v["missing"] or v["extra"]]
@@ -567,10 +604,15 @@ def verify_scans(store, gen: str, root: str, scans: list[dict], tmp: Path, *, ch
     marker written to `verify/<id>.json` in the generation; returns the markers by scan id."""
     from .interval_store import PREFIX, download_served, verify_runs
 
+    from .append_runner import latest_key
+    from .interval_append import covered_scans
+
     prefix = f"{PREFIX}/{gen}"
     download_served(store, prefix, tmp / "served")
     runs = verify_runs(store, prefix, tmp / "runs", {"scans": []})
     doc = {"bucket": root, "scans": scans}
+    newest = latest_key([k.removeprefix(f"{prefix}/") for k in store.keys(f"{prefix}/manifests/")])
+    covered = covered_scans(store.read_json(f"{prefix}/scans.json"), store.read_json(f"{prefix}/{newest}") if newest else None)
     out = {}
 
     def write(s: dict) -> None:
@@ -578,5 +620,6 @@ def verify_scans(store, gen: str, root: str, scans: list[dict], tmp: Path, *, ch
         store.write_text(marker_key(prefix, s["date"]), json.dumps(m) + "\n")
         out[s["date"]] = m
 
-    verify_task([s["id"] for s in scans], 0, 1, str(tmp / "served"), doc, tmp / "verify.jsonl", tmp, None, runs, on_summary=write, changes=changes)
+    verify_task([s["id"] for s in scans], 0, 1, str(tmp / "served"), doc, tmp / "verify.jsonl", tmp, None, runs, on_summary=write, changes=changes,
+                covered=covered)
     return out

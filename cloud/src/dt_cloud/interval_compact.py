@@ -136,8 +136,20 @@ def _islands_sql(src: str, same: list[str], keep: list[str], where: str = "true"
 Fill = Callable[[object, str], None]
 
 
+def attribution_versions_sql(base: str, runs: list[str], name: str) -> str:
+    """Key range `name`'s attribution versions: the base's range file and every run's delta that hold the table (a base
+    or run from before it opened holds none), one row per version (`IDENT`) with the smallest `vt`, in `AT_SCHEMA`'s
+    columns. A version runs on across uncovered scans in both build and append, so these are `build`'s versions as
+    they are: no islands to re-form."""
+    t = ist.ATTRIBUTION
+    files = [f for f in (f"{base}/{t}/{name}.parquet", *(f"{r}/{t}/{name}.parquet" for r in runs)) if Path(f).exists()]
+    cols = ist.qcols(ist.AT_SCHEMA.names)
+    parts = " UNION ALL ".join(f"SELECT {cols} FROM read_parquet({q(f)})" for f in files) or ist.empty_sql(ist.AT_SCHEMA)
+    return f"""SELECT * FROM ({parts}) QUALIFY row_number() OVER (PARTITION BY {', '.join(ia.IDENT[t])} ORDER BY vt) = 1"""
+
+
 def compact_range(con, base: str, runs: list[str], name: str, out: Path, sliced: bool = True, generation: ist.Identity = False,
-                  fill: Fill | None = None, fill_nulls: bool = False) -> dict:
+                  fill: Fill | None = None, fill_nulls: bool = False, attributed: bool = False) -> dict:
     """Key range `name` of the generation folded from the base under `base` and the runs `runs` (dirs, oldest first) into
     `out`'s range files, as `build` writes them: `pvl/`, `pv/` and `rd/` (the islands of `pvl`'s pieces), and with the
     owner axis `sv/` and `svt/`. `generation`: the path versions carry `GENERATION` — read from the inputs, or, with
@@ -180,6 +192,10 @@ def compact_range(con, base: str, runs: list[str], name: str, out: Path, sliced:
         doc["svt"] = sn.write_sorted(sn._batches(con, f"SELECT {', '.join(ist.SVT_SCHEMA.names)} FROM svt ORDER BY depth, path, usr NULLS FIRST, vf"),
                                      rf("svt"), ist.SVT_SCHEMA, ist.RANGE_RG, dictionary=["kind", "usr"])
         con.execute("DROP TABLE sv; DROP TABLE svt")
+    if attributed:
+        t = ist.ATTRIBUTION
+        doc[t] = sn.write_sorted(sn._batches(con, f"SELECT {ist.qcols(ist.AT_SCHEMA.names)} FROM ({attribution_versions_sql(base, runs, name)}) ORDER BY depth, path, vf"),
+                                 rf(t), ist.AT_SCHEMA, ist.RANGE_RG, dictionary=["user", "source"])
     return doc
 
 
@@ -214,8 +230,11 @@ def fold_gen(gen_dir: Path, out: Path, work: Path, *, gen: str, runs: list[dict]
     sliced = ist.sliced(base)
     generation = (ist.has_generation(base) or fill is not None) if identity is None else identity
     fill_nulls = fill is not None and ist.has_generation(base) is True
-    doc = {**{k: v for k, v in base.items() if k not in ("scans", "slices", ist.GENERATION)},
-           "scans": [*base["scans"], *run_scans(gen_dir, gen, runs)], "slices": sliced}
+    # The attribution table: the base's, or opened by a run (its `meta.json` says so). The covered scans ride their
+    # entries (`ATTRIBUTION_SRC`, kept in a run scan's pinned `scans.json`).
+    attributed = ist.attributed(base) or any(ist.ATTRIBUTION in json.loads((gen_dir / r["key"] / "meta.json").read_text()) for r in runs)
+    doc = {**{k: v for k, v in base.items() if k not in ("scans", "slices", ist.GENERATION, ist.ATTRIBUTION)},
+           "scans": [*base["scans"], *run_scans(gen_dir, gen, runs)], "slices": sliced, **({ist.ATTRIBUTION: True} if attributed else {})}
     doc = ist.record_generation(doc, generation)
     if out.exists():
         shutil.rmtree(out)
@@ -229,7 +248,7 @@ def fold_gen(gen_dir: Path, out: Path, work: Path, *, gen: str, runs: list[dict]
 
     def one(cur, i: int) -> dict:
         t0 = monotonic()
-        got = compact_range(cur, str(gen_dir), run_dirs, f"r{i:04d}", out, sliced, generation, fill, fill_nulls)
+        got = compact_range(cur, str(gen_dir), run_dirs, f"r{i:04d}", out, sliced, generation, fill, fill_nulls, attributed)
         with lock:
             done[0] += 1
             err(f"fold {gen}: range {i + 1}/{k}: {sum(got.values()):,} rows in {monotonic() - t0:.1f}s "

@@ -3377,6 +3377,7 @@ from .interval_export import export_cmd as _interval_export  # noqa: E402
 from .interval_backfill import backfill_cmd as _interval_backfill  # noqa: E402
 from .interval_identity import migrate_cmd as _interval_identity  # noqa: E402
 from .interval_backfill import verify_generation_cmd as _interval_verify_generation  # noqa: E402
+from .interval_attribution import backfill_attribution_cmd as _interval_backfill_attribution, convert_cmd as _interval_attribution_convert  # noqa: E402
 
 _interval_store.add_command(_interval_local_build)
 _interval_store.add_command(_interval_local_add)
@@ -3385,6 +3386,8 @@ _interval_store.add_command(_interval_export)
 _interval_store.add_command(_interval_backfill)
 _interval_store.add_command(_interval_identity)
 _interval_store.add_command(_interval_verify_generation)
+_interval_store.add_command(_interval_backfill_attribution)
+_interval_store.add_command(_interval_attribution_convert)
 _interval_store.add_command(_interval_append)
 _interval_store.add_command(_interval_merge)
 _interval_store.add_command(_interval_runs)
