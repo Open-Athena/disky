@@ -157,3 +157,30 @@ def test_prior_dir_counts_match_the_ancestor_expansion():
     ]
     assert [(k, lvl, d, want.get((k, lvl, d), 0)) for k, lvl, d, _ in got] == got
 
+
+
+@pytest.mark.parametrize("batch_keys, queries", [(1, 8), (2, 4), (256, 2)])
+def test_start_probes_read_every_row_under_each_near_prefix_in_key_batches(tmp_path, batch_keys, queries):
+    """Each near key gets every prior row whose name starts with it (nested keys `abc` / `abcd` both), once per tier,
+    whatever the batching; a row between two batched keys that starts with neither is read (the batch's `s` range) but
+    never joined."""
+    con = duckdb.connect()
+    con.execute("CREATE TABLE source(s VARCHAR, depth UTINYINT, path VARCHAR, usr VARCHAR, vf TIMESTAMP, vt TIMESTAMP, size BIGINT, n_files BIGINT)")
+    rows = [("abc", "b/1", 1), ("abcd", "b/2", 2), ("abcde", "b/3", 3), ("abd", "b/4", 4), ("abx", "b/5", 5), ("xyz", "b/6", 6), ("xyzé", "b/7", 7)]
+    con.executemany("INSERT INTO source VALUES (?, 3, ?, NULL, TIMESTAMP '2026-10-01', TIMESTAMP '2027-01-01', ?, 1)", rows)
+    file = str(tmp_path / "source.parquet")
+    con.execute(f"COPY source TO {an.q(file)} (FORMAT PARQUET)")
+    con.execute(f"CREATE TABLE prows({an.AR_COLS})")
+    tier = SimpleNamespace(shard_file=lambda mode, key: file if key != "missing" else None)
+    assert an.probe_start_rows(con, [tier, tier], ["abc", "abcd", "abx", "missing", "xyz"], batch_keys=batch_keys) == queries
+    assert con.execute("SELECT k, size, count(*) FROM prows GROUP BY ALL ORDER BY k, size").fetchall() == [
+        ("abc", 1, 2), ("abc", 2, 2), ("abc", 3, 2),
+        ("abcd", 2, 2), ("abcd", 3, 2),
+        ("abx", 5, 2),
+        ("xyz", 6, 2), ("xyz", 7, 2),
+    ]
+
+
+def test_start_probe_batch_size_must_be_positive():
+    with pytest.raises(ValueError, match="^batch_keys must be positive$"):
+        an.probe_start_rows(None, [], [], batch_keys=0)
