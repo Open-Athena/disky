@@ -1,4 +1,6 @@
 """Specs for the cache warm-up plan (`dt_cloud.warm`): exact request lists."""
+from http.client import IncompleteRead, RemoteDisconnected
+
 from dt_cloud import warm as W
 import pytest
 
@@ -140,22 +142,25 @@ def test_warm_cli_exits_nonzero_for_failed_requests(monkeypatch, statuses, code,
     assert (result.exit_code, result.stdout, logs) == (code, "", [summary])
 
 
-def test_warm_refetches_a_truncated_body(monkeypatch):
-    """A body cut short of its Content-Length (the 18:02 run's 09-23 full diff: `IncompleteRead`) is fetched again
-    before the request counts as failed; one cut short every time is a transport failure (status 0)."""
+@pytest.mark.parametrize("error", [
+    lambda: IncompleteRead(b"{", 9),  # the 18:02 run's 09-23 full diff: a body cut short of its Content-Length
+    lambda: RemoteDisconnected("Remote end closed connection without response"),  # cw's 10-23T1801 warm-up
+])
+def test_warm_refetches_after_a_transport_error(monkeypatch, error):
+    """A transport error is fetched again before the request counts as failed; one that recurs every time is a
+    transport failure (status 0)."""
     import io
-    from http.client import IncompleteRead
 
-    class Truncated(io.BytesIO):
+    class Broken(io.BytesIO):
         def read(self, *a):
-            raise IncompleteRead(b"{", 9)
+            raise error()
 
     class Whole(io.BytesIO):
         status = 200
         headers = {"x-cache": "miss"}
 
-    queue = {"/once": [Truncated(), Whole(b"{}")], "/always": [Truncated() for _ in range(W.TRUNCATED_RETRIES + 1)]}
+    queue = {"/once": [Broken(), Whole(b"{}")], "/always": [Broken() for _ in range(W.TRANSPORT_RETRIES + 1)]}
     monkeypatch.setattr(W.urllib.request, "urlopen", lambda req, timeout: queue[req.full_url.removeprefix("https://x.test")].pop(0))
     res = W.warm("https://x.test", {}, ["/once", "/always"], jobs=1)
-    assert [(p, s, tier) for p, s, _, tier in res] == [("/once", 200, "miss"), ("/always", 0, "IncompleteRead")]
+    assert [(p, s, tier) for p, s, _, tier in res] == [("/once", 200, "miss"), ("/always", 0, type(error()).__name__)]
     assert queue == {"/once": [], "/always": []}
