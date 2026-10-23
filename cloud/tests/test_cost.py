@@ -97,12 +97,17 @@ def test_parse_series():
 def test_slope():
     day = dc.DAY
     assert dc.slope_per_day([(0, 10.0), (day, 11.0), (2 * day, 12.0)]) == 1.0
-    assert dc.slope_per_day([(0, 10.0), (day, 14.0), (2 * day, 12.0), (3 * day, 16.0)]) == 1.6
+    # deltas 4, -2, 4
+    assert dc.slope_per_day([(0, 10.0), (day, 14.0), (2 * day, 12.0), (3 * day, 16.0)]) == 4.0
+    # a one-off fill (+40) and cleanup (-30) don't set the rate
+    assert dc.slope_per_day([(0, 10.0), (day, 11.0), (2 * day, 51.0), (3 * day, 52.0), (4 * day, 22.0), (5 * day, 23.0)]) == 1.0
+    # an even count: the middle two's mean; a 2-day gap counts per day
+    assert dc.slope_per_day([(0, 0.0), (day, 2.0), (3 * day, 10.0)]) == 3.0
     assert dc.slope_per_day([(day, 5.0)]) == 0.0
 
 
 def bucket(points: int, policy: dc.BucketPolicy = dc.BucketPolicy()) -> dict:
-    return {"points": points, "soft_delete_off": policy.soft_delete_off, "ttl_days": policy.ttl_days, "partial_ttl": policy.partial_ttl}
+    return {"points": points, "short": points < dc.MIN_POINTS, "soft_delete_off": policy.soft_delete_off, "ttl_days": policy.ttl_days, "partial_ttl": policy.partial_ttl}
 
 
 @pytest.mark.parametrize("policies, bytes_, usd", [
@@ -231,7 +236,7 @@ def fake_gcp(monkeypatch, tmp_path):
     return calls, args
 
 
-SUMMARY = "We can leave D running for 10d for 26.8→33.3 GB of storage ($10.00→$13.00/mo) and $41.85→$41.85/mo on compute (list-price estimates)."
+SUMMARY = "We can leave D running for 10d for 26.8→33.3 GB of storage ($10.00→$13.00/mo) and $41.85→$41.85/mo on compute (list-price estimates; provisional: short window (< 14 daily points) for bkt-a, bkt-b)."
 
 
 def test_cli(fake_gcp):
@@ -257,8 +262,8 @@ def test_cli(fake_gcp):
         "bkt-b live-object WEIRD 1 1.1 +0.00 unpriced",
         "now: 26.8 GB (live-object 22.5 GB, soft-deleted-object 4.3 GB), $10.00/mo; live -1.07 GB/day",
         "10d: 33.3 GB, $13.00/mo",
-        "bkt-a: 3 daily points; soft delete off: soft-deleted bytes drain",
-        "bkt-b: 3 daily points; lifecycle Delete at 7d: live bytes held flat; soft-deleted bytes held",
+        "bkt-a: short window (3 pts); soft delete off: soft-deleted bytes drain",
+        "bkt-b: short window (3 pts); lifecycle Delete at 7d: live bytes held flat; soft-deleted bytes held",
         "UNPRICED: 1.1 GB of storage class WEIRD",
         "",
         "Compute (Batch jobs labeled app=disky,deployment=d|d-old, created in the window; VM-h = runDuration × min(taskCount, parallelism)):",
@@ -290,6 +295,22 @@ def test_cli_json(fake_gcp):
         {"10d": {"bytes": 31 * G, "usd_per_month": 13.0}},
         41.8515625,
     )
+
+
+def test_long_window():
+    # 14 daily points growing 1 GiB/day, with a one-off 100 GiB fill on the 15th: the rate stays 1 GiB/day
+    pts = [point(d, (d + (100 if d >= 15 else 0)) * G) for d in range(23, 9, -1)]
+    doc = dc.report(name="X", project="p", now=NOW, window_days=14.0, horizons={"10d": 10.0}, prices=PRICES,
+                    series=dc.parse_series([{"timeSeries": [series("bkt-c", "live-object", "REGIONAL", pts)]}]))
+    lines = [" ".join(line.split()) for line in dc.render(doc).splitlines()]
+    assert lines[4:] == [
+        "bkt-c live-object REGIONAL 14 132.1 +1.07 $61.50",
+        "now: 132.1 GB (live-object 132.1 GB), $61.50/mo; live +1.07 GB/day",
+        "10d: 142.8 GB, $66.50/mo",
+        "bkt-c: 14 daily points; soft-deleted bytes held",
+        "",
+        "We can leave X running for 10d for 132.1→142.8 GB of storage ($61.50→$66.50/mo) (list-price estimates).",
+    ]
 
 
 def test_cli_needs_a_target():
