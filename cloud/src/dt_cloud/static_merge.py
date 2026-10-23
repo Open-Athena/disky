@@ -478,6 +478,64 @@ def probe_cmd(
     print(json.dumps({"gen": gen, "manifest": stem, "inputs": [r["key"] for r in inputs], "output": run["key"], "result": result}, indent=1))
 
 
+@cli.command("compact-probe")
+@option("-c", "--chunk-rows", default=1 << 22, type=IntRange(min=1), help="The drill fold's chunks: roots per measurement / rollup q range")
+@option("-g", "--gen", required=True, help="The generation whose base and newest manifest's runs are folded")
+@option("-j", "--jobs", default=1, type=IntRange(min=1), help="The drill fold's chunks at a time")
+@option("-m", "--mount", required=True, help="Read-only local mount of the data bucket")
+@option("-M", "--mem", default="100GB", help="DuckDB memory limit")
+@option("-o", "--out", required=True, help="New local output directory outside the mount: the folded generation")
+@option("-p", "--threads", default=16, type=int, help="DuckDB threads")
+@option("-T", "--tmp", default="/stage/tmp/compact-probe", help="Local work dir")
+@option("-u", "--report", help="Also write the JSON report to this URL (`gs://<scratch>/…/<name>.json`: the VM's disks go with it)")
+def compact_probe_cmd(chunk_rows, gen, jobs, mount, mem, out, threads, tmp, report) -> None:
+    """Fold the generation into its next one locally (`static_compact.fold_gen`, the compaction's own fold), read in place
+    from the mount: no upload, no successor / pointer / manifests in the bucket, no lease, no checkpoint, no pruning; only
+    OUT and TMP are written. Logs the fold's stage lines; prints a JSON of the summary (per-part seconds and peaks) and
+    every output file's size and md5 (to compare with a published compaction's `compaction.json`), also written beside
+    OUT and to `-u`; stdout gets it without the files."""
+    import hashlib
+    from concurrent.futures import ThreadPoolExecutor
+
+    from .static_compact import fold_gen
+
+    source = Path(mount)
+    gen_dir, output, work = source / PREFIX / gen, Path(out), Path(tmp)
+    for path in (output, work):
+        if path.resolve().is_relative_to(source.resolve()):
+            raise UsageError(f"probe output/work must be outside the source mount: {path}")
+    if output.exists():
+        raise UsageError(f"probe output already exists: {output}")
+    manifest, runs = ar.newest_runs(gen_dir)
+    new_gen = ar.next_gen(gen)
+    err(f"compact-probe {gen} → {new_gen}: manifest {manifest}, {len(runs)} runs, -j {jobs} -M {mem} -p {threads} -c {chunk_rows}")
+    summary = fold_gen(gen_dir, output, work, gen=gen, new_gen=new_gen, runs=runs, threads=threads, mem=mem, chunk_rows=chunk_rows, jobs=jobs)
+
+    def md5(p: Path) -> str:
+        h = hashlib.md5()
+        with open(p, "rb") as fh:
+            while b := fh.read(1 << 24):
+                h.update(b)
+        return h.hexdigest()
+
+    t = monotonic()
+    files = sorted(p for p in output.rglob("*") if p.is_file())
+    with ThreadPoolExecutor(16) as ex:
+        sums = list(ex.map(md5, files))
+    rels = [p.relative_to(output).as_posix() for p in files]
+    doc = {"gen": gen, "new_gen": new_gen, "manifest": manifest, "runs": [r["key"] for r in runs], "jobs": jobs, "summary": summary,
+           "md5_s": round(monotonic() - t, 1), "files": {k: {"size": p.stat().st_size, "md5": s} for k, p, s in zip(rels, files, sums)}}
+    text = json.dumps(doc, indent=1) + "\n"
+    (output.parent / f"{output.name}.probe.json").write_text(text)
+    if report:
+        from .blobstore import Store
+
+        root, _, key = report.rpartition("/")
+        Store(root).write_text(key, text)
+        err(f"compact-probe: report → {report}")
+    print(json.dumps({**{k: v for k, v in doc.items() if k != "files"}, "n_files": len(rels)}, indent=1))
+
+
 @cli.command("prune")
 @option("-b", "--bucket", default=data_bucket, help="Data bucket")
 @option("-g", "--gen", required=True, help="Base generation")
