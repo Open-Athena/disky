@@ -14,6 +14,7 @@ Status: tracking doc, opened 2026-10-22. This is the top priority for gcs (Ryan,
 | 10-22 | 30 | 45 | 129 | 3 (failed) | 37 | 277 |
 | 10-22T1545 (manual) | 30 | 46 | 107 | 24 | 44 | 289 (green) |
 | 10-22T2316 (manual) | 21 | 48 | skipped (compaction held the store) | 15 | 41 | 157 (green; marker failed, probe refused search) |
+| 10-23 (daily) | 21 | 46 | skipped (compaction) | 24 | 39 | ~150 (green; marker failed until g3) |
 
 Phases overlap (static-names runs beside interval-store and post), so the totals aren't sums. The total has grown from ~1 h to ~4.6 h in two weeks.
 
@@ -29,6 +30,19 @@ Phases overlap (static-names runs beside interval-store and post), so the totals
 | 10-22 | interval-store marker | the append's exact check found 196,021 depth-3 objects with no `generation` in the base's range files, lost by the 10-09 `backfill-generation` (the served sorts have them, so the old check passed) | in progress: backfill RC + the append fills a NULL generation |
 | 10-23 | static compaction | the laptop driver died on a connection reset and released the coordinator lease while the compaction ran; the 07:00 append would have superseded it | lease held by hand; in progress: a running compaction holds the store itself |
 | 10-08…10-22 | static compaction | drill fold ran 6 h silent and was killed; level 6 stopgap | chunked fold (70ed412a); re-trial running |
+
+## Status 2026-10-23 (before the first daily on every fix)
+
+| phase | last daily | expected next | O(#changes)? |
+|---|---:|---:|---|
+| list | 21 | same | no: a full listing per bucket (item 6) |
+| path-index | 46 | same | no: per-scan sorts (item 5) |
+| interval-store append | 15–24 | ~20, marker passing on `2026-10-09b.g3` | yes |
+| static append | ~90 (2316: catalog 33 refold, anchors 47) | catalog 12 carried; anchors bounded (bcca228a, 14581b65), unmeasured | mostly |
+| retire | 37–44 | a few min, markers only | yes |
+| static compaction | 16 h+, killed at Batch's limit | ~10–12 h on levers 1–3 + 5 with checkpoints; the three root passes (~7.5 h) untouched | amortized; lever 4 + a parallel fold for < 1 h |
+
+Carry merge (10-22 L3) drill: 166 → 155 (levers 1–2) → 79 min (lever 3, parallel writes). Now read-bound (35 min) + fold (18).
 
 ## What each phase scales with
 
