@@ -230,11 +230,12 @@ STEPS = ["intervals", "shards", "catalog", "fold/long-roots-tables", "fold/long-
 
 
 @pytest.mark.parametrize("jobs", [1, 4])
-@pytest.mark.parametrize("stop", ["shards", "fold/long-roots", "fold/spilled", "drill"])
+@pytest.mark.parametrize("stop", ["intervals", "shards", "catalog", "fold/long-roots", "fold/spilled", "drill"])
 def test_a_fold_stopped_after_a_saved_step_resumes_there_to_the_same_bytes(world, tmp_path, stop, jobs):
     """C's fold (chunks of 3 roots), stopped right after a step is saved: the rerun restores what was saved, saves only
-    the steps after it, and writes the uninterrupted fold's files. The stopped fold runs `jobs` chunks at a time, the
-    rerun the other count (1 ↔ 4): a checkpoint doesn't depend on it."""
+    the steps after it, and writes the uninterrupted fold's files. A part's save runs beside the next part, so a failed
+    save surfaces once that part ends, and no later step is saved. The stopped fold runs `jobs` (1 or 4) at a time, the
+    rerun the other count: a checkpoint doesn't depend on it."""
     gen_dir = world["c_store"] / "g"
     _, runs = ar.newest_runs(gen_dir)
     ck_root = str(tmp_path / "scratch")

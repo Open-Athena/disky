@@ -91,26 +91,28 @@ BUCKET = "split_part(path, '/', 1)"
 # ── Census: every prefix's range rows ──────────────────────────────────────
 
 
-def census(con, src: str, floor_rows: int, floor_bytes: int | None = None) -> pa.Table:
+def census(con, src: str, floor_rows: int, floor_bytes: int | None = None, tag: str = "") -> pa.Table:
     """Every prefix (≥ 3 characters) of `src`'s suffixes (a table or `read_parquet` of sx rows) whose range
     holds at least `floor_rows` rows (or `floor_bytes` decoded bytes): `NODE_SCHEMA`, sorted by `q`. Level
-    by level: a prefix of length `L + 1` can reach the floor only inside a prefix of length `L` that does."""
+    by level: a prefix of length `L + 1` can reach the floor only inside a prefix of length `L` that does. `tag`: suffixes
+    its working tables' names, so censuses can run at once on cursors of one database (`static_names.each`)."""
     keep = f"n >= {floor_rows}" + (f" OR ub >= {floor_bytes}" if floor_bytes else "")
-    con.execute("DROP TABLE IF EXISTS cx; DROP TABLE IF EXISTS cnodes")
-    con.execute(f"CREATE TABLE cx AS SELECT s, {UBYTES}::BIGINT AS ub FROM {src}")
-    con.execute("CREATE TABLE cnodes (q VARCHAR, rows BIGINT, ubytes BIGINT)")
+    cx, cnodes, lvl = f"cx{tag}", f"cnodes{tag}", f"lvl{tag}"
+    con.execute(f"DROP TABLE IF EXISTS {cx}; DROP TABLE IF EXISTS {cnodes}")
+    con.execute(f"CREATE TABLE {cx} AS SELECT s, {UBYTES}::BIGINT AS ub FROM {src}")
+    con.execute(f"CREATE TABLE {cnodes} (q VARCHAR, rows BIGINT, ubytes BIGINT)")
     L = 3
     while True:
-        con.execute("DROP TABLE IF EXISTS lvl")
-        con.execute(f"""CREATE TABLE lvl AS SELECT left(s, {L}) AS q, count(*)::BIGINT AS n, sum(ub)::BIGINT AS ub
-            FROM cx WHERE length(s) >= {L} GROUP BY q HAVING {keep}""")
-        if con.execute("SELECT count(*) FROM lvl").fetchone()[0] == 0:
+        con.execute(f"DROP TABLE IF EXISTS {lvl}")
+        con.execute(f"""CREATE TABLE {lvl} AS SELECT left(s, {L}) AS q, count(*)::BIGINT AS n, sum(ub)::BIGINT AS ub
+            FROM {cx} WHERE length(s) >= {L} GROUP BY q HAVING {keep}""")
+        if con.execute(f"SELECT count(*) FROM {lvl}").fetchone()[0] == 0:
             break
-        con.execute("INSERT INTO cnodes SELECT q, n, ub FROM lvl")
-        con.execute(f"CREATE OR REPLACE TABLE cx AS SELECT s, ub FROM cx SEMI JOIN lvl ON left(cx.s, {L}) = lvl.q WHERE length(s) > {L}")
+        con.execute(f"INSERT INTO {cnodes} SELECT q, n, ub FROM {lvl}")
+        con.execute(f"CREATE OR REPLACE TABLE {cx} AS SELECT s, ub FROM {cx} x SEMI JOIN {lvl} v ON left(x.s, {L}) = v.q WHERE length(s) > {L}")
         L += 1
-    out = con.execute("SELECT q, rows, ubytes FROM cnodes ORDER BY q").to_arrow_table().cast(NODE_SCHEMA)
-    con.execute("DROP TABLE IF EXISTS cx; DROP TABLE IF EXISTS cnodes; DROP TABLE IF EXISTS lvl")
+    out = con.execute(f"SELECT q, rows, ubytes FROM {cnodes} ORDER BY q").to_arrow_table().cast(NODE_SCHEMA)
+    con.execute(f"DROP TABLE IF EXISTS {cx}; DROP TABLE IF EXISTS {cnodes}; DROP TABLE IF EXISTS {lvl}")
     return out
 
 
