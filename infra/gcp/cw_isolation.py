@@ -25,7 +25,7 @@ def prepare_isolation(
             public_access_prevention="enforced",
             force_destroy=False,
             labels={**labels, "component": component},
-            soft_delete_policy={"retention_duration_seconds": 0},
+            soft_delete_policy={"retention_duration_seconds": 604800 if days is None else 0},
             lifecycle_rules=[] if days is None else [{"action": {"type": "Delete"}, "condition": {"age": days}}],
             opts=pulumi.ResourceOptions(protect=True),
         )
