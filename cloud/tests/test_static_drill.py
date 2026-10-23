@@ -86,7 +86,7 @@ def test_writing_sorted_chunks_writes_the_same_bytes(tmp_path, file_rows, thread
             con.execute(f"COPY (SELECT * FROM {table} WHERE {where} ORDER BY {order}) TO '{f}' (FORMAT parquet, COMPRESSION zstd)")
             chunks[d].append(f)
     sorted_doc = sd.write_kind(con, tmp_path / "sorted", "long", roots="dr1", rollups="rup", file_rows=file_rows, rg=3)
-    chunk_doc = sd.write_kind(con, tmp_path / "chunks", "long", file_rows=file_rows, rg=3, chunks=chunks, threads=threads)
+    chunk_doc = sd.write_kind(con, tmp_path / "chunks", "long", file_rows=file_rows, rg=3, chunks=chunks, jobs=threads)
     assert chunk_doc == sorted_doc
     files = sorted(p.relative_to(tmp_path / "sorted").as_posix() for p in (tmp_path / "sorted").rglob("*") if p.is_file())
     assert sorted(p.relative_to(tmp_path / "chunks").as_posix() for p in (tmp_path / "chunks").rglob("*") if p.is_file()) == files

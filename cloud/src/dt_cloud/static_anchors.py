@@ -291,11 +291,105 @@ def anchors_meta(R: int, K: int, sets: dict, scans: list[str] | None = None, **e
             **({"scans": scans} if scans is not None else {}), **extra}
 
 
+#: DuckDB threads per shard process when `build_tier_local` builds a tier's rollups shard by shard (`jobs` > 1).
+ANCHOR_THREADS = 4
+
+
+def _sorted_cells(con, table: str, out: str) -> None:
+    con.execute(f"COPY (SELECT q, dir, kind, child, vf, b, o FROM {table} ORDER BY q, dir, kind, child, vf) TO {q(out)} (FORMAT parquet, COMPRESSION zstd)")
+
+
+def _shard_task(kind: str, files: list[str], R: int, K: int, rule: HexRule | None, out: str, threads: int, mem: str, tmp: str) -> dict:
+    """One shard's rollups of `kind` (`end`, `exact`: `base_rollups`; `start`: `start_base` over its own prefix census),
+    sorted → parquet `out`, on a database of its own. A key (`s`; a `^q` prefix, ≥ 3 characters) lies in one shard, so a
+    shard's cells are exactly the tier's cells of its keys."""
+    import shutil
+
+    con = connect(threads, mem, tmp)
+    try:
+        if kind == START:
+            doc = start_base(con, files, start_heads_sql(prefix_counts_sql(files), R), R, K, "cells")
+        else:
+            doc = base_rollups(con, files, kind, R, K, "cells", rule)
+        con.execute("CREATE TABLE IF NOT EXISTS cells (q VARCHAR, dir VARCHAR, kind TINYINT, child VARCHAR, vf BIGINT, b BIGINT, o BIGINT)")
+        _sorted_cells(con, "cells", out)
+        return doc
+    finally:
+        con.close()
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def write_rollup_parts(parts: list[str], out: Path, name: str) -> tuple[int, pa.Table]:
+    """Sorted cell files (`_shard_task`'s, key-disjoint and in key order) streamed in turn → `out/<name>` with its group
+    index: what `write_rollups` writes of their union."""
+    from .static_roots import ROLLUP_SCHEMA, write_indexed
+
+    def batches():
+        for f in parts:
+            yield from pq.ParquetFile(f).iter_batches(batch_size=1 << 17)
+
+    return write_indexed(batches(), out / name, ROLLUP_SCHEMA, "dir", name, ["q", "dir", "child"], ROLLUP_RG)
+
+
+def _tier_parallel(con, sx_files: list[str], names_files: list[str], out: Path, R: int, K: int, rule: HexRule | None, jobs: int,
+                   work: Path) -> tuple[dict, dict]:
+    """`build_tier_local`'s rollups shard by shard over `jobs` processes (`static_names.ConPool`), biggest shards first:
+    each kind's sorted cell files in shard order, and its docs summed. Returns `({kind: parts}, {kind: doc})`."""
+    import os
+
+    from .static_names import ConPool
+
+    tasks = [(kind, i, f) for kind, files in (("end", sx_files), ("exact", names_files), (START, names_files)) for i, f in enumerate(files)]
+    parts: dict[str, list[str]] = {kind: [""] * len(files) for kind, files in (("end", sx_files), ("exact", names_files), (START, names_files))}
+    docs: dict[str, dict] = {}
+    work.mkdir(parents=True, exist_ok=True)
+    with ConPool(con, jobs, "anchors") as pool:
+        futs = []
+        for kind, i, f in sorted(tasks, key=lambda t: -os.path.getsize(t[2])):
+            parts[kind][i] = str(work / f"{kind}-{i:05d}.parquet")
+            futs.append((kind, pool.submit(_shard_task, kind, [f], R, K, rule, parts[kind][i], pool.task_threads, pool.mem,
+                                           str(work / "tmp" / f"{kind}-{i:05d}"))))
+        for kind, fut in futs:
+            d = fut.result()
+            docs[kind] = {k: docs.get(kind, {}).get(k, 0) + v for k, v in d.items()}
+    return parts, docs
+
+
 def build_tier_local(con, sx_files: list[str], names_files: list[str], out: Path, R: int, K: int, scans: list[str] | None = None,
-                     rule: HexRule | None = None) -> dict:
+                     rule: HexRule | None = None, jobs: int | None = None, work: Path | None = None) -> dict:
     """A whole tier's `anchors/` locally from its shard files (the base path in tests; on Batch per shard), under the
-    generation's hex-run `rule` (recorded in `meta.json`)."""
+    generation's hex-run `rule` (recorded in `meta.json`).
+
+    `jobs` > 1 (default: `con`'s threads over `ANCHOR_THREADS`, at most the shards): the shards in parallel, each in a
+    process of its own (a key lies in one shard: the staged path's per-shard build), their sorted cells (under `work`,
+    default a new dir in DuckDB's `temp_directory`) streamed in shard order into the same files, so the same bytes; 1:
+    each kind over all its shards at once on `con`."""
+    import shutil
+
+    from .static_names import pool_jobs
+
     out.mkdir(parents=True, exist_ok=True)
+    jobs = pool_jobs(con, max(len(sx_files), len(names_files), 1), ANCHOR_THREADS) if jobs is None else jobs
+    if jobs > 1:
+        if work is None:  # beside DuckDB's spill (the job's work disk), never inside the generation being written
+            import tempfile
+
+            tmp = con.execute("SELECT current_setting('temp_directory')").fetchone()[0]
+            if tmp:
+                Path(tmp).mkdir(parents=True, exist_ok=True)
+            work = Path(tempfile.mkdtemp(prefix="anchors-shards-", dir=tmp or None))
+        parts, pdocs = _tier_parallel(con, sx_files, names_files, out, R, K, rule, jobs, work)
+        sets, docs = {}, {}
+        for kind, files in (("end", sx_files), ("exact", names_files)):
+            docs[kind] = pdocs.get(kind, {}) if files else {}
+            _, idx = write_rollup_parts(parts[kind], out, f"rollups/{kind}-s0000.parquet")
+            sets[kind] = write_index([idx], out, kind)
+        (out / "meta.json").write_text(json.dumps(anchors_meta(R, K, sets, scans, **rule_json(rule)), indent=1) + "\n")
+        if names_files:
+            docs[START] = pdocs[START]
+            sets[START] = write_start_parts(parts[START], out / START, R, K, scans)
+        shutil.rmtree(work)
+        return {"sets": sets, "docs": docs}
     sets, docs = {}, {}
     for kind, files in (("end", sx_files), ("exact", names_files)):
         con.execute("DROP TABLE IF EXISTS cells")
@@ -380,6 +474,15 @@ def write_start(con, table: str, out: Path, R: int, K: int, scans: list[str] | N
     _, idx = write_rollups(con, table, out, f"rollups/{START}-{name}.parquet")
     doc = write_index([idx], out, START)
     (out / "meta.json").write_text(json.dumps(start_meta(R, K, doc, scans, **extra), indent=1) + "\n")
+    return doc
+
+
+def write_start_parts(parts: list[str], out: Path, R: int, K: int, scans: list[str] | None = None, name: str = "s0000") -> dict:
+    """`write_start` from sorted cell files (`write_rollup_parts`), not a table: the same files."""
+    out.mkdir(parents=True, exist_ok=True)
+    _, idx = write_rollup_parts(parts, out, f"rollups/{START}-{name}.parquet")
+    doc = write_index([idx], out, START)
+    (out / "meta.json").write_text(json.dumps(start_meta(R, K, doc, scans), indent=1) + "\n")
     return doc
 
 
