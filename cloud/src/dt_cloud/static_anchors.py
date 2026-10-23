@@ -95,14 +95,19 @@ def term_key(text: str, mode: str | None) -> str:
     return {"start": f"/{text}", "end": f"{text}/", "exact": f"/{text}/", None: text}[mode]
 
 
-def first_hit_sql(mode: str, key: str = "s", par: str = "par", rule: HexRule | None = None) -> str:
-    """The per-segment first-hit test of a row whose `key` column is the matched key (`q` for `end`, `/q` for
-    `start`/`exact`) and whose lowercase parent is `par`: no ancestor segment matches. Under a hex-run rule (only `end`
-    can lose occurrences to it, `segment_occurs`), a `q$` row (a suffix row kept in a run's tail) also matches only
-    where the rule keeps its occurrence (the name from the row's `path`), and so does an ancestor segment."""
+def name_hit_sql(mode: str, key: str = "s", rule: HexRule | None = None) -> str:
+    """`first_hit_sql`'s test of the row's own name: under a hex-run rule a `q$` row matches only where the rule keeps
+    its occurrence (the name from the row's `path`); otherwise every row passes."""
+    if mode == "end" and rule is not None:
+        return f"NOT {end_dropped_sql(NAME, key, rule)}"
+    return "true"
+
+
+def par_hit_sql(mode: str, key: str = "s", par: str = "par", rule: HexRule | None = None) -> str:
+    """`first_hit_sql`'s test of the row's ancestors, a function of `(key, par)` only: no ancestor segment matches."""
     if mode == "end" and rule is not None:
         anc = f"list_bool_or(list_transform(string_split({par}, '/'), lambda seg: ends_with(seg, {key}) AND NOT {end_dropped_sql('seg', key, rule)}))"
-        return f"(NOT {end_dropped_sql(NAME, key, rule)} AND NOT (contains({par} || '/', {key} || '/') AND {anc}))"
+        return f"NOT (contains({par} || '/', {key} || '/') AND {anc})"
     if mode == "end":
         return f"NOT contains({par} || '/', {key} || '/')"
     if mode == "exact":
@@ -110,6 +115,23 @@ def first_hit_sql(mode: str, key: str = "s", par: str = "par", rule: HexRule | N
     if mode == "start":
         return f"NOT contains('/' || {par}, {key})"
     raise ValueError(mode)
+
+
+def first_hit_sql(mode: str, key: str = "s", par: str = "par", rule: HexRule | None = None) -> str:
+    """The per-segment first-hit test of a row whose `key` column is the matched key (`q` for `end`, `/q` for
+    `start`/`exact`) and whose lowercase parent is `par`: no ancestor segment matches. Under a hex-run rule (only `end`
+    can lose occurrences to it, `segment_occurs`), a `q$` row (a suffix row kept in a run's tail) also matches only
+    where the rule keeps its occurrence (the name from the row's `path`), and so does an ancestor segment."""
+    return f"(({name_hit_sql(mode, key, rule)}) AND ({par_hit_sql(mode, key, par, rule)}))"
+
+
+def first_hits_sql(rows: str, mode: str, rule: HexRule | None = None) -> str:
+    """The rows of `rows` (a query of `AR_COLS`) passing `first_hit_sql` on `k`, the ancestor test run once per distinct
+    `(k, par)` rather than per row: a directory's rows share it, and under a hex-run rule it is a lambda over every
+    segment (cw's 10-21T0602 `end` fold: 5,631 cpu-s filtering 27.5M rows)."""
+    return f"""WITH r AS MATERIALIZED ({rows})
+        SELECT r.* FROM r SEMI JOIN (SELECT k, par FROM (SELECT DISTINCT k, par FROM r) WHERE {par_hit_sql(mode, 'k', rule=rule)}) AS h USING (k, par)
+        WHERE {name_hit_sql(mode, 'k', rule)}"""
 
 
 # ── The name index ─────────────────────────────────────────────────────────
@@ -215,7 +237,7 @@ def base_rollups(con, files: list[str], mode: str, R: int, K: int, into: str, ru
     con.execute(f"CREATE OR REPLACE TABLE hk AS SELECT s AS k FROM ({files_sql(files, 's')}) GROUP BY s HAVING count(*) > {R}")
     con.execute(f"CREATE OR REPLACE TABLE ar AS SELECT x.* FROM ({shard_rows_sql(files)}) AS x SEMI JOIN hk USING (k)")
     heavy_dirs(con, "ar", R)
-    con.execute(f"CREATE OR REPLACE TABLE rt AS SELECT * FROM ar WHERE {first_hit_sql(mode, 'k', rule=rule)}")
+    con.execute(f"CREATE OR REPLACE TABLE rt AS {first_hits_sql('SELECT * FROM ar', mode, rule)}")
     con.execute("DROP TABLE ar; DROP TABLE hk")
     rollup_cells(con, "rt", "hv", K, into, closed=True)
     keys, dirs = con.execute("SELECT count(DISTINCT k), count(*) FROM hv").fetchone()
@@ -745,10 +767,9 @@ def run_rollups(con, prior: list[Tier], run: Tier, D: int, mode: str, R: int, K:
     doc["new_heavy"] = con.execute("SELECT count(*) FROM nh").fetchone()[0]
     if doc["new_heavy"]:
         # `rollup_cells` reads only the heads' keys' roots
-        con.execute(f"""CREATE OR REPLACE TABLE nroots AS SELECT * FROM (
-                SELECT k, any_value(depth) AS depth, path, usr, vf, min(vt) AS vt, any_value(size) AS size, any_value(n_files) AS n_files, any_value(par) AS par
-                FROM (SELECT * FROM prows SEMI JOIN (SELECT DISTINCT k FROM nh) USING (k) UNION ALL SELECT * FROM rr) GROUP BY k, path, usr, vf)
-            WHERE {first_hit_sql(mode, 'k', rule=rule)}""")
+        roots = """SELECT k, any_value(depth) AS depth, path, usr, vf, min(vt) AS vt, any_value(size) AS size, any_value(n_files) AS n_files, any_value(par) AS par
+            FROM (SELECT * FROM prows SEMI JOIN (SELECT DISTINCT k FROM nh) USING (k) UNION ALL SELECT * FROM rr) GROUP BY k, path, usr, vf"""
+        con.execute(f"CREATE OR REPLACE TABLE nroots AS {first_hits_sql(roots, mode, rule)}")
         rollup_cells(con, "nroots", "nh", K, into)
     # 4. Delta headers and cells at D for the heavy (k, dir) the run touches.
     doc["delta"] = delta_cells(con, mode, D, K, into, rule)
@@ -781,11 +802,12 @@ def delta_cells(con, mode: str, D: int, K: int, into: str, rule: HexRule | None 
         return 0
     con.execute("CREATE OR REPLACE TABLE pkid AS SELECT DISTINCT q, dir, child FROM ps WHERE kind = 1")
     con.execute("CREATE OR REPLACE TABLE plast AS SELECT q, dir, kind, child, arg_max(b, vf) AS b, arg_max(o, vf) AS o FROM ps WHERE kind IN (1, 2) GROUP BY ALL")
+    # each first hit under each of its ancestors: an equi-join on (k, dir), not a `starts_with` per (row, dir) of its key
+    hits = first_hits_sql("SELECT * FROM rr SEMI JOIN (SELECT DISTINCT q AS k FROM dt) USING (k)", mode, rule)
     con.execute(f"""CREATE OR REPLACE TABLE ev AS SELECT dt.q, dt.dir, {_child('x.path', 'dt.dir')} AS child,
             sum(CASE WHEN x.vf = {D} THEN x.size ELSE 0 END - CASE WHEN x.vt = {D} THEN x.size ELSE 0 END)::BIGINT AS db,
             sum(CASE WHEN x.vf = {D} THEN x.n_files ELSE 0 END - CASE WHEN x.vt = {D} THEN x.n_files ELSE 0 END)::BIGINT AS dn
-        FROM dt JOIN (SELECT * FROM rr WHERE {first_hit_sql(mode, 'k', rule=rule)}) AS x
-            ON x.k = dt.q AND (dt.dir = '' OR starts_with(x.path, dt.dir || '/'))
+        FROM dt JOIN ({_level_dirs(f"({hits})")}) AS x ON x.k = dt.q AND x.dir = dt.dir
         GROUP BY ALL""")
     # New kept children: not kept in any tier, while the kept count is under K, by name.
     con.execute(f"""CREATE OR REPLACE TABLE nk AS SELECT q, dir, child FROM (
