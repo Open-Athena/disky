@@ -1327,7 +1327,8 @@ def cleanup(path: Path) -> Iterator[None]:
 
 
 @step("retire", core=False, soft=True, options={"keep": int, "execute": bool, "static_gen": str, "static_store": str, "store": str,
-                                                "layer2": bool, "layer1": bool, "cache": bool, "copies": list, "backup": str, "markers_only": bool},
+                                                "layer2": bool, "layer1": bool, "cache": bool, "copies": list, "backup": str, "markers_only": bool,
+                                                "verify_jobs": int},
       requires=_retire_check)
 def retire(ctx: Ctx, arg: str | None) -> None:
     """Retire the per-scan sorts, footers, search sidecars (and, `layer2: true`, layer-2 listings; `layer1: true`, the raw
@@ -1337,7 +1338,8 @@ def retire(ctx: Ctx, arg: str | None) -> None:
     first (`$R2_ARCHIVE` when the data store is a local dir), then each of `copies` (a root, or `r2` for `$R2_ARCHIVE`; D1 left
     to the first). `store` / `static_store`: the
     stores (default the interval-store / static-names steps', else `$R2_ARCHIVE`); `static_gen` (default
-    `options.static-names.gen`); `backup`: copy what goes there first; `markers_only`: never verify in the task. Never
+    `options.static-names.gen`); `backup`: copy what goes there first; `markers_only`: never verify in the task;
+    `verify_jobs`: verify that many shares of the scans at once (`-J`; a backlog's retire then costs its slowest share). Never
     fatal: a failure warns, the files stay, the next run retries."""
     if ctx.reproc:
         err("retire off under REPROC")
@@ -1366,7 +1368,7 @@ def retire(ctx: Ctx, arg: str | None) -> None:
             dc = ctx.profile.layout.listing.replace("{scan}", "{id}") + "dir-cache/"
             cache = ["-c", dc + "*.parquet", "-c", dc + "*/*.parquet"]
     common = ["-G", static_gen, "-k", o["keep"], "-L", l2 + "index/{gen}/path-index.parquet", *(["-l", l2 + "*.parquet"] if o.get("layer2") else []), *l1, *cache,
-              *(["-m"] if o.get("markers_only") else []), "-o", store, "-S", static_store, *store_args_t(ctx), "-w", ctx.work / "retire",
+              *(["-m"] if o.get("markers_only") else []), *(["-J", o["verify_jobs"]] if o.get("verify_jobs") else []), "-o", store, "-S", static_store, *store_args_t(ctx), "-w", ctx.work / "retire",
               *(["-x"] if o.get("execute") else [])]
     # A local data store is the task's scratch (only this scan's files): the scans' files and D1 rows are the archive's.
     first = archive if ctx.profile.data_bucket is None and archive else ctx.data_uri
