@@ -337,9 +337,37 @@ def test_a_heavy_keys_probe_reads_only_the_groups_meeting_its_ranges(tmp_path):
     con.execute(f"CREATE TABLE prows({an.AR_COLS})")
     tier = SimpleNamespace(shard_file=lambda mode, key: file)
     assert an.probe_prior_rows(con, [tier], "end") == 1
-    assert an.island_spans(con, "k", an.path_bounds(file)) == [("d/g010/x0", "d/g011/x9", 2), ("d/g150/x0", "d/g150/x9", 1)]
+    assert an.island_spans(con, "k", an.group_bounds(file)) == [("d/g010/x0", "d/g011/x9", 2), ("d/g150/x0", "d/g150/x9", 1)]
     assert con.execute("SELECT path FROM prows ORDER BY path").fetchall() == [
         (f"d/g{g:03d}/x{j}",) for g in (10, 11, 150) for j in range(10)]
     con.execute("DELETE FROM prows; DELETE FROM near; INSERT INTO near VALUES ('k', 'e/none')")
     assert an.probe_prior_rows(con, [tier], "end") == 0
     assert con.execute("SELECT count(*) FROM prows").fetchone()[0] == 0
+
+
+def test_a_heavy_keys_groups_shared_with_its_neighbors_read_once(tmp_path):
+    """Key `k`'s 1,992 rows (`d/g<g>/x<j>`) between neighbors `a` (5 rows under `z/`) and `m` (5 under `a/`), 10 rows a
+    group: `k`'s first and last groups are shared, their path statistics spanning the neighbors' paths. Their rows of `k`
+    are bounded by the next / previous group of `k` alone (`key_paths`), so a probe under `d/g000` and `d/g199` reads
+    two disjoint spans and keeps each row once."""
+    con = duckdb.connect()
+    con.execute("""CREATE TABLE source AS SELECT * FROM (
+            SELECT 'a' AS s, printf('z/%d', i) AS path FROM range(5) AS r(i)
+            UNION ALL SELECT 'k', printf('d/g%03d/x%d', i // 10, i % 10) FROM range(5, 1997) AS r(i)
+            UNION ALL SELECT 'm', printf('a/%d', i) FROM range(5) AS r(i))
+        ORDER BY s, path""")
+    con.execute("""CREATE TABLE src AS SELECT s, 3::UTINYINT AS depth, path, NULL::VARCHAR AS usr, TIMESTAMP '2026-10-01' AS vf,
+        TIMESTAMP '2027-01-01' AS vt, 1::BIGINT AS size, 1::BIGINT AS n_files FROM source ORDER BY s, path""")
+    file = str(tmp_path / "source.parquet")
+    pq.write_table(con.execute("SELECT * FROM src").to_arrow_table(), file, row_group_size=10)
+    bounds = an.group_bounds(file)
+    groups = [g for g, b in enumerate(bounds) if b[0] <= "k" <= b[1]]
+    assert (bounds[groups[0]][:2], bounds[groups[-1]][:2]) == (("a", "k"), ("k", "m"))
+    assert an.key_paths("k", [bounds[g] for g in groups])[0] == ("", "d/g001/x0")
+    assert an.key_paths("k", [bounds[g] for g in groups])[-1] == ("d/g198/x9", None)
+    con.execute("CREATE TABLE near AS SELECT 'k' AS k, unnest(['d/g000', 'd/g199']) AS dir")
+    con.execute(f"CREATE TABLE prows({an.AR_COLS})")
+    tier = SimpleNamespace(shard_file=lambda mode, key: file)
+    assert an.probe_prior_rows(con, [tier], "end") == 1
+    assert con.execute("SELECT path FROM prows ORDER BY path").fetchall() == [
+        *((f"d/g000/x{j}",) for j in range(5, 10)), *((f"d/g199/x{j}",) for j in range(7))]
