@@ -81,7 +81,9 @@ options:
     import: true
     bulk_args: [-a]
     threads: 8
-    import_args: [-e, stream, -j, "{nproc}", -m, -p, storage_class_id]
+    # `-M {mem}`: each source machine's own DuckDB budget (import's default 8GB failed the 02a import's object-version
+    # attach on its n2-standard-16, 2026-10-24T0601)
+    import_args: [-e, stream, -j, "{nproc}", -M, "{mem}", -m, -p, storage_class_id]
   index:
     webdata: [python, /app/job/cw-webdata.py, "{web}", "{sources}", -l, Marin CoreWeave, -a, "{date}"]
     lifecycle: true
