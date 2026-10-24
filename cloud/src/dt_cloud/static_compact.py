@@ -755,6 +755,21 @@ def checkpoint_prefix(gen: str, new_gen: str, runs: list[dict]) -> str:
     return f"{CHECKPOINTS}/{new_gen}/{inputs}"
 
 
+def same_bucket(a: str, b: str) -> tuple[str, str, str] | None:
+    """Two store roots (URLs) in one bucket: `(bucket URL, a's key prefix, b's key prefix)`, each prefix empty for the
+    bucket's own root or ending in `/` (gcs's race seeded from `gs://<scratch>` itself: an empty prefix joined with `/`
+    made keys `/static-names/…`); None for different buckets or a local dir."""
+    def split(u: str) -> tuple[str, str] | None:
+        if "://" not in u:
+            return None
+        scheme, rest = u.split("://", 1)
+        bucket, _, path = rest.partition("/")
+        return f"{scheme}://{bucket}", f"{path.strip('/')}/" if path.strip("/") else ""
+
+    sa, sb = split(a), split(b)
+    return (sa[0], sa[1], sb[1]) if sa and sb and sa[0] == sb[0] else None
+
+
 def seed_checkpoint(src_root: str, dst_root: str, gen: str, new_gen: str, runs: list[dict], through: str, *, workers: int = 32,
                     log: Callable[[str], None] = err) -> dict:
     """Another run's checkpoint of the same fold (`src_root`'s), its saved steps up to and including `through`
@@ -777,13 +792,11 @@ def seed_checkpoint(src_root: str, dst_root: str, gen: str, new_gen: str, runs: 
     src = Store(src_root)
     steps = [st for st in STEPS[:STEPS.index(through) + 1] if src.exists(f"{prefix}/{st}/done.json")]
     keys = [k for st in steps for k in src.keys(f"{prefix}/{st}/")]
-    scheme = src_root.split("://", 1)[0] if "://" in src_root else None
-    bucket = lambda u: u.split("/", 3)[2] if scheme else None  # noqa: E731
-    if scheme and bucket(src_root) == bucket(dst_root):
-        base = f"{scheme}://{bucket(src_root)}"
+    same = same_bucket(src_root, dst_root)
+    if same is not None:
+        base, src_in, dst_in = same
         within = Store(base)
-        rel = lambda u: u[len(base) + 1:]  # noqa: E731
-        copy = lambda k: within.copy(f"{rel(src_root)}/{k}", f"{rel(dst_root)}/{k}")  # noqa: E731
+        copy = lambda k: within.copy(f"{src_in}{k}", f"{dst_in}{k}")  # noqa: E731
     else:
         import tempfile
 

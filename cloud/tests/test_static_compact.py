@@ -648,3 +648,11 @@ def test_a_prebuilt_fold_is_published_as_the_compaction(world, tmp_path):
     (store / sn.PREFIX / "g" / ar.SUCCESSOR).unlink()
     with pytest.raises(SystemExit, match=r"folds g → g\.c001 over"):
         ar.run_compaction(Store(str(store)), sk.compactor(prebuilt=str(tmp_path / "race")), "g", store, tmp_path / "wp2", policy=1, force=True)
+
+
+def test_seed_keys_join_a_bucket_root_and_a_prefix():
+    """`same_bucket`: a bucket's own root is an empty prefix (gcs's race from `gs://<scratch>`), a path one ends in `/`;
+    other buckets, schemes or a local dir: None (copied through the client)."""
+    assert sk.same_bucket("gs://scratch", "gs://scratch/static-names-race/c001-a") == ("gs://scratch", "", "static-names-race/c001-a/")
+    assert sk.same_bucket("gs://scratch/x/", "gs://scratch") == ("gs://scratch", "x/", "")
+    assert [sk.same_bucket(a, b) for a, b in (("gs://a", "gs://b/x"), ("gs://a", "r2://a"), ("/tmp/a", "/tmp/b"))] == [None, None, None]
