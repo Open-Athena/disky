@@ -50,14 +50,14 @@ The compaction stays **one job**: the fold VM keeps the lease and its local stat
   - It refuses code other than the fold's (`-V`).
   - It skips ranges already done, fetches only its ranges' spills, measures them, and uploads each range's files, then its `done.json`.
   - It ends with `measured/tasks/<plan>-<i>.json`.
-- **`static_merge compact -F N`:** `measure_fanout` builds the helper jobs with the runner's own `job()` (stage `measure`: the profile's machine for it, spot with retries when the profile is) from the profile, which the runner passes inline in `$STATIC_NAMES_PROFILE` (`to_mapping`; `load_profile` takes JSON). Profile field `measure_tasks` (`$STATIC_NAMES_MEASURE_TASKS`) makes `compact_jobs` pass `-F`.
+- **`static_merge compact -D N`** (was `-F`, which collided with `compact_options`' `-F/--read-from`: click took `-F 3` as a read source and refused it): `measure_fanout` builds the helper jobs with the runner's own `job()` (stage `measure`: the profile's machine for it, spot with retries when the profile is) from the profile, which the runner passes inline in `$STATIC_NAMES_PROFILE` (`to_mapping`; `load_profile` takes JSON). Profile field `measure_tasks` (`$STATIC_NAMES_MEASURE_TASKS`) makes `compact_jobs` pass `-D`.
 - **Lease:** held by the compaction's own heartbeat while it waits; nothing changes there.
 - **Image:** helpers run the profile's `image`, as every stage job does. A deployment pins it by digest; a moved tag would surface as `measure-shard` refusing a different code version, not as different bytes.
 - **Tests:**
   - 3 tasks write the single-VM fold's bytes;
   - a helper task that never runs has its ranges re-dealt, same bytes;
   - helpers that never measure fail the fold naming the ranges;
-  - the compaction job carries `-F` and the profile, which loads back as the runner's.
+  - the compaction job carries `-D` (parsed back by `compact` itself) and the profile, which loads back as the runner's.
 
 ## Open
 
