@@ -41,12 +41,13 @@ def spill_sizes(work: Path, kind: str, n: int) -> dict[int, int]:
 class Fanout:
     """The fold VM's side: `start` deals and submits, `groups` names a kind's ranges the helpers measure, `collect` waits
     for and fetches them, `finish` waits for the helper job's end. `ck`: the fold's checkpoint (`spilled` saved);
-    `submit(checkpoint_url, plan_key, tasks, code)`: runs a helper job of `tasks` tasks to its end (raising on its
-    failure); `exists`/`get`/`read_json`/`write_text` go through `ck.store`."""
+    `submit(checkpoint_url, plan_key, tasks, code, scan)`: runs a helper job of `tasks` tasks to its end (raising on its
+    failure; `scan`: the newest scan the compaction folds, what the job is named and labelled by);
+    `exists`/`get`/`read_json`/`write_text` go through `ck.store`."""
 
-    def __init__(self, ck, tasks: int, submit: Callable[[str, str, int, str], None], *, code: str, poll_s: float = 30,
+    def __init__(self, ck, tasks: int, submit: Callable[[str, str, int, str, str], None], *, code: str, scan: str, poll_s: float = 30,
                  retries: int = 2, log: Callable[[str], None] = err):
-        self.ck, self.tasks, self.submit, self.code, self.poll_s, self.retries, self.log = ck, tasks, submit, code, poll_s, retries, log
+        self.ck, self.tasks, self.submit, self.code, self.scan, self.poll_s, self.retries, self.log = ck, tasks, submit, code, scan, poll_s, retries, log
         self.away: dict[str, set[int]] = {}
         self.params: dict = {}
         self.attempt = 0
@@ -86,7 +87,7 @@ class Fanout:
 
         def run() -> None:
             try:
-                self.submit(url, plan, len(shares), self.code)
+                self.submit(url, plan, len(shares), self.code, self.scan)
             except BaseException as e:  # noqa: BLE001 — the waiting side reports it, with the ranges it left
                 self.error = e
 
