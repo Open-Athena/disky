@@ -12,11 +12,13 @@ profiles written before the seam did. A CLI's `-o DIR|URL` is taken as given (`S
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import threading
 import time
 from collections.abc import Callable, Iterable
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 
@@ -102,7 +104,7 @@ class Store:
         prefix = prefix.rstrip("/")
         if not self.url:
             d = Path(self.root) / prefix
-            return {p.relative_to(self.root).as_posix(): p.stat().st_size for p in sorted(d.rglob("*")) if p.is_file()} if d.is_dir() else {}
+            return {p.relative_to(self.root).as_posix(): p.stat().st_size for p in sorted(d.rglob("*")) if p.is_file() and not _is_landing(p)} if d.is_dir() else {}
         # Fresh, not the filesystem's listings cache: other writers (a Batch job, another run) change the store.
         self.fs.invalidate_cache(self._p(prefix))
         try:
@@ -118,7 +120,7 @@ class Store:
         prefix = prefix.rstrip("/")
         if not self.url:
             d = Path(self.root) / prefix
-            return {p.relative_to(self.root).as_posix(): p.stat().st_mtime for p in sorted(d.rglob("*")) if p.is_file()} if d.is_dir() else {}
+            return {p.relative_to(self.root).as_posix(): p.stat().st_mtime for p in sorted(d.rglob("*")) if p.is_file() and not _is_landing(p)} if d.is_dir() else {}
         from disk_tree.blobfs import _info_mtime
 
         self.fs.invalidate_cache(self._p(prefix))
@@ -161,9 +163,8 @@ class Store:
         if self.url:
             self.fs.pipe_file(self._p(key), data)
         else:
-            dst = Path(self.root) / key
-            dst.parent.mkdir(parents=True, exist_ok=True)
-            dst.write_bytes(data)
+            with _landing(Path(self.root) / key) as tmp:
+                tmp.write_bytes(data)
 
     def write_text(self, key: str, text: str) -> None:
         self.write_bytes(key, text.encode())
@@ -238,9 +239,8 @@ class Store:
         if self.url:
             _retrying(lambda: self.fs.put(str(src), self._p(key)))
         else:
-            dst = Path(self.root) / key
-            dst.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copyfile(src, dst)
+            with _landing(Path(self.root) / key) as tmp:
+                shutil.copyfile(src, tmp)
 
     def put_tree(self, local: Path, prefix: str, *, last: tuple[str, ...] = (), workers: int = 32) -> list[dict]:
         """Every file under `local` → `prefix/<rel>`, the `last` (relative paths, in that order) after all the others
@@ -289,6 +289,28 @@ STAGE_DEADLINE_S = 3600
 STAGE_PROGRESS_S = 30.0
 
 _buckets: dict[str, object] = {}
+
+#: A local store's write lands as `.<name>.<random>.landing` beside its key, then is renamed into place: a listing (which
+#: skips them) never sees a key half written. A bucket's objects appear whole already.
+LANDING = ".landing"
+
+
+@contextmanager
+def _landing(dst: Path):
+    """A temporary path beside `dst` to write, renamed onto `dst` when the block ends (removed when it raises)."""
+    import secrets
+
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    tmp = dst.with_name(f".{dst.name}.{secrets.token_hex(4)}{LANDING}")
+    try:
+        yield tmp
+        os.replace(tmp, dst)
+    finally:
+        tmp.unlink(missing_ok=True)
+
+
+def _is_landing(p: Path) -> bool:
+    return p.name.startswith(".") and p.name.endswith(LANDING)
 
 
 def _gcs_slice(bucket: str, name: str, path: str, lo: int, hi: int) -> int:
