@@ -149,7 +149,13 @@ class Runner(ar.Runner):
         out = [self.job("compact", scan, 1, "static_merge", ["compact", "-g", self.cfg.gen, *(["-S", self.cfg.scratch] if self.cfg.scratch else []),
                                                            "-C", str(self.cfg.policy), *(["-K"] if self.compact_now else []), *self.read_args(),
                                                            *(["-r"] if r2 else []), "-j", str(self.cfg.fold_jobs or fold_jobs(self.cfg.machine_for("compact"))),
+                                                           *(["-F", str(self.cfg.measure_tasks)] if self.cfg.measure_tasks > 1 else []),
                                                            *duckdb_args(self.cfg.machine_for("compact"))], r2=r2)]
+        if self.cfg.measure_tasks > 1:
+            # its helper jobs are built from the profile, as this runner's are
+            from .static_profile import to_mapping
+
+            out[0][1]["taskGroups"][0]["taskSpec"]["environment"]["variables"]["STATIC_NAMES_PROFILE"] = json.dumps(to_mapping(self.cfg))
         if not r2:
             out.append(self.job("compact-r2", scan, 1, "static_merge", ["compact-r2", "-g", self.cfg.gen], r2=True, mount=False))
         return out

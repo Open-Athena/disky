@@ -395,13 +395,34 @@ def _summary(doc: dict) -> dict:
     return {k: v for k, v in doc.items() if k != "keys"}
 
 
+def measure_fanout(tasks: int, gen: str) -> Callable:
+    """The compaction's drill measurement over `tasks` tasks (`static_fanout.Fanout`, given the fold's checkpoint): its
+    helper jobs built and run as the runner's stage jobs are (`StaticRunner.job`, stage `measure`: the profile's machine
+    for it, spot with retries when the profile is), from the profile the runner passed in `$STATIC_NAMES_PROFILE`."""
+    from .append_runner import duckdb_args
+    from .checkpoint import code_version
+    from .static_fanout import Fanout
+    from .static_profile import profile
+    from .static_runner import gcs_runner, ready
+
+    cfg = ready(profile(), gen)
+    runner = gcs_runner(cfg)
+
+    def submit(url: str, plan: str, n: int, code: str) -> None:
+        args = ["measure-shard", "-c", url, "-P", plan, "-V", code, *duckdb_args(cfg.machine_for("measure"))]
+        runner.run_job(*runner.job("measure", plan.rsplit("/", 1)[-1].removesuffix(".json"), n, "static_merge", args, mount=False))
+
+    return lambda ck: Fanout(ck, tasks, submit, code=code_version())
+
+
 @cli.command("compact")
 @option("-b", "--bucket", default=data_bucket, help="Data bucket")
 @option("-c", "--chunk-rows", default=1 << 22, type=IntRange(min=1), help="The drill fold's chunks: roots per measurement / rollup q range")
 @option("-g", "--gen", required=True, help="Base generation (followed to its newest successor)")
+@option("-F", "--measure-tasks", default=1, type=IntRange(min=1), help="The drill measurement over this many tasks: this one and helper Batch tasks (`static_fanout`; needs -S and the profile in $STATIC_NAMES_PROFILE)")
 @option("-S", "--scratch", help="Scratch bucket: the compaction lease, held throughout (none: appends aren't held off)")
 @ar.compact_options
-def compact_cmd(bucket, chunk_rows, gen, scratch, policy, read_from, grace_s, jobs, force, mount, mem, threads, to_r2, tmp) -> None:
+def compact_cmd(bucket, chunk_rows, gen, measure_tasks, scratch, policy, read_from, grace_s, jobs, force, mount, mem, threads, to_r2, tmp) -> None:
     """The compaction stage (`append_runner.run_compaction` with `static_compact`): when the policy fires (or `-K`), the
     generation's base and runs folded into `<gen>.c<NNN>` (a rebuild's bytes), published on GCS (`compaction.json`
     last, `successor.json`, `static-names/CURRENT.json`), then with `-r` on R2 (its pointer last). The old generation
@@ -412,8 +433,11 @@ def compact_cmd(bucket, chunk_rows, gen, scratch, policy, read_from, grace_s, jo
     from .blobstore import Store
     from .static_compact import clear_checkpoints, compactor
 
+    if measure_tasks > 1 and not scratch:
+        raise UsageError("-F needs -S: the helpers read the fold's checkpoint")
+    fanout = measure_fanout(measure_tasks, gen) if measure_tasks > 1 else None
     try:
-        doc = ar.run_compaction(Store(f"gs://{bucket}"), compactor(chunk_rows, checkpoint=scratch), gen, Path(mount), Path(tmp),
+        doc = ar.run_compaction(Store(f"gs://{bucket}"), compactor(chunk_rows, checkpoint=scratch, fanout=fanout), gen, Path(mount), Path(tmp),
                                 lease=ar.gcs_compaction_lease_file(scratch, PREFIX), policy=policy, force=force, r2_bucket=bucket if to_r2 else None,
                                 grace_s=grace_s, threads=threads, mem=mem, jobs=jobs, read_from=read_from, rec=from_env("compact"))
     except ar.Busy as e:
@@ -634,16 +658,9 @@ def _fetch_ranges(ck, spills: Path, heaviest: int | None, sample: str | None, wo
     at random (neither: every range); then, with `part` `(i, n)`, task `i`'s share of them (`deal`); only their files
     downloaded from the checkpoint's `spilled` step into `spills`. The step's doc and the ranges chosen per kind."""
     import random
-    import re
-    from concurrent.futures import ThreadPoolExecutor
 
     n, _, seed = (sample or "0").partition(":")
-    base = ck.key("spilled/files/")
-    sizes = {k[len(base):]: v for k, v in ck.store.listing(ck.key("spilled/files")).items() if k.startswith(base)}
-    by: dict[tuple[str, int], list[str]] = {}
-    for rel in sizes:
-        if m := re.match(r"(long|short)/[^/]+/grp=(\d+)/", rel):
-            by.setdefault((m[1], int(m[2])), []).append(rel)
+    sizes, by = _spilled(ck)
     chosen: dict[str, list[int]] = {}
     weights: dict[tuple[str, int], int] = {}
     for kind in ("long", "short"):
@@ -658,11 +675,35 @@ def _fetch_ranges(ck, spills: Path, heaviest: int | None, sample: str | None, wo
     mine = set(deal(weights, part[1])[part[0]]) if part else set(weights)
     for kind in ("long", "short"):
         chosen[kind] = sorted(g for k, g in mine if k == kind)
-    rels = [r for kind, gs in chosen.items() for g in gs for r in by[(kind, g)]]
-    with ThreadPoolExecutor(workers) as ex:
-        list(ex.map(lambda r: ck.store.get(base + r, spills / r), rels))
+    rels = _fetch_spills(ck, spills, by, [(kind, g) for kind, gs in chosen.items() for g in gs], workers)
     err(f"measure-probe: {len(rels):,} files ({sum(sizes[r] for r in rels):,} B) of {', '.join(f'{len(v)} {k}' for k, v in chosen.items())} ranges")
     return ck.store.read_json(ck.key("spilled/done.json"))["doc"], chosen
+
+
+def _spilled(ck) -> tuple[dict[str, int], dict[tuple[str, int], list[str]]]:
+    """A fold checkpoint's saved spills: each file's bytes (by its path under `spilled/files/`) and the files of each
+    `(kind, range)`."""
+    import re
+
+    base = ck.key("spilled/files/")
+    sizes = {k[len(base):]: v for k, v in ck.store.listing(ck.key("spilled/files")).items() if k.startswith(base)}
+    by: dict[tuple[str, int], list[str]] = {}
+    for rel in sizes:
+        if m := re.match(r"(long|short)/[^/]+/grp=(\d+)/", rel):
+            by.setdefault((m[1], int(m[2])), []).append(rel)
+    return sizes, by
+
+
+def _fetch_spills(ck, spills: Path, by: dict[tuple[str, int], list[str]], ranges: list[tuple[str, int]], workers: int) -> list[str]:
+    """The saved spill files of `ranges` (`(kind, range)`) downloaded into `spills` (their paths under it as under
+    `spilled/files/`); their paths."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    base = ck.key("spilled/files/")
+    rels = [r for key in ranges for r in by.get(key, [])]
+    with ThreadPoolExecutor(workers) as ex:
+        list(ex.map(lambda r: ck.store.get(base + r, spills / r), rels))
+    return rels
 
 
 def deal(weights: dict, n: int) -> list[list]:
@@ -677,6 +718,60 @@ def deal(weights: dict, n: int) -> list[list]:
         tasks[i].append(key)
         heapq.heappush(heap, (load + weights[key], i))
     return tasks
+
+
+@cli.command("measure-shard")
+@option("-c", "--checkpoint", required=True, help="The compaction's fold checkpoint (its `spilled` step saved), as a URL")
+@option("-i", "--index", type=int, help="This task's share of the plan (default: $BATCH_TASK_INDEX)")
+@option("-M", "--mem", default="100GB", help="DuckDB memory limit")
+@option("-p", "--threads", default=16, type=int, help="DuckDB threads")
+@option("-P", "--plan", required=True, help="The fan-out's plan, its key under the checkpoint (`measured/plan-<n>.json`)")
+@option("-T", "--tmp", default="/stage/tmp/measure-shard", help="Local work dir")
+@option("-V", "--code", required=True, help="The fold's code version (`checkpoint.code_version`): another refuses")
+@option("-w", "--workers", default=64, type=IntRange(min=1), help="Concurrent downloads and uploads")
+def measure_shard_cmd(checkpoint, index, mem, threads, plan, tmp, code, workers) -> None:
+    """A compaction's drill measurement helper (`static_fanout`, specs/static-measure-fanout.md): task INDEX's share of
+    the plan's `q` ranges, each fetched from the fold's saved spills, measured (`static_local.measure_ranges`) and
+    uploaded as `measured/<kind>/g<g>/{sorted,dirs,rup}.parquet`, then its `done.json` (the range's stats). A range
+    whose `done.json` is there is skipped (a retry resumes); then `measured/tasks/<plan>-<index>.json`. Refuses to run
+    other code than the fold's (its bytes would differ)."""
+    from functools import partial
+
+    from . import static_local as sl
+    from .checkpoint import Checkpoint, code_version
+    from .static_fanout import MEASURED, range_key
+
+    if (mine := code_version()) != code:
+        raise SystemExit(f"measure-shard: this is code {mine}, the fold's is {code}: refusing to measure for it")
+    root, _, prefix = checkpoint.rstrip("/").rpartition("/")
+    work = Path(tmp)
+    ck = Checkpoint(root, prefix, work=work / "ckpt")
+    i = index if index is not None else int(os.environ.get("BATCH_TASK_INDEX", "0"))
+    doc = ck.store.read_json(ck.key(plan))
+    share = [(k, g) for k, g in doc["tasks"][i]]
+    todo = [(k, g) for k, g in share if not ck.store.exists(ck.key(f"{range_key(k, g)}/done.json"))]
+    err(f"measure-shard {plan} #{i}: {len(share)} ranges, {len(todo)} to measure")
+    spills = work / "spills"
+    shutil.rmtree(spills, ignore_errors=True)
+    t0 = monotonic()
+    _, by = _spilled(ck)
+    _fetch_spills(ck, spills, by, todo, workers)
+
+    def upload(kind: str, g: int, task: tuple, stats: dict) -> None:
+        base = range_key(kind, g)
+        for name, f in (("sorted", task[2]), ("dirs", task[3]), ("rup", task[4])):
+            ck.store.put(Path(f), ck.key(f"{base}/{name}.parquet"))
+        ck.store.write_text(ck.key(f"{base}/done.json"), json.dumps(stats) + "\n")
+
+    con = connect(threads, mem, work / "duckdb")
+    for kind in ("long", "short"):
+        gs = [g for k, g in todo if k == kind]
+        if gs:
+            sl.measure_ranges(con, spills, kind, max(gs) + 1, "pd", "pr", floor=doc["floor"], R=doc["R"], K=doc["K"],
+                              on_range=partial(upload, kind))
+    name = plan.rsplit("/", 1)[-1].removesuffix(".json")
+    ck.store.write_text(ck.key(f"{MEASURED}/tasks/{name}-{i}.json"), json.dumps({"ranges": len(todo), "s": round(monotonic() - t0, 1)}) + "\n")
+    err(f"measure-shard {plan} #{i}: {len(todo)} ranges in {monotonic() - t0:.0f}s")
 
 
 @cli.command("measure-probe-merge")

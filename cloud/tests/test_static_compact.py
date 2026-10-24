@@ -352,3 +352,61 @@ def test_deal_balances_ranges_heaviest_first_to_the_least_loaded_task():
 
     assert deal({"a": 10, "b": 9, "c": 5, "d": 4, "e": 1}, 2) == [["a", "d", "e"], ["b", "c"]]
     assert deal({"a": 1}, 3) == [["a"], [], []]
+
+
+def _fanned_fold(world, tmp_path, submit, retries: int = 2):
+    """C's fold with its drill measurement over 3 tasks (`static_fanout.Fanout`), `submit` running the helper jobs."""
+    from dt_cloud.checkpoint import code_version
+    from dt_cloud.static_fanout import Fanout
+
+    gen_dir = world["c_store"] / "g"
+    _, runs = ar.newest_runs(gen_dir)
+    ck = sk.compact_checkpoint(str(tmp_path / "scratch"), "g", "g.c001", runs, work=tmp_path / "ck")
+    try:
+        with _small_groups():
+            sk.fold_gen(gen_dir, tmp_path / "out", tmp_path / "w", gen="g", new_gen="g.c001", runs=runs, threads=2, mem="1GB", chunk_rows=3, ck=ck,
+                        fanout=lambda c: Fanout(c, 3, submit, code=code_version(), poll_s=0.01, retries=retries, log=lambda m: None))
+    finally:
+        ck.close()
+
+
+def _helpers(tmp_path, calls: list, skip=lambda attempt, i: False):
+    """A fake helper job: each task's `measure-shard` in turn, in-process (`skip(attempt, i)`: a task that never runs)."""
+    from dt_cloud import static_merge as sm
+
+    def submit(url: str, plan: str, n: int, code: str) -> None:
+        calls.append((plan, n))
+        for i in range(n):
+            if skip(len(calls), i):
+                continue
+            # the command's body, not `CliRunner`: it runs on the fold's helper thread, and the runner swaps the process's
+            # stdout/stderr under the fold's own logging
+            sm.measure_shard_cmd.callback(checkpoint=url, index=i, mem="1GB", threads=2, plan=plan, tmp=str(tmp_path / f"h{len(calls)}-{i}"),
+                                          code=code, workers=4)
+    return submit
+
+
+def test_a_fanned_out_measurement_writes_the_single_vm_fold(world, tmp_path):
+    """The fold measures its share, 2 helper tasks theirs (from the saved spills, uploaded per range): `g.c001`'s
+    files, md5 for md5."""
+    calls: list = []
+    _fanned_fold(world, tmp_path, _helpers(tmp_path, calls))
+    assert calls == [("measured/plan-1.json", 2)]
+    assert _md5s(tmp_path / "out") == _md5s(world["c_store"] / "g.c001")
+
+
+def test_ranges_a_helper_job_left_are_dealt_again(world, tmp_path):
+    """The first helper job's second task never runs: its ranges go to a second job (over the 2 helper slots), and the
+    fold's bytes are the same."""
+    calls: list = []
+    _fanned_fold(world, tmp_path, _helpers(tmp_path, calls, skip=lambda attempt, i: attempt == 1 and i == 1))
+    assert [p for p, _ in calls] == ["measured/plan-1.json", "measured/plan-2.json"]
+    assert _md5s(tmp_path / "out") == _md5s(world["c_store"] / "g.c001")
+
+
+def test_ranges_never_measured_fail_the_fold_by_name(world, tmp_path):
+    """Helper jobs that measure nothing: after the first and its one retry, the fold fails naming the missing ranges."""
+    calls: list = []
+    with pytest.raises(RuntimeError, match=r"^measure fan-out: (long|short) ranges \[[0-9, ]+\] unmeasured after 2 helper jobs$"):
+        _fanned_fold(world, tmp_path, _helpers(tmp_path, calls, skip=lambda attempt, i: True), retries=1)
+    assert [p for p, _ in calls] == ["measured/plan-1.json", "measured/plan-2.json"]

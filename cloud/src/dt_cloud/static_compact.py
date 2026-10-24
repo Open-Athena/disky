@@ -161,7 +161,8 @@ def overlapping(spans: list[tuple[str, str | None, str | None]], lo: str, hi: st
 
 
 def fold_drill(con, tiers: list[sd.Tier], out: Path, work: Path, *, R: int, K: int, floor: int, chunk_rows: int = sl.CHUNK_ROWS,
-               jobs: int = 1, step=sl._nop_step, log: Callable[[str], None] = err, ck: Checkpoint | None = None) -> dict:
+               jobs: int = 1, step=sl._nop_step, log: Callable[[str], None] = err, ck: Checkpoint | None = None,
+               fanout: Callable[[Checkpoint], object] | None = None) -> dict:
     """`G'`'s `drill/` and `roots-measure/` in `out` from the tiers' drills (`G`'s, then each run's, oldest first) and
     `out/catalog/members.parquet`: each member's roots through the last scan, read from the tiers through each one's
     class map (every tier's `aliases.parquet` maps every member it knows to its canonical, which holds that class's rows
@@ -205,8 +206,10 @@ def fold_drill(con, tiers: list[sd.Tier], out: Path, work: Path, *, R: int, K: i
         ck.drop("long-roots-tables")
         ck.drop("long-roots")
     aliases = con.execute("SELECT q, canonical FROM al ORDER BY q").to_arrow_table()
+    # the measurement's helper tasks fetch the spills the checkpoint just saved (specs/static-measure-fanout.md)
+    fan = fanout(ck) if fanout is not None and ck is not None else None
     done = sl.finish_drill(con, out, work, aliases=aliases, long_groups=groups["long"], short_groups=groups["short"], R=R, K=K, floor=floor,
-                           step=step, t=t)
+                           step=step, t=t, fanout=fan)
     return {"members": aliases.num_rows, "canonical": len(set(aliases.column("canonical").to_pylist())), "groups": done["groups"]}
 
 
@@ -437,7 +440,7 @@ def run_scans(gen_dir: Path, gen: str, runs: list[dict]) -> list[dict]:
 
 def fold_gen(gen_dir: Path, out: Path, work: Path, *, gen: str, new_gen: str, runs: list[dict], threads: int = 4, mem: str = "4GB",
              chunk_rows: int = sl.CHUNK_ROWS, jobs: int = 1, log: Callable[[str], None] = err, progress: Callable[..., None] | None = None,
-             ck: Checkpoint | None = None) -> dict:
+             ck: Checkpoint | None = None, fanout: Callable[[Checkpoint], object] | None = None) -> dict:
     """Generation `gen` (its base in `gen_dir`, the runs `runs`: the newest manifest's, oldest first) folded into `new_gen`
     in `out` (every part but `compaction.json`); its `manifests/<last>.json` lists no runs. Returns a summary (rows, and
     per part its seconds, peak work-disk GiB and peak RSS GiB). `progress(note)`: the run record's hook
@@ -453,11 +456,12 @@ def fold_gen(gen_dir: Path, out: Path, work: Path, *, gen: str, new_gen: str, ru
     shards need every range's histogram (their plan), the census the shards, the drill the members: those stay in order."""
     with ThreadPoolExecutor(2, thread_name_prefix="compact") as bg:
         return _fold_gen(gen_dir, out, work, gen=gen, new_gen=new_gen, runs=runs, threads=threads, mem=mem, chunk_rows=chunk_rows, jobs=jobs,
-                         log=log, progress=progress, ck=ck, bg=bg)
+                         log=log, progress=progress, ck=ck, bg=bg, fanout=fanout)
 
 
 def _fold_gen(gen_dir: Path, out: Path, work: Path, *, gen: str, new_gen: str, runs: list[dict], threads: int, mem: str, chunk_rows: int, jobs: int,
-              log: Callable[[str], None], progress: Callable[..., None] | None, ck: Checkpoint | None, bg: ThreadPoolExecutor) -> dict:
+              log: Callable[[str], None], progress: Callable[..., None] | None, ck: Checkpoint | None, bg: ThreadPoolExecutor,
+              fanout: Callable[[Checkpoint], object] | None = None) -> dict:
     """`fold_gen`, its background work (the catalogs' merge, the parts' saves) on `bg` (waited on as `fold_gen` returns or
     fails)."""
     t0, times, peaks = monotonic(), {}, {}
@@ -556,7 +560,7 @@ def _fold_gen(gen_dir: Path, out: Path, work: Path, *, gen: str, new_gen: str, r
     tiers = [sd.Tier(gen_dir / "drill", "base"), *(sd.Tier(d / "drill", r["key"]) for d, r in zip(run_dirs, runs))]
     drill = resumed("drill", ("drill", "roots-measure"), lambda: fold_drill(
         con, tiers, out, work / "drill", R=dm["R"], K=dm["K"], floor=dm.get("floor", sl.FLOOR), chunk_rows=chunk_rows, jobs=jobs, step=step,
-        log=lambda s: log(f"compact {gen} → {new_gen}: {s}"), ck=ck.sub("fold") if ck is not None else None), after_saves=True)
+        log=lambda s: log(f"compact {gen} → {new_gen}: {s}"), ck=ck.sub("fold") if ck is not None else None, fanout=fanout), after_saves=True)
     t = done("drill", t)
     anchors = None
     if (gen_dir / an.ANCHORS / "meta.json").is_file():
@@ -576,13 +580,15 @@ def _fold_gen(gen_dir: Path, out: Path, work: Path, *, gen: str, new_gen: str, r
 
 
 def fold(gen_dir: Path, out: Path, work: Path, *, gen: str, new_gen: str, runs: list[dict], threads: int = 4, mem: str = "4GB",
-         chunk_rows: int = sl.CHUNK_ROWS, jobs: int = 1, progress: Callable[..., None] | None = None, checkpoint: str | None = None) -> dict:
+         chunk_rows: int = sl.CHUNK_ROWS, jobs: int = 1, progress: Callable[..., None] | None = None, checkpoint: str | None = None,
+         fanout: Callable[[Checkpoint], object] | None = None) -> dict:
     """`append_runner.Compactor.fold` for the static store (`fold_gen`; `jobs`: key ranges, census shards and drill-fold chunks at a time).
-    `checkpoint`: a store root (the scratch bucket) for `compact_checkpoint`."""
+    `checkpoint`: a store root (the scratch bucket) for `compact_checkpoint`; `fanout`: the drill measurement's helper
+    tasks, given the fold's checkpoint (`static_fanout.Fanout`; needs `checkpoint`)."""
     ck = compact_checkpoint(checkpoint, gen, new_gen, runs, work=work / "ckpt") if checkpoint else None
     try:
         return fold_gen(gen_dir, out, work, gen=gen, new_gen=new_gen, runs=runs, threads=threads, mem=mem, chunk_rows=chunk_rows, jobs=jobs,
-                        progress=progress, ck=ck)
+                        progress=progress, ck=ck, fanout=fanout)
     finally:
         if ck is not None:
             ck.close()
@@ -609,11 +615,12 @@ def clear_checkpoints(root: str, new_gen: str) -> int:
     return store.delete(sorted(store.listing(f"{CHECKPOINTS}/{new_gen}")))
 
 
-def compactor(chunk_rows: int = sl.CHUNK_ROWS, checkpoint: str | None = None) -> ar.Compactor:
+def compactor(chunk_rows: int = sl.CHUNK_ROWS, checkpoint: str | None = None, fanout: Callable[[Checkpoint], object] | None = None) -> ar.Compactor:
     """The static store's plug into the shared compaction (`append_runner.compact_store`): its fold and upload order; its
     predecessors are left to `store-gc -k` (readers pin `STATIC_GEN`, so a compacted generation may still be served).
-    `checkpoint`: the folds' checkpoint root (`fold`)."""
-    return ar.Compactor(prefix=PREFIX, fold=lambda *a, **kw: fold(*a, **kw, chunk_rows=chunk_rows, checkpoint=checkpoint), publish_order=sl.publish_order,
+    `checkpoint`: the folds' checkpoint root (`fold`); `fanout`: its drill measurement's helper tasks (`fold`)."""
+    return ar.Compactor(prefix=PREFIX, fold=lambda *a, **kw: fold(*a, **kw, chunk_rows=chunk_rows, checkpoint=checkpoint, fanout=fanout),
+                        publish_order=sl.publish_order,
                         last=("scans.json", "catalog/meta.json", "drill/meta.json", f"{an.ANCHORS}/meta.json"), prune=False, md5s=True, keep=reads,
                         publish_tier=sl.publish_tier)
 
