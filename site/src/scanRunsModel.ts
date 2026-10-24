@@ -197,12 +197,25 @@ export function phaseSkip(p: Pick<ScanRunPhase, 'status' | 'note'>): string | nu
 }
 
 export interface PhaseRecovery { run: ScanRun; phases: ScanRunPhase[]; secs: number | null }
-/** A phase attempt that left the run short: failed (`outcome` its `phaseOutcome`), or skipped (`outcome` `skipped`,
- * `reason` its note's skip clause). */
-export interface PhaseIssue { phase: string; outcome: string; recovery: ScanRun | null; reason?: string }
+/** A phase that left the run short: failed (`outcome` its `phaseOutcome`; `attempts` when more than one failed,
+ * `detail` the last one's verdict, its note without the exit clause), skipped (`outcome` `skipped`, `reason` its note's
+ * skip clause), or done with its search behind (`outcome` `search behind`, `reason` its note's `search behind:` clause:
+ * the data is published, only the static name index lags it). */
+export interface PhaseIssue { phase: string; outcome: string; recovery: ScanRun | null; reason?: string; attempts?: number; detail?: string }
+
+/** A done phase's `search behind: …` clause (`dt_cloud.scan_steps.probe`: every failure was the search's
+ * `scan-not-indexed` refusal), else null. */
+export function phaseBehind(p: Pick<ScanRunPhase, 'status' | 'note'>): string | null {
+  return p.status === 'done' ? /^search behind: (.+)$/.exec(p.note ?? '')?.[1] ?? null : null
+}
+
+export const BEHIND = 'search behind'
 
 export function runOutcome(run: Pick<ScanRun, 'status'>, issues: readonly PhaseIssue[] = []): string {
-  if (run.status === 'succeeded' && issues.length) return issues.every(i => i.recovery != null) ? 'recovered' : 'partial'
+  if (run.status === 'succeeded' && issues.length) {
+    const open = issues.filter(i => i.recovery == null)
+    return !open.length ? 'recovered' : open.every(i => i.outcome === BEHIND) ? BEHIND : 'partial'
+  }
   return run.status === 'nop' ? 'no-op' : run.status
 }
 
@@ -215,7 +228,7 @@ export function partialReasons(issues: readonly PhaseIssue[]): string[] {
 /** `runOutcome`, a `partial` one with its reasons: `partial: static-names skipped (busy): …`. */
 export function runOutcomeLine(run: Pick<ScanRun, 'status'>, issues: readonly PhaseIssue[] = []): string {
   const outcome = runOutcome(run, issues)
-  return outcome === 'partial' ? `partial: ${partialReasons(issues).join('; ')}` : outcome
+  return outcome === 'partial' || outcome === BEHIND ? `${outcome}: ${partialReasons(issues).join('; ')}` : outcome
 }
 
 export function phaseRecoveries(run: ScanRun, runs: readonly ScanRun[], phases: readonly ScanRunPhase[], now: number): PhaseRecovery[] {
@@ -223,13 +236,30 @@ export function phaseRecoveries(run: ScanRun, runs: readonly ScanRun[], phases: 
     .sort(byRunTime).map(r => ({ run: r, phases: phases.filter(p => p.run_id === r.run_id), secs: runSecs(r, now) }))
 }
 
+/** A failed phase's verdict: its note without the `failed (exit N)` clause (`4 passed, 0 skipped, 2 failed`), else
+ * undefined. */
+function failureDetail(note: string | null): string | undefined {
+  const rest = (note ?? '').replace(/^(?:[^,]*,\s*)?failed(?: \([^)]*\))?(?:,\s*|$)/, '').trim()
+  return rest || undefined
+}
+
+/** The run's issues, one per phase (its last attempt's; `attempts` counts a phase's failed ones). */
 export function phaseIssues(run: ScanRun, runs: readonly ScanRun[], phases: readonly ScanRunPhase[]): PhaseIssue[] {
-  return phases.filter(p => p.run_id === run.run_id && (phaseStatus(p) === 'failed' || phaseSkip(p) != null)).map(p => {
+  const own = phases.filter(p => p.run_id === run.run_id && (phaseStatus(p) === 'failed' || phaseSkip(p) != null || phaseBehind(p) != null))
+  const last = new Map<string, ScanRunPhase>()
+  for (const p of own) last.set(p.phase, p)
+  return [...last.values()].map(p => {
     const retries = phaseRecoveries(run, runs, phases, 0).filter(r => r.run.status === 'succeeded' && r.phases.some(a =>
-      a.phase === p.phase && phaseStatus(a) === 'done' && phaseSkip(a) == null && a.finished_ts != null && p.finished_ts != null && a.finished_ts > p.finished_ts))
+      a.phase === p.phase && phaseStatus(a) === 'done' && phaseSkip(a) == null && phaseBehind(a) == null && a.finished_ts != null
+      && p.finished_ts != null && a.finished_ts > p.finished_ts))
     const recovery = retries.at(-1)?.run ?? null
-    const reason = phaseStatus(p) === 'failed' ? null : phaseSkip(p)
-    return reason ? { phase: p.phase, outcome: 'skipped', recovery, reason } : { phase: p.phase, outcome: phaseOutcome(p), recovery }
+    if (phaseStatus(p) !== 'failed') {
+      const skip = phaseSkip(p)
+      return skip != null ? { phase: p.phase, outcome: 'skipped', recovery, reason: skip } : { phase: p.phase, outcome: BEHIND, recovery, reason: phaseBehind(p)! }
+    }
+    const attempts = own.filter(a => a.phase === p.phase && phaseStatus(a) === 'failed').length
+    const detail = failureDetail(p.note)
+    return { phase: p.phase, outcome: phaseOutcome(p), recovery, ...(attempts > 1 ? { attempts } : {}), ...(detail ? { detail } : {}) }
   })
 }
 

@@ -5,7 +5,7 @@ import { Link } from 'react-router-dom'
 import { ago } from './colors'
 import { Tooltip } from './Tooltip'
 import { fmtDur as fmtDurM } from './runs'
-import { overlappingFailures, phaseFill, phaseOutcome, runOutcome, scanRunOf, type PhaseIssue, type PhaseSpan, type RunSummary, type ScanRun } from './scanRunsModel'
+import { BEHIND, overlappingFailures, phaseFill, phaseOutcome, runOutcome, scanRunOf, type PhaseIssue, type PhaseSpan, type RunSummary, type ScanRun } from './scanRunsModel'
 import { fmtTimestamp } from './scan'
 import { DEFAULT_STORE, STORES, type Store, storeQuery, storeUrl } from './stores'
 
@@ -95,10 +95,12 @@ export function Status({ run, failedAt, issues = [], cell, lost }: { run: ScanRu
   }
   if (run.status === 'succeeded' && issues.length) {
     const outcome = runOutcome(run, issues)
-    const failed = issues.filter(i => !i.reason).length, skipped = issues.length - failed
-    const what = [failed && `${failed} phase attempt${failed === 1 ? '' : 's'} failed`, skipped && `${skipped} phase${skipped === 1 ? ' was' : 's were'} skipped`].filter(Boolean).join(' and ')
-    return <Tooltip cell={cell} content={<><div>Batch job succeeded, but {what}.</div>{issues.map(i => <div key={i.phase}>{i.phase}: {i.reason ?? i.outcome}{i.recovery ? ' · recovered by a subsequent attempt' : ' · no successful recovery recorded'}</div>)}</>}>
-      <span className={`sr-status ${outcome === 'recovered' ? 'succeeded' : 'warn'}`}>{outcome}</span>
+    const head = outcome === BEHIND ? "Data published. Search doesn't cover this scan yet." : outcome === 'recovered' ? 'Data published; a later attempt redid what failed.' : 'Data published, but:'
+    return <Tooltip cell={cell} content={<><div>{head}</div>{issues.map(i => <div key={i.phase}>
+      <div>{i.phase}: {i.outcome === BEHIND ? 'search behind' : i.reason ? `skipped: ${i.reason.replace(/^skipped(?: \([^)]*\))?: /, '')}` : `${i.outcome} ${i.attempts ?? 1}x`}{i.recovery ? ' · done by a later attempt' : ''}</div>
+      {(i.outcome === BEHIND ? i.reason : i.detail) && <div className="dim">{i.outcome === BEHIND ? i.reason : i.detail}</div>}
+    </div>)}</>}>
+      <span className={`sr-status ${outcome === 'recovered' ? 'succeeded' : outcome === BEHIND ? 'behind' : 'warn'}`}>{outcome}</span>
     </Tooltip>
   }
   const tag = <span className={`sr-status ${run.status}`}>{run.status === 'nop' ? 'no-op' : run.status}</span>

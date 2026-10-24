@@ -311,4 +311,5 @@ def record(base: str, t: Targets, results: list[Result], now: dt.datetime | None
     now = now or dt.datetime.now(dt.timezone.utc)
     passed, skipped, bad = counts(results)
     return {"ts": now.strftime("%Y-%m-%dT%H:%M:%SZ"), "base": base, **asdict(t), "results": [asdict(r) for r in results],
-            "summary": {"passed": passed, "skipped": skipped, "failed": bad, "line": summary_line(results)}}
+            "summary": {"passed": passed, "skipped": skipped, "failed": bad, "lag": sum(failed(r) and unindexed_refusal(r) for r in results),
+                        "line": summary_line(results)}}
