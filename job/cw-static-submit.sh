@@ -8,6 +8,8 @@
 #
 #   job/cw-static-submit.sh 2026-10-22T1202   # catch up through that scan
 #   DRY=1 job/cw-static-submit.sh <scan>      # print the body only
+#   NO_MERGE=1 job/cw-static-submit.sh <scan> # skip the due carries (`-M`): a level-5 compaction is hours, so it
+#                                             # runs on its own after (`dt-cloud static-names runs merge`)
 #
 # Same image and SA as the scan job (cw-batch-submit.sh).
 set -euo pipefail
@@ -21,14 +23,15 @@ IMAGE=${IMAGE:-us-central1-docker.pkg.dev/$PROJECT/cw-s3-usage/scan:cw}
 MACHINE=${MACHINE:-e2-standard-4}
 JOB_ID=${JOB_ID:-cw-sn-catchup-$(date -u +%Y%m%d-%H%M%S)}
 
-export PROJECT SA IMAGE MACHINE SCAN
+NO_MERGE=${NO_MERGE:-}
+export PROJECT SA IMAGE MACHINE SCAN NO_MERGE
 body=$(python3 <<'EOF'
 import json, os, shlex
 cmd = (
     "set -euo pipefail\n"
     "export STATIC_NAMES_PROFILE=/app/job/static-names.json\n"
     "set -x\n"
-    f"dt-cloud static-names runs add -c {shlex.quote(os.environ['SCAN'])}\n"
+    f"dt-cloud static-names runs add -c {shlex.quote(os.environ['SCAN'])}{' -M' if os.environ['NO_MERGE'] else ''}\n"
     "echo STATIC-CATCHUP-DONE"
 )
 print(json.dumps({
@@ -54,5 +57,5 @@ EOF
 
 if [ -n "${DRY:-}" ]; then echo "$body"; exit 0; fi
 gcloud batch jobs submit "$JOB_ID" --project "$PROJECT" --location "$REGION" --config - <<<"$body" >/dev/null
-echo "submitted $JOB_ID (static-names runs add -c $SCAN on $MACHINE)"
+echo "submitted $JOB_ID (static-names runs add -c $SCAN${NO_MERGE:+ -M} on $MACHINE)"
 echo "  gcloud batch jobs describe $JOB_ID --project $PROJECT --location $REGION --format='value(status.state)'"
