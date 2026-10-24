@@ -286,7 +286,7 @@ def test_exact_request_cli_skips_discovery_and_records_details(monkeypatch):
 
 
 @pytest.mark.parametrize("unindexed,code,verdict", [
-    ((), 1, "FAIL: 1 passed, 0 skipped, 1 failed"),
+    ((), 1, "FAIL: 1 passed, 0 skipped, 1 failed (1 scan-not-indexed: the static name index lags this scan)"),
     (("-i", SKIP), 0, f"PASS: 1 passed, 1 skipped ({SKIP}), 0 failed"),
 ])
 def test_cli_not_indexed_verdict(monkeypatch, unindexed, code, verdict):
