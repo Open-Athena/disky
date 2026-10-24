@@ -90,6 +90,14 @@ class Helpers:
     def done(self, kind: str, i: int) -> bool:
         return self.ck.store.exists(self.ck.key(f"{self.unit_key(kind, i)}/done.json"))
 
+    def listed(self) -> dict[str, int]:
+        """Every file under the checkpoint's `root/` (`{key: size}`), one listing: the units done are those with a
+        `done.json` in it (a `done` per unit is a request each, minutes over thousands of units)."""
+        return self.ck.store.listing(self.ck.key(self.root))
+
+    def done_in(self, listing: dict[str, int], units) -> set[tuple[str, int]]:
+        return {u for u in units if self.ck.key(f"{self.unit_key(*u)}/done.json") in listing}
+
     def deal(self, weights: dict[tuple[str, int], int]) -> tuple[set[tuple[str, int]], list[list[list]]]:
         """`weights`' units dealt over the shares (`static_merge.deal`): share 0 (kept), and the other shares' units not
         done already (an earlier attempt's helpers'), as plan entries; `away` = every unit not in share 0."""
@@ -98,7 +106,8 @@ class Helpers:
         shares = deal(weights, self.tasks)
         mine = set(shares[0])
         self.away = set(weights) - mine
-        return mine, [[[k, i] for k, i in share if not self.done(k, i)] for share in shares[1:]]
+        done = self.done_in(self.listed(), self.away)
+        return mine, [[[k, i] for k, i in share if (k, i) not in done] for share in shares[1:]]
 
     def _submit(self, shares: list[list]) -> None:
         if not shares:
@@ -119,14 +128,23 @@ class Helpers:
         self.thread = threading.Thread(target=run, name=f"{self.root}-helpers-{self.attempt}", daemon=True)
         self.thread.start()
 
-    def wait(self, units: list[tuple[str, int]], what: str, ids: Callable[[list[tuple[str, int]]], list]) -> None:
+    def wait(self, units: list[tuple[str, int]], what: str, ids: Callable[[list[tuple[str, int]]], list],
+             fetch: Callable[[list[tuple[str, int]], dict[str, int]], None] | None = None) -> None:
         """Wait until every unit of `units` is done, dealing every unit away and not done again (over the helper shares,
         one each) when a helper job ends without them, at most `retries` times; then fail naming the missing (`what`
-        `ids(missing)`)."""
+        `ids(missing)`). `fetch(units, listing)`: called with the units newly done at each poll (and the listing), so
+        their outputs download while the rest are still being built."""
         from .static_merge import deal
 
+        fetched: set[tuple[str, int]] = set()
         while True:
-            missing = sorted(u for u in units if not self.done(*u))
+            listing = self.listed()
+            done = self.done_in(listing, units)
+            if fetch is not None and (new := sorted(done - fetched)):
+                fetch(new, listing)
+                fetched.update(new)
+                continue
+            missing = sorted(set(units) - done)
             if not missing:
                 return
             if self.thread is None or not self.thread.is_alive():
@@ -134,9 +152,30 @@ class Helpers:
                 if self.attempt > self.retries:
                     raise RuntimeError(f"{self.label}: {what} {ids(missing)} {self.undone} after {self.attempt} helper jobs{why}")
                 self.log(f"{self.label}: helper job {self.attempt} ended{why}; dealing {len(missing)} {what} again")
-                pend = {u: 1 for u in self.away if not self.done(*u)}
+                pend = {u: 1 for u in self.away - self.done_in(listing, self.away)}
                 self._submit([[[k, i] for k, i in share] for share in deal(pend, self.tasks - 1) if share])
             time.sleep(self.poll_s)
+
+    def fetch(self, files: dict[str, Path], listing: dict[str, int], stage: str) -> None:
+        """Checkpoint files (`{key under root/: local target}`, sizes from `listing`) downloaded in parallel
+        (`blobstore.stage_files`: sliced ranged GETs over processes from `gs://`, threads elsewhere) into a `.fetch/` dir
+        beside the targets, then moved into place. A file still failing after its retries raises."""
+        import os
+        import shutil
+
+        from .blobstore import stage_files
+
+        if not files:
+            return
+        full = {self.ck.key(k): dst for k, dst in files.items()}
+        tmp = Path(os.path.commonpath([str(Path(d).parent) for d in full.values()])) / ".fetch"
+        got = stage_files(self.ck.store.uri(""), {k: listing[k] for k in full}, tmp, label=stage, log=self.log)
+        if got["failed"]:
+            raise RuntimeError(f"{self.label}: {len(got['failed'])} files not fetched: {got['failed'][:5]}")
+        for k, dst in full.items():
+            Path(dst).parent.mkdir(parents=True, exist_ok=True)
+            os.replace(tmp / k, dst)
+        shutil.rmtree(tmp, ignore_errors=True)
 
     def finish(self) -> None:
         """Wait for the helper job's end (every unit is done by now; its tasks are exiting)."""
@@ -175,19 +214,37 @@ class Fanout(Helpers):
         """Wait until every range of `paths` (`{g: (sorted, dirs, rup)}` local targets) is measured by a helper, dealing
         the missing ones again when a helper job ends without them; then download each to its targets. Each range's
         stats (its `done.json`)."""
+        import shutil
+
         from . import heartbeat as hb
 
-        hb.set_stage(f"drill/measure/{kind}: waiting on the helpers' {len(paths)} ranges")
-        self.wait([(kind, g) for g in paths], f"{kind} ranges", lambda us: [g for _, g in us])
-        out = {}
-        for g, (so, do, ro) in paths.items():
-            base = range_key(kind, g)
-            for name, dst in (("sorted", so), ("dirs", do), ("rup", ro)):
-                Path(dst).parent.mkdir(parents=True, exist_ok=True)
-                self.ck.store.get(self.ck.key(f"{base}/{name}.parquet"), Path(dst))
-            out[g] = self.ck.store.read_json(self.ck.key(f"{base}/done.json"))
-        self.log(f"measure fan-out: {len(out)} {kind} ranges from the helpers")
-        return out
+        out: dict[int, dict] = {}
+        nbytes = 0
+        # each range's `done.json` lands here (beside the targets, so moved into place), read, then dropped
+        if not paths:
+            return {}
+        docdir = Path(next(iter(paths.values()))[0]).parent / ".fetch-done"
+        hb.set_stage(f"drill/measure/{kind}: 0/{len(paths)} helper ranges collected")
+
+        def fetch(units: list[tuple[str, int]], listing: dict[str, int]) -> None:
+            nonlocal nbytes
+            files, docs = {}, {}
+            for _, g in units:
+                base = range_key(kind, g)
+                files.update({f"{base}/{name}.parquet": Path(dst) for name, dst in zip(("sorted", "dirs", "rup"), paths[g])})
+                docs[g] = docdir / f"g{g:06d}.json"
+                files[f"{base}/done.json"] = docs[g]
+            nbytes += sum(listing[self.ck.key(k)] for k in files)
+            self.fetch(files, listing, f"measure fan-out: {kind} ranges")
+            for g, f in docs.items():
+                out[g] = json.loads(f.read_text())
+                f.unlink()
+            hb.set_stage(f"drill/measure/{kind}: {len(out)}/{len(paths)} helper ranges collected, {nbytes / 2**30:,.1f} GiB")
+
+        self.wait([(kind, g) for g in paths], f"{kind} ranges", lambda us: [g for _, g in us], fetch)
+        shutil.rmtree(docdir, ignore_errors=True)
+        self.log(f"measure fan-out: {len(out)} {kind} ranges from the helpers ({nbytes / 2**30:,.1f} GiB)")
+        return {g: out[g] for g in paths}
 
 
 class AnchorFanout(Helpers):
@@ -232,16 +289,30 @@ class AnchorFanout(Helpers):
         """Wait until every task of `paths` (`{(kind, i): local cells file}`) is built by a helper, dealing the missing
         ones again when a helper job ends without them; then download each one's cells to its file, and wait for the
         helper job's end. Each task's `_shard_task` doc."""
+        import shutil
+
         from . import heartbeat as hb
 
-        hb.set_stage(f"anchors/rollups: waiting on the helpers' {len(paths)} shard tasks")
-        self.wait(sorted(paths), "shard tasks", lambda us: [f"{k}/s{i:05d}" for k, i in us])
-        out = {}
-        for (kind, i), dst in sorted(paths.items()):
-            base = anchor_task_key(kind, i)
-            Path(dst).parent.mkdir(parents=True, exist_ok=True)
-            self.ck.store.get(self.ck.key(f"{base}/cells.parquet"), Path(dst))
-            out[(kind, i)] = self.ck.store.read_json(self.ck.key(f"{base}/done.json"))["doc"]
+        out: dict[tuple[str, int], dict] = {}
+        docdir = Path(next(iter(paths.values()))).parent / ".fetch-done" if paths else None
+        hb.set_stage(f"anchors/rollups: 0/{len(paths)} helper shard tasks collected")
+
+        def fetch(units: list[tuple[str, int]], listing: dict[str, int]) -> None:
+            files, docs = {}, {}
+            for kind, i in units:
+                base = anchor_task_key(kind, i)
+                files[f"{base}/cells.parquet"] = Path(paths[(kind, i)])
+                docs[(kind, i)] = docdir / f"{kind}-{i:05d}.json"
+                files[f"{base}/done.json"] = docs[(kind, i)]
+            self.fetch(files, listing, "anchors fan-out: shard tasks")
+            for u, f in docs.items():
+                out[u] = json.loads(f.read_text())["doc"]
+                f.unlink()
+            hb.set_stage(f"anchors/rollups: {len(out)}/{len(paths)} helper shard tasks collected")
+
+        self.wait(sorted(paths), "shard tasks", lambda us: [f"{k}/s{i:05d}" for k, i in us], fetch)
+        if docdir is not None:
+            shutil.rmtree(docdir, ignore_errors=True)
         self.log(f"anchors fan-out: {len(out)} shard tasks from the helpers")
         self.finish()
         return out
