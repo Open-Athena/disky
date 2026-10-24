@@ -40,7 +40,11 @@ HEARTBEAT_S = 60.0
 #: Consecutive failed writes after which the recorder gives up (logged once).
 MAX_FAILURES = 5
 #: The job facts the submitter puts in the spec's env (`append_runner.Runner.record_env`) → the run row's columns.
-FACT_ENV = {"job_name": "DT_JOB_NAME", "region": "DT_JOB_REGION", "machine": "DT_JOB_MACHINE", "spot": "DT_JOB_SPOT", "image": "DT_JOB_IMAGE"}
+FACT_ENV = {"job_name": "DT_JOB_NAME", "region": "DT_JOB_REGION", "machine": "DT_JOB_MACHINE", "spot": "DT_JOB_SPOT", "image": "DT_JOB_IMAGE",
+            "parent": "DT_PARENT_RUN"}
+#: A fan-out helper task's record (`task_recorder`): the run it's a child of on `/scans` is `DT_PARENT_RUN`'s (the
+#: compaction's job), under the scan and generation its submitter names.
+RECORD_SCAN_ENV, RECORD_GEN_ENV = "DT_RECORD_SCAN", "DT_RECORD_GEN"
 #: What a recording job needs from its submitter's env, passed through as plain variables (ids, not secrets; the
 #: token comes from Secret Manager: the profile's `record_secrets`).
 PASS_ENV = ("D1_DB_ID", "CLOUDFLARE_ACCOUNT_ID", "SCAN_RUNS_PROFILE")
@@ -238,6 +242,21 @@ class MaintRun:
         if self.prices is None or not machine or self._started is None:
             return None
         return cost(self.prices, str(machine), bool(int(self.facts.get("spot") or 0)), 1, now - self._started)
+
+
+def task_recorder(kind: str, env: Mapping[str, str] | None = None, *, log: Callable[[str], None] = err) -> Recorder:
+    """A fan-out helper task's recorder (`from_env`), started: one row per task (`<job uid>-<task index>`), a child of
+    the compaction's run (`$DT_PARENT_RUN`), under `$DT_RECORD_SCAN` / `$DT_RECORD_GEN`; `NULL` when its submitter named
+    no scan (or recording is off)."""
+    env = dict(os.environ if env is None else env)
+    if not (env.get(RECORD_SCAN_ENV) or "").strip():
+        log(f"{kind}: not recorded on /scans (its submitter named no ${RECORD_SCAN_ENV})")
+        return NULL
+    if (uid := (env.get("BATCH_JOB_UID") or "").strip()):
+        env["BATCH_JOB_UID"] = f"{uid}-{env.get('BATCH_TASK_INDEX', '0')}"
+    rec = from_env(kind, env, log=log)
+    rec.start(env[RECORD_SCAN_ENV].strip(), env.get(RECORD_GEN_ENV, "").strip())
+    return rec
 
 
 def from_env(kind: str, env: Mapping[str, str] | None = None, *, log: Callable[[str], None] = err) -> Recorder:

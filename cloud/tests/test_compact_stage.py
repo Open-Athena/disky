@@ -312,6 +312,9 @@ def test_the_fan_outs_helper_job_is_a_real_stage_job_named_by_the_compactions_sc
     r = _static_runner(1)
     name, spec = helper_job(r, "gs://scr/static-names/compact-checkpoints/g.c001/abc/fold", "measured/plan-2.json", 15, "c0de", "2026-10-23T0702")
     assert re.fullmatch(r"[a-z0-9-]+-measure-2026-10-23-0702-\d{6}", name), name
+    v = spec["taskGroups"][0]["taskSpec"]["environment"]["variables"]
+    assert {k: v.get(k) for k in ("DT_RECORD_SCAN", "DT_RECORD_GEN", "DT_JOB_NAME")} == {"DT_RECORD_SCAN": "2026-10-23T0702",
+                                                                                    "DT_RECORD_GEN": f"static-names/{r.cfg.gen}", "DT_JOB_NAME": name}
     group = spec["taskGroups"][0]
     assert (spec["labels"]["stage"], group["taskCount"], group["taskSpec"]["runnables"][0]["container"]["commands"][1]) == (
         "measure", 15, _py("static_merge", "measure-shard", "-c", "gs://scr/static-names/compact-checkpoints/g.c001/abc/fold", "-P", "measured/plan-2.json",

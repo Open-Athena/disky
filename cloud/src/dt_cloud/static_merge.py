@@ -448,7 +448,7 @@ def helper_job(runner, url: str, plan: str, n: int, code: str, scan: str) -> tup
     from .append_runner import duckdb_args
 
     args = ["measure-shard", "-c", url, "-P", plan, "-V", code, *duckdb_args(runner.cfg.machine_for("measure"))]
-    return runner.job("measure", scan, n, "static_merge", args, mount=False)
+    return _helper_recorded(runner, *runner.job("measure", scan, n, "static_merge", args, mount=False), scan)
 
 
 #: The anchors fan-out's helper stage (its own: `anchors` is a long single-task stage, STANDARD; the helpers are
@@ -463,7 +463,44 @@ def anchor_helper_job(runner, url: str, plan: str, n: int, code: str, scan: str)
     from .append_runner import duckdb_args
 
     args = ["anchor-shard", "-c", url, "-P", plan, "-V", code, *duckdb_args(runner.cfg.machine_for(ANCHOR_STAGE))]
-    return runner.job(ANCHOR_STAGE, scan, n, "static_merge", args, mount=False)
+    return _helper_recorded(runner, *runner.job(ANCHOR_STAGE, scan, n, "static_merge", args, mount=False), scan)
+
+
+def _task_recorded(kind: str):
+    """A fan-out helper command recorded per task on `/scans` (`maint_runs.task_recorder`, a child row of the
+    compaction's run): one phase `kind` around the body, then the run finished succeeded or failed (re-raised)."""
+    from functools import wraps
+
+    def wrap(fn):
+        @wraps(fn)
+        def run(*args, **kw):
+            from .maint_runs import phase, task_recorder
+
+            rec = task_recorder(kind)
+            try:
+                with phase(rec, kind):
+                    fn(*args, **kw)
+            except BaseException as e:
+                rec.finish("failed", f"{type(e).__name__}: {e}")
+                raise
+            rec.finish("succeeded")
+
+        return run
+
+    return wrap
+
+
+def _helper_recorded(runner, name: str, spec: dict, scan: str) -> tuple[str, dict]:
+    """A fan-out helper job with what its tasks record with (`runner.record_env`; `maint_runs.task_recorder`): each task
+    a child row on `/scans` of this process's job (`$BATCH_JOB_UID`: the compaction's), under its newest `scan`."""
+    from .maint_runs import RECORD_GEN_ENV, RECORD_SCAN_ENV
+
+    runner.record_env(name, spec)
+    v = spec["taskGroups"][0]["taskSpec"]["environment"]["variables"]
+    v.update({RECORD_SCAN_ENV: scan, RECORD_GEN_ENV: f"{PREFIX}/{runner.cfg.gen}"})
+    if (parent := (os.environ.get("BATCH_JOB_UID") or "").strip()):
+        v["DT_PARENT_RUN"] = parent
+    return name, spec
 
 
 @cli.command("compact")
@@ -821,6 +858,7 @@ def deal(weights: dict, n: int) -> list[list]:
 @option("-T", "--tmp", default="/stage/tmp/measure-shard", help="Local work dir")
 @option("-V", "--code", required=True, help="The fold's code version (`checkpoint.code_version`): another refuses")
 @option("-w", "--workers", default=64, type=IntRange(min=1), help="Concurrent downloads and uploads")
+@_task_recorded("measure-shard")
 def measure_shard_cmd(checkpoint, index, mem, threads, plan, tmp, code, workers) -> None:
     """A compaction's drill measurement helper (`static_fanout`, specs/static-measure-fanout.md): task INDEX's share of
     the plan's `q` ranges, each fetched from the fold's saved spills, measured (`static_local.measure_ranges`; only
@@ -886,6 +924,7 @@ def _timed_shard_task(*args) -> tuple[dict, float]:
 @option("-T", "--tmp", default="/stage/tmp/anchor-shard", help="Local work dir")
 @option("-V", "--code", required=True, help="The fold's code version (`checkpoint.code_version`): another refuses")
 @option("-w", "--workers", default=16, type=IntRange(min=1), help="Concurrent downloads")
+@_task_recorded("anchor-shard")
 def anchor_shard_cmd(checkpoint, index, mem, threads, plan, tmp, code, workers) -> None:
     """A compaction's base anchors helper (`static_fanout.AnchorFanout`, specs/static-anchors-fanout.md): task INDEX's
     share of the plan's `(kind, shard)` rollup tasks, each one's input shard fetched from `anchors-in/`, its rollups
