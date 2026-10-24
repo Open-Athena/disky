@@ -152,3 +152,32 @@ def test_fmt_bytes():
     assert [H.fmt_bytes(n) for n in (0, 512, 3 << 20, int(1.25 * GiB), int(2.1 * (1 << 40)))] == [
         "0 B", "512 B", "3.0 MiB", "1.25 GiB", "2.10 TiB",
     ]
+
+
+def test_liveness_peak_is_the_trees_and_cpu_never_negative():
+    """The tree's RSS past the process's own peak (a child's: cw's 28 GiB import under a 173.5 MiB wrapper) is the peak
+    from then on; a CPU sum falling (a child gone between samples) reads 0%, and the next interval counts from the
+    higher mark."""
+    clock = Clock()
+    lines: list[str] = []
+    samples = iter([(20 * GiB, 100.0), (28 * GiB, 40.0), (10 * GiB, 160.0)])
+    cur = {}
+
+    def wait(s: float) -> bool:
+        try:
+            cur["rss"], cur["cpu"] = next(samples)
+        except StopIteration:
+            return True
+        clock.t += s
+        return False
+
+    live = Liveness(lines.append, 60.0, disk_path="/stage", clock=clock, wait=wait, cpu=lambda: cur.get("cpu", 0.0),
+                    rss=lambda: (cur.get("rss"), 200 << 20), disk=lambda: None)
+    live.started = clock()
+    live._last = (clock(), 0.0)
+    live._run()
+    assert lines == [
+        "[alive] 1m · - · RSS 20.00 GiB (peak 20.00 GiB) · CPU 167%",
+        "[alive] 2m · - · RSS 28.00 GiB (peak 28.00 GiB) · CPU 0%",
+        "[alive] 3m · - · RSS 10.00 GiB (peak 28.00 GiB) · CPU 100%",
+    ]

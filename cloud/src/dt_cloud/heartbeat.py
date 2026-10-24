@@ -375,8 +375,10 @@ def descendants(pid: int, proc: str = "/proc") -> list[int]:
 
 
 def tree_cpu_seconds(proc: str = "/proc") -> float:
-    """CPU seconds of this process, its exited (waited-for) children and its live descendants: a spawn pool's workers'
-    included (`time.process_time` alone read 0% through a compaction's `drill/measure`, 12 processes busy)."""
+    """CPU seconds of this process, its exited (waited-for) children and its live descendants, each with the children it
+    waited for (`cutime`/`cstime`: a worker's exited processes stay counted once their parent reaped them; without them
+    the sum fell as they exited, cw's import read -1711%): a spawn pool's workers' included (`time.process_time` alone
+    read 0% through a compaction's `drill/measure`, 12 processes busy)."""
     import resource
 
     total = time.process_time() + sum(getattr(resource.getrusage(resource.RUSAGE_CHILDREN), f) for f in ("ru_utime", "ru_stime"))
@@ -385,7 +387,7 @@ def tree_cpu_seconds(proc: str = "/proc") -> float:
         try:
             with open(f"{proc}/{c}/stat") as f:
                 fields = f.read().rsplit(")", 1)[1].split()
-            total += (int(fields[11]) + int(fields[12])) / tick
+            total += sum(int(f) for f in fields[11:15]) / tick
         except (OSError, ValueError, IndexError):
             continue
     return total
@@ -449,6 +451,7 @@ class Liveness(Heartbeat):
         self.disk_path, self.stage, self.rss, self.cpu = disk_path, stage, rss, cpu
         self.disk = disk or (lambda: disk_used(disk_path))
         self._last = (clock(), cpu())
+        self.peak = 0
 
     def start(self) -> Liveness:
         self._last = (self.clock(), self.cpu())
@@ -457,13 +460,18 @@ class Liveness(Heartbeat):
 
     def note(self) -> str:
         now, cpu = self.clock(), self.cpu()
-        (t0, c0), self._last = self._last, (now, cpu)
+        t0, c0 = self._last
+        # a child exiting unreaped between two samples can still drop out of the tree's sum: never a negative interval
+        cpu = max(cpu, c0)
+        self._last = (now, cpu)
         label, detail, since = self.stage()
         # No stage set yet: `-`, with no time in it (the elapsed already says how long the process has run).
         stage = "-" if label is None else clip(label, STAGE_CHARS) + (f" {detail}" if detail else "") + f" ({fmt_secs(now - since)})"
         parts = [LIVE_TAG, fmt_secs(now - self.started), "·", stage]
         cur, peak = self.rss()
-        parts += ["·", f"RSS {fmt_bytes(cur)} (peak {fmt_bytes(peak)})" if cur is not None else f"RSS peak {fmt_bytes(peak)}"]
+        # the tree's peak as sampled (the process's own `ru_maxrss` misses its children's: cw's 28 GiB import read 173.5 MiB)
+        self.peak = max(self.peak, peak, cur or 0)
+        parts += ["·", f"RSS {fmt_bytes(cur)} (peak {fmt_bytes(self.peak)})" if cur is not None else f"RSS peak {fmt_bytes(self.peak)}"]
         used = self.disk()
         if used is not None:
             parts += ["·", f"{self.disk_path} {fmt_bytes(used)} used"]
