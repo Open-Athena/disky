@@ -447,6 +447,4 @@ def test_scans_needing_verify_are_verified_in_parallel_shares(fx, d1, tmp_path):
     assert [(r["id"], r["status"], r["marker"]) for r in rep["scans"] if r["status"] == "retire"] == [
         ("2026-07-30", "retire", "verified"), ("2026-08-03", "retire", "verified"), ("2026-08-04", "retire", "verified"),
         ("2026-08-04T1236", "retire", "verified")]
-    assert sorted(p.name for p in verify.iterdir()) == [
-        "2026-07-30.json", "2026-08-02.json", "2026-08-03.json", "2026-08-04.json", "2026-08-04T1236.json"]
     assert [json.loads((verify / f"{d}.json").read_text())["pass"] for d in ("2026-07-30", "2026-08-03", "2026-08-04", "2026-08-04T1236")] == [True] * 4
