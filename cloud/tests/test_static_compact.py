@@ -758,3 +758,28 @@ def test_a_seed_through_the_spills_carries_the_finished_measured_ranges(tmp_path
                                            "fold/spilled/done.json", "fold/spilled/long/x.parquet"]
     assert seeded("drill", "b") == ["anchored/end/s00000/cells.parquet", "anchored/end/s00000/done.json", "anchors-in/sx/s00000.parquet",
                                     "code.json", "drill/d.parquet", "drill/done.json", "fold/spilled/done.json", "fold/spilled/long/x.parquet"]
+
+
+def test_a_compactions_record_phases_its_fold_drill_and_anchors(world, tmp_path, monkeypatch):
+    """A static compaction's run on /scans: the fold's record phases `fold` (intervals, shards, catalog), `drill` and
+    `anchors` (the fold's `done` hook moves it on), each ended done (`fold`'s and `drill`'s notes naming their parts'
+    seconds), before `upload`."""
+    from dt_cloud.blobstore import Store
+    from test_maint_runs import FakeRecorder
+
+    monkeypatch.setattr(ar, "NOTE_S", 1e12)  # no throttled notes: a deterministic call list
+    store = tmp_path / "store"
+    shutil.copytree(world["c_store"].parent, store)
+    shutil.rmtree(store / sn.PREFIX / "g.c001")
+    for f in (store / sn.PREFIX / "g" / ar.SUCCESSOR, store / sn.PREFIX / ar.CURRENT):
+        f.unlink(missing_ok=True)
+    rec = FakeRecorder()
+    with _small_groups():
+        ar.run_compaction(Store(str(store)), sk.compactor(), "g", store, tmp_path / "w", policy=1, force=True, log=lambda m: None, rec=rec)
+    begun = [c[1] for c in rec.calls if c[0] == "begin"]
+    fold = begun[begun.index("fold"):begun.index("upload") + 1]
+    ended = [c for c in rec.calls if c[0] == "end" and c[1] in ("fold", "drill", "anchors")]
+    # the last of them ends with the fold's summary (`compact_store`), the others with their parts' seconds
+    parts = {p: [x for x in re.findall(r"(?:^|; )([a-z/-]+) [\d.]+s", rec.notes[p]) if "/" not in x] for p in ("fold", "drill")}
+    assert (fold, ended, parts) == (["fold", "drill", "anchors", "upload"], [("end", p, "done") for p in ("fold", "drill", "anchors")],
+                                    {"fold": ["intervals", "shards", "catalog"], "drill": ["drill"]})
