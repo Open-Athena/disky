@@ -31,13 +31,11 @@ def range_key(kind: str, g: int) -> str:
 
 
 def spill_sizes(work: Path, kind: str, n: int) -> dict[int, int]:
-    """Each of `kind`'s spilled `q` ranges' bytes (`work/<kind>/*/grp=<g>/`), ranges without roots left out."""
-    out = {}
-    for g in range(n):
-        size = sum(f.stat().st_size for f in (work / kind).glob(f"*/grp={g}/*.parquet"))
-        if size:
-            out[g] = size
-    return out
+    """Each of `kind`'s spilled `q` ranges' bytes (`work/<kind>/*/grp=<g>/`, `static_local.spill_files`: one walk), ranges
+    without roots left out."""
+    from .static_local import spill_files
+
+    return {g: size for g, fs in spill_files(work, kind).items() if g < n and (size := sum(f.stat().st_size for f in fs))}
 
 
 class Fanout:
@@ -64,8 +62,10 @@ class Fanout:
         measurement's `R`, `K`, `floor`, and `measure` (false: the helpers only sort each range's roots, an incremental
         compaction's: `static_local.finish_drill`)."""
         self.params = {"R": R, "K": K, "floor": floor, "measure": measure}
+        from . import heartbeat as hb
         from .static_merge import deal
 
+        hb.set_stage("drill/measure/fan-out plan")
         weights = {(kind, g): size for kind, n in groups.items() for g, size in spill_sizes(work, kind, n).items()}
         shares = deal(weights, self.tasks)
         mine = set(shares[0])
@@ -82,6 +82,7 @@ class Fanout:
         plan = f"{MEASURED}/plan-{self.attempt}.json"
         self.ck.store.write_text(self.ck.key(plan), json.dumps({"tasks": shares, "code": self.code, **self.params}) + "\n")
         url = self.ck.store.uri(self.ck.prefix)
+        self.log(f"measure fan-out: {plan}: {len(shares)} helper tasks submitted")
 
         def run() -> None:
             try:
@@ -100,6 +101,9 @@ class Fanout:
         """Wait until every range of `paths` (`{g: (sorted, dirs, rup)}` local targets) is measured by a helper, dealing
         the missing ones again when a helper job ends without them; then download each to its targets. Each range's
         stats (its `done.json`)."""
+        from . import heartbeat as hb
+
+        hb.set_stage(f"drill/measure/{kind}: waiting on the helpers' {len(paths)} ranges")
         while True:
             missing = sorted(g for g in paths if not self.done(kind, g))
             if not missing:
