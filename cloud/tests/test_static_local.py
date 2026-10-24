@@ -11,6 +11,7 @@ from pathlib import Path
 
 import duckdb
 import fsspec
+import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 from click.testing import CliRunner
@@ -169,8 +170,13 @@ def test_build_drill_is_the_reference_drill(built):
     ref = tmp / "ref" / "drill"
     meas = _drill(staged["con"], staged, ref, R, KEEP, FLOOR)
     got, want = _files(gen / "drill"), _files(ref)
+    # the members' digests (the classes' source for a compaction: specs/static-incremental-compaction.md step 3) are the
+    # build's own; one row per member, the aliases' members
+    digests = got.pop("digests-long.parquet")
     assert sorted(got) == sorted(want)
     assert {k: v for k, v in got.items() if k != "meta.json"} == {k: v for k, v in want.items() if k != "meta.json"}
+    assert sorted(pq.read_table(pa.BufferReader(digests), columns=["q"]).column("q").to_pylist()) == sorted(
+        pq.read_table(gen / "drill" / "aliases.parquet", columns=["q"]).column("q").to_pylist())
     assert json.loads(got["meta.json"]) == {**json.loads(want["meta.json"]), "floor": FLOOR}
     for sub, kind in (("dirs", "long"), ("short/dirs", "short")):
         got_meas = pq.read_table(gen / "roots-measure" / sub / "s0000.parquet").to_pylist()
