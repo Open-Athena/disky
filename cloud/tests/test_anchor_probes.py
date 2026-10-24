@@ -58,6 +58,8 @@ def test_probe_join_state_is_bounded_by_the_current_key_batch(tmp_path):
     profile = tmp_path / 'profile.json'
     con.execute("SET enable_profiling='json'")
     con.execute(f'SET profiling_output={an.q(str(profile))}')
+    # an ASOF join over a small, known-size left side (a registered arrow batch) is otherwise planned as a loop join
+    con.execute("SET asof_loop_join_threshold = 0")
     right_rows = []
 
     def joins(node):
