@@ -270,3 +270,17 @@ def test_a_fold_stopped_after_a_saved_step_resumes_there_to_the_same_bytes(world
     # cleared once published: nothing of the new generation's folds is left
     assert sk.clear_checkpoints(ck_root, "g.c001") > 0
     assert sorted(p.relative_to(tmp_path / "scratch").as_posix() for p in (tmp_path / "scratch").rglob("*") if p.is_file()) == []
+
+
+def test_progress_counts_items_done_across_pool_calls():
+    """The long roots run one `_pool` per batch of spill parts on one `Progress`: its lines count the items done over
+    all of them (gcs's live compaction printed each call's own count: 45, 61, 1, 34 … of 4,881)."""
+    import duckdb
+
+    lines: list[str] = []
+    prog = sn.Progress("drill/fold/long-roots", 5, lines.append, every_s=0)
+    con = duckdb.connect()
+    for batch in ([0, 1, 2], [3, 4]):
+        sk._pool(con, lambda cur, i: (10, i), batch, 2, prog)
+    assert [line.split(":")[0] for line in lines] == [f"drill/fold/long-roots {k}/5" for k in range(1, 6)]
+    assert prog.rows == 50

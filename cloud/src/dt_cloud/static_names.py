@@ -303,9 +303,14 @@ class Progress:
     def __init__(self, label: str, n: int, log: Callable[[str], None], every_s: float = hb.PROGRESS_S):
         self.label, self.n, self.log, self.every_s = label, n, log, every_s
         self.t0 = self.last = monotonic()
-        self.rows = 0
+        self.rows = self.done = 0
         hb.set_stage(label)
         hb.set_detail(f"0/{n}")
+
+    def finish(self, rows: int) -> None:
+        """One more item done, however many loops (`static_compact._pool` calls) share this progress: `tick` its count."""
+        self.done += 1
+        self.tick(self.done - 1, rows)
 
     def tick(self, k: int, rows: int) -> None:
         self.rows += rows
