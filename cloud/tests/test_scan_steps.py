@@ -140,10 +140,12 @@ def test_index_imports_listings_when_list_does_not(tmp_path, env, monkeypatch):
 
 
 def test_serving_steps_gate_on_credentials(tmp_path, env):
+    """Without the site's, R2's or Slack's credentials no serving step runs a command; the probe's static lag check needs
+    none of them (the static-names profile reads the data bucket)."""
     c = ctx(tmp_path, env)
     for f in (S.publish_r2, S.index_rows, S.index_sync, S.over_time, S.index_gc, S.warm_cache, S.probe, S.digest):
         f(c, None)
-    assert c.sh_impl.calls == []
+    assert c.sh_impl.calls == ["dt-cloud static-names runs lag 2026-10-16T1200"]
 
 
 def test_serving_steps_commands(tmp_path, env):
