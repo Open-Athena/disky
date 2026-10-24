@@ -430,57 +430,78 @@ def write_rollup_parts(parts: list[str], out: Path, name: str) -> tuple[int, pa.
     return write_indexed(batches(), out / name, ROLLUP_SCHEMA, "dir", name, ["q", "dir", "child"], ROLLUP_RG)
 
 
+def shard_tasks(sx_files: list[str], names_files: list[str]) -> list[tuple[str, int, str]]:
+    """A tier's rollup tasks, `(kind, shard index, input file)`: `end` over the suffix shards, `exact` and `start` over
+    the name shards."""
+    return [(kind, i, f) for kind, files in (("end", sx_files), ("exact", names_files), (START, names_files)) for i, f in enumerate(files)]
+
+
 def _tier_parallel(con, sx_files: list[str], names_files: list[str], out: Path, R: int, K: int, rule: HexRule | None, jobs: int,
-                   work: Path) -> tuple[dict, dict]:
+                   work: Path, fanout=None) -> tuple[dict, dict]:
     """`build_tier_local`'s rollups shard by shard over `jobs` processes (`static_names.ConPool`), biggest shards first:
-    each kind's sorted cell files in shard order, and its docs summed. Returns `({kind: parts}, {kind: doc})`."""
+    each kind's sorted cell files in shard order, and its docs summed. Returns `({kind: parts}, {kind: doc})`.
+
+    `fanout` (`static_fanout.AnchorFanout`): the tasks it deals to its helper tasks are not built here; once these are,
+    `fanout.collect` downloads their cells to the files this pool's would be, so the parts are the same."""
     import os
 
     from .static_names import ConPool
 
-    tasks = [(kind, i, f) for kind, files in (("end", sx_files), ("exact", names_files), (START, names_files)) for i, f in enumerate(files)]
+    tasks = shard_tasks(sx_files, names_files)
     parts: dict[str, list[str]] = {kind: [""] * len(files) for kind, files in (("end", sx_files), ("exact", names_files), (START, names_files))}
+    for kind, i, _ in tasks:
+        parts[kind][i] = str(work / f"{kind}-{i:05d}.parquet")
     docs: dict[str, dict] = {}
     work.mkdir(parents=True, exist_ok=True)
+    away = fanout.start(tasks, R=R, K=K, rule=rule) if fanout is not None else set()
+    local = [t for t in tasks if (t[0], t[1]) not in away]
     from concurrent.futures import as_completed
 
     from .heartbeat import Progress
 
+    def add(kind: str, d: dict) -> None:
+        docs[kind] = {k: docs.get(kind, {}).get(k, 0) + v for k, v in d.items()}
+
     # a shard task's progress line as each ends (a compaction's base anchors ran an hour+ without a line)
-    prog = Progress("anchors/rollups", len(tasks), total_bytes=sum(os.path.getsize(t[2]) for t in tasks), unit="shard tasks")
+    prog = Progress("anchors/rollups" + (" (share 0)" if fanout is not None else ""), len(local),
+                    total_bytes=sum(os.path.getsize(t[2]) for t in local), unit="shard tasks")
     with ConPool(con, jobs, "anchors") as pool:
         futs = {}
-        for kind, i, f in sorted(tasks, key=lambda t: -os.path.getsize(t[2])):
-            parts[kind][i] = str(work / f"{kind}-{i:05d}.parquet")
+        for kind, i, f in sorted(local, key=lambda t: -os.path.getsize(t[2])):
             futs[pool.submit(_shard_task, kind, [f], R, K, rule, parts[kind][i], pool.task_threads, pool.mem,
                              str(work / "tmp" / f"{kind}-{i:05d}"))] = (kind, f)
         for fut in as_completed(futs):
             kind, f = futs[fut]
-            d = fut.result()
-            docs[kind] = {k: docs.get(kind, {}).get(k, 0) + v for k, v in d.items()}
+            add(kind, fut.result())
             prog.tick(nbytes=os.path.getsize(f))
     prog.done()
+    if away:
+        for (kind, _), d in fanout.collect({(k, i): parts[k][i] for k, i in away}).items():
+            add(kind, d)
     return parts, docs
 
 
 def build_tier_local(con, sx_files: list[str], names_files: list[str], out: Path, R: int, K: int, scans: list[str] | None = None,
-                     rule: HexRule | None = None, jobs: int | None = None, work: Path | None = None) -> dict:
+                     rule: HexRule | None = None, jobs: int | None = None, work: Path | None = None, fanout=None) -> dict:
     """A whole tier's `anchors/` locally from its shard files (the base path in tests; on Batch per shard), under the
     generation's hex-run `rule` (recorded in `meta.json`).
 
     `jobs` > 1 (default: `con`'s threads over `ANCHOR_THREADS`, at most the shards): the shards in parallel, each in a
     process of its own (a key lies in one shard: the staged path's per-shard build), their sorted cells (under `work`,
     default a new dir in DuckDB's `temp_directory`) streamed in shard order into the same files, so the same bytes; 1:
-    each kind over all its shards at once on `con`."""
+    each kind over all its shards at once on `con`.
+
+    `fanout` (`static_fanout.AnchorFanout`): the shard by shard path, part of its tasks on helper Batch tasks (a
+    compaction's, specs/static-anchors-fanout.md); the same bytes."""
     import shutil
 
     from .static_names import pool_jobs
 
     out.mkdir(parents=True, exist_ok=True)
     jobs = pool_jobs(con, max(len(sx_files), len(names_files), 1), ANCHOR_THREADS) if jobs is None else jobs
-    if jobs > 1:
+    if jobs > 1 or fanout is not None:
         work = work or _scratch(con, "anchors-shards-")
-        parts, pdocs = _tier_parallel(con, sx_files, names_files, out, R, K, rule, jobs, work)
+        parts, pdocs = _tier_parallel(con, sx_files, names_files, out, R, K, rule, jobs, work, fanout)
         sets, docs = {}, {}
         for kind, files in (("end", sx_files), ("exact", names_files)):
             docs[kind] = pdocs.get(kind, {}) if files else {}

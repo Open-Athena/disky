@@ -318,11 +318,12 @@ def build_gen(scans: dict, mount: str, gen_dir: Path, work: Path, *, gen: str, r
             "anchors": anchors, "s": round(monotonic() - t0, 1), "stages": times, "steps": steps, "peaks": peaks}
 
 
-def build_base_anchors(con, gen_dir: Path, *, R: int, K: int, scans: list[str], rule) -> dict:
+def build_base_anchors(con, gen_dir: Path, *, R: int, K: int, scans: list[str], rule, fanout: Callable[[], object] | None = None) -> dict:
     """The base generation's anchored search (`static_anchors`; `^q`, `q$`, `^q$` and path terms): the name index
     (`names/`, from the coalesced versions, as `static-names anchors names`), then `anchors/` — the `q$` rollups over the
     suffix shards, the `^q$` ones over the name index and the starts-with catalog `anchors/start/` (`build_tier_local`,
-    each `meta.json` written last), at the drill's R and K."""
+    each `meta.json` written last), at the drill's R and K. `fanout()`: the rollups' `static_fanout.AnchorFanout` (a
+    compaction's helper tasks; made once `names/` is written, its shards being their inputs)."""
     cint = sorted(str(f) for f in (gen_dir / "cintervals").glob("*.parquet"))
     t = monotonic()
     hb.set_stage("anchors/names")
@@ -330,7 +331,8 @@ def build_base_anchors(con, gen_dir: Path, *, R: int, K: int, scans: list[str], 
     sn.err(f"anchors/names: {names['rows']:,} rows in {names['shards']} shards in {monotonic() - t:.0f}s")
     tier = an.Tier(gen_dir)
     t = monotonic()
-    doc = an.build_tier_local(con, tier.files("end"), tier.files("exact"), gen_dir / an.ANCHORS, R, K, scans, rule)
+    doc = an.build_tier_local(con, tier.files("end"), tier.files("exact"), gen_dir / an.ANCHORS, R, K, scans, rule,
+                              fanout=fanout() if fanout is not None else None)
     sn.err(f"anchors/rollups: {', '.join(f'{k} {v['rows']:,} rows' for k, v in doc['sets'].items())} in {monotonic() - t:.0f}s")
     return {"names": {k: names[k] for k in ("rows", "shards")}, **{k: v["rows"] for k, v in doc["sets"].items()}}
 

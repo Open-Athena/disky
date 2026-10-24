@@ -67,9 +67,12 @@ class Profile:
     #: before it and its own previous stage are done, publishes in order (specs/static-backlog-pipeline.md); 1: one scan
     #: at a time.
     pipeline_depth: int = 1
-    #: The compaction's drill measurement over this many tasks (`static_merge compact -F`: the compaction's own and
+    #: The compaction's drill measurement over this many tasks (`static_merge compact -D`: the compaction's own and
     #: helper Batch tasks on the `measure` stage's machine; specs/static-measure-fanout.md); 1: the compaction alone.
     measure_tasks: int = 1
+    #: The compaction's base anchors' rollups over this many tasks (`static_merge compact -A`: the compaction's own and
+    #: helper Batch tasks on the `anchor-shard` stage's machine; specs/static-anchors-fanout.md); 1: the compaction alone.
+    anchor_tasks: int = 1
     #: Whether each run also gets the heavy-term drilldown (`drill/`, `static_drill`): needs the base generation's `drill/`.
     drill: bool = False
     #: Where the drill's tasks save each step (`static_drill build -S`: a store root, a bare bucket name meaning `gs://`), so
@@ -165,7 +168,7 @@ ENV = {
     "r2_sa": "STATIC_NAMES_R2_SA", "machine": "STATIC_NAMES_MACHINE", "ssd_gb": "STATIC_NAMES_SSD", "spot": "STATIC_NAMES_SPOT",
     "machines": "STATIC_NAMES_MACHINES", "ssd_gbs": "STATIC_NAMES_SSDS",
     "standard_stages": "STATIC_NAMES_STANDARD_STAGES",
-    "append_tasks": "STATIC_NAMES_APPEND_TASKS", "pipeline_depth": "STATIC_NAMES_PIPELINE_DEPTH", "measure_tasks": "STATIC_NAMES_MEASURE_TASKS", "drill": "STATIC_NAMES_DRILL", "drill_checkpoint": "STATIC_NAMES_DRILL_CHECKPOINT", "anchors": "STATIC_NAMES_ANCHORS", "src": "STATIC_NAMES_SRC",
+    "append_tasks": "STATIC_NAMES_APPEND_TASKS", "pipeline_depth": "STATIC_NAMES_PIPELINE_DEPTH", "measure_tasks": "STATIC_NAMES_MEASURE_TASKS", "anchor_tasks": "STATIC_NAMES_ANCHOR_TASKS", "drill": "STATIC_NAMES_DRILL", "drill_checkpoint": "STATIC_NAMES_DRILL_CHECKPOINT", "anchors": "STATIC_NAMES_ANCHORS", "src": "STATIC_NAMES_SRC",
     "hex_runs": "STATIC_NAMES_HEX_RUNS", "compact_level": "STATIC_NAMES_COMPACT_LEVEL", "compact": "STATIC_NAMES_COMPACT", "read_from": "STATIC_NAMES_READ_FROM",
     "compact_jobs": "STATIC_NAMES_COMPACT_JOBS", "fold_jobs": "STATIC_NAMES_FOLD_JOBS", "record_secrets": "STATIC_NAMES_RECORD_SECRETS",
 }
@@ -214,7 +217,7 @@ def _parse(name: str, raw: str):
         from .append_runner import parse_policy
 
         return parse_policy(ENV[name], raw)
-    if name in ("ssd_gb", "append_tasks", "pipeline_depth", "measure_tasks", "compact_jobs", "fold_jobs"):
+    if name in ("ssd_gb", "append_tasks", "pipeline_depth", "measure_tasks", "anchor_tasks", "compact_jobs", "fold_jobs"):
         return int(raw)
     if name in ("spot", "drill", "anchors"):
         return raw.strip() not in ("0", "false", "")

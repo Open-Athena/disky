@@ -582,6 +582,67 @@ def test_ranges_never_measured_fail_the_fold_by_name(world, tmp_path):
     assert [p for p, _ in calls] == ["measured/plan-1.json", "measured/plan-2.json"]
 
 
+def _anchors_fanned_fold(world, tmp_path, submit, retries: int = 2):
+    """C's fold with its base anchors' rollups over 3 tasks (`static_fanout.AnchorFanout`), `submit` running the helper
+    jobs."""
+    from dt_cloud.checkpoint import code_version
+    from dt_cloud.static_fanout import AnchorFanout
+
+    gen_dir = world["c_store"] / "g"
+    _, runs = ar.newest_runs(gen_dir)
+    ck = sk.compact_checkpoint(str(tmp_path / "scratch"), "g", "g.c001", runs, work=tmp_path / "ck")
+    try:
+        with _small_groups():
+            sk.fold_gen(gen_dir, tmp_path / "out", tmp_path / "w", gen="g", new_gen="g.c001", runs=runs, threads=2, mem="1GB", chunk_rows=3, ck=ck,
+                        anchor_fanout=lambda c, scan: AnchorFanout(c, 3, submit, code=code_version(), scan=scan, poll_s=0.01, retries=retries,
+                                                                   log=lambda m: None))
+    finally:
+        ck.close()
+
+
+def _anchor_helpers(tmp_path, calls: list, skip=lambda attempt, i: False):
+    """A fake anchors helper job: each task's `anchor-shard` in turn, in-process (`skip(attempt, i)`: a task that never
+    runs). `calls`: each job's plan, task count and the scan it's named by."""
+    from dt_cloud import static_merge as sm
+
+    def submit(url: str, plan: str, n: int, code: str, scan: str) -> None:
+        calls.append((plan, n, scan))
+        for i in range(n):
+            if skip(len(calls), i):
+                continue
+            sm.anchor_shard_cmd.callback(checkpoint=url, index=i, mem="1GB", threads=2, plan=plan, tmp=str(tmp_path / f"a{len(calls)}-{i}"),
+                                         code=code, workers=4)
+    return submit
+
+
+def test_fanned_out_anchors_write_the_single_vm_fold(world, tmp_path):
+    """The fold builds its share of the anchors' shard tasks, 2 helper tasks theirs (from the shards uploaded under
+    `anchors-in/`, their cells under `anchored/`): `g.c001`'s files (built at `anchor_tasks` 1), md5 for md5. The helper
+    job is named by the newest scan folded, never by the plan."""
+    calls: list = []
+    _anchors_fanned_fold(world, tmp_path, _anchor_helpers(tmp_path, calls))
+    assert calls == [("anchored/plan-1.json", 2, world["ids"][3])]
+    assert _md5s(tmp_path / "out") == _md5s(world["c_store"] / "g.c001")
+
+
+def test_anchor_tasks_a_helper_job_left_are_dealt_again(world, tmp_path):
+    """The first anchors helper job's second task never runs: its shard tasks go to a second job, and the fold's bytes
+    are the same."""
+    calls: list = []
+    _anchors_fanned_fold(world, tmp_path, _anchor_helpers(tmp_path, calls, skip=lambda attempt, i: attempt == 1 and i == 1))
+    assert [p for p, _, _ in calls] == ["anchored/plan-1.json", "anchored/plan-2.json"]
+    assert _md5s(tmp_path / "out") == _md5s(world["c_store"] / "g.c001")
+
+
+def test_anchor_tasks_never_built_fail_the_fold_by_name(world, tmp_path):
+    """Anchors helper jobs that build nothing: after the first and its one retry, the fold fails naming the missing
+    shard tasks."""
+    calls: list = []
+    with pytest.raises(RuntimeError, match=r"^anchors fan-out: shard tasks \[('(end|exact|start)/s\d{5}'(, )?)+\] not built after 2 helper jobs$"):
+        _anchors_fanned_fold(world, tmp_path, _anchor_helpers(tmp_path, calls, skip=lambda attempt, i: True), retries=1)
+    assert [p for p, _, _ in calls] == ["anchored/plan-1.json", "anchored/plan-2.json"]
+
+
 def _stopped_fold(world, tmp_path, stop: str = "fold/spilled") -> tuple[Path, list[dict], str]:
     """C's fold checkpointed under `tmp_path/scratch`, stopped right after saving `stop`; its source dir, runs, root."""
     gen_dir = world["c_store"] / "g"
