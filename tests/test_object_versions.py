@@ -111,3 +111,33 @@ def test_stream_version_attach_takes_the_import_memory_limit_and_spills(tmp_path
     aggregate_stream((str(raw),), "b", "s3", str(out), memory_limit="3GB", temp_dir=spill)
     assert configs == [{"memory_limit": "3GB", "temp_directory": spill or f"{out}.parts/version-spill"}]
     assert pq.read_table(out, columns=["path", "version"]).to_pylist()[-1] == {"path": "d/a", "version": '"a-3"'}
+
+
+def test_version_attach_streams_rows_beside_the_ordered_identities(tmp_path: Path, monkeypatch) -> None:
+    """A layer-2 of 11 rows in 4-row groups, attached at 3-row groups (`BLOB_ROW_GROUP_SIZE`) on 4 threads: every row in
+    its place with its columns and metadata, files carrying their listed identity (one unlisted: NULL), dirs none (a dir
+    named in the listing included), the output cut into 3-row groups."""
+    import duckdb
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    import disk_tree.storage.base as base
+    from disk_tree.object_version import attach_parquet
+
+    monkeypatch.setattr(base, "BLOB_ROW_GROUP_SIZE", 3)
+    l2, listing = tmp_path / "l2.parquet", tmp_path / "listing.parquet"
+    paths = [(".", "dir"), ("d", "dir"), *((f"d/f{i:02d}", "file") for i in range(9))]
+    table = pa.Table.from_pylist([{"path": p, "kind": k, "size": i} for i, (p, k) in enumerate(paths)]).replace_schema_metadata({b"fmt": b"v2"})
+    pq.write_table(table, l2, row_group_size=4)
+    pq.write_table(pa.Table.from_pylist([{"bucket": "b", "name": f"d/f{i:02d}", "version": f"v{i}"} for i in range(9) if i != 4]
+                                        + [{"bucket": "b", "name": "d", "version": "x"}, {"bucket": "other", "name": "d/f04", "version": "no"}]), listing)
+    con = duckdb.connect()
+    con.execute("SET threads = 4")
+    attach_parquet(str(l2), f"read_parquet('{listing}')", "b", con)
+    f = pq.ParquetFile(l2)
+    assert [f.metadata.row_group(g).num_rows for g in range(f.metadata.num_row_groups)] == [3, 3, 3, 2]
+    assert f.schema_arrow.metadata == {b"fmt": b"v2"}
+    assert [(r["path"], r["kind"], r["size"], r["version"]) for r in pq.read_table(l2).to_pylist()] == [
+        (".", "dir", 0, None), ("d", "dir", 1, None),
+        *((f"d/f{i:02d}", "file", i + 2, None if i == 4 else f"v{i}") for i in range(9)),
+    ]

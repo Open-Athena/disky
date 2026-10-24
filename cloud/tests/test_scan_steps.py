@@ -1327,5 +1327,6 @@ def test_import_args_mem(tmp_path, env, monkeypatch):
     """`{mem}` in `import_args` is the task machine's DuckDB budget (a profile shared by machines of every size)."""
     monkeypatch.setattr(S.Ctx, "nproc", property(lambda self: 4))
     monkeypatch.setattr(S.Ctx, "mem", property(lambda self: "9GB"))
-    c = ctx(tmp_path, env, options={"list": {"import": True, "import_args": ["-e", "stream", "-j", "{nproc}", "-M", "{mem}"]}})
+    c = ctx(tmp_path, env, options={"list": {"import": True, "import_args": ["-e", "stream", "-j", "{nproc}", "-M", "{mem}"]},
+                                    "static-names": {"profile": "sn.json"}, "digest": {"template": "t", "config": "c.yml"}})
     assert c.expand(c.opt("list", "import_args")) == ["-e", "stream", "-j", "4", "-M", "9GB"]
