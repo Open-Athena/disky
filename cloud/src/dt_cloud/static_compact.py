@@ -1022,8 +1022,9 @@ def compactor(chunk_rows: int = sl.CHUNK_ROWS, checkpoint: str | None = None, st
                         prune=False, md5s=True, keep=reads, publish_tier=sl.publish_tier, source=True)
 
 
-#: What the fold never reads of the base: the anchored search and the measurement (rebuilt), the parity markers.
-UNREAD = (f"{an.NAMES}/", "roots-measure/", "verify/")
+#: What the fold never reads of the base: the anchored search (rebuilt), the parity markers. (Its measurement,
+#: `roots-measure/`, is read: an incremental compaction's `static_measure` starts from it.)
+UNREAD = (f"{an.NAMES}/", "verify/")
 
 
 def reads(rel: str) -> bool:
