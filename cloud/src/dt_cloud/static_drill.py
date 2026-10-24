@@ -29,7 +29,7 @@ from . import heartbeat
 from . import static_names as sn
 from . import static_roots as sr
 from .checkpoint import Checkpoint, code_version, Parts
-from .static_names import CODEC, OPEN, PREFIX, Progress, _batches, err, q
+from .static_names import CODEC, OPEN, PREFIX, U64, Progress, _batches, err, q
 from .static_profile import data_bucket
 from .resource_monitor import monitor_resources, resource_stage
 
@@ -97,6 +97,18 @@ COALESCE_SPAN = 8 << 20
 #: did. A tier without it (built before) counts the closes too: conservative for its readers, but not what a compaction's
 #: incremental measurement sums (`static_measure`).
 DCOUNT_FRESH = "fresh"
+#: A drill's long members' root-set digests (specs/static-incremental-compaction.md, step 3: a compaction's classes from
+#: them, `static_compact`), `drill/digests-long.parquet`. A generation's (`static_local.finish_drill`): each member's
+#: absolute `(q, n, h1, h2)` (`DIGEST_SCHEMA`: its roots' count and two hash sums mod 2⁶⁴, `static_roots.ROW_HASH`, as the
+#: build's digest pass sums them). A run's (`day_digests`; `merge_tiers` sums its inputs'): per class canonical at the run,
+#: the change its roots make to that class's digest (`DIGEST_DELTA_SCHEMA`, the sums mod 2⁶⁴), with `meta.json` `digests:
+#: delta` (`DIGESTS_DELTA`); a merged tier's only when every input's has it.
+DIGESTS = "digests-long.parquet"
+DIGESTS_DELTA = "delta"
+DIGEST_SCHEMA = pa.schema([pa.field("q", pa.string(), nullable=False), pa.field("n", pa.int64(), nullable=False),
+                           pa.field("h1", pa.uint64(), nullable=False), pa.field("h2", pa.uint64(), nullable=False)])
+DIGEST_DELTA_SCHEMA = pa.schema([pa.field("q", pa.string(), nullable=False), pa.field("dn", pa.int64(), nullable=False),
+                                 pa.field("d1", pa.uint64(), nullable=False), pa.field("d2", pa.uint64(), nullable=False)])
 DCOUNT_SCHEMA = pa.schema([pa.field("q", pa.string(), nullable=False), pa.field("dir", pa.string(), nullable=False),
                            pa.field("rows", pa.int64(), nullable=False)])
 ALIAS_SCHEMA = pa.schema([pa.field("q", pa.string(), nullable=False), pa.field("canonical", pa.string(), nullable=False)])
@@ -1879,6 +1891,59 @@ def write_state(con, out: Path, kind: str, table: str = "dcnt", queries: list[st
             writer.write_table(DCOUNT_SCHEMA.empty_table())
 
 
+def _mod(x: str) -> str:
+    """`x` (HUGEINT, possibly negative) as its residue mod 2⁶⁴ (`UBIGINT`): what `% 2⁶⁴` gives a sum of hashes."""
+    return f"((({x}) % {U64} + {U64}) % {U64})::UBIGINT"
+
+
+def day_digests(con, out: Path, D: int) -> str | None:
+    """The run's change to each long class's root-set digest → `out/DIGESTS` (`DIGEST_DELTA_SCHEMA`, per class canonical at
+    scan `D`), from tables `dr` (the delta roots per class canonical; a new member's whole history) and `newq`. The rows are
+    combined first as the stack combines them (the smallest `vt` per `(q, path, usr, vf)`); then per row `r`:
+
+    - a new member's (every root of it is new to the stack, closed history included): `+h(r)`, one more root;
+    - an existing member's open (`vf = D`): `+h(r)`, one more root;
+    - an existing member's close record (`vf < D`, `vt` set): it restates a root the stack holds open, whose combined `vt`
+      becomes this one: `−h(r with vt = OPEN) + h(r)`, the count unchanged.
+
+    `h` is the build's digest pair (`static_roots.ROW_HASH` and its `hash(·, 'x')`), summed mod 2⁶⁴. Returns None, or
+    (nothing written) why the change can't be exact: an existing member's delta root that is neither (an open version
+    not opened at `D`), which no rule above places. A close of a root the stack doesn't hold open can't be seen here;
+    the compaction's fold checks each class's count against the roots it reads (`static_compact._long_roots`)."""
+    rh, was = sr.ROW_HASH, f"hash(path, usr, vf, {OPEN}::BIGINT, size, n_files)"
+    con.execute("""CREATE OR REPLACE TEMP TABLE dd_r AS SELECT r.*, r.q IN (SELECT q FROM newq) AS new FROM (
+            SELECT q, path, usr, vf, min(vt) AS vt, any_value(size) AS size, any_value(n_files) AS n_files FROM dr GROUP BY q, path, usr, vf) AS r""")
+    odd = con.execute(f"SELECT count(*) FROM dd_r WHERE NOT new AND vf <> {D} AND (vt = {OPEN} OR vf > {D})").fetchone()[0]
+    if odd:
+        con.execute("DROP TABLE dd_r")
+        return f"{odd:,} delta roots of existing members neither opened at the scan nor closed"
+    close = f"NOT new AND vf <> {D}"
+    tab = con.execute(f"""SELECT q, (count(*) FILTER (WHERE NOT ({close})))::BIGINT AS dn,
+            {_mod(f"sum({rh})::HUGEINT - coalesce(sum({was}) FILTER (WHERE {close}), 0)::HUGEINT")} AS d1,
+            {_mod(f"sum(hash({rh}, 'x'))::HUGEINT - coalesce(sum(hash({was}, 'x')) FILTER (WHERE {close}), 0)::HUGEINT")} AS d2
+        FROM dd_r GROUP BY q ORDER BY q""").to_arrow_table()
+    con.execute("DROP TABLE dd_r")
+    pq.write_table(tab.cast(DIGEST_DELTA_SCHEMA), out / DIGESTS, compression=CODEC)
+    return None
+
+
+def merge_digests(con, tiers: list[Tier], out: Path) -> None:
+    """Merged runs' digest changes → `out/DIGESTS`: each input's (`DIGESTS`) re-keyed to the merged canonicals through
+    table `cmap (c, tier, ci)` (`merge_tiers`' long kind) and summed (mod 2⁶⁴). A merged class's members share one class
+    at each input, so its change is the inputs' changes to those classes, summed."""
+    parts = " UNION ALL ".join(f"""SELECT m.c AS q, x.dn, x.d1, x.d2 FROM read_parquet({q(t.local(DIGESTS))}) AS x
+        JOIN cmap AS m ON m.tier = {i} AND m.ci = x.q""" for i, t in enumerate(tiers))
+    tab = con.execute(f"""SELECT q, sum(dn)::BIGINT AS dn, (sum(d1) % {U64})::UBIGINT AS d1, (sum(d2) % {U64})::UBIGINT AS d2
+        FROM ({parts}) GROUP BY q ORDER BY q""").to_arrow_table()
+    pq.write_table(tab.cast(DIGEST_DELTA_SCHEMA), out / DIGESTS, compression=CODEC)
+
+
+def write_digests(con, out: Path, table: str = "dgq") -> None:
+    """Table `table` `(q, n, h1, h2)` (each long member's absolute root-set digest) → `out/DIGESTS` (`DIGEST_SCHEMA`)."""
+    out.mkdir(parents=True, exist_ok=True)
+    pq.write_table(con.execute(f"SELECT q, n, h1, h2 FROM {table} ORDER BY q").to_arrow_table().cast(DIGEST_SCHEMA), out / DIGESTS, compression=CODEC)
+
+
 def write_aliases(con, out: Path, table: str = "cls") -> None:
     pq.write_table(con.execute(f"SELECT q, canonical FROM {table} ORDER BY q").to_arrow_table().cast(ALIAS_SCHEMA), out / "aliases.parquet",
                    compression=CODEC)
@@ -1891,8 +1956,8 @@ def tier_files(meta: dict) -> list[str]:
 
 
 def kind_files(meta: dict, kind: str) -> list[str]:
-    """One kind's files of a run's `drill/` (the long kind's with the alias map)."""
-    out = ["aliases.parquet"] if kind == "long" else []
+    """One kind's files of a run's `drill/` (the long kind's with the alias map, and its digest changes when marked)."""
+    out = ["aliases.parquet", *([DIGESTS] if meta.get("digests") == DIGESTS_DELTA else [])] if kind == "long" else []
     for sub in ("roots", "rollups"):
         out += [f"{kind}/{sub}/r{i:04d}.parquet" for i in range(meta[f"{kind}_{sub}"]["files"])]
         out += [f"{kind}-{sub}-index.parquet", f"{kind}-{sub}-index.top.parquet"]
@@ -1911,7 +1976,8 @@ def build_day(con, prior: list[Tier], out: Path, *, D: int, R: int, K: int, floo
               new_members: list[str], history: pa.Table | None, meas: dict[str, str], tier: dict, chunk_rows: int = 1 << 24,
               file_rows: int = FILE_ROWS, rg: int | None = None, kinds: tuple[str, ...] = KINDS, log=err, rule=None,
               threads: int = FETCH_THREADS, cache_bytes: int | None = None, checkpoint: Checkpoint | None = None, step=_nop_step) -> dict:
-    """A scan's `drill/` in `out`: each kind's delta roots, rollups, indexes and `dcount` (long: and the run's alias map), and
+    """A scan's `drill/` in `out`: each kind's delta roots, rollups, indexes and `dcount` (long: and the run's alias map and
+    its classes' digest changes, `day_digests`, marked `digests: delta` in the meta when exact), and
     with both kinds `meta.json` last (one kind: its part, `meta.<kind>.json`; `join_meta` makes `meta.json` of the two). Needs
     table `pnew (depth, path)`; `meas[kind]` is a query of the base's `(q, dir, rows)` at ≥ `floor` rows. `threads`,
     `cache_bytes`: the prior tiers' reads' prefetch (`TierReads`); the output is the same without it. `checkpoint`: each
@@ -1943,6 +2009,11 @@ def build_day(con, prior: list[Tier], out: Path, *, D: int, R: int, K: int, floo
                 ck.save(con, "roots", ("dr", "newq", "cls") if kind == "long" else ("dr", "newq"), km)
         if kind == "long":
             write_aliases(con, out)
+            why = day_digests(con, out, D)
+            if why is None:
+                km["digests"] = DIGESTS_DELTA
+            else:
+                log(f"drill long: no digest changes ({why}); a compaction over this run finds its classes from every root")
         t = step(f"drill/roots/{kind}", t1, roots=con.execute("SELECT count(*) FROM dr").fetchone()[0])
         con.execute(f"CREATE OR REPLACE TABLE meas AS {meas[kind]}")
         reads = TierReads(prior, kind, threads, cache_bytes)
@@ -2039,7 +2110,7 @@ def merge_tiers(con, tiers: list[Tier], out: Path, tier: dict, file_rows: int = 
     """Runs' drills (oldest first) merged into one tier in `out`: the newest alias map; each input's rows re-keyed to the
     merged canonicals (a class only splits, so its canonical at an input holds the merged canonical's rows there); roots
     combined (smallest `vt`), rollups by the newest-full-header rule (the merged header full if an included input's was),
-    `dcount` summed (heavy directories dropped).
+    `dcount` summed (heavy directories dropped), the digest changes summed when every input has them (`merge_digests`).
 
     Chunked by merged `q` range, so the working set is `chunk_rows` rows, not the inputs' (gcs's 10-22 L3 carry, 8 runs
     / 78.5 GiB, spilled 1.2 TiB and filled its SSD folding them in one table): every fold is per `q` (roots per
@@ -2059,6 +2130,8 @@ def merge_tiers(con, tiers: list[Tier], out: Path, tier: dict, file_rows: int = 
     meta: dict = {**tier, **{k: tiers[-1].meta[k] for k in ("R", "K", "rg", "idx_rg", "dispatch_rows")}}
     if all(t.meta.get("dcount") == DCOUNT_FRESH for t in tiers):
         meta["dcount"] = DCOUNT_FRESH
+    if all(t.meta.get("digests") == DIGESTS_DELTA for t in tiers):
+        meta["digests"] = DIGESTS_DELTA
     resource_stage("merge/aliases")
     con.register("al_last", tiers[-1].alias_table())
     con.execute("CREATE OR REPLACE TABLE cls AS SELECT q, canonical FROM al_last")
@@ -2081,6 +2154,8 @@ def merge_tiers(con, tiers: list[Tier], out: Path, tier: dict, file_rows: int = 
                 con.unregister("al_in")
             else:
                 con.execute(f"INSERT INTO cmap SELECT q, {i}, q FROM lit")
+        if kind == "long" and meta.get("digests") == DIGESTS_DELTA:
+            merge_digests(con, tiers, out)
         # each input's rows re-keyed (`cmap`): roots and rollups per merged `q`, then the ranges planned over their counts
         sources = []
         for i, t in enumerate(tiers):
