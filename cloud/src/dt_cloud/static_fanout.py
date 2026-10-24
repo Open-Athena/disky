@@ -104,9 +104,10 @@ class Helpers:
         from .static_merge import deal
 
         shares = deal(weights, self.tasks)
-        mine = set(shares[0])
+        done = self.done_in(self.listed(), weights)
+        # share 0's units already in the checkpoint (a seeded or resumed run's) are fetched, not built again
+        mine = set(shares[0]) - done
         self.away = set(weights) - mine
-        done = self.done_in(self.listed(), self.away)
         return mine, [[[k, i] for k, i in share if (k, i) not in done] for share in shares[1:]]
 
     def _submit(self, shares: list[list]) -> None:
@@ -208,6 +209,18 @@ class Fanout(Helpers):
         self.log(f"measure fan-out: {len(mine)} ranges here ({sum(weights[r] for r in mine):,} B), "
                  f"{len(self.away)} on {self.tasks - 1} helper tasks ({sum(len(t) for t in todo)} to measure)")
         self._submit([t for t in todo if t])
+
+    def keep(self, kind: str) -> Callable[[int, tuple, dict], None]:
+        """`measure_ranges`' `on_range` for share 0: each range measured here saved under the checkpoint as a helper's
+        is (`sorted`/`dirs`/`rup`, then `done.json`), so a race seeded from this one (`seed_checkpoint`) or a rerun
+        fetches it instead of measuring it again."""
+        def save(g: int, task: tuple, stats: dict) -> None:
+            base = range_key(kind, g)
+            for name, f in (("sorted", task[2]), ("dirs", task[3]), ("rup", task[4])):
+                self.ck.store.put(Path(f), self.ck.key(f"{base}/{name}.parquet"))
+            self.ck.store.write_text(self.ck.key(f"{base}/done.json"), json.dumps(stats) + "\n")
+
+        return save
 
     def groups(self, kind: str) -> set[int]:
         return {g for k, g in self.away if k == kind}
