@@ -138,6 +138,8 @@ class Helpers:
 
         fetched: set[tuple[str, int]] = set()
         while True:
+            # liveness read before the listing: a helper job already ended then has written all it will, so the listing shows it
+            ended = self.thread is None or not self.thread.is_alive()
             listing = self.listed()
             done = self.done_in(listing, units)
             if fetch is not None and (new := sorted(done - fetched)):
@@ -147,7 +149,7 @@ class Helpers:
             missing = sorted(set(units) - done)
             if not missing:
                 return
-            if self.thread is None or not self.thread.is_alive():
+            if ended:
                 why = f" ({type(self.error).__name__}: {self.error})" if self.error else ""
                 if self.attempt > self.retries:
                     raise RuntimeError(f"{self.label}: {what} {ids(missing)} {self.undone} after {self.attempt} helper jobs{why}")
