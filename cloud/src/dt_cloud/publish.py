@@ -205,6 +205,10 @@ class Report:
         return f"publish-r2 {scan}: {verb} {len(self.copied)} ({self.bytes:,} B), skipped {len(self.skipped)} up to date"
 
 
+#: The R2 client's connection pool (`r2_client`).
+R2_POOL = 128
+
+
 def r2_client() -> "S3Client":
     """boto3 S3 client for R2 (creds from the env, see the module doc)."""
     import boto3
@@ -219,7 +223,9 @@ def r2_client() -> "S3Client":
         region_name="auto",
         aws_access_key_id=os.environ.get("R2_ACCESS_KEY_ID"),
         aws_secret_access_key=os.environ.get("R2_SECRET_ACCESS_KEY"),
-        config=Config(s3={"addressing_style": "path"}, retries={"max_attempts": 10, "mode": "standard"}),
+        # Many objects in flight (`append_runner.R2_WORKERS`), each a multipart transfer of its own threads: botocore's
+        # default pool of 10 connections would serialize them.
+        config=Config(s3={"addressing_style": "path"}, retries={"max_attempts": 10, "mode": "standard"}, max_pool_connections=R2_POOL),
     )
 
 

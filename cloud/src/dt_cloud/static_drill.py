@@ -57,9 +57,31 @@ SETTLE_CHUNK_ROWS = 1 << 22
 #: Concurrent ranged reads when the builder prefetches the groups its loops will read (`build -j`); ≤ 1: no prefetch, the
 #: loops fetch each miss in turn.
 FETCH_THREADS = 64
-#: Files `write_kind` writes at once from sorted chunks (each a pure function of its `q` range; the same bytes at any count):
-#: the carry was write-bound after its reads were (gcs's 10-22 L3 carry: long 41–53 min, short 18).
-WRITE_THREADS = 8
+#: Files `write_kind` writes at once from sorted chunks, each in a process of its own (each a pure function of its `q`
+#: range; the same bytes at any count): the carry was write-bound after its reads were (gcs's 10-22 L3 carry: long 41–53
+#: min, short 18), and a writer is Python per 8,192-row group (~6.7 M groups for a compaction's 55 B roots), so threads
+#: share one GIL. None: every core (`write_jobs`).
+WRITE_JOBS: int | None = None
+#: Files `write_kind` sorts and writes at once from tables (each its own cursor's `ORDER BY` over its `q` range).
+SORT_WRITERS = 4
+#: Sorted-chunk files `_sorted_chunks` counts at a time (each its own cursor; DuckDB releases the GIL).
+COUNT_THREADS = 16
+
+
+def write_jobs() -> int:
+    """`WRITE_JOBS`, or every core this process may run on."""
+    import os
+
+    if WRITE_JOBS is not None:
+        return WRITE_JOBS
+    try:
+        return len(os.sched_getaffinity(0))
+    except AttributeError:
+        return os.cpu_count() or 1
+
+
+def _writer_init() -> None:
+    pa.set_cpu_count(1)
 #: Prefetched raw bytes held at most, as a fraction of the machine's RAM (`build -C` overrides): beyond it, the loops run in
 #: windows (each prefetched in turn) and the byte cache evicts least recently used.
 CACHE_RAM_FRACTION = 1 / 8
@@ -1664,12 +1686,23 @@ def _cut_counts(counts, file_rows: int) -> list[tuple[str | None, str | None]]:
     return list(zip(bounds, [*bounds[1:], None]))
 
 
-def _sorted_chunks(con, files: list[Path]) -> tuple[list[tuple[str, int]], list[tuple[Path, str, str]]]:
+def _sorted_chunks(con, files: list[Path], threads: int = COUNT_THREADS) -> tuple[list[tuple[str, int]], list[tuple[Path, str, str]]]:
     """Files each sorted, `q`-disjoint and in `q` order (`merge_tiers`' folded ranges): their `(q, rows)` in `q` order, and
-    each file with its first and last `q`."""
+    each file with its first and last `q`. Counted `threads` files at a time (a compaction's are ~13 K measured ranges)."""
+    def one(f: Path) -> list:
+        cur = con.cursor()
+        try:
+            return cur.execute(f"SELECT q, count(*) FROM read_parquet({q(str(f))}) GROUP BY q ORDER BY q").fetchall()
+        finally:
+            cur.close()
+
+    if threads > 1 and len(files) > 1:
+        with ThreadPoolExecutor(min(threads, len(files))) as ex:
+            got_all = list(ex.map(one, files))
+    else:
+        got_all = [con.execute(f"SELECT q, count(*) FROM read_parquet({q(str(f))}) GROUP BY q ORDER BY q").fetchall() for f in files]
     counts, spans = [], []
-    for f in files:
-        got = con.execute(f"SELECT q, count(*) FROM read_parquet({q(str(f))}) GROUP BY q ORDER BY q").fetchall()
+    for f, got in zip(files, got_all):
         if got:
             counts += got
             spans.append((f, got[0][0], got[-1][0]))
@@ -1693,6 +1726,11 @@ def _chunk_batches(spans: list[tuple[Path, str, str]], names: list[str], lo: str
                 yield b
 
 
+def _overlapping(spans: list[tuple[Path, str, str]], lo: str | None, hi: str | None) -> list[tuple[Path, str, str]]:
+    """The `spans` holding rows in `q` range `[lo, hi)` (what `_chunk_batches` reads; the rest it skips)."""
+    return [s for s in spans if not ((hi is not None and s[1] >= hi) or (lo is not None and s[2] < lo))]
+
+
 def _write_chunk_file(spans, schema: pa.Schema, lo: str | None, hi: str | None, out: Path, name: str, key: str, dic: list[str],
                       rg: int | None) -> tuple[int, pa.Table, int]:
     """One `write_kind` file from sorted chunks: rows, its group index, bytes."""
@@ -1701,13 +1739,21 @@ def _write_chunk_file(spans, schema: pa.Schema, lo: str | None, hi: str | None, 
 
 
 def write_kind(con, out: Path, kind: str, roots: str = "dr", rollups: str = "rup", file_rows: int = FILE_ROWS, rg: int | None = None,
-               chunks: dict[str, list[Path]] | None = None, threads: int = WRITE_THREADS) -> dict:
+               chunks: dict[str, list[Path]] | None = None, jobs: int | None = None) -> dict:
     """Tables `roots` (`ROOT_COLS`) and `rollups` (`ROLLUP_COLS`) → `out/<kind>/{roots,rollups}/r####.parquet` (sorted, `ROOT_RG`-row
     groups, files cut at `q` boundaries) and the two-level indexes `out/<kind>-{roots,rollups}-index{,.top}.parquet`.
     `chunks` `{sub: files}`: a sub's rows as files already in its order, `q`-disjoint and in `q` order (`merge_tiers`' folded
-    ranges), streamed in turn instead of sorted again (gcs's 10-22 L3 carry: 69 of its drill's 185 min in this sort), `threads`
-    files at a time (each reads only its own `q` range of the chunks); the same bytes."""
+    ranges), streamed in turn instead of sorted again (gcs's 10-22 L3 carry: 69 of its drill's 185 min in this sort), `jobs`
+    files at a time (default `write_jobs()`), each in a spawned process reading only its own `q` range of the chunks; the
+    same bytes (the row-group size is resolved here: a process sees the modules' defaults)."""
+    from concurrent.futures import ProcessPoolExecutor
+    from multiprocessing import get_context
+
+    from .static_append import _Inline
+
     doc = {}
+    rg = rg or sr.ROOT_RG
+    jobs = write_jobs() if jobs is None else jobs
     for sub, table, order, schema, key, dic in (("roots", roots, "q, path, usr, vf", sr.ROOT_SCHEMA, "path", ["q", "usr"]),
                                                ("rollups", rollups, "q, dir, kind, child, vf", sr.ROLLUP_SCHEMA, "dir", ["q", "dir", "child"])):
         cols = ", ".join(schema.names)
@@ -1721,22 +1767,33 @@ def write_kind(con, out: Path, kind: str, roots: str = "dr", rollups: str = "rup
         prog = heartbeat.Progress(f"drill/write/{kind}/{sub}", len(cuts), unit="files")
         names = [f"{kind}/{sub}/r{i:04d}.parquet" for i in range(len(cuts))]
         if chunks is not None and sub in chunks:
-            with ThreadPoolExecutor(max(1, min(threads, len(cuts)))) as pool:
-                futs = [pool.submit(_write_chunk_file, spans, schema, lo, hi, out, name, key, dic, rg) for (lo, hi), name in zip(cuts, names)]
+            procs = max(1, min(jobs, len(cuts)))
+            pool = _Inline() if procs == 1 else ProcessPoolExecutor(procs, mp_context=get_context("spawn"), initializer=_writer_init)
+            with pool:
+                futs = [pool.submit(_write_chunk_file, _overlapping(spans, lo, hi), schema, lo, hi, out, name, key, dic, rg)
+                        for (lo, hi), name in zip(cuts, names)]
                 for f in futs:
                     n, t, size = f.result()
                     rows, nbytes = rows + n, nbytes + size
                     idx.append(t)
                     prog.tick(rows=n, nbytes=size)
         else:
-            for (lo, hi), name in zip(cuts, names):
+            def one(lo, hi, name):
                 where = " AND ".join(x for x in (f"q >= {q(lo)}" if lo is not None else "", f"q < {q(hi)}" if hi is not None else "") if x) or "true"
-                batches = _batches(con, f"SELECT {cols} FROM {table} WHERE {where} ORDER BY {order}")
-                n, t = sr.write_indexed(prog.batches(batches), out / name, schema, key, name, dic, rg)
-                rows += n
-                nbytes += (out / name).stat().st_size
-                idx.append(t)
+                cur = con.cursor()
+                try:
+                    batches = _batches(cur, f"SELECT {cols} FROM {table} WHERE {where} ORDER BY {order}")
+                    n, t = sr.write_indexed(prog.batches(batches), out / name, schema, key, name, dic, rg)
+                finally:
+                    cur.close()
                 prog.tick(nbytes=(out / name).stat().st_size)
+                return n, t, (out / name).stat().st_size
+
+            # each file a sort of its own `q` range on a cursor (one DuckDB pool), its writer in a thread: the same bytes
+            with ThreadPoolExecutor(max(1, min(SORT_WRITERS, len(cuts)))) as ex:
+                for n, t, size in ex.map(lambda c: one(*c[0], c[1]), zip(cuts, names)):
+                    rows, nbytes = rows + n, nbytes + size
+                    idx.append(t)
         prog.done()
         t = pa.concat_tables(idx) if idx else sr.GROUP_INDEX_SCHEMA.empty_table()
         top = sr.write_index_levels(t, out / f"{kind}-{sub}-index.parquet")
