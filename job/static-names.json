@@ -21,14 +21,17 @@
  "ssd_gb": 1500,
  "machines": {
   "drill": "n2-highmem-48",
-  "compact": "n2-highmem-48"
+  "compact": "n2-highmem-48",
+  "measure": "n2-highmem-32"
  },
  "ssd_gbs": {
   "drill": 3000,
-  "compact": 3000
+  "compact": 3000,
+  "measure": 1500
  },
  "spot": true,
  "append_tasks": 16,
+ "measure_tasks": 8,
  "drill": true,
  "anchors": true,
  "src": [],
