@@ -901,12 +901,19 @@ def group_bound(con, name: str, cand: str, into: str) -> None:
     the lower bound or its minimum is at/above the upper bound. Null statistics
     never exclude a group. Prefix sums make both exclusions ASOF lookups.
     """
+    # The prefix sums of `cand`'s keys only, each its own table: an ASOF join sorts its whole right side, so over every
+    # key's sums it cost a full sort per call (cw's 10-22T0001: `near_candidates`' levels at ~6 min each, 460 rows or 38M)
+    con.execute(f"CREATE OR REPLACE TABLE gb_k AS SELECT DISTINCT k FROM {cand}")
+    for x in "ba":
+        con.execute(f"CREATE OR REPLACE TABLE gb_{x} AS SELECT g.* FROM {name}_{x} AS g SEMI JOIN gb_k USING (k)")
     con.execute(f"""CREATE OR REPLACE TABLE {into} AS
         SELECT c.k, c.lvl, c.dir, c.n, (coalesce(t.n, 0) - CASE WHEN c.dir = '' THEN 0
             ELSE coalesce(b.n, 0) + coalesce(a.n, 0) END)::BIGINT AS bound
         FROM {cand} AS c LEFT JOIN {name}_t AS t USING (k)
-        ASOF LEFT JOIN {name}_b AS b ON c.k = b.k AND c.dir || '/' > b.x
-        ASOF LEFT JOIN {name}_a AS a ON c.k = a.k AND c.dir || '0' <= a.x""")
+        ASOF LEFT JOIN gb_b AS b ON c.k = b.k AND c.dir || '/' > b.x
+        ASOF LEFT JOIN gb_a AS a ON c.k = a.k AND c.dir || '0' <= a.x""")
+    for t in ("gb_k", "gb_b", "gb_a"):
+        con.execute(f"DROP TABLE {t}")
 
 
 def near_candidates(con, R: int, run_counts: str | None = None) -> None:
@@ -916,9 +923,12 @@ def near_candidates(con, R: int, run_counts: str | None = None) -> None:
     (`group_bound`). That is tight over groups holding only `k`, but a group holding other keys too has their paths in
     its statistics, so it meets every `dir` and counts all its rows: in a run tier, where a key's few rows share a
     group, each tier added up to a group's rows to every `(k, dir)` of the key (cw's 10-20T1806 `end`: 37M near, 7
-    newly heavy). `run_counts` (`k, n`: each key's rows over the run tiers, every tier but the base `t = 0`, exactly;
-    a key absent has none): the base is bounded by its groups, the run tiers by the lesser of their groups and the
-    key's rows there.
+    newly heavy). `run_counts` (`k, n`: each key's rows over the run tiers, every tier but the base `t = 0`, exactly or
+    from above; a key absent has none): the base is bounded by its groups; the run tiers by their **pure** groups (holding
+    only `k`: `s_min = s_max`) meeting the range, plus the key's rows outside them (`n` less the pure groups' rows), at
+    most `n`. Mixed run groups are never read: one spans many keys, so `ktk` held a copy per key (cw's 10-22T0001:
+    ~430M rows of run-tier prefix sums, sorted by every ASOF join), and the key's rows in them are what `n` already
+    bounds.
 
     Level by level, top down: `n + bound` can only shrink from a directory to its child (fewer rows under it, and every
     group meeting the child's range meets the parent's), so a candidate whose parent was a candidate that can't pass
@@ -928,12 +938,14 @@ def near_candidates(con, R: int, run_counts: str | None = None) -> None:
         group_prefix(con, "SELECT * FROM ktk", "kg")
     else:
         group_prefix(con, "SELECT * FROM ktk WHERE t = 0", "kg_base")
-        group_prefix(con, "SELECT * FROM ktk WHERE t > 0", "kg_runs")
+        group_prefix(con, "SELECT * FROM ktk WHERE t > 0 AND s_min = s_max", "kg_runs")
     con.execute("CREATE OR REPLACE TABLE near (k VARCHAR, lvl INTEGER, dir VARCHAR, n BIGINT, bound BIGINT)")
     con.execute("CREATE OR REPLACE TABLE near_cut (k VARCHAR, dir VARCHAR)")
+    # sorted by level once, so each level's scan skips the others' row groups (zone maps on `lvl`)
+    con.execute("CREATE OR REPLACE TABLE near_cand AS SELECT * FROM cand ORDER BY lvl")
     parent = "CASE WHEN c.lvl <= 1 THEN '' ELSE left(c.dir, length(c.dir) - length(string_split(c.dir, '/')[-1]) - 1) END"
-    for (lvl,) in con.execute("SELECT DISTINCT lvl FROM cand ORDER BY lvl").fetchall():
-        con.execute(f"""CREATE OR REPLACE TABLE near_lvl AS SELECT c.* FROM cand AS c
+    for (lvl,) in con.execute("SELECT DISTINCT lvl FROM near_cand ORDER BY lvl").fetchall():
+        con.execute(f"""CREATE OR REPLACE TABLE near_lvl AS SELECT c.* FROM near_cand AS c
             ANTI JOIN near_cut AS x ON c.k = x.k AND {parent} = x.dir WHERE c.lvl = {lvl}""")
         if run_counts is None:
             group_bound(con, "kg", "near_lvl", "near_b")
@@ -941,11 +953,12 @@ def near_candidates(con, R: int, run_counts: str | None = None) -> None:
             group_bound(con, "kg_base", "near_lvl", "nb_base")
             group_bound(con, "kg_runs", "near_lvl", "nb_runs")
             con.execute(f"""CREATE OR REPLACE TABLE near_b AS SELECT b.k, b.lvl, b.dir, b.n,
-                    (b.bound + least(r.bound, coalesce(rc.n, 0)))::BIGINT AS bound
-                FROM nb_base AS b JOIN nb_runs AS r USING (k, lvl, dir) LEFT JOIN {run_counts} AS rc USING (k)""")
+                    (b.bound + least(r.bound + greatest(coalesce(rc.n, 0) - coalesce(pt.n, 0), 0), coalesce(rc.n, 0)))::BIGINT AS bound
+                FROM nb_base AS b JOIN nb_runs AS r USING (k, lvl, dir) LEFT JOIN {run_counts} AS rc USING (k)
+                LEFT JOIN kg_runs_t AS pt USING (k)""")
         con.execute(f"INSERT INTO near SELECT k, lvl, dir, n, bound FROM near_b WHERE n + bound > {R}")
         con.execute(f"CREATE OR REPLACE TABLE near_cut AS SELECT k, dir FROM near_b WHERE n + bound <= {R}")
-    for table in ("near_cut", "near_lvl", "near_b", "nb_base", "nb_runs", *(f"{g}_{x}" for g in sets for x in "tba")):
+    for table in ("near_cand", "near_cut", "near_lvl", "near_b", "nb_base", "nb_runs", *(f"{g}_{x}" for g in sets for x in "tba")):
         con.execute(f"DROP TABLE IF EXISTS {table}")
 
 
@@ -1000,7 +1013,9 @@ def run_rollups(con, prior: list[Tier], run: Tier, D: int, mode: str, R: int, K:
             con.register("kt_in", keys_table(t.files(mode)))
             con.execute(f"INSERT INTO kt SELECT {i}, * FROM kt_in")
             con.unregister("kt_in")
-    con.execute("""CREATE OR REPLACE TABLE ktk AS SELECT ck.k, kt.* FROM ck JOIN kt ON kt.s_min <= ck.k AND ck.k <= kt.s_max""")
+    # the base's groups of each key, and the run tiers' pure ones (`near_candidates`: their mixed groups aren't read)
+    con.execute("""CREATE OR REPLACE TABLE ktk AS SELECT ck.k, kt.* FROM ck JOIN kt ON kt.s_min <= ck.k AND ck.k <= kt.s_max
+        WHERE kt.t = 0 OR kt.s_min = kt.s_max""")
     # each key's rows over the run tiers, exactly (their `s` column only): their groups mix keys, so bound them by this
     # (from the tier's census where it has one; a tier built before censuses reads its `s` column: cw's 10-21T1202 spent
     # 73 s reading two merged runs' 173M rows for these counts)

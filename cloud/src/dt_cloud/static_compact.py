@@ -338,14 +338,13 @@ def _pool(con, fn: Callable[..., tuple[int, object]], items: list, jobs: int, pr
     """`fn(cursor, item)` → `(rows, result)` for every item, `jobs` at a time, each on its own cursor of `con`
     (`static_names.each`: one `threads` pool and one `memory_limit` across them, its own temp tables), `prog` ticked as
     each ends; the results in `items`' order. Each item writes its own files, so the outputs never depend on `jobs`."""
-    lock, done = Lock(), [0]
+    lock = Lock()
 
     def one(cur, item):
         cur.execute("SET preserve_insertion_order=false")  # a connection's own setting, as `connect` sets it
         rows, res = fn(cur, item)
         with lock:
-            prog.tick(done[0], rows)
-            done[0] += 1
+            prog.finish(rows)  # its count, not this call's: the long roots run one `_pool` per batch of spill parts
         return res
 
     return sn.each(con, one, items, jobs)
