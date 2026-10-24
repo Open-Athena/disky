@@ -93,17 +93,47 @@ def test_static_compact_jobs_split_by_account():
     assert ROOT == f"static-names/{GEN}"
 
 
+def _compact_params(command: str) -> dict:
+    """The `static_merge compact` job command `command`'s arguments as `compact` itself parses them (`-b`: the profile's
+    bucket, from the job's env)."""
+    from dt_cloud.static_merge import compact_cmd
+
+    args = command.split("dt_cloud.static_merge compact ", 1)[1].split()
+    return compact_cmd.make_context("compact", ["-b", "data", *args]).params
+
+
 def test_a_fanned_out_compaction_gets_its_task_count_and_the_profile():
-    """`measure_tasks` 3: the compaction runs `-F 3`, with the profile inline in `$STATIC_NAMES_PROFILE` (its helper jobs
-    are built from it, as the runner's are), which loads back as the runner's own."""
+    """`measure_tasks` 3: the compaction runs `-D 3` (not `-F`: `compact_options`' `--read-from`, which refused `3`),
+    which `compact` parses as its measure tasks, with the profile inline in `$STATIC_NAMES_PROFILE` (its helper jobs are
+    built from it, as the runner's are), which loads back as the runner's own."""
     from dt_cloud.static_profile import load_profile
 
     r = _static_runner(1)
     r.cfg = replace(r.cfg, measure_tasks=3)
     spec = r.compact_jobs("2026-10-10")[0][1]["taskGroups"][0]["taskSpec"]
-    assert spec["runnables"][0]["container"]["commands"][1] == _py(
-        "static_merge", "compact", "-g", GEN, "-S", "scr", "-C", "level:1", "-j", "2", "-F", "3", "-M", "90GB", "-p", "16")
+    cmd = spec["runnables"][0]["container"]["commands"][1]
+    assert cmd == _py("static_merge", "compact", "-g", GEN, "-S", "scr", "-C", "level:1", "-j", "2", "-D", "3", "-M", "90GB", "-p", "16")
+    params = _compact_params(cmd)
+    assert (params["measure_tasks"], params["anchor_tasks"], params["read_from"]) == (3, 1, "gcs")
     assert load_profile({"STATIC_NAMES_PROFILE": spec["environment"]["variables"]["STATIC_NAMES_PROFILE"]}) == r.cfg
+
+
+def test_an_anchors_fanned_out_compaction_gets_its_task_count_and_the_profile():
+    """`anchor_tasks` 4: the compaction runs `-A 4` (parsed by `compact` as its anchor tasks), with the profile inline
+    in `$STATIC_NAMES_PROFILE`, which loads back as the runner's own; with `measure_tasks` too, both flags."""
+    from dt_cloud.static_profile import load_profile
+
+    r = _static_runner(1)
+    r.cfg = replace(r.cfg, anchor_tasks=4)
+    spec = r.compact_jobs("2026-10-10")[0][1]["taskGroups"][0]["taskSpec"]
+    cmd = spec["runnables"][0]["container"]["commands"][1]
+    assert cmd == _py("static_merge", "compact", "-g", GEN, "-S", "scr", "-C", "level:1", "-j", "2", "-A", "4", "-M", "90GB", "-p", "16")
+    params = _compact_params(cmd)
+    assert (params["measure_tasks"], params["anchor_tasks"]) == (1, 4)
+    assert load_profile({"STATIC_NAMES_PROFILE": spec["environment"]["variables"]["STATIC_NAMES_PROFILE"]}) == r.cfg
+    r.cfg = replace(r.cfg, measure_tasks=3)
+    assert r.compact_jobs("2026-10-10")[0][1]["taskGroups"][0]["taskSpec"]["runnables"][0]["container"]["commands"][1] == _py(
+        "static_merge", "compact", "-g", GEN, "-S", "scr", "-C", "level:1", "-j", "2", "-D", "3", "-A", "4", "-M", "90GB", "-p", "16")
 
 
 # ── The job: `run_compaction` over local stand-ins of the data bucket ──────
@@ -286,3 +316,26 @@ def test_the_fan_outs_helper_job_is_a_real_stage_job_named_by_the_compactions_sc
     assert (spec["labels"]["stage"], group["taskCount"], group["taskSpec"]["runnables"][0]["container"]["commands"][1]) == (
         "measure", 15, _py("static_merge", "measure-shard", "-c", "gs://scr/static-names/compact-checkpoints/g.c001/abc/fold", "-P", "measured/plan-2.json",
                            "-V", "c0de", *duckdb_args(r.cfg.machine_for("measure")), mount=False))
+
+
+def test_the_anchors_fan_outs_helper_job_is_a_real_stage_job_named_by_the_compactions_scan():
+    """`anchor_helper_job` through the static runner's own `job()` (no fake submitter): stage `anchor-shard`, named and
+    labelled by the compaction's newest scan (never the plan's key), `n` tasks of `anchor-shard` over the plan, on the
+    `anchor-shard` stage's machine (the profile's `machines` entry when set), no mount, spot with retries."""
+    import re
+
+    from dt_cloud.append_runner import duckdb_args
+    from dt_cloud.static_merge import ANCHOR_STAGE, anchor_helper_job
+
+    r = _static_runner(1)
+    r.cfg = replace(r.cfg, machines={**r.cfg.machines, ANCHOR_STAGE: "n2-highmem-32"})
+    url = "gs://scr/static-names/compact-checkpoints/g.c001/abc"
+    name, spec = anchor_helper_job(r, url, "anchored/plan-1.json", 7, "c0de", "2026-10-23T0702")
+    assert re.fullmatch(r"[a-z0-9-]+-anchor-shard-2026-10-23-0702-\d{6}", name), name
+    group = spec["taskGroups"][0]
+    assert (spec["labels"]["stage"], group["taskCount"], group["taskSpec"]["runnables"][0]["container"]["commands"][1],
+            spec["allocationPolicy"]["instances"][0]["policy"]["machineType"], spec["allocationPolicy"]["instances"][0]["policy"]["provisioningModel"],
+            group["taskSpec"]["maxRetryCount"]) == (
+        ANCHOR_STAGE, 7, _py("static_merge", "anchor-shard", "-c", url, "-P", "anchored/plan-1.json", "-V", "c0de", *duckdb_args("n2-highmem-32"),
+                             mount=False), "n2-highmem-32", "SPOT", 3)
+    assert duckdb_args("n2-highmem-32") == ["-M", "180GB", "-p", "32"]

@@ -1055,6 +1055,8 @@ def day_rollups(con, prior: list[Tier], kind: str, D: int, *, R: int, K: int, fl
     # sum, so S is the exact root count, not one inflated by the closes (specs/static-incremental-compaction.md)
     con.execute("""CREATE OR REPLACE TABLE tdir AS SELECT *, CASE WHEN q IN (SELECT q FROM newq) THEN rows ELSE opens END AS fresh
         FROM tdir""")
+    tdir_rows = con.execute("SELECT count(*) FROM tdir").fetchone()[0]
+    log(f"drill {kind}: {tdir_rows:,} touched directories in {monotonic() - t0:.0f}s")
     # the prior state of the touched directories: each tier's rows for the member's canonical there, from the newest full header on
     con.execute(f"CREATE OR REPLACE TABLE ru (tier INTEGER, {ROLLUP_COLS})")
     for i, t in enumerate(prior):
@@ -1141,25 +1143,32 @@ def day_rollups(con, prior: list[Tier], kind: str, D: int, *, R: int, K: int, fl
     release_heap()
     if doc["affected"]:
         log(f"drill {kind}: {doc['affected']:,} directories settled one by one, {doc['restated']:,} restated in {monotonic() - t1:.0f}s")
-    # directories that become heavy: S = base rows (measured, else counted) + the prior runs' + today's
-    con.execute("CREATE OR REPLACE TABLE dc (tier INTEGER, q VARCHAR, dir VARCHAR, rows BIGINT)")
-    for i, t in enumerate(prior):
-        f = t.dcount(kind)
-        if f:
-            con.execute(f"INSERT INTO dc SELECT {i}, q, dir, rows FROM read_parquet({q(f)})")
-    # The prior runs' counts of only the touched (class, dir)s: `cmap` maps many classes to one earlier canonical (a split),
-    # so joining every tier's `dcount` through it first multiplied each row by its split before any was dropped (cw's
-    # 10-24T1202, 17 tiers, 393 new members: 663 GiB of temp). Each touched (class, dir) wants one (tier, canonical, dir)
-    # per tier; only those `dcount` rows are read.
+    # directories that become heavy: S = base rows (measured, else counted) + the prior runs' + today's. The prior runs'
+    # counts of only the touched (class, dir)s, tier by tier: each tier's `dcount` file read in place, joined to the
+    # touched pairs through that tier's canonical (`cmap`), only matches kept. Loading every tier's `dcount` first (a
+    # table of all of them: 17 tiers on cw), joining through `cmap` before the touched pairs (a class split multiplies
+    # the rows) or a (tier × touched pair) table each ran cw's 10-24T1202 out of 663 GiB of temp.
+    heartbeat.set_stage(f"drill/rollups/{kind}: newly heavy")
+    t2 = monotonic()
     con.execute("CREATE OR REPLACE TABLE nh_t AS SELECT t.q, t.dir, t.k, t.fresh FROM tdir AS t ANTI JOIN hdr USING (q, dir)")
-    con.execute("""CREATE OR REPLACE TABLE nh_w AS SELECT m.tier, m.ci, t.dir, t.q AS c FROM nh_t AS t JOIN cmap AS m ON m.c = t.q""")
-    con.execute("""CREATE OR REPLACE TABLE nh_r AS SELECT w.c AS q, w.dir, sum(d.rows)::BIGINT AS rows
-        FROM nh_w AS w JOIN dc AS d ON d.tier = w.tier AND d.q = w.ci AND d.dir = w.dir GROUP BY ALL""")
+    touched = con.execute("SELECT count(*) FROM nh_t").fetchone()[0]
+    log(f"drill {kind}: newly heavy: {tdir_rows:,} touched directories, {touched:,} without a header ({monotonic() - t2:.0f}s)")
+    con.execute("CREATE OR REPLACE TABLE nh_m (q VARCHAR, dir VARCHAR, rows BIGINT)")
+    for i, t in enumerate(prior):
+        if not (f := t.dcount(kind)):
+            continue
+        heartbeat.set_stage(f"drill/rollups/{kind}: newly heavy, tier {i + 1}/{len(prior)}'s counts")
+        t3 = monotonic()
+        n = con.execute(f"""INSERT INTO nh_m SELECT t.q, t.dir, d.rows FROM nh_t AS t JOIN cmap AS m ON m.tier = {i} AND m.c = t.q
+            JOIN read_parquet({q(f)}) AS d ON d.q = m.ci AND d.dir = t.dir""").fetchone()[0]
+        log(f"drill {kind}: newly heavy: tier {i + 1}/{len(prior)}: {n:,} prior-run counts in {monotonic() - t3:.0f}s")
     con.execute("""CREATE OR REPLACE TABLE nh AS SELECT t.q, t.dir, t.k, t.fresh AS today,
             CASE WHEN t.q IN (SELECT q FROM newq) THEN 0 ELSE m.rows END AS base, coalesce(r.rows, 0) AS runs
-        FROM nh_t AS t LEFT JOIN meas AS m USING (q, dir) LEFT JOIN nh_r AS r USING (q, dir)""")
-    for tb in ("nh_t", "nh_w", "nh_r"):
+        FROM nh_t AS t LEFT JOIN meas AS m USING (q, dir)
+        LEFT JOIN (SELECT q, dir, sum(rows)::BIGINT AS rows FROM nh_m GROUP BY ALL) AS r USING (q, dir)""")
+    for tb in ("nh_t", "nh_m"):
         con.execute(f"DROP TABLE {tb}")
+    log(f"drill {kind}: newly heavy: the sums in {monotonic() - t2:.0f}s")
     unknown = con.execute(f"SELECT q, dir FROM nh WHERE base IS NULL AND {floor - 1} + runs + today > {R} ORDER BY q, dir").fetchall()
     if ck and ck.done("counts"):
         ck.load(con, "counts")
@@ -1181,7 +1190,7 @@ def day_rollups(con, prior: list[Tier], kind: str, D: int, *, R: int, K: int, fl
         log(f"drill {kind}: {doc['heavy_new']:,} newly heavy, {count:,} earlier tier roots inserted in {monotonic() - t0:.0f}s ({reads.io()})")
     step(f"drill/newly-heavy/{kind}", t2, directories=doc["heavy_new"], prior_roots=count)
     con.execute("CREATE OR REPLACE TABLE dcnt AS SELECT q, dir, fresh AS rows FROM tdir ANTI JOIN hdr USING (q, dir) ANTI JOIN newh USING (q, dir) WHERE fresh > 0")
-    for t in ("tdir", "stf", "hdr", "kc", "rc", "tch", "nk", "nkc", "pr", "kt", "cand", "aff", "joins", "dc", "nh", "bx", "newh", "cmap"):
+    for t in ("tdir", "stf", "hdr", "kc", "rc", "tch", "nk", "nkc", "pr", "kt", "cand", "aff", "joins", "nh", "bx", "newh", "cmap"):
         con.execute(f"DROP TABLE IF EXISTS {t}")
     doc["rollup_rows"] = con.execute("SELECT count(*) FROM rup").fetchone()[0]
     doc["dcount_rows"] = con.execute("SELECT count(*) FROM dcnt").fetchone()[0]
