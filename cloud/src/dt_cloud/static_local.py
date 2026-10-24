@@ -589,8 +589,10 @@ def finish_drill(con, gen_dir: Path, work: Path, *, aliases, long_groups: int, s
                  step=_nop_step, t: float | None = None, fanout=None, incremental: tuple[list, Path] | None = None) -> dict:
     """A base drill's second half, from roots already spilled under `work/{long,short}/*/grp=<g>/` (canonical members'
     long roots; short literals' roots) by `q` range (`long_groups`, `short_groups` ranges) and the member classes (table
-    `al (q, canonical)`, and `aliases` as Arrow): each range measured and rolled up, `roots-measure/{dirs,short/dirs}/`
-    (an alias gets its canonical's directories), then `drill/` (`static_drill.build_drill`). What `build_base_drill`
+    `al (q, canonical)`, and `aliases` as Arrow) and their digests (table `dgq (q, n, h1, h2)`, every long member's): each
+    range measured and rolled up, `roots-measure/{dirs,short/dirs}/` (an alias gets its canonical's directories), then
+    `drill/` (`static_drill.build_drill`) with the members' digests (`static_drill.write_digests`: what a later
+    compaction finds its classes from, specs/static-incremental-compaction.md step 3). What `build_base_drill`
     and a compaction's fold (`static_compact`) share. Returns the drill's `meta.json` and the groups measured.
     `fanout` (`static_fanout.Fanout`): the ranges measured in part by helper tasks (a compaction's, its spills saved).
 
@@ -636,6 +638,7 @@ def finish_drill(con, gen_dir: Path, work: Path, *, aliases, long_groups: int, s
         for kind, into in (("long", "lrup"), ("short", "srup")):
             sme.incremental_rollups(con, tiers, kind, meas, into, R=R, aliases=aliases)
         t = step("drill/rollup/incremental", t, rup=count(con, "lrup") + count(con, "srup"))
+    sd.write_digests(con, gen_dir / "drill")
     meta = sd.build_drill(con, gen_dir / "drill", long_roots=None, short_roots=None, aliases=aliases, R=R, K=K, meta={"floor": floor},
                           rollups={"long": "lrup", "short": "srup"}, sorted_roots={"long": lcan, "short": sall}, step=step)
     for tb in ("dmem", "dg", "dgq", "al", "canon", "qg", "ldirs", "sdirs", "lrup", "srup", "mem"):

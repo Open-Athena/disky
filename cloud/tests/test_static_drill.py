@@ -406,6 +406,24 @@ def test_rollups_equal_rebuild(world, stack, kind):
     assert len(want_heavy) > 20
 
 
+@pytest.mark.parametrize("stack", STACKS, ids=[s[0] for s in STACKS])
+@pytest.mark.parametrize("kind", sd.KINDS)
+def test_fleet_root_rows_equal_rebuild(world, stack, kind):
+    """Every member's root rows at the fleet root over base ⊕ runs (`TieredDrill.root_rows`, as the Worker counts a heavy
+    literal's `matchCount.n` with no drilldown) are the rebuild's, and brute force: its distinct `(path, usr, vf)` roots
+    over every scan. A run's close records restate roots an earlier tier holds, so they are never counted again (gcs
+    10-24: `.parquet` read 103,345,534 over `2026-10-08c` + runs, 94,487,544 over its compaction)."""
+    _, j, tiers_of, _ = stack
+    tiers, rebuilt = tiers_of(world), world["drills"][j]
+    versions = _coalesced_oracle(_oracle(world["merged"][:j + 1]))
+    got, want = sd.TieredDrill(tiers, kind), sd.TieredDrill([rebuilt], kind)
+    members = _members(rebuilt, kind)
+    brute = [(t, len({(v[1], v[2], v[3]) for v in _matching(versions, t)})) for t in members]
+    assert [(t, got.root_rows(t)) for t in members] == brute
+    assert [(t, want.root_rows(t)) for t in members] == brute
+    assert sum(n > 0 for _, n in brute) > 20
+
+
 def _matching(versions: list[tuple], t: str) -> list[tuple]:
     """The versions whose name holds `t` and whose parent doesn't: a member's roots, every date."""
     out = []

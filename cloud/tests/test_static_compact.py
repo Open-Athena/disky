@@ -11,6 +11,8 @@ import re
 import shutil
 from pathlib import Path
 
+import pyarrow as pa
+import pyarrow.parquet as pq
 import pytest
 from click.testing import CliRunner
 
@@ -182,6 +184,118 @@ def test_a_run_counting_closes_measures_every_root_to_the_same_bytes(world, tmp_
     got, want = _md5s(tmp_path / "out"), _md5s(world["c_store"] / "g.c001")
     assert sorted(got) == sorted(want)
     assert got == want
+
+
+def test_compactions_find_their_classes_from_digests(world):
+    """specs/static-incremental-compaction.md step 3: every fixture base has its members' digests and every run its
+    classes' changes, so each compaction above (whose bytes `test_compacted_generation_is_the_rebuild` checks) took its
+    classes from them, and no tuple's roots disagreed with its count."""
+    assert [(world[k]["drill"]["classes"], world[k]["drill"]["fixed"]) for k in ("b", "c", "d", "e", "f", "h", "i", "j")] == [("digests", 0)] * 8
+    assert [(o["compact"]["drill"]["classes"], o["compact"]["drill"]["fixed"]) for o in world["a"][1:]] == [("digests", 0)] * 2
+
+
+def _tiers(root: Path, gen: str) -> list[sd.Tier]:
+    """The tiers compaction `gen` (in store `root`) folded: its base's drill, then its runs'."""
+    rec = json.loads((root / gen / ar.COMPACTION).read_text())
+    base = root / rec["from"]
+    return [sd.Tier(base / "drill", "base"), *(sd.Tier(base / k / "drill", k) for k in rec["runs"])]
+
+
+@pytest.mark.parametrize("store, gen", [("a_store", "g.c001"), ("a_store", "g.c002"), ("b_store", "g.c001"), ("c_store", "g.c001"),
+                                        ("i_store", "g.c001")])
+def test_digests_are_the_digest_passes(world, tmp_path, store, gen):
+    """Each member's digest from its base's digests plus the runs' changes (`member_digests`) is the rebuild's digest pass,
+    member for member, and so are the classes they give (`min(q)` per digest: the rebuild's `aliases.parquet`): two
+    level-0 runs (A, I), a run over a compacted base (A's `g.c002`), one merged run (B, C)."""
+    root, ref = world[store], world["tmp"] / f"ref-{gen}" / sn.PREFIX / gen / "drill"
+    con = sn.connect(2, "1GB", tmp_path / "duckdb")
+    sk.member_classes(con, _tiers(root, gen), str(root / gen / "catalog" / "members.parquet"))
+    sk.member_digests(con, _tiers(root, gen), "mdig")
+    want = [tuple(r.values()) for r in pq.read_table(ref / sd.DIGESTS).to_pylist()]
+    assert con.execute("SELECT q, n, h1, h2 FROM mdig ORDER BY q").fetchall() == want
+    assert len(want) > 10
+    aliases = [(r["q"], r["canonical"]) for r in pq.read_table(ref / "aliases.parquet", columns=["q", "canonical"]).to_pylist()]
+    assert con.execute("SELECT q, min(q) OVER (PARTITION BY n, h1, h2) FROM mdig ORDER BY q").fetchall() == aliases
+
+
+@pytest.mark.parametrize("drop", ["run marks", "base digests"])
+def test_a_tier_without_digests_finds_classes_from_every_root_to_the_same_bytes(world, tmp_path, drop):
+    """C's fold with its runs' `digests: delta` marks removed (drills built before them), or its base's digests gone (a
+    generation built before them): the fold digests every root instead, and writes the same files (its own digests
+    among them)."""
+    gen_dir = tmp_path / "g"
+    shutil.copytree(world["c_store"] / "g", gen_dir)
+    _, runs = ar.newest_runs(gen_dir)
+    if drop == "run marks":
+        for r in runs:
+            f = gen_dir / r["key"] / "drill" / "meta.json"
+            f.write_text(json.dumps({k: v for k, v in json.loads(f.read_text()).items() if k != "digests"}))
+    else:
+        (gen_dir / "drill" / sd.DIGESTS).unlink()
+    with _small_groups():
+        doc = sk.fold_gen(gen_dir, tmp_path / "out", tmp_path / "w", gen="g", new_gen="g.c001", runs=runs, threads=2, mem="1GB", chunk_rows=3)
+    assert (doc["drill"]["classes"], doc["drill"]["fixed"], doc["drill"]["measure"]) == ("roots", 0, "incremental")
+    got, want = _md5s(tmp_path / "out"), _md5s(world["c_store"] / "g.c001")
+    assert sorted(got) == sorted(want)
+    assert got == want
+
+
+def test_a_wrong_change_is_corrected_from_the_roots(world, tmp_path):
+    """C's run with one class's change off by one root (a change that wasn't exact): every tuple holding that class there
+    fails its count check, takes its digest from its roots (the result's `fixed`: those members), and the fold writes
+    the same files."""
+    gen_dir = tmp_path / "g"
+    shutil.copytree(world["c_store"] / "g", gen_dir)
+    _, runs = ar.newest_runs(gen_dir)
+    drill = gen_dir / runs[-1]["key"] / "drill"
+    delta = pq.read_table(drill / sd.DIGESTS).to_pylist()
+    bad = delta[0]["q"]
+    pq.write_table(pa.Table.from_pylist([{**r, "dn": r["dn"] + (r["q"] == bad)} for r in delta], schema=sd.DIGEST_DELTA_SCHEMA), drill / sd.DIGESTS)
+    canon = {r["q"]: r["canonical"] for r in pq.read_table(drill / "aliases.parquet").to_pylist()}
+    members = pq.read_table(world["c_store"] / "g.c001" / "catalog" / "members.parquet", columns=["q"]).column("q").to_pylist()
+    with _small_groups():
+        doc = sk.fold_gen(gen_dir, tmp_path / "out", tmp_path / "w", gen="g", new_gen="g.c001", runs=runs, threads=2, mem="1GB", chunk_rows=3)
+    assert (doc["drill"]["classes"], doc["drill"]["fixed"]) == ("digests", sum(canon.get(m) == bad for m in members))
+    assert doc["drill"]["fixed"] > 0
+    assert _md5s(tmp_path / "out") == _md5s(world["c_store"] / "g.c001")
+
+
+def _digest(con, rows: list[tuple]) -> tuple[int, int, int]:
+    """Rows `(path, usr, vf, vt, size, n_files)`' digest, as the build's digest pass sums it."""
+    con.register("dig_in", pa.table({k: pa.array([r[i] for r in rows], t) for i, (k, t) in enumerate(
+        (("path", pa.string()), ("usr", pa.string()), ("vf", pa.int64()), ("vt", pa.int64()), ("size", pa.int64()), ("n_files", pa.int64())))}))
+    try:
+        return con.execute(f"""SELECT count(*), coalesce(sum({sr.ROW_HASH}), 0) % {sn.U64}, coalesce(sum(hash({sr.ROW_HASH}, 'x')), 0) % {sn.U64}
+            FROM dig_in""").fetchone()
+    finally:
+        con.unregister("dig_in")
+
+
+def test_a_runs_change_is_its_classes_after_less_before(tmp_path):
+    """`day_digests`: an existing member's open adds its root; its close record turns the open root it restates into the
+    closed one (the count unchanged); a new member's every root is new, closed history included. Each class's change is
+    its digest after the scan less its digest before, mod 2⁶⁴."""
+    import duckdb
+
+    D, D0, D1, O = 2000, 1000, 1500, sn.OPEN
+    con = duckdb.connect()
+    con.execute(f"CREATE TABLE dr ({sr.ROOT_COLS}); CREATE TABLE newq (q VARCHAR)")
+    con.execute(f"""INSERT INTO dr VALUES ('abc', 2, 'a/abc', 'u', {D}, {O}, 5, 1), ('abc', 2, 'b/abc', 'u', {D0}, {D}, 7, 2),
+        ('xyz', 1, 'xyz', 'v', {D0}, {D1}, 3, 1), ('xyz', 1, 'xyz', 'v', {D1}, {O}, 4, 1)""")
+    con.execute("INSERT INTO newq VALUES ('xyz')")
+    assert sd.day_digests(con, tmp_path, D) is None
+    before = {"abc": [("b/abc", "u", D0, O, 7, 2)], "xyz": []}
+    after = {"abc": [("a/abc", "u", D, O, 5, 1), ("b/abc", "u", D0, D, 7, 2)], "xyz": [("xyz", "v", D0, D1, 3, 1), ("xyz", "v", D1, O, 4, 1)]}
+    want = []
+    for c in ("abc", "xyz"):
+        (na, a1, a2), (nb, b1, b2) = _digest(con, after[c]), _digest(con, before[c])
+        want.append({"q": c, "dn": na - nb, "d1": (a1 - b1) % sn.U64, "d2": (a2 - b2) % sn.U64})
+    assert pq.read_table(tmp_path / sd.DIGESTS).to_pylist() == want
+    # an existing member's open root not opened at the scan: no rule places it, so no change is written
+    (tmp_path / sd.DIGESTS).unlink()
+    con.execute(f"INSERT INTO dr VALUES ('abc', 2, 'c/abc', 'u', {D1}, {O}, 1, 1)")
+    assert sd.day_digests(con, tmp_path, D) == "1 delta roots of existing members neither opened at the scan nor closed"
+    assert sorted(p.name for p in tmp_path.iterdir()) == []
 
 
 def test_incremental_measure_refuses_runs_counting_closes(world, tmp_path):
@@ -783,3 +897,18 @@ def test_a_compactions_record_phases_its_fold_drill_and_anchors(world, tmp_path,
     parts = {p: [x for x in re.findall(r"(?:^|; )([a-z/-]+) [\d.]+s", rec.notes[p]) if "/" not in x] for p in ("fold", "drill")}
     assert (fold, ended, parts) == (["fold", "drill", "anchors", "upload"], [("end", p, "done") for p in ("fold", "drill", "anchors")],
                                     {"fold": ["intervals", "shards", "catalog"], "drill": ["drill"]})
+
+
+def test_heavy_chunks_combine_in_parts_to_the_same_generation(world, tmp_path, monkeypatch):
+    """A long-roots chunk past `COMBINE_PART_ROWS` (2 here: every chunk of more than two roots) combines in parts by
+    `hash(path)`: chunks split, and `g.c001`'s files md5 for md5."""
+    monkeypatch.setattr(sk, "COMBINE_PART_ROWS", 2)
+    gen_dir = world["c_store"] / "g"
+    _, runs = ar.newest_runs(gen_dir)
+    lines: list[str] = []
+    with _small_groups():
+        sk.fold_gen(gen_dir, tmp_path / "out", tmp_path / "w", gen="g", new_gen="g.c001", runs=runs, threads=2, mem="1GB", chunk_rows=3,
+                    log=lines.append)
+    split = [int(m.group(1)) for m in map(re.compile(r".*: drill/fold/long-roots in .*, split (\d+)\)$").fullmatch, lines) if m]
+    assert (len(split), split[0] > 0) == (1, True)
+    assert _md5s(tmp_path / "out") == _md5s(world["c_store"] / "g.c001")

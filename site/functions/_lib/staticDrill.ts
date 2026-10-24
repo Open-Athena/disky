@@ -49,6 +49,8 @@ export interface DrillMeta {
   rg: number
   idx_rg: number
   dispatch_rows: number
+  /** `'rows'`: a run carrying its roots new to the stack per `q` (`<kind>-fresh.parquet`, `DrillTier.fresh`). */
+  fresh?: string
   /** Per set (`long_roots`, …): `row_groups` = the index's entries (the data files' row groups). */
   [set: string]: unknown
 }
@@ -62,9 +64,10 @@ export interface Rollup {
   dir: string
   /** Children kept by name. */
   kept: number
-  /** Root rows under `dir`, every date (an upper bound on any date's match roots); at the fleet root a long
-   *  member's base alias entry, a short one's counted from the base's roots index (`GroupFile.count`), plus
-   *  each run's stored rows. Null: unknown. */
+  /** Root rows under `dir`, every date (an upper bound on any date's match roots: closed versions and each owner
+   *  slice count); at the fleet root a long member's base alias entry, a short one's counted from the base's roots
+   *  index (`GroupFile.count`), plus each run's roots new to the stack (`DrillTier.fresh`): exactly the compacted
+   *  generation's count. Null: unknown. */
   rows: number | null
   /** Children holding roots, every date. */
   children: number
@@ -334,9 +337,10 @@ export interface TierCache { top?: IndexCache<Top>; aliases?: IndexCache<[string
 
 /** One tier's drill: the base generation's `drill/` (`dir` null) or a run's `<dir>/drill/`, in the same layout. */
 export class DrillTier {
-  /** `meta.json` and the alias map, held once read; one pending in another request is joined (`shared.ts`). */
+  /** `meta.json`, the alias map and the fresh counts, held once read; one pending in another request is joined (`shared.ts`). */
   private meta = new Memo<DrillMeta>('static-drill-meta')
   private aliasMap = new Memo<Map<string, { c: string; n: number | null }>>('static-drill-aliases')
+  private freshMap = new Memo<Map<string, number>>('static-drill-fresh')
   readonly files: Record<Kind, Record<Set_, GroupFile>>
   constructor(readonly blobs: Blobs, readonly dir: string | null, readonly cache?: TierCache) {
     const meta = (req?: Req) => this.info(req)
@@ -362,6 +366,17 @@ export class DrillTier {
       const m = new Map(rows.map(r => [r.q, { c: r.canonical, n: r.n == null ? null : num(r.n) }]))
       await this.cache?.aliases?.put('aliases.parquet', [[...m.keys()], [...m].map(([q, a]) => a.c === q ? '' : a.c), [...m.values()].map(a => a.n ?? -1)])
       return m
+    }, req)
+  }
+
+  /** A run's roots new to the stack per class canonical (long) or literal (short), `<kind>-fresh.parquet` (`static_drill.
+   *  write_fresh`: an existing member's opens, every root of a new member; absent = none); null: a tier without them
+   *  (`meta.json` `fresh`, a run built before them). */
+  async fresh(kind: Kind, req?: Req): Promise<Map<string, number> | null> {
+    if ((await this.info(req)).fresh !== 'rows') return null
+    return this.freshMap.get(kind, async () => {
+      const rows = await parquetReadObjects({ file: await this.blobs.range(`${kind}-fresh.parquet`, 0), compressors }) as { q: string; n: bigint }[]
+      return new Map(rows.map(r => [r.q, num(r.n)]))
     }, req)
   }
 }
@@ -665,8 +680,14 @@ export class Drill {
       const cells: RollupCell[] = got.member.cells.map(x => ({ kind: 1, child: x.bucket, vf: Number(x.vf) * 1000, b: x.b, o: x.o }))
       const buckets = new Set(cells.map(x => x.child)).size
       // Root rows, every date: a long member's base alias entry (else, and a short one's, counted from the base's
-      // roots index), plus each run's stored rows (opens and close records: an upper bound).
-      const counts = await perTier(tiers, async (x, i) => i === 0 && all != null ? all : x.files[kind].roots.count(lo(cs[i]), hi(cs[i]), io, req))
+      // roots index), plus each run's roots new to the stack — never its stored rows, whose close records restate roots
+      // an earlier tier holds (gcs 10-24: `.parquet` 103.3M over `2026-10-08c` + runs, 94.5M over its compaction). A run
+      // built before its fresh counts adds its stored rows: an upper bound.
+      const counts = await perTier(tiers, async (x, i) => {
+        if (i === 0 && all != null) return all
+        const fresh = i === 0 ? null : await x.fresh(kind, req)
+        return fresh ? fresh.get(cs[i]) ?? 0 : x.files[kind].roots.count(lo(cs[i]), hi(cs[i]), io, req)
+      })
       const rows = counts.reduce((s, x) => s + x, 0)
       // The catalog's own stack cut at a broken tier: its cells answer only the scans it still covers.
       const narrow = got.scans && st.scans.some(d => !got.scans!.includes(d)) ? { scans: st.scans.filter(d => got.scans!.includes(d)) } : {}

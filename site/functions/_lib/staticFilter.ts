@@ -419,8 +419,10 @@ export function liveTotal(hits: Hit[], date: string, keep: (usr: string | null) 
  *  big root on an interval-store deployment one tile ("over the read budget")); 26: a diff's name whose lookup the walk's
  *  budget left unanswered folds into `(other)` on both sides, where it read as added / removed at zero; 27: path terms parked
  *  behind `SEARCH_PATH_TERMS` (off: walked, flagged approximate, or refused `unsupported-slash` indexed-only) — a cached
- *  26 holds their static answer under the same key; on, their keys carry `.p`). */
-const RESPONSE_V = 27
+ *  26 holds their static answer under the same key; on, their keys carry `.p`); 28: a heavy literal's fleet-root
+ *  `matchCount.n` over base ⊕ runs adds each run's roots new to the stack (`<kind>-fresh.parquet`), where it added the
+ *  run's stored rows, close records too — over the compaction's count (gcs 10-24, `.parquet`: 103.3M vs 94.5M)). */
+const RESPONSE_V = 28
 
 /** The query's substring matchers (positive and negative): the literals the hex-run rule applies to. */
 const subMatchers = (ast: QueryAst | undefined): Extract<Matcher, { kind: 'sub' }>[] =>
