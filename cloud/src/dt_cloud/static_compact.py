@@ -35,7 +35,7 @@ from time import monotonic
 
 import pyarrow as pa
 import pyarrow.parquet as pq
-from click import IntRange, command, option
+from click import Choice, IntRange, command, option
 
 from . import append_runner as ar
 from . import heartbeat as hb
@@ -46,6 +46,7 @@ from . import static_drill as sd
 from . import static_local as sl
 from . import static_names as sn
 from . import static_roots as sr
+from .blobstore import stage_files
 from .checkpoint import Checkpoint, code_version
 from .static_names import CINTERVAL_SCHEMA, CODEC, INTERVAL_RG, PREFIX, err, q
 
@@ -160,9 +161,94 @@ def overlapping(spans: list[tuple[str, str | None, str | None]], lo: str, hi: st
     return [f for f, a, b in spans if a is None or ((hi is None or a <= hi) and b >= lo)]
 
 
+# ── Staging the tiers' roots on the work disk ──────────────────────────────
+#
+# The drill fold reads the base's roots per chunk by `q` span (`_long_roots`) and per short range (`_spill_roots`). Read
+# in place from the bucket's mount, that ran throughput-capped (gcs's 10-08c probe at `-j 8`: a steady ~550 MB/s in,
+# CPU at ~40%, ~1 TB read for a ~280 GiB base drill: each byte ~3–4× through gcsfuse). So the roots files are copied
+# once onto the work disk (`blobstore.stage_files`, NIC speed) and read there. A cache: the same files, so the same
+# bytes out; never checkpointed (a resumed fold stages again what its remaining steps read).
+
+#: `stage_roots`' modes: `auto` stages when the generation isn't on the work disk already and the disk has room; `on`
+#: always (tests: a local generation); `off` reads in place.
+STAGE_MODES = ("auto", "on", "off")
+#: `auto` stages when the work disk's free bytes cover the staged bytes × (1 + this): the rest of the fold's own peak
+#: beside them (gcs's 10-08c: 1,085 GiB of work disk at canonical-roots over a 279 GiB base drill, ≈ 3.9×; the staged
+#: long roots are gone by then).
+STAGE_HEADROOM = 4.0
+STAGE = "stage"
+
+
+class Staged:
+    """`stage_roots`' copies: each staged file's local path by the path the tier names it by (`Tier.files`)."""
+
+    def __init__(self, root: Path, paths: dict[str, dict[str, str]], doc: dict):
+        self.root, self.paths, self.doc = root, paths, doc
+
+    def files(self, kind: str, files: list[str]) -> list[str]:
+        """`files` (one tier's `kind` roots), the staged copy of each where there is one."""
+        got = self.paths.get(kind, {})
+        return [got.get(f, f) for f in files]
+
+    def drop(self, kind: str) -> None:
+        """`kind`'s copies deleted: its reads are over."""
+        for p in self.paths.pop(kind, {}).values():
+            Path(p).unlink(missing_ok=True)
+        if not self.paths:
+            shutil.rmtree(self.root, ignore_errors=True)
+
+
+def _same_disk(a: Path, b: Path) -> bool:
+    """Whether `a` and `b` are on one filesystem (a mirrored generation is already on the work disk)."""
+    return a.stat().st_dev == b.stat().st_dev
+
+
+def _free(path: Path) -> int:
+    """The free bytes on `path`'s filesystem."""
+    return shutil.disk_usage(path).free
+
+
+def stage_roots(gen_dir: Path, tiers: list[str], kinds: tuple[str, ...], dst: Path, *, source: str | None = None, mode: str = "auto",
+                log: Callable[[str], None] = err) -> Staged | None:
+    """The `kinds`' roots files of `tiers` (generation-relative drill dirs: `drill`, `<run>/drill`) copied from `source`
+    (the generation's store URL, `gs://<bucket>/<prefix>/<gen>`; None: `gen_dir` itself) to `dst`; None (logged why)
+    when `mode` says not to, the generation is already on the work disk, or (`auto`) the disk lacks room
+    (`STAGE_HEADROOM`)."""
+    if mode not in STAGE_MODES:
+        raise ValueError(f"stage mode {mode!r}: one of {STAGE_MODES}")
+    if mode == "off":
+        log(f"stage: off; roots read in place from {gen_dir}")
+        return None
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    if mode == "auto" and _same_disk(gen_dir, dst.parent):
+        log(f"stage: skipped, {gen_dir} is on the work disk already")
+        return None
+    rels = {k: [f"{t}/{k}/roots/{p.name}" for t in tiers for p in sorted((gen_dir / t / k / "roots").glob("*.parquet"))] for k in kinds}
+    keys = {r: (gen_dir / r).stat().st_size for k in kinds for r in rels[k]}
+    need, free = sum(keys.values()), _free(dst.parent)
+    gib = lambda n: f"{n / 2**30:,.1f} GiB"  # noqa: E731
+    if mode == "auto" and free < need * (1 + STAGE_HEADROOM):
+        log(f"stage: skipped, the work disk has {gib(free)} free, under {gib(need)} of {'+'.join(kinds)} roots × {1 + STAGE_HEADROOM:g}; "
+            f"roots read in place from {gen_dir}")
+        return None
+    shutil.rmtree(dst, ignore_errors=True)
+    try:
+        doc = stage_files(source or str(gen_dir), keys, dst, label=f"stage {'+'.join(kinds)} roots", log=log)
+    except Exception as e:
+        # a cache: whatever broke the copy (credentials, the pool), the roots are still readable in place
+        shutil.rmtree(dst, ignore_errors=True)
+        log(f"stage: failed ({type(e).__name__}: {e}); roots read in place from {gen_dir}")
+        return None
+    missed = f"; {len(doc['failed'])} not staged, read in place" if doc["failed"] else ""
+    log(f"stage: {doc['files']} files, {gib(doc['bytes'])} of {'+'.join(kinds)} roots from {source or gen_dir} → {dst} in {doc['s']}s "
+        f"({doc['bytes'] / max(doc['s'], 0.1) / 1e9:.2f} GB/s; {gib(free)} free before{missed})")
+    bad = set(doc["failed"])
+    return Staged(dst, {k: {str(gen_dir / r): str(dst / r) for r in rels[k] if r not in bad} for k in kinds}, {**doc, "kinds": list(kinds)})
+
+
 def fold_drill(con, tiers: list[sd.Tier], out: Path, work: Path, *, R: int, K: int, floor: int, chunk_rows: int = sl.CHUNK_ROWS,
                jobs: int = 1, step=sl._nop_step, log: Callable[[str], None] = err, ck: Checkpoint | None = None,
-               fanout: Callable[[Checkpoint], object] | None = None) -> dict:
+               staged: Callable[[], Staged | None] = lambda: None, fanout: Callable[[Checkpoint], object] | None = None) -> dict:
     """`G'`'s `drill/` and `roots-measure/` in `out` from the tiers' drills (`G`'s, then each run's, oldest first) and
     `out/catalog/members.parquet`: each member's roots through the last scan, read from the tiers through each one's
     class map (every tier's `aliases.parquet` maps every member it knows to its canonical, which holds that class's rows
@@ -186,19 +272,29 @@ def fold_drill(con, tiers: list[sd.Tier], out: Path, work: Path, *, R: int, K: i
     (gcs's 10-23 compaction ran its 4,881 chunks one after another at ~9 of 48 cores). It never changes the bytes.
 
     `ck`: saved after the long roots (`long-roots`: their digests and files) and after every root is spilled (`spilled`:
-    the classes and the spills), so a resubmitted job resumes past the last one saved."""
+    the classes and the spills), so a resubmitted job resumes past the last one saved.
+
+    `staged()`: the tiers' roots copied onto the work disk (`stage_roots`; `fold_gen` starts the copy early, this waits
+    on it), read instead of the tier's files; each kind's copies deleted once its last read is done. None: read in place."""
     t = monotonic()
     shutil.rmtree(work, ignore_errors=True)
     work.mkdir(parents=True)
     if ck is not None and ck.done("spilled"):
         groups = _restore(con, ck, "spilled", work)
     else:
+        st = staged()
+        if st is not None:
+            t = step("drill/fold/stage", t, files=st.doc["files"], bytes=st.doc["bytes"])
         if ck is not None and ck.done("long-roots"):
             _restore(con, ck, "long-roots", work)
         else:
-            t = _long_roots(con, tiers, out, work, chunk_rows=chunk_rows, jobs=jobs, step=step, log=log, t=t)
+            t = _long_roots(con, tiers, out, work, chunk_rows=chunk_rows, jobs=jobs, step=step, log=log, t=t, st=st)
             _save(con, ck, "long-roots", work, tables=("dmem", "mtid", "tdig"), subs=("troots",))
-        t, groups = _spill_roots(con, tiers, work, chunk_rows=chunk_rows, jobs=jobs, step=step, log=log, t=t)
+        if st is not None:
+            st.drop("long")
+        t, groups = _spill_roots(con, tiers, work, chunk_rows=chunk_rows, jobs=jobs, step=step, log=log, t=t, st=st)
+        if st is not None:
+            st.drop("short")
         _save(con, ck, "spilled", work, tables=("al",), subs=("long", "short"), doc=groups)
     if ck is not None:
         # the spills hold every long root again: the chunks' roots are no longer needed to resume (an attempt stopped
@@ -211,6 +307,12 @@ def fold_drill(con, tiers: list[sd.Tier], out: Path, work: Path, *, R: int, K: i
     done = sl.finish_drill(con, out, work, aliases=aliases, long_groups=groups["long"], short_groups=groups["short"], R=R, K=K, floor=floor,
                            step=step, t=t, fanout=fan)
     return {"members": aliases.num_rows, "canonical": len(set(aliases.column("canonical").to_pylist())), "groups": done["groups"]}
+
+
+def _roots_files(tr: sd.Tier, kind: str, st: Staged | None) -> list[str]:
+    """`tr`'s `kind` roots files, their staged copies where `st` has them."""
+    files = tr.files(kind, "roots")
+    return st.files(kind, files) if st is not None else files
 
 
 def _files(root: Path, *subs: str) -> list[str]:
@@ -235,9 +337,10 @@ def _restore(con, ck: Checkpoint, step: str, work: Path) -> dict | None:
     return ck.load_files(step, work)
 
 
-def _long_roots(con, tiers: list[sd.Tier], out: Path, work: Path, *, chunk_rows: int, jobs: int, step, log: Callable[[str], None], t: float) -> float:
+def _long_roots(con, tiers: list[sd.Tier], out: Path, work: Path, *, chunk_rows: int, jobs: int, step, log: Callable[[str], None], t: float,
+                st: Staged | None = None) -> float:
     """`fold_drill`'s plan, runs' spill and long roots: tables `dmem`, `mtid (q, tid)`, `tdig` (each tuple's digest) and
-    `work/troots/c<chunk>.parquet` (each chunk's combined roots)."""
+    `work/troots/c<chunk>.parquet` (each chunk's combined roots). `st`: the roots' local copies."""
     n = len(tiers)
     con.execute(f"CREATE OR REPLACE TABLE dmem AS SELECT q FROM read_parquet({q(str(out / 'catalog' / 'members.parquet'))})")
     for i, tr in enumerate(tiers):
@@ -252,7 +355,7 @@ def _long_roots(con, tiers: list[sd.Tier], out: Path, work: Path, *, chunk_rows:
         FROM (SELECT DISTINCT {', '.join(f'c{i}' for i in range(n))} FROM mt)""")
     on = " AND ".join(f"t.c{i} IS NOT DISTINCT FROM mt.c{i}" for i in range(n))
     con.execute(f"CREATE OR REPLACE TABLE mtid AS SELECT mt.q, t.tid FROM mt JOIN tup AS t ON {on}")
-    long_files = [tr.files("long", "roots") for tr in tiers]
+    long_files = [_roots_files(tr, "long", st) for tr in tiers]
     # each tier's rows per class, estimated from its roots index (`static_roots.index_estimates`): chunk sizes only
     for i, tr in enumerate(tiers):
         sr.index_estimates(con, [tr.local("long-roots-index.parquet")] if long_files[i] else [], f"SELECT canonical AS q FROM ta{i}", f"tc{i}")
@@ -353,9 +456,11 @@ def _pool(con, fn: Callable[..., tuple[int, object]], items: list, jobs: int, pr
     return sn.each(con, one, items, jobs)
 
 
-def _spill_roots(con, tiers: list[sd.Tier], work: Path, *, chunk_rows: int, jobs: int, step, log: Callable[[str], None], t: float) -> tuple[float, dict]:
+def _spill_roots(con, tiers: list[sd.Tier], work: Path, *, chunk_rows: int, jobs: int, step, log: Callable[[str], None], t: float,
+                 st: Staged | None = None) -> tuple[float, dict]:
     """`fold_drill`'s classes (table `al (q, canonical)`, by root-set digest) and every root spilled by `q` range: the
-    canonical members' long roots (`work/long/`) and the short literals' (`work/short/`); the ranges per kind."""
+    canonical members' long roots (`work/long/`) and the short literals' (`work/short/`); the ranges per kind. `st`: the
+    roots' local copies."""
     n, troots = len(tiers), work / "troots"
     con.execute("CREATE OR REPLACE TABLE dgq AS SELECT m.q, d.n, d.h1, d.h2 FROM mtid AS m JOIN tdig AS d USING (tid)")
     con.execute("CREATE OR REPLACE TABLE al AS SELECT q, min(q) OVER (PARTITION BY n, h1, h2) AS canonical FROM dgq")
@@ -387,7 +492,7 @@ def _spill_roots(con, tiers: list[sd.Tier], work: Path, *, chunk_rows: int, jobs
     for tb in ("rt", "tdig", "ctid", "mt", "mtid", "tup", "tch", *(f"t{x}{i}" for i in range(n) for x in "ac")):
         con.execute(f"DROP TABLE IF EXISTS {tb}")
     t = step("drill/fold/canonical-roots", t, lcan=n_long, groups=long_groups)
-    short_files = [tr.files("short", "roots") for tr in tiers]
+    short_files = [_roots_files(tr, "short", st) for tr in tiers]
     hb.set_stage("drill/fold/short-roots: plan")
     # the q ranges planned from the tiers' roots indexes (the literals: every group's first and last `q`), not counted
     idx = [tr.local("short-roots-index.parquet") for tr, fs in zip(tiers, short_files) if fs]
@@ -440,7 +545,8 @@ def run_scans(gen_dir: Path, gen: str, runs: list[dict]) -> list[dict]:
 
 def fold_gen(gen_dir: Path, out: Path, work: Path, *, gen: str, new_gen: str, runs: list[dict], threads: int = 4, mem: str = "4GB",
              chunk_rows: int = sl.CHUNK_ROWS, jobs: int = 1, log: Callable[[str], None] = err, progress: Callable[..., None] | None = None,
-             ck: Checkpoint | None = None, fanout: Callable[[Checkpoint], object] | None = None) -> dict:
+             ck: Checkpoint | None = None, source: str | None = None, stage: str = "auto",
+             fanout: Callable[[Checkpoint], object] | None = None) -> dict:
     """Generation `gen` (its base in `gen_dir`, the runs `runs`: the newest manifest's, oldest first) folded into `new_gen`
     in `out` (every part but `compaction.json`); its `manifests/<last>.json` lists no runs. Returns a summary (rows, and
     per part its seconds, peak work-disk GiB and peak RSS GiB). `progress(note)`: the run record's hook
@@ -453,15 +559,18 @@ def fold_gen(gen_dir: Path, out: Path, work: Path, *, gen: str, new_gen: str, ru
 
     `jobs`: key ranges (`fold_ranges`) and census shards (`fold_catalog`) at a time, on cursors of one DuckDB database
     (`threads` and `mem` shared). The catalogs' merge needs no other part and runs beside the intervals and shards. The
-    shards need every range's histogram (their plan), the census the shards, the drill the members: those stay in order."""
-    with ThreadPoolExecutor(2, thread_name_prefix="compact") as bg:
+    shards need every range's histogram (their plan), the census the shards, the drill the members: those stay in order.
+
+    `stage` (`STAGE_MODES`): the roots files the drill fold reads copied onto the work disk (`stage_roots`, from `source`:
+    the generation's store URL; None: from `gen_dir`), started beside the intervals, so the drill reads them locally."""
+    with ThreadPoolExecutor(3, thread_name_prefix="compact") as bg:
         return _fold_gen(gen_dir, out, work, gen=gen, new_gen=new_gen, runs=runs, threads=threads, mem=mem, chunk_rows=chunk_rows, jobs=jobs,
-                         log=log, progress=progress, ck=ck, bg=bg, fanout=fanout)
+                         log=log, progress=progress, ck=ck, bg=bg, source=source, stage=stage, fanout=fanout)
 
 
 def _fold_gen(gen_dir: Path, out: Path, work: Path, *, gen: str, new_gen: str, runs: list[dict], threads: int, mem: str, chunk_rows: int, jobs: int,
-              log: Callable[[str], None], progress: Callable[..., None] | None, ck: Checkpoint | None, bg: ThreadPoolExecutor,
-              fanout: Callable[[Checkpoint], object] | None = None) -> dict:
+              log: Callable[[str], None], progress: Callable[..., None] | None, ck: Checkpoint | None, bg: ThreadPoolExecutor, source: str | None,
+              stage: str, fanout: Callable[[Checkpoint], object] | None = None) -> dict:
     """`fold_gen`, its background work (the catalogs' merge, the parts' saves) on `bg` (waited on as `fold_gen` returns or
     fails)."""
     t0, times, peaks = monotonic(), {}, {}
@@ -528,6 +637,22 @@ def _fold_gen(gen_dir: Path, out: Path, work: Path, *, gen: str, new_gen: str, r
     (out / "scans.json").write_text(json.dumps(doc, indent=1) + "\n")
     shutil.copyfile(gen_dir / "ranges.json", out / "ranges.json")
     ranges = json.loads((out / "ranges.json").read_text())
+    # the drill's roots onto the work disk, beside the light parts: what the fold's remaining steps read (none once the
+    # drill or its spills were saved, only the short roots once the long roots were)
+    fck = ck.sub("fold") if ck is not None else None
+    if (ck is not None and ck.done("drill")) or (fck is not None and fck.done("spilled")):
+        kinds: tuple[str, ...] = ()
+    else:
+        kinds = ("short",) if fck is not None and fck.done("long-roots") else sd.KINDS
+    staging: Future | None = None
+    stage_log: list[str] = []
+
+    def slog(line: str) -> None:
+        stage_log.append(line)
+        log(f"compact {gen} → {new_gen}: {line}")
+    if kinds:
+        tdirs = ["drill", *(f"{r['key']}/drill" for r in runs)]
+        staging = bg.submit(stage_roots, gen_dir, tdirs, kinds, work / STAGE, source=source, mode=stage, log=slog)
     merging: Future | None = None
     if ck is None or not ck.done("catalog"):
         def merge() -> dict:
@@ -560,7 +685,9 @@ def _fold_gen(gen_dir: Path, out: Path, work: Path, *, gen: str, new_gen: str, r
     tiers = [sd.Tier(gen_dir / "drill", "base"), *(sd.Tier(d / "drill", r["key"]) for d, r in zip(run_dirs, runs))]
     drill = resumed("drill", ("drill", "roots-measure"), lambda: fold_drill(
         con, tiers, out, work / "drill", R=dm["R"], K=dm["K"], floor=dm.get("floor", sl.FLOOR), chunk_rows=chunk_rows, jobs=jobs, step=step,
-        log=lambda s: log(f"compact {gen} → {new_gen}: {s}"), ck=ck.sub("fold") if ck is not None else None, fanout=fanout), after_saves=True)
+        log=lambda s: log(f"compact {gen} → {new_gen}: {s}"), ck=fck, staged=staging.result if staging is not None else lambda: None,
+        fanout=fanout), after_saves=True)
+    staged = staging.result() if staging is not None else None
     t = done("drill", t)
     anchors = None
     if (gen_dir / an.ANCHORS / "meta.json").is_file():
@@ -576,19 +703,21 @@ def _fold_gen(gen_dir: Path, out: Path, work: Path, *, gen: str, new_gen: str, r
     return {"from": gen, "gen": new_gen, "runs": [r["key"] for r in runs], "base_scans": len(base["scans"]), "scans": len(ids),
             "versions": versions, "suffix_rows": suffix_rows, "shards": len(plan["shards"]),
             "members": drill["members"], "cells_rows": cat["cells_rows"], "drill": drill, "anchors": anchors, "s": round(monotonic() - t0, 1),
+            "staged": staged.doc if staged is not None else None, "stage_log": stage_log,
             "stages": times, "steps": steps, "peaks": peaks}
 
 
 def fold(gen_dir: Path, out: Path, work: Path, *, gen: str, new_gen: str, runs: list[dict], threads: int = 4, mem: str = "4GB",
          chunk_rows: int = sl.CHUNK_ROWS, jobs: int = 1, progress: Callable[..., None] | None = None, checkpoint: str | None = None,
-         fanout: Callable[[Checkpoint], object] | None = None) -> dict:
+         source: str | None = None, stage: str = "auto", fanout: Callable[[Checkpoint], object] | None = None) -> dict:
     """`append_runner.Compactor.fold` for the static store (`fold_gen`; `jobs`: key ranges, census shards and drill-fold chunks at a time).
-    `checkpoint`: a store root (the scratch bucket) for `compact_checkpoint`; `fanout`: the drill measurement's helper
-    tasks, given the fold's checkpoint (`static_fanout.Fanout`; needs `checkpoint`)."""
+    `checkpoint`: a store root (the scratch bucket) for `compact_checkpoint`. `source`, `stage`: the drill's roots staged
+    from the generation's store URL (`stage_roots`). `fanout`: the drill measurement's helper tasks, given the fold's
+    checkpoint (`static_fanout.Fanout`; needs `checkpoint`)."""
     ck = compact_checkpoint(checkpoint, gen, new_gen, runs, work=work / "ckpt") if checkpoint else None
     try:
         return fold_gen(gen_dir, out, work, gen=gen, new_gen=new_gen, runs=runs, threads=threads, mem=mem, chunk_rows=chunk_rows, jobs=jobs,
-                        progress=progress, ck=ck, fanout=fanout)
+                        progress=progress, ck=ck, source=source, stage=stage, fanout=fanout)
     finally:
         if ck is not None:
             ck.close()
@@ -615,14 +744,15 @@ def clear_checkpoints(root: str, new_gen: str) -> int:
     return store.delete(sorted(store.listing(f"{CHECKPOINTS}/{new_gen}")))
 
 
-def compactor(chunk_rows: int = sl.CHUNK_ROWS, checkpoint: str | None = None, fanout: Callable[[Checkpoint], object] | None = None) -> ar.Compactor:
+def compactor(chunk_rows: int = sl.CHUNK_ROWS, checkpoint: str | None = None, stage: str = "auto",
+              fanout: Callable[[Checkpoint], object] | None = None) -> ar.Compactor:
     """The static store's plug into the shared compaction (`append_runner.compact_store`): its fold and upload order; its
     predecessors are left to `store-gc -k` (readers pin `STATIC_GEN`, so a compacted generation may still be served).
-    `checkpoint`: the folds' checkpoint root (`fold`); `fanout`: its drill measurement's helper tasks (`fold`)."""
-    return ar.Compactor(prefix=PREFIX, fold=lambda *a, **kw: fold(*a, **kw, chunk_rows=chunk_rows, checkpoint=checkpoint, fanout=fanout),
-                        publish_order=sl.publish_order,
-                        last=("scans.json", "catalog/meta.json", "drill/meta.json", f"{an.ANCHORS}/meta.json"), prune=False, md5s=True, keep=reads,
-                        publish_tier=sl.publish_tier)
+    `checkpoint`: the folds' checkpoint root (`fold`). `stage`: the drill's roots staged on the work disk (`STAGE_MODES`;
+    from the store, given as the fold's `source`). `fanout`: its drill measurement's helper tasks (`fold`)."""
+    return ar.Compactor(prefix=PREFIX, fold=lambda *a, **kw: fold(*a, **kw, chunk_rows=chunk_rows, checkpoint=checkpoint, stage=stage, fanout=fanout),
+                        publish_order=sl.publish_order, last=("scans.json", "catalog/meta.json", "drill/meta.json", f"{an.ANCHORS}/meta.json"),
+                        prune=False, md5s=True, keep=reads, publish_tier=sl.publish_tier, source=True)
 
 
 #: What the fold never reads of the base: the anchored search and the measurement (rebuilt), the parity markers.
@@ -645,8 +775,9 @@ def reads(rel: str) -> bool:
 @option("-M", "--mem", default="4GB", help="DuckDB memory limit")
 @option("-o", "--out", "store_root", required=True, help="The store: a dir or URL (`r2://bucket[/prefix]`, `s3://…`, `gs://…`)")
 @option("-p", "--threads", default=4, type=IntRange(min=1), help="DuckDB threads")
+@option("-s", "--stage", default="auto", type=Choice(STAGE_MODES), help="Stage the drill's roots on the work disk (auto: when the generation isn't there already and the disk has room)")
 @option("-w", "--work", help="Local work dir (default: a temporary one, removed after); the generation is mirrored into it")
-def compact_cmd(chunk_rows, gen, jobs, mem, store_root, threads, work) -> None:
+def compact_cmd(chunk_rows, gen, jobs, mem, store_root, stage, threads, work) -> None:
     """Fold the generation's base and its newest manifest's runs into a new generation now (`<gen>.c<NNN>`, equal to
     `build -r <gen>/ranges.json` through the last scan), whatever the compaction policy says; published (data, then
     `compaction.json`), then `successor.json` in the old generation and `static-names/CURRENT.json` when it named it (or
@@ -663,5 +794,5 @@ def compact_cmd(chunk_rows, gen, jobs, mem, store_root, threads, work) -> None:
         why = ar.forced(gen_dir, "forced (compact)")
         if why is None:
             raise SystemExit(f"{store.root}/{prefix}: no runs to compact")
-        out = ar.compact_store(store, compactor(chunk_rows), gen, gen_dir, w, policy=ar.NEVER, why=why, threads=threads, mem=mem, jobs=jobs)
+        out = ar.compact_store(store, compactor(chunk_rows, stage=stage), gen, gen_dir, w, policy=ar.NEVER, why=why, threads=threads, mem=mem, jobs=jobs)
     print(json.dumps(out, indent=1))
