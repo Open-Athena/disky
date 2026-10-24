@@ -352,6 +352,60 @@ def rss_bytes() -> int | None:
         return None
 
 
+def descendants(pid: int, proc: str = "/proc") -> list[int]:
+    """`pid`'s live descendant processes (Linux: each `/proc/<p>/stat`'s parent; `[]` elsewhere)."""
+    try:
+        entries = [e for e in os.listdir(proc) if e.isdigit()]
+    except OSError:
+        return []
+    kids: dict[int, list[int]] = {}
+    for e in entries:
+        try:
+            with open(f"{proc}/{e}/stat") as f:
+                ppid = int(f.read().rsplit(")", 1)[1].split()[1])
+        except (OSError, ValueError, IndexError):
+            continue
+        kids.setdefault(ppid, []).append(int(e))
+    out, todo = [], [pid]
+    while todo:
+        for c in kids.get(todo.pop(), []):
+            out.append(c)
+            todo.append(c)
+    return out
+
+
+def tree_cpu_seconds(proc: str = "/proc") -> float:
+    """CPU seconds of this process, its exited (waited-for) children and its live descendants: a spawn pool's workers'
+    included (`time.process_time` alone read 0% through a compaction's `drill/measure`, 12 processes busy)."""
+    import resource
+
+    total = time.process_time() + sum(getattr(resource.getrusage(resource.RUSAGE_CHILDREN), f) for f in ("ru_utime", "ru_stime"))
+    tick = os.sysconf("SC_CLK_TCK") if hasattr(os, "sysconf") else 100
+    for c in descendants(os.getpid(), proc):
+        try:
+            with open(f"{proc}/{c}/stat") as f:
+                fields = f.read().rsplit(")", 1)[1].split()
+            total += (int(fields[11]) + int(fields[12])) / tick
+        except (OSError, ValueError, IndexError):
+            continue
+    return total
+
+
+def tree_rss_bytes(proc: str = "/proc") -> int | None:
+    """This process's current RSS plus its live descendants' (Linux; None elsewhere)."""
+    own = rss_bytes()
+    if own is None:
+        return None
+    page = os.sysconf("SC_PAGE_SIZE")
+    for c in descendants(os.getpid(), proc):
+        try:
+            with open(f"{proc}/{c}/statm") as f:
+                own += int(f.read().split()[1]) * page
+        except (OSError, ValueError, IndexError):
+            continue
+    return own
+
+
 def rss_peak_bytes() -> int:
     """This process's peak RSS so far (`ru_maxrss`: bytes on macOS, KiB on Linux)."""
     import resource
@@ -381,15 +435,16 @@ class Liveness(Heartbeat):
     """`Heartbeat`'s thread writing `LIVE_TAG <elapsed> · <stage>[ <detail>] (<in stage>) · RSS … · <disk> … · CPU …%`
     (`-` for the stage, with no time, before any is set)
     (`write`: a stderr line). The probes (`rss() -> (current | None, peak)`, `disk() -> used | None`, `cpu()`: the
-    process's CPU seconds, all threads) and `stage()` are parameters, so a test fakes them; CPU% is over the interval
-    since the previous line (all threads: past 100% on a busy multi-core sort)."""
+    CPU seconds of the process and its children, all threads: `tree_cpu_seconds`) and `stage()` are parameters, so a test
+    fakes them; CPU% is over the interval since the previous line (past 100% on a busy multi-core sort or a pool). RSS
+    is the process's and its live descendants' (`tree_rss_bytes`); the peak is the process's own."""
 
     def __init__(self, write: Callable[[str], None], interval: float, *, disk_path: str, clock: Callable[[], float] = time.monotonic,
                  wait: Callable[[float], bool] | None = None,
                  stage: Callable[[], tuple[str | None, str | None, float]] = current_stage,
-                 rss: Callable[[], tuple[int | None, int]] = lambda: (rss_bytes(), rss_peak_bytes()),
+                 rss: Callable[[], tuple[int | None, int]] = lambda: (tree_rss_bytes(), rss_peak_bytes()),
                  disk: Callable[[], int | None] | None = None,
-                 cpu: Callable[[], float] = time.process_time):
+                 cpu: Callable[[], float] = tree_cpu_seconds):
         super().__init__(write, interval, clock=clock, wait=wait, log=err, label="liveness")
         self.disk_path, self.stage, self.rss, self.cpu = disk_path, stage, rss, cpu
         self.disk = disk or (lambda: disk_used(disk_path))
