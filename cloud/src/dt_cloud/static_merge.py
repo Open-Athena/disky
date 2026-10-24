@@ -479,6 +479,7 @@ def probe_cmd(
 
 
 @cli.command("compact-probe")
+@option("-b", "--bucket", default=lambda: os.environ.get("DATA_BUCKET") or None, help="The mount's bucket: the drill's roots are staged from it by the GCS API (default $DATA_BUCKET; none: copied from the mount)")
 @option("-c", "--chunk-rows", default=1 << 22, type=IntRange(min=1), help="The drill fold's chunks: roots per measurement / rollup q range")
 @option("-g", "--gen", required=True, help="The generation whose base and newest manifest's runs are folded")
 @option("-j", "--jobs", default=1, type=IntRange(min=1), help="The drill fold's chunks at a time")
@@ -486,9 +487,10 @@ def probe_cmd(
 @option("-M", "--mem", default="100GB", help="DuckDB memory limit")
 @option("-o", "--out", required=True, help="New local output directory outside the mount: the folded generation")
 @option("-p", "--threads", default=16, type=int, help="DuckDB threads")
+@option("-s", "--stage", default="auto", type=Choice(["auto", "on", "off"]), help="Stage the drill's roots on the work disk first (`static_compact.STAGE_MODES`; auto: when it has room)")
 @option("-T", "--tmp", default="/stage/tmp/compact-probe", help="Local work dir")
 @option("-u", "--report", help="Also write the JSON report to this URL (`gs://<scratch>/…/<name>.json`: the VM's disks go with it)")
-def compact_probe_cmd(chunk_rows, gen, jobs, mount, mem, out, threads, tmp, report) -> None:
+def compact_probe_cmd(bucket, chunk_rows, gen, jobs, mount, mem, out, threads, stage, tmp, report) -> None:
     """Fold the generation into its next one locally (`static_compact.fold_gen`, the compaction's own fold), read in place
     from the mount: no upload, no successor / pointer / manifests in the bucket, no lease, no checkpoint, no pruning; only
     OUT and TMP are written. Logs the fold's stage lines; prints a JSON of the summary (per-part seconds and peaks) and
@@ -508,8 +510,9 @@ def compact_probe_cmd(chunk_rows, gen, jobs, mount, mem, out, threads, tmp, repo
         raise UsageError(f"probe output already exists: {output}")
     manifest, runs = ar.newest_runs(gen_dir)
     new_gen = ar.next_gen(gen)
-    err(f"compact-probe {gen} → {new_gen}: manifest {manifest}, {len(runs)} runs, -j {jobs} -M {mem} -p {threads} -c {chunk_rows}")
-    summary = fold_gen(gen_dir, output, work, gen=gen, new_gen=new_gen, runs=runs, threads=threads, mem=mem, chunk_rows=chunk_rows, jobs=jobs)
+    err(f"compact-probe {gen} → {new_gen}: manifest {manifest}, {len(runs)} runs, -j {jobs} -M {mem} -p {threads} -c {chunk_rows} -s {stage}")
+    summary = fold_gen(gen_dir, output, work, gen=gen, new_gen=new_gen, runs=runs, threads=threads, mem=mem, chunk_rows=chunk_rows, jobs=jobs,
+                       source=f"gs://{bucket}/{PREFIX}/{gen}" if bucket else None, stage=stage)
 
     def md5(p: Path) -> str:
         h = hashlib.md5()

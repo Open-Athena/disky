@@ -274,6 +274,49 @@ def mirror(store: Store, prefix: str, local: Path, keep: Callable[[str], bool] =
     return listing
 
 
+#: Files `stage_files` downloads at once: one GCS stream carries ~100–200 MB/s, so 64 fill a 32 Gbps NIC.
+STAGE_WORKERS = 64
+
+
+def stage_files(root: str, keys: dict[str, int], dst: Path, *, workers: int = STAGE_WORKERS, label: str = "stage") -> dict:
+    """`keys` (`{key: size}` under `root`: a local dir or a store URL) copied to `dst/<key>`, `workers` files at once: a
+    local cache of what a fold reads many times. A `gs://` root downloads through the GCS JSON API (not a bucket mount,
+    not fsspec's one event loop), each file checked against its object's crc32c by the client; every file is checked
+    against its listed size, written beside its place first and renamed into it. Returns `{files, bytes, s}`."""
+    t0 = time.monotonic()
+    prog = Progress(label, len(keys), total_bytes=sum(keys.values()), unit="files", stage=False)
+    get: Callable[[str, Path], None]
+    if scheme(root) == "gs":
+        from google.cloud import storage
+        from requests.adapters import HTTPAdapter
+
+        client = storage.Client()
+        # one connection per worker (requests' default pool keeps 10 and churns the rest)
+        client._http.mount("https://", HTTPAdapter(pool_connections=workers, pool_maxsize=workers))
+        bucket, _, base = root.removeprefix("gs://").partition("/")
+        b = client.bucket(bucket)
+        get = lambda key, out: b.blob(f"{base}/{key}" if base else key).download_to_filename(str(out), checksum="crc32c")  # noqa: E731
+    else:
+        store = Store(root)
+        get = store.get
+
+    def one(kv: tuple[str, int]) -> None:
+        key, size = kv
+        out = dst / key
+        tmp = out.with_name(out.name + ".part")
+        tmp.parent.mkdir(parents=True, exist_ok=True)
+        get(key, tmp)
+        if (got := tmp.stat().st_size) != size:
+            raise OSError(f"{label}: {root}/{key}: {got} bytes staged, {size} listed")
+        tmp.rename(out)
+        prog.tick(nbytes=size)
+
+    with ThreadPoolExecutor(max(1, workers)) as ex:
+        list(ex.map(one, sorted(keys.items())))
+    prog.done()
+    return {"files": len(keys), "bytes": sum(keys.values()), "s": round(time.monotonic() - t0, 1)}
+
+
 #: Files `upload_new` (and `put_tree`) keep in flight within one parallel tier: a compacted generation is ~300 GiB in
 #: thousands of files, and one stream to GCS or R2 carries ~100 MB/s.
 UPLOAD_WORKERS = 32
