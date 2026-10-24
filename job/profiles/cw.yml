@@ -72,9 +72,6 @@ pass: [DT_RECORD, DT_ALERTS]
 steps: [retire]
 labels: {deployment: cw}
 queue_size: 20
-# TEMPORARY (2026-10-24): 10-24T1202's static drill ran its 750 GB stage disk out of DuckDB temp (`day_rollups`' `nh`,
-# 663 GiB), so scans skip static-names until that's fixed; the catch-up appends meanwhile (`job/cw-static-submit.sh`).
-skip: [static-names]
 options:
   list:
     import: true
