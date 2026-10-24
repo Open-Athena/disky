@@ -962,6 +962,26 @@ def near_candidates(con, R: int, run_counts: str | None = None) -> None:
         con.execute(f"DROP TABLE IF EXISTS {table}")
 
 
+def near_report(con, prior: list[Tier], mode: str, top: int = 5) -> None:
+    """Log the `top` keys by `near` rows with their bound's terms: the base's group rows, the run tiers' pure-group rows,
+    and per run tier the rows `rc` took (census or `s` column) next to an exact count (that tier's shard of the key,
+    read by `s` pushdown). A run tier's census above its exact count is the bound's slack (a merged run's census sums
+    its inputs')."""
+    keys = con.execute(f"""SELECT k, count(*) AS nn, min(bound), max(bound) FROM near GROUP BY k ORDER BY nn DESC, k LIMIT {top}""").fetchall()
+    for k, nn, b_lo, b_hi in keys:
+        base, pure = con.execute("""SELECT coalesce(sum(rows) FILTER (WHERE t = 0), 0), coalesce(sum(rows) FILTER (WHERE t > 0 AND s_min = s_max), 0)
+            FROM ktk WHERE k = ?""", [k]).fetchone()
+        took = dict(con.execute("SELECT t, n FROM rc_t WHERE k = ?", [k]).fetchall())
+        tiers = []
+        for i, t in enumerate(prior[1:], 1):
+            f = t.shard_file(mode, k)
+            exact = con.execute(f"SELECT count(*) FROM read_parquet({q(f)}) WHERE s = ? AND depth >= 1", [k]).fetchone()[0] if f else 0
+            if took.get(i) or exact:
+                tiers.append(f"t{i} {took.get(i, 0):,}/{exact:,}")
+        err(f"anchors {mode}: near key {k!r}: {nn:,} near, bound {b_lo:,}..{b_hi:,}; base groups {base:,}, run pure groups {pure:,}; "
+            f"run rows taken/exact: {', '.join(tiers) or 'none'}")
+
+
 def run_rollups(con, prior: list[Tier], run: Tier, D: int, mode: str, R: int, K: int, into: str, rule: HexRule | None = None) -> dict:
     """One level-0 run's rollups of `mode` at scan `D` (epoch seconds) into table `into` (see the module doc).
     `prior`: the tiers before the run, base first, each with its `anchors/`; `run`: the run's shards; `rule`: the
@@ -1019,15 +1039,16 @@ def run_rollups(con, prior: list[Tier], run: Tier, D: int, mode: str, R: int, K:
     # each key's rows over the run tiers, exactly (their `s` column only): their groups mix keys, so bound them by this
     # (from the tier's census where it has one; a tier built before censuses reads its `s` column: cw's 10-21T1202 spent
     # 73 s reading two merged runs' 173M rows for these counts)
-    con.execute("CREATE OR REPLACE TABLE rc (k VARCHAR, n BIGINT)")
-    for t in prior[1:]:
+    con.execute("CREATE OR REPLACE TABLE rc_t (t INTEGER, k VARCHAR, n BIGINT)")
+    for i, t in enumerate(prior[1:], 1):
         if census := t.census(mode):
-            con.execute(f"INSERT INTO rc SELECT x.s, x.n FROM read_parquet({q(str(census))}) AS x SEMI JOIN ck ON x.s = ck.k")
+            con.execute(f"INSERT INTO rc_t SELECT {i}, x.s, x.n FROM read_parquet({q(str(census))}) AS x SEMI JOIN ck ON x.s = ck.k")
         elif fs := t.files(mode):
-            con.execute(f"""INSERT INTO rc SELECT x.s, count(*)::BIGINT FROM ({files_sql(fs, "s, depth")}) AS x SEMI JOIN ck ON x.s = ck.k
+            con.execute(f"""INSERT INTO rc_t SELECT {i}, x.s, count(*)::BIGINT FROM ({files_sql(fs, "s, depth")}) AS x SEMI JOIN ck ON x.s = ck.k
                 WHERE x.depth >= 1 GROUP BY x.s""")
-    con.execute("CREATE OR REPLACE TABLE rc AS SELECT k, sum(n)::BIGINT AS n FROM rc GROUP BY k")
+    con.execute("CREATE OR REPLACE TABLE rc AS SELECT k, sum(n)::BIGINT AS n FROM rc_t GROUP BY k")
     near_candidates(con, R, "rc")
+    near_report(con, prior, mode)
     # The prior rows of each near (k, dir), exactly: per key one pushdown read of the tiers' files holding it.
     con.execute("CREATE OR REPLACE TABLE prows AS SELECT * FROM rr WHERE false")
     probe_prior_rows(con, prior, mode)
@@ -1050,7 +1071,7 @@ def run_rollups(con, prior: list[Tier], run: Tier, D: int, mode: str, R: int, K:
     # 4. Delta headers and cells at D for the heavy (k, dir) the run touches.
     doc["delta"] = delta_cells(con, mode, D, K, into, rule)
     doc["keys"] = con.execute(f"SELECT count(DISTINCT q) FROM {into}").fetchone()[0]
-    for t in ("rr", "rk", "pb", "sc", "sca", "scb", "ck", "rd", "pr", "ps", "cand", "kt", "ktk", "rc", "near", "prows", "pv", "pd", "nh", "nroots"):
+    for t in ("rr", "rk", "pb", "sc", "sca", "scb", "ck", "rd", "pr", "ps", "cand", "kt", "ktk", "rc", "rc_t", "near", "prows", "pv", "pd", "nh", "nroots"):
         con.execute(f"DROP TABLE IF EXISTS {t}")
     return doc
 
