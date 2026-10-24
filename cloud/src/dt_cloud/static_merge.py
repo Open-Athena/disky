@@ -46,7 +46,7 @@ from .append_runner import (  # noqa: F401 — the shared names, as this module 
     rebase,
 )
 from .maint_runs import NULL, Recorder, from_env
-from .static_names import PREFIX, connect, err
+from .static_names import PREFIX, connect, err, q
 from .static_profile import data_bucket, scratch_bucket
 from .resource_monitor import monitor_resources, resource_stage
 
@@ -534,6 +534,76 @@ def compact_probe_cmd(chunk_rows, gen, jobs, mount, mem, out, threads, tmp, repo
         Store(root).write_text(key, text)
         err(f"compact-probe: report → {report}")
     print(json.dumps({**{k: v for k, v in doc.items() if k != "files"}, "n_files": len(rels)}, indent=1))
+
+
+@cli.command("measure-probe")
+@option("-c", "--checkpoint", required=True, help="A compaction's fold checkpoint (`…/compact-checkpoints/<gen>/<inputs>/fold`, or a copy of it) holding a saved `spilled` step")
+@option("-g", "--gen", required=True, help="The generation the checkpoint's compaction folds (its `drill/meta.json`: R, K, floor)")
+@option("-m", "--mount", required=True, help="Read-only local mount of the data bucket")
+@option("-M", "--mem", default="100GB", help="DuckDB memory limit")
+@option("-o", "--out", required=True, help="New local output directory: the measurement's tables and sorted roots")
+@option("-p", "--threads", default=16, type=int, help="DuckDB threads")
+@option("-T", "--tmp", default="/stage/tmp/measure-probe", help="Local work dir (the spills, ~the checkpoint's size)")
+@option("-u", "--report", help="Also write the JSON report to this URL")
+@option("-w", "--workers", default=64, type=IntRange(min=1), help="Concurrent downloads of the checkpoint's files")
+def measure_probe_cmd(checkpoint, gen, mount, mem, out, threads, tmp, report, workers) -> None:
+    """The drill measurement alone (`static_local.measure_ranges`, long then short), over a compaction's saved spills: the
+    checkpoint's `spilled` files are downloaded into TMP, nothing is written to it or the bucket (no `code.json` claim,
+    so another build's checkpoint is read, not cleared). `$DT_MEASURE_THREADS` sets the pool's width as in a compaction.
+    Logs `measure_report`'s lines; prints a JSON of each kind's seconds and jobs and every output file's size and md5 (the
+    measured tables sorted, and the sorted roots: equal bytes at any pool width), also written beside OUT and to `-u`."""
+    import hashlib
+    from concurrent.futures import ThreadPoolExecutor
+
+    from .checkpoint import Checkpoint
+    from . import static_local as sl
+
+    output, work = Path(out), Path(tmp)
+    if output.exists():
+        raise UsageError(f"probe output already exists: {output}")
+    dm = json.loads((Path(mount) / PREFIX / gen / "drill" / "meta.json").read_text())
+    root, _, prefix = checkpoint.rstrip("/").rpartition("/")
+    ck = Checkpoint(root, prefix, work=work / "ckpt")
+    spills = work / "spills"
+    shutil.rmtree(spills, ignore_errors=True)
+    t = monotonic()
+    groups = ck.load_files("spilled", spills, workers=workers)
+    fetched = round(monotonic() - t, 1)
+    con = connect(threads, mem, work / "duckdb")
+    output.mkdir(parents=True)
+    kinds = {}
+    for kind in ("long", "short"):
+        t = monotonic()
+        sorted_files, m = sl.measure_ranges(con, spills, kind, groups[kind], "pd", "pr", floor=dm.get("floor", sl.FLOOR), R=dm["R"], K=dm["K"])
+        con.execute(f"COPY (SELECT * FROM pd ORDER BY ALL) TO {q(str(output / f'{kind}-dirs.parquet'))} (FORMAT parquet, COMPRESSION zstd)")
+        con.execute(f"COPY (SELECT * FROM pr ORDER BY ALL) TO {q(str(output / f'{kind}-rup.parquet'))} (FORMAT parquet, COMPRESSION zstd)")
+        (output / f"{kind}-sorted").mkdir()
+        for f in sorted_files:
+            shutil.move(f, output / f"{kind}-sorted" / f.name)
+        kinds[kind] = {**m, "s": round(monotonic() - t, 1)}
+
+    def md5(p: Path) -> str:
+        h = hashlib.md5()
+        with open(p, "rb") as fh:
+            while b := fh.read(1 << 24):
+                h.update(b)
+        return h.hexdigest()
+
+    files = sorted(p for p in output.rglob("*") if p.is_file())
+    with ThreadPoolExecutor(16) as ex:
+        sums = list(ex.map(md5, files))
+    doc = {"checkpoint": checkpoint, "gen": gen, "threads": threads, "mem": mem, "measure_threads": os.environ.get(sl.MEASURE_THREADS_ENV),
+           "fetch_s": fetched, "kinds": kinds,
+           "files": {p.relative_to(output).as_posix(): {"size": p.stat().st_size, "md5": s} for p, s in zip(files, sums)}}
+    text = json.dumps(doc, indent=1) + "\n"
+    (output.parent / f"{output.name}.probe.json").write_text(text)
+    if report:
+        from .blobstore import Store
+
+        r, _, key = report.rpartition("/")
+        Store(r).write_text(key, text)
+        err(f"measure-probe: report → {report}")
+    print(json.dumps({**{k: v for k, v in doc.items() if k != "files"}, "n_files": len(files)}, indent=1))
 
 
 @cli.command("prune")

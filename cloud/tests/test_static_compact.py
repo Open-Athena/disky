@@ -284,3 +284,38 @@ def test_progress_counts_items_done_across_pool_calls():
         sk._pool(con, lambda cur, i: (10, i), batch, 2, prog)
     assert [line.split(":")[0] for line in lines] == [f"drill/fold/long-roots {k}/5" for k in range(1, 6)]
     assert prog.rows == 50
+
+
+def test_measure_probe_measures_a_saved_spill_read_only_at_any_pool_width(world, tmp_path, monkeypatch):
+    """C's fold stopped once its spills are saved; `static_merge measure-probe` over that checkpoint, in turn (2 threads,
+    `MEASURE_THREADS` 4) and in 2 processes (`$DT_MEASURE_THREADS` 1): the same measured tables and sorted roots, md5 for
+    md5, and the checkpoint untouched."""
+    from dt_cloud import static_merge as sm
+
+    gen_dir = world["c_store"] / "g"
+    _, runs = ar.newest_runs(gen_dir)
+    ck_root = str(tmp_path / "scratch")
+
+    def on_save(name: str) -> None:
+        if name == "fold/spilled":
+            raise _Stop(name)
+
+    ck = sk.compact_checkpoint(ck_root, "g", "g.c001", runs, on_save=on_save, work=tmp_path / "ck")
+    with pytest.raises(_Stop), _small_groups():
+        sk.fold_gen(gen_dir, tmp_path / "fold-out", tmp_path / "fw", gen="g", new_gen="g.c001", runs=runs, threads=2, mem="1GB", chunk_rows=3, ck=ck)
+    ck.close()
+    [done] = [p for p in (tmp_path / "scratch").rglob("done.json") if p.parent.name == "spilled"]
+    fold_ck = str(done.parent.parent)
+    before = _md5s(tmp_path / "scratch")
+    docs = []
+    for i, width in enumerate([None, "1"]):
+        if width:
+            monkeypatch.setenv(sl.MEASURE_THREADS_ENV, width)
+        res = CliRunner().invoke(sm.cli, ["measure-probe", "-c", fold_ck, "-m", str(world["c_store"].parent), "-g", "g", "-o", str(tmp_path / f"m{i}"),
+                                          "-T", str(tmp_path / f"t{i}"), "-M", "1GB", "-p", "2"], catch_exceptions=False)
+        assert res.exit_code == 0, res.output
+        docs.append(json.loads((tmp_path / f"m{i}.probe.json").read_text()))
+    assert [(d["kinds"]["long"]["jobs"], d["measure_threads"]) for d in docs] == [(1, None), (2, "1")]
+    assert docs[0]["files"] == docs[1]["files"]
+    assert sorted(docs[0]["files"])[:2] == ["long-dirs.parquet", "long-rup.parquet"]
+    assert _md5s(tmp_path / "scratch") == before
