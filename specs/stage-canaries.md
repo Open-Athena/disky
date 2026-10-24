@@ -22,6 +22,12 @@ Real inputs already processed, re-run into scratch, never the live store:
 
 Each step runs only once the one before it passes. cw's data is ~0.28× gcs's, so cw's top step is a cheap rung below gcs's.
 
+**Inputs come from the newest manifest.** Re-running a run over the tiers its own manifest listed fails once a carry has folded those tiers and prune has deleted them. cw's 10-22 ladder was un-runnable by 10-24: `manifests/2026-10-22T1202.json`'s L3/L2/L1 runs were gone. So each rung is a level-0 run the newest manifest lists, re-run over the tiers that manifest lists before it (`-P` = the newest manifest). Those tiers hold the same scans, and they live as long as that manifest does. The rungs are picked by rows (~4× apart) when the ladder runs, so a carry refreshes the ladder instead of breaking it. The comparison is baseline vs candidate on that same input, both re-run, never against the published files, which were built over the unmerged tiers. When the newest manifest has no level-0 run of a rung's size (right after a carry), that rung uses the nearest it has. A ladder that needs a rung at all costs copies the tiers into scratch first. That's deferred until one does.
+
+**Published bytes as the baseline.** When a rung's own manifest still lives, so its tiers are the ones its published files were built over, the published files are an a2a baseline (`prior` in `meta.json` aside). This is also the **bootstrap**: no image before 2a573d6b (cw) has `run -P -o`, so the first candidate with it can only be gated against published bytes, pinned to such a manifest. From then on, the baseline image re-runs too.
+
+**A rung's input pruned mid-run** (a publish's prune deleting the folded runs its manifest listed) surfaces as gcsfuse `ESTALE` ("Stale file handle") or a missing tier, not as a clean refusal. cw's 10-23T0001 canary died this way at 37 GiB. The canary classifies those as "input pruned: take the next rung on the newest manifest", never as a candidate failure. A rung pinned to the newest manifest (its tiers not yet folded) avoids it.
+
 ## At each step
 
 The baseline image (the deployment's current tag) and the candidate run on the same input, side by side. Each records:
