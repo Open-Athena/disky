@@ -645,17 +645,34 @@ def compact_probe_cmd(anchor_tasks, bucket, chunk_rows, measure_tasks, gen, jobs
         + (f" -F {measure_tasks}" if measure_tasks > 1 else "") + (f" -A {anchor_tasks}" if anchor_tasks > 1 else "") + (f", resumed from {resume_from} through {through}" if resume_from else ""))
     from .static_compact import compact_checkpoint, seed_checkpoint
 
-    if resume_from:
-        seed_checkpoint(resume_from, ck_root, gen, new_gen, runs, through)
-    ck = compact_checkpoint(ck_root, gen, new_gen, runs, work=work / "ckpt") if ck_root else None
+    from .maint_runs import PhaseHook, from_env, phase
+
+    # a race (`-U`) is a run of its own on /scans (`race`), phased as a compaction's fold is
+    rec = from_env("race") if upload else NULL
+    scan, _ = ar.parse_manifest(manifest.removeprefix("manifests/")) or (None, 0)
+    if scan:
+        rec.start(scan, f"{PREFIX}/{gen}")
+    hook = PhaseHook(rec, "fold", note_s=ar.NOTE_S)
     try:
-        summary = fold_gen(gen_dir, output, work, gen=gen, new_gen=new_gen, runs=runs, threads=threads, mem=mem, chunk_rows=chunk_rows, jobs=jobs,
-                           source=f"gs://{bucket}/{PREFIX}/{gen}" if bucket else None, stage=stage, ck=ck,
-                           fanout=measure_fanout(measure_tasks, gen) if measure_tasks > 1 else None,
-                           anchor_fanout=anchor_fanout(anchor_tasks, gen) if anchor_tasks > 1 else None)
-    finally:
-        if ck is not None:
-            ck.close()
+        if resume_from:
+            seed_checkpoint(resume_from, ck_root, gen, new_gen, runs, through)
+        ck = compact_checkpoint(ck_root, gen, new_gen, runs, work=work / "ckpt") if ck_root else None
+        hook.begin()
+        try:
+            summary = fold_gen(gen_dir, output, work, gen=gen, new_gen=new_gen, runs=runs, threads=threads, mem=mem, chunk_rows=chunk_rows, jobs=jobs,
+                               source=f"gs://{bucket}/{PREFIX}/{gen}" if bucket else None, stage=stage, ck=ck, progress=hook,
+                               fanout=measure_fanout(measure_tasks, gen) if measure_tasks > 1 else None,
+                               anchor_fanout=anchor_fanout(anchor_tasks, gen) if anchor_tasks > 1 else None)
+        except BaseException as e:
+            hook.end(f"failed: {type(e).__name__}: {e}", failed=True)
+            raise
+        finally:
+            if ck is not None:
+                ck.close()
+        hook.end(f"{new_gen}: {summary.get('s', '?')}s")
+    except BaseException as e:
+        rec.finish("failed", f"{type(e).__name__}: {e}")
+        raise
 
     def md5(p: Path) -> str:
         h = hashlib.md5()
@@ -682,10 +699,17 @@ def compact_probe_cmd(anchor_tasks, bucket, chunk_rows, measure_tasks, gen, jobs
     if upload:
         from .blobstore import Store
 
-        dst = Store(upload.rstrip("/"))
-        dst.put_tree(output, "gen")
-        dst.write_text("probe.json", text)
+        try:
+            with phase(rec, "upload") as ph:
+                dst = Store(upload.rstrip("/"))
+                dst.put_tree(output, "gen")
+                dst.write_text("probe.json", text)
+                ph.note = f"{len(rels)} files to {upload.rstrip('/')}/gen/ (`compact --prebuilt`)"
+        except BaseException as e:
+            rec.finish("failed", f"{type(e).__name__}: {e}")
+            raise
         err(f"compact-probe: {len(rels)} files → {upload.rstrip('/')}/gen/, its report last (`compact --prebuilt {upload}`)")
+        rec.finish("succeeded", gen=f"{PREFIX}/{gen} → {new_gen} (race, not published)")
     print(json.dumps({**{k: v for k, v in doc.items() if k != "files"}, "n_files": len(rels)}, indent=1))
 
 

@@ -70,7 +70,9 @@ export interface OutputDelta extends ScanRunOutput {
  * row on /scans. Their `scan` is the newest scan they fold or carry (so they sort beside it) and their `gen` is
  * `<store>/<gen>` (a compaction's finish: `<store>/<gen> → <new gen>`); they are never a scan's run (`scanRunOf`, the
  * paging, /health's running scans skip them). */
-export const MAINT_KINDS = ['compact', 'merge'] as const
+/** Maintenance runs' kinds: a compaction, a race of one (`compact-probe -U`: built beside it, published only by a
+ * compaction adopting it), a merge of deferred carries. */
+export const MAINT_KINDS = ['compact', 'race', 'merge'] as const
 export const isMaintenance = (kind: string): boolean => (MAINT_KINDS as readonly string[]).includes(kind)
 
 /** A maintenance run's store (`interval-store`, `static-names`): its `gen`'s first segment; null for a scan's run. */

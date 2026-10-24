@@ -129,6 +129,31 @@ def phase(rec: Recorder, name: str) -> Iterator[Slot]:
     rec.end(name, slot.note)
 
 
+class PhaseHook:
+    """A long step's progress hook on `rec`'s run (a fold's `progress`): `hook(note)` notes the running phase (at most
+    every `note_s`), `hook(note, next_phase)` ends it (its note + `suffix()`) and begins `next_phase`; `phase` is the
+    running one, begun with `begin()`."""
+
+    def __init__(self, rec: Recorder, first: str, *, note_s: float, suffix: Callable[[], str] = lambda: ""):
+        self.rec, self.phase, self.note_s, self.suffix, self.noted = rec, first, note_s, suffix, 0.0
+
+    def begin(self) -> None:
+        self.rec.begin(self.phase)
+
+    def __call__(self, note: str, next_phase: str | None = None) -> None:
+        if next_phase is None:
+            if time.monotonic() - self.noted >= self.note_s:
+                self.noted = time.monotonic()
+                self.rec.note(self.phase, note)
+            return
+        self.rec.end(self.phase, note + self.suffix())
+        self.phase = next_phase
+        self.rec.begin(next_phase)
+
+    def end(self, note: str | None = None, *, failed: bool = False) -> None:
+        self.rec.end(self.phase, note, failed=failed)
+
+
 def gib(n: float | None) -> str:
     return "?" if n is None else f"{n / 2**30:.2f} GiB"
 
