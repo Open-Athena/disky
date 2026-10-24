@@ -651,11 +651,10 @@ def test_upload_new_puts_each_step_after_the_last(tmp_path):
 
 
 
-def test_disk_peak_per_stage(monkeypatch, tmp_path):
+def test_disk_peak_per_stage(tmp_path):
     """`DiskPeak`: each `take()` is the peak above the starting level since the previous one; `close()` the run's peak."""
     used = iter([100, 100 + 3 * sl.GB, 100 + sl.GB, 100 + 2 * sl.GB, 100])
-    monkeypatch.setattr(sl.shutil, "disk_usage", lambda p: type("U", (), {"used": next(used)}))
-    disk = sl.DiskPeak(tmp_path, every_s=3600)
+    disk = sl.DiskPeak(tmp_path, every_s=3600, usage=lambda: next(used))
     disk.sample()
     assert disk.take() == 3.0
     disk.sample()

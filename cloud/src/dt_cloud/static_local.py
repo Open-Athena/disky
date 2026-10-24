@@ -93,16 +93,18 @@ class DiskPeak:
     `take_step()` the same within a stage (since the previous `take_step()` or `take()`), leaving the stage's peak.
     The filesystem is the job's own scratch, so other writers' bytes count too; on a shared disk this over-states."""
 
-    def __init__(self, path: Path, every_s: float = 2.0):
+    def __init__(self, path: Path, every_s: float = 2.0, usage: Callable[[], int] | None = None):
         self.path, self.every_s = path, every_s
-        self.base = shutil.disk_usage(path).used
+        # `usage`: the bytes used (a test's own sequence, not a patched `shutil`: other samplers' threads read that too)
+        self.usage = usage or (lambda: shutil.disk_usage(path).used)
+        self.base = self.usage()
         self.peak = self.total = self.step = 0
         self.stop = threading.Event()
         self.thread = threading.Thread(target=self.run, daemon=True)
         self.thread.start()
 
     def sample(self) -> None:
-        used = max(0, shutil.disk_usage(self.path).used - self.base)
+        used = max(0, self.usage() - self.base)
         self.peak, self.total, self.step = max(self.peak, used), max(self.total, used), max(self.step, used)
 
     def run(self) -> None:
