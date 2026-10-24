@@ -650,3 +650,23 @@ def test_query_reads_a_non_gcs_store(built):
     assert res.exit_code == 0, res.output
     got = [json.loads(ln) for ln in res.stdout.splitlines()]
     assert [o["answers"] for o in got] == [{d: _brute_answer(oracle, t, d) for d in ids} for t in terms]
+
+
+def test_anchors_rerun_over_a_pinned_manifest_reproduces_a_published_run(appended, tmp_path):
+    """`static_anchors run -P manifests/<a>.json -o OUT` (a canary's re-run, specs/stage-canaries.md) after the carry
+    merged `a`: over the tiers `a`'s own manifest listed before it, into OUT, nothing uploaded: `a`'s published `anchors/`,
+    md5 for md5, in the report."""
+    import hashlib
+
+    ids = scan_ids(appended["scans"])
+    a, gen = ids[-2], appended["gen"]
+    out = tmp_path / "rerun"
+    with _small_groups(1):
+        res = CliRunner().invoke(an.cli, ["run", "-g", "g", "-d", a, "-m", str(gen.parent.parent), "-P", f"manifests/{a}.json", "-o", str(out),
+                                          "-T", str(tmp_path / "t"), "-R", str(R), "-K", str(KEEP), "-p", "2", "-M", "1GB"], catch_exceptions=False)
+    assert res.exit_code == 0, res.output
+    report = json.loads((out / "report.json").read_text())
+    published = gen / sa.run_key(a, a)
+    want = {f.relative_to(published).as_posix(): hashlib.md5(f.read_bytes()).hexdigest() for f in sorted((published / an.ANCHORS).rglob("*")) if f.is_file()}
+    assert (report["run"], report["manifest"], report["tiers"]) == (a, f"manifests/{a}.json", 1)
+    assert report["files"] == want

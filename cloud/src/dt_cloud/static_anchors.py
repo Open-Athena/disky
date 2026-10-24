@@ -1906,21 +1906,31 @@ def start_cmd(bucket, run, gen, K, mount, mem, threads, R, tmp) -> None:
 @option("-K", "--keep", "K", default=K_DEFAULT, type=int, help="Kept children per heavy directory")
 @option("-m", "--mount", required=True, help="Local mount of the bucket")
 @option("-M", "--mem", default="100GB", help="DuckDB memory limit")
+@option("-o", "--out", help="Build into this new local dir and upload nothing (a canary or probe re-run; with -P)")
 @option("-p", "--threads", default=16, type=int, help="DuckDB threads")
+@option("-P", "--manifest", help="The tiers before the run from this manifest (`manifests/<id>.json`, the one that published it), not the newest")
 @option("-R", "--read-rows", "R", default=R_DEFAULT, type=int, help="R")
 @option("-T", "--tmp", default="/stage/tmp", help="Local scratch")
 @monitor_resources(prefix="ANCHOR_RESOURCE")
-def run_cmd(bucket, run, gen, K, mount, mem, threads, R, tmp) -> None:
+def run_cmd(bucket, run, gen, K, mount, mem, out, threads, manifest, R, tmp) -> None:
     """A level-0 run's `names/` and `anchors/` (both kinds and, when every tier before it carries one, the starts-with
     catalog `anchors/start/`; `meta.json` last), over the tiers before it in the newest manifest (the base and its earlier
-    runs, each with `anchors/meta.json`). When its `anchors/meta.json` is there, only a missing `anchors/start/`."""
+    runs, each with `anchors/meta.json`). When its `anchors/meta.json` is there, only a missing `anchors/start/`.
+
+    `-P` / `-o` (specs/stage-canaries.md): a past run re-run read-only, over the tiers the manifest `-P` lists before it
+    (later carries' merged runs never seen; a tier since pruned fails, named), into the new local dir `-o`: nothing is
+    uploaded (the query profiles stay under it too); prints the build's docs and every output file's md5."""
     import shutil
 
     from .scan_id import scan_epoch
 
-    b = _gcs(bucket)
+    if out is not None and manifest is None:
+        raise SystemExit("-o needs -P: a re-run reads the tiers its own manifest listed")
+    if out is not None and Path(out).exists():
+        raise SystemExit(f"{out}: already exists")
+    b = None if out is not None else _gcs(bucket)
     prefix = f"{PREFIX}/{gen}/deltas/{run}"
-    if b.blob(f"{prefix}/{ANCHORS}/meta.json").exists():
+    if b is not None and b.blob(f"{prefix}/{ANCHORS}/meta.json").exists():
         # Built before the starts-with catalog existed: only its `anchors/start/` (when the base carries one).
         if b.blob(f"{PREFIX}/{gen}/{START_DIR}/meta.json").exists():
             start_cmd.callback(bucket, run, gen, K, mount, mem, threads, R, tmp)
@@ -1931,8 +1941,13 @@ def run_cmd(bucket, run, gen, K, mount, mem, threads, R, tmp) -> None:
     # The tiers before the run: the newest manifest's runs before it (the run listed, published by hand), else the newest
     # earlier scan's manifest's (a run being appended: `runs add` builds it before `publish` lists it; or a scan inside a
     # merged run, its level-0 run backfilled before the merge's tier is, `runs add`'s backfill).
-    listed = _manifest_runs(mount, gen)
-    if f"deltas/{run}" in {r["key"] for r in listed}:
+    if manifest is not None:
+        runs = json.loads((Path(mount) / PREFIX / gen / manifest).read_text())["runs"]
+        k = next((i for i, r in enumerate(runs) if r["key"] == f"deltas/{run}"), None)
+        if k is None or runs[k].get("level", 0) != 0:
+            raise SystemExit(f"{manifest}: no level-0 run deltas/{run}")
+        before, scans = runs[:k], runs[k]["scans"]
+    elif f"deltas/{run}" in {r["key"] for r in _manifest_runs(mount, gen)}:
         runs = _manifest_runs(mount, gen, run)
         before, scans = runs[:-1], runs[-1]["scans"]
         if runs[-1].get("level", 0) != 0:
@@ -1947,9 +1962,9 @@ def run_cmd(bucket, run, gen, K, mount, mem, threads, R, tmp) -> None:
             raise SystemExit(f"{t.root}: no {ANCHORS}/meta.json (build the tiers in order)")
     from .anchor_profile import AnchorConnection
 
-    profiles = Path(tmp) / f"anchor-profiles-{run}"
+    profiles = Path(out) / "profiles" if out is not None else Path(tmp) / f"anchor-profiles-{run}"
     con = AnchorConnection(connect(threads, mem, tmp), profiles)
-    local = Path(tmp) / f"run-{run}"
+    local = Path(out) / "run" if out is not None else Path(tmp) / f"run-{run}"
     local.mkdir(parents=True, exist_ok=True)
     src = _tier_root(mount, gen, run)
     (local / "sx").unlink(missing_ok=True)
@@ -1966,8 +1981,19 @@ def run_cmd(bucket, run, gen, K, mount, mem, threads, R, tmp) -> None:
     try:
         doc = build_run_local(con, prior, Tier(local), scan_epoch(run), R, K, scans, versions, rule=_gen_rule(mount, gen))
     finally:
-        _upload_dir(_gcs(scratch_bucket()), profiles, diagnostics)
-        err(f"ANCHOR_PROFILES gs://{scratch_bucket()}/{diagnostics}/")
+        if out is None:
+            _upload_dir(_gcs(scratch_bucket()), profiles, diagnostics)
+            err(f"ANCHOR_PROFILES gs://{scratch_bucket()}/{diagnostics}/")
+    if out is not None:
+        import hashlib
+
+        files = sorted(f for f in (local / ANCHORS).rglob("*") if f.is_file())
+        md5 = {f.relative_to(local).as_posix(): hashlib.md5(f.read_bytes()).hexdigest() for f in files}
+        report = {"run": run, "manifest": manifest, "tiers": len(prior), "docs": doc["docs"], "s": round(monotonic() - t0, 1), "files": md5}
+        (Path(out) / "report.json").write_text(json.dumps(report, indent=1) + "\n")
+        err(f"anchors {prefix} (re-run over {manifest}, {len(prior)} tiers): {json.dumps(doc['docs'])} in {monotonic() - t0:.0f}s → {out}")
+        print(json.dumps({k: v for k, v in report.items() if k != "files"} | {"n_files": len(md5)}))
+        return
     if versions is not None:
         _upload_dir(b, local / NAMES, f"{prefix}/{NAMES}", last=("sidecar.parquet",))
     # The starts-with catalog first (its own `meta.json` last), then the rest of `anchors/` (`meta.json` last).
