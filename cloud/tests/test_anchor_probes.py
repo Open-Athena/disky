@@ -106,28 +106,34 @@ def test_candidate_bounds_include_unknown_statistics_and_exact_edges():
     ]
 
 
-def test_run_tiers_bound_by_the_lesser_of_their_groups_and_the_keys_rows():
-    """The base by its groups; the run tiers by their groups or the key's rows over them, whichever is less: a run
-    group holding other keys spans their paths, so it meets every `dir`, but `foo` has only 3 rows there."""
+def test_run_tiers_bound_by_their_pure_groups_and_the_keys_other_rows():
+    """The base by its groups; the run tiers by their pure groups (only the key's rows) meeting the range, plus the key's
+    rows outside them (its count less the pure groups'), at most its count. A mixed run group spans other keys' paths,
+    so it would meet every `dir` with all its rows: `foo` has only 3 rows in the runs, all in mixed groups; `big` 5,000,
+    4,300 in pure groups under `b/` and `c/`, so 700 elsewhere."""
     con = duckdb.connect()
     con.execute('CREATE TABLE cand(k VARCHAR, lvl INTEGER, dir VARCHAR, n BIGINT)')
-    con.executemany('INSERT INTO cand VALUES (?, ?, ?, ?)', [('foo', 0, '', 1), ('foo', 1, 'a', 1), ('foo', 1, 'b', 1), ('big', 1, 'b', 1)])
-    con.execute('CREATE TABLE ktk(k VARCHAR, t INTEGER, p_min VARCHAR, p_max VARCHAR, rows BIGINT)')
-    con.executemany('INSERT INTO ktk VALUES (?, ?, ?, ?, ?)', [
-        ('foo', 0, 'a/a', 'a/m', 200),   # the base: only foo's rows, under a/
-        ('foo', 1, 'a', 'z/z', 8000),    # a run: a group of many keys
-        ('foo', 2, 'a', 'z/z', 8000),    # another
-        ('big', 1, 'b/a', 'b/z', 300),   # a run group of big's own rows: tighter than its count
+    con.executemany('INSERT INTO cand VALUES (?, ?, ?, ?)', [
+        ('foo', 0, '', 1), ('foo', 1, 'a', 1), ('foo', 1, 'b', 1), ('big', 1, 'b', 1), ('big', 1, 'c', 1), ('big', 1, 'd', 1)])
+    con.execute('CREATE TABLE ktk(k VARCHAR, t INTEGER, s_min VARCHAR, s_max VARCHAR, p_min VARCHAR, p_max VARCHAR, rows BIGINT)')
+    con.executemany('INSERT INTO ktk VALUES (?, ?, ?, ?, ?, ?, ?)', [
+        ('foo', 0, 'foo', 'foo', 'a/a', 'a/m', 200),   # the base: only foo's rows, under a/
+        ('foo', 1, 'a', 'zz', 'a', 'z/z', 8000),       # a run: a group of many keys
+        ('foo', 2, 'a', 'zz', 'a', 'z/z', 8000),       # another
+        ('big', 1, 'a', 'zz', 'a', 'z/z', 8000),       # the first, as big's
+        ('big', 1, 'big', 'big', 'b/a', 'b/z', 300),   # run groups of big's own rows
+        ('big', 2, 'big', 'big', 'c/a', 'c/z', 4000),
     ])
     con.execute('CREATE TABLE rc(k VARCHAR, n BIGINT)')
     con.executemany('INSERT INTO rc VALUES (?, ?)', [('foo', 3), ('big', 5000)])
     an.near_candidates(con, 100, "rc")
     assert con.execute('SELECT * FROM near ORDER BY k, lvl, dir').fetchall() == [
-        ('big', 1, 'b', 1, 300), ('foo', 0, '', 1, 203), ('foo', 1, 'a', 1, 203),
+        ('big', 1, 'b', 1, 1000), ('big', 1, 'c', 1, 4700), ('big', 1, 'd', 1, 700),
+        ('foo', 0, '', 1, 203), ('foo', 1, 'a', 1, 203),
     ]
     an.near_candidates(con, 100, None)
     assert con.execute('SELECT k, dir, bound FROM near ORDER BY k, lvl, dir').fetchall() == [
-        ('big', 'b', 300), ('foo', '', 16200), ('foo', 'a', 16200), ('foo', 'b', 16000),
+        ('big', 'b', 8300), ('big', 'c', 12000), ('big', 'd', 8000), ('foo', '', 16200), ('foo', 'a', 16200), ('foo', 'b', 16000),
     ]
 
 
@@ -244,7 +250,7 @@ def test_level_pruning_keeps_exactly_the_unpruned_near(runs):
     rng = random.Random(7)
     con = duckdb.connect()
     con.execute("CREATE TABLE cand(k VARCHAR, lvl INTEGER, dir VARCHAR, n BIGINT)")
-    con.execute("CREATE TABLE ktk(k VARCHAR, t INTEGER, p_min VARCHAR, p_max VARCHAR, rows BIGINT)")
+    con.execute("CREATE TABLE ktk(k VARCHAR, t INTEGER, s_min VARCHAR, s_max VARCHAR, p_min VARCHAR, p_max VARCHAR, rows BIGINT)")
     con.execute("CREATE TABLE rc(k VARCHAR, n BIGINT)")
     for key in ("k1", "k2", "k3"):
         dirs = {""}
@@ -256,7 +262,8 @@ def test_level_pruning_keeps_exactly_the_unpruned_near(runs):
         for _ in range(30):
             lo, hi = sorted(rng.choice(sorted(dirs - {""})) + "/" + rng.choice("xyz") for _ in range(2))
             lo, hi = (None if rng.random() < 0.05 else lo), (None if rng.random() < 0.05 else hi)
-            con.execute("INSERT INTO ktk VALUES (?, ?, ?, ?, ?)", (key, rng.choice([0, 1, 2]), lo, hi, rng.randint(1, 60)))
+            s_min, s_max = (key, key) if rng.random() < 0.5 else ("k0", "k9")  # pure, or mixed
+            con.execute("INSERT INTO ktk VALUES (?, ?, ?, ?, ?, ?, ?)", (key, rng.choice([0, 1, 2]), s_min, s_max, lo, hi, rng.randint(1, 60)))
         con.execute("INSERT INTO rc VALUES (?, ?)", (key, rng.randint(0, 100)))
     rc = "rc" if runs else None
     for R in (0, 50, 150, 400):
@@ -265,12 +272,12 @@ def test_level_pruning_keeps_exactly_the_unpruned_near(runs):
         # unpruned: every candidate bounded
         if runs:
             an.group_prefix(con, "SELECT * FROM ktk WHERE t = 0", "gb")
-            an.group_prefix(con, "SELECT * FROM ktk WHERE t > 0", "gr")
+            an.group_prefix(con, "SELECT * FROM ktk WHERE t > 0 AND s_min = s_max", "gr")
             an.group_bound(con, "gb", "cand", "wb")
             an.group_bound(con, "gr", "cand", "wr")
-            want = con.execute(f"""SELECT b.k, b.lvl, b.dir, b.n, b.bound + least(r.bound, coalesce(rc.n, 0)) FROM wb AS b
-                JOIN wr AS r USING (k, lvl, dir) LEFT JOIN rc USING (k) WHERE b.n + b.bound + least(r.bound, coalesce(rc.n, 0)) > {R}
-                ORDER BY ALL""").fetchall()
+            runs = "least(r.bound + greatest(coalesce(rc.n, 0) - coalesce(pt.n, 0), 0), coalesce(rc.n, 0))"
+            want = con.execute(f"""SELECT b.k, b.lvl, b.dir, b.n, b.bound + {runs} FROM wb AS b JOIN wr AS r USING (k, lvl, dir)
+                LEFT JOIN rc USING (k) LEFT JOIN gr_t AS pt USING (k) WHERE b.n + b.bound + {runs} > {R} ORDER BY ALL""").fetchall()
         else:
             an.group_prefix(con, "SELECT * FROM ktk", "g")
             an.group_bound(con, "g", "cand", "w")
