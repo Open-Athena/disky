@@ -63,6 +63,10 @@ class Profile:
     #: single-task stage restarts from zero on each preemption, so spot's discount can cost more than it saves.
     standard_stages: tuple[str, ...] = ()
     append_tasks: int = 16
+    #: A backlog's scans in flight at once (`runs add -c`): each stage of a scan starts once the same stage of the scan
+    #: before it and its own previous stage are done, publishes in order (specs/static-backlog-pipeline.md); 1: one scan
+    #: at a time.
+    pipeline_depth: int = 1
     #: Whether each run also gets the heavy-term drilldown (`drill/`, `static_drill`): needs the base generation's `drill/`.
     drill: bool = False
     #: Where the drill's tasks save each step (`static_drill build -S`: a store root, a bare bucket name meaning `gs://`), so
@@ -158,7 +162,7 @@ ENV = {
     "r2_sa": "STATIC_NAMES_R2_SA", "machine": "STATIC_NAMES_MACHINE", "ssd_gb": "STATIC_NAMES_SSD", "spot": "STATIC_NAMES_SPOT",
     "machines": "STATIC_NAMES_MACHINES", "ssd_gbs": "STATIC_NAMES_SSDS",
     "standard_stages": "STATIC_NAMES_STANDARD_STAGES",
-    "append_tasks": "STATIC_NAMES_APPEND_TASKS", "drill": "STATIC_NAMES_DRILL", "drill_checkpoint": "STATIC_NAMES_DRILL_CHECKPOINT", "anchors": "STATIC_NAMES_ANCHORS", "src": "STATIC_NAMES_SRC",
+    "append_tasks": "STATIC_NAMES_APPEND_TASKS", "pipeline_depth": "STATIC_NAMES_PIPELINE_DEPTH", "drill": "STATIC_NAMES_DRILL", "drill_checkpoint": "STATIC_NAMES_DRILL_CHECKPOINT", "anchors": "STATIC_NAMES_ANCHORS", "src": "STATIC_NAMES_SRC",
     "hex_runs": "STATIC_NAMES_HEX_RUNS", "compact_level": "STATIC_NAMES_COMPACT_LEVEL", "compact": "STATIC_NAMES_COMPACT", "read_from": "STATIC_NAMES_READ_FROM",
     "compact_jobs": "STATIC_NAMES_COMPACT_JOBS", "fold_jobs": "STATIC_NAMES_FOLD_JOBS", "record_secrets": "STATIC_NAMES_RECORD_SECRETS",
 }
@@ -207,7 +211,7 @@ def _parse(name: str, raw: str):
         from .append_runner import parse_policy
 
         return parse_policy(ENV[name], raw)
-    if name in ("ssd_gb", "append_tasks", "compact_jobs", "fold_jobs"):
+    if name in ("ssd_gb", "append_tasks", "pipeline_depth", "compact_jobs", "fold_jobs"):
         return int(raw)
     if name in ("spot", "drill", "anchors"):
         return raw.strip() not in ("0", "false", "")

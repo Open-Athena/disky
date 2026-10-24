@@ -1655,19 +1655,22 @@ def _tier_root(mount: str, gen: str, run: str | None) -> Path:
 
 def _manifest_runs(mount: str, gen: str, through: str | None = None, before: str | None = None) -> list[dict]:
     """The newest manifest's runs (oldest first; a merge's revision counts, `static_merge`), cut after run `through` (its
-    scan id) when given; `before`: the newest manifest of a scan strictly before that one's instead."""
-    from .static_merge import manifest_keys, parse_manifest
+    scan id) when given; `before`: the runs before that scan instead (`append_runner.prior_key`: the newest earlier
+    manifest's, or a pending scan's listing newer than it)."""
+    from .append_runner import PENDING, latest_key, prior_key
 
     d = Path(mount) / PREFIX / gen
     names = [f"manifests/{p.name}" for p in (d / "manifests").glob("*.json")]
-    keys = [d / k for k in manifest_keys(names) if before is None or parse_manifest(k.removeprefix("manifests/"))[0] < before]
-    if not keys:
+    if before is not None:
+        names += [f"{PENDING}{p.name}" for p in (d / PENDING).glob("*.json")]
+    key = latest_key(names) if before is None else prior_key(names, before)
+    if key is None:
         return []
-    runs = json.loads(keys[-1].read_text())["runs"]
+    runs = json.loads((d / key).read_text())["runs"]
     if through is not None:
         k = next((i for i, r in enumerate(runs) if r["key"] == f"deltas/{through}"), None)
         if k is None:
-            raise SystemExit(f"run deltas/{through} is not in {keys[-1].name}")
+            raise SystemExit(f"run deltas/{through} is not in {key}")
         runs = runs[:k + 1]
     return runs
 

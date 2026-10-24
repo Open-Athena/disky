@@ -875,3 +875,93 @@ def test_per_stage_machines():
     drill = next(c for c in f.calls if c[0] == "drill")
     assert drill == ("drill", 2, _py("static_drill", "build", f"-g {GEN} -d {d}", "-k", "task",
                                      *sd.drill_duckdb_args("n2-highmem-32")))
+
+
+class _SafeKeys(dict):
+    """The fake bucket's keys, iterable while another thread writes them (a pipelined backlog's jobs run at once)."""
+
+    def __iter__(self):
+        return iter(list(dict.keys(self)))
+
+
+SCANS = ["2026-10-09T0001", "2026-10-09T0601", "2026-10-09T1201"]
+
+
+def _pipelined(f: Fake, depth: int = 3, **kw) -> sd.Runner:
+    from dataclasses import replace
+
+    f.keys = _SafeKeys(f.keys)
+    return f.daily(replace(CFG, pipeline_depth=depth), **kw)
+
+
+def test_a_pipelined_backlog_writes_what_one_at_a_time_does():
+    """Three pending scans at depth 3: the same jobs, manifests and merge as at depth 1, each step in scan order (the
+    publishes too), each scan's steps in chain order."""
+    serial, piped = Fake({}, SCANS), Fake({}, SCANS)
+    assert serial.daily().run(SCANS[-1], catch_up=True) == SCANS
+    assert _pipelined(piped).run(SCANS[-1], catch_up=True) == SCANS
+    assert sorted(map(repr, piped._calls)) == sorted(map(repr, serial._calls))
+    assert {k: v for k, v in piped.keys.items() if "/manifests/" in k} == {k: v for k, v in serial.keys.items() if "/manifests/" in k}
+    for stage in ("prepare", "append", "publish", "r2", "prune"):
+        assert [c for c in piped._calls if c[0] == stage] == [c for c in serial._calls if c[0] == stage]
+    for d in SCANS:
+        at = [piped._calls.index((stage, d)) for stage in ("prepare", "publish", "prune")]
+        assert at == sorted(at)
+
+
+def test_a_pipelined_backlog_appends_the_next_scan_while_this_one_builds():
+    """The second scan's append starts while the first's drill is in flight (else this deadlocks: the drill job waits
+    for it)."""
+    from threading import Event
+
+    f = Fake({}, SCANS[:2])
+    started = Event()
+    run_job = f.run_job
+
+    def job(name, spec, wait=None):
+        words = spec["taskGroups"][0]["taskSpec"]["runnables"][0]["container"]["commands"][1].split()
+        d = words[words.index("-d") + 1] if "-d" in words else None
+        if spec["labels"]["stage"] == "append" and d == SCANS[1]:
+            started.set()
+        if spec["labels"]["stage"] == "drill" and d == SCANS[0]:
+            assert started.wait(5), "the second scan's append never started while the first's drill ran"
+        return run_job(name, spec, wait)
+
+    f.run_job = job
+    from dataclasses import replace
+
+    f.keys = _SafeKeys(f.keys)
+    assert f.daily(replace(CFG, pipeline_depth=2, drill=True)).run(SCANS[1], catch_up=True) == SCANS[:2]
+    assert sorted(k.rsplit("/", 1)[-1] for k in f.keys if "/manifests/" in k) == [f"{SCANS[0]}.json", f"{SCANS[1]}.json", f"{SCANS[1]}.m001.json"]
+
+
+def test_a_failed_step_stops_its_scan_and_the_later_ones_not_the_earlier():
+    """The second scan's shards fail: the first scan publishes, the second and third don't (the third stops before its
+    shards: it would read the second's), and the run raises the failure; a rerun at depth 1 resumes them."""
+    f = Fake({}, SCANS)
+    run_job = f.run_job
+
+    def job(name, spec, wait=None):
+        if spec["labels"]["stage"] == "shards" and f"-d {SCANS[1]}" in spec["taskGroups"][0]["taskSpec"]["runnables"][0]["container"]["commands"][1]:
+            raise RuntimeError(f"Batch job {name}: FAILED")
+        return run_job(name, spec, wait)
+
+    f.run_job = job
+    with pytest.raises(RuntimeError, match="FAILED"):
+        _pipelined(f).run(SCANS[-1], catch_up=True)
+    assert sorted(k.rsplit("/", 1)[-1] for k in f.keys if "/manifests/" in k) == [f"{SCANS[0]}.json"]
+    assert [c[0] for c in f._calls if SCANS[2] in repr(c) and c[0] in ("shards", "catalog", "publish")] == []
+    f.run_job = run_job
+    assert f.daily().run(SCANS[-1], catch_up=True) == SCANS[1:]
+
+
+def test_the_runs_before_a_scan_count_pending_listings_newer_than_its_manifest():
+    """`prior_key`: the newest manifest before the scan, unless a pending listing (`prepare`'s) of a later scan before it
+    exists; a pending listing at or before that manifest's scan is superseded by it (its publish removes it anyway)."""
+    from dt_cloud.append_runner import prior_key
+
+    keys = ["manifests/2026-10-09T0001.json", "manifests/2026-10-09T0001.m001.json", "pending/2026-10-09T0001.json",
+            "pending/2026-10-09T0601.json", "pending/2026-10-09T1201.json", "deltas/2026-10-09T0601/scans.json"]
+    assert [prior_key(keys, s) for s in ("2026-10-09T0001", "2026-10-09T0601", "2026-10-09T1201", "2026-10-09T1801")] == [
+        None, "manifests/2026-10-09T0001.m001.json", "pending/2026-10-09T0601.json", "pending/2026-10-09T1201.json"]
+    assert prior_key(["pending/2026-10-09T0001.json"], "2026-10-09T0601") == "pending/2026-10-09T0001.json"

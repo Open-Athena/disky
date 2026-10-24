@@ -216,6 +216,23 @@ def latest_key(keys: Collection[str], before: str | None = None) -> str | None:
     return ms[-1] if ms else None
 
 
+#: A scan's run listed before its publish: `pending/<scan>.json`, a manifest's `runs` through it, written by `prepare`. A
+#: pipelined backlog's later scans build over it while the earlier ones are still in flight; `publish` removes it
+#: (specs/static-backlog-pipeline.md).
+PENDING = "pending/"
+
+
+def prior_key(keys: Collection[str], before: str) -> str | None:
+    """The listing of the runs before scan `before` among generation-relative `keys`: the newest pending listing of a scan
+    after the newest manifest before `before` (`latest_key`) and before `before`, else that manifest; None without
+    either."""
+    m = latest_key(keys, before)
+    floor = parse_manifest(m.removeprefix("manifests/"))[0] if m else ""
+    pend = sorted(k for k in keys if k.startswith(PENDING) and SCAN_ID.fullmatch(s := k.removeprefix(PENDING).removesuffix(".json"))
+                  and floor < s < before)
+    return pend[-1] if pend else m
+
+
 def scans_of(base: dict, runs: list[dict]) -> list[str]:
     """The generation's scans: its base's (`scans.json`), then the runs'."""
     return [*(s["id"] for s in base["scans"]), *(s for r in runs for s in r["scans"])]
@@ -1715,11 +1732,15 @@ class Runner:
             return []
         if len(todo) > 1:
             self.log(f"catching up {len(todo)} scans: {', '.join(todo)}")
+        self.run_scans(todo)
+        self.carries()
+        return todo
+
+    def run_scans(self, todo: list[str]) -> None:
+        """Each scan's chain (`one`), in turn."""
         for s in todo:
             self.wait_compaction()
             self.one(s)
-        self.carries()
-        return todo
 
     def wait_compaction(self) -> None:
         """`Busy` while a live compaction holds the generation (`compaction_holds`): a scan appended to it would supersede

@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
 from datetime import datetime
 from functools import partial
@@ -157,49 +158,117 @@ class Runner(ar.Runner):
         return replace(self.cfg, gen=gen)
 
     def one(self, d: str) -> None:
+        for _, step in self.steps(d):
+            step()
+
+    def steps(self, d: str) -> list[tuple[str, Callable[[], None]]]:
+        """Scan `d`'s chain, as `(name, fn)` steps in order; each checks its own outputs when it runs (a done one logs and
+        returns), so a rerun resumes at the first missing one."""
         run = f"{self.root}/deltas/{d}"
         g = ["-g", self.cfg.gen, "-d", d]
-        self.log(f"{d}: gen {self.cfg.gen}")
-        # 1. prepare (local): pins the scan as the run's `scans.json` (checks it is the next one).
-        if self.exists(f"{run}/scans.json"):
-            self.log(f"{d} prepare: done")
-        else:
-            self.stage(f"{d} prepare", lambda: self.prepare(d))
-        # 2. append: every key range, `append_tasks` tasks.
-        k = self.read_json(f"{self.root}/ranges.json")["k"]
-        n = self.count(f"{run}/dhist/", ".parquet")
-        if n >= k:
-            self.log(f"{d} append: done ({n}/{k} ranges)")
-        else:
-            per = ceil(k / self.cfg.append_tasks)
-            name, spec = self.job("append", d, ceil(k / per), "static_append", ["append", *g, "-n", str(per)])
-            self.stage(f"{d} append ({n}/{k} ranges)", lambda: self.run_job(name, spec))
-        # 3. shards ∥ catalog (both read only the run's `cdelta/`).
-        jobs = []
-        for stage, done in (("shards", "sidecar.parquet"), ("catalog", "catalog/meta.json")):
-            if self.exists(f"{run}/{done}"):
-                self.log(f"{d} {stage}: done")
+
+        def prepare() -> None:
+            # pins the scan as the run's `scans.json` (checks it is the next one) and lists it as pending
+            self.log(f"{d}: gen {self.cfg.gen}")
+            if self.exists(f"{run}/scans.json"):
+                self.log(f"{d} prepare: done")
             else:
-                jobs.append((stage, partial(self.run_job, *self.job(stage, d, 1, "static_append", [stage, *g]))))
-        self.concurrently(d, jobs)
-        # 4. drill ∥ anchors (the profile's `drill`, `anchors`): neither reads the other's output, so they run at once.
-        self.drill_anchors(d)
-        # 5. publish (local, seconds): `manifests/<d>.json` (written once), the run at level 0; carries come after (`carries`).
-        if self.exists(f"{self.root}/manifests/{d}.json"):
-            self.log(f"{d} publish: done")
-        else:
-            self.stage(f"{d} publish", lambda: self.publish(d))
-        # 6. R2: the runs the manifest lists, then the manifest, last.
-        self.r2(d)
-        # 7. verify (optional): brute force from the scan file vs the base + runs.
-        if self.verify_terms:
+                self.stage(f"{d} prepare", lambda: self.prepare(d))
+
+        def append() -> None:
+            # every key range, `append_tasks` tasks
+            k = self.read_json(f"{self.root}/ranges.json")["k"]
+            n = self.count(f"{run}/dhist/", ".parquet")
+            if n >= k:
+                self.log(f"{d} append: done ({n}/{k} ranges)")
+            else:
+                per = ceil(k / self.cfg.append_tasks)
+                name, spec = self.job("append", d, ceil(k / per), "static_append", ["append", *g, "-n", str(per)])
+                self.stage(f"{d} append ({n}/{k} ranges)", lambda: self.run_job(name, spec))
+
+        def shards_catalog() -> None:
+            # both read only the run's `cdelta/`
+            jobs = []
+            for stage, done in (("shards", "sidecar.parquet"), ("catalog", "catalog/meta.json")):
+                if self.exists(f"{run}/{done}"):
+                    self.log(f"{d} {stage}: done")
+                else:
+                    jobs.append((stage, partial(self.run_job, *self.job(stage, d, 1, "static_append", [stage, *g]))))
+            self.concurrently(d, jobs)
+
+        def publish() -> None:
+            # local, seconds: `manifests/<d>.json` (written once), the run at level 0; carries come after (`carries`)
+            if self.exists(f"{self.root}/manifests/{d}.json"):
+                self.log(f"{d} publish: done")
+            else:
+                self.stage(f"{d} publish", lambda: self.publish(d))
+
+        def verify() -> None:
+            # optional: brute force from the scan file vs the base + runs
+            if not self.verify_terms:
+                return
             if self.exists(f"{run}/verify.json"):
                 self.log(f"{d} verify: done")
             else:
                 name, spec = self.job("verify", d, 1, "static_append", ["verify", *g, "-t", self.verify_terms])
                 self.stage(f"{d} verify", lambda: self.run_job(name, spec))
-        # 8. prune: only the newest complete open-version state is kept.
-        self.stage(f"{d} prune", lambda: self.prune(d))
+
+        return [
+            ("prepare", prepare),
+            ("append", append),
+            ("shards ∥ catalog", shards_catalog),
+            # the profile's `drill`, `anchors`: neither reads the other's output, so they run at once
+            ("drill ∥ anchors", lambda: self.drill_anchors(d)),
+            ("publish", publish),
+            # the runs the manifest lists, then the manifest, last
+            ("r2", lambda: self.r2(d)),
+            ("verify", verify),
+            # only the newest complete open-version state is kept
+            ("prune", lambda: self.stage(f"{d} prune", lambda: self.prune(d))),
+        ]
+
+    def run_scans(self, todo: list[str]) -> None:
+        """A backlog's chains, `pipeline_depth` scans in flight (specs/static-backlog-pipeline.md): step `j` of a scan
+        starts once its own step `j − 1` and step `j` of the scan before it are done, so the backlog advances at its
+        slowest step, not their sum; every step of a scan follows the same step of the scans before it (publishes in
+        order; a scan's prepare lists it as pending, so the next one's stages read it before it publishes). A failed step
+        stops its scan and every later one before their next step (the earlier ones go on: they never read it); the steps
+        running finish; then the earliest scan's failure is raised. At depth 1, or one scan, `one` in turn."""
+        depth = max(1, self.cfg.pipeline_depth)
+        if depth == 1 or len(todo) < 2:
+            super().run_scans(todo)
+            return
+        from threading import Event, Lock
+
+        steps = [self.steps(s) for s in todo]
+        done = [[Event() for _ in st] for st in steps]
+        failed: list[tuple[int, BaseException]] = []
+        lock = Lock()
+
+        def chain(i: int) -> None:
+            try:
+                for j, (_, step) in enumerate(steps[i]):
+                    if i:
+                        done[i - 1][j].wait()
+                    if any(k < i for k, _ in failed):
+                        return
+                    if j == 0:
+                        self.wait_compaction()
+                    step()
+                    done[i][j].set()
+            except BaseException as e:
+                with lock:
+                    failed.append((i, e))
+            finally:
+                # a stopped scan releases the scans after it, which then see the failure and stop too
+                for e in done[i]:
+                    e.set()
+
+        self.log(f"pipelining {len(todo)} scans, {depth} in flight")
+        with ThreadPoolExecutor(depth) as ex:
+            list(ex.map(chain, range(len(todo))))
+        if failed:
+            raise min(failed, key=lambda f: f[0])[1]
 
     # ── Backfill: every listed run's drill and anchors ───────────────────────
 
