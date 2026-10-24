@@ -662,7 +662,8 @@ def test_anchors_rerun_over_a_pinned_manifest_reproduces_a_published_run(appende
     a, gen = ids[-2], appended["gen"]
     out = tmp_path / "rerun"
     with _small_groups(1):
-        res = CliRunner().invoke(an.cli, ["run", "-g", "g", "-d", a, "-m", str(gen.parent.parent), "-P", f"manifests/{a}.json", "-o", str(out),
+        # `-b`: its default reads the deployment profile; `-o` never touches a bucket
+        res = CliRunner().invoke(an.cli, ["run", "-b", "unused", "-g", "g", "-d", a, "-m", str(gen.parent.parent), "-P", f"manifests/{a}.json", "-o", str(out),
                                           "-T", str(tmp_path / "t"), "-R", str(R), "-K", str(KEEP), "-p", "2", "-M", "1GB"], catch_exceptions=False)
     assert res.exit_code == 0, res.output
     report = json.loads((out / "report.json").read_text())
