@@ -292,14 +292,22 @@ def fold_drill(con, tiers: list[sd.Tier], out: Path, work: Path, *, R: int, K: i
         st = staged()
         if st is not None:
             t = step("drill/fold/stage", t, files=st.doc["files"], bytes=st.doc["bytes"])
+        saving: Future | None = None
         if ck is not None and ck.done("long-roots"):
             _restore(con, ck, "long-roots", work)
         else:
             t = _long_roots(con, tiers, out, work, chunk_rows=chunk_rows, jobs=jobs, step=step, log=log, t=t, st=st)
-            _save(con, ck, "long-roots", work, tables=("dmem", "mtid", "tdig"), subs=("troots",))
+            if ck is not None:
+                # the tables now (they're read off `con`); the chunks' roots upload while the classes are found and the
+                # canonical roots spilled from them (c001: the fold waited 16 min on this save), until they're dropped
+                ck.save(con, "long-roots-tables", ("dmem", "mtid", "tdig"))
+                ex = ThreadPoolExecutor(1)
+                saving = ex.submit(ck.save_files, "long-roots", work, _files(work, "troots"))
+                ex.shutdown(wait=False)
         if st is not None:
             st.drop("long")
-        t, groups = _spill_roots(con, tiers, work, chunk_rows=chunk_rows, jobs=jobs, step=step, log=log, t=t, st=st)
+        t, groups = _spill_roots(con, tiers, work, chunk_rows=chunk_rows, jobs=jobs, step=step, log=log, t=t, st=st,
+                                 before_drop=saving.result if saving is not None else lambda: None)
         if st is not None:
             st.drop("short")
         _save(con, ck, "spilled", work, tables=("al",), subs=("long", "short"), doc=groups)
@@ -467,10 +475,10 @@ def _pool(con, fn: Callable[..., tuple[int, object]], items: list, jobs: int, pr
 
 
 def _spill_roots(con, tiers: list[sd.Tier], work: Path, *, chunk_rows: int, jobs: int, step, log: Callable[[str], None], t: float,
-                 st: Staged | None = None) -> tuple[float, dict]:
+                 st: Staged | None = None, before_drop: Callable[[], object] = lambda: None) -> tuple[float, dict]:
     """`fold_drill`'s classes (table `al (q, canonical)`, by root-set digest) and every root spilled by `q` range: the
     canonical members' long roots (`work/long/`) and the short literals' (`work/short/`); the ranges per kind. `st`: the
-    roots' local copies."""
+    roots' local copies. `before_drop()` runs before the chunks' roots (`work/troots/`) are removed: their save's end."""
     n, troots = len(tiers), work / "troots"
     con.execute("CREATE OR REPLACE TABLE dgq AS SELECT m.q, d.n, d.h1, d.h2 FROM mtid AS m JOIN tdig AS d USING (tid)")
     con.execute("CREATE OR REPLACE TABLE al AS SELECT q, min(q) OVER (PARTITION BY n, h1, h2) AS canonical FROM dgq")
@@ -497,6 +505,7 @@ def _spill_roots(con, tiers: list[sd.Tier], work: Path, *, chunk_rows: int, jobs
 
     _pool(con, canonical, list(enumerate(files)), jobs, prog)
     n_long = prog.rows
+    before_drop()
     shutil.rmtree(troots)
     # a resumed fold (`long-roots` restored) never made `mt`, `tup`, `tch` or the per-tier tables
     for tb in ("rt", "tdig", "ctid", "mt", "mtid", "tup", "tch", *(f"t{x}{i}" for i in range(n) for x in "ac")):

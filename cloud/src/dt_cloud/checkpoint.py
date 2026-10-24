@@ -140,11 +140,14 @@ class Checkpoint:
 
     # ── Files ──
 
-    def save_files(self, step: str, local: Path, rels: list[str], doc: dict | None = None, workers: int = 16) -> None:
-        """Files `local/<rel>` (a sub-job's finished output), `workers` at a time, and `doc`; the marker last."""
+    def save_files(self, step: str, local: Path, rels: list[str], doc: dict | None = None, workers: int | None = None) -> None:
+        """Files `local/<rel>` (a sub-job's finished output; `blobstore.upload_files`: processes to `gs://`, `workers`
+        at a time, default its own) and `doc`; the marker last."""
+        from .blobstore import STAGE_WORKERS, upload_files
+
         t0 = monotonic()
-        with ThreadPoolExecutor(workers) as ex:
-            list(ex.map(lambda r: self.store.put(local / r, self.key(f"{step}/files/{r}")), rels))
+        upload_files(self.store.uri(""), {self.key(f"{step}/files/{r}"): local / r for r in rels}, workers=workers or STAGE_WORKERS,
+                     label=f"checkpoint {self.key(step)}", log=self.log)
         self.store.write_text(self.key(f"{step}/done.json"), json.dumps({"tables": {}, "files": rels, "doc": doc}) + "\n")
         self.log(f"checkpoint {self.key(step)}: saved {len(rels)} files ({sum((local / r).stat().st_size for r in rels):,} B) in {monotonic() - t0:.0f}s")
         self._count("save", t0)
