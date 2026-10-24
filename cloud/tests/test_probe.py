@@ -179,7 +179,8 @@ def test_not_indexed_after_a_recorded_static_names_skip_is_skipped():
 
 
 def test_not_indexed_without_a_recorded_skip_is_failed():
-    """No static-names skip in the run's record: the scan should be indexed, so its refusal is a failure."""
+    """No static-names skip in the run's record: the scan should be indexed, so its refusal is a failure, named as the
+    index's lag (the healthcheck's probe: gcs's index held behind by its compaction, 10-22 → 10-24)."""
     results = run({"/a": ok(ms=1000), "/q": refused()}.__getitem__, {"filter-hit": ["/a", "/q"]})
     assert results == [
         Result("filter-hit", "/a", 200, 1000, 2, "miss", 80),
@@ -187,9 +188,9 @@ def test_not_indexed_without_a_recorded_skip_is_failed():
     ]
     assert summarize(results) == (False, [
         "  ✗ filter-hit     1.00s  2 reqs, 0 cached, 1 failed",
-        "      400 0.30s /q",
+        "      400 0.30s /q (scan-not-indexed)",
     ])
-    assert summary_line(results) == "1 passed, 0 skipped, 1 failed"
+    assert summary_line(results) == "1 passed, 0 skipped, 1 failed (1 scan-not-indexed: the static name index lags this scan)"
 
 
 @pytest.mark.parametrize("resp", [

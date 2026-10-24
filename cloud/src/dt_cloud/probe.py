@@ -252,6 +252,16 @@ def compare_requests(fetch: Fetch, baseline: Fetch, paths: list[str], *, paralle
     return results, before, parity
 
 
+def unindexed_refusal(r: Result) -> bool:
+    """Whether `r` failed as the search's `scan-not-indexed` refusal: the static name index lags this scan (a real gap,
+    named apart from other failures so a lag doesn't read as a broken site)."""
+    try:
+        body = json.loads(r.error or "")
+    except ValueError:
+        return False
+    return r.status == 400 and isinstance(body, dict) and body.get("code") == NOT_INDEXED
+
+
 def failed(r: Result) -> bool:
     return r.skip is None and (r.status not in (200, 409) or r.error is not None)
 
@@ -267,7 +277,9 @@ def summary_line(results: list[Result]) -> str:
     """`n passed, n skipped (reason), n failed`: each distinct skip reason named, so a skip never reads as a pass."""
     passed, skipped, bad = counts(results)
     reasons = "; ".join(dict.fromkeys(r.skip for r in results if r.skip is not None))
-    return f"{passed} passed, {skipped} skipped{f' ({reasons})' if reasons else ''}, {bad} failed"
+    lag = sum(failed(r) and unindexed_refusal(r) for r in results)
+    return (f"{passed} passed, {skipped} skipped{f' ({reasons})' if reasons else ''}, {bad} failed"
+            + (f" ({lag} {NOT_INDEXED}: the static name index lags this scan)" if lag else ""))
 
 
 def summarize(results: list[Result], budget_ms: int | None = None) -> tuple[bool, list[str]]:
@@ -289,7 +301,7 @@ def summarize(results: list[Result], budget_ms: int | None = None) -> tuple[bool
         lines.append(f"  {mark} {name:<12} {wall / 1000:6.2f}s  {len(rs)} reqs, {hits} cached"
                      + (f", {len(skipped)} skipped" if skipped else "") + (f", {len(bad)} failed" if bad else ""))
         for r in bad:
-            lines.append(f"      {r.status} {r.ms / 1000:.2f}s {r.path}")
+            lines.append(f"      {r.status} {r.ms / 1000:.2f}s {r.path}" + (f" ({NOT_INDEXED})" if unindexed_refusal(r) else ""))
         for r in skipped:
             lines.append(f"      skipped {r.status} {r.ms / 1000:.2f}s {r.path}: {r.skip}")
     return ok, lines
