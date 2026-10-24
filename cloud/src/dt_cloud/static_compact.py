@@ -44,6 +44,7 @@ from . import static_append as sa
 from . import static_catalog as sc
 from . import static_drill as sd
 from . import static_local as sl
+from . import static_measure as sme
 from . import static_names as sn
 from . import static_roots as sr
 from .blobstore import stage_files
@@ -248,13 +249,19 @@ def stage_roots(gen_dir: Path, tiers: list[str], kinds: tuple[str, ...], dst: Pa
 
 def fold_drill(con, tiers: list[sd.Tier], out: Path, work: Path, *, R: int, K: int, floor: int, chunk_rows: int = sl.CHUNK_ROWS,
                jobs: int = 1, step=sl._nop_step, log: Callable[[str], None] = err, ck: Checkpoint | None = None,
-               staged: Callable[[], Staged | None] = lambda: None, fanout: Callable[[Checkpoint], object] | None = None) -> dict:
+               staged: Callable[[], Staged | None] = lambda: None, fanout: Callable[[Checkpoint], object] | None = None,
+               meas: Path | None = None) -> dict:
     """`G'`'s `drill/` and `roots-measure/` in `out` from the tiers' drills (`G`'s, then each run's, oldest first) and
     `out/catalog/members.parquet`: each member's roots through the last scan, read from the tiers through each one's
     class map (every tier's `aliases.parquet` maps every member it knows to its canonical, which holds that class's rows
     there; a member a tier doesn't know has none there), combined; the classes by root-set digest, as the build's
     (`static_local.build_base_drill`); then `static_local.finish_drill` over the canonical members' roots and the short
     literals'.
+
+    `meas`: `G`'s `roots-measure/`. When every run counts only new roots (`static_measure.blocker` finds nothing in the
+    way), `finish_drill` only sorts each range's roots and takes the measurement and rollups from base ⊕ runs
+    (specs/static-incremental-compaction.md, step 4); else it measures and rolls up every root. `log` says which, and
+    the result's `measure` (`incremental` | `roots`).
 
     Chunked, so the working set is `chunk_rows` roots, not the corpus (gcs's first compaction ran one aggregate over all
     299 GB of roots and logged nothing for 6 h): members with equal tuples of classes (one per tier) hold equal rows, so
@@ -304,9 +311,12 @@ def fold_drill(con, tiers: list[sd.Tier], out: Path, work: Path, *, R: int, K: i
     aliases = con.execute("SELECT q, canonical FROM al ORDER BY q").to_arrow_table()
     # the measurement's helper tasks fetch the spills the checkpoint just saved (specs/static-measure-fanout.md)
     fan = fanout(ck) if fanout is not None and ck is not None else None
+    why = sme.blocker(tiers, meas, floor=floor, R=R) if meas is not None else "no base measurement given"
+    log(f"drill measurement: {'incremental (base ⊕ runs; each range only sorted)' if why is None else f'every root ({why})'}")
     done = sl.finish_drill(con, out, work, aliases=aliases, long_groups=groups["long"], short_groups=groups["short"], R=R, K=K, floor=floor,
-                           step=step, t=t, fanout=fan)
-    return {"members": aliases.num_rows, "canonical": len(set(aliases.column("canonical").to_pylist())), "groups": done["groups"]}
+                           step=step, t=t, fanout=fan, incremental=(tiers, meas) if why is None else None)
+    return {"members": aliases.num_rows, "canonical": len(set(aliases.column("canonical").to_pylist())), "groups": done["groups"],
+            "measure": "roots" if why else "incremental"}
 
 
 def _roots_files(tr: sd.Tier, kind: str, st: Staged | None) -> list[str]:
@@ -686,7 +696,7 @@ def _fold_gen(gen_dir: Path, out: Path, work: Path, *, gen: str, new_gen: str, r
     drill = resumed("drill", ("drill", "roots-measure"), lambda: fold_drill(
         con, tiers, out, work / "drill", R=dm["R"], K=dm["K"], floor=dm.get("floor", sl.FLOOR), chunk_rows=chunk_rows, jobs=jobs, step=step,
         log=lambda s: log(f"compact {gen} → {new_gen}: {s}"), ck=fck, staged=staging.result if staging is not None else lambda: None,
-        fanout=fanout), after_saves=True)
+        fanout=fanout, meas=gen_dir / "roots-measure"), after_saves=True)
     staged = staging.result() if staging is not None else None
     t = done("drill", t)
     anchors = None
@@ -732,8 +742,76 @@ def compact_checkpoint(root: str, gen: str, new_gen: str, runs: list[dict], **kw
     into the same `new_gen` folds more runs) and, as every `Checkpoint`, by the code (another build's isn't resumed)."""
     from .blobstore import store_url
 
+    return Checkpoint(store_url(root), checkpoint_prefix(gen, new_gen, runs), code=code_version(), **kw)
+
+
+#: A fold's checkpoint steps, in the order it saves them (`fold_gen`'s parts, the drill's own within it).
+STEPS = ("intervals", "shards", "catalog", "fold/long-roots-tables", "fold/long-roots", "fold/spilled-tables", "fold/spilled", "drill", "anchors")
+
+
+def checkpoint_prefix(gen: str, new_gen: str, runs: list[dict]) -> str:
+    """`compact_checkpoint`'s prefix under its root: the fold of `gen` and `runs` into `new_gen`."""
     inputs = hashlib.sha256(json.dumps([gen, [r["key"] for r in runs]]).encode()).hexdigest()[:16]
-    return Checkpoint(store_url(root), f"{CHECKPOINTS}/{new_gen}/{inputs}", code=code_version(), **kw)
+    return f"{CHECKPOINTS}/{new_gen}/{inputs}"
+
+
+def same_bucket(a: str, b: str) -> tuple[str, str, str] | None:
+    """Two store roots (URLs) in one bucket: `(bucket URL, a's key prefix, b's key prefix)`, each prefix empty for the
+    bucket's own root or ending in `/` (gcs's race seeded from `gs://<scratch>` itself: an empty prefix joined with `/`
+    made keys `/static-names/…`); None for different buckets or a local dir."""
+    def split(u: str) -> tuple[str, str] | None:
+        if "://" not in u:
+            return None
+        scheme, rest = u.split("://", 1)
+        bucket, _, path = rest.partition("/")
+        return f"{scheme}://{bucket}", f"{path.strip('/')}/" if path.strip("/") else ""
+
+    sa, sb = split(a), split(b)
+    return (sa[0], sa[1], sb[1]) if sa and sb and sa[0] == sb[0] else None
+
+
+def seed_checkpoint(src_root: str, dst_root: str, gen: str, new_gen: str, runs: list[dict], through: str, *, workers: int = 32,
+                    log: Callable[[str], None] = err) -> dict:
+    """Another run's checkpoint of the same fold (`src_root`'s), its saved steps up to and including `through`
+    (`STEPS`' order), copied under `dst_root` and claimed for this code (`code.json`: the steps after `through` run on
+    it): a fold resumed there on new code, the source never written (a run still holding it goes on). The copied steps
+    were made by the code that saved them; that they equal this code's is what CI's byte-identity tests hold (the
+    drill's measurement at any pool width, fan-out, staging). Same bucket: copied server side. Returns the steps and
+    files copied."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    from .blobstore import Store, store_url
+    from .checkpoint import code_version
+
+    if through not in STEPS:
+        raise SystemExit(f"--through {through}: one of {', '.join(STEPS)}")
+    src_root, dst_root = store_url(src_root).rstrip("/"), store_url(dst_root).rstrip("/")
+    if src_root == dst_root:
+        raise SystemExit(f"{dst_root}: the seeded checkpoint must be another root than its source")
+    prefix = checkpoint_prefix(gen, new_gen, runs)
+    src = Store(src_root)
+    steps = [st for st in STEPS[:STEPS.index(through) + 1] if src.exists(f"{prefix}/{st}/done.json")]
+    keys = [k for st in steps for k in src.keys(f"{prefix}/{st}/")]
+    same = same_bucket(src_root, dst_root)
+    if same is not None:
+        base, src_in, dst_in = same
+        within = Store(base)
+        copy = lambda k: within.copy(f"{src_in}{k}", f"{dst_in}{k}")  # noqa: E731
+    else:
+        import tempfile
+
+        dst, tmp = Store(dst_root), Path(tempfile.mkdtemp(prefix="seed-"))
+
+        def copy(k: str) -> None:
+            f = tmp / k
+            src.get(k, f)
+            dst.put(f, k)
+            f.unlink()
+    with ThreadPoolExecutor(workers) as ex:
+        list(ex.map(copy, keys))
+    Store(dst_root).write_text(f"{prefix}/code.json", json.dumps({"code": code_version()}) + "\n")
+    log(f"seed checkpoint: {len(keys)} files of steps {', '.join(steps)} from {src_root} to {dst_root}/{prefix}/")
+    return {"steps": steps, "files": len(keys)}
 
 
 def clear_checkpoints(root: str, new_gen: str) -> int:
@@ -744,13 +822,54 @@ def clear_checkpoints(root: str, new_gen: str) -> int:
     return store.delete(sorted(store.listing(f"{CHECKPOINTS}/{new_gen}")))
 
 
+def prebuilt_fold(url: str) -> Callable[..., dict]:
+    """A `Compactor.fold` that adopts a fold done elsewhere (`compact-probe -U url`: `<url>/gen/` and its report
+    `<url>/probe.json`, written last): refused unless the report folds the same generation and runs into the same
+    successor; its files downloaded into `out`, each one's size and md5 checked against the report. The race's output
+    published as the compaction's own (the lease, the supersession checks, the upload and pointers unchanged)."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    from .blobstore import Store
+
+    def fold(gen_dir: Path, out: Path, work: Path, *, gen: str, new_gen: str, runs: list[dict], progress=None, **_) -> dict:
+        src = Store(url.rstrip("/"))
+        doc = src.read_json("probe.json")
+        want = (gen, new_gen, [r["key"] for r in runs])
+        if (doc["gen"], doc["new_gen"], doc["runs"]) != want:
+            raise SystemExit(f"{url}: folds {doc['gen']} → {doc['new_gen']} over {doc['runs']}, not {want[0]} → {want[1]} over {want[2]}")
+        files = doc["files"]
+
+        def get(rel: str) -> str | None:
+            f = out / rel
+            src.get(f"gen/{rel}", f)
+            h = hashlib.md5()
+            with open(f, "rb") as fh:
+                while b := fh.read(1 << 24):
+                    h.update(b)
+            ok = f.stat().st_size == files[rel]["size"] and h.hexdigest() == files[rel]["md5"]
+            return None if ok else rel
+
+        with ThreadPoolExecutor(32) as ex:
+            bad = [r for r in ex.map(get, sorted(files)) if r]
+        if bad:
+            raise SystemExit(f"{url}: {len(bad)} of {len(files)} files differ from the report (e.g. {bad[0]})")
+        if extra := sorted(p.relative_to(out).as_posix() for p in out.rglob("*") if p.is_file() and p.relative_to(out).as_posix() not in files):
+            raise SystemExit(f"{url}: files the report doesn't list ({extra[0]}, …)")
+        err(f"compact {gen} → {new_gen}: adopted {len(files)} files from {url} (md5 checked)")
+        return {**doc["summary"], "prebuilt": url}
+
+    return fold
+
+
 def compactor(chunk_rows: int = sl.CHUNK_ROWS, checkpoint: str | None = None, stage: str = "auto",
-              fanout: Callable[[Checkpoint], object] | None = None) -> ar.Compactor:
+              fanout: Callable[[Checkpoint], object] | None = None, prebuilt: str | None = None) -> ar.Compactor:
     """The static store's plug into the shared compaction (`append_runner.compact_store`): its fold and upload order; its
     predecessors are left to `store-gc -k` (readers pin `STATIC_GEN`, so a compacted generation may still be served).
     `checkpoint`: the folds' checkpoint root (`fold`). `stage`: the drill's roots staged on the work disk (`STAGE_MODES`;
-    from the store, given as the fold's `source`). `fanout`: its drill measurement's helper tasks (`fold`)."""
-    return ar.Compactor(prefix=PREFIX, fold=lambda *a, **kw: fold(*a, **kw, chunk_rows=chunk_rows, checkpoint=checkpoint, stage=stage, fanout=fanout),
+    from the store, given as the fold's `source`). `fanout`: its drill measurement's helper tasks (`fold`). `prebuilt`:
+    adopt a fold done elsewhere instead (`prebuilt_fold`)."""
+    folder = prebuilt_fold(prebuilt) if prebuilt else (lambda *a, **kw: fold(*a, **kw, chunk_rows=chunk_rows, checkpoint=checkpoint, stage=stage, fanout=fanout))
+    return ar.Compactor(prefix=PREFIX, fold=folder,
                         publish_order=sl.publish_order, last=("scans.json", "catalog/meta.json", "drill/meta.json", f"{an.ANCHORS}/meta.json"),
                         prune=False, md5s=True, keep=reads, publish_tier=sl.publish_tier, source=True)
 

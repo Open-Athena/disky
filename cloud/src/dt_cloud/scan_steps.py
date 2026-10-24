@@ -988,7 +988,7 @@ def path_index_part(ctx: Ctx, pid: str) -> None:
 def _static_check(p: ScanProfile) -> list[str]:
     o = p.opts("static-names")
     if o.get("gen"):
-        return [f"options.static-names.{k}: not with gen (the one-machine path)" for k in ("profile",) if k in o]
+        return [f"options.static-names.{k}: not with gen (the one-machine path)" for k in ("profile", "merge") if k in o]
     problems = [f"options.static-names.{k}: only with gen (the one-machine path)" for k in ("store", "mem", "build_args", "current_key") if k in o]
     if not o.get("profile") and not p.env.get("STATIC_NAMES_PROFILE"):
         problems.append("options.static-names.profile: required (the deployment's static-names profile; or env STATIC_NAMES_PROFILE, "
@@ -996,7 +996,8 @@ def _static_check(p: ScanProfile) -> list[str]:
     return problems
 
 
-@step("static-names", stage="serve", soft=True, options={"profile": str, "gen": str, "store": str, "mem": str, "build_args": list, "current_key": str},
+@step("static-names", stage="serve", soft=True, options={"profile": str, "gen": str, "store": str, "mem": str, "build_args": list, "current_key": str,
+                                                          "merge": bool},
       requires=_static_check)
 def static_names(ctx: Ctx, arg: str | None) -> None:
     """Append this scan (and any earlier one still pending, in scan-id order) to the static name index as a run
@@ -1034,7 +1035,9 @@ def static_names(ctx: Ctx, arg: str | None) -> None:
     # appends this scan too, else the next run does. Until then search refuses the scan: an explicit skip (the probe
     # reads it from the record and skips those refusals; /scans shows the run `partial`, with this reason)
     with ctx.phase("static-names", note="overlapped"):
-        ctx.sh(["dt-cloud", "static-names", "runs", "add", "-c", ctx.scan], env={"STATIC_NAMES_PROFILE": str(prof)},
+        # `merge: false`: the due carries (and a compaction) wait for `runs merge` on its own schedule, never a scan's task
+        merge = ctx.opt("static-names", "merge", True)
+        ctx.sh(["dt-cloud", "static-names", "runs", "add", "-c", *([] if merge else ["-M"]), ctx.scan], env={"STATIC_NAMES_PROFILE": str(prof)},
                fatal=False, warn=f"static-names runs add failed for {ctx.scan}", allowed_codes=(BUSY,))
         if ctx.last is not None and ctx.last.returncode == BUSY:
             ctx.skip("busy", STATIC_NAMES_BUSY)
