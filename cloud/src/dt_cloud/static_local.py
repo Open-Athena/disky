@@ -31,6 +31,7 @@ manifest but the newest and those superseded less than `-G` s ago, 1 h by defaul
 from __future__ import annotations
 
 import json
+import os
 import resource
 import shutil
 import sys
@@ -386,11 +387,15 @@ def plan_groups(con, counts: list[tuple[str, int]], chunk_rows: int) -> int:
 #: statements (one per depth), which one DuckDB at 48 threads runs mostly serially; so the ranges run `threads //
 #: MEASURE_THREADS` at a time, each in its own process (its own database, `memory_limit` split between them).
 MEASURE_THREADS = 4
+#: Overrides `MEASURE_THREADS`: fewer, wider measurement processes, each with a bigger share of `memory_limit` (a range
+#: whose working set passes its share spills to its temp dir and re-reads it per statement).
+MEASURE_THREADS_ENV = "DT_MEASURE_THREADS"
 
 
 def measure_jobs(con, ranges: int) -> int:
-    """How many `q` ranges `measure_ranges` measures at a time over `con`'s threads (`MEASURE_THREADS` each)."""
-    return sn.pool_jobs(con, ranges, MEASURE_THREADS)
+    """How many `q` ranges `measure_ranges` measures at a time over `con`'s threads (`MEASURE_THREADS` each, or
+    `$DT_MEASURE_THREADS`)."""
+    return sn.pool_jobs(con, ranges, int(os.environ.get(MEASURE_THREADS_ENV) or MEASURE_THREADS))
 
 
 def _measure_one(con, files: list[str], sorted_out: str, dirs_out: str, rup_out: str, *, floor: int, R: int, K: int) -> dict:
