@@ -403,17 +403,41 @@ def _measure_one(con, files: list[str], sorted_out: str, dirs_out: str, rup_out:
     roots sorted → `sorted_out`; the spill's directories removed. Its seconds and spilled bytes."""
     con.execute("CREATE OR REPLACE TABLE mr_dirs (q VARCHAR, k INTEGER, dir VARCHAR, rows BIGINT)")
     con.execute(f"CREATE OR REPLACE TABLE mr_rup ({sd.ROLLUP_COLS})")
+    t0 = monotonic()
     con.execute(f"CREATE OR REPLACE TABLE qg_roots AS {read_roots([Path(f) for f in files])}")
+    temp = [temp_bytes(con)]
     m = measure_rollups(con, "qg_roots", floor=floor, R=R, K=K, dirs_into="mr_dirs", rup_into="mr_rup")
+    temp.append(temp_bytes(con))
     for tb, f in (("mr_dirs", dirs_out), ("mr_rup", rup_out)):
         con.execute(f"COPY {tb} TO {q(f)} (FORMAT parquet, COMPRESSION zstd)")
     con.execute(f"COPY (SELECT {', '.join(sr.ROOT_SCHEMA.names)} FROM qg_roots ORDER BY q, path, usr, vf) TO {q(sorted_out)} (FORMAT parquet, COMPRESSION zstd)")
+    temp.append(temp_bytes(con))
+    rows = count(con, "qg_roots")
     for tb in ("qg_roots", "mr_dirs", "mr_rup"):
         con.execute(f"DROP TABLE IF EXISTS {tb}")
     nbytes = sum(Path(f).stat().st_size for f in files)
     for d in sorted({str(Path(f).parent) for f in files}):
         shutil.rmtree(d)
-    return {**m, "nbytes": nbytes}
+    return {**m, "nbytes": nbytes, "rows": rows, "files": len(files), "temp": temp, "s": monotonic() - t0}
+
+
+def temp_bytes(con) -> int:
+    """The bytes of `con`'s DuckDB temp files now (buffers evicted past `memory_limit`)."""
+    return int(con.execute("SELECT coalesce(sum(size), 0) FROM duckdb_temporary_files()").fetchone()[0])
+
+
+def measure_report(kind: str, done: dict[int, dict], top: int = 5) -> None:
+    """A measurement's per-range costs: how many ranges spilled past their `memory_limit` share (temp bytes after
+    loading, measuring and the sorted copy), and the `top` slowest with their rows, input files, bytes and temp."""
+    spilled = [d for d in done.values() if max(d["temp"]) > 0]
+    sn.err(f"drill/measure/{kind}: {len(spilled):,} of {len(done):,} ranges spilled to temp (largest {fmt_b(max((max(d['temp']) for d in done.values()), default=0))})")
+    for g, d in sorted(done.items(), key=lambda kv: -kv[1]["s"])[:top]:
+        sn.err(f"drill/measure/{kind}: range {g}: {d['s']:.1f}s, {d['rows']:,} roots from {d['files']:,} files ({fmt_b(d['nbytes'])}); "
+               f"temp after load / measure / sort {' / '.join(fmt_b(b) for b in d['temp'])}")
+
+
+def fmt_b(n: int) -> str:
+    return hb.fmt_bytes(n)
 
 
 def _measure_task(files: list[str], sorted_out: str, dirs_out: str, rup_out: str, floor: int, R: int, K: int, threads: int, mem: str,
@@ -467,6 +491,8 @@ def measure_ranges(con, work: Path, kind: str, n: int, dirs_into: str, rup_into:
                 done[futs[f]] = f.result()
                 prog.tick(nbytes=done[futs[f]]["nbytes"])
     prog.done()
+    if done:
+        measure_report(kind, done)
     for tb, i in ((dirs_into, 3), (rup_into, 4)):
         if tasks:
             con.execute(f"INSERT INTO {tb} SELECT * FROM read_parquet([{', '.join(q(t[i]) for t in tasks)}])")
