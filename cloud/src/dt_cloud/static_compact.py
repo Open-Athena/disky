@@ -450,10 +450,10 @@ def _long_roots(con, tiers: list[sd.Tier], out: Path, work: Path, *, chunk_rows:
         sr.index_estimates(con, [tr.local("long-roots-index.parquet")] if long_files[i] else [], f"SELECT canonical AS q FROM ta{i}", f"tc{i}")
     est = " + ".join(f"coalesce(tc{i}.n, 0)" for i in range(n))
     cjoin = " ".join(f"LEFT JOIN tc{i} ON tc{i}.q = t.c{i}" for i in range(n))
-    con.execute(f"""CREATE OR REPLACE TABLE tch AS SELECT tid, (dense_rank() OVER (ORDER BY ch) - 1)::BIGINT AS ch FROM (
-        SELECT tid, ((sum(est) OVER (ORDER BY tid ROWS UNBOUNDED PRECEDING) - est) // {chunk_rows})::BIGINT AS ch
+    con.execute(f"""CREATE OR REPLACE TABLE tch AS SELECT tid, est, (dense_rank() OVER (ORDER BY ch) - 1)::BIGINT AS ch FROM (
+        SELECT tid, est, ((sum(est) OVER (ORDER BY tid ROWS UNBOUNDED PRECEDING) - est) // {chunk_rows})::BIGINT AS ch
         FROM (SELECT t.tid, {est} AS est FROM tup AS t {cjoin}))""")
-    chunks = con.execute("""SELECT ch, min(tid), max(tid), min(t.c0), max(t.c0) FROM tch JOIN tup AS t USING (tid)
+    chunks = con.execute("""SELECT ch, min(tid), max(tid), min(t.c0), max(t.c0), sum(est)::BIGINT FROM tch JOIN tup AS t USING (tid)
         GROUP BY ch ORDER BY ch""").fetchall()
     t = step("drill/fold/plan", t, tuples=sl.count(con, "tup"), chunks=len(chunks))
     runs = sr.ChunkSpill(con, work / "runs", len(chunks))
@@ -475,12 +475,13 @@ def _long_roots(con, tiers: list[sd.Tier], out: Path, work: Path, *, chunk_rows:
     troots = work / "troots"
     troots.mkdir()
     prog = sn.Progress("drill/fold/long-roots", len(chunks), log)
+    split: list[int] = []  # the heavy chunks' combine parts
     spilled: dict[int, list[Path]] = {}
 
     def chunk(cur, c: tuple) -> tuple[int, object]:
         """Chunk `c`'s combined roots → `troots/c<ch>.parquet`; its rows and its tuples' digests (by `tid`), or (`derived`)
         the tuples whose rows aren't `tdig`'s count, with their digests from the rows (None: every count holds)."""
-        ch, a, b, lo, hi = c
+        ch, a, b, lo, hi, est = c
         parts = []
         base = overlapping(spans, lo, hi) if lo is not None else []
         if base:
@@ -493,8 +494,20 @@ def _long_roots(con, tiers: list[sd.Tier], out: Path, work: Path, *, chunk_rows:
             if not derived:
                 return 0, None
             parts.append(NO_ROOTS)  # `tdig`'s counts here are checked all the same
-        cur.execute(f"""CREATE OR REPLACE TEMP TABLE ct AS SELECT tid, path, usr, vf, min(vt) AS vt, any_value(size) AS size,
-            any_value(n_files) AS n_files FROM ({' UNION ALL '.join(parts)}) GROUP BY tid, path, usr, vf""")
+        combine = f"""SELECT tid, path, usr, vf, min(vt) AS vt, any_value(size) AS size, any_value(n_files) AS n_files
+            FROM ({' UNION ALL '.join(parts)}) {{}} GROUP BY tid, path, usr, vf"""
+        # a heavy chunk (one class can hold 440M roots: c001's tail OOM'd at a 186 GiB limit) combines in parts by
+        # `hash(path)`: its groups lie in one part each, so the parts' files hold the same rows; `ct` reads them back
+        k = max(1, -(-int(est or 0) // COMBINE_PART_ROWS))
+        if k > 1:
+            split.append(k)
+        if k == 1:
+            cur.execute(f"CREATE OR REPLACE TEMP TABLE ct AS {combine.format('')}")
+        else:
+            files = [troots / f"c{ch:06d}-p{i:03d}.parquet" for i in range(k)]
+            for i, f in enumerate(files):
+                cur.execute(f"COPY ({combine.format(f'WHERE hash(path) % {k} = {i}')}) TO {q(str(f))} (FORMAT parquet, COMPRESSION zstd)")
+            cur.execute(f"CREATE OR REPLACE TEMP VIEW ct AS SELECT * FROM read_parquet([{', '.join(q(str(f)) for f in files)}])")
         dig_sql = f"""SELECT tid, count(*)::BIGINT AS n, (sum({ROW_HASH}) % {U64})::UBIGINT AS h1,
             (sum(hash({ROW_HASH}, 'x')) % {U64})::UBIGINT AS h2 FROM ct {{}} GROUP BY tid ORDER BY tid"""
         if derived:
@@ -506,6 +519,12 @@ def _long_roots(con, tiers: list[sd.Tier], out: Path, work: Path, *, chunk_rows:
         else:
             dig = cur.execute(dig_sql.format("")).to_arrow_table()
         rows = sl.count(cur, "ct")
+        if k > 1:
+            cur.execute("DROP VIEW ct")
+            for f in files:
+                if not pq.ParquetFile(f).metadata.num_rows:
+                    f.unlink()
+            return rows, dig
         if rows:
             cur.execute(f"COPY ct TO {q(str(troots / f'c{ch:06d}.parquet'))} (FORMAT parquet, COMPRESSION zstd)")
         cur.execute("DROP TABLE ct")
@@ -537,8 +556,13 @@ def _long_roots(con, tiers: list[sd.Tier], out: Path, work: Path, *, chunk_rows:
         con.register("tdig_in", pa.concat_tables(digs))
         con.execute("INSERT INTO tdig SELECT tid, n, h1, h2 FROM tdig_in")
         con.unregister("tdig_in")
-    return (step("drill/fold/long-roots", t, tuples=sl.count(con, "tup"), rows=prog.rows, chunks=len(chunks)),
+    return (step("drill/fold/long-roots", t, tuples=sl.count(con, "tup"), rows=prog.rows, chunks=len(chunks), split=len(split)),
             {"classes": "digests" if derived else "roots", "fixed": fixed})
+
+
+#: Estimated root rows per part of a long-roots chunk's combine (`_long_roots`' `chunk`): a chunk past it (one heavy
+#: class is one chunk) combines in parts by `hash(path)`, so its hash table is a part's.
+COMBINE_PART_ROWS = 1 << 26
 
 
 def _part_batches(spill: sr.ChunkSpill, jobs: int) -> list[list[int]]:

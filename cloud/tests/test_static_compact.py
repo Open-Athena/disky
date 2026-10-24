@@ -897,3 +897,18 @@ def test_a_compactions_record_phases_its_fold_drill_and_anchors(world, tmp_path,
     parts = {p: [x for x in re.findall(r"(?:^|; )([a-z/-]+) [\d.]+s", rec.notes[p]) if "/" not in x] for p in ("fold", "drill")}
     assert (fold, ended, parts) == (["fold", "drill", "anchors", "upload"], [("end", p, "done") for p in ("fold", "drill", "anchors")],
                                     {"fold": ["intervals", "shards", "catalog"], "drill": ["drill"]})
+
+
+def test_heavy_chunks_combine_in_parts_to_the_same_generation(world, tmp_path, monkeypatch):
+    """A long-roots chunk past `COMBINE_PART_ROWS` (2 here: every chunk of more than two roots) combines in parts by
+    `hash(path)`: chunks split, and `g.c001`'s files md5 for md5."""
+    monkeypatch.setattr(sk, "COMBINE_PART_ROWS", 2)
+    gen_dir = world["c_store"] / "g"
+    _, runs = ar.newest_runs(gen_dir)
+    lines: list[str] = []
+    with _small_groups():
+        sk.fold_gen(gen_dir, tmp_path / "out", tmp_path / "w", gen="g", new_gen="g.c001", runs=runs, threads=2, mem="1GB", chunk_rows=3,
+                    log=lines.append)
+    split = [int(m.group(1)) for m in map(re.compile(r".*: drill/fold/long-roots in .*, split (\d+)\)$").fullmatch, lines) if m]
+    assert (len(split), split[0] > 0) == (1, True)
+    assert _md5s(tmp_path / "out") == _md5s(world["c_store"] / "g.c001")
