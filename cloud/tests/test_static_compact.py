@@ -524,18 +524,19 @@ def test_deal_balances_ranges_heaviest_first_to_the_least_loaded_task():
     assert deal({"a": 1}, 3) == [["a"], [], []]
 
 
-def _fanned_fold(world, tmp_path, submit, retries: int = 2):
-    """C's fold with its drill measurement over 3 tasks (`static_fanout.Fanout`), `submit` running the helper jobs."""
+def _fanned_fold(world, tmp_path, submit, retries: int = 2, root: str = "scratch", out: str = "out", log=lambda m: None):
+    """C's fold with its drill measurement over 3 tasks (`static_fanout.Fanout`, logging to `log`), `submit` running the
+    helper jobs; its checkpoint under `tmp_path / root`, the generation at `tmp_path / out`."""
     from dt_cloud.checkpoint import code_version
     from dt_cloud.static_fanout import Fanout
 
     gen_dir = world["c_store"] / "g"
     _, runs = ar.newest_runs(gen_dir)
-    ck = sk.compact_checkpoint(str(tmp_path / "scratch"), "g", "g.c001", runs, work=tmp_path / "ck")
+    ck = sk.compact_checkpoint(str(tmp_path / root), "g", "g.c001", runs, work=tmp_path / f"ck-{root}")
     try:
         with _small_groups():
-            sk.fold_gen(gen_dir, tmp_path / "out", tmp_path / "w", gen="g", new_gen="g.c001", runs=runs, threads=2, mem="1GB", chunk_rows=3, ck=ck,
-                        fanout=lambda c, scan: Fanout(c, 3, submit, code=code_version(), scan=scan, poll_s=0.01, retries=retries, log=lambda m: None))
+            sk.fold_gen(gen_dir, tmp_path / out, tmp_path / f"w-{root}", gen="g", new_gen="g.c001", runs=runs, threads=2, mem="1GB", chunk_rows=3, ck=ck,
+                        fanout=lambda c, scan: Fanout(c, 3, submit, code=code_version(), scan=scan, poll_s=0.01, retries=retries, log=log))
     finally:
         ck.close()
 
@@ -563,6 +564,20 @@ def test_a_fanned_out_measurement_writes_the_single_vm_fold(world, tmp_path):
     _fanned_fold(world, tmp_path, _helpers(tmp_path, calls))
     assert calls == [("measured/plan-1.json", 2)]
     assert _md5s(tmp_path / "out") == _md5s(world["c_store"] / "g.c001")
+
+
+def test_a_race_seeded_from_a_fanned_out_fold_measures_nothing_again(world, tmp_path):
+    """The fold saves its own share's ranges as the helpers save theirs, so a race seeded from its checkpoint through
+    `fold/spilled` fetches every range: no helper job, no range measured, the same bytes."""
+    calls: list = []
+    _fanned_fold(world, tmp_path, _helpers(tmp_path, calls))
+    _, runs = ar.newest_runs(world["c_store"] / "g")
+    seeded = sk.seed_checkpoint(str(tmp_path / "scratch"), str(tmp_path / "race"), "g", "g.c001", runs, "fold/spilled", log=lambda m: None)
+    again, lines = [], []
+    _fanned_fold(world, tmp_path, _helpers(tmp_path, again), root="race", out="out-race", log=lines.append)
+    plans = [m.groups() for m in map(re.compile(r"measure fan-out: (\d+) ranges here \(\d+ B\), (\d+) on 2 helper tasks \((\d+) to measure\)").fullmatch, lines) if m]
+    assert (again, seeded["steps"][-1], len(plans), plans[0][0], plans[0][2]) == ([], "fold/spilled", 1, "0", "0")
+    assert _md5s(tmp_path / "out-race") == _md5s(world["c_store"] / "g.c001")
 
 
 def test_ranges_a_helper_job_left_are_dealt_again(world, tmp_path):

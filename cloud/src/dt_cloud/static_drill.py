@@ -49,6 +49,9 @@ GROUP_CACHE = 2048
 SPAN_CACHE = 512
 #: `dr` rows (at depth ≥ 2) per part of the aggregations over their ancestors (`_by_parts`).
 EXPLODE_PART_ROWS = 1 << 23
+#: Touched directories per part of the newly-heavy sums' join to a prior tier's `dcount` (by `hash(dir)`): the join's
+#: hash table holds a part of each side (cw's 10-24T1202, 203M touched pairs: ~70 GiB of temp per tier in one pass).
+NH_PART_ROWS = 1 << 24
 #: Newly heavy directories' estimated root rows (summed over a chunk's directories, so nested ones count each time) built
 #: at once (`newly_heavy_rollups`): their prior roots read under one prefetch plan, combined and rolled up in one statement each.
 NEWLY_HEAVY_CHUNK_ROWS = 1 << 23
@@ -1154,14 +1157,33 @@ def day_rollups(con, prior: list[Tier], kind: str, D: int, *, R: int, K: int, fl
     touched = con.execute("SELECT count(*) FROM nh_t").fetchone()[0]
     log(f"drill {kind}: newly heavy: {tdir_rows:,} touched directories, {touched:,} without a header ({monotonic() - t2:.0f}s)")
     con.execute("CREATE OR REPLACE TABLE nh_m (q VARCHAR, dir VARCHAR, rows BIGINT)")
+    parts = max(1, -(-touched // NH_PART_ROWS))
+    from .static_anchors import _scratch
+
     for i, t in enumerate(prior):
         if not (f := t.dcount(kind)):
             continue
-        heartbeat.set_stage(f"drill/rollups/{kind}: newly heavy, tier {i + 1}/{len(prior)}'s counts")
-        t3 = monotonic()
-        n = con.execute(f"""INSERT INTO nh_m SELECT t.q, t.dir, d.rows FROM nh_t AS t JOIN cmap AS m ON m.tier = {i} AND m.c = t.q
-            JOIN read_parquet({q(f)}) AS d ON d.q = m.ci AND d.dir = t.dir""").fetchone()[0]
-        log(f"drill {kind}: newly heavy: tier {i + 1}/{len(prior)}: {n:,} prior-run counts in {monotonic() - t3:.0f}s")
+        t3, n = monotonic(), 0
+        # the tier's `dcount` (often on a bucket mount) read once, cut into the parts on the work disk
+        split = _scratch(con, "nh-dcount-") if parts > 1 else None
+        if split is not None:
+            heartbeat.set_stage(f"drill/rollups/{kind}: newly heavy, tier {i + 1}/{len(prior)}'s counts, split")
+            con.execute(f"""COPY (SELECT q, dir, rows, hash(dir) % {parts} AS part FROM read_parquet({q(f)}))
+                TO {q(str(split))} (FORMAT parquet, PARTITION_BY (part))""")
+        for p in range(parts):
+            heartbeat.set_stage(f"drill/rollups/{kind}: newly heavy, tier {i + 1}/{len(prior)}'s counts, part {p + 1}/{parts}")
+            t_sql = f"SELECT q, dir FROM nh_t WHERE hash(dir) % {parts} = {p}" if split is not None else "SELECT q, dir FROM nh_t"
+            if split is None:
+                d_sql = f"SELECT q, dir, rows FROM read_parquet({q(f)})"
+            elif (split / f"part={p}").is_dir():
+                d_sql = f"SELECT q, dir, rows FROM read_parquet({q(str(split / f'part={p}' / '*.parquet'))}, hive_partitioning = false)"
+            else:
+                continue
+            n += con.execute(f"""INSERT INTO nh_m SELECT t.q, t.dir, d.rows FROM ({t_sql}) AS t
+                JOIN cmap AS m ON m.tier = {i} AND m.c = t.q JOIN ({d_sql}) AS d ON d.q = m.ci AND d.dir = t.dir""").fetchone()[0]
+        if split is not None:
+            shutil.rmtree(split)
+        log(f"drill {kind}: newly heavy: tier {i + 1}/{len(prior)}: {n:,} prior-run counts ({parts} parts) in {monotonic() - t3:.0f}s")
     con.execute("""CREATE OR REPLACE TABLE nh AS SELECT t.q, t.dir, t.k, t.fresh AS today,
             CASE WHEN t.q IN (SELECT q FROM newq) THEN 0 ELSE m.rows END AS base, coalesce(r.rows, 0) AS runs
         FROM nh_t AS t LEFT JOIN meas AS m USING (q, dir)

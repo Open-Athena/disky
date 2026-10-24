@@ -602,14 +602,16 @@ def finish_drill(con, gen_dir: Path, work: Path, *, aliases, long_groups: int, s
     measure = incremental is None
     if fanout is not None:
         fanout.start(work, {"long": long_groups, "short": short_groups}, R=R, K=K, floor=floor, measure=measure)
-    lcan, lm = measure_ranges(con, work, "long", long_groups, "ldirs", "lrup", floor=floor, R=R, K=K, remote=fanout, measure=measure)
+    lcan, lm = measure_ranges(con, work, "long", long_groups, "ldirs", "lrup", floor=floor, R=R, K=K, remote=fanout, measure=measure,
+                              on_range=fanout.keep("long") if fanout is not None else None)
     end = monotonic()
     if measure:
         step("drill/measure/long", end - lm["measure_s"] - lm["rollup_s"], groups=lm["groups"], dirs=count(con, "ldirs"))
         t = step("drill/rollup/long", end - lm["rollup_s"], rup=count(con, "lrup"))
     else:
         t = step("drill/sort/long", t, groups=lm["groups"])
-    sall, m = measure_ranges(con, work, "short", short_groups, "sdirs", "srup", floor=floor, R=R, K=K, remote=fanout, measure=measure)
+    sall, m = measure_ranges(con, work, "short", short_groups, "sdirs", "srup", floor=floor, R=R, K=K, remote=fanout, measure=measure,
+                              on_range=fanout.keep("short") if fanout is not None else None)
     if fanout is not None:
         fanout.finish()
     end = monotonic()
