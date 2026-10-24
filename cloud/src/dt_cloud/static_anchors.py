@@ -1961,7 +1961,8 @@ def run_cmd(bucket, run, gen, K, mount, mem, out, threads, manifest, R, tmp) -> 
     else:
         before, scans = _manifest_runs(mount, gen, before=run), [run]
     base = _tier_root(mount, gen, None)
-    keys = {k: str(base / ANCHORS / f"keys-{k}.parquet") for k in KINDS}
+    # the base's precomputed key bounds where it has them (a staged base); else from its shards' footers (`keys_table`)
+    keys = {k: str(f) for k in KINDS if (f := base / ANCHORS / f"keys-{k}.parquet").exists()}
     prior = [Tier(base, keys)] + [Tier(Path(mount) / PREFIX / gen / r["key"]) for r in before]
     for t in prior:
         if not (t.root / ANCHORS / "meta.json").exists():
