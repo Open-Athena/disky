@@ -812,6 +812,17 @@ class TieredDrill:
         out.update(source="rollup", io=dict(io), rows=n, **sr.rollup_view(header, cells, dates))
         return out
 
+    def root_rows(self, term: str) -> int:
+        """`term`'s root rows at the fleet root, every date (`staticDrill.ts` `Drill.bounded`'s `rows` there, the heavy
+        literal's `matchCount.n` with no drilldown): each tier's stored rows under its canonical, summed."""
+        t = term.lower()
+        n = 0
+        for tier in self.tiers:
+            c = tier.canon(t, self.kind)
+            gf = tier.group_file(self.kind, "roots")
+            n += len(gf.rows_in((c, ""), (c, "\U0010ffff"))) if gf is not None else 0
+        return n
+
 
 # ── Series: events ↔ running cells ─────────────────────────────────────────
 
