@@ -252,6 +252,18 @@ def test_the_probe_checks_the_lag_when_the_deployment_skips_static_names(tmp_pat
                                "catch-up appends them")]
 
 
+@pytest.mark.parametrize("merge, argv", [(None, "-c 2026-10-16T1200"), (True, "-c 2026-10-16T1200"), (False, "-c -M 2026-10-16T1200")])
+def test_static_names_merge_off_leaves_the_due_carries_to_their_own_schedule(tmp_path, env, merge, argv):
+    """`options.static-names.merge: false`: the scan's `runs add` skips the merge stage (`-M`), so a due carry or
+    compaction never runs inside a scan's task; unset or true, as before."""
+    opts = {"profile": "sn.json", **({} if merge is None else {"merge": merge})}
+    c = ctx(tmp_path, env, options={"list": {"import": True, "bulk_args": ["-a"], "threads": 8},
+                                     "index": {"webdata": ["python", "web.py", "{web}", "{sources}", "-a", "{date}"], "mem": "16GB", "threads": 2},
+                                     "static-names": opts, "digest": {"template": "t", "config": "c.yml"}})
+    S.static_names(c, None)
+    assert c.sh_impl.calls == [f"dt-cloud static-names runs add {argv}", "dt-cloud static-names runs lag 2026-10-16T1200"]
+
+
 BUSY_REASON = ("another coordinator or a compaction holds the static-names store's lease; search for this scan comes "
                "with its append or the next run")
 
