@@ -401,7 +401,6 @@ def measure_fanout(tasks: int, gen: str) -> Callable:
     for it, spot with retries when the profile is), from the profile the runner passed in `$STATIC_NAMES_PROFILE`."""
     from dataclasses import replace
 
-    from .append_runner import duckdb_args
     from .checkpoint import code_version
     from .static_fanout import Fanout
     from .static_profile import profile
@@ -417,11 +416,19 @@ def measure_fanout(tasks: int, gen: str) -> Callable:
         cfg.need(f)
     runner = gcs_runner(cfg)
 
-    def submit(url: str, plan: str, n: int, code: str) -> None:
-        args = ["measure-shard", "-c", url, "-P", plan, "-V", code, *duckdb_args(cfg.machine_for("measure"))]
-        runner.run_job(*runner.job("measure", plan.rsplit("/", 1)[-1].removesuffix(".json"), n, "static_merge", args, mount=False))
+    def submit(url: str, plan: str, n: int, code: str, scan: str) -> None:
+        runner.run_job(*helper_job(runner, url, plan, n, code, scan))
 
-    return lambda ck: Fanout(ck, tasks, submit, code=code_version())
+    return lambda ck, scan: Fanout(ck, tasks, submit, code=code_version(), scan=scan)
+
+
+def helper_job(runner, url: str, plan: str, n: int, code: str, scan: str) -> tuple[str, dict]:
+    """The fan-out's helper job (`runner.job`, stage `measure`, named and labelled by the compaction's newest `scan`): `n`
+    tasks of `measure-shard` over the plan `plan` of the fold's checkpoint `url`, the fold's `code` version."""
+    from .append_runner import duckdb_args
+
+    args = ["measure-shard", "-c", url, "-P", plan, "-V", code, *duckdb_args(runner.cfg.machine_for("measure"))]
+    return runner.job("measure", scan, n, "static_merge", args, mount=False)
 
 
 @cli.command("compact")

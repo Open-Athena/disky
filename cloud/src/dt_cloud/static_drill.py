@@ -1147,11 +1147,19 @@ def day_rollups(con, prior: list[Tier], kind: str, D: int, *, R: int, K: int, fl
         f = t.dcount(kind)
         if f:
             con.execute(f"INSERT INTO dc SELECT {i}, q, dir, rows FROM read_parquet({q(f)})")
+    # The prior runs' counts of only the touched (class, dir)s: `cmap` maps many classes to one earlier canonical (a split),
+    # so joining every tier's `dcount` through it first multiplied each row by its split before any was dropped (cw's
+    # 10-24T1202, 17 tiers, 393 new members: 663 GiB of temp). Each touched (class, dir) wants one (tier, canonical, dir)
+    # per tier; only those `dcount` rows are read.
+    con.execute("CREATE OR REPLACE TABLE nh_t AS SELECT t.q, t.dir, t.k, t.fresh FROM tdir AS t ANTI JOIN hdr USING (q, dir)")
+    con.execute("""CREATE OR REPLACE TABLE nh_w AS SELECT m.tier, m.ci, t.dir, t.q AS c FROM nh_t AS t JOIN cmap AS m ON m.c = t.q""")
+    con.execute("""CREATE OR REPLACE TABLE nh_r AS SELECT w.c AS q, w.dir, sum(d.rows)::BIGINT AS rows
+        FROM nh_w AS w JOIN dc AS d ON d.tier = w.tier AND d.q = w.ci AND d.dir = w.dir GROUP BY ALL""")
     con.execute("""CREATE OR REPLACE TABLE nh AS SELECT t.q, t.dir, t.k, t.fresh AS today,
             CASE WHEN t.q IN (SELECT q FROM newq) THEN 0 ELSE m.rows END AS base, coalesce(r.rows, 0) AS runs
-        FROM tdir AS t ANTI JOIN hdr USING (q, dir) LEFT JOIN meas AS m USING (q, dir)
-        LEFT JOIN (SELECT m.c AS q, d.dir, sum(d.rows)::BIGINT AS rows FROM dc AS d JOIN cmap AS m ON d.tier = m.tier AND d.q = m.ci GROUP BY ALL) AS r
-            USING (q, dir)""")
+        FROM nh_t AS t LEFT JOIN meas AS m USING (q, dir) LEFT JOIN nh_r AS r USING (q, dir)""")
+    for tb in ("nh_t", "nh_w", "nh_r"):
+        con.execute(f"DROP TABLE {tb}")
     unknown = con.execute(f"SELECT q, dir FROM nh WHERE base IS NULL AND {floor - 1} + runs + today > {R} ORDER BY q, dir").fetchall()
     if ck and ck.done("counts"):
         ck.load(con, "counts")
