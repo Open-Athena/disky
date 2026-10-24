@@ -1478,18 +1478,21 @@ def probe(ctx: Ctx, arg: str | None) -> None:
     When this run's record says its static-names step was skipped (`Ctx.recorded_skip`), the probe gets that reason
     (`-i`) and skips the search's `scan-not-indexed` refusals for it; otherwise they fail it. The phase's note is the
     probe's verdict (`n passed, n skipped (reason), n failed`), on a failure too."""
-    with ctx.phase("probe"):
-        if ctx.reproc or not ctx.has("SITE_TOKEN", "SITE_URL"):
-            return
-        sub = ctx.profile.layout.snapshots
-        unindexed = ctx.recorded_skip("static-names")
-        ctx.sh(["dt-cloud", "probe", "-c", "-u", ctx.env["SITE_URL"], "-o", f"{ctx.data_uri}/probes/{sub + '/' if sub else ''}",
-                "-j", *(["-i", unindexed] if unindexed else [])], fatal=False, capture=True,
-               warn=f"serving probe failed for {ctx.scan} (an HTTP or transport error; data is fine)")
-        verdict = ctx.note = _probe_verdict(ctx.last.stdout if ctx.last is not None else None)
-        if ctx.failure and verdict:
-            ctx.failure = (ctx.failure[0], f"serving probe failed for {ctx.scan}: {verdict}")
-    static_lag(ctx)
+    try:
+        with ctx.phase("probe"):
+            if ctx.reproc or not ctx.has("SITE_TOKEN", "SITE_URL"):
+                return
+            sub = ctx.profile.layout.snapshots
+            unindexed = ctx.recorded_skip("static-names")
+            ctx.sh(["dt-cloud", "probe", "-c", "-u", ctx.env["SITE_URL"], "-o", f"{ctx.data_uri}/probes/{sub + '/' if sub else ''}",
+                    "-j", *(["-i", unindexed] if unindexed else [])], fatal=False, capture=True,
+                   warn=f"serving probe failed for {ctx.scan} (an HTTP or transport error; data is fine)")
+            verdict = ctx.note = _probe_verdict(ctx.last.stdout if ctx.last is not None else None)
+            if ctx.failure and verdict:
+                ctx.failure = (ctx.failure[0], f"serving probe failed for {ctx.scan}: {verdict}")
+    finally:
+        # whatever the probe did, or without a site to probe
+        static_lag(ctx)
 
 
 def _probe_verdict(stdout: str | None) -> str | None:
