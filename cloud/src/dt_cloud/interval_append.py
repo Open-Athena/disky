@@ -11,7 +11,9 @@ Per scan `D`, under `interval-store/<gen>/deltas/<D>/` (data bucket):
    generation without the owner axis, `scans.json` `"slices": false`, which refuses a scan naming owners):
    - `pvl`: one row per path, `last_read` in the key (`interval_store.fold`'s versions);
    - `sv`: owner slices (`build -S`);
-   - `svt`: owner slices split where their path's version changes, with its total (`fold -S`).
+   - `svt`: owner slices split where their path's version changes, with its total (`fold -S`);
+   - `attribution` (an attributed lineage, specs/attr-interval-table.md): the scan's `attribution.parquet`, by prefix
+     (`append_attribution`; an uncovered scan, without one, carries the open state over and writes no delta).
    Each writes its delta (`pvl|sv|svt/r####.parquet`: opened versions, `op` 1, and close records — the closed
    version's row with its final `vt` — `op` −1) and the next open state (`state/<D>/…`, scratch bucket); the range's
    `ranges/r####.json` (its counts and reconstruction check) is written last.
@@ -84,7 +86,7 @@ from .static_profile import Profile, from_mapping, level_arg, parse_compact_leve
 PREFIX = ist.PREFIX
 #: The served sorts a run carries: what the Worker reads (`R2_SERVED` less the standalone `reads` sort and the
 #: superseded per-slice `slices-bysize`).
-RUN_SORTS = ("path", "bysize", "slices", "slices-bytotal", "slices-bysize-user")
+RUN_SORTS = ("path", "bysize", "slices", "slices-bytotal", "slices-bysize-user", ist.ATTRIBUTION)
 #: Cost-attribution `component` of every job the append submits (`cost_labels`).
 COMPONENT = "interval-store"
 #: What a folded run keeps on GCS (`append_runner.plan_prune`'s `retain`): its `ranges/` docs (the next scan's
@@ -99,6 +101,8 @@ STATE_SCHEMA = {
     "pvl": ist.PVL_SCHEMA.append(PVF),
     "sv": ist.SV_SCHEMA,
     "svt": ist.SVT_SCHEMA.append(PVF),
+    # Roster attribution (`interval_store.ATTRIBUTION`): only in an attributed lineage's runs (`tables`).
+    ist.ATTRIBUTION: ist.AT_SCHEMA,
 }
 #: A run's delta files: the state's columns and `op` (1 opened, −1 a close record).
 DELTA_SCHEMA = {k: s.append(OP) for k, s in STATE_SCHEMA.items()}
@@ -116,8 +120,9 @@ def delta_schema(t: str, generation: ist.Identity = False) -> pa.Schema:
     """Table `t`'s delta columns (`DELTA_SCHEMA`, with `state_schema`'s `GENERATION`)."""
     return state_schema(t, generation).append(OP)
 #: Each table's version identity (a version's rows across tiers share it).
-IDENT = {"pvl": ["depth", "path", "vf"], "sv": ["depth", "path", "usr", "vf"], "svt": ["depth", "path", "usr", "vf"]}
+IDENT = {"pvl": ["depth", "path", "vf"], "sv": ["depth", "path", "usr", "vf"], "svt": ["depth", "path", "usr", "vf"], ist.ATTRIBUTION: ["depth", "path", "vf"]}
 TABLES = tuple(STATE_SCHEMA)
+AT = ist.ATTRIBUTION
 #: The version tables' change columns and the carried ones (`build`'s, `fold`'s): `dr` is computed from the stored
 #: `wts`/`wb` (constant within a version), `pvf` rides along to cut the slice pieces.
 PVL_STATE = [*ist.CHANGE_COLS, "last_read", "wts", "pvf"]
@@ -129,12 +134,14 @@ HASH = {
     "pvl": f"{ist.ROW_HASH[:-1]}, last_read)",
     "sv": ist.SV_HASH,
     "svt": f"hash({ist.SV_HASH[5:-1]}, tot)",
+    ist.ATTRIBUTION: ist.AT_HASH,
 }
-#: A scan's rows per table (`append_range`'s `np` / `ns`): what the open versions, and the store's answer, must be.
+#: A scan's rows per table (`append_range`'s `np` / `ns` / `na`): what the open versions, and the store's answer, must be.
 SCAN_ROWS = {
     "pvl": "SELECT * FROM np",
     "sv": "SELECT * FROM ns",
     "svt": "SELECT s.*, p.size AS tot FROM ns s JOIN np p ON p.depth = s.depth AND p.path = s.path",
+    ist.ATTRIBUTION: "SELECT * FROM na",
 }
 #: What the append's parity check compares per table, row for row: `HASH`'s columns (the key, the change columns with `dr`
 #: from the stored `wts`/`wb`, `last_read`, `tot`).
@@ -142,26 +149,49 @@ CHECK_COLS = {
     "pvl": ["depth", "path", *ist.CHANGE_COLS, "last_read"],
     "sv": ["depth", "path", "usr", *ist.SV_CHANGE],
     "svt": ["depth", "path", "usr", *ist.SV_CHANGE, "tot"],
+    ist.ATTRIBUTION: ["depth", "path", *ist.ATTRIBUTION_CHANGE],
 }
+#: What a version carries besides its check columns (`live_sql`).
+CARRIED_COLS = {"pvl": ["wts"], "sv": ["wts"], "svt": ["wts"], ist.ATTRIBUTION: []}
 
 
-def tables(sliced: bool = True) -> tuple[str, ...]:
-    """The version tables a generation's runs carry: `pvl`, and the owner slices only with the owner axis
-    (`interval_store.sliced`)."""
-    return tuple(t for t in TABLES if sliced or t not in ist.SLICE_SUBS)
+def tables(sliced: bool = True, attributed: bool = False) -> tuple[str, ...]:
+    """The version tables a generation's runs carry: `pvl`, the owner slices only with the owner axis
+    (`interval_store.sliced`), the attribution table only in an attributed lineage (`lineage_attributed`)."""
+    return tuple(t for t in TABLES if (sliced or t not in ist.SLICE_SUBS) and (attributed or t not in ist.ATTRIBUTION_SUBS))
 
 
-def run_sorts(sliced: bool = True) -> tuple[str, ...]:
-    """The served sorts a generation's runs carry (`RUN_SORTS`, the slice sorts only with the owner axis)."""
-    return tuple(s for s in RUN_SORTS if s in ist.served_sorts(sliced))
+def run_sorts(sliced: bool = True, attributed: bool = False) -> tuple[str, ...]:
+    """The served sorts a run carries (`RUN_SORTS`, the slice sorts only with the owner axis, the attribution sort only
+    when the run holds the table: some scan of it is covered)."""
+    return tuple(s for s in RUN_SORTS if s in ist.served_sorts(sliced, attributed))
+
+
+def has_table(root: str | Path, t: str) -> bool:
+    """Whether a base's range-file dir or a run's dir under `root` holds table `t`'s files (a run before the attribution
+    table, or of uncovered scans only, holds none of it)."""
+    return any(Path(root, t).glob("r*.parquet"))
+
+
+def lineage_attributed(base: dict, manifest: dict | None) -> bool:
+    """Whether a generation carries the attribution table: its base (`scans.json` `"attribution"`), or a run (the newest
+    manifest's `"attribution"`, present once a run opened it). Its appends then continue it, every scan covered or not."""
+    return ist.attributed(base) or (manifest is not None and ist.ATTRIBUTION in manifest)
+
+
+def covered_scans(base: dict, manifest: dict | None) -> set[str]:
+    """The scans the attribution table answers for: the base's covered scans (an entry naming its file) and the runs'
+    (the manifest's `"attribution"`)."""
+    return {s["id"] for s in base["scans"] if s.get(ist.ATTRIBUTION_SRC)} | set((manifest or {}).get(ist.ATTRIBUTION) or [])
 
 
 # ── The open versions ──────────────────────────────────────────────────────
 
 
-def base_state_sql(root: str, name: str, sliced: bool = True, generation: ist.Identity = False) -> dict[str, str]:
-    """A key range's open versions from a base generation's range files under `root` (`pvl/`, `pv/`, `sv/`, `svt/`
-    `<name>.parquet`): `state_schema` relations (`tables(sliced)`). `pvf` is the open path version's `vf` (`pv/`)."""
+def base_state_sql(root: str, name: str, sliced: bool = True, generation: ist.Identity = False, attributed: bool = False) -> dict[str, str]:
+    """A key range's open versions from a base generation's range files under `root` (`pvl/`, `pv/`, `sv/`, `svt/`,
+    `attribution/` `<name>.parquet`): `state_schema` relations (`tables(sliced, attributed)`). `pvf` is the open path
+    version's `vf` (`pv/`). A base without the attribution table opens it empty."""
     rd = lambda sub: f"read_parquet({q(f'{root}/{sub}/{name}.parquet')})"  # noqa: E731
     pv = f"(SELECT depth, path, vf AS pvf FROM {rd('pv')} WHERE vt = {OPEN})"
     pvl_cols = ", ".join(f"l.{c}" for c in ist.with_generation(ist.PVL_SCHEMA, generation).names)
@@ -171,13 +201,15 @@ def base_state_sql(root: str, name: str, sliced: bool = True, generation: ist.Id
         "pvl": f"SELECT {pvl_cols}, p.pvf FROM {rd('pvl')} l JOIN {pv} p ON p.depth = l.depth AND p.path = l.path WHERE l.vt = {OPEN}",
         "sv": f"SELECT {sv_cols} FROM {rd('sv')} WHERE vt = {OPEN}",
         "svt": f"SELECT {svt_cols}, p.pvf FROM {rd('svt')} s JOIN {pv} p ON p.depth = s.depth AND p.path = s.path WHERE s.vt = {OPEN}",
+        AT: (f"SELECT {ist.qcols(ist.AT_SCHEMA.names)} FROM {rd(AT)} WHERE vt = {OPEN}" if Path(root, AT, f"{name}.parquet").exists()
+             else ist.empty_sql(ist.AT_SCHEMA)),
     }
-    return {t: out[t] for t in tables(sliced)}
+    return {t: out[t] for t in tables(sliced, attributed)}
 
 
-def run_state_sql(root: str, name: str, sliced: bool = True) -> dict[str, str]:
+def run_state_sql(root: str, name: str, sliced: bool = True, attributed: bool = False) -> dict[str, str]:
     """A key range's open versions after a scan, from its `state/<D>/` dir `root`."""
-    return {t: f"SELECT * FROM read_parquet({q(f'{root}/{t}/{name}.parquet')})" for t in tables(sliced)}
+    return {t: f"SELECT * FROM read_parquet({q(f'{root}/{t}/{name}.parquet')})" for t in tables(sliced, attributed)}
 
 
 def _reconstructs(con, table: str, new: str, kind: str) -> tuple[list[int], list[int]]:
@@ -193,8 +225,9 @@ def _reconstructs(con, table: str, new: str, kind: str) -> tuple[list[int], list
 
 
 def append_range(con, prev: dict[str, str], scan: dict, r: dict, name: str, out: Path, *, bucket: str, mount: str | None,
-                 sliced: bool = True, generation: ist.Identity = False, check: list[str] | None = None) -> dict:
-    """Append `scan` to one key range's open versions (`prev`: `state_schema` relations per table, `tables(sliced)`).
+                 sliced: bool = True, generation: ist.Identity = False, check: list[str] | None = None, attributed: bool = False) -> dict:
+    """Append `scan` to one key range's open versions (`prev`: `state_schema` relations per table, `tables(sliced,
+    attributed)`; `attributed`: the lineage carries the attribution table, `append_attribution`).
     Writes under `out` each table's delta `<t>/<name>.parquet` (`delta_schema`, sorted by identity then `op`) and next
     open state `state/<t>/<name>.parquet`. Raises unless the next open state is the scan's rows exactly; refuses
     (`SystemExit`) a scan naming owners in a generation without the owner axis (`sliced` false). With `generation` (the
@@ -264,13 +297,54 @@ def append_range(con, prev: dict[str, str], scan: dict, r: dict, name: str, out:
             raise RuntimeError(f"append {name} {scan['id']} {t}: the open versions ({got[0]:,} rows) are not the scan's ({want[0]:,})")
         doc[t] = {"opened": n_open, "closed": n_close, "delta": n_delta, "open": n_state}
         con.execute(f"DROP TABLE o_{t}; DROP TABLE p_{t}")
+    if attributed:
+        doc[AT] = append_attribution(con, prev[AT], scan, preds, name, out, D, bucket=bucket, mount=mount)
     if check is not None:
         t1 = monotonic()
-        doc["check"] = {**check_tables(con, [*check, str(out)], name, D, sliced=sliced, generation=generation), "s": round(monotonic() - t1, 1)}
-    con.execute("DROP TABLE np; DROP TABLE IF EXISTS ns; DROP TABLE npf")
+        doc["check"] = {**check_tables(con, [*check, str(out)], name, D, sliced=sliced, generation=generation,
+                                       attribution=attributed and doc[AT]["covered"]), "s": round(monotonic() - t1, 1)}
+    con.execute("DROP TABLE np; DROP TABLE IF EXISTS ns; DROP TABLE npf; DROP TABLE IF EXISTS na")
     doc["s"] = round(monotonic() - t0, 1)
-    err(f"append {name} {scan['id']}: " + ", ".join(f"{t} +{doc[t]['opened']:,} −{doc[t]['closed']:,}" for t in todo) + f" in {doc['s']}s")
+    err(f"append {name} {scan['id']}: " + ", ".join(f"{t} +{doc[t]['opened']:,} −{doc[t]['closed']:,}" for t in todo)
+        + (f", {AT} " + (f"+{doc[AT]['opened']:,} −{doc[AT]['closed']:,}" if doc[AT]["covered"] else "uncovered") if attributed else "") + f" in {doc['s']}s")
     return doc
+
+
+def append_attribution(con, prev: str, scan: dict, preds: list[str], name: str, out: Path, D: int, *, bucket: str, mount: str | None) -> dict:
+    """The attribution table's append for one key range: `prev` its open versions. A covered scan (its entry names an
+    `attribution.parquet`, `interval_store.ATTRIBUTION_SRC`) is appended as the path versions are (`append_intervals`,
+    change columns `user`, `source`, `evidence`): its delta `attribution/<name>.parquet`, its next open state, checked to
+    be the scan's prefixes exactly; its rows stay in table `na` for the parity check. An uncovered scan adds no input: the
+    open versions carry over unchanged (the state rewritten as it was), no delta, as `build` skips it."""
+    from pyrmts.intervals import append_intervals
+
+    cols = ist.qcols(ist.AT_SCHEMA.names)
+    schema = delta_schema(AT)
+    con.execute(f"CREATE OR REPLACE TABLE p_at AS SELECT {cols} FROM ({prev})")
+    state = out / "state" / AT / f"{name}.parquet"
+    key = f"{scan['id']} {name} {AT}"
+    if not scan.get(ist.ATTRIBUTION_SRC):
+        n_state = write_sorted(sn._batches(con, f"SELECT {cols} FROM p_at ORDER BY depth, path, vf"), state, ist.AT_SCHEMA, ist.RANGE_RG,
+                               dictionary=["user", "source"])
+        con.execute("DROP TABLE p_at")
+        return {"covered": False, "open": n_state}
+    con.execute(f"CREATE OR REPLACE TABLE na AS {ist.attribution_rows_sql(sn._src(bucket, scan[ist.ATTRIBUTION_SRC], mount), preds)}")
+    n_open, n_close = append_intervals(con, "SELECT * FROM p_at", "SELECT * FROM na", ist.KEY_COLS, ist.ATTRIBUTION_CHANGE, D, OPEN, out="o_at")
+    n_delta = write_sorted(sn._batches(con, f"""SELECT {cols}, 1::TINYINT AS op FROM o_at WHERE vf = {D}
+            UNION ALL SELECT {cols}, -1::TINYINT AS op FROM o_at WHERE vt = {D} ORDER BY depth, path, vf, op"""),
+                           out / AT / f"{name}.parquet", schema, ist.RANGE_RG, dictionary=["user", "source"])
+    n_state = write_sorted(sn._batches(con, f"SELECT {cols} FROM o_at WHERE vt = {OPEN} ORDER BY depth, path, vf"), state, ist.AT_SCHEMA,
+                           ist.RANGE_RG, dictionary=["user", "source"])
+
+    def dig(rel: str) -> list[int]:
+        n, s = con.execute(f"SELECT count(*), coalesce(sum({ist.AT_HASH}::HUGEINT), 0) FROM ({rel})").fetchone()
+        return [int(n), int(s) % U64]
+
+    got, want = dig(f"SELECT * FROM o_at WHERE vt = {OPEN}"), dig("SELECT * FROM na")
+    if got != want:
+        raise RuntimeError(f"append {key}: the open versions ({got[0]:,} rows) are not the scan's ({want[0]:,})")
+    con.execute("DROP TABLE o_at; DROP TABLE p_at")
+    return {"covered": True, "opened": n_open, "closed": n_close, "delta": n_delta, "open": n_state}
 
 
 # ── A run's served sorts, and merges ───────────────────────────────────────
@@ -283,15 +357,15 @@ def delta_relation(root: str, t: str, served: bool = True, cols: list[str] | Non
     if not served:
         return src
     cols = cols or ist.SUB_SCHEMA[t].names
-    return f"(SELECT {', '.join('nullif(usr, ' + q('') + ') AS usr' if c == 'usr' else c for c in cols)} FROM {src})"
+    return f"(SELECT {', '.join('nullif(usr, ' + q('') + ') AS usr' if c == 'usr' else ist.ident(c) for c in cols)} FROM {src})"
 
 
 def cut_run(con, root: str, out: Path, *, rg_rows: int = ist.SERVED_RG, sliced: bool = True, generation: ist.Identity = False) -> dict:
-    """A run's served sorts (`run_sorts(sliced)`) from its delta files under `root` → `out/<sort>.parquet` +
-    `.groups.parquet` + `<sort>.json`. Open versions then close records (`seg_sql` without stamps: segment 0, then 1).
-    `GENERATION` in `interval_store.GENERATION_SORT` with `generation`."""
+    """A run's served sorts (`run_sorts(sliced)`, the attribution sort when the run holds its table) from its delta files
+    under `root` → `out/<sort>.parquet` + `.groups.parquet` + `<sort>.json`. Open versions then close records (`seg_sql`
+    without stamps: segment 0, then 1). `GENERATION` in `interval_store.GENERATION_SORT` with `generation`."""
     docs = {}
-    for sort in run_sorts(sliced):
+    for sort in run_sorts(sliced, has_table(root, AT)):
         sub, _, _ = ist.SORTS[sort]
         t0 = monotonic()
         schema = ist.served_schema(sort, generation)
@@ -303,16 +377,20 @@ def cut_run(con, root: str, out: Path, *, rg_rows: int = ist.SERVED_RG, sliced: 
 
 
 def merge_range(inputs: list[str], name: str, out: Path, sliced: bool = True, generation: ist.Identity = False) -> dict:
-    """One key range of runs (`inputs`: their roots, oldest first) merged per table (`tables(sliced)`): rows of one
-    version are one (`IDENT`), the smallest `vt` (a close record over the row it closes), `op` 1 if any input opened it."""
+    """One key range of runs (`inputs`: their roots, oldest first) merged per table (`tables(sliced)`, and the attribution
+    table over the inputs holding it: none before the table opened, nor a run of uncovered scans): rows of one version
+    are one (`IDENT`), the smallest `vt` (a close record over the row it closes), `op` 1 if any input opened it."""
     from pyrmts.runs import merge_parquets
 
     doc = {}
-    for t in tables(sliced):
+    for t in tables(sliced, True):
+        files = [f"{r}/{t}/{name}.parquet" for r in inputs]
+        if t in ist.ATTRIBUTION_SUBS and not (files := [f for f in files if Path(f).exists()]):
+            continue
         schema = delta_schema(t, generation)
-        stream = merge_parquets([f"{r}/{t}/{name}.parquet" for r in inputs], [*IDENT[t], "op"], identity=IDENT[t], reduce={"vt": "min", "op": "max"})
+        stream = merge_parquets(files, [*IDENT[t], "op"], identity=IDENT[t], reduce={"vt": "min", "op": "max"})
         doc[t] = write_sorted(stream, out / t / f"{name}.parquet", schema, ist.RANGE_RG,
-                              dictionary=[c for c in ("kind", "us", "usr") if c in schema.names])
+                              dictionary=[c for c in ("kind", "us", "usr", "user", "source") if c in schema.names])
     return doc
 
 
@@ -326,10 +404,14 @@ def live_sql(roots: list[str], t: str, name: str, D: int, generation: ist.Identi
     when the generation carries it."""
     gcol = [ist.identity_column(generation)] if generation and t == "pvl" else []
     key = [c for c in CHECK_COLS[t] if c in IDENT[t]]
-    cols = [*key, "vf", "vt", *(c for c in CHECK_COLS[t] if c not in (*key, "dr")), "wts", *gcol]
-    sel = ", ".join("coalesce(usr, '') AS usr" if c == "usr" else c for c in cols)
-    parts = " UNION ALL ".join(f"SELECT {sel} FROM read_parquet({q(f'{r}/{t}/{name}.parquet')})" for r in roots)
-    out = ", ".join(f"{DR} AS dr" if c == "dr" else c for c in [*CHECK_COLS[t], *gcol])
+    cols = [*key, "vf", "vt", *(c for c in CHECK_COLS[t] if c not in (*key, "dr")), *CARRIED_COLS[t], *gcol]
+    sel = ", ".join("coalesce(usr, '') AS usr" if c == "usr" else ist.ident(c) for c in cols)
+    files = [f"{r}/{t}/{name}.parquet" for r in roots]
+    if t in ist.ATTRIBUTION_SUBS:
+        # The table's tiers: a base or run from before it opened holds none of it.
+        files = [f for f in files if Path(f).exists()]
+    parts = " UNION ALL ".join(f"SELECT {sel} FROM read_parquet({q(f)})" for f in files) or ist.empty_sql(ist.AT_SCHEMA)
+    out = ", ".join(f"{DR} AS dr" if c == "dr" else ist.ident(c) for c in [*CHECK_COLS[t], *gcol])
     return f"""SELECT {out} FROM (SELECT * FROM ({parts}) WHERE vf <= {D}
         QUALIFY row_number() OVER (PARTITION BY {', '.join(IDENT[t])} ORDER BY vt) = 1) WHERE vt > {D}"""
 
@@ -339,18 +421,20 @@ def _differ(con, a: str, b: str, cols: str) -> int:
     return int(con.execute(f"SELECT count(*) FROM (SELECT {cols} FROM {a} EXCEPT ALL SELECT {cols} FROM {b})").fetchone()[0])
 
 
-def check_tables(con, roots: list[str], name: str, D: int, *, sliced: bool = True, generation: ist.Identity = False) -> dict:
-    """The scan's rows in key range `name` (`np`, `ns`: `append_range`'s tables) against the store's answer at `D` over
+def check_tables(con, roots: list[str], name: str, D: int, *, sliced: bool = True, generation: ist.Identity = False,
+                 attribution: bool = False) -> dict:
+    """The scan's rows in key range `name` (`np`, `ns`, and with `attribution` — a covered scan of an attributed lineage —
+    `na`: `append_range`'s tables) against the store's answer at `D` over
     `roots` (`live_sql`), row for row, per table: `rows` (the scan's), `store` (the store's), `missing` (scan rows the
     store doesn't give, as a multiset), `extra` (store rows the scan doesn't have). With `generation`, also `generation`:
     the scan's objects that carry one, and how many the store's live version gives the same (`interval_verify
     .generation_parity`'s count)."""
     out: dict = {}
-    for t in tables(sliced):
+    for t in tables(sliced, attribution):
         gcol = [ist.identity_column(generation)] if generation and t == "pvl" else []
-        cols = ", ".join(CHECK_COLS[t])
+        cols = ist.qcols(CHECK_COLS[t])
         con.execute(f"CREATE OR REPLACE TEMP TABLE c_store AS {live_sql(roots, t, name, D, generation)}")
-        con.execute(f"CREATE OR REPLACE TEMP TABLE c_scan AS SELECT {', '.join([*CHECK_COLS[t], *gcol])} FROM ({SCAN_ROWS[t]})")
+        con.execute(f"CREATE OR REPLACE TEMP TABLE c_scan AS SELECT {ist.qcols([*CHECK_COLS[t], *gcol])} FROM ({SCAN_ROWS[t]})")
         n_scan, n_store = (int(con.execute(f"SELECT count(*) FROM {x}").fetchone()[0]) for x in ("c_scan", "c_store"))
         out[t] = {"rows": n_scan, "store": n_store, "missing": _differ(con, "c_scan", "c_store", cols), "extra": _differ(con, "c_store", "c_scan", cols)}
         if gcol:
@@ -363,27 +447,31 @@ def check_tables(con, roots: list[str], name: str, D: int, *, sliced: bool = Tru
 
 
 def check_scan(con, scan: dict, r: dict, name: str, roots: list[str], *, bucket: str, mount: str | None, sliced: bool = True,
-               generation: ist.Identity = False) -> dict:
+               generation: ist.Identity = False, attributed: bool = False) -> dict:
     """`check_tables` for a scan already appended (its run one of `roots`): its rows in key range `r` (`name`) from its
-    `path` sort against the store's answer at it over `roots`. A re-check, outside `append_range`."""
+    `path` sort (and, covered in an attributed lineage, its `attribution.parquet`) against the store's answer at it over
+    `roots`. A re-check, outside `append_range`."""
     src = sn._src(bucket, scan["src"], mount)
     preds = sn.range_preds(r)
     con.execute(f"CREATE OR REPLACE TABLE np AS {ist.path_rows_sql(con, src, preds, scan.get('version'), generation)}")
     if sliced:
         con.execute(f"CREATE OR REPLACE TABLE ns AS {ist.slice_rows_sql(con, src, preds, scan.get('version'))}")
+    covered = attributed and bool(scan.get(ist.ATTRIBUTION_SRC))
+    if covered:
+        con.execute(f"CREATE OR REPLACE TABLE na AS {ist.attribution_rows_sql(sn._src(bucket, scan[ist.ATTRIBUTION_SRC], mount), preds)}")
     try:
-        return check_tables(con, roots, name, int(scan["ts"]), sliced=sliced, generation=generation)
+        return check_tables(con, roots, name, int(scan["ts"]), sliced=sliced, generation=generation, attribution=covered)
     finally:
-        con.execute("DROP TABLE IF EXISTS np; DROP TABLE IF EXISTS ns")
+        con.execute("DROP TABLE IF EXISTS np; DROP TABLE IF EXISTS ns; DROP TABLE IF EXISTS na")
 
 
 def check_cut(con, root: str, served: Path, *, sliced: bool = True, generation: ist.Identity = False) -> dict:
     """Each of a run's served sorts (`served/<sort>.parquet`) against the deltas under `root` it was cut from, row for
     row in the sort's columns: `rows` (the sort's), `missing` (delta rows it lacks), `extra` (rows the deltas lack)."""
     out = {}
-    for sort in run_sorts(sliced):
+    for sort in run_sorts(sliced, has_table(root, AT)):
         names = ist.served_schema(sort, generation).names
-        cols = ", ".join(names)
+        cols = ist.qcols(names)
         got = f"(SELECT {cols} FROM read_parquet({q(str(served / f'{sort}.parquet'))}))"
         want = f"(SELECT {cols} FROM {delta_relation(root, ist.SORTS[sort][0], cols=names)})"
         out[sort] = {"rows": int(con.execute(f"SELECT count(*) FROM {got}").fetchone()[0]), "missing": _differ(con, want, got, cols),
@@ -421,28 +509,43 @@ def append_marker(gen: str, scan: str, manifest: dict, docs: list[dict], cut: di
             "tables": tabs, "cut": cut, **({"generation": gen_eq} if gen_eq is not None else {})}
 
 
-def run_files(sliced: bool = True) -> tuple[str, ...]:
-    """What every run a manifest lists holds (the reader's files and the run's record), checked before it is written."""
-    return ("meta.json", *(f"served/{s}{x}" for s in run_sorts(sliced) for x in (".parquet", ".groups.parquet")))
+def run_files(sliced: bool = True, attributed: bool = False) -> tuple[str, ...]:
+    """What every run a manifest lists holds (the reader's files and the run's record), checked before it is written;
+    `attributed`: the run holds the attribution table (some scan of it is covered)."""
+    return ("meta.json", *(f"served/{s}{x}" for s in run_sorts(sliced, attributed) for x in (".parquet", ".groups.parquet")))
 
 
-def missing_files(runs: list[dict], exists: Callable[[str], bool], sliced: bool = True) -> list[str]:
-    return [f"{r['key']}/{f}" for r in runs for f in run_files(sliced) if not exists(f"{r['key']}/{f}")]
+def missing_files(runs: list[dict], exists: Callable[[str], bool], sliced: bool = True, covered: set[str] | frozenset = frozenset()) -> list[str]:
+    """The reader files the listed `runs` lack: each run's `run_files`, the attribution sort's where a scan of it is in
+    `covered` (the manifest's `"attribution"`)."""
+    return [f"{r['key']}/{f}" for r in runs for f in run_files(sliced, bool(covered.intersection(r.get("scans", [])))) if not exists(f"{r['key']}/{f}")]
 
 
-def manifest(gen: str, base: dict, runs: list[dict]) -> dict:
+def manifest(gen: str, base: dict, runs: list[dict], attribution: list[str] | None = None) -> dict:
     """`manifests/<D>.json`: the base's scans and the runs (oldest first) with each run scan's epoch (`stamps`, what
-    a reader tests `vf ≤ D < vt` at)."""
+    a reader tests `vf ≤ D < vt` at); in an attributed lineage, `"attribution"`: the run scans the attribution table
+    covers (present, maybe empty, once a run carried the table; a revision keeps it, its scans unchanged)."""
     scans = [*(s["id"] for s in base["scans"]), *(s for r in runs for s in r["scans"])]
     stamps = {s: ts for r in runs for s, ts in r["stamps"].items()}
     return {"gen": gen, "date": scans[-1], "base_scans": len(base["scans"]), "scans": scans, "stamps": dict(sorted(stamps.items())),
-            "runs": [{k: r[k] for k in ("key", "first", "last", "level", "scans", "rows", "bytes") if k in r} for r in runs]}
+            "runs": [{k: r[k] for k in ("key", "first", "last", "level", "scans", "rows", "bytes") if k in r} for r in runs],
+            **({ist.ATTRIBUTION: attribution} if attribution is not None else {})}
 
 
-def run_meta(gen: str, run: dict, stamps: dict[str, int], docs: dict) -> dict:
+def run_attribution(pinned: dict) -> list[str] | None:
+    """A scan run's `meta.json` `"attribution"` from its pinned `scans.json`: `[scan]` when covered, `[]` when not, None
+    outside an attributed lineage."""
+    if not pinned.get(ist.ATTRIBUTION):
+        return None
+    return [s["id"] for s in pinned["scans"] if s.get(ist.ATTRIBUTION_SRC)]
+
+
+def run_meta(gen: str, run: dict, stamps: dict[str, int], docs: dict, attribution: list[str] | None = None) -> dict:
+    """A run's `meta.json`; `attribution` (an attributed lineage's run): the run's scans the attribution table covers."""
     return {"gen": gen, "key": run["key"], "first": run["first"], "last": run["last"], "level": run["level"], "scans": run["scans"],
             "stamps": stamps, "rows": sum(d["rows"] for s, d in docs.items() if s == "path"),
-            "bytes": sum(d["bytes"] + d["groups_bytes"] for d in docs.values()), "sorts": docs}
+            "bytes": sum(d["bytes"] + d["groups_bytes"] for d in docs.values()), "sorts": docs,
+            **({ist.ATTRIBUTION: attribution} if attribution is not None else {})}
 
 
 def publish_run(store: ar.RunStore, scan: str) -> dict:
@@ -459,11 +562,15 @@ def publish_run(store: ar.RunStore, scan: str) -> dict:
     rk = run_key(scan, scan)
     meta = store.read_json(f"{rk}/meta.json")
     new = {"key": rk, "first": scan, "last": scan, "level": 0, "scans": [scan], "rows": meta["rows"], "bytes": meta["bytes"]}
+    covered: set[str] = set()
 
     def doc(m: dict, after: list[dict]) -> dict:
         stamps = {**m.get("stamps", {}), **meta["stamps"]}
-        return manifest(store.gen, base, [{**r, "stamps": {s: stamps[s] for s in r["scans"]}} for r in after])
-    return ar.publish_scan(store, scan, new, doc, lambda runs: missing_files(runs, store.exists, ist.sliced(base)))
+        # The attribution table's run scans: the earlier manifest's and this run's (its `meta.json`, an attributed run's).
+        at = None if ist.ATTRIBUTION not in m and ist.ATTRIBUTION not in meta else [*m.get(ist.ATTRIBUTION, []), *meta.get(ist.ATTRIBUTION, [])]
+        covered.update(at or [])
+        return manifest(store.gen, base, [{**r, "stamps": {s: stamps[s] for s in r["scans"]}} for r in after], at)
+    return ar.publish_scan(store, scan, new, doc, lambda runs: missing_files(runs, store.exists, ist.sliced(base), covered))
 
 
 def build_merged_run(dirs: list[Path], run: dict, outp: Path, *, gen: str, k: int, tmp: Path, threads: int = 16, mem: str = "100GB",
@@ -479,8 +586,10 @@ def build_merged_run(dirs: list[Path], run: dict, outp: Path, *, gen: str, k: in
     t1 = monotonic()
     docs = cut_run(sn.connect(threads, mem, tmp), str(outp), outp / "served", rg_rows=rg_rows, sliced=sliced, generation=generation)
     cut_s = round(monotonic() - t1, 1)
-    stamps = {sid: ts for d in dirs for sid, ts in json.loads((d / "meta.json").read_text())["stamps"].items()}
-    meta = {**run_meta(gen, run, stamps, docs), "merge_s": merge_s, "cut_s": cut_s}
+    metas = [json.loads((d / "meta.json").read_text()) for d in dirs]
+    stamps = {sid: ts for m in metas for sid, ts in m["stamps"].items()}
+    at = [s for m in metas for s in m.get(ist.ATTRIBUTION, [])] if any(ist.ATTRIBUTION in m for m in metas) else None
+    meta = {**run_meta(gen, run, stamps, docs, at), "merge_s": merge_s, "cut_s": cut_s}
     (outp / "meta.json").write_text(json.dumps(meta, indent=1) + "\n")
     log(f"merge {run['key']}: {len(dirs)} runs merged in {merge_s}s, cut in {cut_s}s ({meta['bytes']:,} B)")
     return {"rows": meta["rows"], "bytes": meta["bytes"], "s": {"merge": merge_s, "cut": cut_s}}
@@ -488,12 +597,16 @@ def build_merged_run(dirs: list[Path], run: dict, outp: Path, *, gen: str, k: in
 
 def carry(gen: str, k: int, *, threads: int = 16, mem: str = "100GB", rg_rows: int = ist.SERVED_RG, sliced: bool = True,
           generation: ist.Identity = False) -> Carry:
-    """The interval store's `Carry`: merged runs by `build_merged_run`, every listed run holding `run_files(sliced)`, no
-    drills."""
+    """The interval store's `Carry`: merged runs by `build_merged_run`, every listed run holding `run_files(sliced)` (and
+    the attribution sort, a run some scan of which the newest manifest's `"attribution"` covers), no drills."""
     def build(dirs, run, outp, *, drilled, tmp, log, rec=None):
         return build_merged_run(dirs, run, outp, gen=gen, k=k, tmp=tmp, threads=threads, mem=mem, rg_rows=rg_rows, log=log, sliced=sliced,
                                 generation=generation)
-    return Carry(build=build, missing=lambda store, runs: missing_files(runs, store.exists, sliced))
+
+    def missing(store, runs):
+        cur = ar.newest(store)
+        return missing_files(runs, store.exists, sliced, set((cur[1] if cur else {}).get(ist.ATTRIBUTION) or []))
+    return Carry(build=build, missing=missing)
 
 
 # ── Key ranges → tasks ─────────────────────────────────────────────────────
@@ -544,12 +657,13 @@ def prev_open_counts(store: Store, prefix: str, prev: str, k: int, *, workers: i
 # ── The open-version state: the newest complete scan only ─────────────────
 
 
-def prune_plan(objects: list[tuple[str, int]], prefix: str, k: int, published: bool, scan: str, sliced: bool = True) -> dict:
+def prune_plan(objects: list[tuple[str, int]], prefix: str, k: int, published: bool, scan: str, sliced: bool = True,
+               attributed: bool = False) -> dict:
     """What `prune` deletes, from the scratch bucket's `(name, size)` listing under `<prefix>/state/`: every scan's
-    state before `scan`, once `scan`'s is complete (every table's `k` range files, `tables(sliced)`) and its manifest
-    `published`. Raises `StateIncomplete` otherwise."""
+    state before `scan`, once `scan`'s is complete (every table's `k` range files, `tables(sliced, attributed)`) and its
+    manifest `published`. Raises `StateIncomplete` otherwise."""
     root = f"{prefix}/state/"
-    want_tables = tables(sliced)
+    want_tables = tables(sliced, attributed)
     scans: dict[str, dict] = {}
     for name, size in objects:
         if not name.startswith(root):
@@ -585,6 +699,9 @@ class Config:
     generation may be a re-cut of another's ranges)."""
     p: Profile
     ranges_gen: str
+    #: `append.attribution`: each appended scan's `attribution.parquet` goes into the store's attribution table
+    #: (specs/attr-interval-table.md). Once a generation carries the table its appends continue it whatever this says.
+    attribution: bool = False
 
 
 #: Env overrides of an interval profile's `append` fields (a staged source tree, a job image, the R2 endpoint).
@@ -602,6 +719,9 @@ def load_config(profile: str | None, environ: dict[str, str] | None = None) -> C
     if not a:
         raise SystemExit("interval store: the profile has no `append` section")
     ranges_gen = a.pop("ranges_gen", None)
+    attribution = a.pop("attribution", False)
+    if not isinstance(attribution, bool):
+        raise SystemExit(f"interval store: the profile's `append.attribution` must be true or false, not {attribution!r}")
     p = from_mapping({"name": doc.get("name", profile or ""), "bucket": doc["bucket"], **a})
     over: dict[str, Any] = {}
     for k, var in ENV.items():
@@ -628,7 +748,7 @@ def load_config(profile: str | None, environ: dict[str, str] | None = None) -> C
     for f in ("gen", "bucket", "scratch", "layouts", "region", "image", "sa", "r2_bucket"):
         if getattr(p, f) in (None, "", ()):
             raise SystemExit(f"interval store: no {f} in the profile's `append` section" + (f" (or ${ENV[f]})" if f in ENV else ""))
-    return Config(p, ranges_gen or p.gen)
+    return Config(p, ranges_gen or p.gen, attribution)
 
 
 # ── The chain ──────────────────────────────────────────────────────────────
@@ -673,7 +793,7 @@ class Runner(ar.Runner):
 
     def with_gen(self, gen: str) -> Config:
         """A compacted generation holds its own range files and `ranges.json`."""
-        return Config(replace(self.p, gen=gen), gen)
+        return Config(replace(self.p, gen=gen), gen, self.cfg.attribution)
 
     def follow(self) -> None:
         """`append_runner.Runner.follow`, then the generation's own ranges over the profile's `ranges_gen` when it holds
@@ -681,7 +801,7 @@ class Runner(ar.Runner):
         super().follow()
         if (own := own_ranges(self.p.gen, self.cfg.ranges_gen, self.exists)) != self.cfg.ranges_gen:
             self.log(f"{self.p.gen} holds its own key ranges and base: reading them, not {self.cfg.ranges_gen}'s")
-            self.cfg = Config(self.p, own)
+            self.cfg = Config(self.p, own, self.cfg.attribution)
 
     def one(self, d: str) -> None:
         run = f"{self.root}/deltas/{d}"
@@ -756,7 +876,7 @@ def store_runner(cfg: Config, *, dry_run: bool = False, merge: bool = True, merg
     # the local stages read the runner's generation when they run: `follow` moves it to a compacted successor
     def prepare(d):
         try:
-            prepare_scan(p.bucket, runner.p.gen, d, p.layouts)
+            prepare_scan(p.bucket, runner.p.gen, d, p.layouts, cfg.attribution)
         except SystemExit as e:
             raise ar.NotNext(str(e)) from e
 
@@ -764,7 +884,9 @@ def store_runner(cfg: Config, *, dry_run: bool = False, merge: bool = True, merg
         gen = runner.p.gen
         k = store.read_json(f"{PREFIX}/{runner.cfg.ranges_gen}/ranges.json")["k"]
         sl = ist.sliced(store.read_json(f"{PREFIX}/{gen}/scans.json"))
-        doc = prune_state(client, gen, d, k, bucket=p.bucket, scratch=p.scratch, dry_run=dry_run, sliced=sl)
+        pinned = f"{PREFIX}/{gen}/{run_key(d, d)}/scans.json"
+        at = store.exists(pinned) and bool(store.read_json(pinned).get(ist.ATTRIBUTION))
+        doc = prune_state(client, gen, d, k, bucket=p.bucket, scratch=p.scratch, dry_run=dry_run, sliced=sl, attributed=at)
         err(json.dumps({k_: v for k_, v in doc.items() if k_ != "delete"} | {"deleted_scans": [x["scan"] for x in doc["delete"]]}))
         folded = ar.prune_folded(ar.GcsRunStore(gs_bucket(p.bucket), None, gen, prefix=PREFIX, client=client), retain=FOLDED_RETAIN, dry_run=dry_run,
                                  where=" gcs")
@@ -846,10 +968,12 @@ def _state(store: Store, gen: str, scan: str) -> tuple[dict, list[dict]]:
     return base, (m["runs"] if m else [])
 
 
-def prepare_scan(bucket: str, gen: str, scan: str, layouts: tuple[str, ...]) -> dict:
+def prepare_scan(bucket: str, gen: str, scan: str, layouts: tuple[str, ...], attribution: bool = False) -> dict:
     """Pin `scan`'s newest `path` sort (size, source format; on GCS also its generation, md5, crc32c) as
     `deltas/<scan>/scans.json` in the store `bucket` (a bucket name or URL), refusing (SystemExit) unless it is the next
-    scan after the base and the live runs."""
+    scan after the base and the live runs. With `attribution` (the profile's), or in a lineage that carries the
+    attribution table (`lineage_attributed`), the doc says `"attribution": true` and the scan's entry names its
+    `attribution.parquet` beside the sort when there is one (`interval_store.ATTRIBUTION_SRC`; none: uncovered)."""
     store = Store(store_url(bucket))
     base, runs = _state(store, gen, scan)
     have = scans_of(base, runs)
@@ -862,18 +986,24 @@ def prepare_scan(bucket: str, gen: str, scan: str, layouts: tuple[str, ...]) -> 
         raise SystemExit(f"{scan}: its stamp {s['ts']} is not past the generation's")
     s["version"] = scan_version(store, s["src"])
     doc = {"bucket": bucket, "scans": [s]}
+    if attribution or lineage_attributed(base, _latest_manifest(store, gen, before=scan)):
+        doc[ist.ATTRIBUTION] = True
+        if store.exists(src := ist.attribution_src(s)):
+            s[ist.ATTRIBUTION_SRC] = src
+        else:
+            err(f"{scan}: no {src}: the attribution table doesn't cover the scan (readers answer \"unknown\" there)")
     store.create(f"{PREFIX}/{gen}/{run_key(scan, scan)}/scans.json", json.dumps(doc, indent=1) + "\n")
     err(json.dumps(doc))
     return doc
 
 
 def prune_state(gcs, gen: str, scan: str, k: int, *, bucket: str, scratch: str, dry_run: bool = False, workers: int = 8,
-                sliced: bool = True) -> dict:
+                sliced: bool = True, attributed: bool = False) -> dict:
     """Delete every `state/<prev>/` (prev < `scan`) of generation `gen` in the scratch bucket (nowhere else), once
     `scan`'s state is complete and its manifest published (`prune_plan`), `workers` deletes at a time
     (`append_runner.prune_state`). Idempotent."""
     prefix = f"{PREFIX}/{gen}"
-    return ar.prune_state(gcs, prefix, scan, lambda objects, published: prune_plan(objects, prefix, k, published, scan, sliced),
+    return ar.prune_state(gcs, prefix, scan, lambda objects, published: prune_plan(objects, prefix, k, published, scan, sliced, attributed),
                           bucket=bucket, scratch=scratch, dry_run=dry_run, workers=workers)
 
 
@@ -936,6 +1066,12 @@ def ranges_cmd(bucket, gen, ranges_gen, scratch, scan, force, index, mount, mem,
     # What the store answers each range from once D's run is published beside them: the base's range files and the runs
     # the newest earlier manifest lists (`append_range`'s check).
     check = [f"{mount}/{PREFIX}/{ranges_gen}", *(f"{mount}/{prefix}/{r['key']}" for r in runs)]
+    # The attribution table (`prepare` pinned the flag): its open versions are the previous scan's state when that run
+    # carried the table, else the base's (empty in a base without it: the table opens at this run).
+    at = bool(doc_scan.get(ist.ATTRIBUTION))
+    prev_at = at and bool(runs) and bool(store.read_json(f"{prefix}/{run_key(prev, prev)}/scans.json").get(ist.ATTRIBUTION))
+    if at and runs and not prev_at and ist.ATTRIBUTION in (_latest_manifest(store, gen, before=scan) or {}):
+        raise SystemExit(f"{scan}: the generation carries the attribution table but {prev}'s run doesn't: no open state to append to")
     for i in todo:
         name = f"r{i:04d}"
         if not force and store.exists(f"{run}/ranges/{name}.json"):
@@ -943,15 +1079,19 @@ def ranges_cmd(bucket, gen, ranges_gen, scratch, scan, force, index, mount, mem,
             continue
         state = (run_state_sql(f"{smount}/{prefix}/state/{prev}", name, sl) if runs
                  else base_state_sql(f"{mount}/{PREFIX}/{ranges_gen}", name, sl, ist.has_generation(base)))
+        if at:
+            state[AT] = (run_state_sql(f"{smount}/{prefix}/state/{prev}", name, sl, True)[AT] if prev_at
+                         else base_state_sql(f"{mount}/{PREFIX}/{ranges_gen}", name, sl, ist.has_generation(base), True)[AT])
         outp = Path(out) / name
         shutil.rmtree(outp, ignore_errors=True)
         doc = append_range(con, state, s, ranges["ranges"][i], name, outp, bucket=doc_scan["bucket"], mount=mount, sliced=sl,
-                           generation=ist.has_generation(base), check=check)
+                           generation=ist.has_generation(base), check=check, attributed=at)
         doc["prev"] = prev
         doc["check"]["runs"] = [r["key"] for r in runs]
         sstore.put_tree(outp / "state", f"{prefix}/state/{scan}")
-        for tb in tables(sl):
-            store.put_tree(outp / tb, f"{run}/{tb}")
+        for tb in tables(sl, at):
+            if (outp / tb).is_dir():  # an uncovered scan writes no attribution delta
+                store.put_tree(outp / tb, f"{run}/{tb}")
         shutil.rmtree(outp)
         store.write_text(f"{run}/ranges/{name}.json", json.dumps(doc) + "\n")
         print(json.dumps(doc), flush=True)
@@ -996,7 +1136,8 @@ def publish_cmd(bucket, gen, ranges_gen, scratch, scan, compact_level, mount, me
     if store.exists(f"{rk}/meta.json"):
         err(f"{rk}: cut")
     else:
-        s = store.read_json(f"{rk}/scans.json")["scans"][0]
+        pinned = store.read_json(f"{rk}/scans.json")
+        s = pinned["scans"][0]
         outp = Path(tmp) / "served"
         shutil.rmtree(outp, ignore_errors=True)
         t0 = monotonic()
@@ -1009,7 +1150,8 @@ def publish_cmd(bucket, gen, ranges_gen, scratch, scan, compact_level, mount, me
         Store(store_url(bucket)).put_tree(outp, f"{prefix}/{rk}/served")
         shutil.rmtree(outp)
         new = {"key": rk, "first": scan, "last": scan, "level": 0, "scans": [scan]}
-        meta = {**run_meta(gen, new, {scan: s["ts"]}, docs), "cut_s": cut_s, "check": cut, "check_s": round(monotonic() - t0 - cut_s, 1)}
+        meta = {**run_meta(gen, new, {scan: s["ts"]}, docs, run_attribution(pinned)), "cut_s": cut_s, "check": cut,
+                "check_s": round(monotonic() - t0 - cut_s, 1)}
         store.create(f"{rk}/meta.json", json.dumps(meta, indent=1) + "\n")
         err(f"{rk}: cut in {meta['cut_s']}s ({meta['bytes']:,} B)")
     print(json.dumps(publish_run(store, scan), indent=1))

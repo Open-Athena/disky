@@ -13,8 +13,9 @@ listing shards are copies of what the stores serve: a deployment's storage then 
 | `layer2` | the layer-2 listing (`-l` templates), where the deployment keeps one                    | delete |
 | `layer1` | the raw listing shards (`-1` templates), held while they carry a `generation` no marker vouches for | delete |
 | `cache`  | derived rollups (`-c` templates; `path-index -c`'s dir cache): a re-run's shortcut, rebuilt from the listing | delete |
+| `attribution` | `attr.tsv*`, `attribution.parquet`: the roster attribution map, held unless the IS's attribution table covers the scan and its marker compared it equal | delete |
 | `age`    | `age-pyramid-*`, `age-index*` (still read per scan)                                     | keep   |
-| `extras` | `attr.tsv*`, `ck.txt` (provenance that can't be derived later)                          | keep   |
+| `extras` | `ck.txt` (provenance that can't be derived later)                                       | keep   |
 | `snapshot` | other `*.json` (`meta.json`, `verification.json`, …)                                  | keep   |
 | `over-time` | `over-time*`                                                                         | keep   |
 | `other`  | anything else under a scan's index dir (raw listing shards, unknown files)               | keep   |
@@ -37,7 +38,10 @@ second: its D1 rows are gone). Deletion is a whitelist: a file no class names st
 
 A scan's raw listing shards carrying a (non-null) `generation` go only when its marker compared the objects' generations
 and every one was equal (`interval_verify.generation_parity`): else they hold information the IS doesn't (yet), and stay
-(`held`) while the rest of the scan retires.
+(`held`) while the rest of the scan retires. Likewise its attribution map (`attribution`, specs/attr-interval-table.md):
+it goes only when the IS's attribution table covers the scan (`interval_append.covered_scans`) and its marker compared
+the table with the scan's `attribution.parquet` and found it equal (the append's `attribution` table check, or `verify`'s
+`attribution_parity`).
 
 **Order**, executing (`-x`): every to-be-deleted object is copied to `-b` first (server side when both are the same
 store's buckets, GCS rewrite / S3 CopyObject; sizes checked; any mismatch stops the
@@ -71,7 +75,7 @@ from .static_names import err
 
 PREFIX = ist.PREFIX
 STATIC_PREFIX = "static-names"
-DELETE = ("sort", "footer", "coarse", "search", "layer2", "layer1", "cache")
+DELETE = ("sort", "footer", "coarse", "search", "layer2", "layer1", "cache", "attribution")
 KEEP = ("age", "extras", "snapshot", "over-time", "other")
 SEARCH_SUFFIXES = (".rows", ".trigrams", ".rows-search")
 #: The per-scan sorts' D1 variants (`index_footer.SORT_VARIANTS`), plus the v1 `coarse*` tiers (a LIKE).
@@ -88,7 +92,9 @@ def classify(name: str) -> str:
         return "age"
     if stem.startswith("over-time"):
         return "over-time"
-    if name.startswith("attr.tsv") or name == "ck.txt":
+    if name.startswith("attr.tsv") or name == "attribution.parquet":
+        return "attribution"
+    if name == "ck.txt":
         return "extras"
     if stem.startswith("path-index") and (footer or name.endswith(".parquet")):
         if stem.startswith("path-index-coarse"):
@@ -183,14 +189,24 @@ def listed(store: Store, prefix: str) -> list[str]:
     return [s["id"] for s in store.read_json(f"{prefix}/scans.json")["scans"]]
 
 
+def attribution_covered(store: Store, gen: str) -> set[str]:
+    """The scans generation `gen`'s attribution table covers (`interval_append.covered_scans`; none without the table)."""
+    from .interval_append import covered_scans
+
+    prefix = f"{PREFIX}/{gen}"
+    newest = latest_key([k.removeprefix(f"{prefix}/") for k in store.keys(f"{prefix}/manifests/")])
+    return covered_scans(store.read_json(f"{prefix}/scans.json"), store.read_json(f"{prefix}/{newest}") if newest else None)
+
+
 def lineage(store: Store, gen: str) -> list[str]:
-    """`gen`, then each generation it was compacted or backfilled from (`compaction.json` / `backfill.json` `from`: the
-    same versions, so their parity markers hold), newest first."""
+    """`gen`, then each generation it was compacted or backfilled from (`compaction.json` / `backfill.json` /
+    `attribution-backfill.json` `from`: the same versions, so their parity markers hold), newest first."""
+    from .interval_attribution import RECORD
     from .interval_backfill import BACKFILL
 
     out = [gen]
     while True:
-        key = next((k for k in (f"{PREFIX}/{out[-1]}/{ic.COMPACTION}", f"{PREFIX}/{out[-1]}/{BACKFILL}") if store.exists(k)), None)
+        key = next((k for k in (f"{PREFIX}/{out[-1]}/{x}" for x in (ic.COMPACTION, BACKFILL, RECORD)) if store.exists(k)), None)
         if key is None or (frm := store.read_json(key)["from"]) in out:
             return out
         out.append(frm)
@@ -224,6 +240,13 @@ def generation_vouched(marker: dict) -> bool:
     """Whether a passing marker compared the scan's objects' `generation` and found every one equal."""
     g = marker.get("generation")
     return bool(marker["pass"] and g and g["objects"] > 0 and g["equal"] == g["objects"])
+
+
+def attribution_vouched(marker: dict) -> bool:
+    """Whether a passing marker compared the scan's attribution map with the IS's attribution table and found them equal:
+    an append's `attribution` table check, or `verify`'s whole-map comparison."""
+    a = marker.get("attribution") or marker.get("tables", {}).get(ist.ATTRIBUTION)
+    return bool(marker["pass"] and a and a["rows"] >= 0 and a["missing"] == a["extra"] == 0)
 
 
 def find_marker(store: Store, gens: list[str], scan: str) -> dict | None:
@@ -372,8 +395,13 @@ def retire(scans_root: str, layouts: list[str], *, iv_root: str, static_gen: str
     static_gen = chain(st, STATIC_PREFIX, static_gen)[-1]
     in_iv = set(listed(iv, f"{PREFIX}/{iv_gen}"))
     in_static = set(listed(st, f"{STATIC_PREFIX}/{static_gen}"))
+    covered = attribution_covered(iv, iv_gen)
     gens = lineage(iv, iv_gen)
     scans = find_scans(src, list(layouts), list(layer2s), list(layer1s), list(caches))
+    # A scan the attribution table doesn't cover keeps its map whatever its marker says (nor counts it as pending).
+    for sid, s in scans.items():
+        if sid not in covered:
+            s.held.add("attribution")
     # The newest `keep` of the deployment's scans (this root's and every one the interval store holds), not of this
     # root's alone: a copy that stopped receiving per-scan files (lean scans write none to R2) would otherwise keep its
     # own last `keep` forever.
@@ -436,6 +464,15 @@ def retire(scans_root: str, layouts: list[str], *, iv_root: str, static_gen: str
             if r["status"] == "retire" and raw and not generation_vouched(markers[r["id"]]) and has_generation(src, raw):
                 s.held.add("layer1")
                 r["held"] = "layer1: its listing has `generation`, which its marker didn't compare equal"
+            if r["status"] == "retire" and any(c == "attribution" for _, c in s.objects.values()):
+                why = None
+                if r["id"] not in covered:
+                    why = "attribution: the interval store's attribution table doesn't cover the scan"
+                elif not attribution_vouched(markers[r["id"]]):
+                    s.held.add("attribution")
+                    why = "attribution: its marker didn't compare the attribution table equal"
+                if why:
+                    r["held"] = f"{r['held']}; {why}" if r.get("held") else why
             go = r["status"] == "retire"
             r["delete"] = s.by_class(DELETE) if go else {}
             r["keep"] = s.by_class(KEEP + tuple(s.held), held=True) if go else s.by_class((*DELETE, *KEEP), held=True)
