@@ -49,6 +49,9 @@ GROUP_CACHE = 2048
 SPAN_CACHE = 512
 #: `dr` rows (at depth ≥ 2) per part of the aggregations over their ancestors (`_by_parts`).
 EXPLODE_PART_ROWS = 1 << 23
+#: Touched directories per part of the newly-heavy sums' join to a prior tier's `dcount` (by `hash(dir)`): the join's
+#: hash table holds a part of each side (cw's 10-24T1202, 203M touched pairs: ~70 GiB of temp per tier in one pass).
+NH_PART_ROWS = 1 << 24
 #: Newly heavy directories' estimated root rows (summed over a chunk's directories, so nested ones count each time) built
 #: at once (`newly_heavy_rollups`): their prior roots read under one prefetch plan, combined and rolled up in one statement each.
 NEWLY_HEAVY_CHUNK_ROWS = 1 << 23
@@ -1154,14 +1157,18 @@ def day_rollups(con, prior: list[Tier], kind: str, D: int, *, R: int, K: int, fl
     touched = con.execute("SELECT count(*) FROM nh_t").fetchone()[0]
     log(f"drill {kind}: newly heavy: {tdir_rows:,} touched directories, {touched:,} without a header ({monotonic() - t2:.0f}s)")
     con.execute("CREATE OR REPLACE TABLE nh_m (q VARCHAR, dir VARCHAR, rows BIGINT)")
+    parts = max(1, -(-touched // NH_PART_ROWS))
     for i, t in enumerate(prior):
         if not (f := t.dcount(kind)):
             continue
-        heartbeat.set_stage(f"drill/rollups/{kind}: newly heavy, tier {i + 1}/{len(prior)}'s counts")
-        t3 = monotonic()
-        n = con.execute(f"""INSERT INTO nh_m SELECT t.q, t.dir, d.rows FROM nh_t AS t JOIN cmap AS m ON m.tier = {i} AND m.c = t.q
-            JOIN read_parquet({q(f)}) AS d ON d.q = m.ci AND d.dir = t.dir""").fetchone()[0]
-        log(f"drill {kind}: newly heavy: tier {i + 1}/{len(prior)}: {n:,} prior-run counts in {monotonic() - t3:.0f}s")
+        t3, n = monotonic(), 0
+        for p in range(parts):
+            heartbeat.set_stage(f"drill/rollups/{kind}: newly heavy, tier {i + 1}/{len(prior)}'s counts, part {p + 1}/{parts}")
+            w = f"WHERE hash(dir) % {parts} = {p}" if parts > 1 else ""
+            n += con.execute(f"""INSERT INTO nh_m SELECT t.q, t.dir, d.rows FROM (SELECT q, dir FROM nh_t {w}) AS t
+                JOIN cmap AS m ON m.tier = {i} AND m.c = t.q
+                JOIN (SELECT q, dir, rows FROM read_parquet({q(f)}) {w}) AS d ON d.q = m.ci AND d.dir = t.dir""").fetchone()[0]
+        log(f"drill {kind}: newly heavy: tier {i + 1}/{len(prior)}: {n:,} prior-run counts ({parts} parts) in {monotonic() - t3:.0f}s")
     con.execute("""CREATE OR REPLACE TABLE nh AS SELECT t.q, t.dir, t.k, t.fresh AS today,
             CASE WHEN t.q IN (SELECT q FROM newq) THEN 0 ELSE m.rows END AS base, coalesce(r.rows, 0) AS runs
         FROM nh_t AS t LEFT JOIN meas AS m USING (q, dir)
