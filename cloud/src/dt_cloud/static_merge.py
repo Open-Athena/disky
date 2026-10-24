@@ -539,19 +539,25 @@ def compact_probe_cmd(chunk_rows, gen, jobs, mount, mem, out, threads, tmp, repo
 @cli.command("measure-probe")
 @option("-c", "--checkpoint", required=True, help="A compaction's fold checkpoint (`…/compact-checkpoints/<gen>/<inputs>/fold`, or a copy of it) holding a saved `spilled` step")
 @option("-g", "--gen", required=True, help="The generation the checkpoint's compaction folds (its `drill/meta.json`: R, K, floor)")
+@option("-H", "--heaviest", type=IntRange(min=0), help="Only the N ranges of each kind with the most spilled bytes (with `-s`: and a sample of the rest)")
 @option("-m", "--mount", required=True, help="Read-only local mount of the data bucket")
 @option("-M", "--mem", default="100GB", help="DuckDB memory limit")
 @option("-o", "--out", required=True, help="New local output directory: the measurement's tables and sorted roots")
 @option("-p", "--threads", default=16, type=int, help="DuckDB threads")
+@option("-s", "--sample", help="Only N[:SEED] ranges of each kind drawn at random (seed default 0; with `-H`: from the others)")
 @option("-T", "--tmp", default="/stage/tmp/measure-probe", help="Local work dir (the spills, ~the checkpoint's size)")
 @option("-u", "--report", help="Also write the JSON report to this URL")
 @option("-w", "--workers", default=64, type=IntRange(min=1), help="Concurrent downloads of the checkpoint's files")
-def measure_probe_cmd(checkpoint, gen, mount, mem, out, threads, tmp, report, workers) -> None:
+def measure_probe_cmd(checkpoint, gen, heaviest, mount, mem, out, threads, sample, tmp, report, workers) -> None:
     """The drill measurement alone (`static_local.measure_ranges`, long then short), over a compaction's saved spills: the
     checkpoint's `spilled` files are downloaded into TMP, nothing is written to it or the bucket (no `code.json` claim,
     so another build's checkpoint is read, not cleared). `$DT_MEASURE_THREADS` sets the pool's width as in a compaction.
     Logs `measure_report`'s lines; prints a JSON of each kind's seconds and jobs and every output file's size and md5 (the
-    measured tables sorted, and the sorted roots: equal bytes at any pool width), also written beside OUT and to `-u`."""
+    measured tables sorted, and the sorted roots: equal bytes at any pool width), also written beside OUT and to `-u`.
+
+    `-H` / `-s`: a subset of each kind's ranges (every range is measured on its own, so a subset's are the same bytes as
+    the whole's): the heaviest by spilled bytes, and a seeded sample; only their files are downloaded. The report then
+    lists the ranges chosen and each one's seconds, roots, files, bytes and temp bytes."""
     import hashlib
     from concurrent.futures import ThreadPoolExecutor
 
@@ -567,7 +573,11 @@ def measure_probe_cmd(checkpoint, gen, mount, mem, out, threads, tmp, report, wo
     spills = work / "spills"
     shutil.rmtree(spills, ignore_errors=True)
     t = monotonic()
-    groups = ck.load_files("spilled", spills, workers=workers)
+    if heaviest is None and sample is None:
+        groups = ck.load_files("spilled", spills, workers=workers)
+        chosen = None
+    else:
+        groups, chosen = _fetch_ranges(ck, spills, heaviest or 0, sample, workers)
     fetched = round(monotonic() - t, 1)
     con = connect(threads, mem, work / "duckdb")
     output.mkdir(parents=True)
@@ -580,7 +590,7 @@ def measure_probe_cmd(checkpoint, gen, mount, mem, out, threads, tmp, report, wo
         (output / f"{kind}-sorted").mkdir()
         for f in sorted_files:
             shutil.move(f, output / f"{kind}-sorted" / f.name)
-        kinds[kind] = {**m, "s": round(monotonic() - t, 1)}
+        kinds[kind] = {**m, "s": round(monotonic() - t, 1), **({"chosen": chosen[kind]} if chosen else {})}
 
     def md5(p: Path) -> str:
         h = hashlib.md5()
@@ -604,6 +614,35 @@ def measure_probe_cmd(checkpoint, gen, mount, mem, out, threads, tmp, report, wo
         Store(r).write_text(key, text)
         err(f"measure-probe: report → {report}")
     print(json.dumps({**{k: v for k, v in doc.items() if k != "files"}, "n_files": len(files)}, indent=1))
+
+
+def _fetch_ranges(ck, spills: Path, heaviest: int, sample: str | None, workers: int) -> tuple[dict, dict[str, list[int]]]:
+    """`measure-probe -H/-s`: per kind, the `heaviest` ranges by spilled bytes, then `sample` (`N[:SEED]`) of the rest at
+    random; only their files downloaded from the checkpoint's `spilled` step into `spills`. The step's doc and the
+    ranges chosen per kind."""
+    import random
+    import re
+    from concurrent.futures import ThreadPoolExecutor
+
+    n, _, seed = (sample or "0").partition(":")
+    base = ck.key("spilled/files/")
+    sizes = {k[len(base):]: v for k, v in ck.store.listing(ck.key("spilled/files")).items() if k.startswith(base)}
+    by: dict[tuple[str, int], list[str]] = {}
+    for rel in sizes:
+        if m := re.match(r"(long|short)/[^/]+/grp=(\d+)/", rel):
+            by.setdefault((m[1], int(m[2])), []).append(rel)
+    chosen: dict[str, list[int]] = {}
+    for kind in ("long", "short"):
+        weight = {g: sum(sizes[r] for r in rels) for (k, g), rels in by.items() if k == kind}
+        top = sorted(weight, key=lambda g: (-weight[g], g))[:heaviest]
+        rest = sorted(set(weight) - set(top))
+        drawn = random.Random(int(seed or 0)).sample(rest, min(int(n), len(rest)))
+        chosen[kind] = sorted({*top, *drawn})
+    rels = [r for kind, gs in chosen.items() for g in gs for r in by[(kind, g)]]
+    with ThreadPoolExecutor(workers) as ex:
+        list(ex.map(lambda r: ck.store.get(base + r, spills / r), rels))
+    err(f"measure-probe: {len(rels):,} files ({sum(sizes[r] for r in rels):,} B) of {', '.join(f'{len(v)} {k}' for k, v in chosen.items())} ranges")
+    return ck.store.read_json(ck.key("spilled/done.json"))["doc"], chosen
 
 
 @cli.command("prune")
