@@ -718,7 +718,7 @@ def test_today_rows_equal_the_range_join():
 #: below covers matched rows in every run but one.
 SETTLE_CALLS = {
     3: [[(4, 8), (34, 82)], [(0, 0), (0, 0)], [(3, 3), (16, 17)], [(1, 2), (13, 20)]],
-    5: [[(2, 6), (28, 85)], [(1, 1), (14, 18)], [(1, 4), (6, 18)], [(29, 32), (14, 26)]],
+    5: [[(2, 6), (28, 85)], [(1, 1), (14, 18)], [(1, 4), (6, 18)], [(2, 5), (11, 23)]],
 }
 
 
@@ -864,8 +864,8 @@ def _steps(long_settle: int, long_heavy: int, short_settle: int, short_heavy: in
 
 #: Per config (`R`) and run, the checkpointed build's saves (`_steps`: settled and newly heavy directories per kind).
 SAVES = {
-    3: [_steps(4, 36, 34, 160), _steps(10, 63, 30, 41), _steps(33, 9, 35, 32), _steps(8, 63, 26, 72)],
-    5: [_steps(2, 19, 27, 113), _steps(4, 12, 31, 59), _steps(4, 59, 23, 25), _steps(29, 26, 14, 90)],
+    3: [_steps(4, 26, 34, 93), _steps(10, 58, 30, 31), _steps(33, 6, 35, 21), _steps(8, 68, 26, 76)],
+    5: [_steps(2, 13, 27, 75), _steps(4, 7, 31, 44), _steps(4, 4, 23, 15), _steps(2, 76, 11, 79)],
 }
 
 

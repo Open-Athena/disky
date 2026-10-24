@@ -375,15 +375,34 @@ def _stored_rows(con, tier: Path, kind: str, alias: dict[str, str]) -> dict[tupl
     return out
 
 
+def _new_rows(con, base: Path, run: Path, kind: str, alias: dict[str, str]) -> dict[tuple[str, str], int]:
+    """A run's stored root rows new to the stack per `(q, dir)` (each ancestor directory of each root): those whose
+    `(q, path, usr, vf)` the base doesn't hold (a close record restates one it does), `q` the base's canonical."""
+    def keys(tier: Path) -> list[tuple]:
+        files = [str(f) for f in sorted((tier / kind / "roots").glob("*.parquet"))]
+        return [(alias.get(r[0], r[0]), *r[1:]) for r in con.execute(f"SELECT q, path, usr, vf FROM read_parquet({files})").fetchall()] if files else []
+    held = set(keys(base))
+    out: dict[tuple[str, str], int] = {}
+    for qq, path, usr, vf in keys(run):
+        if (qq, path, usr, vf) in held:
+            continue
+        segs = path.split("/")
+        for k in range(1, len(segs)):
+            key = (qq, "/".join(segs[:k]))
+            out[key] = out.get(key, 0) + 1
+    return out
+
+
 def _full_headers(con, tier: Path, kind: str, alias: dict[str, str]) -> set[tuple[str, str]]:
     files = [str(f) for f in sorted((tier / kind / "rollups").glob("*.parquet"))]
     return {(alias.get(qq, qq), d) for qq, d in con.execute(f"SELECT q, dir FROM read_parquet({files}) WHERE kind = 0").fetchall()} if files else set()
 
 
 def test_first_add_agrees_with_the_base_on_heaviness(appended):
-    """The first run over a fresh base makes heavy exactly the `(q, dir)`s its stored rows push over R: not heavy in the
-    base, base rows + the run's rows > R (the heavy rule counts stored rows, close records included). Nothing heavy in the
-    base turns heavy again: the base's rollups, `roots-measure/` and the run's `dcount` agree on what is already heavy."""
+    """The first run over a fresh base makes heavy exactly the `(q, dir)`s its roots new to the stack push over R: not
+    heavy in the base, base rows + the run's new rows > R (a close record restates a base root: not counted). Nothing heavy
+    in the base turns heavy again: the base's rollups, `roots-measure/` and the run's `dcount` agree on what is already
+    heavy."""
     import duckdb
 
     ids = scan_ids(appended["scans"])
@@ -395,7 +414,7 @@ def test_first_add_agrees_with_the_base_on_heaviness(appended):
     for kind in ("long", "short"):
         a = alias if kind == "long" else {}
         heavy = _full_headers(con, base, kind, a)
-        before, today = _stored_rows(con, base, kind, a), _stored_rows(con, run, kind, a)
+        before, today = _stored_rows(con, base, kind, a), _new_rows(con, base, run, kind, a)
         want = {k for k, n in today.items() if k not in heavy and before.get(k, 0) + n > R}
         assert _full_headers(con, run, kind, a) - heavy == want, kind
         assert {k for k in want if before.get(k, 0) > R} == set(), kind
