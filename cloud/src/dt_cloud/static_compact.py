@@ -232,10 +232,18 @@ def stage_roots(gen_dir: Path, tiers: list[str], kinds: tuple[str, ...], dst: Pa
             f"roots read in place from {gen_dir}")
         return None
     shutil.rmtree(dst, ignore_errors=True)
-    doc = stage_files(source or str(gen_dir), keys, dst, label=f"stage {'+'.join(kinds)} roots")
+    try:
+        doc = stage_files(source or str(gen_dir), keys, dst, label=f"stage {'+'.join(kinds)} roots", log=log)
+    except Exception as e:
+        # a cache: whatever broke the copy (credentials, the pool), the roots are still readable in place
+        shutil.rmtree(dst, ignore_errors=True)
+        log(f"stage: failed ({type(e).__name__}: {e}); roots read in place from {gen_dir}")
+        return None
+    missed = f"; {len(doc['failed'])} not staged, read in place" if doc["failed"] else ""
     log(f"stage: {doc['files']} files, {gib(doc['bytes'])} of {'+'.join(kinds)} roots from {source or gen_dir} → {dst} in {doc['s']}s "
-        f"({doc['bytes'] / max(doc['s'], 0.1) / 1e9:.2f} GB/s; {gib(free)} free before)")
-    return Staged(dst, {k: {str(gen_dir / r): str(dst / r) for r in rels[k]} for k in kinds}, {**doc, "kinds": list(kinds)})
+        f"({doc['bytes'] / max(doc['s'], 0.1) / 1e9:.2f} GB/s; {gib(free)} free before{missed})")
+    bad = set(doc["failed"])
+    return Staged(dst, {k: {str(gen_dir / r): str(dst / r) for r in rels[k] if r not in bad} for k in kinds}, {**doc, "kinds": list(kinds)})
 
 
 def fold_drill(con, tiers: list[sd.Tier], out: Path, work: Path, *, R: int, K: int, floor: int, chunk_rows: int = sl.CHUNK_ROWS,

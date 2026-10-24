@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from pathlib import Path
 
 import pytest
@@ -217,7 +218,8 @@ def test_staged_fold_copied_every_roots_file(world):
     """World J's fold staged every roots file of the base and its runs (`-s on`), byte for byte their sizes."""
     files = _roots_files(world["j_store"] / "g", world["j_runs"])
     staged = world["j"]["staged"]
-    assert {**staged, "s": None} == {"files": len(files), "bytes": sum(f.stat().st_size for f in files), "s": None, "kinds": ["long", "short"]}
+    assert {**staged, "s": None} == {"files": len(files), "bytes": sum(f.stat().st_size for f in files), "s": None, "kinds": ["long", "short"],
+                                     "failed": []}
     assert len(files) == 4  # the base and its one run, long and short
 
 
@@ -259,44 +261,73 @@ def test_stage_roots_modes(world, tmp_path, monkeypatch):
         assert not (tmp_path / "w" / "stage").exists()
 
 
-@pytest.mark.parametrize("stage", ["off", "on", "auto"])
+@pytest.mark.parametrize("stage", ["off", "on", "auto", "on-fail-one", "on-fail-all"])
 def test_compact_probe_folds_read_only_to_the_published_bytes(world, tmp_path, monkeypatch, stage):
     """`static_merge compact-probe` over C's store as the mount (4 chunks at a time): the published `g.c001`'s files, md5
     for md5, in its report (stdout without the files, the report beside OUT and at `-u`); the mount is untouched. The
     drill's roots read in place (`-s off`), staged on the work disk (`-s on`, from the mount: no `-b`), or (`-s auto`,
-    the mount taken for another disk) not staged for lack of room."""
+    the mount taken for another disk) not staged for lack of room. Staging is a cache: a file whose copy fails
+    (`on-fail-one`: the base's long roots) is read in place, as is everything when the copy itself breaks
+    (`on-fail-all`), and the bytes are the same."""
+    from dt_cloud import blobstore as bs
     from dt_cloud import static_merge as sm
 
     mount = world["c_store"].parent
+    gen_dir = mount / sn.PREFIX / "g"
+    files = _roots_files(gen_dir, [r["key"] for r in ar.newest_runs(gen_dir)[1]])
+    need = sum(f.stat().st_size for f in files)
+    broken = files[0].relative_to(gen_dir).as_posix()
     before = _md5s(mount)
     if stage == "auto":
         monkeypatch.setattr(sk, "_same_disk", lambda a, b: False)
         monkeypatch.setattr(sk, "_free", lambda p: 1)
+    if stage == "on-fail-one":
+        get = bs.Store.get
+
+        def flaky(self, key: str, dst: Path) -> None:
+            if key == broken:
+                raise OSError("injected")
+            get(self, key, dst)
+        monkeypatch.setattr(bs.Store, "get", flaky)
+    if stage == "on-fail-all":
+        def broke(*a, **kw):
+            raise RuntimeError("injected")
+        monkeypatch.setattr(sk, "stage_files", broke)
     monkeypatch.delenv("DATA_BUCKET", raising=False)
     with _small_groups():
         res = CliRunner().invoke(sm.cli, ["compact-probe", "-m", str(mount), "-g", "g", "-o", str(tmp_path / "out"), "-T", str(tmp_path / "w"),
-                                          "-c", "3", "-j", "4", "-M", "1GB", "-p", "2", "-s", stage, "-u", str(tmp_path / "reports" / "p.json")],
-                                 catch_exceptions=False)
+                                          "-c", "3", "-j", "4", "-M", "1GB", "-p", "2", "-s", stage.partition("-")[0],
+                                          "-u", str(tmp_path / "reports" / "p.json")], catch_exceptions=False)
     assert res.exit_code == 0, res.output
-    gen_dir = mount / sn.PREFIX / "g"
-    files = _roots_files(gen_dir, [r["key"] for r in ar.newest_runs(gen_dir)[1]])
-    need = sum(f.stat().st_size for f in files)
-    lines = json.loads((tmp_path / "out.probe.json").read_text())["summary"]["stage_log"]
+    summary = json.loads((tmp_path / "out.probe.json").read_text())["summary"]
+    # the copy's progress lines (`<label> k/n files, …`) apart from the decisions (`stage: …`)
+    lines = [ln for ln in summary["stage_log"] if ln.startswith("stage:")]
+    fin = [re.sub(r" in \d+s \([\d,]+ MB/s\)", " in <s> (<rate>)", ln) for ln in summary["stage_log"] if ln.endswith("(done)")]
+    stage_dir = tmp_path / "w" / "stage"
     if stage == "on":
         assert [ln.partition(" in ")[0] for ln in lines] == [
-            f"stage: {len(files)} files, {need / 2**30:,.1f} GiB of long+short roots from {gen_dir} → {tmp_path / 'w' / 'stage'}"]
+            f"stage: {len(files)} files, {need / 2**30:,.1f} GiB of long+short roots from {gen_dir} → {stage_dir}"]
+        assert fin == [f"stage long+short roots {len(files)}/{len(files)} files, {need / 2**30:,.2f} of {need / 2**30:,.2f} GiB in <s> (<rate>) (done)"]
+    elif stage == "on-fail-one":
+        rest = need - (gen_dir / broken).stat().st_size
+        assert [ln.partition(" in ")[0] for ln in lines] == [
+            f"stage: {len(files) - 1} files, {rest / 2**30:,.1f} GiB of long+short roots from {gen_dir} → {stage_dir}"]
+        assert [ln for ln in summary["stage_log"] if " not staged " in ln] == [
+            f"stage long+short roots: {broken} not staged (OSError: injected); read in place"]
+        assert summary["staged"]["failed"] == [broken]
     else:
         assert lines == [{"off": f"stage: off; roots read in place from {gen_dir}",
                           "auto": f"stage: skipped, the work disk has 0.0 GiB free, under {need / 2**30:,.1f} GiB of long+short roots × 5; "
-                                  f"roots read in place from {gen_dir}"}[stage]]
-    assert not (tmp_path / "w" / "stage").exists()
+                                  f"roots read in place from {gen_dir}",
+                          "on-fail-all": f"stage: failed (RuntimeError: injected); roots read in place from {gen_dir}"}[stage]]
+    assert not stage_dir.exists()
     head = json.loads(res.stdout)
     doc = json.loads((tmp_path / "out.probe.json").read_text())
     assert json.loads((tmp_path / "reports" / "p.json").read_text()) == doc
     assert (head["new_gen"], head["jobs"], head["n_files"], head["runs"]) == ("g.c001", 4, len(doc["files"]), doc["runs"])
     got = {k: v["md5"] for k, v in doc["files"].items() if not k.startswith(OWN)}
     assert got == _md5s(world["c_store"] / "g.c001")
-    assert (doc["summary"]["staged"] or {}).get("files") == (len(files) if stage == "on" else None)
+    assert (doc["summary"]["staged"] or {}).get("files") == {"on": len(files), "on-fail-one": len(files) - 1}.get(stage)
     assert {k: v["size"] for k, v in doc["files"].items()} == {p.relative_to(tmp_path / "out").as_posix(): p.stat().st_size
                                                               for p in (tmp_path / "out").rglob("*") if p.is_file()}
     assert _md5s(mount) == before
