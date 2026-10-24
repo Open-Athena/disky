@@ -1158,16 +1158,31 @@ def day_rollups(con, prior: list[Tier], kind: str, D: int, *, R: int, K: int, fl
     log(f"drill {kind}: newly heavy: {tdir_rows:,} touched directories, {touched:,} without a header ({monotonic() - t2:.0f}s)")
     con.execute("CREATE OR REPLACE TABLE nh_m (q VARCHAR, dir VARCHAR, rows BIGINT)")
     parts = max(1, -(-touched // NH_PART_ROWS))
+    from .static_anchors import _scratch
+
     for i, t in enumerate(prior):
         if not (f := t.dcount(kind)):
             continue
         t3, n = monotonic(), 0
+        # the tier's `dcount` (often on a bucket mount) read once, cut into the parts on the work disk
+        split = _scratch(con, "nh-dcount-") if parts > 1 else None
+        if split is not None:
+            heartbeat.set_stage(f"drill/rollups/{kind}: newly heavy, tier {i + 1}/{len(prior)}'s counts, split")
+            con.execute(f"""COPY (SELECT q, dir, rows, hash(dir) % {parts} AS part FROM read_parquet({q(f)}))
+                TO {q(str(split))} (FORMAT parquet, PARTITION_BY (part))""")
         for p in range(parts):
             heartbeat.set_stage(f"drill/rollups/{kind}: newly heavy, tier {i + 1}/{len(prior)}'s counts, part {p + 1}/{parts}")
-            w = f"WHERE hash(dir) % {parts} = {p}" if parts > 1 else ""
-            n += con.execute(f"""INSERT INTO nh_m SELECT t.q, t.dir, d.rows FROM (SELECT q, dir FROM nh_t {w}) AS t
-                JOIN cmap AS m ON m.tier = {i} AND m.c = t.q
-                JOIN (SELECT q, dir, rows FROM read_parquet({q(f)}) {w}) AS d ON d.q = m.ci AND d.dir = t.dir""").fetchone()[0]
+            t_sql = f"SELECT q, dir FROM nh_t WHERE hash(dir) % {parts} = {p}" if split is not None else "SELECT q, dir FROM nh_t"
+            if split is None:
+                d_sql = f"SELECT q, dir, rows FROM read_parquet({q(f)})"
+            elif (split / f"part={p}").is_dir():
+                d_sql = f"SELECT q, dir, rows FROM read_parquet({q(str(split / f'part={p}' / '*.parquet'))}, hive_partitioning = false)"
+            else:
+                continue
+            n += con.execute(f"""INSERT INTO nh_m SELECT t.q, t.dir, d.rows FROM ({t_sql}) AS t
+                JOIN cmap AS m ON m.tier = {i} AND m.c = t.q JOIN ({d_sql}) AS d ON d.q = m.ci AND d.dir = t.dir""").fetchone()[0]
+        if split is not None:
+            shutil.rmtree(split)
         log(f"drill {kind}: newly heavy: tier {i + 1}/{len(prior)}: {n:,} prior-run counts ({parts} parts) in {monotonic() - t3:.0f}s")
     con.execute("""CREATE OR REPLACE TABLE nh AS SELECT t.q, t.dir, t.k, t.fresh AS today,
             CASE WHEN t.q IN (SELECT q FROM newq) THEN 0 ELSE m.rows END AS base, coalesce(r.rows, 0) AS runs
