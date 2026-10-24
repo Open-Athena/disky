@@ -72,10 +72,6 @@ pass: [DT_RECORD, DT_ALERTS]
 steps: [retire]
 labels: {deployment: cw}
 queue_size: 20
-# TEMPORARY (2026-10-22): the static name index is ~8 scans behind and one scan's anchors outlast the scan's 6 h
-# `static_names` task, so its catch-up runs on its own (`job/cw-static-submit.sh`). Two coordinators must never append at
-# once: drop this when that job has caught up.
-skip: [static-names]
 options:
   list:
     import: true
@@ -88,7 +84,9 @@ options:
     webdata: [python, /app/job/cw-webdata.py, "{web}", "{sources}", -l, Marin CoreWeave, -a, "{date}"]
     lifecycle: true
     mem: 16GB
-  static-names: {profile: /app/job/static-names.json}
+  # `merge: false`: a scan appends only (`runs add -M`); carries and compactions run on their own (`static-names runs merge`),
+  # never inside a scan's 6 h task
+  static-names: {profile: /app/job/static-names.json, merge: false}
   publish-r2: {barrier: true}
   interval-store: {timeout: 90m, mem: 12GB}
   over-time: {mem: 16GB}
