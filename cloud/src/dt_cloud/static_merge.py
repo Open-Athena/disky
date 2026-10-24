@@ -399,13 +399,22 @@ def measure_fanout(tasks: int, gen: str) -> Callable:
     """The compaction's drill measurement over `tasks` tasks (`static_fanout.Fanout`, given the fold's checkpoint): its
     helper jobs built and run as the runner's stage jobs are (`StaticRunner.job`, stage `measure`: the profile's machine
     for it, spot with retries when the profile is), from the profile the runner passed in `$STATIC_NAMES_PROFILE`."""
+    from dataclasses import replace
+
     from .append_runner import duckdb_args
     from .checkpoint import code_version
     from .static_fanout import Fanout
     from .static_profile import profile
-    from .static_runner import gcs_runner, ready
+    from .static_runner import gcs_runner
 
-    cfg = ready(profile(), gen)
+    # only what the helper jobs need (a race's `compact-probe -F` serves nothing: no R2, no layouts)
+    cfg = replace(profile(), gen=gen)
+    if not cfg.project:
+        from .gcp import gcp_project
+
+        cfg = replace(cfg, project=gcp_project())
+    for f in ("bucket", "scratch", "region", "image", "sa"):
+        cfg.need(f)
     runner = gcs_runner(cfg)
 
     def submit(url: str, plan: str, n: int, code: str) -> None:
@@ -420,9 +429,10 @@ def measure_fanout(tasks: int, gen: str) -> Callable:
 @option("-c", "--chunk-rows", default=1 << 22, type=IntRange(min=1), help="The drill fold's chunks: roots per measurement / rollup q range")
 @option("-g", "--gen", required=True, help="Base generation (followed to its newest successor)")
 @option("-F", "--measure-tasks", default=1, type=IntRange(min=1), help="The drill measurement over this many tasks: this one and helper Batch tasks (`static_fanout`; needs -S and the profile in $STATIC_NAMES_PROFILE)")
+@option("-P", "--prebuilt", help="Publish a fold done elsewhere (`compact-probe -U URL`) instead of folding: checked against its report, then published as this compaction's")
 @option("-S", "--scratch", help="Scratch bucket: the compaction lease, held throughout (none: appends aren't held off)")
 @ar.compact_options
-def compact_cmd(bucket, chunk_rows, gen, measure_tasks, scratch, policy, read_from, grace_s, jobs, force, mount, mem, threads, to_r2, tmp) -> None:
+def compact_cmd(bucket, chunk_rows, gen, measure_tasks, prebuilt, scratch, policy, read_from, grace_s, jobs, force, mount, mem, threads, to_r2, tmp) -> None:
     """The compaction stage (`append_runner.run_compaction` with `static_compact`): when the policy fires (or `-K`), the
     generation's base and runs folded into `<gen>.c<NNN>` (a rebuild's bytes), published on GCS (`compaction.json`
     last, `successor.json`, `static-names/CURRENT.json`), then with `-r` on R2 (its pointer last). The old generation
@@ -437,7 +447,7 @@ def compact_cmd(bucket, chunk_rows, gen, measure_tasks, scratch, policy, read_fr
         raise UsageError("-F needs -S: the helpers read the fold's checkpoint")
     fanout = measure_fanout(measure_tasks, gen) if measure_tasks > 1 else None
     try:
-        doc = ar.run_compaction(Store(f"gs://{bucket}"), compactor(chunk_rows, checkpoint=scratch, fanout=fanout), gen, Path(mount), Path(tmp),
+        doc = ar.run_compaction(Store(f"gs://{bucket}"), compactor(chunk_rows, checkpoint=scratch, fanout=fanout, prebuilt=prebuilt), gen, Path(mount), Path(tmp),
                                 lease=ar.gcs_compaction_lease_file(scratch, PREFIX), policy=policy, force=force, r2_bucket=bucket if to_r2 else None,
                                 grace_s=grace_s, threads=threads, mem=mem, jobs=jobs, read_from=read_from, rec=from_env("compact"))
     except ar.Busy as e:
@@ -505,21 +515,31 @@ def probe_cmd(
 @cli.command("compact-probe")
 @option("-b", "--bucket", default=lambda: os.environ.get("DATA_BUCKET") or None, help="The mount's bucket: the drill's roots are staged from it by the GCS API (default $DATA_BUCKET; none: copied from the mount)")
 @option("-c", "--chunk-rows", default=1 << 22, type=IntRange(min=1), help="The drill fold's chunks: roots per measurement / rollup q range")
+@option("-F", "--measure-tasks", default=1, type=IntRange(min=1), help="The drill measurement over this many tasks (`static_fanout`; needs -K and the profile in $STATIC_NAMES_PROFILE)")
 @option("-g", "--gen", required=True, help="The generation whose base and newest manifest's runs are folded")
 @option("-j", "--jobs", default=1, type=IntRange(min=1), help="The drill fold's chunks at a time")
+@option("-K", "--checkpoint", "ck_root", help="This fold's own checkpoint root (a scratch URL, never the compaction's): its steps saved there, resumed from there")
 @option("-m", "--mount", required=True, help="Read-only local mount of the data bucket")
 @option("-M", "--mem", default="100GB", help="DuckDB memory limit")
 @option("-o", "--out", required=True, help="New local output directory outside the mount: the folded generation")
 @option("-p", "--threads", default=16, type=int, help="DuckDB threads")
+@option("-R", "--resume-from", help="Another run's checkpoint root of this same fold (e.g. the running compaction's scratch bucket): its steps through -t seeded into -K (`seed_checkpoint`; the source never written)")
 @option("-s", "--stage", default="auto", type=Choice(["auto", "on", "off"]), help="Stage the drill's roots on the work disk first (`static_compact.STAGE_MODES`; auto: when it has room)")
+@option("-t", "--through", default="fold/spilled", help="With -R: the last step seeded (`static_compact.STEPS`); the rest run on this code")
 @option("-T", "--tmp", default="/stage/tmp/compact-probe", help="Local work dir")
 @option("-u", "--report", help="Also write the JSON report to this URL (`gs://<scratch>/…/<name>.json`: the VM's disks go with it)")
-def compact_probe_cmd(bucket, chunk_rows, gen, jobs, mount, mem, out, threads, stage, tmp, report) -> None:
+@option("-U", "--upload", help="Upload the folded generation to this URL (`<url>/gen/`, then `<url>/probe.json`, last): what `compact --prebuilt` publishes")
+def compact_probe_cmd(bucket, chunk_rows, measure_tasks, gen, jobs, ck_root, mount, mem, out, threads, resume_from, stage, through, tmp, report, upload) -> None:
     """Fold the generation into its next one locally (`static_compact.fold_gen`, the compaction's own fold), read in place
     from the mount: no upload, no successor / pointer / manifests in the bucket, no lease, no checkpoint, no pruning; only
     OUT and TMP are written. Logs the fold's stage lines; prints a JSON of the summary (per-part seconds and peaks) and
     every output file's size and md5 (to compare with a published compaction's `compaction.json`), also written beside
-    OUT and to `-u`; stdout gets it without the files."""
+    OUT and to `-u`; stdout gets it without the files.
+
+    A race beside a running compaction (`-K`, `-R`, `-F`, `-U`): resumed from the running one's saved steps (copied, on
+    this code), the measurement fanned out, its own checkpoint under `-K`; the output uploaded under `-U` for `compact
+    --prebuilt` to publish under the lease (the running one cancelled, or it finished first and this one is dropped).
+    Still no lease, no publish, no pointer, and nothing written to the running compaction's checkpoint."""
     import hashlib
     from concurrent.futures import ThreadPoolExecutor
 
@@ -532,11 +552,24 @@ def compact_probe_cmd(bucket, chunk_rows, gen, jobs, mount, mem, out, threads, s
             raise UsageError(f"probe output/work must be outside the source mount: {path}")
     if output.exists():
         raise UsageError(f"probe output already exists: {output}")
+    if (resume_from or measure_tasks > 1) and not ck_root:
+        raise UsageError("-R and -F need -K: this fold's own checkpoint root")
     manifest, runs = ar.newest_runs(gen_dir)
     new_gen = ar.next_gen(gen)
-    err(f"compact-probe {gen} → {new_gen}: manifest {manifest}, {len(runs)} runs, -j {jobs} -M {mem} -p {threads} -c {chunk_rows} -s {stage}")
-    summary = fold_gen(gen_dir, output, work, gen=gen, new_gen=new_gen, runs=runs, threads=threads, mem=mem, chunk_rows=chunk_rows, jobs=jobs,
-                       source=f"gs://{bucket}/{PREFIX}/{gen}" if bucket else None, stage=stage)
+    err(f"compact-probe {gen} → {new_gen}: manifest {manifest}, {len(runs)} runs, -j {jobs} -M {mem} -p {threads} -c {chunk_rows} -s {stage}"
+        + (f" -F {measure_tasks}" if measure_tasks > 1 else "") + (f", resumed from {resume_from} through {through}" if resume_from else ""))
+    from .static_compact import compact_checkpoint, seed_checkpoint
+
+    if resume_from:
+        seed_checkpoint(resume_from, ck_root, gen, new_gen, runs, through)
+    ck = compact_checkpoint(ck_root, gen, new_gen, runs, work=work / "ckpt") if ck_root else None
+    try:
+        summary = fold_gen(gen_dir, output, work, gen=gen, new_gen=new_gen, runs=runs, threads=threads, mem=mem, chunk_rows=chunk_rows, jobs=jobs,
+                           source=f"gs://{bucket}/{PREFIX}/{gen}" if bucket else None, stage=stage, ck=ck,
+                           fanout=measure_fanout(measure_tasks, gen) if measure_tasks > 1 else None)
+    finally:
+        if ck is not None:
+            ck.close()
 
     def md5(p: Path) -> str:
         h = hashlib.md5()
@@ -560,6 +593,13 @@ def compact_probe_cmd(bucket, chunk_rows, gen, jobs, mount, mem, out, threads, s
         root, _, key = report.rpartition("/")
         Store(root).write_text(key, text)
         err(f"compact-probe: report → {report}")
+    if upload:
+        from .blobstore import Store
+
+        dst = Store(upload.rstrip("/"))
+        dst.put_tree(output, "gen")
+        dst.write_text("probe.json", text)
+        err(f"compact-probe: {len(rels)} files → {upload.rstrip('/')}/gen/, its report last (`compact --prebuilt {upload}`)")
     print(json.dumps({**{k: v for k, v in doc.items() if k != "files"}, "n_files": len(rels)}, indent=1))
 
 
@@ -734,7 +774,8 @@ def deal(weights: dict, n: int) -> list[list]:
 @option("-w", "--workers", default=64, type=IntRange(min=1), help="Concurrent downloads and uploads")
 def measure_shard_cmd(checkpoint, index, mem, threads, plan, tmp, code, workers) -> None:
     """A compaction's drill measurement helper (`static_fanout`, specs/static-measure-fanout.md): task INDEX's share of
-    the plan's `q` ranges, each fetched from the fold's saved spills, measured (`static_local.measure_ranges`) and
+    the plan's `q` ranges, each fetched from the fold's saved spills, measured (`static_local.measure_ranges`; only
+    sorted when the plan's `measure` is false: an incremental compaction's) and
     uploaded as `measured/<kind>/g<g>/{sorted,dirs,rup}.parquet`, then its `done.json` (the range's stats). A range
     whose `done.json` is there is skipped (a retry resumes); then `measured/tasks/<plan>-<index>.json`. Refuses to run
     other code than the fold's (its bytes would differ)."""
@@ -772,7 +813,7 @@ def measure_shard_cmd(checkpoint, index, mem, threads, plan, tmp, code, workers)
         gs = [g for k, g in todo if k == kind]
         if gs:
             sl.measure_ranges(con, spills, kind, max(gs) + 1, "pd", "pr", floor=doc["floor"], R=doc["R"], K=doc["K"],
-                              on_range=partial(upload, kind))
+                              on_range=partial(upload, kind), measure=doc.get("measure", True))
     name = plan.rsplit("/", 1)[-1].removesuffix(".json")
     ck.store.write_text(ck.key(f"{MEASURED}/tasks/{name}-{i}.json"), json.dumps({"ranges": len(todo), "s": round(monotonic() - t0, 1)}) + "\n")
     err(f"measure-shard {plan} #{i}: {len(todo)} ranges in {monotonic() - t0:.0f}s")

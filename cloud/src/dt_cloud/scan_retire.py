@@ -379,7 +379,8 @@ def retire(scans_root: str, layouts: list[str], *, iv_root: str, static_gen: str
            static_root: str | None = None, layer2s: list[str] = (), layer1s: list[str] = (), caches: list[str] = (), keep: int = 2,
            only: list[str] = (),
            execute: bool = False, markers_only: bool = False, backup_root: str | None = None, d1: bool = True,
-           d1_store: str = F.PRIMARY_STORE, drop_path: bool = False, work: Path | None = None, d1_elsewhere: bool = False) -> dict:
+           d1_store: str = F.PRIMARY_STORE, drop_path: bool = False, work: Path | None = None, d1_elsewhere: bool = False,
+           verify_jobs: int = 1) -> dict:
     """Plan (and with `execute`, carry out) the retirement; returns the report (`scans`, `totals`, `d1`, …)."""
     scans_root, iv_root = store_url(scans_root), store_url(iv_root)  # a bare bucket name is a GCS bucket (a profile's)
     src = Store(scans_root)
@@ -450,7 +451,7 @@ def retire(scans_root: str, layouts: list[str], *, iv_root: str, static_gen: str
 
             entries = [{"id": r["id"], "src": scans[r["id"]].src, "ts": scan_entry(iv, f"{PREFIX}/{iv_gen}", r["id"])[0]["ts"],
                         "version": scan_version(src, scans[r["id"]].src)} for r in todo]
-            verified = verify_scans(iv, iv_gen, scans_root, entries, work / "verify")
+            verified = verify_scans(iv, iv_gen, scans_root, entries, work / "verify", jobs=verify_jobs)
             markers |= verified
             for r in todo:
                 m = verified.get(r["id"])
@@ -549,6 +550,7 @@ def render(report: dict) -> list[str]:
 @option("-g", "--gen", help="The interval store's generation (default: its current, `interval-store/CURRENT.json`), followed to its newest successor")
 @option("-G", "--static-gen", required=True, help="The static name index's generation (`static-names/GEN/` under -S)")
 @option("-j", "--json", "as_json", is_flag=True, help="Print the report as JSON")
+@option("-J", "--verify-jobs", default=1, type=IntRange(min=1), help="Verify the scans needing it in this many processes at once, each with that share of the machine (a backlog's scans verify one after another otherwise)")
 @option("-k", "--keep", default=2, type=IntRange(min=1), help="Never retire the newest N scans (appends and catch-ups read them)")
 @option("-l", "--layer2", "layer2s", multiple=True, help="Key template of a scan's layer-2 listing under -s (`{id}`, `*` within a segment), e.g. `cw-l2/{id}/*.parquet`; repeat")
 @option("-L", "--layout", "layouts", multiple=True, required=True, help="Key template of a scan's per-scan `path` sort under -s (`{id}`, `{gen}`): every file in its dir is classified; repeat")
@@ -563,8 +565,8 @@ def render(report: dict) -> list[str]:
 @option("-w", "--work", help="Local work dir (verify's copies, backups' staging; default: a temporary one)")
 @option("-x", "--execute", is_flag=True, help="Back up (-b), delete the D1 rows, then the files")
 @argument("ids", nargs=-1)
-def retire_cmd(layer1s, backup_root, caches, d1_elsewhere, gen, static_gen, as_json, keep, layer2s, layouts, markers_only, dry_run, iv_root, drop_path_pointer, no_d1,
-               scans_root, static_root, d1_store, work, execute, ids) -> None:
+def retire_cmd(layer1s, backup_root, caches, d1_elsewhere, gen, static_gen, as_json, verify_jobs, keep, layer2s, layouts, markers_only, dry_run, iv_root,
+               drop_path_pointer, no_d1, scans_root, static_root, d1_store, work, execute, ids) -> None:
     """Retire the per-scan sorts, footers, search sidecars, layer-2 and raw listings and rollup caches of the scans the interval store and the
     static name index both hold and a parity marker vouches for (all but the newest -k; IDS: only these). A dry run by
     default: per scan the objects and bytes per class it would delete and keep, the totals, and the D1 rows that would
@@ -574,7 +576,7 @@ def retire_cmd(layer1s, backup_root, caches, d1_elsewhere, gen, static_gen, as_j
     report = retire(scans_root, list(layouts), iv_root=iv_root, static_gen=static_gen, iv_gen=gen, static_root=static_root,
                     layer2s=list(layer2s), layer1s=list(layer1s), caches=list(caches), keep=keep, only=list(ids), execute=execute, markers_only=markers_only,
                     backup_root=backup_root, d1=not no_d1, d1_elsewhere=d1_elsewhere, d1_store=d1_store, drop_path=drop_path_pointer,
-                    work=Path(work) if work else None)
+                    work=Path(work) if work else None, verify_jobs=verify_jobs)
     if as_json:
         print(json.dumps(report))
         return

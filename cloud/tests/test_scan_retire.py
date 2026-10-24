@@ -432,3 +432,19 @@ def test_an_earlier_generations_failed_marker_is_verified_again(fx, d1, tmp_path
     assert [r for r in _statuses(rep) if r[0] == "2026-08-03"] == [("2026-08-03", "retire", None, "verified")]
     marker = json.loads((iv / "g" / "verify" / "2026-08-03.json").read_text())
     assert (marker["scan"], marker["gen"], marker["pass"]) == ("2026-08-03", "g", True)
+
+
+def test_scans_needing_verify_are_verified_in_parallel_shares(fx, d1, tmp_path):
+    """Markers of 07-30, 08-04 and 08-04T1236 removed (and their footers' unparseable stand-ins, as 08-03 has none): with
+    08-03's, four scans need verify; `-J 2` verifies them in two processes (contiguous shares), each writing its scans'
+    markers, and every one retires as `verified`, as at `-J 1`."""
+    verify = fx["store"] / "interval-store" / "g" / "verify"
+    for d in ("2026-07-30", "2026-08-04", "2026-08-04T1236"):
+        (verify / f"{d}.json").unlink()
+        for name in FOOTERS:
+            (fx["root"] / "idx" / d / "index" / "g1" / name).unlink()
+    rep = _run(fx, "-x", "-J", "2", "-w", str(tmp_path / "work"))
+    assert [(r["id"], r["status"], r["marker"]) for r in rep["scans"] if r["status"] == "retire"] == [
+        ("2026-07-30", "retire", "verified"), ("2026-08-03", "retire", "verified"), ("2026-08-04", "retire", "verified"),
+        ("2026-08-04T1236", "retire", "verified")]
+    assert [json.loads((verify / f"{d}.json").read_text())["pass"] for d in ("2026-07-30", "2026-08-03", "2026-08-04", "2026-08-04T1236")] == [True] * 4
