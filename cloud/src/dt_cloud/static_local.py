@@ -93,16 +93,18 @@ class DiskPeak:
     `take_step()` the same within a stage (since the previous `take_step()` or `take()`), leaving the stage's peak.
     The filesystem is the job's own scratch, so other writers' bytes count too; on a shared disk this over-states."""
 
-    def __init__(self, path: Path, every_s: float = 2.0):
+    def __init__(self, path: Path, every_s: float = 2.0, usage: Callable[[], int] | None = None):
         self.path, self.every_s = path, every_s
-        self.base = shutil.disk_usage(path).used
+        # `usage`: the bytes used (a test's own sequence, not a patched `shutil`: other samplers' threads read that too)
+        self.usage = usage or (lambda: shutil.disk_usage(path).used)
+        self.base = self.usage()
         self.peak = self.total = self.step = 0
         self.stop = threading.Event()
         self.thread = threading.Thread(target=self.run, daemon=True)
         self.thread.start()
 
     def sample(self) -> None:
-        used = max(0, shutil.disk_usage(self.path).used - self.base)
+        used = max(0, self.usage() - self.base)
         self.peak, self.total, self.step = max(self.peak, used), max(self.total, used), max(self.step, used)
 
     def run(self) -> None:
@@ -602,14 +604,16 @@ def finish_drill(con, gen_dir: Path, work: Path, *, aliases, long_groups: int, s
     measure = incremental is None
     if fanout is not None:
         fanout.start(work, {"long": long_groups, "short": short_groups}, R=R, K=K, floor=floor, measure=measure)
-    lcan, lm = measure_ranges(con, work, "long", long_groups, "ldirs", "lrup", floor=floor, R=R, K=K, remote=fanout, measure=measure)
+    lcan, lm = measure_ranges(con, work, "long", long_groups, "ldirs", "lrup", floor=floor, R=R, K=K, remote=fanout, measure=measure,
+                              on_range=fanout.keep("long") if fanout is not None else None)
     end = monotonic()
     if measure:
         step("drill/measure/long", end - lm["measure_s"] - lm["rollup_s"], groups=lm["groups"], dirs=count(con, "ldirs"))
         t = step("drill/rollup/long", end - lm["rollup_s"], rup=count(con, "lrup"))
     else:
         t = step("drill/sort/long", t, groups=lm["groups"])
-    sall, m = measure_ranges(con, work, "short", short_groups, "sdirs", "srup", floor=floor, R=R, K=K, remote=fanout, measure=measure)
+    sall, m = measure_ranges(con, work, "short", short_groups, "sdirs", "srup", floor=floor, R=R, K=K, remote=fanout, measure=measure,
+                              on_range=fanout.keep("short") if fanout is not None else None)
     if fanout is not None:
         fanout.finish()
     end = monotonic()

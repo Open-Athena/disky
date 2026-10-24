@@ -448,7 +448,7 @@ def helper_job(runner, url: str, plan: str, n: int, code: str, scan: str) -> tup
     from .append_runner import duckdb_args
 
     args = ["measure-shard", "-c", url, "-P", plan, "-V", code, *duckdb_args(runner.cfg.machine_for("measure"))]
-    return runner.job("measure", scan, n, "static_merge", args, mount=False)
+    return _helper_recorded(runner, *runner.job("measure", scan, n, "static_merge", args, mount=False), scan)
 
 
 #: The anchors fan-out's helper stage (its own: `anchors` is a long single-task stage, STANDARD; the helpers are
@@ -463,7 +463,44 @@ def anchor_helper_job(runner, url: str, plan: str, n: int, code: str, scan: str)
     from .append_runner import duckdb_args
 
     args = ["anchor-shard", "-c", url, "-P", plan, "-V", code, *duckdb_args(runner.cfg.machine_for(ANCHOR_STAGE))]
-    return runner.job(ANCHOR_STAGE, scan, n, "static_merge", args, mount=False)
+    return _helper_recorded(runner, *runner.job(ANCHOR_STAGE, scan, n, "static_merge", args, mount=False), scan)
+
+
+def _task_recorded(kind: str):
+    """A fan-out helper command recorded per task on `/scans` (`maint_runs.task_recorder`, a child row of the
+    compaction's run): one phase `kind` around the body, then the run finished succeeded or failed (re-raised)."""
+    from functools import wraps
+
+    def wrap(fn):
+        @wraps(fn)
+        def run(*args, **kw):
+            from .maint_runs import phase, task_recorder
+
+            rec = task_recorder(kind)
+            try:
+                with phase(rec, kind):
+                    fn(*args, **kw)
+            except BaseException as e:
+                rec.finish("failed", f"{type(e).__name__}: {e}")
+                raise
+            rec.finish("succeeded")
+
+        return run
+
+    return wrap
+
+
+def _helper_recorded(runner, name: str, spec: dict, scan: str) -> tuple[str, dict]:
+    """A fan-out helper job with what its tasks record with (`runner.record_env`; `maint_runs.task_recorder`): each task
+    a child row on `/scans` of this process's job (`$BATCH_JOB_UID`: the compaction's), under its newest `scan`."""
+    from .maint_runs import RECORD_GEN_ENV, RECORD_SCAN_ENV
+
+    runner.record_env(name, spec)
+    v = spec["taskGroups"][0]["taskSpec"]["environment"]["variables"]
+    v.update({RECORD_SCAN_ENV: scan, RECORD_GEN_ENV: f"{PREFIX}/{runner.cfg.gen}"})
+    if (parent := (os.environ.get("BATCH_JOB_UID") or "").strip()):
+        v["DT_PARENT_RUN"] = parent
+    return name, spec
 
 
 @cli.command("compact")
@@ -608,17 +645,34 @@ def compact_probe_cmd(anchor_tasks, bucket, chunk_rows, measure_tasks, gen, jobs
         + (f" -F {measure_tasks}" if measure_tasks > 1 else "") + (f" -A {anchor_tasks}" if anchor_tasks > 1 else "") + (f", resumed from {resume_from} through {through}" if resume_from else ""))
     from .static_compact import compact_checkpoint, seed_checkpoint
 
-    if resume_from:
-        seed_checkpoint(resume_from, ck_root, gen, new_gen, runs, through)
-    ck = compact_checkpoint(ck_root, gen, new_gen, runs, work=work / "ckpt") if ck_root else None
+    from .maint_runs import PhaseHook, from_env, phase
+
+    # a race (`-U`) is a run of its own on /scans (`race`), phased as a compaction's fold is
+    rec = from_env("race") if upload else NULL
+    scan, _ = ar.parse_manifest(manifest.removeprefix("manifests/")) or (None, 0)
+    if scan:
+        rec.start(scan, f"{PREFIX}/{gen}")
+    hook = PhaseHook(rec, "fold", note_s=ar.NOTE_S)
     try:
-        summary = fold_gen(gen_dir, output, work, gen=gen, new_gen=new_gen, runs=runs, threads=threads, mem=mem, chunk_rows=chunk_rows, jobs=jobs,
-                           source=f"gs://{bucket}/{PREFIX}/{gen}" if bucket else None, stage=stage, ck=ck,
-                           fanout=measure_fanout(measure_tasks, gen) if measure_tasks > 1 else None,
-                           anchor_fanout=anchor_fanout(anchor_tasks, gen) if anchor_tasks > 1 else None)
-    finally:
-        if ck is not None:
-            ck.close()
+        if resume_from:
+            seed_checkpoint(resume_from, ck_root, gen, new_gen, runs, through)
+        ck = compact_checkpoint(ck_root, gen, new_gen, runs, work=work / "ckpt") if ck_root else None
+        hook.begin()
+        try:
+            summary = fold_gen(gen_dir, output, work, gen=gen, new_gen=new_gen, runs=runs, threads=threads, mem=mem, chunk_rows=chunk_rows, jobs=jobs,
+                               source=f"gs://{bucket}/{PREFIX}/{gen}" if bucket else None, stage=stage, ck=ck, progress=hook,
+                               fanout=measure_fanout(measure_tasks, gen) if measure_tasks > 1 else None,
+                               anchor_fanout=anchor_fanout(anchor_tasks, gen) if anchor_tasks > 1 else None)
+        except BaseException as e:
+            hook.end(f"failed: {type(e).__name__}: {e}", failed=True)
+            raise
+        finally:
+            if ck is not None:
+                ck.close()
+        hook.end(f"{new_gen}: {summary.get('s', '?')}s")
+    except BaseException as e:
+        rec.finish("failed", f"{type(e).__name__}: {e}")
+        raise
 
     def md5(p: Path) -> str:
         h = hashlib.md5()
@@ -645,10 +699,17 @@ def compact_probe_cmd(anchor_tasks, bucket, chunk_rows, measure_tasks, gen, jobs
     if upload:
         from .blobstore import Store
 
-        dst = Store(upload.rstrip("/"))
-        dst.put_tree(output, "gen")
-        dst.write_text("probe.json", text)
+        try:
+            with phase(rec, "upload") as ph:
+                dst = Store(upload.rstrip("/"))
+                dst.put_tree(output, "gen")
+                dst.write_text("probe.json", text)
+                ph.note = f"{len(rels)} files to {upload.rstrip('/')}/gen/ (`compact --prebuilt`)"
+        except BaseException as e:
+            rec.finish("failed", f"{type(e).__name__}: {e}")
+            raise
         err(f"compact-probe: {len(rels)} files → {upload.rstrip('/')}/gen/, its report last (`compact --prebuilt {upload}`)")
+        rec.finish("succeeded", gen=f"{PREFIX}/{gen} → {new_gen} (race, not published)")
     print(json.dumps({**{k: v for k, v in doc.items() if k != "files"}, "n_files": len(rels)}, indent=1))
 
 
@@ -821,6 +882,7 @@ def deal(weights: dict, n: int) -> list[list]:
 @option("-T", "--tmp", default="/stage/tmp/measure-shard", help="Local work dir")
 @option("-V", "--code", required=True, help="The fold's code version (`checkpoint.code_version`): another refuses")
 @option("-w", "--workers", default=64, type=IntRange(min=1), help="Concurrent downloads and uploads")
+@_task_recorded("measure-shard")
 def measure_shard_cmd(checkpoint, index, mem, threads, plan, tmp, code, workers) -> None:
     """A compaction's drill measurement helper (`static_fanout`, specs/static-measure-fanout.md): task INDEX's share of
     the plan's `q` ranges, each fetched from the fold's saved spills, measured (`static_local.measure_ranges`; only
@@ -886,6 +948,7 @@ def _timed_shard_task(*args) -> tuple[dict, float]:
 @option("-T", "--tmp", default="/stage/tmp/anchor-shard", help="Local work dir")
 @option("-V", "--code", required=True, help="The fold's code version (`checkpoint.code_version`): another refuses")
 @option("-w", "--workers", default=16, type=IntRange(min=1), help="Concurrent downloads")
+@_task_recorded("anchor-shard")
 def anchor_shard_cmd(checkpoint, index, mem, threads, plan, tmp, code, workers) -> None:
     """A compaction's base anchors helper (`static_fanout.AnchorFanout`, specs/static-anchors-fanout.md): task INDEX's
     share of the plan's `(kind, shard)` rollup tasks, each one's input shard fetched from `anchors-in/`, its rollups

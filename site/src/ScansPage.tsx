@@ -21,7 +21,7 @@ import { useStore } from './store'
 import { useMinSlug } from './scan'
 import {
   batchHref, isLost, isMaintenance, liveness, logsHref, maintStore, mapHref, metaHref, type OutputDelta, phaseOrder, type PhaseSpan, type RunSummary, type ScanRun,
-  type ScanRunPhase, type PhaseIssue, type PhaseRecovery, overlappingFailures, phaseFill, phaseOutcome, runOutcome, runOutcomeLine, runTasks, type RunTask, taskLogsHref,
+  type ScanRunPhase, type PhaseIssue, type PhaseRecovery, BEHIND, overlappingFailures, phaseFill, phaseOutcome, runOutcome, runOutcomeLine, runTasks, type RunTask, taskLogsHref,
 } from './scanRunsModel'
 import { colorer, fmtDur, fmtRunTime, getJson, type Links, PhaseBar, QUIET_TIP, runDay, RunWhen, scanRunsApi, scansHref, scansStore, Status, useScanRuns } from './scanRunsUi'
 import { brushRole, dagNodes, processOf, type DagNode, type Hl, type RunDagRow } from './runDag'
@@ -301,7 +301,7 @@ export function ScansPage() {
         </section>
         <div className="run-filters">
           {kinds.length > 1 && <select aria-label="Filter by kind" value={kind} onChange={e => setKind(e.target.value)}><option value="">all kinds</option>{kinds.map(k => <option key={k}>{k}</option>)}</select>}
-          <select aria-label="Filter by status" value={status} onChange={e => setStatus(e.target.value)}><option value="">all statuses</option>{['succeeded', 'partial', 'recovered', 'failed', 'running', 'no-op'].map(s => <option key={s} value={s}>{s}</option>)}</select>
+          <select aria-label="Filter by status" value={status} onChange={e => setStatus(e.target.value)}><option value="">all statuses</option>{['succeeded', 'partial', 'search behind', 'recovered', 'failed', 'running', 'no-op'].map(s => <option key={s} value={s}>{s}</option>)}</select>
           <span className="dim">{shown.length} / {runs.length} runs</span>
           {span
             ? <Tooltip content="The runs that started in the window dragged on the chart. Esc clears it."><button type="button" className="sr-span" onClick={() => setSpan(null)}>{fmtRunTime(span[0])} → {fmtRunTime(span[1])} ✕</button></Tooltip>
@@ -667,7 +667,7 @@ export function ScanRunPage() {
       <p className="sr-crumbs"><Link to={scanHref()}>Scan runs</Link>{prev && <> · <Link to={scanHref(prev.run.run_id)}>‹ {prev.run.scan}</Link></>}{next && <> · <Link to={scanHref(next.run.run_id)}>{next.run.scan} ›</Link></>}</p>
       {q.isLoading ? <p>Loading run…</p> : q.error ? <p className="err">{q.error.message}</p> : d && r && <>
         <h1><code>{r.scan}</code>{(kinds.size > 1 || isMaintenance(r.kind)) && <> <span className="dim"><KindLabel run={r} /></span></>}</h1>
-        {isMaintenance(r.kind) && <p className="sub">{r.kind === 'compact' ? 'A compaction' : 'A merge of deferred carries'} of <code>{r.gen ?? '?'}</code>, its own Batch job; <code>{r.scan}</code> is the newest scan it {r.kind === 'compact' ? 'folds' : 'carries'}{d.siblings.length > 0 && <> (<Link to={scanHref(d.siblings[d.siblings.length - 1].run_id)}>its scan run</Link>)</>}.</p>}
+        {isMaintenance(r.kind) && <p className="sub">{r.kind === 'compact' ? 'A compaction' : r.kind === 'race' ? 'A race of a compaction (built beside it; published only if a compaction adopts it)' : 'A merge of deferred carries'} of <code>{r.gen ?? '?'}</code>, its own Batch job; <code>{r.scan}</code> is the newest scan it {r.kind === 'merge' ? 'carries' : 'folds'}{d.siblings.length > 0 && <> (<Link to={scanHref(d.siblings[d.siblings.length - 1].run_id)}>its scan run</Link>)</>}.</p>}
         <p className="sub">
           <Status run={r} failedAt={d.failed_at} issues={d.phase_issues} lost={liveDetail?.lost} />{liveDetail && <Live live={liveDetail} inline />} · {fmtRunTime(r.started_ts)} → {r.finished_ts ? fmtRunTime(r.finished_ts) : '…'}
           {d.secs != null && <> · {fmtDur(d.secs)}</>}
@@ -679,12 +679,14 @@ export function ScanRunPage() {
           {' · '}<Links run={r} links={d} />
         </p>
         {r.status === 'failed' && <div className="sr-failure"><b>Failed {d.failed_at ? (d.failed_at.startsWith('after') ? d.failed_at : `in ${d.failed_at}`) : ''}</b>{r.error && <div><code>{r.error}</code></div>}</div>}
-        {d.phase_issues?.map(i => i.reason ? <div className={`sr-failure${i.recovery ? ' recovered' : ''}`} key={i.phase}>
+        {d.phase_issues?.map(i => i.outcome === BEHIND ? <div className="sr-failure recovered" key={i.phase}>
+          <b>{i.phase}: search doesn't cover this scan yet.</b> {i.reason}. The data is published; search catches up when the static name index appends this scan.
+        </div> : i.reason ? <div className={`sr-failure${i.recovery ? ' recovered' : ''}`} key={i.phase}>
           <b>{i.phase} {i.reason}</b>{' '}
           {i.recovery ? <>Done by <Link to={scanHref(i.recovery.run_id)}>a subsequent attempt</Link> at {fmtRunTime(i.recovery.finished_ts)}.</> : 'The run is partial until it is done; a later step that depends on it says so instead of failing.'}
         </div> : <div className={`sr-failure${i.recovery ? ' recovered' : ''}`} key={i.phase}>
-          <b>{i.phase}: {i.outcome} in the original attempt.</b>{' '}
-          {i.recovery ? <>Recovered by <Link to={scanHref(i.recovery.run_id)}>a subsequent attempt</Link> at {fmtRunTime(i.recovery.finished_ts)}.</> : 'The Batch job completed, but this phase did not. No successful recovery is recorded.'}
+          <b>{i.phase}: {i.outcome} {i.attempts ?? 1}x.</b>{i.detail && <> {i.detail}.</>}{' '}
+          {i.recovery ? <>Done by <Link to={scanHref(i.recovery.run_id)}>a later attempt</Link> at {fmtRunTime(i.recovery.finished_ts)}.</> : 'The data is published; this phase\'s work is not.'}
         </div>)}
         {r.kind === 'phase-recovery' && r.parent && <p className="sub">Phase recovery for <Link to={scanHref(r.parent)}>the original scan run</Link>. This attempt has its own clock; it does not replace the original timings.</p>}
         <dl className="sr-facts">

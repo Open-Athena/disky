@@ -306,6 +306,28 @@ def test_probe_without_a_recorded_skip_fails_on_a_refusal(tmp_path, env):
         "warn": True, "msg": f"serving probe failed for 2026-10-16T1200: {verdict}", "note": verdict})]
 
 
+def test_a_probe_failing_only_on_the_index_lag_is_search_behind_not_a_failure(tmp_path, env):
+    """Every failed request was the search's `scan-not-indexed` refusal: the phase ends done (no warn), its note
+    `search behind: …` in plain words from `runs lag`; the lag's own alert is `static_lag`'s, once."""
+    lag = {"gen": "g", "scan": "2026-10-16T1200", "newest": "2026-10-15T1200", "behind": ["2026-10-15T1800", "2026-10-16T1200"],
+           "s": 18 * 3600, "lagging": True, "episode": "continue"}
+    env.update(SITE_TOKEN="st", SITE_URL="https://site.example.org")
+    rec = json.dumps({"results": [], "summary": {"passed": 6, "skipped": 0, "failed": 3, "lag": 3, "line": "6 passed, 0 skipped, 3 failed (3 scan-not-indexed: …)"}})
+    c = ctx(tmp_path, env, runner=Runner(tmp_path, stdout={"dt-cloud probe -c": rec, "dt-cloud static-names runs": json.dumps(lag)},
+                                         codes={"dt-cloud probe -c": 1}),
+            options={"list": {"import": True, "bulk_args": ["-a"], "threads": 8}, "digest": {"template": "t", "config": "c.yml"},
+                     "index": {"webdata": ["python", "web.py", "{web}", "{sources}", "-a", "{date}"], "mem": "16GB", "threads": 2},
+                     "static-names": {"profile": "sn.json"}})
+    calls = []
+    c.run.phases = lambda: [{"phase": "static-names", "seq": 0, "status": "done", "note": "overlapped"}]
+    c.run.begin = lambda name: calls.append(("begin", name))
+    c.run.end = lambda name, rc=0, **kw: calls.append(("end", name, rc, kw))
+    S.probe(c, None)
+    assert c.sh_impl.calls == ["dt-cloud probe -c -u https://site.example.org -o <tmp>/data/probes/sub/ -j", "dt-cloud static-names runs lag 2026-10-16T1200"]
+    assert calls == [("begin", "probe"), ("end", "probe", 0, {"note": "search behind: the static name index covers scans through 2026-10-15T1200, "
+                                                                     "2 published scans behind (18.0 h); 3 of 9 probe requests refused as not indexed yet"})]
+
+
 def test_interval_store_without_a_generation(tmp_path, env):
     env["R2_ARCHIVE"] = "r2://x"
     c = ctx(tmp_path, env, runner=Runner(tmp_path, stdout={"dt-cloud interval-store current": "\n"}))
