@@ -58,6 +58,8 @@ def test_probe_join_state_is_bounded_by_the_current_key_batch(tmp_path):
     profile = tmp_path / 'profile.json'
     con.execute("SET enable_profiling='json'")
     con.execute(f'SET profiling_output={an.q(str(profile))}')
+    # an ASOF join over a small, known-size left side (a registered arrow batch) is otherwise planned as a loop join
+    con.execute("SET asof_loop_join_threshold = 0")
     right_rows = []
 
     def joins(node):
@@ -67,6 +69,12 @@ def test_probe_join_state_is_bounded_by_the_current_key_batch(tmp_path):
             yield from joins(child)
 
     class Observed:
+        def register(self, name, table):
+            return con.register(name, table)
+
+        def unregister(self, name):
+            return con.unregister(name)
+
         def execute(self, sql):
             result = con.execute(sql)
             if sql.startswith('INSERT INTO prows'):
@@ -237,6 +245,32 @@ def test_probe_batches_split_where_the_rows_between_keys_pass_the_gap(tmp_path):
     tier = SimpleNamespace(shard_file=lambda mode, key: file)
     assert an.probe_prior_rows(con, [tier], "end") == 1
     assert con.execute("SELECT k, count(*) FROM prows GROUP BY k ORDER BY k").fetchall() == [(k, 100) for k in keys]
+
+
+def test_probe_batches_read_only_the_row_groups_meeting_their_keys(tmp_path):
+    """Keys `k00`..`k99`, 100 rows each, one 100-row group per key (`k50`'s split over two): a batch reads its keys'
+    groups, never those between, up to `max_rows` (a key's groups are never split) and `batch_keys`; keys in no group are
+    dropped."""
+    con = duckdb.connect()
+    con.execute("""CREATE TABLE source AS SELECT printf('k%02d', i // 100) AS s, 3::UTINYINT AS depth, printf('b/a/%04d', i) AS path,
+        NULL::VARCHAR AS usr, TIMESTAMP '2026-10-01' AS vf, TIMESTAMP '2027-01-01' AS vt, 1::BIGINT AS size, 1::BIGINT AS n_files
+        FROM range(10000) AS r(i) ORDER BY s, path""")
+    file = str(tmp_path / "source.parquet")
+    table = con.execute("SELECT * FROM source").to_arrow_table()
+    with pq.ParquetWriter(file, table.schema) as w:
+        for lo, hi in [(i, i + 100) for i in range(0, 5000, 100)] + [(5000, 5050), (5050, 5100)] + [(i, i + 100) for i in range(5100, 10000, 100)]:
+            w.write_table(table.slice(lo, hi - lo))
+    keys = ["k00", "k01", "k03", "k10", "k11", "k50", "k99", "zz"]
+    assert an.key_group_batches(file, keys) == [([0, 1, 3, 10, 11, 50, 51, 100], keys[:-1])]
+    assert an.key_group_batches(file, keys, max_rows=250) == [
+        ([0, 1], ["k00", "k01"]), ([3, 10], ["k03", "k10"]), ([11, 50, 51], ["k11", "k50"]), ([100], ["k99"])]
+    assert an.key_group_batches(file, ["k49", "k50"], max_rows=50) == [([49], ["k49"]), ([50, 51], ["k50"])]
+    assert an.key_group_batches(file, keys, batch_keys=3) == [([0, 1, 3], ["k00", "k01", "k03"]), ([10, 11, 50, 51], ["k10", "k11", "k50"]), ([100], ["k99"])]
+    con.execute("CREATE TABLE near AS SELECT unnest(?) AS k, 'b/a' AS dir", [keys[:-1]])
+    con.execute(f"CREATE TABLE prows({an.AR_COLS})")
+    tier = SimpleNamespace(shard_file=lambda mode, key: file)
+    assert an.probe_prior_rows(con, [tier], "end", batch_keys=3) == 3
+    assert con.execute("SELECT k, count(*) FROM prows GROUP BY k ORDER BY k").fetchall() == [(k, 100) for k in keys[:-1]]
 
 
 @pytest.mark.parametrize("runs", [False, True])

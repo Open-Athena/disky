@@ -278,8 +278,13 @@ AR_COLS = "k VARCHAR, depth UTINYINT, path VARCHAR, usr VARCHAR, vf BIGINT, vt B
 
 def shard_rows_sql(sx_files: list[str], where: str = "true") -> str:
     """A shard set's rows as `AR_COLS` (`k` = `s`; timestamps → epoch seconds)."""
+    return rows_sql(f"({files_sql(sx_files)})", where)
+
+
+def rows_sql(src: str, where: str = "true") -> str:
+    """`shard_rows_sql` over any relation of the shards' columns (`src`: a table name or a parenthesized query)."""
     return f"""SELECT s AS k, depth, path, usr, epoch(vf)::BIGINT AS vf, epoch(vt)::BIGINT AS vt, size, n_files, {PARENT} AS par
-        FROM ({files_sql(sx_files)}) WHERE depth >= 1 AND ({where})"""
+        FROM {src} WHERE depth >= 1 AND ({where})"""
 
 
 def heavy_dirs(con, rows: str, R: int) -> None:
@@ -746,6 +751,10 @@ def _child(path: str, dir_: str) -> str:
 PROBE_BATCH_KEYS = 1 << 16
 #: A probe batch's keys are split where the shard rows between two of them pass this (`key_clusters`).
 PROBE_GAP_ROWS = 1 << 22
+#: Rows of a shard's row groups read per prior-probe batch (`key_group_batches`).
+PROBE_READ_ROWS = 1 << 22
+#: The shard columns a prior probe reads (`rows_sql`'s).
+PROBE_COLS = ["s", "depth", "path", "usr", "vf", "vt", "size", "n_files"]
 
 
 def key_clusters(con, file: str, keys: list[str], gap_rows: int = PROBE_GAP_ROWS, batch_keys: int = PROBE_BATCH_KEYS) -> list[list[str]]:
@@ -774,6 +783,41 @@ def key_clusters(con, file: str, keys: list[str], gap_rows: int = PROBE_GAP_ROWS
     return runs
 
 
+def key_group_batches(file: str, keys: list[str], max_rows: int = PROBE_READ_ROWS,
+                      batch_keys: int = PROBE_BATCH_KEYS) -> list[tuple[list[int] | None, list[str]]]:
+    """`keys` (sorted, all in `file`) in batches of `(row groups, keys)`: each batch's groups are exactly those whose `s`
+    statistics meet one of its keys, at most `max_rows` rows of them (a key's own groups are never split: one past it
+    is its batch alone) and at most `batch_keys` keys. Keys no group meets are dropped. A range read from a batch's
+    first key to its last read every group between: cw's 10-22T1202 `end` probed each run tier's ~300 near keys in one
+    `s` range spanning nearly the whole shard (t1–t18: 308 s of 558). Without `s` statistics, `(None, keys)` batches of
+    `batch_keys` (the whole file read)."""
+    md = pq.ParquetFile(file).metadata
+    si = md.schema.to_arrow_schema().names.index("s")
+    stats = [md.row_group(g).column(si).statistics for g in range(md.num_row_groups)]
+    if not stats or any(st is None or not st.has_min_max for st in stats):
+        return [(None, keys[i:i + batch_keys]) for i in range(0, len(keys), batch_keys)]
+    los, his = [st.min for st in stats], [st.max for st in stats]
+    rows = [md.row_group(g).num_rows for g in range(md.num_row_groups)]
+    batches: list[tuple[list[int], list[str]]] = []
+    n = 0
+    for k in keys:
+        first, last = bisect_left(his, k), bisect_right(los, k) - 1
+        if first > last:
+            continue
+        groups = range(first, last + 1)
+        if batches:
+            gs, ks = batches[-1]
+            new = [g for g in groups if g > gs[-1]]
+            if len(ks) < batch_keys and n + sum(rows[g] for g in new) <= max_rows:
+                gs.extend(new)
+                ks.append(k)
+                n += sum(rows[g] for g in new)
+                continue
+        batches.append((list(groups), [k]))
+        n = sum(rows[g] for g in groups)
+    return batches
+
+
 def probe_prior_rows(
     con,
     prior: list[Tier],
@@ -785,9 +829,9 @@ def probe_prior_rows(
     Disjoint intervals plus an ASOF lookup replace an O(rows × directories) OR predicate. Nested directories
     are merged before the lookup; a row contributes once per tier, even under multiple requested ancestors.
 
-    A batch is a contiguous run of a shard's keys (they're sorted, as its rows are): its keys go into a table
-    (`pkeys`), the shard is read over the batch's `s` range only (row-group pruning), and the ASOF join's right side is
-    just the batch's probe ranges. cw's backlogged 10-20 18:06 scan spent its whole 4 h `anchors` task in 41,767
+    A batch is a run of a shard's keys (they're sorted, as its rows are; `key_group_batches`): its keys go into a table
+    (`pkeys`), only the row groups meeting them are read, and the ASOF join's right side is just the batch's probe
+    ranges. cw's backlogged 10-20 18:06 scan spent its whole 4 h `anchors` task in 41,767
     256-key `IN (…)` queries of ~0.34 s each (`PROBE_BATCH_KEYS` was 256): per-query overhead, not rows.
     """
     if batch_keys <= 0:
@@ -810,15 +854,23 @@ def probe_prior_rows(
             if file := tier.shard_file(mode, key):
                 by_file.setdefault(file, []).append(key)
         for file, file_keys in by_file.items():
-            for selected in key_clusters(con, file, file_keys, batch_keys=batch_keys):
+            for groups, selected in key_group_batches(file, file_keys, batch_keys=batch_keys):
                 values = ", ".join(f"({q(k)})" for k in selected)
                 con.execute(f"CREATE OR REPLACE TABLE pkeys AS SELECT * FROM (VALUES {values}) AS t(k)")
                 where = f"s >= {q(selected[0])} AND s <= {q(selected[-1])}"
-                resource_stage(f"anchors {mode}: prior probes", tier=ti, query=queries + 1, keys=len(selected))
+                if groups is None:
+                    src = f"({files_sql([file])})"
+                else:
+                    con.register("probe_in", pq.ParquetFile(file).read_row_groups(groups, columns=PROBE_COLS))
+                    src = "probe_in"
+                resource_stage(f"anchors {mode}: prior probes", tier=ti, query=queries + 1, keys=len(selected),
+                               groups=None if groups is None else len(groups))
                 con.execute(f"""INSERT INTO prows SELECT x.k, x.depth, x.path, x.usr, x.vf, x.vt, x.size, x.n_files, x.par
-                    FROM ({shard_rows_sql([file], where)}) AS x
+                    FROM ({rows_sql(src, where)}) AS x
                     ASOF JOIN (SELECT * FROM probe_ranges SEMI JOIN pkeys USING (k)) AS p ON x.k = p.k AND x.path >= p.lo
                     WHERE p.hi IS NULL OR x.path < p.hi""")
+                if groups is not None:
+                    con.unregister("probe_in")
                 queries += 1
     con.execute("DROP TABLE IF EXISTS pkeys")
     resource_stage(f"anchors {mode}: prior probes complete", queries=queries, keys=len(keys))
