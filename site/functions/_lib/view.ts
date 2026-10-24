@@ -1945,6 +1945,10 @@ async function rollupRead(env: Env, o: ViewOpts, rollup: Rollup, x: {
     rootAll: x.rootAll, rootAgg: total, kept, aggDepth, foldedOf,
     threshold: T, thrAt, tier: 'rollup', idx: x.idx, truncated: false,
     matches: matched.map(m => m.path).sort(), matched: matched.map(m => ({ path: m.path, b: Math.round(m.b), o: Math.round(m.o) })),
+    // `n`: the rollup's root rows under P over every scan (every version of every owner slice, closed ones too), not
+    // this scan's live match roots; a child answered by its roots (`matchLists`) counts those instead, so a heavy
+    // literal's fleet-root `n` exceeds the sum of its buckets' wherever some bucket is light (gcs 10-24, `checkpoint`:
+    // 191,988 at the root, 185,709 over the six buckets; `.parquet`, every bucket heavy, equal). Definitional, not drift.
     matchCount: { n: rollup.rows ?? matched.length, b: Math.round(total.b), o: Math.round(total.o) },
     rollup: { children: rollup.children, kept: rollup.kept, rows: rollup.rows, ...(rollup.bucketsOnly ? { bucketsOnly: true as const } : {}), ...(rollup.scopedBelow ? { scopedBelow: true as const } : {}) },
     exact, complete, nested: insideDone.size || absent.size ? new Set([...fetched, ...insideDone, ...absent]) : fetched,

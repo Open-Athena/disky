@@ -10,6 +10,8 @@
   or its whole history under a full header (`kind` 0) when an existing child enters or leaves the kept set, or the
   directory just became heavy. A reader walks the tiers newest first and stops after a full header.
 - **Heavy**: `S(c, dir)`, the stored root rows under `dir` summed over the tiers, above R; sticky.
+- **Fresh**: per class canonical (and short literal), the run's roots new to the stack (`<kind>-fresh.parquet`): the fleet
+  root's root rows are the base's plus these, never the runs' stored rows (their close records restate earlier roots).
 """
 from __future__ import annotations
 
@@ -105,10 +107,18 @@ DCOUNT_FRESH = "fresh"
 #: delta` (`DIGESTS_DELTA`); a merged tier's only when every input's has it.
 DIGESTS = "digests-long.parquet"
 DIGESTS_DELTA = "delta"
+#: A run's roots new to the stack per class canonical at the run (long) or literal (short), `<kind>-fresh.parquet`
+#: (`fresh_file`, `FRESH_SCHEMA`, `n > 0` only; `write_fresh`, summed by `merge_fresh`): an existing member's opens, every
+#: root of a new member (`day_rollups`' `fresh`, over the whole member). The fleet root's root rows over base ⊕ runs are
+#: the base's plus these (`TieredDrill.root_rows`, `staticDrill.ts` `Drill.bounded`): a run's stored rows count its close
+#: records too, each a root an earlier tier holds. `meta.json` `fresh: rows` (`FRESH_ROWS`) marks a tier that has them; a
+#: merged tier's only when every input's did.
+FRESH_ROWS = "rows"
 DIGEST_SCHEMA = pa.schema([pa.field("q", pa.string(), nullable=False), pa.field("n", pa.int64(), nullable=False),
                            pa.field("h1", pa.uint64(), nullable=False), pa.field("h2", pa.uint64(), nullable=False)])
 DIGEST_DELTA_SCHEMA = pa.schema([pa.field("q", pa.string(), nullable=False), pa.field("dn", pa.int64(), nullable=False),
                                  pa.field("d1", pa.uint64(), nullable=False), pa.field("d2", pa.uint64(), nullable=False)])
+FRESH_SCHEMA = pa.schema([pa.field("q", pa.string(), nullable=False), pa.field("n", pa.int64(), nullable=False)])
 DCOUNT_SCHEMA = pa.schema([pa.field("q", pa.string(), nullable=False), pa.field("dir", pa.string(), nullable=False),
                            pa.field("rows", pa.int64(), nullable=False)])
 ALIAS_SCHEMA = pa.schema([pa.field("q", pa.string(), nullable=False), pa.field("canonical", pa.string(), nullable=False)])
@@ -382,6 +392,7 @@ class Tier:
         self._aliases: dict[str, str] | None = None
         self._gf: dict[tuple[str, str], CachedGroupFile | None] = {}
         self._sizes: dict[str, int] = {}
+        self._fresh: dict[str, dict[str, int]] = {}
 
     # storage
     def read(self, rel: str) -> bytes:
@@ -454,6 +465,15 @@ class Tier:
     def dcount(self, kind: str) -> str | None:
         rel = f"state/dcount-{kind}.parquet"
         return self.local(rel) if self.exists(rel) else None
+
+    def fresh(self, kind: str) -> dict[str, int] | None:
+        """`kind`'s roots new to the stack per `q` (`fresh_file`), or None: a tier without them (`meta.json` `fresh`)."""
+        if self.meta.get("fresh") != FRESH_ROWS:
+            return None
+        if kind not in self._fresh:
+            t = self.table(fresh_file(kind))
+            self._fresh[kind] = dict(zip(t.column("q").to_pylist(), t.column("n").to_pylist()))
+        return self._fresh[kind]
 
 
 class GcsTier(Tier):
@@ -814,11 +834,17 @@ class TieredDrill:
 
     def root_rows(self, term: str) -> int:
         """`term`'s root rows at the fleet root, every date (`staticDrill.ts` `Drill.bounded`'s `rows` there, the heavy
-        literal's `matchCount.n` with no drilldown): each tier's stored rows under its canonical, summed."""
+        literal's `matchCount.n` with no drilldown): the base's rows under its canonical, plus each run's roots new to the
+        stack (`Tier.fresh`), so exactly the compacted generation's count. A run without them (built before) adds its stored
+        rows, its close records too: an upper bound."""
         t = term.lower()
         n = 0
-        for tier in self.tiers:
+        for i, tier in enumerate(self.tiers):
             c = tier.canon(t, self.kind)
+            fresh = tier.fresh(self.kind) if i else None
+            if fresh is not None:
+                n += fresh.get(c, 0)
+                continue
             gf = tier.group_file(self.kind, "roots")
             n += len(gf.rows_in((c, ""), (c, "\U0010ffff"))) if gf is not None else 0
         return n
@@ -1949,6 +1975,30 @@ def merge_digests(con, tiers: list[Tier], out: Path) -> None:
     pq.write_table(tab.cast(DIGEST_DELTA_SCHEMA), out / DIGESTS, compression=CODEC)
 
 
+def fresh_file(kind: str) -> str:
+    """A tier's roots new to the stack, per `q` (`FRESH_ROWS`)."""
+    return f"{kind}-fresh.parquet"
+
+
+def write_fresh(con, out: Path, kind: str, D: int) -> None:
+    """Tables `dr` (the scan's delta roots per class canonical; a new member's whole history) and `newq` → `out/<kind>-fresh.parquet`
+    (`FRESH_SCHEMA`): per `q`, its rows combined as the stack combines them (one per `(path, usr, vf)`), counting an existing
+    member's opens (`vf = D`; a close record restates a root an earlier tier holds) and every root of a new member."""
+    tab = con.execute(f"""SELECT q, n FROM (SELECT r.q, (count(*) FILTER (WHERE r.vf = {D} OR r.new))::BIGINT AS n FROM (
+            SELECT DISTINCT q, path, usr, vf, q IN (SELECT q FROM newq) AS new FROM dr) AS r GROUP BY r.q) WHERE n > 0 ORDER BY q""").to_arrow_table()
+    pq.write_table(tab.cast(FRESH_SCHEMA), out / fresh_file(kind), compression=CODEC)
+
+
+def merge_fresh(con, tiers: list[Tier], out: Path, kind: str) -> None:
+    """Merged runs' fresh roots → `out/<kind>-fresh.parquet`: each input's re-keyed to the merged `q`s through table `cmap (c,
+    tier, ci)` (`merge_tiers`') and summed. A root is new to the stack in exactly one input (the one that opened it, or whose
+    new member's history holds it), so the sum is the merged tier's."""
+    parts = " UNION ALL ".join(f"""SELECT m.c AS q, x.n FROM read_parquet({q(t.local(fresh_file(kind)))}) AS x
+        JOIN cmap AS m ON m.tier = {i} AND m.ci = x.q""" for i, t in enumerate(tiers))
+    tab = con.execute(f"SELECT q, sum(n)::BIGINT AS n FROM ({parts}) GROUP BY q ORDER BY q").to_arrow_table()
+    pq.write_table(tab.cast(FRESH_SCHEMA), out / fresh_file(kind), compression=CODEC)
+
+
 def write_digests(con, out: Path, table: str = "dgq") -> None:
     """Table `table` `(q, n, h1, h2)` (each long member's absolute root-set digest) → `out/DIGESTS` (`DIGEST_SCHEMA`)."""
     out.mkdir(parents=True, exist_ok=True)
@@ -1967,8 +2017,11 @@ def tier_files(meta: dict) -> list[str]:
 
 
 def kind_files(meta: dict, kind: str) -> list[str]:
-    """One kind's files of a run's `drill/` (the long kind's with the alias map, and its digest changes when marked)."""
+    """One kind's files of a run's `drill/` (the long kind's with the alias map, and its digest changes when marked; its
+    fresh roots when marked)."""
     out = ["aliases.parquet", *([DIGESTS] if meta.get("digests") == DIGESTS_DELTA else [])] if kind == "long" else []
+    if meta.get("fresh") == FRESH_ROWS:
+        out.append(fresh_file(kind))
     for sub in ("roots", "rollups"):
         out += [f"{kind}/{sub}/r{i:04d}.parquet" for i in range(meta[f"{kind}_{sub}"]["files"])]
         out += [f"{kind}-{sub}-index.parquet", f"{kind}-{sub}-index.top.parquet"]
@@ -2025,6 +2078,8 @@ def build_day(con, prior: list[Tier], out: Path, *, D: int, R: int, K: int, floo
                 km["digests"] = DIGESTS_DELTA
             else:
                 log(f"drill long: no digest changes ({why}); a compaction over this run finds its classes from every root")
+        write_fresh(con, out, kind, D)
+        km["fresh"] = FRESH_ROWS
         t = step(f"drill/roots/{kind}", t1, roots=con.execute("SELECT count(*) FROM dr").fetchone()[0])
         con.execute(f"CREATE OR REPLACE TABLE meas AS {meas[kind]}")
         reads = TierReads(prior, kind, threads, cache_bytes)
@@ -2121,7 +2176,8 @@ def merge_tiers(con, tiers: list[Tier], out: Path, tier: dict, file_rows: int = 
     """Runs' drills (oldest first) merged into one tier in `out`: the newest alias map; each input's rows re-keyed to the
     merged canonicals (a class only splits, so its canonical at an input holds the merged canonical's rows there); roots
     combined (smallest `vt`), rollups by the newest-full-header rule (the merged header full if an included input's was),
-    `dcount` summed (heavy directories dropped), the digest changes summed when every input has them (`merge_digests`).
+    `dcount` summed (heavy directories dropped), the digest changes and the fresh roots summed when every input has them
+    (`merge_digests`, `merge_fresh`).
 
     Chunked by merged `q` range, so the working set is `chunk_rows` rows, not the inputs' (gcs's 10-22 L3 carry, 8 runs
     / 78.5 GiB, spilled 1.2 TiB and filled its SSD folding them in one table): every fold is per `q` (roots per
@@ -2143,6 +2199,8 @@ def merge_tiers(con, tiers: list[Tier], out: Path, tier: dict, file_rows: int = 
         meta["dcount"] = DCOUNT_FRESH
     if all(t.meta.get("digests") == DIGESTS_DELTA for t in tiers):
         meta["digests"] = DIGESTS_DELTA
+    if all(t.meta.get("fresh") == FRESH_ROWS for t in tiers):
+        meta["fresh"] = FRESH_ROWS
     resource_stage("merge/aliases")
     con.register("al_last", tiers[-1].alias_table())
     con.execute("CREATE OR REPLACE TABLE cls AS SELECT q, canonical FROM al_last")
@@ -2167,6 +2225,8 @@ def merge_tiers(con, tiers: list[Tier], out: Path, tier: dict, file_rows: int = 
                 con.execute(f"INSERT INTO cmap SELECT q, {i}, q FROM lit")
         if kind == "long" and meta.get("digests") == DIGESTS_DELTA:
             merge_digests(con, tiers, out)
+        if meta.get("fresh") == FRESH_ROWS:
+            merge_fresh(con, tiers, out, kind)
         # each input's rows re-keyed (`cmap`): roots and rollups per merged `q`, then the ranges planned over their counts
         sources = []
         for i, t in enumerate(tiers):
