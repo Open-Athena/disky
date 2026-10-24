@@ -324,9 +324,14 @@ def build_base_anchors(con, gen_dir: Path, *, R: int, K: int, scans: list[str], 
     suffix shards, the `^q$` ones over the name index and the starts-with catalog `anchors/start/` (`build_tier_local`,
     each `meta.json` written last), at the drill's R and K."""
     cint = sorted(str(f) for f in (gen_dir / "cintervals").glob("*.parquet"))
+    t = monotonic()
+    hb.set_stage("anchors/names")
     names = an.write_names(con, an.files_sql(cint, an.VERSION_COLS), gen_dir / an.NAMES, jobs=sn.pool_jobs(con, 1 << 30, an.ANCHOR_THREADS))
+    sn.err(f"anchors/names: {names['rows']:,} rows in {names['shards']} shards in {monotonic() - t:.0f}s")
     tier = an.Tier(gen_dir)
+    t = monotonic()
     doc = an.build_tier_local(con, tier.files("end"), tier.files("exact"), gen_dir / an.ANCHORS, R, K, scans, rule)
+    sn.err(f"anchors/rollups: {', '.join(f'{k} {v['rows']:,} rows' for k, v in doc['sets'].items())} in {monotonic() - t:.0f}s")
     return {"names": {k: names[k] for k in ("rows", "shards")}, **{k: v["rows"] for k, v in doc["sets"].items()}}
 
 

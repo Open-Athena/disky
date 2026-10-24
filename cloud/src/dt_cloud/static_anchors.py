@@ -442,15 +442,24 @@ def _tier_parallel(con, sx_files: list[str], names_files: list[str], out: Path, 
     parts: dict[str, list[str]] = {kind: [""] * len(files) for kind, files in (("end", sx_files), ("exact", names_files), (START, names_files))}
     docs: dict[str, dict] = {}
     work.mkdir(parents=True, exist_ok=True)
+    from concurrent.futures import as_completed
+
+    from .heartbeat import Progress
+
+    # a shard task's progress line as each ends (a compaction's base anchors ran an hour+ without a line)
+    prog = Progress("anchors/rollups", len(tasks), total_bytes=sum(os.path.getsize(t[2]) for t in tasks), unit="shard tasks")
     with ConPool(con, jobs, "anchors") as pool:
-        futs = []
+        futs = {}
         for kind, i, f in sorted(tasks, key=lambda t: -os.path.getsize(t[2])):
             parts[kind][i] = str(work / f"{kind}-{i:05d}.parquet")
-            futs.append((kind, pool.submit(_shard_task, kind, [f], R, K, rule, parts[kind][i], pool.task_threads, pool.mem,
-                                           str(work / "tmp" / f"{kind}-{i:05d}"))))
-        for kind, fut in futs:
+            futs[pool.submit(_shard_task, kind, [f], R, K, rule, parts[kind][i], pool.task_threads, pool.mem,
+                             str(work / "tmp" / f"{kind}-{i:05d}"))] = (kind, f)
+        for fut in as_completed(futs):
+            kind, f = futs[fut]
             d = fut.result()
             docs[kind] = {k: docs.get(kind, {}).get(k, 0) + v for k, v in d.items()}
+            prog.tick(nbytes=os.path.getsize(f))
+    prog.done()
     return parts, docs
 
 
