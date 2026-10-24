@@ -2196,6 +2196,9 @@ class Compactor:
     #: `blobstore.upload_new`'s `tier` over `publish_order`'s keys (None: every file in turn): consecutive keys of one
     #: tier go up together, a key of tier None alone. `compaction.json` always goes up alone, last.
     publish_tier: Callable[[str], object] | None = None
+    #: Whether `fold` takes `source`: the generation's store URL (`store.uri(<prefix>/<gen>)`), to copy what it reads many
+    #: times onto the work disk around `gen_dir` (a bucket mount).
+    source: bool = False
 
 
 #: Files hashed at a time for `compaction.json`'s md5s (hashlib releases the GIL over each 1 MiB block).
@@ -2285,8 +2288,9 @@ def compact_store(store, c: Compactor, gen: str, gen_dir: Path, work: Path, *, p
 
     rec.begin("fold")
     try:
+        src = {"source": store.uri(f"{c.prefix}/{gen}")} if c.source else {}
         summary = {"from": gen, "gen": new, **c.fold(gen_dir, out, work, gen=gen, new_gen=new, runs=runs, threads=threads, mem=mem, jobs=jobs,
-                                                      progress=progress)}
+                                                      progress=progress, **src)}
     except BaseException as e:
         rec.end(cur[0], f"failed: {type(e).__name__}: {e}", failed=True)
         raise
