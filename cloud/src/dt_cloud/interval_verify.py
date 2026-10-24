@@ -488,7 +488,7 @@ def verify_budget(ram: int, cpus: int) -> tuple[int, int]:
 
 
 def verify_task(sampled: list[str], task: int, tasks: int, served: str, scans: dict, out_path: Path, tmp: Path, mount: str | None,
-                runs: list[str] = (), on_summary=None, *, changes: bool = False, covered: set[str] = frozenset()) -> list[dict]:
+                runs: list[str] = (), on_summary=None, *, changes: bool = False, covered: set[str] = frozenset(), share: int = 1) -> list[dict]:
     """This task's share of the `sampled` scan ids (contiguous, so each diff's previous scan is local),
     each scan's per-scan `path` sort copied to local disk first: from `mount`, else through the scans' root (`scans["bucket"]`:
     a URL, a dir, or a bare GCS bucket name), then loaded into a table of a DuckDB database under `tmp` (`Scan`'s `table`;
@@ -496,7 +496,8 @@ def verify_task(sampled: list[str], task: int, tasks: int, served: str, scans: d
     beside the base. `on_summary(summary)` runs as each scan completes (its marker written then: a later scan killed
     mid-task loses only itself). `changes`: `run_date`'s. `covered`: the scans the store's attribution table covers
     (`interval_append.covered_scans`): each one's table is compared with its own `attribution.parquet`, whole
-    (`interval_attribution.attribution_parity`)."""
+    (`interval_attribution.attribution_parity`). `share`: this task's process is one of that many on the machine (its
+    DuckDB budget the machine's split that many ways)."""
     import duckdb
 
     from .blobstore import Store, store_url
@@ -511,7 +512,7 @@ def verify_task(sampled: list[str], task: int, tasks: int, served: str, scans: d
     for f in (db, db.with_name(db.name + ".wal")):
         f.unlink(missing_ok=True)
     con = duckdb.connect(str(db))
-    threads, mem = verify_budget(os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES"), os.cpu_count() or 1)
+    threads, mem = verify_budget(os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES") // share, max(1, (os.cpu_count() or 1) // share))
     con.execute(f"SET threads={threads}; SET memory_limit='{mem >> 20}MB'; SET temp_directory={q(str(tmp / 'spill'))}")
     src = Store(store_url(scans["bucket"]))
     prev = None
@@ -598,10 +599,12 @@ def failure(m: dict) -> str:
     return "; ".join(bad)
 
 
-def verify_scans(store, gen: str, root: str, scans: list[dict], tmp: Path, *, changes: bool = False) -> dict[str, dict]:
+def verify_scans(store, gen: str, root: str, scans: list[dict], tmp: Path, *, changes: bool = False, jobs: int = 1) -> dict[str, dict]:
     """Parity of `scans` (`{id, src, ts, version}`, oldest first; `src` under `root`, a dir or URL) against generation
     `gen` of `store` (a `blobstore.Store`: base + the newest manifest's runs, as the reader serves them), each scan's
-    marker written to `verify/<id>.json` in the generation; returns the markers by scan id."""
+    marker written to `verify/<id>.json` in the generation; returns the markers by scan id. `jobs`: the scans split into
+    that many contiguous shares (`verify_task`'s), each verified in a process of its own with that share of the
+    machine (cw's 10-24T1202 retire verified a backlog's 6 scans one after another: ~7–8 min each)."""
     from .interval_store import PREFIX, download_served, verify_runs
 
     from .append_runner import latest_key
@@ -620,6 +623,34 @@ def verify_scans(store, gen: str, root: str, scans: list[dict], tmp: Path, *, ch
         store.write_text(marker_key(prefix, s["date"]), json.dumps(m) + "\n")
         out[s["date"]] = m
 
-    verify_task([s["id"] for s in scans], 0, 1, str(tmp / "served"), doc, tmp / "verify.jsonl", tmp, None, runs, on_summary=write, changes=changes,
-                covered=covered)
+    ids = [s["id"] for s in scans]
+    jobs = max(1, min(jobs, len(ids)))
+    if jobs == 1:
+        verify_task(ids, 0, 1, str(tmp / "served"), doc, tmp / "verify.jsonl", tmp, None, runs, on_summary=write, changes=changes,
+                    covered=covered)
+        return out
+    from concurrent.futures import ProcessPoolExecutor
+    from multiprocessing import get_context
+
+    with ProcessPoolExecutor(jobs, mp_context=get_context("spawn")) as ex:
+        parts = [ex.submit(_verify_part, store.root, prefix, gen, ids, i, jobs, str(tmp / "served"), doc, str(tmp / f"part{i}"), runs, changes, covered)
+                 for i in range(jobs)]
+        for f in parts:
+            out |= f.result()
+    return out
+
+
+def _verify_part(root: str, prefix: str, gen: str, ids: list[str], i: int, jobs: int, served: str, doc: dict, tmp: str, runs: list[str],
+                 changes: bool, covered: set[str]) -> dict[str, dict]:
+    """`verify_scans`' share `i` of `jobs`, in a process of its own: its scans' markers written and returned."""
+    from .blobstore import Store
+
+    store, part, out = Store(root), Path(tmp), {}
+
+    def write(s: dict) -> None:
+        m = marker(s, gen)
+        store.write_text(marker_key(prefix, s["date"]), json.dumps(m) + "\n")
+        out[s["date"]] = m
+
+    verify_task(ids, i, jobs, served, doc, part / "verify.jsonl", part, None, runs, on_summary=write, changes=changes, covered=covered, share=jobs)
     return out
