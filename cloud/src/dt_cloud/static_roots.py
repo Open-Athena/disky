@@ -950,6 +950,12 @@ def alias_plan_cmd(bucket, gen) -> None:
         out = Path(d) / "aliases.parquet"
         con.execute(f"COPY (SELECT * FROM a ORDER BY q) TO {q(str(out))} (FORMAT parquet, COMPRESSION zstd)")
         client.bucket(bucket).blob(f"{prefix}/{DRILL}/aliases.parquet").upload_from_filename(str(out))
+        # every member's digest, as the one-machine build writes it (`static_drill.write_digests`: a compaction's classes)
+        from .static_drill import DIGESTS, write_digests
+
+        con.execute(f"CREATE TABLE dgq AS SELECT g.q, g.n, g.h1, g.h2 FROM read_parquet({q(d + '/s*.parquet')}) AS g SEMI JOIN a USING (q)")
+        write_digests(con, Path(d) / "dg")
+        client.bucket(bucket).blob(f"{prefix}/{DRILL}/{DIGESTS}").upload_from_filename(str(Path(d) / "dg" / DIGESTS))
         summary = dict(zip(("members", "canonical", "rows", "canonical_rows"), con.execute(
             "SELECT count(*), count(*) FILTER (WHERE q = canonical), sum(n), sum(n) FILTER (WHERE q = canonical) FROM a").fetchone()))
     summary = {"gen": gen, **{k: int(v) for k, v in summary.items()}}

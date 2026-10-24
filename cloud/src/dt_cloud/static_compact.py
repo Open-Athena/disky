@@ -18,7 +18,9 @@ How each part folds (the build's own code wherever a part is a function of other
 - `drill/` and `roots-measure/` (`fold_drill`): roots are read, not recomputed from the suffix shards. Each member's
   root set through the last scan is `G`'s rows of its class there ∪ each run's rows of its class there (combined: the
   smallest `vt` per `(path, usr, vf)`); members with equal sets (digest as the build's: count and two hash sums) alias
-  to the least; then the build's own measurement, rollups and writer (`static_local.finish_drill`).
+  to the least; then the build's own measurement, rollups and writer (`static_local.finish_drill`). The digests come
+  from the base's (`drill/digests-long.parquet`) plus the runs' changes (`member_digests`), not from the roots, when
+  every tier has them (`digests_blocker`); the new generation writes its members' for the next compaction.
 - `names/`, `anchors/` (when `G` has `anchors/meta.json`): the build's base builders over `G'` (`build_base_anchors`).
 - `manifests/<last scan>.json` (no runs), and `compaction.json` (the orchestrator's completion record).
 """
@@ -258,6 +260,12 @@ def fold_drill(con, tiers: list[sd.Tier], out: Path, work: Path, *, R: int, K: i
     (`static_local.build_base_drill`); then `static_local.finish_drill` over the canonical members' roots and the short
     literals'.
 
+    The classes: each member's digest is the base's plus every run's change to its class there (`member_digests`,
+    specs/static-incremental-compaction.md step 3) when the base has its members' digests and every run its classes'
+    changes (`digests_blocker`); each chunk then only checks each tuple's count against the roots it combined, taking
+    the digest from those roots where they differ (logged; the result's `fixed`: the members whose digests were). Else
+    every chunk digests its roots. `log` says which, and the result's `classes` (`digests` | `roots`).
+
     `meas`: `G`'s `roots-measure/`. When every run counts only new roots (`static_measure.blocker` finds nothing in the
     way), `finish_drill` only sorts each range's roots and takes the measurement and rollups from base ⊕ runs
     (specs/static-incremental-compaction.md, step 4); else it measures and rolls up every root. `log` says which, and
@@ -278,7 +286,7 @@ def fold_drill(con, tiers: list[sd.Tier], out: Path, work: Path, *, R: int, K: i
     `con` (one DuckDB database: its `threads` and `memory_limit` shared, not multiplied), each writing its own files
     (gcs's 10-23 compaction ran its 4,881 chunks one after another at ~9 of 48 cores). It never changes the bytes.
 
-    `ck`: saved after the long roots (`long-roots`: their digests and files) and after every root is spilled (`spilled`:
+    `ck`: saved after the long roots (`long-roots`: the tuples' digests and the chunks' roots) and after every root is spilled (`spilled`:
     the classes and the spills), so a resubmitted job resumes past the last one saved.
 
     `staged()`: the tiers' roots copied onto the work disk (`stage_roots`; `fold_gen` starts the copy early, this waits
@@ -294,23 +302,24 @@ def fold_drill(con, tiers: list[sd.Tier], out: Path, work: Path, *, R: int, K: i
             t = step("drill/fold/stage", t, files=st.doc["files"], bytes=st.doc["bytes"])
         saving: Future | None = None
         if ck is not None and ck.done("long-roots"):
-            _restore(con, ck, "long-roots", work)
+            cdoc = _restore(con, ck, "long-roots", work)
         else:
-            t = _long_roots(con, tiers, out, work, chunk_rows=chunk_rows, jobs=jobs, step=step, log=log, t=t, st=st)
+            t, cdoc = _long_roots(con, tiers, out, work, chunk_rows=chunk_rows, jobs=jobs, step=step, log=log, t=t, st=st)
             if ck is not None:
                 # the tables now (they're read off `con`); the chunks' roots upload while the classes are found and the
                 # canonical roots spilled from them (c001: the fold waited 16 min on this save), until they're dropped
                 ck.save(con, "long-roots-tables", ("dmem", "mtid", "tdig"))
                 ex = ThreadPoolExecutor(1)
-                saving = ex.submit(ck.save_files, "long-roots", work, _files(work, "troots"))
+                saving = ex.submit(ck.save_files, "long-roots", work, _files(work, "troots"), cdoc)
                 ex.shutdown(wait=False)
         if st is not None:
             st.drop("long")
         t, groups = _spill_roots(con, tiers, work, chunk_rows=chunk_rows, jobs=jobs, step=step, log=log, t=t, st=st,
                                  before_drop=saving.result if saving is not None else lambda: None)
+        groups = {**groups, **cdoc}
         if st is not None:
             st.drop("short")
-        _save(con, ck, "spilled", work, tables=("al",), subs=("long", "short"), doc=groups)
+        _save(con, ck, "spilled", work, tables=("al", "dgq"), subs=("long", "short"), doc=groups)
     if ck is not None:
         # the spills hold every long root again: the chunks' roots are no longer needed to resume (an attempt stopped
         # right after saving the spills left them)
@@ -324,7 +333,7 @@ def fold_drill(con, tiers: list[sd.Tier], out: Path, work: Path, *, R: int, K: i
     done = sl.finish_drill(con, out, work, aliases=aliases, long_groups=groups["long"], short_groups=groups["short"], R=R, K=K, floor=floor,
                            step=step, t=t, fanout=fan, incremental=(tiers, meas) if why is None else None)
     return {"members": aliases.num_rows, "canonical": len(set(aliases.column("canonical").to_pylist())), "groups": done["groups"],
-            "measure": "roots" if why else "incremental"}
+            "measure": "roots" if why else "incremental", "classes": groups["classes"], "fixed": groups["fixed"]}
 
 
 def _roots_files(tr: sd.Tier, kind: str, st: Staged | None) -> list[str]:
@@ -355,34 +364,96 @@ def _restore(con, ck: Checkpoint, step: str, work: Path) -> dict | None:
     return ck.load_files(step, work)
 
 
-def _long_roots(con, tiers: list[sd.Tier], out: Path, work: Path, *, chunk_rows: int, jobs: int, step, log: Callable[[str], None], t: float,
-                st: Staged | None = None) -> float:
-    """`fold_drill`'s plan, runs' spill and long roots: tables `dmem`, `mtid (q, tid)`, `tdig` (each tuple's digest) and
-    `work/troots/c<chunk>.parquet` (each chunk's combined roots). `st`: the roots' local copies."""
-    n = len(tiers)
-    con.execute(f"CREATE OR REPLACE TABLE dmem AS SELECT q FROM read_parquet({q(str(out / 'catalog' / 'members.parquet'))})")
+def member_classes(con, tiers: list[sd.Tier], members: str) -> None:
+    """Tables `dmem (q)` (the members of parquet `members`), `ta<i> (q, canonical)` (tier `i`'s class map) and `mt (q,
+    c0, …)`: each member's canonical in every tier (NULL where the tier doesn't know it, so holds none of its rows)."""
+    con.execute(f"CREATE OR REPLACE TABLE dmem AS SELECT q FROM read_parquet({q(members)})")
     for i, tr in enumerate(tiers):
         con.register(f"al_in{i}", tr.alias_table())
         con.execute(f"CREATE OR REPLACE TABLE ta{i} AS SELECT q, canonical FROM al_in{i}")
         con.unregister(f"al_in{i}")
-    cs = ", ".join(f"ta{i}.canonical AS c{i}" for i in range(n))
-    joins = " ".join(f"LEFT JOIN ta{i} USING (q)" for i in range(n))
-    # a member's tuple of classes, one per tier: members with equal tuples hold equal rows
+    cs = ", ".join(f"ta{i}.canonical AS c{i}" for i in range(len(tiers)))
+    joins = " ".join(f"LEFT JOIN ta{i} USING (q)" for i in range(len(tiers)))
     con.execute(f"CREATE OR REPLACE TABLE mt AS SELECT m.q, {cs} FROM dmem AS m {joins}")
+
+
+def digests_blocker(tiers: list[sd.Tier]) -> str | None:
+    """Why a compaction over `tiers` (the base's drill, then the runs') can't take its classes from the persisted digests
+    (`member_digests`), or None: a base without its members' digests (`static_drill.DIGESTS`: one built before them), or
+    runs without their classes' changes (`meta.json` `digests: delta`: built before them, or a change `day_digests`
+    couldn't place)."""
+    if not tiers[0].exists(sd.DIGESTS):
+        return f"a base without {sd.DIGESTS}"
+    if stale := [t.name for t in tiers[1:] if t.meta.get("digests") != sd.DIGESTS_DELTA]:
+        return f"runs without `digests: {sd.DIGESTS_DELTA}`: {', '.join(stale)}"
+    return None
+
+
+def member_digests(con, tiers: list[sd.Tier], into: str) -> None:
+    """Table `into (q, n, h1, h2)`: each member's root-set digest through the last tier, from table `mt` (`member_classes`)
+    and the tiers' digests (`digests_blocker` finds none missing): the base's (absolute, per member; 0 for a member it
+    doesn't know) plus each run's change to the member's class there (`mt`'s canonical; none where the run doesn't know
+    it), the hash sums mod 2⁶⁴ as the digest pass's `% 2⁶⁴`. A tier's class holds equal roots for all its members, so a
+    class's change is each member's."""
+    n = len(tiers)
+    xs = " ".join(f"LEFT JOIN read_parquet({q(tiers[i].local(sd.DIGESTS))}) AS x{i} ON x{i}.q = mt.c{i}" for i in range(1, n))
+
+    def total(b: str, d: str) -> str:
+        return " + ".join([f"coalesce(b.{b}, 0)::HUGEINT", *(f"coalesce(x{i}.{d}, 0)" for i in range(1, n))])
+    con.execute(f"""CREATE OR REPLACE TABLE {into} AS SELECT mt.q, ({total('n', 'dn')})::BIGINT AS n, (({total('h1', 'd1')}) % {U64})::UBIGINT AS h1,
+            (({total('h2', 'd2')}) % {U64})::UBIGINT AS h2
+        FROM mt LEFT JOIN read_parquet({q(tiers[0].local(sd.DIGESTS))}) AS b ON b.q = mt.q {xs}""")
+
+
+def _tuple_digests(con, tiers: list[sd.Tier]) -> str | None:
+    """Table `tdig (tid, n, h1, h2)` from the persisted digests (`member_digests` over `mt`, per tuple of `mtid`; a tuple
+    with no roots left out), or (nothing made) why not: `digests_blocker`'s reason, or members of one tuple whose digests
+    differ (their classes are equal in every tier, so their digests can't but for a wrong input)."""
+    if (why := digests_blocker(tiers)) is not None:
+        return why
+    member_digests(con, tiers, "mdig")
+    split = con.execute("""SELECT count(*) FROM (SELECT tid FROM mdig JOIN mtid USING (q) GROUP BY tid
+        HAVING count(DISTINCT n) > 1 OR count(DISTINCT h1) > 1 OR count(DISTINCT h2) > 1)""").fetchone()[0]
+    if not split:
+        con.execute("""CREATE OR REPLACE TABLE tdig AS SELECT tid, min(n)::BIGINT AS n, min(h1)::UBIGINT AS h1, min(h2)::UBIGINT AS h2
+            FROM mdig JOIN mtid USING (q) GROUP BY tid HAVING min(n) > 0""")
+    con.execute("DROP TABLE mdig")
+    return f"the digests differ within {split:,} tuples of equal classes" if split else None
+
+
+#: No roots: a chunk's combined rows when no tier has any there (`_long_roots`).
+NO_ROOTS = ("SELECT NULL::BIGINT AS tid, NULL::VARCHAR AS path, NULL::VARCHAR AS usr, NULL::BIGINT AS vf, NULL::BIGINT AS vt, "
+            "NULL::BIGINT AS size, NULL::BIGINT AS n_files WHERE false")
+
+
+def _long_roots(con, tiers: list[sd.Tier], out: Path, work: Path, *, chunk_rows: int, jobs: int, step, log: Callable[[str], None], t: float,
+                st: Staged | None = None) -> tuple[float, dict]:
+    """`fold_drill`'s plan, runs' spill and long roots: tables `dmem`, `mtid (q, tid)`, `tdig` (each tuple's digest) and
+    `work/troots/c<chunk>.parquet` (each chunk's combined roots). `st`: the roots' local copies. The digests come from the
+    tiers' (`_tuple_digests`), each tuple's count checked against its combined roots (a tuple whose count differs takes
+    its digest from them, logged), or else from the roots. Returns the time and `{classes: digests | roots, fixed:
+    members whose digests their roots corrected}`."""
+    n = len(tiers)
+    member_classes(con, tiers, str(out / "catalog" / "members.parquet"))
+    # a member's tuple of classes, one per tier: members with equal tuples hold equal rows
     con.execute(f"""CREATE OR REPLACE TABLE tup AS SELECT row_number() OVER (ORDER BY {', '.join(f'c{i} NULLS FIRST' for i in range(n))}) AS tid, *
         FROM (SELECT DISTINCT {', '.join(f'c{i}' for i in range(n))} FROM mt)""")
     on = " AND ".join(f"t.c{i} IS NOT DISTINCT FROM mt.c{i}" for i in range(n))
     con.execute(f"CREATE OR REPLACE TABLE mtid AS SELECT mt.q, t.tid FROM mt JOIN tup AS t ON {on}")
+    why = _tuple_digests(con, tiers)
+    derived = why is None
+    log("drill classes: " + ("from the digests (the base's ⊕ the runs' changes; each tuple's count checked against its roots)" if derived
+                             else f"every root's digest ({why})"))
     long_files = [_roots_files(tr, "long", st) for tr in tiers]
     # each tier's rows per class, estimated from its roots index (`static_roots.index_estimates`): chunk sizes only
     for i, tr in enumerate(tiers):
         sr.index_estimates(con, [tr.local("long-roots-index.parquet")] if long_files[i] else [], f"SELECT canonical AS q FROM ta{i}", f"tc{i}")
     est = " + ".join(f"coalesce(tc{i}.n, 0)" for i in range(n))
     cjoin = " ".join(f"LEFT JOIN tc{i} ON tc{i}.q = t.c{i}" for i in range(n))
-    con.execute(f"""CREATE OR REPLACE TABLE tch AS SELECT tid, (dense_rank() OVER (ORDER BY ch) - 1)::BIGINT AS ch FROM (
-        SELECT tid, ((sum(est) OVER (ORDER BY tid ROWS UNBOUNDED PRECEDING) - est) // {chunk_rows})::BIGINT AS ch
+    con.execute(f"""CREATE OR REPLACE TABLE tch AS SELECT tid, est, (dense_rank() OVER (ORDER BY ch) - 1)::BIGINT AS ch FROM (
+        SELECT tid, est, ((sum(est) OVER (ORDER BY tid ROWS UNBOUNDED PRECEDING) - est) // {chunk_rows})::BIGINT AS ch
         FROM (SELECT t.tid, {est} AS est FROM tup AS t {cjoin}))""")
-    chunks = con.execute("""SELECT ch, min(tid), max(tid), min(t.c0), max(t.c0) FROM tch JOIN tup AS t USING (tid)
+    chunks = con.execute("""SELECT ch, min(tid), max(tid), min(t.c0), max(t.c0), sum(est)::BIGINT FROM tch JOIN tup AS t USING (tid)
         GROUP BY ch ORDER BY ch""").fetchall()
     t = step("drill/fold/plan", t, tuples=sl.count(con, "tup"), chunks=len(chunks))
     runs = sr.ChunkSpill(con, work / "runs", len(chunks))
@@ -404,11 +475,13 @@ def _long_roots(con, tiers: list[sd.Tier], out: Path, work: Path, *, chunk_rows:
     troots = work / "troots"
     troots.mkdir()
     prog = sn.Progress("drill/fold/long-roots", len(chunks), log)
+    split: list[int] = []  # the heavy chunks' combine parts
     spilled: dict[int, list[Path]] = {}
 
-    def chunk(cur, c: tuple) -> tuple[int, pa.Table | None]:
-        """Chunk `c`'s combined roots → `troots/c<ch>.parquet`; its rows and its tuples' digests (by `tid`)."""
-        ch, a, b, lo, hi = c
+    def chunk(cur, c: tuple) -> tuple[int, object]:
+        """Chunk `c`'s combined roots → `troots/c<ch>.parquet`; its rows and its tuples' digests (by `tid`), or (`derived`)
+        the tuples whose rows aren't `tdig`'s count, with their digests from the rows (None: every count holds)."""
+        ch, a, b, lo, hi, est = c
         parts = []
         base = overlapping(spans, lo, hi) if lo is not None else []
         if base:
@@ -418,19 +491,47 @@ def _long_roots(con, tiers: list[sd.Tier], out: Path, work: Path, *, chunk_rows:
             parts.append(f"""SELECT tid, path, usr, vf, vt, size, n_files
                 FROM read_parquet([{', '.join(q(str(f)) for f in spilled[ch])}], hive_partitioning = false)""")
         if not parts:
-            return 0, None
-        cur.execute(f"""CREATE OR REPLACE TEMP TABLE ct AS SELECT tid, path, usr, vf, min(vt) AS vt, any_value(size) AS size,
-            any_value(n_files) AS n_files FROM ({' UNION ALL '.join(parts)}) GROUP BY tid, path, usr, vf""")
-        dig = cur.execute(f"""SELECT tid, count(*)::BIGINT AS n, (sum({ROW_HASH}) % {U64})::UBIGINT AS h1,
-            (sum(hash({ROW_HASH}, 'x')) % {U64})::UBIGINT AS h2 FROM ct GROUP BY tid ORDER BY tid""").to_arrow_table()
+            if not derived:
+                return 0, None
+            parts.append(NO_ROOTS)  # `tdig`'s counts here are checked all the same
+        combine = f"""SELECT tid, path, usr, vf, min(vt) AS vt, any_value(size) AS size, any_value(n_files) AS n_files
+            FROM ({' UNION ALL '.join(parts)}) {{}} GROUP BY tid, path, usr, vf"""
+        # a heavy chunk (one class can hold 440M roots: c001's tail OOM'd at a 186 GiB limit) combines in parts by
+        # `hash(path)`: its groups lie in one part each, so the parts' files hold the same rows; `ct` reads them back
+        k = max(1, -(-int(est or 0) // COMBINE_PART_ROWS))
+        if k > 1:
+            split.append(k)
+        if k == 1:
+            cur.execute(f"CREATE OR REPLACE TEMP TABLE ct AS {combine.format('')}")
+        else:
+            files = [troots / f"c{ch:06d}-p{i:03d}.parquet" for i in range(k)]
+            for i, f in enumerate(files):
+                cur.execute(f"COPY ({combine.format(f'WHERE hash(path) % {k} = {i}')}) TO {q(str(f))} (FORMAT parquet, COMPRESSION zstd)")
+            cur.execute(f"CREATE OR REPLACE TEMP VIEW ct AS SELECT * FROM read_parquet([{', '.join(q(str(f)) for f in files)}])")
+        dig_sql = f"""SELECT tid, count(*)::BIGINT AS n, (sum({ROW_HASH}) % {U64})::UBIGINT AS h1,
+            (sum(hash({ROW_HASH}, 'x')) % {U64})::UBIGINT AS h2 FROM ct {{}} GROUP BY tid ORDER BY tid"""
+        if derived:
+            cur.execute(f"""CREATE OR REPLACE TEMP TABLE cbad AS SELECT tid FROM (SELECT tid, count(*)::BIGINT AS n FROM ct GROUP BY tid) AS r
+                FULL JOIN (SELECT tid, n FROM tdig WHERE tid BETWEEN {a} AND {b}) AS d USING (tid) WHERE r.n IS DISTINCT FROM d.n""")
+            bad = [x for (x,) in cur.execute("SELECT tid FROM cbad ORDER BY tid").fetchall()]
+            dig = (bad, cur.execute(dig_sql.format("SEMI JOIN cbad USING (tid)")).to_arrow_table()) if bad else None
+            cur.execute("DROP TABLE cbad")
+        else:
+            dig = cur.execute(dig_sql.format("")).to_arrow_table()
         rows = sl.count(cur, "ct")
+        if k > 1:
+            cur.execute("DROP VIEW ct")
+            for f in files:
+                if not pq.ParquetFile(f).metadata.num_rows:
+                    f.unlink()
+            return rows, dig
         if rows:
             cur.execute(f"COPY ct TO {q(str(troots / f'c{ch:06d}.parquet'))} (FORMAT parquet, COMPRESSION zstd)")
         cur.execute("DROP TABLE ct")
         return rows, dig
 
     # the chunks run `jobs` at a time, whole runs' spill partitions at once (each split by chunk first, removed after)
-    digs: list[pa.Table] = []
+    digs: list = []  # digest tables, or (`derived`) each corrected chunk's `(tids, digest table)`
     for parts in _part_batches(runs, jobs):
         for p in parts:
             spilled.update(runs.prepare(p))
@@ -439,12 +540,29 @@ def _long_roots(con, tiers: list[sd.Tier], out: Path, work: Path, *, chunk_rows:
             runs.release(p)
         spilled.clear()
     runs.close()
-    con.execute("CREATE OR REPLACE TABLE tdig (tid BIGINT, n BIGINT, h1 UBIGINT, h2 UBIGINT)")
+    fixed = 0
+    if not derived:
+        con.execute("CREATE OR REPLACE TABLE tdig (tid BIGINT, n BIGINT, h1 UBIGINT, h2 UBIGINT)")
+    elif digs:
+        # tuples whose roots aren't their digests' count (a run's change that wasn't exact): their digests from the roots
+        bad = [x for b, _ in digs for x in b]
+        con.register("fix_bad", pa.table({"tid": pa.array(bad, pa.int64())}))
+        fixed = con.execute("SELECT count(*) FROM mtid SEMI JOIN fix_bad USING (tid)").fetchone()[0]
+        log(f"drill classes: {len(bad):,} tuples ({fixed:,} members) whose roots aren't their digests' count; their digests taken from their roots")
+        con.execute("DELETE FROM tdig WHERE tid IN (SELECT tid FROM fix_bad)")
+        con.unregister("fix_bad")
+        digs = [d for _, d in digs]
     if digs:
         con.register("tdig_in", pa.concat_tables(digs))
         con.execute("INSERT INTO tdig SELECT tid, n, h1, h2 FROM tdig_in")
         con.unregister("tdig_in")
-    return step("drill/fold/long-roots", t, tuples=sl.count(con, "tup"), rows=prog.rows, chunks=len(chunks))
+    return (step("drill/fold/long-roots", t, tuples=sl.count(con, "tup"), rows=prog.rows, chunks=len(chunks), split=len(split)),
+            {"classes": "digests" if derived else "roots", "fixed": fixed})
+
+
+#: Estimated root rows per part of a long-roots chunk's combine (`_long_roots`' `chunk`): a chunk past it (one heavy
+#: class is one chunk) combines in parts by `hash(path)`, so its hash table is a part's.
+COMBINE_PART_ROWS = 1 << 26
 
 
 def _part_batches(spill: sr.ChunkSpill, jobs: int) -> list[list[int]]:
@@ -928,8 +1046,9 @@ def compactor(chunk_rows: int = sl.CHUNK_ROWS, checkpoint: str | None = None, st
                         prune=False, md5s=True, keep=reads, publish_tier=sl.publish_tier, source=True)
 
 
-#: What the fold never reads of the base: the anchored search and the measurement (rebuilt), the parity markers.
-UNREAD = (f"{an.NAMES}/", "roots-measure/", "verify/")
+#: What the fold never reads of the base: the anchored search (rebuilt), the parity markers. (Its measurement,
+#: `roots-measure/`, is read: an incremental compaction's `static_measure` starts from it.)
+UNREAD = (f"{an.NAMES}/", "verify/")
 
 
 def reads(rel: str) -> bool:
