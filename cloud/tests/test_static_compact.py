@@ -580,3 +580,71 @@ def test_ranges_never_measured_fail_the_fold_by_name(world, tmp_path):
     with pytest.raises(RuntimeError, match=r"^measure fan-out: (long|short) ranges \[[0-9, ]+\] unmeasured after 2 helper jobs$"):
         _fanned_fold(world, tmp_path, _helpers(tmp_path, calls, skip=lambda attempt, i: True), retries=1)
     assert [p for p, _ in calls] == ["measured/plan-1.json", "measured/plan-2.json"]
+
+
+def _stopped_fold(world, tmp_path, stop: str = "fold/spilled") -> tuple[Path, list[dict], str]:
+    """C's fold checkpointed under `tmp_path/scratch`, stopped right after saving `stop`; its source dir, runs, root."""
+    gen_dir = world["c_store"] / "g"
+    _, runs = ar.newest_runs(gen_dir)
+    root = str(tmp_path / "scratch")
+
+    def on_save(name: str) -> None:
+        if name == stop:
+            raise _Stop(name)
+
+    ck = sk.compact_checkpoint(root, "g", "g.c001", runs, on_save=on_save, work=tmp_path / "ck0")
+    with pytest.raises(_Stop), _small_groups():
+        sk.fold_gen(gen_dir, tmp_path / "out0", tmp_path / "w0", gen="g", new_gen="g.c001", runs=runs, threads=2, mem="1GB", chunk_rows=3, ck=ck)
+    ck.close()
+    return gen_dir, runs, root
+
+
+def test_a_race_resumes_another_codes_saved_steps_into_its_own_checkpoint(world, tmp_path, monkeypatch):
+    """C's fold stopped after `fold/spilled` by "other code" (its `code.json` says so: a resume there would clear it);
+    `compact-probe -R <its root> -t fold/spilled -K <race root>`: the steps through `fold/spilled` seeded into the race's
+    root and claimed for this code (the intervals not folded again), the rest folded: `g.c001`'s files, md5 for md5; the
+    source checkpoint untouched."""
+    from dt_cloud import static_merge as sm
+
+    gen_dir, runs, root = _stopped_fold(world, tmp_path)
+    prefix = sk.checkpoint_prefix("g", "g.c001", runs)
+    (tmp_path / "scratch" / prefix / "code.json").write_text(json.dumps({"code": "older"}) + "\n")
+    before = _md5s(tmp_path / "scratch")
+    monkeypatch.setattr(sk, "fold_ranges", lambda *a, **k: (_ for _ in ()).throw(AssertionError("the intervals were folded again")))
+    with _small_groups():
+        res = CliRunner().invoke(sm.cli, ["compact-probe", "-m", str(world["c_store"].parent), "-g", "g", "-o", str(tmp_path / "out"), "-T", str(tmp_path / "w"),
+                                          "-c", "3", "-M", "1GB", "-p", "2", "-R", root, "-t", "fold/spilled", "-K", str(tmp_path / "race")],
+                                 catch_exceptions=False)
+    assert res.exit_code == 0, res.output
+    assert {k: v for k, v in _md5s(tmp_path / "out").items() if not k.startswith(OWN)} == _md5s(world["c_store"] / "g.c001")
+    assert _md5s(tmp_path / "scratch") == before
+    from dt_cloud.checkpoint import code_version
+
+    assert json.loads((tmp_path / "race" / prefix / "code.json").read_text()) == {"code": code_version()}
+
+
+def test_a_prebuilt_fold_is_published_as_the_compaction(world, tmp_path):
+    """`compact-probe -U URL` of C's base and runs, then a compaction of a copy of C's store with its own successor
+    removed, adopting it (`compactor(prebuilt=URL)`): `g.c001` published, md5 for md5 C's; a report for other runs is
+    refused."""
+    from dt_cloud import static_merge as sm
+    from dt_cloud.blobstore import Store
+
+    with _small_groups():
+        res = CliRunner().invoke(sm.cli, ["compact-probe", "-m", str(world["c_store"].parent), "-g", "g", "-o", str(tmp_path / "out"), "-T", str(tmp_path / "w"),
+                                          "-c", "3", "-M", "1GB", "-p", "2", "-U", str(tmp_path / "race")], catch_exceptions=False)
+    assert res.exit_code == 0, res.output
+    store = tmp_path / "store"
+    shutil.copytree(world["c_store"].parent, store)
+    shutil.rmtree(store / sn.PREFIX / "g.c001")
+    for f in (store / sn.PREFIX / "g" / ar.SUCCESSOR, store / sn.PREFIX / ar.CURRENT):
+        f.unlink(missing_ok=True)
+    doc = ar.run_compaction(Store(str(store)), sk.compactor(prebuilt=str(tmp_path / "race")), "g", store, tmp_path / "wp", policy=1, force=True)
+    assert (doc["compact"]["gen"], doc["compact"]["prebuilt"]) == ("g.c001", str(tmp_path / "race"))
+    assert _md5s(store / sn.PREFIX / "g.c001") == _md5s(world["c_store"] / "g.c001")
+    report = json.loads((tmp_path / "race" / "probe.json").read_text())
+    (tmp_path / "race" / "probe.json").write_text(json.dumps({**report, "runs": report["runs"][:-1]}))
+    shutil.rmtree(store / sn.PREFIX / "g.c001")
+    (store / sn.PREFIX / "g" / ar.SUCCESSOR).unlink()
+    with pytest.raises(SystemExit, match=r"folds g → g\.c001 over"):
+        ar.run_compaction(Store(str(store)), sk.compactor(prebuilt=str(tmp_path / "race")), "g", store, tmp_path / "wp2", policy=1, force=True)
