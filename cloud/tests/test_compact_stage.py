@@ -93,6 +93,19 @@ def test_static_compact_jobs_split_by_account():
     assert ROOT == f"static-names/{GEN}"
 
 
+def test_a_fanned_out_compaction_gets_its_task_count_and_the_profile():
+    """`measure_tasks` 3: the compaction runs `-F 3`, with the profile inline in `$STATIC_NAMES_PROFILE` (its helper jobs
+    are built from it, as the runner's are), which loads back as the runner's own."""
+    from dt_cloud.static_profile import load_profile
+
+    r = _static_runner(1)
+    r.cfg = replace(r.cfg, measure_tasks=3)
+    spec = r.compact_jobs("2026-10-10")[0][1]["taskGroups"][0]["taskSpec"]
+    assert spec["runnables"][0]["container"]["commands"][1] == _py(
+        "static_merge", "compact", "-g", GEN, "-S", "scr", "-C", "level:1", "-j", "2", "-F", "3", "-M", "90GB", "-p", "16")
+    assert load_profile({"STATIC_NAMES_PROFILE": spec["environment"]["variables"]["STATIC_NAMES_PROFILE"]}) == r.cfg
+
+
 # ── The job: `run_compaction` over local stand-ins of the data bucket ──────
 
 

@@ -140,10 +140,12 @@ def test_index_imports_listings_when_list_does_not(tmp_path, env, monkeypatch):
 
 
 def test_serving_steps_gate_on_credentials(tmp_path, env):
+    """Without the site's, R2's or Slack's credentials no serving step runs a command; the probe's static lag check needs
+    none of them (the static-names profile reads the data bucket)."""
     c = ctx(tmp_path, env)
     for f in (S.publish_r2, S.index_rows, S.index_sync, S.over_time, S.index_gc, S.warm_cache, S.probe, S.digest):
         f(c, None)
-    assert c.sh_impl.calls == []
+    assert c.sh_impl.calls == ["dt-cloud static-names runs lag 2026-10-16T1200"]
 
 
 def test_serving_steps_commands(tmp_path, env):
@@ -157,6 +159,7 @@ def test_serving_steps_commands(tmp_path, env):
     k = "l2/2026-10-16T1200/index/G1"
     assert c.sh_impl.calls == [
         "dt-cloud static-names runs add -c 2026-10-16T1200",
+        "dt-cloud static-names runs lag 2026-10-16T1200",
         "dt-cloud publish-r2 -b <tmp>/data -a 2026-10-16T1200",
         f"dt-cloud index-sync -r -b r2://r2b -d <tmp>/data/{k} -g G1 -k {k} 2026-10-16T1200",
         f"dt-cloud index-sync -p -b r2://r2b -d <tmp>/data/{k} -g G1 -k {k} -M <tmp>/data/snapshots/sub 2026-10-16T1200",
@@ -165,6 +168,7 @@ def test_serving_steps_commands(tmp_path, env):
         "dt-cloud index-gc -R -m 2d -F <tmp>/data -F r2",
         "dt-cloud warm-cache -d 2026-10-16T1200 -r r2://r2b/snapshots/sub",
         "dt-cloud probe -c -u https://site.example.org -o <tmp>/data/probes/sub/ -j",
+        "dt-cloud static-names runs lag 2026-10-16T1200",
         "dt-cloud digest -T t -C c.yml -P slack -r <tmp>/data/snapshots/sub",
     ]
     assert (tmp_path / "home/.config/disk-tree/buckets.yml").read_text() == (
@@ -191,7 +195,7 @@ def test_static_names_failure_records_failed_phase_and_the_run_goes_on(tmp_path,
     assert S.run_step("static-names", None, env) == 0
     assert phases == [("begin", "static-names"), ("end", "static-names", 1, {
         "warn": True, "msg": "static-names runs add failed for 2026-10-16T1200", "note": "overlapped"})]
-    assert c.sh_impl.calls == ["dt-cloud static-names runs add -c 2026-10-16T1200"]
+    assert c.sh_impl.calls == ["dt-cloud static-names runs add -c 2026-10-16T1200", "dt-cloud static-names runs lag 2026-10-16T1200"]
 
 
 def test_static_names_busy_is_not_a_failure(tmp_path, env, monkeypatch):
@@ -209,7 +213,43 @@ def test_static_names_busy_is_not_a_failure(tmp_path, env, monkeypatch):
         ("end", "static-names", 0, {"note": f"overlapped, skipped (busy): {BUSY_REASON}"}),
         ("alert", "warn", f"static-names skipped (busy): {BUSY_REASON}"),
     ]
-    assert c.sh_impl.calls == ["dt-cloud static-names runs add -c 2026-10-16T1200"]
+    assert c.sh_impl.calls == ["dt-cloud static-names runs add -c 2026-10-16T1200", "dt-cloud static-names runs lag 2026-10-16T1200"]
+
+
+@pytest.mark.parametrize("episode, alerts", [
+    ("start", [("warn", "static name index lags: its newest scan is 2026-10-15T1200, 2 published scans behind "
+                        "(2026-10-15T1800 … 2026-10-16T1200, 18.0 h); search refuses them until the catch-up appends them")]),
+    ("end", []), (None, []),
+])
+def test_static_names_alerts_once_when_the_index_starts_lagging(tmp_path, env, monkeypatch, episode, alerts):
+    """`runs lag` after the append: a lag episode's start is one warn alert; its end and the runs between say nothing."""
+    import json
+
+    lag = {"gen": "g", "scan": "2026-10-16T1200", "newest": "2026-10-15T1200", "behind": ["2026-10-15T1800", "2026-10-16T1200"],
+           "s": 18 * 3600, "lagging": episode == "start", "episode": episode}
+    c = ctx(tmp_path, env, runner=Runner(tmp_path, stdout={"dt-cloud static-names runs": json.dumps(lag)}))
+    posted = []
+    c.run.alert = lambda level, msg: posted.append((level, msg))
+    S.static_names(c, None)
+    assert posted == alerts
+
+
+def test_the_probe_checks_the_lag_when_the_deployment_skips_static_names(tmp_path, env):
+    """A deployment skipping its static-names step (cw since 10-22) still gets the lag alert, from the probe, naming the
+    skip."""
+    lag = {"gen": "g", "scan": "2026-10-16T1200", "newest": "2026-10-15T1200", "behind": ["2026-10-15T1800", "2026-10-16T1200"],
+           "s": 18 * 3600, "lagging": True, "episode": "start"}
+    c = ctx(tmp_path, env, runner=Runner(tmp_path, stdout={"dt-cloud static-names runs": json.dumps(lag)}), skip=["static-names"],
+            options={"list": {"import": True, "bulk_args": ["-a"], "threads": 8}, "index": {"webdata": ["python", "web.py", "{web}", "{sources}", "-a", "{date}"], "mem": "16GB", "threads": 2},
+                     "digest": {"template": "t", "config": "c.yml"}})
+    c.env["STATIC_NAMES_PROFILE"] = "sn.json"
+    posted = []
+    c.run.alert = lambda level, msg: posted.append((level, msg))
+    S.probe(c, None)
+    assert c.sh_impl.calls == ["dt-cloud static-names runs lag 2026-10-16T1200"]
+    assert posted == [("warn", "static name index lags: its newest scan is 2026-10-15T1200, 2 published scans behind (2026-10-15T1800 … "
+                               "2026-10-16T1200, 18.0 h) (this deployment skips its static-names step); search refuses them until the "
+                               "catch-up appends them")]
 
 
 BUSY_REASON = ("another coordinator or a compaction holds the static-names store's lease; search for this scan comes "
@@ -238,6 +278,7 @@ def test_probe_skip_reason_comes_from_the_record(tmp_path, env):
     S.probe(c, None)
     assert c.sh_impl.calls == [
         f"dt-cloud probe -c -u https://site.example.org -o <tmp>/data/probes/sub/ -j -i static-names {skip}",
+        "dt-cloud static-names runs lag 2026-10-16T1200",
     ]
     assert calls == [("begin", "probe"), ("end", "probe", 0, {"note": verdict})]
 
@@ -248,7 +289,7 @@ def test_probe_without_a_recorded_skip_fails_on_a_refusal(tmp_path, env):
     verdict = "2 passed, 0 skipped, 2 failed"
     c, calls = probe_ctx(tmp_path, env, [("static-names", "overlapped")], code=1, summary=verdict)
     S.probe(c, None)
-    assert c.sh_impl.calls == ["dt-cloud probe -c -u https://site.example.org -o <tmp>/data/probes/sub/ -j"]
+    assert c.sh_impl.calls == ["dt-cloud probe -c -u https://site.example.org -o <tmp>/data/probes/sub/ -j", "dt-cloud static-names runs lag 2026-10-16T1200"]
     assert calls == [("begin", "probe"), ("end", "probe", 1, {
         "warn": True, "msg": f"serving probe failed for 2026-10-16T1200: {verdict}", "note": verdict})]
 

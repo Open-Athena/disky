@@ -89,6 +89,11 @@ MAX_CACHE_BYTES = 2 << 30
 #: Prefetch coalescing: needed groups of one file at most this far apart are one request, of at most `COALESCE_SPAN` bytes.
 COALESCE_GAP = 64 << 10
 COALESCE_SPAN = 8 << 20
+#: A drill tier's `meta.json` `dcount` when its `dcount` and newly-heavy sums count only the roots new to the stack (an
+#: existing member's opens, every root of a new member: `day_rollups`' `fresh`); a merged tier's only when every input's
+#: did. A tier without it (built before) counts the closes too: conservative for its readers, but not what a compaction's
+#: incremental measurement sums (`static_measure`).
+DCOUNT_FRESH = "fresh"
 DCOUNT_SCHEMA = pa.schema([pa.field("q", pa.string(), nullable=False), pa.field("dir", pa.string(), nullable=False),
                            pa.field("rows", pa.int64(), nullable=False)])
 ALIAS_SCHEMA = pa.schema([pa.field("q", pa.string(), nullable=False), pa.field("canonical", pa.string(), nullable=False)])
@@ -1045,6 +1050,11 @@ def day_rollups(con, prior: list[Tier], kind: str, D: int, *, R: int, K: int, fl
     parts = _explode_parts(con)
     _by_parts(con, "tdir", parts, lambda w: f"""SELECT q, dir, any_value(k) AS k, count(*)::BIGINT AS rows,
             count(*) FILTER (WHERE vf = {D})::BIGINT AS opens FROM ({_explode(w)}) GROUP BY q, dir""")
+    # the roots new to the stack under each directory: an existing member's opens (a close record restates a root an
+    # earlier tier holds), every root of a new member (its whole history is new). What heaviness (`S`) and `dcount`
+    # sum, so S is the exact root count, not one inflated by the closes (specs/static-incremental-compaction.md)
+    con.execute("""CREATE OR REPLACE TABLE tdir AS SELECT *, CASE WHEN q IN (SELECT q FROM newq) THEN rows ELSE opens END AS fresh
+        FROM tdir""")
     # the prior state of the touched directories: each tier's rows for the member's canonical there, from the newest full header on
     con.execute(f"CREATE OR REPLACE TABLE ru (tier INTEGER, {ROLLUP_COLS})")
     for i, t in enumerate(prior):
@@ -1137,7 +1147,7 @@ def day_rollups(con, prior: list[Tier], kind: str, D: int, *, R: int, K: int, fl
         f = t.dcount(kind)
         if f:
             con.execute(f"INSERT INTO dc SELECT {i}, q, dir, rows FROM read_parquet({q(f)})")
-    con.execute("""CREATE OR REPLACE TABLE nh AS SELECT t.q, t.dir, t.k, t.rows AS today,
+    con.execute("""CREATE OR REPLACE TABLE nh AS SELECT t.q, t.dir, t.k, t.fresh AS today,
             CASE WHEN t.q IN (SELECT q FROM newq) THEN 0 ELSE m.rows END AS base, coalesce(r.rows, 0) AS runs
         FROM tdir AS t ANTI JOIN hdr USING (q, dir) LEFT JOIN meas AS m USING (q, dir)
         LEFT JOIN (SELECT m.c AS q, d.dir, sum(d.rows)::BIGINT AS rows FROM dc AS d JOIN cmap AS m ON d.tier = m.tier AND d.q = m.ci GROUP BY ALL) AS r
@@ -1162,7 +1172,7 @@ def day_rollups(con, prior: list[Tier], kind: str, D: int, *, R: int, K: int, fl
         count = newly_heavy_rollups(con, reads, kind, K, log=log, ck=ck)
         log(f"drill {kind}: {doc['heavy_new']:,} newly heavy, {count:,} earlier tier roots inserted in {monotonic() - t0:.0f}s ({reads.io()})")
     step(f"drill/newly-heavy/{kind}", t2, directories=doc["heavy_new"], prior_roots=count)
-    con.execute("CREATE OR REPLACE TABLE dcnt AS SELECT q, dir, rows FROM tdir ANTI JOIN hdr USING (q, dir) ANTI JOIN newh USING (q, dir)")
+    con.execute("CREATE OR REPLACE TABLE dcnt AS SELECT q, dir, fresh AS rows FROM tdir ANTI JOIN hdr USING (q, dir) ANTI JOIN newh USING (q, dir) WHERE fresh > 0")
     for t in ("tdir", "stf", "hdr", "kc", "rc", "tch", "nk", "nkc", "pr", "kt", "cand", "aff", "joins", "dc", "nh", "bx", "newh", "cmap"):
         con.execute(f"DROP TABLE IF EXISTS {t}")
     doc["rollup_rows"] = con.execute("SELECT count(*) FROM rup").fetchone()[0]
@@ -1873,7 +1883,7 @@ def build_day(con, prior: list[Tier], out: Path, *, D: int, R: int, K: int, floo
     (`drill/roots/<kind>`, `day_rollups`', `drill/write/<kind>`)."""
     t0 = monotonic()
     out.mkdir(parents=True, exist_ok=True)
-    meta: dict = {**tier, **base_meta(R, K, rg), "D": D, "floor": floor}
+    meta: dict = {**tier, **base_meta(R, K, rg), "D": D, "floor": floor, "dcount": DCOUNT_FRESH}
     for i, kind in enumerate(kinds):
         t1 = monotonic()
         ck = checkpoint.sub(kind) if checkpoint else None
@@ -2008,6 +2018,8 @@ def merge_tiers(con, tiers: list[Tier], out: Path, tier: dict, file_rows: int = 
     shutil.rmtree(work, ignore_errors=True)
     work.mkdir(parents=True)
     meta: dict = {**tier, **{k: tiers[-1].meta[k] for k in ("R", "K", "rg", "idx_rg", "dispatch_rows")}}
+    if all(t.meta.get("dcount") == DCOUNT_FRESH for t in tiers):
+        meta["dcount"] = DCOUNT_FRESH
     resource_stage("merge/aliases")
     con.register("al_last", tiers[-1].alias_table())
     con.execute("CREATE OR REPLACE TABLE cls AS SELECT q, canonical FROM al_last")

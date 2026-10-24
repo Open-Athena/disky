@@ -856,12 +856,19 @@ def _gcs():
 
 
 def _latest_manifest(bucket: str, gen: str, before: str | None = None) -> dict | None:
-    """The newest manifest of the generation (of a scan strictly before `before`, when given), or None: the greatest
-    `manifests/<id>.json` or merge revision `manifests/<id>.m<NNN>.json` (`append_runner.latest_key`), which sort by
-    scan, then revision."""
+    """The newest manifest of the generation, or None: the greatest `manifests/<id>.json` or merge revision
+    `manifests/<id>.m<NNN>.json` (`append_runner.latest_key`), which sort by scan, then revision. With `before`: the
+    listing of the runs before that scan (`append_runner.prior_key`): a pending scan's listing (`pending/<id>.json`,
+    `prepare`'s) newer than the newest manifest before it counts, so a pipelined backlog's later scans build over the
+    earlier ones' runs before those publish."""
+    from .append_runner import PENDING, prior_key
+
     prefix = f"{PREFIX}/{gen}/"
-    keys = latest_key([b.name.removeprefix(prefix) for b in _gcs().list_blobs(bucket, prefix=f"{prefix}manifests/")], before)
-    return read_json(f"gs://{bucket}/{prefix}{keys}") if keys else None
+    names = [b.name.removeprefix(prefix) for b in _gcs().list_blobs(bucket, prefix=f"{prefix}manifests/")]
+    if before is not None:
+        names += [b.name.removeprefix(prefix) for b in _gcs().list_blobs(bucket, prefix=f"{prefix}{PENDING}")]
+    key = latest_key(names) if before is None else prior_key(names, before)
+    return read_json(f"gs://{bucket}/{prefix}{key}") if key else None
 
 
 def _state(bucket: str, gen: str, date: str) -> tuple[dict, list[dict]]:
@@ -890,7 +897,13 @@ def prepare_cmd(bucket, date, gen) -> None:
     s = nxt[0]
     s["version"] = _version_from_footer(_gcs().bucket(bucket), s["src"])
     doc = {"bucket": bucket, "scans": [s]}
-    _gcs().bucket(bucket).blob(f"{PREFIX}/{gen}/{run_key(date, date)}/scans.json").upload_from_string(json.dumps(doc, indent=1) + "\n")
+    gb = _gcs().bucket(bucket)
+    gb.blob(f"{PREFIX}/{gen}/{run_key(date, date)}/scans.json").upload_from_string(json.dumps(doc, indent=1) + "\n")
+    # the runs through this one, for the scans after it to build over before it publishes (a pipelined backlog)
+    from .append_runner import PENDING
+
+    pending = {"gen": gen, "date": date, "runs": [*runs, {"key": run_key(date, date), "first": date, "last": date, "level": 0, "scans": [date]}]}
+    gb.blob(f"{PREFIX}/{gen}/{PENDING}{date}.json").upload_from_string(json.dumps(pending, indent=1) + "\n")
     print(json.dumps(doc, indent=1))
 
 
@@ -1014,7 +1027,7 @@ def publish_run(store, date: str, rule: HexRule | None = None, dry_run: bool = F
     publish takes seconds however big a carry it makes due. Refuses (`SystemExit`) a manifest that exists, whose runs lack
     a reader file, or whose drill covers fewer scans than the last's. Returns the manifest (dry run: and the carries due,
     none reaching `max_level`, the compaction level; None: unbounded)."""
-    from .append_runner import plan_carries, publish_scan
+    from .append_runner import PENDING, plan_carries, publish_scan
     from .static_merge import drilled_runs, missing, refuse
 
     base = store.read_json("scans.json")
@@ -1036,7 +1049,11 @@ def publish_run(store, date: str, rule: HexRule | None = None, dry_run: bool = F
                                                      **rule_json(rule)}, indent=1) + "\n")
     # A manifest only after every file of every run it lists exists (the readers need each tier whole), and never one
     # whose drill covers fewer scans than the last's.
-    return publish_scan(store, date, new, doc, lambda runs: missing(store, runs), lambda before, after: refuse(store, before, after))
+    published = publish_scan(store, date, new, doc, lambda runs: missing(store, runs), lambda before, after: refuse(store, before, after))
+    # the pending listings through this scan are superseded by its manifest
+    if done := [k for k in store.keys(PENDING) if k.removeprefix(PENDING).removesuffix(".json") <= date]:
+        store.delete(done)
+    return published
 
 
 @cli.command("publish")

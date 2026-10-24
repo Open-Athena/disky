@@ -1038,6 +1038,27 @@ def static_names(ctx: Ctx, arg: str | None) -> None:
                fatal=False, warn=f"static-names runs add failed for {ctx.scan}", allowed_codes=(BUSY,))
         if ctx.last is not None and ctx.last.returncode == BUSY:
             ctx.skip("busy", STATIC_NAMES_BUSY)
+    static_lag(ctx)
+
+
+def static_lag(ctx: Ctx) -> None:
+    """One alert per lag episode of the static name index (`static-names runs lag`): more than a scan (or one for 12 h)
+    behind the newest published scan, search refusing those. Run after `runs add` and again by `probe`, which a
+    deployment skipping its static-names step (cw since 10-22: the outage this is for) or a step dying first still runs;
+    the episode's marker keeps it to one alert. Not on the one-machine path (`options.static-names.gen`) nor without a
+    static-names profile."""
+    prof = ctx.opt("static-names", "profile") or ctx.env.get("STATIC_NAMES_PROFILE")
+    if ctx.reproc or ctx.opt("static-names", "gen") or not prof:
+        return
+    out = ctx.sh(["dt-cloud", "static-names", "runs", "lag", ctx.scan], env={"STATIC_NAMES_PROFILE": str(prof)}, fatal=False,
+                 warn=f"static-names runs lag failed for {ctx.scan}", capture=True)
+    lag = json.loads(out) if out else None
+    if lag and lag["episode"] == "start":
+        why = " (this deployment skips its static-names step)" if "static-names" in ctx.profile.skip else (
+            f" (static-names skipped: {r})" if (r := ctx.recorded_skip("static-names")) else "")
+        ctx.run.alert("warn", f"static name index lags: its newest scan is {lag['newest']}, {len(lag['behind'])} published scans behind "
+                              f"({lag['behind'][0]} … {lag['behind'][-1]}, {lag['s'] / 3600:.1f} h){why}; search refuses them until the "
+                              "catch-up appends them")
 
 
 #: Why a scan's static-names step was skipped (`runs add` exit `BUSY`): its phase note's reason, and the probe's.
@@ -1457,17 +1478,21 @@ def probe(ctx: Ctx, arg: str | None) -> None:
     When this run's record says its static-names step was skipped (`Ctx.recorded_skip`), the probe gets that reason
     (`-i`) and skips the search's `scan-not-indexed` refusals for it; otherwise they fail it. The phase's note is the
     probe's verdict (`n passed, n skipped (reason), n failed`), on a failure too."""
-    with ctx.phase("probe"):
-        if ctx.reproc or not ctx.has("SITE_TOKEN", "SITE_URL"):
-            return
-        sub = ctx.profile.layout.snapshots
-        unindexed = ctx.recorded_skip("static-names")
-        ctx.sh(["dt-cloud", "probe", "-c", "-u", ctx.env["SITE_URL"], "-o", f"{ctx.data_uri}/probes/{sub + '/' if sub else ''}",
-                "-j", *(["-i", unindexed] if unindexed else [])], fatal=False, capture=True,
-               warn=f"serving probe failed for {ctx.scan} (an HTTP or transport error; data is fine)")
-        verdict = ctx.note = _probe_verdict(ctx.last.stdout if ctx.last is not None else None)
-        if ctx.failure and verdict:
-            ctx.failure = (ctx.failure[0], f"serving probe failed for {ctx.scan}: {verdict}")
+    try:
+        with ctx.phase("probe"):
+            if ctx.reproc or not ctx.has("SITE_TOKEN", "SITE_URL"):
+                return
+            sub = ctx.profile.layout.snapshots
+            unindexed = ctx.recorded_skip("static-names")
+            ctx.sh(["dt-cloud", "probe", "-c", "-u", ctx.env["SITE_URL"], "-o", f"{ctx.data_uri}/probes/{sub + '/' if sub else ''}",
+                    "-j", *(["-i", unindexed] if unindexed else [])], fatal=False, capture=True,
+                   warn=f"serving probe failed for {ctx.scan} (an HTTP or transport error; data is fine)")
+            verdict = ctx.note = _probe_verdict(ctx.last.stdout if ctx.last is not None else None)
+            if ctx.failure and verdict:
+                ctx.failure = (ctx.failure[0], f"serving probe failed for {ctx.scan}: {verdict}")
+    finally:
+        # whatever the probe did, or without a site to probe
+        static_lag(ctx)
 
 
 def _probe_verdict(stdout: str | None) -> str | None:

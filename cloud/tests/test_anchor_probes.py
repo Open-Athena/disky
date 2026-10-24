@@ -321,3 +321,25 @@ def test_level_pruning_keeps_exactly_the_unpruned_near(runs):
             want = con.execute(f"SELECT * FROM w WHERE n + bound > {R} ORDER BY ALL").fetchall()
         assert got == want
         assert got or R >= 300  # a vacuous comparison would prove nothing
+
+
+def test_a_heavy_keys_probe_reads_only_the_groups_meeting_its_ranges(tmp_path):
+    """Key `k`'s 2,000 rows in 200 groups of 10 (group g: `d/g<g>/x<j>`), probe ranges under `d/g010`, `d/g011` and
+    `d/g150`: the spans `island_spans` reads are those groups' (10 and 11 joined), the probe keeps exactly their rows,
+    and a probe range nothing meets reads nothing."""
+    con = duckdb.connect()
+    con.execute("""CREATE TABLE source AS SELECT 'k' AS s, 3::UTINYINT AS depth, printf('d/g%03d/x%d', i // 10, i % 10) AS path,
+        NULL::VARCHAR AS usr, TIMESTAMP '2026-10-01' AS vf, TIMESTAMP '2027-01-01' AS vt, 1::BIGINT AS size, 1::BIGINT AS n_files
+        FROM range(2000) AS r(i) ORDER BY path""")
+    file = str(tmp_path / "source.parquet")
+    pq.write_table(con.execute("SELECT * FROM source").to_arrow_table(), file, row_group_size=10)
+    con.execute("CREATE TABLE near AS SELECT 'k' AS k, unnest(['d/g010', 'd/g011', 'd/g150']) AS dir")
+    con.execute(f"CREATE TABLE prows({an.AR_COLS})")
+    tier = SimpleNamespace(shard_file=lambda mode, key: file)
+    assert an.probe_prior_rows(con, [tier], "end") == 1
+    assert an.island_spans(con, "k", an.path_bounds(file)) == [("d/g010/x0", "d/g011/x9", 2), ("d/g150/x0", "d/g150/x9", 1)]
+    assert con.execute("SELECT path FROM prows ORDER BY path").fetchall() == [
+        (f"d/g{g:03d}/x{j}",) for g in (10, 11, 150) for j in range(10)]
+    con.execute("DELETE FROM prows; DELETE FROM near; INSERT INTO near VALUES ('k', 'e/none')")
+    assert an.probe_prior_rows(con, [tier], "end") == 0
+    assert con.execute("SELECT count(*) FROM prows").fetchone()[0] == 0
