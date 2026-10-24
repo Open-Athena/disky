@@ -193,3 +193,20 @@ def test_a_steps_commands_feed_its_phase_heartbeat(tmp_path):
         ("begin", "static-names"), ("beat", "static-names"), ("beat stopped", "static-names"), ("end", "static-names", 0, "nf-2 RUNNING"),
         ("begin", "index"), ("beat", "index"), ("beat stopped", "index"), ("end", "index", 4, "index: 3/9 buckets"),
     ], None)
+
+
+def test_descendants_walk_proc_parents_recursively(tmp_path):
+    """A fake `/proc`: 10 → 11, 12; 12 → 13 (its name holding `) ` and spaces); 20 is another tree; `self` and junk ignored."""
+    def proc(pid, ppid, comm="python3"):
+        d = tmp_path / str(pid)
+        d.mkdir()
+        (d / "stat").write_text(f"{pid} ({comm}) S {ppid} 1 1 0 -1 0 0 0 0 0 7 3 0 0 20 0 1 0\n")
+
+    for pid, ppid in ((10, 1), (11, 10), (12, 10), (20, 1), (21, 20)):
+        proc(pid, ppid)
+    proc(13, 12, comm="spawn) main x")
+    (tmp_path / "self").mkdir()
+    (tmp_path / "99").mkdir()  # no stat: a process gone mid-walk
+    assert sorted(H.descendants(10, str(tmp_path))) == [11, 12, 13]
+    assert H.descendants(13, str(tmp_path)) == []
+    assert H.descendants(10, str(tmp_path / "missing")) == []
