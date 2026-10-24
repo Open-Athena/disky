@@ -500,7 +500,8 @@ def measure_ranges(con, work: Path, kind: str, n: int, dirs_into: str, rup_into:
     # wall seconds, split as the ranges' own measure / rollup seconds were (they overlap at `jobs` > 1)
     wall, ms, rs = monotonic() - t0, sum(d["measure_s"] for d in done.values()), sum(d["rollup_s"] for d in done.values())
     frac = ms / (ms + rs) if ms + rs else 1.0
-    return [Path(t[2]) for t in tasks], {"groups": len(tasks), "measure_s": wall * frac, "rollup_s": wall * (1 - frac), "jobs": jobs}
+    ranges = {g: {k: d[k] for k in ("s", "rows", "files", "nbytes", "temp")} for g, d in sorted(done.items())}
+    return [Path(t[2]) for t in tasks], {"groups": len(tasks), "measure_s": wall * frac, "rollup_s": wall * (1 - frac), "jobs": jobs, "ranges": ranges}
 
 
 def finish_drill(con, gen_dir: Path, work: Path, *, aliases, long_groups: int, short_groups: int, R: int, K: int, floor: int,

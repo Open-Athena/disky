@@ -25,7 +25,7 @@ from faulthandler import enable
 from pathlib import Path
 from time import monotonic
 
-from click import Choice, IntRange, UsageError, group, option
+from click import Choice, IntRange, UsageError, argument, group, option
 
 from . import append_runner as ar
 from .append_runner import (  # noqa: F401 — the shared names, as this module has always offered them
@@ -539,19 +539,30 @@ def compact_probe_cmd(chunk_rows, gen, jobs, mount, mem, out, threads, tmp, repo
 @cli.command("measure-probe")
 @option("-c", "--checkpoint", required=True, help="A compaction's fold checkpoint (`…/compact-checkpoints/<gen>/<inputs>/fold`, or a copy of it) holding a saved `spilled` step")
 @option("-g", "--gen", required=True, help="The generation the checkpoint's compaction folds (its `drill/meta.json`: R, K, floor)")
+@option("-H", "--heaviest", type=IntRange(min=0), help="Only the N ranges of each kind with the most spilled bytes (with `-s`: and a sample of the rest)")
 @option("-m", "--mount", required=True, help="Read-only local mount of the data bucket")
 @option("-M", "--mem", default="100GB", help="DuckDB memory limit")
 @option("-o", "--out", required=True, help="New local output directory: the measurement's tables and sorted roots")
 @option("-p", "--threads", default=16, type=int, help="DuckDB threads")
+@option("-s", "--sample", help="Only N[:SEED] ranges of each kind drawn at random (seed default 0; with `-H`: from the others)")
+@option("-S", "--shard", help="I/N: only task I's (0-based) share of the chosen ranges, balanced by spilled bytes (default: $BATCH_TASK_INDEX/$BATCH_TASK_COUNT when set)")
 @option("-T", "--tmp", default="/stage/tmp/measure-probe", help="Local work dir (the spills, ~the checkpoint's size)")
-@option("-u", "--report", help="Also write the JSON report to this URL")
+@option("-u", "--report", help="Also write the JSON report to this URL (sharded: a prefix, the report at `<prefix>/<I>-of-<N>.json`)")
 @option("-w", "--workers", default=64, type=IntRange(min=1), help="Concurrent downloads of the checkpoint's files")
-def measure_probe_cmd(checkpoint, gen, mount, mem, out, threads, tmp, report, workers) -> None:
+def measure_probe_cmd(checkpoint, gen, heaviest, mount, mem, out, threads, sample, shard, tmp, report, workers) -> None:
     """The drill measurement alone (`static_local.measure_ranges`, long then short), over a compaction's saved spills: the
     checkpoint's `spilled` files are downloaded into TMP, nothing is written to it or the bucket (no `code.json` claim,
     so another build's checkpoint is read, not cleared). `$DT_MEASURE_THREADS` sets the pool's width as in a compaction.
     Logs `measure_report`'s lines; prints a JSON of each kind's seconds and jobs and every output file's size and md5 (the
-    measured tables sorted, and the sorted roots: equal bytes at any pool width), also written beside OUT and to `-u`."""
+    measured tables sorted, and the sorted roots: equal bytes at any pool width), also written beside OUT and to `-u`.
+
+    `-H` / `-s`: a subset of each kind's ranges (every range is measured on its own, so a subset's are the same bytes as
+    the whole's): the heaviest by spilled bytes, and a seeded sample; only their files are downloaded. The report then
+    lists the ranges chosen and each one's seconds, roots, files, bytes and temp bytes.
+
+    `-S I/N`: task I of N measures its share of the chosen ranges (every range when neither `-H` nor `-s`), the ranges
+    dealt heaviest first to the least-loaded task (by spilled bytes), and downloads only theirs: one Batch job of N tasks
+    measures the whole in about 1/N of the time. `measure-probe-merge` unions the tasks' reports."""
     import hashlib
     from concurrent.futures import ThreadPoolExecutor
 
@@ -567,7 +578,16 @@ def measure_probe_cmd(checkpoint, gen, mount, mem, out, threads, tmp, report, wo
     spills = work / "spills"
     shutil.rmtree(spills, ignore_errors=True)
     t = monotonic()
-    groups = ck.load_files("spilled", spills, workers=workers)
+    if shard is None and os.environ.get("BATCH_TASK_COUNT"):
+        shard = f"{os.environ.get('BATCH_TASK_INDEX', '0')}/{os.environ['BATCH_TASK_COUNT']}"
+    part = tuple(int(x) for x in shard.split("/")) if shard else None
+    if part is not None and not (len(part) == 2 and 0 <= part[0] < part[1]):
+        raise UsageError(f"-S {shard}: want I/N with 0 ≤ I < N")
+    if heaviest is None and sample is None and part is None:
+        groups = ck.load_files("spilled", spills, workers=workers)
+        chosen = None
+    else:
+        groups, chosen = _fetch_ranges(ck, spills, heaviest, sample, workers, part)
     fetched = round(monotonic() - t, 1)
     con = connect(threads, mem, work / "duckdb")
     output.mkdir(parents=True)
@@ -580,7 +600,7 @@ def measure_probe_cmd(checkpoint, gen, mount, mem, out, threads, tmp, report, wo
         (output / f"{kind}-sorted").mkdir()
         for f in sorted_files:
             shutil.move(f, output / f"{kind}-sorted" / f.name)
-        kinds[kind] = {**m, "s": round(monotonic() - t, 1)}
+        kinds[kind] = {**m, "s": round(monotonic() - t, 1), **({"chosen": chosen[kind]} if chosen else {})}
 
     def md5(p: Path) -> str:
         h = hashlib.md5()
@@ -592,7 +612,7 @@ def measure_probe_cmd(checkpoint, gen, mount, mem, out, threads, tmp, report, wo
     files = sorted(p for p in output.rglob("*") if p.is_file())
     with ThreadPoolExecutor(16) as ex:
         sums = list(ex.map(md5, files))
-    doc = {"checkpoint": checkpoint, "gen": gen, "threads": threads, "mem": mem, "measure_threads": os.environ.get(sl.MEASURE_THREADS_ENV),
+    doc = {"checkpoint": checkpoint, "gen": gen, "shard": list(part) if part else None, "threads": threads, "mem": mem, "measure_threads": os.environ.get(sl.MEASURE_THREADS_ENV),
            "fetch_s": fetched, "kinds": kinds,
            "files": {p.relative_to(output).as_posix(): {"size": p.stat().st_size, "md5": s} for p, s in zip(files, sums)}}
     text = json.dumps(doc, indent=1) + "\n"
@@ -600,10 +620,107 @@ def measure_probe_cmd(checkpoint, gen, mount, mem, out, threads, tmp, report, wo
     if report:
         from .blobstore import Store
 
+        if part is not None:
+            report = f"{report.rstrip('/')}/{part[0]}-of-{part[1]}.json"
         r, _, key = report.rpartition("/")
         Store(r).write_text(key, text)
         err(f"measure-probe: report → {report}")
     print(json.dumps({**{k: v for k, v in doc.items() if k != "files"}, "n_files": len(files)}, indent=1))
+
+
+def _fetch_ranges(ck, spills: Path, heaviest: int | None, sample: str | None, workers: int,
+                  part: tuple[int, int] | None = None) -> tuple[dict, dict[str, list[int]]]:
+    """`measure-probe -H/-s/-S`: per kind, the `heaviest` ranges by spilled bytes, then `sample` (`N[:SEED]`) of the rest
+    at random (neither: every range); then, with `part` `(i, n)`, task `i`'s share of them (`deal`); only their files
+    downloaded from the checkpoint's `spilled` step into `spills`. The step's doc and the ranges chosen per kind."""
+    import random
+    import re
+    from concurrent.futures import ThreadPoolExecutor
+
+    n, _, seed = (sample or "0").partition(":")
+    base = ck.key("spilled/files/")
+    sizes = {k[len(base):]: v for k, v in ck.store.listing(ck.key("spilled/files")).items() if k.startswith(base)}
+    by: dict[tuple[str, int], list[str]] = {}
+    for rel in sizes:
+        if m := re.match(r"(long|short)/[^/]+/grp=(\d+)/", rel):
+            by.setdefault((m[1], int(m[2])), []).append(rel)
+    chosen: dict[str, list[int]] = {}
+    weights: dict[tuple[str, int], int] = {}
+    for kind in ("long", "short"):
+        weight = {g: sum(sizes[r] for r in rels) for (k, g), rels in by.items() if k == kind}
+        if heaviest is None and sample is None:
+            picked = set(weight)
+        else:
+            top = sorted(weight, key=lambda g: (-weight[g], g))[:heaviest or 0]
+            rest = sorted(set(weight) - set(top))
+            picked = {*top, *random.Random(int(seed or 0)).sample(rest, min(int(n), len(rest)))}
+        weights.update({(kind, g): weight[g] for g in picked})
+    mine = set(deal(weights, part[1])[part[0]]) if part else set(weights)
+    for kind in ("long", "short"):
+        chosen[kind] = sorted(g for k, g in mine if k == kind)
+    rels = [r for kind, gs in chosen.items() for g in gs for r in by[(kind, g)]]
+    with ThreadPoolExecutor(workers) as ex:
+        list(ex.map(lambda r: ck.store.get(base + r, spills / r), rels))
+    err(f"measure-probe: {len(rels):,} files ({sum(sizes[r] for r in rels):,} B) of {', '.join(f'{len(v)} {k}' for k, v in chosen.items())} ranges")
+    return ck.store.read_json(ck.key("spilled/done.json"))["doc"], chosen
+
+
+def deal(weights: dict, n: int) -> list[list]:
+    """`weights`' keys dealt to `n` tasks, the heaviest first, each to the least-loaded task so far (ties: the lower
+    task, then the lower key): a few heavy ranges don't serialize one task."""
+    import heapq
+
+    tasks: list[list] = [[] for _ in range(n)]
+    heap = [(0, i) for i in range(n)]
+    for key in sorted(weights, key=lambda k: (-weights[k], k)):
+        load, i = heapq.heappop(heap)
+        tasks[i].append(key)
+        heapq.heappush(heap, (load + weights[key], i))
+    return tasks
+
+
+@cli.command("measure-probe-merge")
+@option("-o", "--out", help="Also write the merged report here (a local path or URL)")
+@argument("prefix")
+def measure_probe_merge_cmd(out, prefix) -> None:
+    """The `measure-probe -S I/N -u PREFIX` tasks' reports (`PREFIX/<I>-of-<N>.json`) as one: every task's present (else
+    exit 1, naming the missing), each kind's ranges and chosen ranges unioned, its seconds the slowest task's, and the
+    files' md5s: each range's sorted roots as themselves (the same bytes as an unsharded run's), each task's measured
+    tables under `<I>-of-<N>/`."""
+    import re
+
+    from .blobstore import Store
+
+    store = Store(prefix.rstrip("/"))
+    names = sorted(k for k in store.keys("") if re.fullmatch(r"\d+-of-\d+\.json", k.rsplit("/", 1)[-1]))
+    docs = [store.read_json(k) for k in names]
+    counts = {d["shard"][1] for d in docs}
+    if len(counts) != 1:
+        raise UsageError(f"{prefix}: reports of different task counts {sorted(counts)}")
+    [n] = counts
+    missing = sorted(set(range(n)) - {d["shard"][0] for d in docs})
+    if missing:
+        err(f"measure-probe-merge: {prefix}: tasks {missing} of {n} have no report")
+        raise SystemExit(1)
+    kinds = {}
+    for kind in ("long", "short"):
+        ks = [d["kinds"][kind] for d in docs]
+        kinds[kind] = {"chosen": sorted(g for k in ks for g in k["chosen"]), "groups": sum(k["groups"] for k in ks),
+                       "s": max(k["s"] for k in ks), "s_sum": round(sum(k["s"] for k in ks), 1),
+                       "ranges": {g: r for k in ks for g, r in k["ranges"].items()}}
+    files = {}
+    for d in docs:
+        tag = f"{d['shard'][0]}-of-{n}"
+        for k, v in d["files"].items():
+            files[k if "-sorted/" in k else f"{tag}/{k}"] = v
+    doc = {"checkpoint": docs[0]["checkpoint"], "gen": docs[0]["gen"], "tasks": n, "measure_threads": docs[0]["measure_threads"],
+           "fetch_s": max(d["fetch_s"] for d in docs), "kinds": kinds, "files": dict(sorted(files.items()))}
+    text = json.dumps(doc, indent=1) + "\n"
+    if out:
+        r, _, key = out.rpartition("/")
+        Store(r or ".").write_text(key, text)
+    print(json.dumps({**{k: v for k, v in doc.items() if k not in ("files", "kinds")},
+                      "kinds": {k: {x: v[x] for x in ("groups", "s", "s_sum")} for k, v in kinds.items()}, "n_files": len(files)}, indent=1))
 
 
 @cli.command("prune")

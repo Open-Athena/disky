@@ -811,6 +811,38 @@ def key_group_batches(file: str, keys: list[str], max_rows: int = PROBE_READ_ROW
     return batches
 
 
+#: A single-key probe batch of at least this many row groups logs how many meet its probe ranges (`island_groups`).
+ISLAND_REPORT_GROUPS = 64
+
+
+def path_bounds(file: str) -> list[tuple[str | None, str | None]]:
+    """Each row group of `file`'s `path` statistics `(min, max)` (None where absent)."""
+    md = pq.ParquetFile(file).metadata
+    pi = md.schema.to_arrow_schema().names.index("path")
+    out = []
+    for g in range(md.num_row_groups):
+        st = md.row_group(g).column(pi).statistics
+        out.append((st.min, st.max) if st is not None and st.has_min_max else (None, None))
+    return out
+
+
+def island_groups(con, k: str, bounds: list[tuple[str | None, str | None]]) -> int:
+    """How many of `bounds` (row groups' path `(min, max)`) meet one of key `k`'s probe ranges (`probe_ranges`)."""
+    islands = con.execute("SELECT lo, hi FROM probe_ranges WHERE k = ? ORDER BY lo", [k]).fetchall()
+    if any(hi is None for _, hi in islands):
+        return len(bounds)
+    los = [lo for lo, _ in islands]
+    n = 0
+    for p_min, p_max in bounds:
+        if p_min is None or p_max is None:
+            n += 1
+            continue
+        # the last island starting at or below the group's max; it meets the group if it ends above the group's min
+        i = bisect_right(los, p_max) - 1
+        n += i >= 0 and islands[i][1] > p_min
+    return n
+
+
 def probe_prior_rows(
     con,
     prior: list[Tier],
@@ -847,6 +879,7 @@ def probe_prior_rows(
             if file := tier.shard_file(mode, key):
                 by_file.setdefault(file, []).append(key)
         for file, file_keys in by_file.items():
+            paths = None
             for groups, selected in key_group_batches(file, file_keys, batch_keys=batch_keys):
                 values = ", ".join(f"({q(k)})" for k in selected)
                 con.execute(f"CREATE OR REPLACE TABLE pkeys AS SELECT * FROM (VALUES {values}) AS t(k)")
@@ -854,8 +887,14 @@ def probe_prior_rows(
                 # key to the last reads every group between); DuckDB's reads, overlapped, not pyarrow's per group: over
                 # gcsfuse those waited ~3 s a group (cw's 10-22T1802: 0.5 of 16 cores)
                 where = f"s IN ({', '.join(q(k) for k in selected)})"
+                # one heavy key's batch: how many of its groups meet one of its probe ranges (the rest a path-pruned
+                # read would skip)
+                meet = None
+                if groups is not None and len(selected) == 1 and len(groups) >= ISLAND_REPORT_GROUPS:
+                    paths = paths or path_bounds(file)
+                    meet = island_groups(con, selected[0], [paths[g] for g in groups])
                 resource_stage(f"anchors {mode}: prior probes", tier=ti, query=queries + 1, keys=len(selected),
-                               groups=None if groups is None else len(groups))
+                               groups=None if groups is None else len(groups), island_groups=meet)
                 con.execute(f"""INSERT INTO prows SELECT x.k, x.depth, x.path, x.usr, x.vf, x.vt, x.size, x.n_files, x.par
                     FROM ({shard_rows_sql([file], where)}) AS x
                     ASOF JOIN (SELECT * FROM probe_ranges SEMI JOIN pkeys USING (k)) AS p ON x.k = p.k AND x.path >= p.lo
@@ -1003,24 +1042,17 @@ def near_candidates(con, R: int, run_counts: str | None = None) -> None:
         con.execute(f"DROP TABLE IF EXISTS {table}")
 
 
-def near_report(con, prior: list[Tier], mode: str, top: int = 5) -> None:
+def near_report(con, mode: str, top: int = 5) -> None:
     """Log the `top` keys by `near` rows with their bound's terms: the base's group rows, the run tiers' pure-group rows,
-    and per run tier the rows `rc` took (census or `s` column) next to an exact count (that tier's shard of the key,
-    read by `s` pushdown). A run tier's census above its exact count is the bound's slack (a merged run's census sums
-    its inputs')."""
+    and per run tier the rows `rc` took (its census, else its `s` column). cw checked the censuses against exact counts
+    over 10-22T1202 … 10-23T0001 (every pair equal, a 233M-row level-4 merged run included)."""
     keys = con.execute(f"""SELECT k, count(*) AS nn, min(bound), max(bound) FROM near GROUP BY k ORDER BY nn DESC, k LIMIT {top}""").fetchall()
     for k, nn, b_lo, b_hi in keys:
         base, pure = con.execute("""SELECT coalesce(sum(rows) FILTER (WHERE t = 0), 0), coalesce(sum(rows) FILTER (WHERE t > 0 AND s_min = s_max), 0)
             FROM ktk WHERE k = ?""", [k]).fetchone()
-        took = dict(con.execute("SELECT t, n FROM rc_t WHERE k = ?", [k]).fetchall())
-        tiers = []
-        for i, t in enumerate(prior[1:], 1):
-            f = t.shard_file(mode, k)
-            exact = con.execute(f"SELECT count(*) FROM read_parquet({q(f)}) WHERE s = ? AND depth >= 1", [k]).fetchone()[0] if f else 0
-            if took.get(i) or exact:
-                tiers.append(f"t{i} {took.get(i, 0):,}/{exact:,}")
+        took = con.execute("SELECT t, n FROM rc_t WHERE k = ? ORDER BY t", [k]).fetchall()
         err(f"anchors {mode}: near key {k!r}: {nn:,} near, bound {b_lo:,}..{b_hi:,}; base groups {base:,}, run pure groups {pure:,}; "
-            f"run rows taken/exact: {', '.join(tiers) or 'none'}")
+            f"run rows: {', '.join(f't{t} {n:,}' for t, n in took) or 'none'}")
 
 
 def run_rollups(con, prior: list[Tier], run: Tier, D: int, mode: str, R: int, K: int, into: str, rule: HexRule | None = None) -> dict:
@@ -1089,7 +1121,7 @@ def run_rollups(con, prior: list[Tier], run: Tier, D: int, mode: str, R: int, K:
                 WHERE x.depth >= 1 GROUP BY x.s""")
     con.execute("CREATE OR REPLACE TABLE rc AS SELECT k, sum(n)::BIGINT AS n FROM rc_t GROUP BY k")
     near_candidates(con, R, "rc")
-    near_report(con, prior, mode)
+    near_report(con, mode)
     # The prior rows of each near (k, dir), exactly: per key one pushdown read of the tiers' files holding it.
     con.execute("CREATE OR REPLACE TABLE prows AS SELECT * FROM rr WHERE false")
     probe_prior_rows(con, prior, mode)

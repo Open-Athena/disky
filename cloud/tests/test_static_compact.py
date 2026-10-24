@@ -318,4 +318,37 @@ def test_measure_probe_measures_a_saved_spill_read_only_at_any_pool_width(world,
     assert [(d["kinds"]["long"]["jobs"], d["measure_threads"]) for d in docs] == [(1, None), (2, "1")]
     assert docs[0]["files"] == docs[1]["files"]
     assert sorted(docs[0]["files"])[:2] == ["long-dirs.parquet", "long-rup.parquet"]
+    # a subset (the heaviest range and a sample of 2 others per kind): only theirs fetched and measured, each to the
+    # whole's bytes
+    monkeypatch.delenv(sl.MEASURE_THREADS_ENV)
+    res = CliRunner().invoke(sm.cli, ["measure-probe", "-c", fold_ck, "-m", str(world["c_store"].parent), "-g", "g", "-o", str(tmp_path / "m2"),
+                                      "-T", str(tmp_path / "t2"), "-M", "1GB", "-p", "2", "-H", "1", "-s", "2:3"], catch_exceptions=False)
+    assert res.exit_code == 0, res.output
+    sub = json.loads((tmp_path / "m2.probe.json").read_text())
+    chosen = {k: sub["kinds"][k]["chosen"] for k in ("long", "short")}
+    assert {k: (len(v), sorted(map(int, sub["kinds"][k]["ranges"]))) for k, v in chosen.items()} == {k: (min(3, docs[0]["kinds"][k]["groups"]), v) for k, v in chosen.items()}
+    sorted_files = {k: v for k, v in sub["files"].items() if "-sorted/" in k}
+    assert sorted(sorted_files) == sorted(f"{k}-sorted/g{g:06d}.parquet" for k, gs in chosen.items() for g in gs)
+    assert sorted_files == {k: docs[0]["files"][k] for k in sorted_files}
+    # every range dealt to 2 tasks (each fetching only its own), their reports merged: the whole run's sorted roots
+    for i in range(2):
+        res = CliRunner().invoke(sm.cli, ["measure-probe", "-c", fold_ck, "-m", str(world["c_store"].parent), "-g", "g", "-o", str(tmp_path / f"s{i}"),
+                                          "-T", str(tmp_path / f"ts{i}"), "-M", "1GB", "-p", "2", "-S", f"{i}/2", "-u", str(tmp_path / "shards")],
+                                 catch_exceptions=False)
+        assert res.exit_code == 0, res.output
+    assert sorted(p.name for p in (tmp_path / "shards").iterdir()) == ["0-of-2.json", "1-of-2.json"]
+    res = CliRunner().invoke(sm.cli, ["measure-probe-merge", "-o", str(tmp_path / "merged.json"), str(tmp_path / "shards")], catch_exceptions=False)
+    assert res.exit_code == 0, res.output
+    merged = json.loads((tmp_path / "merged.json").read_text())
+    whole = {k: v for k, v in docs[0]["files"].items() if "-sorted/" in k}
+    assert {k: v for k, v in merged["files"].items() if "-sorted/" in k} == whole
+    assert {k: (merged["kinds"][k]["groups"], len(merged["kinds"][k]["ranges"])) for k in ("long", "short")} == {
+        k: (docs[0]["kinds"][k]["groups"], docs[0]["kinds"][k]["groups"]) for k in ("long", "short")}
     assert _md5s(tmp_path / "scratch") == before
+
+
+def test_deal_balances_ranges_heaviest_first_to_the_least_loaded_task():
+    from dt_cloud.static_merge import deal
+
+    assert deal({"a": 10, "b": 9, "c": 5, "d": 4, "e": 1}, 2) == [["a", "d", "e"], ["b", "c"]]
+    assert deal({"a": 1}, 3) == [["a"], [], []]
