@@ -399,13 +399,22 @@ def measure_fanout(tasks: int, gen: str) -> Callable:
     """The compaction's drill measurement over `tasks` tasks (`static_fanout.Fanout`, given the fold's checkpoint): its
     helper jobs built and run as the runner's stage jobs are (`StaticRunner.job`, stage `measure`: the profile's machine
     for it, spot with retries when the profile is), from the profile the runner passed in `$STATIC_NAMES_PROFILE`."""
+    from dataclasses import replace
+
     from .append_runner import duckdb_args
     from .checkpoint import code_version
     from .static_fanout import Fanout
     from .static_profile import profile
-    from .static_runner import gcs_runner, ready
+    from .static_runner import gcs_runner
 
-    cfg = ready(profile(), gen)
+    # only what the helper jobs need (a race's `compact-probe -F` serves nothing: no R2, no layouts)
+    cfg = replace(profile(), gen=gen)
+    if not cfg.project:
+        from .gcp import gcp_project
+
+        cfg = replace(cfg, project=gcp_project())
+    for f in ("bucket", "scratch", "region", "image", "sa"):
+        cfg.need(f)
     runner = gcs_runner(cfg)
 
     def submit(url: str, plan: str, n: int, code: str) -> None:
