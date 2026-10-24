@@ -1099,7 +1099,8 @@ def test_retire_layer1_passes_the_listing_layouts_shards(tmp_path, env):
 
 def test_retire_verify_jobs_passes_J(tmp_path, env):
     """`verify_jobs: N`: the scans needing verify in N shares at once (`-J N`)."""
-    opts = {"static-names": {"gen": "s1"}, "digest": {"template": "t", "config": "c.yml"}, "retire": {"keep": 2, "verify_jobs": 3, "store": "gs://iv"}}
+    opts = {"list": {"import": True}, "static-names": {"gen": "s1"}, "digest": {"template": "t", "config": "c.yml"},
+            "retire": {"keep": 2, "verify_jobs": 3, "store": "gs://iv"}}
     c = ctx(tmp_path, env, steps=["retire"], options=opts)
     S.retire(c, None)
     w = "<tmp>/t/dt-scan/2026-10-16T1200/retire"
