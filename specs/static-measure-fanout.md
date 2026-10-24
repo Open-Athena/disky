@@ -61,4 +61,5 @@ The compaction stays **one job**: the fold VM keeps the lease and its local stat
 
 ## Open
 
+- **Local SSD quota:** `LOCAL_SSD_TOTAL_GB_PER_VM_FAMILY` (gcs: 25,000 GB of N2 in us-east1) caps how many helper VMs come up at once. gcs's sharded probe got 4 of 16 n2-highmem-32s (1.5 TB each) beside its other jobs, and Batch ran the rest in turn on them. Size N × the `measure` stage's SSD (`machines` / `ssd_gbs` `measure` in the profile) under the quota, together with whatever else runs: an n2-highmem-16 at 750 GB fits twice as many. Raising the quota is a deployment decision. `measure-shard` works in a dir of its own per plan and task, cleared first, since a reused VM's earlier task leaves its files.
 - **Helper machine and N:** they come from the heaviest range. With ef95df4d (heavy ranges first, wide), one helper task may still take a 440M-root range alone, ~500–1,000 s.

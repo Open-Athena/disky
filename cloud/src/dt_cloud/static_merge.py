@@ -744,15 +744,16 @@ def measure_shard_cmd(checkpoint, index, mem, threads, plan, tmp, code, workers)
     if (mine := code_version()) != code:
         raise SystemExit(f"measure-shard: this is code {mine}, the fold's is {code}: refusing to measure for it")
     root, _, prefix = checkpoint.rstrip("/").rpartition("/")
-    work = Path(tmp)
-    ck = Checkpoint(root, prefix, work=work / "ckpt")
     i = index if index is not None else int(os.environ.get("BATCH_TASK_INDEX", "0"))
+    # the task's own dir, cleared first: Batch runs a job's later tasks on the VMs its earlier ones used
+    work = Path(tmp) / f"{plan.rsplit('/', 1)[-1].removesuffix('.json')}-{i}"
+    shutil.rmtree(work, ignore_errors=True)
+    ck = Checkpoint(root, prefix, work=work / "ckpt")
     doc = ck.store.read_json(ck.key(plan))
     share = [(k, g) for k, g in doc["tasks"][i]]
     todo = [(k, g) for k, g in share if not ck.store.exists(ck.key(f"{range_key(k, g)}/done.json"))]
     err(f"measure-shard {plan} #{i}: {len(share)} ranges, {len(todo)} to measure")
     spills = work / "spills"
-    shutil.rmtree(spills, ignore_errors=True)
     t0 = monotonic()
     _, by = _spilled(ck)
     _fetch_spills(ck, spills, by, todo, workers)
