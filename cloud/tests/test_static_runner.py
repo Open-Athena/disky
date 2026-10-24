@@ -965,3 +965,44 @@ def test_the_runs_before_a_scan_count_pending_listings_newer_than_its_manifest()
     assert [prior_key(keys, s) for s in ("2026-10-09T0001", "2026-10-09T0601", "2026-10-09T1201", "2026-10-09T1801")] == [
         None, "manifests/2026-10-09T0001.m001.json", "pending/2026-10-09T0601.json", "pending/2026-10-09T1201.json"]
     assert prior_key(["pending/2026-10-09T0001.json"], "2026-10-09T0601") == "pending/2026-10-09T0001.json"
+
+
+@pytest.mark.parametrize("newest, scan, behind, s, lagging", [
+    ("2026-10-09T0001", "2026-10-09T0001", [], 0, False),
+    ("2026-10-09T0001", "2026-10-09T0601", ["2026-10-09T0601"], 0, False),
+    ("2026-10-09T0001", "2026-10-09T1201", ["2026-10-09T0601", "2026-10-09T1201"], 6 * 3600, True),
+    ("2026-10-08T0001", "2026-10-09T1201", ["2026-10-09T0001", "2026-10-09T0601", "2026-10-09T1201"], 12 * 3600, True),
+    (None, "2026-10-09T0601", ["2026-10-09T0001", "2026-10-09T0601"], 6 * 3600, True),
+])
+def test_lag_counts_the_published_scans_past_the_index(newest, scan, behind, s, lagging):
+    published = ["2026-10-09T0001", "2026-10-09T0601", "2026-10-09T1201", "2026-10-09T1801"]
+    assert sd.lag_state(newest, published, scan) == {"newest": newest, "behind": behind, "s": s, "lagging": lagging}
+
+
+def test_one_behind_for_longer_than_lag_s_lags():
+    """One scan behind lags once it has been for more than `LAG_S` (12 h) by the scan's clock; exactly 12 h doesn't."""
+    assert sd.lag_state("2026-10-08T0001", ["2026-10-08T0601", "2026-10-09T0001"], "2026-10-08T1801")["lagging"] is False
+    assert sd.lag_state("2026-10-08T0001", ["2026-10-08T0601"], "2026-10-09T0001") == {
+        "newest": "2026-10-08T0001", "behind": ["2026-10-08T0601"], "s": 18 * 3600, "lagging": True}
+    assert sd.lag_state(None, ["2026-10-08T0601"], "2026-10-08T0601")["lagging"] is False
+
+
+def test_a_lag_episode_alerts_at_its_start_and_clears_at_its_end():
+    assert [sd.lag_episode(lagging, marked) for lagging, marked in ((True, False), (True, True), (False, True), (False, False))] == [
+        "start", None, "end", None]
+
+
+def test_check_priors_compares_each_tiers_recorded_priors_with_its_manifest():
+    """A run's drill built over its manifest's runs before it: `ok`; its anchors over one fewer: `differs`; a scan whose
+    anchors predate the field: `unrecorded`; a tier not built: `absent`."""
+    a, b = "2026-10-09T0001", "2026-10-09T0601"
+    keys = {
+        f"{ROOT}/manifests/{b}.json": {"runs": _runs(a, b)},
+        f"{ROOT}/deltas/{b}/drill/meta.json": {"prior": ["base", f"deltas/{a}"]},
+        f"{ROOT}/deltas/{b}/anchors/meta.json": {"prior": ["base"]},
+        f"{ROOT}/manifests/{a}.json": {"runs": _runs(a)},
+        f"{ROOT}/deltas/{a}/anchors/meta.json": {"R": 3},
+    }
+    check = lambda s: sd.check_priors(keys.__getitem__, keys.__contains__, ROOT, s)  # noqa: E731
+    assert check(b) == {"scan": b, "want": ["base", f"deltas/{a}"], "drill": "ok", "anchors": {"differs": ["base"]}}
+    assert check(a) == {"scan": a, "want": ["base"], "drill": "absent", "anchors": "unrecorded"}

@@ -1038,6 +1038,14 @@ def static_names(ctx: Ctx, arg: str | None) -> None:
                fatal=False, warn=f"static-names runs add failed for {ctx.scan}", allowed_codes=(BUSY,))
         if ctx.last is not None and ctx.last.returncode == BUSY:
             ctx.skip("busy", STATIC_NAMES_BUSY)
+    # one alert per lag episode: the index more than a scan (or 12 h) behind the newest published scan
+    out = ctx.sh(["dt-cloud", "static-names", "runs", "lag", ctx.scan], env={"STATIC_NAMES_PROFILE": str(prof)}, fatal=False,
+                 warn=f"static-names runs lag failed for {ctx.scan}", capture=True)
+    lag = json.loads(out) if out else None
+    if lag and lag["episode"] == "start":
+        hours = lag["s"] / 3600
+        ctx.run.alert("warn", f"static name index lags: its newest scan is {lag['newest']}, {len(lag['behind'])} published scans behind "
+                          f"({lag['behind'][0]} … {lag['behind'][-1]}, {hours:.1f} h); search refuses them until the catch-up appends them")
 
 
 #: Why a scan's static-names step was skipped (`runs add` exit `BUSY`): its phase note's reason, and the probe's.

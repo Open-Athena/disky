@@ -47,7 +47,8 @@ So stage S of N+1 can start once stage S of N (and N+1's own earlier stages) are
    - the next scan's append runs while this one's drill is in flight;
    - a mid-backlog failure stops only the later scans.
 3. A deployment turns it on (cw first: `STATIC_NAMES_PIPELINE_DEPTH=3`), then the default moves to 3.
-4. The lag alert + the `/scans` lag field.
+4. The lag alert (done): `runs lag SCAN` (`lag_state`, `lag_episode`, the marker `<gen>/lag-alert.json` in scratch) after the static-names step's `runs add`, a warn alert at an episode's start. Still open: the `/scans` lag field.
+5. `runs check-priors SCAN…` (done): each run's drill and anchors `prior` (anchors' `meta.json` records it now, as the drill's does) against its manifest's runs before it, and no `pending/` left. A pipelined catch-up's check.
 
 ## Open
 

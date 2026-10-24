@@ -157,6 +157,7 @@ def test_serving_steps_commands(tmp_path, env):
     k = "l2/2026-10-16T1200/index/G1"
     assert c.sh_impl.calls == [
         "dt-cloud static-names runs add -c 2026-10-16T1200",
+        "dt-cloud static-names runs lag 2026-10-16T1200",
         "dt-cloud publish-r2 -b <tmp>/data -a 2026-10-16T1200",
         f"dt-cloud index-sync -r -b r2://r2b -d <tmp>/data/{k} -g G1 -k {k} 2026-10-16T1200",
         f"dt-cloud index-sync -p -b r2://r2b -d <tmp>/data/{k} -g G1 -k {k} -M <tmp>/data/snapshots/sub 2026-10-16T1200",
@@ -191,7 +192,7 @@ def test_static_names_failure_records_failed_phase_and_the_run_goes_on(tmp_path,
     assert S.run_step("static-names", None, env) == 0
     assert phases == [("begin", "static-names"), ("end", "static-names", 1, {
         "warn": True, "msg": "static-names runs add failed for 2026-10-16T1200", "note": "overlapped"})]
-    assert c.sh_impl.calls == ["dt-cloud static-names runs add -c 2026-10-16T1200"]
+    assert c.sh_impl.calls == ["dt-cloud static-names runs add -c 2026-10-16T1200", "dt-cloud static-names runs lag 2026-10-16T1200"]
 
 
 def test_static_names_busy_is_not_a_failure(tmp_path, env, monkeypatch):
@@ -209,7 +210,25 @@ def test_static_names_busy_is_not_a_failure(tmp_path, env, monkeypatch):
         ("end", "static-names", 0, {"note": f"overlapped, skipped (busy): {BUSY_REASON}"}),
         ("alert", "warn", f"static-names skipped (busy): {BUSY_REASON}"),
     ]
-    assert c.sh_impl.calls == ["dt-cloud static-names runs add -c 2026-10-16T1200"]
+    assert c.sh_impl.calls == ["dt-cloud static-names runs add -c 2026-10-16T1200", "dt-cloud static-names runs lag 2026-10-16T1200"]
+
+
+@pytest.mark.parametrize("episode, alerts", [
+    ("start", [("warn", "static name index lags: its newest scan is 2026-10-15T1200, 2 published scans behind "
+                        "(2026-10-15T1800 … 2026-10-16T1200, 18.0 h); search refuses them until the catch-up appends them")]),
+    ("end", []), (None, []),
+])
+def test_static_names_alerts_once_when_the_index_starts_lagging(tmp_path, env, monkeypatch, episode, alerts):
+    """`runs lag` after the append: a lag episode's start is one warn alert; its end and the runs between say nothing."""
+    import json
+
+    lag = {"gen": "g", "scan": "2026-10-16T1200", "newest": "2026-10-15T1200", "behind": ["2026-10-15T1800", "2026-10-16T1200"],
+           "s": 18 * 3600, "lagging": episode == "start", "episode": episode}
+    c = ctx(tmp_path, env, runner=Runner(tmp_path, stdout={"dt-cloud static-names runs": json.dumps(lag)}))
+    posted = []
+    c.run.alert = lambda level, msg: posted.append((level, msg))
+    S.static_names(c, None)
+    assert posted == alerts
 
 
 BUSY_REASON = ("another coordinator or a compaction holds the static-names store's lease; search for this scan comes "

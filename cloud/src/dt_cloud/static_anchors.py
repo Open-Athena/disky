@@ -1240,7 +1240,10 @@ def build_run_local(con, prior: list[Tier], run: Tier, D: int, R: int, K: int, s
         fs = run.files(kind)
         rows = f"SELECT s, 1 AS n FROM ({files_sql(fs, 's, depth')}) WHERE depth >= 1" if fs else "SELECT NULL::VARCHAR AS s, 0 AS n WHERE false"
         write_census(con, rows, out / f"census-{kind}.parquet")
-    (out / "meta.json").write_text(json.dumps(anchors_meta(R, K, sets, scans, **rule_json(rule)), indent=1) + "\n")
+    # the tiers it was built over, as the drill's `meta.json` records its (`base`, then the runs' keys): what a check of
+    # a pipelined backlog compares with the manifest that publishes it
+    names = ["base", *("/".join(t.root.parts[-2:]) for t in prior[1:])]
+    (out / "meta.json").write_text(json.dumps(anchors_meta(R, K, sets, scans, prior=names, **rule_json(rule)), indent=1) + "\n")
     if all(t.has_start for t in prior):
         docs[START], sets[START] = build_run_start(con, prior, run, D, R, K, scans)
     return {"sets": sets, "docs": docs}

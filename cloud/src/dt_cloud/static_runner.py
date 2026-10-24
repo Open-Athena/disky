@@ -492,6 +492,95 @@ def add_cmd(catch_up: bool, gen: str | None, compact_now: bool, no_merge: bool, 
     print(json.dumps({"gen": runner.cfg.gen, "scan": scan_id, "appended": done, "dry_run": dry_run, "compaction": runner.compaction}))
 
 
+#: The static index lags when more than `LAG_SCANS` published scans are past its newest, or any one has been for longer
+#: than `LAG_S` (specs/static-backlog-pipeline.md): search refuses those scans, the site's default view among them.
+LAG_SCANS, LAG_S = 1, 12 * 3600
+#: The lag episode's marker in the scratch bucket (`runs lag`): one alert per episode, not one per run.
+LAG_MARKER = "lag-alert.json"
+
+
+def lag_state(newest: str | None, published: list[str], scan: str) -> dict:
+    """How far the index (newest scan `newest`) is behind `scan`: the published scans after `newest` up to `scan`
+    (`behind`), the seconds from the oldest of them to `scan` (`s`), and whether that is lagging (`LAG_SCANS`, `LAG_S`)."""
+    from .scan_id import scan_epoch
+
+    behind = sorted(x for x in published if (newest is None or x > newest) and x <= scan)
+    secs = scan_epoch(scan) - scan_epoch(behind[0]) if behind else 0
+    return {"newest": newest, "behind": behind, "s": secs, "lagging": len(behind) > LAG_SCANS or (bool(behind) and secs > LAG_S)}
+
+
+def lag_episode(lagging: bool, marked: bool) -> str | None:
+    """`start` when a lag begins (no marker yet: alert, then mark), `end` when it clears (unmark), else None."""
+    if lagging and not marked:
+        return "start"
+    if marked and not lagging:
+        return "end"
+    return None
+
+
+@command("lag")
+@option("-g", "--gen", help="Base generation (default: the profile's, $STATIC_NAMES_GEN)")
+@argument("scan_id")
+def lag_cmd(gen: str | None, scan_id: str) -> None:
+    """Whether the static index lags SCAN_ID (`lag_state`), as JSON, with `episode`: `start` the first time it does (the
+    marker `<gen>/lag-alert.json` in the scratch bucket is then written: the caller alerts once), `end` once it no longer
+    does (the marker removed), else null. Read-only but for the marker."""
+    from google.cloud import storage
+
+    cfg = ready(profile(), gen)
+    runner = gcs_runner(cfg, dry_run=True)
+    runner.follow()
+    have, layouts = runner.have()
+    doc = lag_state(have[-1] if have else None, runner.published(layouts, have[-1] if have else ""), scan_id)
+    blob = storage.Client(project=cfg.project).bucket(cfg.scratch).blob(f"{PREFIX}/{runner.cfg.gen}/{LAG_MARKER}") if cfg.scratch else None
+    episode = lag_episode(doc["lagging"], bool(blob and blob.exists()))
+    if blob is not None and episode == "start":
+        blob.upload_from_string(json.dumps({"scan": scan_id, **doc}) + "\n")
+    elif blob is not None and episode == "end":
+        blob.delete()
+    print(json.dumps({"gen": runner.cfg.gen, "scan": scan_id, **doc, "episode": episode}))
+
+
+def check_priors(read_json: Callable[[str], dict], exists: Callable[[str], bool], root: str, scan: str) -> dict:
+    """Scan `scan`'s run: the tiers its drill and anchors record they were built over (`meta.json`'s `prior`) against
+    the runs its own manifest (`manifests/<scan>.json`) lists before it, `base` first: what a pipelined backlog could get
+    wrong (specs/static-backlog-pipeline.md). Per tier `ok`, `differs` (with both lists), `unrecorded` (a build from
+    before the field), or `absent`."""
+    m = read_json(f"{root}/manifests/{scan}.json")
+    keys = [r["key"] for r in m["runs"]]
+    want = ["base", *keys[:keys.index(f"deltas/{scan}")]]
+    out: dict = {"scan": scan, "want": want}
+    for tier in ("drill", "anchors"):
+        key = f"{root}/deltas/{scan}/{tier}/meta.json"
+        if not exists(key):
+            out[tier] = "absent"
+            continue
+        got = read_json(key).get("prior")
+        out[tier] = "unrecorded" if got is None else "ok" if got == want else {"differs": got}
+    return out
+
+
+@command("check-priors")
+@option("-g", "--gen", help="Base generation (default: the profile's, $STATIC_NAMES_GEN)")
+@argument("scans", nargs=-1, required=True)
+def check_priors_cmd(gen: str | None, scans: tuple[str, ...]) -> None:
+    """Each SCAN's run's drill and anchors built over the tiers its manifest lists before it (`check_priors`), one JSON
+    line per scan; then that no pending listing is left (`pending/`). Exit 1 when any tier differs or a listing is left."""
+    cfg = ready(profile(), gen)
+    runner = gcs_runner(cfg, dry_run=True)
+    runner.follow()
+    root = f"{PREFIX}/{runner.cfg.gen}"
+    bad = False
+    for scan in scans:
+        doc = check_priors(runner.read_json, runner.exists, root, scan)
+        bad |= any(isinstance(doc[t], dict) for t in ("drill", "anchors"))
+        print(json.dumps(doc))
+    left = runner.list_keys(f"{root}/{ar.PENDING}")
+    print(json.dumps({"pending": left}))
+    if bad or left:
+        raise SystemExit(1)
+
+
 @command("merge")
 @option("-g", "--gen", help="Base generation (default: the profile's, $STATIC_NAMES_GEN)")
 @option("-n", "--dry-run", is_flag=True, help="Report the due carries; submit and write nothing")
