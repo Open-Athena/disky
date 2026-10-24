@@ -163,6 +163,25 @@ def cpu_quota(cgroup: Path) -> int | None:
     return -(-q // p) if q > 0 else None
 
 
+#: The share of the task's memory `{mem}` names: room for a DuckDB process's RSS above its `memory_limit` (some tens of
+#: percent) and whatever else the task runs beside it.
+MEM_SHARE = 0.6
+
+
+def mem_budget(cgroup: Path, share: float = MEM_SHARE) -> str:
+    """`share` of the task's memory as a DuckDB size (`"38GB"`): the machine's RAM, or the cgroup's limit when lower
+    (v2 `memory.max`, v1 `memory.limit_in_bytes`; v1's unlimited is ≥ 2^60)."""
+    total = os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES")
+    for f in ("memory.max", "memory/memory.limit_in_bytes"):
+        try:
+            limit = int((cgroup / f).read_text())
+        except (OSError, ValueError):  # absent, or v2's "max"
+            continue
+        if limit < 2**60:
+            total = min(total, limit)
+    return f"{max(1, int(total * share / 2**30))}GB"
+
+
 @dataclass
 class Ctx:
     """One step's view: the profile, the scan's identity, its environment (also every command's), a local scratch dir,
@@ -271,6 +290,10 @@ class Ctx:
         quota = cpu_quota(Path(self.env.get("DT_CGROUP") or "/sys/fs/cgroup"))
         return min(cpus, quota) if quota else cpus
 
+    @property
+    def mem(self) -> str:
+        return mem_budget(Path(self.env.get("DT_CGROUP") or "/sys/fs/cgroup"))
+
     def fill_env(self, template: str) -> str:
         """`template` with each `{env:NAME}` filled from the task's env (a step fails on an unset one)."""
         def var(m: re.Match[str]) -> str:
@@ -281,9 +304,12 @@ class Ctx:
         return re.sub(r"\{env:([A-Za-z_][A-Za-z0-9_]*)\}", var, template)
 
     def expand(self, args: Sequence[str], **extra: object) -> list[str]:
-        """`args` with `{nproc}`, `{scan}`, `{date}`, `{gen}`, `{work}`, `{data}` (the data store's local root,
-        `data_root`) (+ `extra`) filled; an arg that is exactly `{<key>}` of a list value expands to its items."""
+        """`args` with `{nproc}`, `{mem}` (`mem_budget`: a DuckDB `memory_limit` sized to the task's machine), `{scan}`,
+        `{date}`, `{gen}`, `{work}`, `{data}` (the data store's local root, `data_root`) (+ `extra`) filled; an arg that
+        is exactly `{<key>}` of a list value expands to its items."""
         vals: dict[str, object] = dict(nproc=self.nproc, scan=self.scan, date=self.date, gen=self.gen, work=self.work, **extra)
+        if any("{mem}" in a for a in args):
+            vals["mem"] = self.mem
         if any("{data}" in a for a in args):
             vals["data"] = self.data_root
         out: list[str] = []
