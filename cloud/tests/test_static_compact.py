@@ -535,7 +535,7 @@ def _fanned_fold(world, tmp_path, submit, retries: int = 2):
     try:
         with _small_groups():
             sk.fold_gen(gen_dir, tmp_path / "out", tmp_path / "w", gen="g", new_gen="g.c001", runs=runs, threads=2, mem="1GB", chunk_rows=3, ck=ck,
-                        fanout=lambda c: Fanout(c, 3, submit, code=code_version(), poll_s=0.01, retries=retries, log=lambda m: None))
+                        fanout=lambda c, scan: Fanout(c, 3, submit, code=code_version(), scan=scan, poll_s=0.01, retries=retries, log=lambda m: None))
     finally:
         ck.close()
 
@@ -544,7 +544,7 @@ def _helpers(tmp_path, calls: list, skip=lambda attempt, i: False):
     """A fake helper job: each task's `measure-shard` in turn, in-process (`skip(attempt, i)`: a task that never runs)."""
     from dt_cloud import static_merge as sm
 
-    def submit(url: str, plan: str, n: int, code: str) -> None:
+    def submit(url: str, plan: str, n: int, code: str, scan: str) -> None:
         calls.append((plan, n))
         for i in range(n):
             if skip(len(calls), i):

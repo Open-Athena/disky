@@ -461,6 +461,28 @@ def _measure_task(files: list[str], sorted_out: str, dirs_out: str, rup_out: str
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def spill_files(work: Path, kind: str) -> dict[int, list[Path]]:
+    """Each `q` range's spill files of `kind` (`work/<kind>/<producer>/grp=<g>/*.parquet`), sorted, in one walk: a glob
+    per range listed every producer's dir per range (gcs's c001: 5,371 ranges × ~4,900 fold chunks, minutes on one core
+    before the measurement or a fan-out's plan began)."""
+    import os
+
+    out: dict[int, list[Path]] = {}
+    root = work / kind
+    if not root.is_dir():
+        return out
+    with os.scandir(root) as producers:
+        for prod in producers:
+            if not prod.is_dir():
+                continue
+            with os.scandir(prod.path) as groups:
+                for grp in groups:
+                    if grp.is_dir() and grp.name.startswith("grp="):
+                        with os.scandir(grp.path) as files:
+                            out.setdefault(int(grp.name[4:]), []).extend(Path(f.path) for f in files if f.name.endswith(".parquet"))
+    return {g: sorted(fs) for g, fs in out.items()}
+
+
 def measure_ranges(con, work: Path, kind: str, n: int, dirs_into: str, rup_into: str, *, floor: int, R: int, K: int,
                    jobs: int | None = None, remote=None, on_range: Callable[[int, tuple, dict], None] | None = None,
                    measure: bool = True) -> tuple[list[Path], dict]:
@@ -488,8 +510,9 @@ def measure_ranges(con, work: Path, kind: str, n: int, dirs_into: str, rup_into:
     out.mkdir(parents=True, exist_ok=True)
     meas.mkdir(parents=True, exist_ok=True)
     tasks = []
+    spilled = spill_files(work, kind)
     for g in range(n):
-        files = sorted((work / kind).glob(f"*/grp={g}/*.parquet"))
+        files = spilled.get(g, [])
         if files:
             tasks.append((g, [str(f) for f in files], str(out / f"g{g:06d}.parquet"), str(meas / f"dirs-g{g:06d}.parquet"),
                           str(meas / f"rup-g{g:06d}.parquet")))

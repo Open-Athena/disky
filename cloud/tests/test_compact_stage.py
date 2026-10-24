@@ -268,3 +268,21 @@ def test_compact_now_skips_the_due_carries():
     assert (f.calls(), [m for m in f.log if m.startswith("merge")]) == (
         [("compact", f"compact -C level:5 -K -r -j 1 -M 90GB -p 16 {COMMON} -m /gcs/data")],
         ["merge: compaction forced (-K): it folds every run, so the due carries are skipped (1 merge)"])
+
+
+def test_the_fan_outs_helper_job_is_a_real_stage_job_named_by_the_compactions_scan():
+    """`helper_job` through the static runner's own `job()` (not a fake submitter: c001's race failed there, its plan's
+    key passed as the scan id): stage `measure`, named and labelled by the compaction's newest scan, `n` tasks of
+    `measure-shard` over the plan, on the `measure` stage's machine, no mount."""
+    import re
+
+    from dt_cloud.append_runner import duckdb_args
+    from dt_cloud.static_merge import helper_job
+
+    r = _static_runner(1)
+    name, spec = helper_job(r, "gs://scr/static-names/compact-checkpoints/g.c001/abc/fold", "measured/plan-2.json", 15, "c0de", "2026-10-23T0702")
+    assert re.fullmatch(r"[a-z0-9-]+-measure-2026-10-23-0702-\d{6}", name), name
+    group = spec["taskGroups"][0]
+    assert (spec["labels"]["stage"], group["taskCount"], group["taskSpec"]["runnables"][0]["container"]["commands"][1]) == (
+        "measure", 15, _py("static_merge", "measure-shard", "-c", "gs://scr/static-names/compact-checkpoints/g.c001/abc/fold", "-P", "measured/plan-2.json",
+                           "-V", "c0de", *duckdb_args(r.cfg.machine_for("measure")), mount=False))

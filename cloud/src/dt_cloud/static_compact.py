@@ -249,8 +249,8 @@ def stage_roots(gen_dir: Path, tiers: list[str], kinds: tuple[str, ...], dst: Pa
 
 def fold_drill(con, tiers: list[sd.Tier], out: Path, work: Path, *, R: int, K: int, floor: int, chunk_rows: int = sl.CHUNK_ROWS,
                jobs: int = 1, step=sl._nop_step, log: Callable[[str], None] = err, ck: Checkpoint | None = None,
-               staged: Callable[[], Staged | None] = lambda: None, fanout: Callable[[Checkpoint], object] | None = None,
-               meas: Path | None = None) -> dict:
+               staged: Callable[[], Staged | None] = lambda: None, fanout: Callable[[Checkpoint, str], object] | None = None,
+               meas: Path | None = None, scan: str | None = None) -> dict:
     """`G'`'s `drill/` and `roots-measure/` in `out` from the tiers' drills (`G`'s, then each run's, oldest first) and
     `out/catalog/members.parquet`: each member's roots through the last scan, read from the tiers through each one's
     class map (every tier's `aliases.parquet` maps every member it knows to its canonical, which holds that class's rows
@@ -310,7 +310,7 @@ def fold_drill(con, tiers: list[sd.Tier], out: Path, work: Path, *, R: int, K: i
         ck.drop("long-roots")
     aliases = con.execute("SELECT q, canonical FROM al ORDER BY q").to_arrow_table()
     # the measurement's helper tasks fetch the spills the checkpoint just saved (specs/static-measure-fanout.md)
-    fan = fanout(ck) if fanout is not None and ck is not None else None
+    fan = fanout(ck, scan) if fanout is not None and ck is not None else None
     why = sme.blocker(tiers, meas, floor=floor, R=R) if meas is not None else "no base measurement given"
     log(f"drill measurement: {'incremental (base ⊕ runs; each range only sorted)' if why is None else f'every root ({why})'}")
     done = sl.finish_drill(con, out, work, aliases=aliases, long_groups=groups["long"], short_groups=groups["short"], R=R, K=K, floor=floor,
@@ -696,7 +696,7 @@ def _fold_gen(gen_dir: Path, out: Path, work: Path, *, gen: str, new_gen: str, r
     drill = resumed("drill", ("drill", "roots-measure"), lambda: fold_drill(
         con, tiers, out, work / "drill", R=dm["R"], K=dm["K"], floor=dm.get("floor", sl.FLOOR), chunk_rows=chunk_rows, jobs=jobs, step=step,
         log=lambda s: log(f"compact {gen} → {new_gen}: {s}"), ck=fck, staged=staging.result if staging is not None else lambda: None,
-        fanout=fanout, meas=gen_dir / "roots-measure"), after_saves=True)
+        fanout=fanout, meas=gen_dir / "roots-measure", scan=days[-1]), after_saves=True)
     staged = staging.result() if staging is not None else None
     t = done("drill", t)
     anchors = None
