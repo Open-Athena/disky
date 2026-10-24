@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import shutil
+import threading
 import time
 from collections.abc import Callable, Iterable
 from concurrent.futures import ThreadPoolExecutor
@@ -274,47 +275,189 @@ def mirror(store: Store, prefix: str, local: Path, keep: Callable[[str], bool] =
     return listing
 
 
-#: Files `stage_files` downloads at once: one GCS stream carries ~100–200 MB/s, so 64 fill a 32 Gbps NIC.
-STAGE_WORKERS = 64
+#: Processes `stage_files` downloads in from GCS (spawned: none of them shares a GIL with the caller's threads; gcs's
+#: first probe ran 64 threads inside the fold's process beside a CPU-saturated DuckDB, 8 KiB per GIL hand-off, and
+#: staged at ~24 MB/s), each one ranged GET at a time.
+STAGE_WORKERS = 32
+#: Bytes per ranged GET: a file is ⌈size / this⌉ requests spread over the workers, and a failure retries one slice.
+STAGE_SLICE = 64 << 20
+#: Attempts per slice (backing off `RETRY_BASE_S · 2^n`), each GET's own read timeout and its client retries' deadline.
+STAGE_TRIES = 4
+STAGE_TIMEOUT_S = 600
+STAGE_DEADLINE_S = 3600
+#: Seconds between `stage_files`' progress lines.
+STAGE_PROGRESS_S = 30.0
+
+_buckets: dict[str, object] = {}
 
 
-def stage_files(root: str, keys: dict[str, int], dst: Path, *, workers: int = STAGE_WORKERS, label: str = "stage") -> dict:
-    """`keys` (`{key: size}` under `root`: a local dir or a store URL) copied to `dst/<key>`, `workers` files at once: a
-    local cache of what a fold reads many times. A `gs://` root downloads through the GCS JSON API (not a bucket mount,
-    not fsspec's one event loop), each file checked against its object's crc32c by the client; every file is checked
-    against its listed size, written beside its place first and renamed into it. Returns `{files, bytes, s}`."""
+def _gcs_slice(bucket: str, name: str, path: str, lo: int, hi: int) -> int:
+    """A `stage_files` worker: bytes `[lo, hi)` of `gs://<bucket>/<name>` written into `path` at `lo`; retried
+    `STAGE_TRIES` times. Returns the bytes."""
+    from google.cloud import storage
+    from google.cloud.storage.retry import DEFAULT_RETRY
+
+    if bucket not in _buckets:
+        _buckets[bucket] = storage.Client().bucket(bucket)
+    b = _buckets[bucket]
+    for n in range(STAGE_TRIES):
+        try:
+            with open(path, "r+b") as fh:
+                fh.seek(lo)
+                b.blob(name).download_to_file(fh, start=lo, end=hi - 1, checksum=None, timeout=STAGE_TIMEOUT_S,  # type: ignore[attr-defined]
+                                              retry=DEFAULT_RETRY.with_timeout(STAGE_DEADLINE_S))
+                if fh.tell() != hi:
+                    raise OSError(f"gs://{bucket}/{name} [{lo}, {hi}): {fh.tell() - lo} bytes read")
+            return hi - lo
+        except Exception:
+            if n == STAGE_TRIES - 1:
+                raise
+            time.sleep(RETRY_BASE_S * 2**n)
+    raise AssertionError("unreachable")
+
+
+def _crc32c(path: str) -> str:
+    """`path`'s crc32c as GCS lists it (base64 of the big-endian value)."""
+    import base64
+
+    import google_crc32c
+
+    c = google_crc32c.Checksum()
+    with open(path, "rb") as fh:
+        while b := fh.read(16 << 20):
+            c.update(b)
+    return base64.b64encode(c.digest()).decode()
+
+
+class _Rate:
+    """`stage_files`' progress lines: files and bytes done, and MB/s, at most one per `STAGE_PROGRESS_S`, then the last."""
+
+    def __init__(self, label: str, files: int, total: int, log: Callable[[str], None]):
+        self.label, self.files, self.total, self.log = label, files, total, log
+        self.t0 = self.last = time.monotonic()
+        self.done = self.nbytes = 0
+        self.lock = threading.Lock()
+
+    def tick(self, files: int = 0, nbytes: int = 0, final: bool = False) -> None:
+        with self.lock:
+            self.done += files
+            self.nbytes += nbytes
+            now = time.monotonic()
+            if not final and now - self.last < STAGE_PROGRESS_S:
+                return
+            self.last = now
+            s = max(now - self.t0, 1e-3)
+            self.log(f"{self.label} {self.done}/{self.files} files, {self.nbytes / 2**30:,.2f} of {self.total / 2**30:,.2f} GiB in {s:.0f}s "
+                     f"({self.nbytes / s / 1e6:,.0f} MB/s){' (done)' if final else ''}")
+
+
+def stage_files(root: str, keys: dict[str, int], dst: Path, *, workers: int = STAGE_WORKERS, label: str = "stage",
+                log: Callable[[str], None] = print) -> dict:
+    """`keys` (`{key: size}` under `root`: a local dir or a store URL) copied to `dst/<key>`: a local cache of what a
+    fold reads many times. Each copy is written to `<key>.part`, checked against its listed size (and on GCS its
+    object's crc32c), then renamed into place.
+
+    A `gs://` root downloads over the GCS JSON API (not a bucket mount) in `workers` spawned processes, each file in
+    `STAGE_SLICE` ranged GETs; others copy `workers` files at a time on threads (`Store.get`). A file whose copy still
+    fails after its retries is logged and left out (`failed`): a cache, so its reader reads it in place. Returns
+    `{files, bytes, s, failed}` (`files`, `bytes`: what was staged)."""
     t0 = time.monotonic()
-    prog = Progress(label, len(keys), total_bytes=sum(keys.values()), unit="files", stage=False)
-    get: Callable[[str, Path], None]
-    if scheme(root) == "gs":
-        from google.cloud import storage
-        from requests.adapters import HTTPAdapter
+    rate = _Rate(label, len(keys), sum(keys.values()), log)
+    failed: dict[str, str] = {}
+    staged: list[str] = []
 
-        client = storage.Client()
-        # one connection per worker (requests' default pool keeps 10 and churns the rest)
-        client._http.mount("https://", HTTPAdapter(pool_connections=workers, pool_maxsize=workers))
-        bucket, _, base = root.removeprefix("gs://").partition("/")
-        b = client.bucket(bucket)
-        get = lambda key, out: b.blob(f"{base}/{key}" if base else key).download_to_filename(str(out), checksum="crc32c")  # noqa: E731
+    def part(key: str) -> Path:
+        out = dst / key
+        out.parent.mkdir(parents=True, exist_ok=True)
+        return out.with_name(out.name + ".part")
+
+    def land(key: str) -> None:
+        part(key).rename(dst / key)
+        staged.append(key)
+
+    def fail(key: str, e: BaseException) -> None:
+        if key not in failed:
+            failed[key] = f"{type(e).__name__}: {e}"
+            log(f"{label}: {key} not staged ({failed[key]}); read in place")
+        part(key).unlink(missing_ok=True)
+
+    if scheme(root) == "gs":
+        _stage_gcs(root, keys, part, land, fail, rate, workers)
     else:
         store = Store(root)
-        get = store.get
 
-    def one(kv: tuple[str, int]) -> None:
-        key, size = kv
-        out = dst / key
-        tmp = out.with_name(out.name + ".part")
-        tmp.parent.mkdir(parents=True, exist_ok=True)
-        get(key, tmp)
-        if (got := tmp.stat().st_size) != size:
-            raise OSError(f"{label}: {root}/{key}: {got} bytes staged, {size} listed")
-        tmp.rename(out)
-        prog.tick(nbytes=size)
+        def one(kv: tuple[str, int]) -> None:
+            key, size = kv
+            try:
+                store.get(key, part(key))
+                if (got := part(key).stat().st_size) != size:
+                    raise OSError(f"{got} bytes staged, {size} listed")
+            except Exception as e:
+                fail(key, e)
+                return
+            land(key)
+            rate.tick(1, size)
 
-    with ThreadPoolExecutor(max(1, workers)) as ex:
-        list(ex.map(one, sorted(keys.items())))
-    prog.done()
-    return {"files": len(keys), "bytes": sum(keys.values()), "s": round(time.monotonic() - t0, 1)}
+        with ThreadPoolExecutor(max(1, workers)) as ex:
+            list(ex.map(one, sorted(keys.items())))
+    rate.tick(final=True)
+    return {"files": len(staged), "bytes": sum(keys[k] for k in staged), "s": round(time.monotonic() - t0, 1), "failed": sorted(failed)}
+
+
+def _stage_gcs(root: str, keys: dict[str, int], part: Callable[[str], Path], land: Callable[[str], None],
+               fail: Callable[[str, BaseException], None], rate: _Rate, workers: int) -> None:
+    """`stage_files` from `gs://`: every file's slices over a pool of spawned processes; a file whose slices all landed
+    is checked (size, then crc32c in a worker) before `land`; any failure `fail`s the file."""
+    import multiprocessing as mp
+    from concurrent.futures import FIRST_COMPLETED, Future, ProcessPoolExecutor, wait
+
+    from google.cloud import storage
+
+    bucket, _, base = root.removeprefix("gs://").partition("/")
+    name = lambda key: f"{base}/{key}" if base else key  # noqa: E731
+    listed = {b.name: (int(b.size), b.crc32c) for b in storage.Client().list_blobs(bucket, prefix=f"{base}/" if base else None)}
+    left: dict[str, int] = {}
+    with ProcessPoolExecutor(max(1, workers), mp_context=mp.get_context("spawn")) as ex:
+        pending: dict[Future, tuple[str, str]] = {}
+
+        def check(key: str) -> None:
+            pending[ex.submit(_crc32c, str(part(key)))] = (key, "crc")
+
+        for key, size in sorted(keys.items()):
+            got = listed.get(name(key))
+            if got is None or got[0] != size:
+                fail(key, OSError(f"gs://{bucket}/{name(key)}: listed {got[0] if got else 'missing'}, expected {size} bytes"))
+                continue
+            with open(part(key), "wb") as fh:
+                fh.truncate(size)
+            spans = [(lo, min(lo + STAGE_SLICE, size)) for lo in range(0, size, STAGE_SLICE)]
+            left[key] = len(spans)
+            if not spans:
+                check(key)
+            for lo, hi in spans:
+                pending[ex.submit(_gcs_slice, bucket, name(key), str(part(key)), lo, hi)] = (key, "slice")
+        while pending:
+            done, _ = wait(list(pending), timeout=STAGE_PROGRESS_S, return_when=FIRST_COMPLETED)
+            for f in done:
+                key, what = pending.pop(f)
+                if key not in left:  # already failed
+                    continue
+                if (e := f.exception()) is not None:
+                    del left[key]
+                    fail(key, e)
+                elif what == "slice":
+                    rate.tick(0, f.result())
+                    left[key] -= 1
+                    if left[key] == 0:
+                        check(key)
+                elif f.result() != listed[name(key)][1]:
+                    del left[key]
+                    fail(key, OSError(f"crc32c {f.result()}, listed {listed[name(key)][1]}"))
+                else:
+                    del left[key]
+                    land(key)
+                    rate.tick(1)
+            rate.tick()
 
 
 #: Files `upload_new` (and `put_tree`) keep in flight within one parallel tier: a compacted generation is ~300 GiB in
