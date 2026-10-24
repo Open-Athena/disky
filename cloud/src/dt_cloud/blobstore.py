@@ -16,7 +16,7 @@ import os
 import shutil
 import threading
 import time
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from datetime import datetime
@@ -336,6 +336,58 @@ def _gcs_slice(bucket: str, name: str, path: str, lo: int, hi: int) -> int:
                 raise
             time.sleep(RETRY_BASE_S * 2**n)
     raise AssertionError("unreachable")
+
+
+def _gcs_put(bucket: str, name: str, path: str) -> int:
+    """An `upload_files` worker: local `path` → `gs://<bucket>/<name>` (the client checks its crc32c); retried
+    `STAGE_TRIES` times. Returns the bytes."""
+    from google.cloud import storage
+    from google.cloud.storage.retry import DEFAULT_RETRY
+
+    if bucket not in _buckets:
+        _buckets[bucket] = storage.Client().bucket(bucket)
+    b = _buckets[bucket]
+    for n in range(STAGE_TRIES):
+        try:
+            b.blob(name).upload_from_filename(path, timeout=STAGE_TIMEOUT_S, retry=DEFAULT_RETRY.with_timeout(STAGE_DEADLINE_S))  # type: ignore[attr-defined]
+            return os.path.getsize(path)
+        except Exception:
+            if n == STAGE_TRIES - 1:
+                raise
+            time.sleep(RETRY_BASE_S * 2**n)
+    raise AssertionError("unreachable")
+
+
+def upload_files(root: str, files: Mapping[str, Path], *, workers: int = STAGE_WORKERS, label: str = "upload",
+                 log: Callable[[str], None] = print) -> dict:
+    """Local files (`{key: path}`) to `<root>/<key>`: a checkpoint's save. To `gs://`, over the JSON API in `workers`
+    spawned processes, a file each (a thread pool's `Store.put`s ran at ~0.25–0.55 GB/s: gcs's c001 fold waited 16 + 24
+    min on two saves); elsewhere `workers` `Store.put`s at a time on threads. Any file failing its retries raises.
+    Returns `{files, bytes, s}`."""
+    t0 = time.monotonic()
+    sizes = {k: Path(p).stat().st_size for k, p in files.items()}
+    rate = _Rate(label, len(files), sum(sizes.values()), log)
+    if scheme(root) == "gs":
+        import multiprocessing as mp
+        from concurrent.futures import ProcessPoolExecutor, as_completed
+
+        bucket, _, base = root.removeprefix("gs://").partition("/")
+        with ProcessPoolExecutor(max(1, workers), mp_context=mp.get_context("spawn")) as ex:
+            futs = {ex.submit(_gcs_put, bucket, f"{base}/{k}" if base else k, str(p)): k for k, p in sorted(files.items())}
+            for f in as_completed(futs):
+                f.result()
+                rate.tick(1, sizes[futs[f]])
+    else:
+        store = Store(root)
+
+        def one(kv: tuple[str, Path]) -> None:
+            store.put(Path(kv[1]), kv[0])
+            rate.tick(1, sizes[kv[0]])
+
+        with ThreadPoolExecutor(max(1, workers)) as ex:
+            list(ex.map(one, sorted(files.items())))
+    rate.tick(final=True)
+    return {"files": len(files), "bytes": sum(sizes.values()), "s": round(time.monotonic() - t0, 1)}
 
 
 def _crc32c(path: str) -> str:

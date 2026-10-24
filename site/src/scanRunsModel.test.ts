@@ -177,8 +177,25 @@ describe('phase spans', () => {
       { ...phase('b', 'probe', 1, 2400, 2500), note: 'failed (exit 1), 4 passed, 0 skipped, 2 failed' },
     ]
     const issues = phaseIssues(RUNS[2], [RUNS[2]], ps)
-    expect(issues).toEqual([{ phase: 'probe', outcome: 'failed', recovery: null }])
+    expect(issues).toEqual([{ phase: 'probe', outcome: 'failed', recovery: null, detail: '4 passed, 0 skipped, 2 failed' }])
     expect(runOutcomeLine(RUNS[2], issues)).toEqual('partial: probe failed')
+  })
+  it('a phase failed twice is one issue, its attempts counted, the last one\'s verdict its detail', () => {
+    const ps: ScanRunPhase[] = [
+      { ...phase('b', 'probe', 0, 2400, 2500), note: 'failed (exit 1), 4 passed, 0 skipped, 2 failed' },
+      { ...phase('b', 'probe', 1, 2600, 2700), note: 'failed (exit 1), 5 passed, 0 skipped, 1 failed' },
+    ]
+    expect(phaseIssues(RUNS[2], [RUNS[2]], ps)).toEqual([{ phase: 'probe', outcome: 'failed', recovery: null, attempts: 2, detail: '5 passed, 0 skipped, 1 failed' }])
+  })
+  it('a probe whose only failures are the index\'s lag leaves the run "search behind", not partial', () => {
+    const lag = 'the static name index covers scans through 2026-10-23T0702, 2 published scans behind (20.1 h); 3 of 9 search requests refused'
+    const ps: ScanRunPhase[] = [{ ...phase('b', 'probe', 0, 2400, 2500), note: `search behind: ${lag}` }]
+    const issues = phaseIssues(RUNS[2], [RUNS[2]], ps)
+    expect(issues).toEqual([{ phase: 'probe', outcome: 'search behind', recovery: null, reason: lag }])
+    expect([runOutcome(RUNS[2], issues), runOutcomeLine(RUNS[2], issues), phaseSpans(RUNS[2], ps).map(s => s.status)])
+      .toEqual(['search behind', `search behind: probe ${lag}`, ['done']])
+    const failed = { phase: 'iv', outcome: 'failed', recovery: null }
+    expect(runOutcome(RUNS[2], [...issues, failed])).toEqual('partial')
   })
   it('puts an overlapped phase on its own lane, on the run clock', () => {
     expect(phaseSpans(RUNS[2], PHASES.filter(p => p.run_id === 'b')).map(s => [s.phase, s.start, s.end, s.lane])).toEqual([

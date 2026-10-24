@@ -292,14 +292,22 @@ def fold_drill(con, tiers: list[sd.Tier], out: Path, work: Path, *, R: int, K: i
         st = staged()
         if st is not None:
             t = step("drill/fold/stage", t, files=st.doc["files"], bytes=st.doc["bytes"])
+        saving: Future | None = None
         if ck is not None and ck.done("long-roots"):
             _restore(con, ck, "long-roots", work)
         else:
             t = _long_roots(con, tiers, out, work, chunk_rows=chunk_rows, jobs=jobs, step=step, log=log, t=t, st=st)
-            _save(con, ck, "long-roots", work, tables=("dmem", "mtid", "tdig"), subs=("troots",))
+            if ck is not None:
+                # the tables now (they're read off `con`); the chunks' roots upload while the classes are found and the
+                # canonical roots spilled from them (c001: the fold waited 16 min on this save), until they're dropped
+                ck.save(con, "long-roots-tables", ("dmem", "mtid", "tdig"))
+                ex = ThreadPoolExecutor(1)
+                saving = ex.submit(ck.save_files, "long-roots", work, _files(work, "troots"))
+                ex.shutdown(wait=False)
         if st is not None:
             st.drop("long")
-        t, groups = _spill_roots(con, tiers, work, chunk_rows=chunk_rows, jobs=jobs, step=step, log=log, t=t, st=st)
+        t, groups = _spill_roots(con, tiers, work, chunk_rows=chunk_rows, jobs=jobs, step=step, log=log, t=t, st=st,
+                                 before_drop=saving.result if saving is not None else lambda: None)
         if st is not None:
             st.drop("short")
         _save(con, ck, "spilled", work, tables=("al",), subs=("long", "short"), doc=groups)
@@ -467,10 +475,10 @@ def _pool(con, fn: Callable[..., tuple[int, object]], items: list, jobs: int, pr
 
 
 def _spill_roots(con, tiers: list[sd.Tier], work: Path, *, chunk_rows: int, jobs: int, step, log: Callable[[str], None], t: float,
-                 st: Staged | None = None) -> tuple[float, dict]:
+                 st: Staged | None = None, before_drop: Callable[[], object] = lambda: None) -> tuple[float, dict]:
     """`fold_drill`'s classes (table `al (q, canonical)`, by root-set digest) and every root spilled by `q` range: the
     canonical members' long roots (`work/long/`) and the short literals' (`work/short/`); the ranges per kind. `st`: the
-    roots' local copies."""
+    roots' local copies. `before_drop()` runs before the chunks' roots (`work/troots/`) are removed: their save's end."""
     n, troots = len(tiers), work / "troots"
     con.execute("CREATE OR REPLACE TABLE dgq AS SELECT m.q, d.n, d.h1, d.h2 FROM mtid AS m JOIN tdig AS d USING (tid)")
     con.execute("CREATE OR REPLACE TABLE al AS SELECT q, min(q) OVER (PARTITION BY n, h1, h2) AS canonical FROM dgq")
@@ -497,6 +505,7 @@ def _spill_roots(con, tiers: list[sd.Tier], work: Path, *, chunk_rows: int, jobs
 
     _pool(con, canonical, list(enumerate(files)), jobs, prog)
     n_long = prog.rows
+    before_drop()
     shutil.rmtree(troots)
     # a resumed fold (`long-roots` restored) never made `mt`, `tup`, `tch` or the per-tier tables
     for tb in ("rt", "tdig", "ctid", "mt", "mtid", "tup", "tch", *(f"t{x}{i}" for i in range(n) for x in "ac")):
@@ -603,21 +612,33 @@ def _fold_gen(gen_dir: Path, out: Path, work: Path, *, gen: str, new_gen: str, r
     work.mkdir(parents=True, exist_ok=True)
     disk = sl.DiskPeak(work)
     steps: dict[str, float] = {}
+    noted: set[str] = set()  # parts and sub-steps an ended phase's note carried
 
-    def done(part: str, t: float) -> float:
+    def done(part: str, t: float, next_phase: str | None = None) -> float:
+        """Part `part` ended: logged, and on the run's record (`progress`) its running phase's note, or with `next_phase`
+        that phase ended and the next begun (/scans: `fold` = intervals, shards and the catalog; `drill`; `anchors`)."""
         times[part] = round(monotonic() - t, 1)
         peaks[part] = {"disk_gb": disk.take(), "rss_gb": sl.rss_peak_gb()}
         log(f"compact {gen} → {new_gen}: {part} in {times[part]}s (work disk peak {peaks[part]['disk_gb']} GiB, RSS peak {peaks[part]['rss_gb']} GiB)")
         hb.after(f"compact/{part}")
         if progress is not None:
-            progress("; ".join(f"{p} {s}s (disk {peaks[p]['disk_gb']} GiB, RSS {peaks[p]['rss_gb']} GiB)" for p, s in times.items()))
+            progress(phase_note(), next_phase)
+            if next_phase is not None:
+                noted.update(times, steps)
         return monotonic()
+
+    def phase_note() -> str:
+        """The running phase's note: its parts' and the drill's sub-steps' seconds (those an ended phase didn't carry)."""
+        return "; ".join([*(f"{p} {s}s (disk {peaks[p]['disk_gb']} GiB, RSS {peaks[p]['rss_gb']} GiB)" for p, s in times.items() if p not in noted),
+                          *(f"{k} {v}s" for k, v in steps.items() if k not in noted)])
 
     def step(name: str, t: float, **counts: int) -> float:
         steps[name] = round(monotonic() - t, 1)
         n = "".join(f", {k} {v:,}" for k, v in counts.items())
         log(f"compact {gen} → {new_gen}: {name} in {steps[name]}s (work disk peak {disk.take_step()} GiB, RSS peak {sl.rss_peak_gb()} GiB{n})")
         hb.after(name)
+        if progress is not None:  # the drill's sub-steps (measure, the helpers' collect, write) in its phase's note
+            progress(phase_note())
         return monotonic()
 
     # In the background: the catalogs' merge (it reads only the tiers' catalogs) and each part's checkpoint save, one at a
@@ -694,7 +715,7 @@ def _fold_gen(gen_dir: Path, out: Path, work: Path, *, gen: str, new_gen: str, r
     cat = resumed("catalog", ("catalog",), lambda: fold_catalog(con, [gen_dir / "catalog", *(d / "catalog" for d in run_dirs)], out, work,
                                                                 new_gen=new_gen, plan=plan, membership=membership, rule=rule, jobs=jobs,
                                                                 merged=merging.result if merging is not None else None))
-    t = done("catalog", t)
+    t = done("catalog", t, "drill")
     dm = json.loads((gen_dir / "drill" / "meta.json").read_text())
     tiers = [sd.Tier(gen_dir / "drill", "base"), *(sd.Tier(d / "drill", r["key"]) for d, r in zip(run_dirs, runs))]
     drill = resumed("drill", ("drill", "roots-measure"), lambda: fold_drill(
@@ -702,9 +723,10 @@ def _fold_gen(gen_dir: Path, out: Path, work: Path, *, gen: str, new_gen: str, r
         log=lambda s: log(f"compact {gen} → {new_gen}: {s}"), ck=fck, staged=staging.result if staging is not None else lambda: None,
         fanout=fanout, meas=gen_dir / "roots-measure", scan=days[-1]), after_saves=True)
     staged = staging.result() if staging is not None else None
-    t = done("drill", t)
+    has_anchors = (gen_dir / an.ANCHORS / "meta.json").is_file()
+    t = done("drill", t, "anchors" if has_anchors else None)
     anchors = None
-    if (gen_dir / an.ANCHORS / "meta.json").is_file():
+    if has_anchors:
         am = json.loads((gen_dir / an.ANCHORS / "meta.json").read_text())
         # the rollups' helper tasks read the name and suffix shards uploaded under `ck` (specs/static-anchors-fanout.md)
         afan = (lambda: anchor_fanout(ck, days[-1])) if anchor_fanout is not None and ck is not None else None

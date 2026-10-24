@@ -328,3 +328,21 @@ def test_merge_record(tmp_path):
         assert ar.finish_merge(rec, doc, lambda: pruned) == pruned
         assert rec.calls == calls
     assert rec.notes == {"prune": "1 folded runs, 3 objects, 1.00 GiB deleted"}
+
+
+def test_a_fan_out_helper_task_records_a_child_row_of_its_own(monkeypatch):
+    """`task_recorder`: one row per task (`<job uid>-<task index>`), started under the scan and generation its submitter
+    named; nothing recorded (`NULL`) when it named no scan."""
+    got: list = []
+
+    def fake_from_env(kind, env, *, log):
+        got.append((kind, env["BATCH_JOB_UID"], env.get("DT_PARENT_RUN")))
+        return rec
+
+    rec = FakeRecorder()
+    monkeypatch.setattr(mr, "from_env", fake_from_env)
+    env = {"BATCH_JOB_UID": "job-u1", "BATCH_TASK_INDEX": "2", "DT_PARENT_RUN": "job-c0", mr.RECORD_SCAN_ENV: "2026-10-23T0702",
+           mr.RECORD_GEN_ENV: "static-names/g"}
+    assert mr.task_recorder("measure-shard", env, log=lambda m: None) is rec
+    assert (got, rec.calls) == ([("measure-shard", "job-u1-2", "job-c0")], [("start", "2026-10-23T0702", "static-names/g")])
+    assert mr.task_recorder("measure-shard", {"BATCH_JOB_UID": "job-u1"}, log=lambda m: None) is mr.NULL

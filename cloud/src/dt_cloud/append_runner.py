@@ -1880,9 +1880,14 @@ class Runner:
                  "spot": "1" if inst["provisioningModel"] == "SPOT" else "0", "image": image}
         v.update({FACT_ENV[k]: x for k, x in facts.items() if x})
         secrets = dict(getattr(self.p, "record_secrets", None) or {})
-        if secrets and all((self.environ.get(k) or "").strip() for k in ("D1_DB_ID", "CLOUDFLARE_ACCOUNT_ID")):
+        missing = [k for k in ("D1_DB_ID", "CLOUDFLARE_ACCOUNT_ID") if not (self.environ.get(k) or "").strip()]
+        if secrets and not missing:
             v.update({k: self.environ[k].strip() for k in PASS_ENV if (self.environ.get(k) or "").strip()})
             env.setdefault("secretVariables", {}).update({k: f"projects/{self.p.project}/secrets/{x}/versions/latest" for k, x in sorted(secrets.items())})
+        else:
+            # said here, where it's decided: the job only logs that it isn't recorded (c001's 16 h compaction never reached /scans)
+            self.log(f"{name}: not recorded on /scans: " + (f"no {', '.join('$' + k for k in missing)} in the submitter's environment"
+                                                            if secrets else "the profile names no `record_secrets`"))
         return spec
 
     def compact_jobs(self, scan: str) -> list[tuple[str, dict]]:
@@ -2253,7 +2258,7 @@ def compact_store(store, c: Compactor, gen: str, gen_dir: Path, work: Path, *, p
     `rec`: the run's record (`maint_runs`): phases `fold` (the interval store's then `sorts`: the fold's `progress`
     hook moves it on), `upload`, `pointer`, `r2`, each with its note (rows, files, GiB, seconds, work-disk / RSS peaks)."""
     from .blobstore import upload_new
-    from .maint_runs import NULL, gib, phase
+    from .maint_runs import NULL, PhaseHook, gib, phase
     from .static_local import DiskPeak, rss_peak_gb
 
     rec = rec or NULL
@@ -2272,29 +2277,17 @@ def compact_store(store, c: Compactor, gen: str, gen_dir: Path, work: Path, *, p
     work.mkdir(parents=True, exist_ok=True)
     t0, disk = monotonic(), DiskPeak(work)
     log(f"compact {gen} → {new} under {as_policy(policy)} ({why}): {len(runs)} runs and the base")
-    cur, noted = ["fold"], [0.0]
-
-    def progress(note: str, next_phase: str | None = None) -> None:
-        """The fold's hook: `note` on its running phase (at most every `NOTE_S`: a range ends every few seconds); with
-        `next_phase`, that phase ends with it and the next begins."""
-        if next_phase is None:
-            if monotonic() - noted[0] >= NOTE_S:
-                noted[0] = monotonic()
-                rec.note(cur[0], note)
-            return
-        rec.end(cur[0], f"{note}; work disk peak {disk.take()} GiB, RSS peak {rss_peak_gb()} GiB")
-        cur[0] = next_phase
-        rec.begin(next_phase)
-
-    rec.begin("fold")
+    # the fold's hook: notes on its running phase (at most every `NOTE_S`: a range ends every few seconds), the next phase
+    progress = PhaseHook(rec, "fold", note_s=NOTE_S, suffix=lambda: f"; work disk peak {disk.take()} GiB, RSS peak {rss_peak_gb()} GiB")
+    progress.begin()
     try:
         src = {"source": store.uri(f"{c.prefix}/{gen}")} if c.source else {}
         summary = {"from": gen, "gen": new, **c.fold(gen_dir, out, work, gen=gen, new_gen=new, runs=runs, threads=threads, mem=mem, jobs=jobs,
                                                       progress=progress, **src)}
     except BaseException as e:
-        rec.end(cur[0], f"failed: {type(e).__name__}: {e}", failed=True)
+        progress.end(f"failed: {type(e).__name__}: {e}", failed=True)
         raise
-    rec.end(cur[0], f"{fold_note(summary)}; work disk peak {disk.take()} GiB, RSS peak {rss_peak_gb()} GiB")
+    progress.end(f"{fold_note(summary)}; work disk peak {disk.take()} GiB, RSS peak {rss_peak_gb()} GiB")
     comp = {"from": gen, "manifest": manifest, "runs": [r["key"] for r in runs], "base_scans": base_scans,
             "scans": len(json.loads((out / "scans.json").read_text())["scans"]), **compaction_doc(policy, why)}
     if c.md5s:
