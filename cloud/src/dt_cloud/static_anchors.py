@@ -811,8 +811,12 @@ def key_group_batches(file: str, keys: list[str], max_rows: int = PROBE_READ_ROW
     return batches
 
 
-#: A single-key probe batch of at least this many row groups logs how many meet its probe ranges (`island_groups`).
+#: A single-key probe batch of at least this many row groups reads only the spans of them meeting its probe ranges
+#: (`island_spans`), and logs how many meet (`island_groups=`).
 ISLAND_REPORT_GROUPS = 64
+#: Runs of meeting groups at most this many groups apart are read as one `path` range (`island_spans`): fewer scans for a
+#: few groups more.
+SPAN_GAP_GROUPS = 4
 
 
 def path_bounds(file: str) -> list[tuple[str | None, str | None]]:
@@ -826,21 +830,29 @@ def path_bounds(file: str) -> list[tuple[str | None, str | None]]:
     return out
 
 
-def island_groups(con, k: str, bounds: list[tuple[str | None, str | None]]) -> int:
-    """How many of `bounds` (row groups' path `(min, max)`) meet one of key `k`'s probe ranges (`probe_ranges`)."""
+def island_spans(con, k: str, bounds: list[tuple[str | None, str | None]], gap: int = SPAN_GAP_GROUPS) -> list[tuple[str, str, int]] | None:
+    """The `path` spans of `bounds` (one key's row groups, in order: their path `(min, max)`) that meet one of key `k`'s
+    probe ranges (`probe_ranges`): `(first group's min, last group's max, groups meeting)` per run of meeting groups, runs
+    at most `gap` groups apart joined (one range read for both). None when every group may meet (a whole-key probe range,
+    or a group without path statistics): read the key whole."""
     islands = con.execute("SELECT lo, hi FROM probe_ranges WHERE k = ? ORDER BY lo", [k]).fetchall()
-    if any(hi is None for _, hi in islands):
-        return len(bounds)
+    if any(hi is None for _, hi in islands) or any(p_min is None or p_max is None for p_min, p_max in bounds):
+        return None
     los = [lo for lo, _ in islands]
-    n = 0
-    for p_min, p_max in bounds:
-        if p_min is None or p_max is None:
-            n += 1
-            continue
+    spans: list[list] = []
+    last = None
+    for g, (p_min, p_max) in enumerate(bounds):
         # the last island starting at or below the group's max; it meets the group if it ends above the group's min
         i = bisect_right(los, p_max) - 1
-        n += i >= 0 and islands[i][1] > p_min
-    return n
+        if not (i >= 0 and islands[i][1] > p_min):
+            continue
+        if spans and g - last <= gap + 1:
+            spans[-1][1] = p_max
+            spans[-1][2] += 1
+        else:
+            spans.append([p_min, p_max, 1])
+        last = g
+    return [(lo, hi, n) for lo, hi, n in spans]
 
 
 def probe_prior_rows(
@@ -887,16 +899,23 @@ def probe_prior_rows(
                 # key to the last reads every group between); DuckDB's reads, overlapped, not pyarrow's per group: over
                 # gcsfuse those waited ~3 s a group (cw's 10-22T1802: 0.5 of 16 cores)
                 where = f"s IN ({', '.join(q(k) for k in selected)})"
-                # one heavy key's batch: how many of its groups meet one of its probe ranges (the rest a path-pruned
-                # read would skip)
+                # one heavy key's batch (cw's t0: ~1–2% of 1,100–2,100 groups meet its probe ranges): only the spans of
+                # groups that do, each a single `path` range (DuckDB prunes groups by one range, not by an `OR` of them),
+                # one `UNION ALL` statement
                 meet = None
+                src = shard_rows_sql([file], where)
                 if groups is not None and len(selected) == 1 and len(groups) >= ISLAND_REPORT_GROUPS:
                     paths = paths or path_bounds(file)
-                    meet = island_groups(con, selected[0], [paths[g] for g in groups])
+                    spans = island_spans(con, selected[0], [paths[g] for g in groups])
+                    if spans is not None:
+                        meet = sum(n for _, _, n in spans)
+                        src = " UNION ALL ".join(shard_rows_sql([file], f"{where} AND path >= {q(lo)} AND path <= {q(hi)}") for lo, hi, _ in spans)
                 resource_stage(f"anchors {mode}: prior probes", tier=ti, query=queries + 1, keys=len(selected),
                                groups=None if groups is None else len(groups), island_groups=meet)
+                if meet == 0:
+                    continue
                 con.execute(f"""INSERT INTO prows SELECT x.k, x.depth, x.path, x.usr, x.vf, x.vt, x.size, x.n_files, x.par
-                    FROM ({shard_rows_sql([file], where)}) AS x
+                    FROM ({src}) AS x
                     ASOF JOIN (SELECT * FROM probe_ranges SEMI JOIN pkeys USING (k)) AS p ON x.k = p.k AND x.path >= p.lo
                     WHERE p.hi IS NULL OR x.path < p.hi""")
                 queries += 1
