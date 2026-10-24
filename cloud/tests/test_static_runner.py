@@ -884,7 +884,7 @@ class _SafeKeys(dict):
         return iter(list(dict.keys(self)))
 
 
-SCANS = ["2026-10-09T0001", "2026-10-09T0601", "2026-10-09T1201"]
+PIPE_SCANS = ["2026-10-09T0001", "2026-10-09T0601", "2026-10-09T1201"]
 
 
 def _pipelined(f: Fake, depth: int = 3, **kw) -> sd.Runner:
@@ -897,14 +897,14 @@ def _pipelined(f: Fake, depth: int = 3, **kw) -> sd.Runner:
 def test_a_pipelined_backlog_writes_what_one_at_a_time_does():
     """Three pending scans at depth 3: the same jobs, manifests and merge as at depth 1, each step in scan order (the
     publishes too), each scan's steps in chain order."""
-    serial, piped = Fake({}, SCANS), Fake({}, SCANS)
-    assert serial.daily().run(SCANS[-1], catch_up=True) == SCANS
-    assert _pipelined(piped).run(SCANS[-1], catch_up=True) == SCANS
+    serial, piped = Fake({}, PIPE_SCANS), Fake({}, PIPE_SCANS)
+    assert serial.daily().run(PIPE_SCANS[-1], catch_up=True) == PIPE_SCANS
+    assert _pipelined(piped).run(PIPE_SCANS[-1], catch_up=True) == PIPE_SCANS
     assert sorted(map(repr, piped._calls)) == sorted(map(repr, serial._calls))
     assert {k: v for k, v in piped.keys.items() if "/manifests/" in k} == {k: v for k, v in serial.keys.items() if "/manifests/" in k}
     for stage in ("prepare", "append", "publish", "r2", "prune"):
         assert [c for c in piped._calls if c[0] == stage] == [c for c in serial._calls if c[0] == stage]
-    for d in SCANS:
+    for d in PIPE_SCANS:
         at = [piped._calls.index((stage, d)) for stage in ("prepare", "publish", "prune")]
         assert at == sorted(at)
 
@@ -914,16 +914,16 @@ def test_a_pipelined_backlog_appends_the_next_scan_while_this_one_builds():
     for it)."""
     from threading import Event
 
-    f = Fake({}, SCANS[:2])
+    f = Fake({}, PIPE_SCANS[:2])
     started = Event()
     run_job = f.run_job
 
     def job(name, spec, wait=None):
         words = spec["taskGroups"][0]["taskSpec"]["runnables"][0]["container"]["commands"][1].split()
         d = words[words.index("-d") + 1] if "-d" in words else None
-        if spec["labels"]["stage"] == "append" and d == SCANS[1]:
+        if spec["labels"]["stage"] == "append" and d == PIPE_SCANS[1]:
             started.set()
-        if spec["labels"]["stage"] == "drill" and d == SCANS[0]:
+        if spec["labels"]["stage"] == "drill" and d == PIPE_SCANS[0]:
             assert started.wait(5), "the second scan's append never started while the first's drill ran"
         return run_job(name, spec, wait)
 
@@ -931,28 +931,28 @@ def test_a_pipelined_backlog_appends_the_next_scan_while_this_one_builds():
     from dataclasses import replace
 
     f.keys = _SafeKeys(f.keys)
-    assert f.daily(replace(CFG, pipeline_depth=2, drill=True)).run(SCANS[1], catch_up=True) == SCANS[:2]
-    assert sorted(k.rsplit("/", 1)[-1] for k in f.keys if "/manifests/" in k) == [f"{SCANS[0]}.json", f"{SCANS[1]}.json", f"{SCANS[1]}.m001.json"]
+    assert f.daily(replace(CFG, pipeline_depth=2, drill=True)).run(PIPE_SCANS[1], catch_up=True) == PIPE_SCANS[:2]
+    assert sorted(k.rsplit("/", 1)[-1] for k in f.keys if "/manifests/" in k) == [f"{PIPE_SCANS[0]}.json", f"{PIPE_SCANS[1]}.json", f"{PIPE_SCANS[1]}.m001.json"]
 
 
 def test_a_failed_step_stops_its_scan_and_the_later_ones_not_the_earlier():
     """The second scan's shards fail: the first scan publishes, the second and third don't (the third stops before its
     shards: it would read the second's), and the run raises the failure; a rerun at depth 1 resumes them."""
-    f = Fake({}, SCANS)
+    f = Fake({}, PIPE_SCANS)
     run_job = f.run_job
 
     def job(name, spec, wait=None):
-        if spec["labels"]["stage"] == "shards" and f"-d {SCANS[1]}" in spec["taskGroups"][0]["taskSpec"]["runnables"][0]["container"]["commands"][1]:
+        if spec["labels"]["stage"] == "shards" and f"-d {PIPE_SCANS[1]}" in spec["taskGroups"][0]["taskSpec"]["runnables"][0]["container"]["commands"][1]:
             raise RuntimeError(f"Batch job {name}: FAILED")
         return run_job(name, spec, wait)
 
     f.run_job = job
     with pytest.raises(RuntimeError, match="FAILED"):
-        _pipelined(f).run(SCANS[-1], catch_up=True)
-    assert sorted(k.rsplit("/", 1)[-1] for k in f.keys if "/manifests/" in k) == [f"{SCANS[0]}.json"]
-    assert [c[0] for c in f._calls if SCANS[2] in repr(c) and c[0] in ("shards", "catalog", "publish")] == []
+        _pipelined(f).run(PIPE_SCANS[-1], catch_up=True)
+    assert sorted(k.rsplit("/", 1)[-1] for k in f.keys if "/manifests/" in k) == [f"{PIPE_SCANS[0]}.json"]
+    assert [c[0] for c in f._calls if PIPE_SCANS[2] in repr(c) and c[0] in ("shards", "catalog", "publish")] == []
     f.run_job = run_job
-    assert f.daily().run(SCANS[-1], catch_up=True) == SCANS[1:]
+    assert f.daily().run(PIPE_SCANS[-1], catch_up=True) == PIPE_SCANS[1:]
 
 
 def test_the_runs_before_a_scan_count_pending_listings_newer_than_its_manifest():
