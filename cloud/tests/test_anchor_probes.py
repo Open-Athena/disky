@@ -253,11 +253,16 @@ def test_level_pruning_keeps_exactly_the_unpruned_near(runs):
     con.execute("CREATE TABLE ktk(k VARCHAR, t INTEGER, s_min VARCHAR, s_max VARCHAR, p_min VARCHAR, p_max VARCHAR, rows BIGINT)")
     con.execute("CREATE TABLE rc(k VARCHAR, n BIGINT)")
     for key in ("k1", "k2", "k3"):
-        dirs = {""}
-        for _ in range(60):
-            parts = [rng.choice("abc") for _ in range(rng.randint(1, 4))]
-            dirs |= {"/".join(parts[:i]) for i in range(1, len(parts) + 1)}
-        cand = [(key, 0 if d == "" else d.count("/") + 1, d, rng.randint(1, 40)) for d in sorted(dirs) if rng.random() > 0.1]
+        # the run's rows (paths), and each of their directories with its rows under it, as `rd` counts them
+        paths = ["/".join(rng.choice("abc") for _ in range(rng.randint(2, 5))) for _ in range(300)]
+        under: dict[str, int] = {}
+        for p in paths:
+            parts = p.split("/")
+            for i in range(len(parts)):
+                d = "/".join(parts[:i])
+                under[d] = under.get(d, 0) + 1
+        dirs = set(under)
+        cand = [(key, 0 if d == "" else d.count("/") + 1, d, under[d]) for d in sorted(dirs) if rng.random() > 0.1]
         con.executemany("INSERT INTO cand VALUES (?, ?, ?, ?)", cand)
         for _ in range(30):
             lo, hi = sorted(rng.choice(sorted(dirs - {""})) + "/" + rng.choice("xyz") for _ in range(2))
@@ -266,7 +271,7 @@ def test_level_pruning_keeps_exactly_the_unpruned_near(runs):
             con.execute("INSERT INTO ktk VALUES (?, ?, ?, ?, ?, ?, ?)", (key, rng.choice([0, 1, 2]), s_min, s_max, lo, hi, rng.randint(1, 60)))
         con.execute("INSERT INTO rc VALUES (?, ?)", (key, rng.randint(0, 100)))
     rc = "rc" if runs else None
-    for R in (0, 50, 150, 400):
+    for R in (0, 100, 300, 600):
         an.near_candidates(con, R, rc)
         got = con.execute("SELECT * FROM near ORDER BY ALL").fetchall()
         # unpruned: every candidate bounded
@@ -283,4 +288,4 @@ def test_level_pruning_keeps_exactly_the_unpruned_near(runs):
             an.group_bound(con, "g", "cand", "w")
             want = con.execute(f"SELECT * FROM w WHERE n + bound > {R} ORDER BY ALL").fetchall()
         assert got == want
-        assert got or R >= 150  # a vacuous comparison would prove nothing
+        assert got or R >= 300  # a vacuous comparison would prove nothing
