@@ -783,12 +783,15 @@ def seed_checkpoint(src_root: str, dst_root: str, gen: str, new_gen: str, runs: 
     (`STEPS`' order), copied under `dst_root` and claimed for this code (`code.json`: the steps after `through` run on
     it): a fold resumed there on new code, the source never written (a run still holding it goes on). The copied steps
     were made by the code that saved them; that they equal this code's is what CI's byte-identity tests hold (the
-    drill's measurement at any pool width, fan-out, staging). Same bucket: copied server side. Returns the steps and
-    files copied."""
+    drill's measurement at any pool width, fan-out, staging). So are the fan-outs' finished units of the step after
+    `through` (`helper_units`): the drill measurement's ranges when the drill isn't copied, the anchors' shard tasks when
+    the anchors aren't; the resumed fold deals only the rest. Same bucket: copied server side. Returns the steps, files
+    and units copied."""
     from concurrent.futures import ThreadPoolExecutor
 
     from .blobstore import Store, store_url
     from .checkpoint import code_version
+    from .static_fanout import ANCHORED, ANCHORS_IN, MEASURED
 
     if through not in STEPS:
         raise SystemExit(f"--through {through}: one of {', '.join(STEPS)}")
@@ -799,6 +802,13 @@ def seed_checkpoint(src_root: str, dst_root: str, gen: str, new_gen: str, runs: 
     src = Store(src_root)
     steps = [st for st in STEPS[:STEPS.index(through) + 1] if src.exists(f"{prefix}/{st}/done.json")]
     keys = [k for st in steps for k in src.keys(f"{prefix}/{st}/")]
+    units = []
+    if "fold/spilled" in steps and "drill" not in steps:
+        units += helper_units(src, f"{prefix}/fold/{MEASURED}/")
+    if "drill" in steps and "anchors" not in steps:
+        units += helper_units(src, f"{prefix}/{ANCHORED}/")
+        keys += src.keys(f"{prefix}/{ANCHORS_IN}/")
+    keys += [k for u in units for k in u]
     same = same_bucket(src_root, dst_root)
     if same is not None:
         base, src_in, dst_in = same
@@ -817,8 +827,20 @@ def seed_checkpoint(src_root: str, dst_root: str, gen: str, new_gen: str, runs: 
     with ThreadPoolExecutor(workers) as ex:
         list(ex.map(copy, keys))
     Store(dst_root).write_text(f"{prefix}/code.json", json.dumps({"code": code_version()}) + "\n")
-    log(f"seed checkpoint: {len(keys)} files of steps {', '.join(steps)} from {src_root} to {dst_root}/{prefix}/")
-    return {"steps": steps, "files": len(keys)}
+    log(f"seed checkpoint: {len(keys)} files of steps {', '.join(steps)} (+ {len(units)} finished helper units) from {src_root} to "
+        f"{dst_root}/{prefix}/")
+    return {"steps": steps, "files": len(keys), "units": len(units)}
+
+
+def helper_units(src, root: str) -> list[list[str]]:
+    """A fan-out's finished units under `root` (`<root><kind>/<unit>/…`, `static_fanout`): each unit dir holding a
+    `done.json`, its files (the `done.json` last). Plans and task reports aren't units."""
+    by: dict[str, list[str]] = {}
+    for k in src.keys(root):
+        rel = k[len(root):].split("/")
+        if len(rel) == 3:
+            by.setdefault("/".join(rel[:2]), []).append(k)
+    return [sorted(fs, key=lambda k: k.endswith("/done.json")) for fs in by.values() if any(k.endswith("/done.json") for k in fs)]
 
 
 def clear_checkpoints(root: str, new_gen: str) -> int:

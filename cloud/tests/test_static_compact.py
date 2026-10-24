@@ -717,3 +717,29 @@ def test_seed_keys_join_a_bucket_root_and_a_prefix():
     assert sk.same_bucket("gs://scratch", "gs://scratch/static-names-race/c001-a") == ("gs://scratch", "", "static-names-race/c001-a/")
     assert sk.same_bucket("gs://scratch/x/", "gs://scratch") == ("gs://scratch", "x/", "")
     assert [sk.same_bucket(a, b) for a, b in (("gs://a", "gs://b/x"), ("gs://a", "r2://a"), ("/tmp/a", "/tmp/b"))] == [None, None, None]
+
+
+def test_a_seed_through_the_spills_carries_the_finished_measured_ranges(tmp_path):
+    """`seed_checkpoint` through `fold/spilled` also copies `fold/measured/`'s finished ranges (a unit dir with a
+    `done.json`), not unfinished ones, plans or task reports, so the race resumed there deals only the rest; through
+    `drill`, the anchors' finished shard tasks and their uploaded inputs instead."""
+    from dt_cloud.blobstore import Store
+
+    runs = [{"key": "runs/2026-10-23T0702"}]
+    pre = sk.checkpoint_prefix("g", "g.c001", runs)
+    src = Store(str(tmp_path / "src"))
+    for rel in ("fold/spilled/done.json", "fold/spilled/long/x.parquet", "fold/measured/plan-1.json", "fold/measured/tasks/plan-1-0.json",
+                "fold/measured/long/g000001/sorted.parquet", "fold/measured/long/g000001/done.json",
+                "fold/measured/long/g000002/sorted.parquet", "drill/done.json", "drill/d.parquet",
+                "anchored/end/s00000/cells.parquet", "anchored/end/s00000/done.json", "anchored/exact/s00001/cells.parquet",
+                "anchors-in/sx/s00000.parquet"):
+        src.write_text(f"{pre}/{rel}", rel)
+
+    def seeded(through: str, dst: str) -> list[str]:
+        sk.seed_checkpoint(str(tmp_path / "src"), str(tmp_path / dst), "g", "g.c001", runs, through, log=lambda m: None)
+        return sorted(k[len(pre) + 1:] for k in Store(str(tmp_path / dst)).keys(f"{pre}/"))
+
+    assert seeded("fold/spilled", "a") == ["code.json", "fold/measured/long/g000001/done.json", "fold/measured/long/g000001/sorted.parquet",
+                                           "fold/spilled/done.json", "fold/spilled/long/x.parquet"]
+    assert seeded("drill", "b") == ["anchored/end/s00000/cells.parquet", "anchored/end/s00000/done.json", "anchors-in/sx/s00000.parquet",
+                                    "code.json", "drill/d.parquet", "drill/done.json", "fold/spilled/done.json", "fold/spilled/long/x.parquet"]
