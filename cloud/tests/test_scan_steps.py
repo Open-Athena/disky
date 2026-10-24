@@ -2,6 +2,7 @@
 dispatcher's fake / fail / soft semantics."""
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 from dataclasses import replace
@@ -139,10 +140,12 @@ def test_index_imports_listings_when_list_does_not(tmp_path, env, monkeypatch):
 
 
 def test_serving_steps_gate_on_credentials(tmp_path, env):
+    """Without the site's, R2's or Slack's credentials no serving step runs a command; the probe's static lag check needs
+    none of them (the static-names profile reads the data bucket)."""
     c = ctx(tmp_path, env)
     for f in (S.publish_r2, S.index_rows, S.index_sync, S.over_time, S.index_gc, S.warm_cache, S.probe, S.digest):
         f(c, None)
-    assert c.sh_impl.calls == []
+    assert c.sh_impl.calls == ["dt-cloud static-names runs lag 2026-10-16T1200"]
 
 
 def test_serving_steps_commands(tmp_path, env):
@@ -156,6 +159,7 @@ def test_serving_steps_commands(tmp_path, env):
     k = "l2/2026-10-16T1200/index/G1"
     assert c.sh_impl.calls == [
         "dt-cloud static-names runs add -c 2026-10-16T1200",
+        "dt-cloud static-names runs lag 2026-10-16T1200",
         "dt-cloud publish-r2 -b <tmp>/data -a 2026-10-16T1200",
         f"dt-cloud index-sync -r -b r2://r2b -d <tmp>/data/{k} -g G1 -k {k} 2026-10-16T1200",
         f"dt-cloud index-sync -p -b r2://r2b -d <tmp>/data/{k} -g G1 -k {k} -M <tmp>/data/snapshots/sub 2026-10-16T1200",
@@ -163,7 +167,8 @@ def test_serving_steps_commands(tmp_path, env):
         "dt-cloud over-time-groups -g G1 -o <tmp>/t/dt-scan/2026-10-16T1200/over-time -p r2://r2b",
         "dt-cloud index-gc -R -m 2d -F <tmp>/data -F r2",
         "dt-cloud warm-cache -d 2026-10-16T1200 -r r2://r2b/snapshots/sub",
-        "dt-cloud probe -c -u https://site.example.org -o <tmp>/data/probes/sub/",
+        "dt-cloud probe -c -u https://site.example.org -o <tmp>/data/probes/sub/ -j",
+        "dt-cloud static-names runs lag 2026-10-16T1200",
         "dt-cloud digest -T t -C c.yml -P slack -r <tmp>/data/snapshots/sub",
     ]
     assert (tmp_path / "home/.config/disk-tree/buckets.yml").read_text() == (
@@ -190,7 +195,7 @@ def test_static_names_failure_records_failed_phase_and_the_run_goes_on(tmp_path,
     assert S.run_step("static-names", None, env) == 0
     assert phases == [("begin", "static-names"), ("end", "static-names", 1, {
         "warn": True, "msg": "static-names runs add failed for 2026-10-16T1200", "note": "overlapped"})]
-    assert c.sh_impl.calls == ["dt-cloud static-names runs add -c 2026-10-16T1200"]
+    assert c.sh_impl.calls == ["dt-cloud static-names runs add -c 2026-10-16T1200", "dt-cloud static-names runs lag 2026-10-16T1200"]
 
 
 def test_static_names_busy_is_not_a_failure(tmp_path, env, monkeypatch):
@@ -201,9 +206,92 @@ def test_static_names_busy_is_not_a_failure(tmp_path, env, monkeypatch):
     c.run.end = lambda name, rc=0, **kw: phases.append(("end", name, rc, kw))
     monkeypatch.setattr(S, "load_profile_env", lambda *a: c.profile)
     monkeypatch.setattr(S, "make_ctx", lambda *a: c)
+    c.run.alert = lambda level, msg: phases.append(("alert", level, msg))
     assert S.run_step("static-names", None, env) == 0
-    assert phases == [("begin", "static-names"), ("end", "static-names", 0, {"note": "overlapped"})]
-    assert c.sh_impl.calls == ["dt-cloud static-names runs add -c 2026-10-16T1200"]
+    assert phases == [
+        ("begin", "static-names"),
+        ("end", "static-names", 0, {"note": f"overlapped, skipped (busy): {BUSY_REASON}"}),
+        ("alert", "warn", f"static-names skipped (busy): {BUSY_REASON}"),
+    ]
+    assert c.sh_impl.calls == ["dt-cloud static-names runs add -c 2026-10-16T1200", "dt-cloud static-names runs lag 2026-10-16T1200"]
+
+
+@pytest.mark.parametrize("episode, alerts", [
+    ("start", [("warn", "static name index lags: its newest scan is 2026-10-15T1200, 2 published scans behind "
+                        "(2026-10-15T1800 … 2026-10-16T1200, 18.0 h); search refuses them until the catch-up appends them")]),
+    ("end", []), (None, []),
+])
+def test_static_names_alerts_once_when_the_index_starts_lagging(tmp_path, env, monkeypatch, episode, alerts):
+    """`runs lag` after the append: a lag episode's start is one warn alert; its end and the runs between say nothing."""
+    import json
+
+    lag = {"gen": "g", "scan": "2026-10-16T1200", "newest": "2026-10-15T1200", "behind": ["2026-10-15T1800", "2026-10-16T1200"],
+           "s": 18 * 3600, "lagging": episode == "start", "episode": episode}
+    c = ctx(tmp_path, env, runner=Runner(tmp_path, stdout={"dt-cloud static-names runs": json.dumps(lag)}))
+    posted = []
+    c.run.alert = lambda level, msg: posted.append((level, msg))
+    S.static_names(c, None)
+    assert posted == alerts
+
+
+def test_the_probe_checks_the_lag_when_the_deployment_skips_static_names(tmp_path, env):
+    """A deployment skipping its static-names step (cw since 10-22) still gets the lag alert, from the probe, naming the
+    skip."""
+    lag = {"gen": "g", "scan": "2026-10-16T1200", "newest": "2026-10-15T1200", "behind": ["2026-10-15T1800", "2026-10-16T1200"],
+           "s": 18 * 3600, "lagging": True, "episode": "start"}
+    c = ctx(tmp_path, env, runner=Runner(tmp_path, stdout={"dt-cloud static-names runs": json.dumps(lag)}), skip=["static-names"],
+            options={"list": {"import": True, "bulk_args": ["-a"], "threads": 8}, "index": {"webdata": ["python", "web.py", "{web}", "{sources}", "-a", "{date}"], "mem": "16GB", "threads": 2},
+                     "digest": {"template": "t", "config": "c.yml"}})
+    c.env["STATIC_NAMES_PROFILE"] = "sn.json"
+    posted = []
+    c.run.alert = lambda level, msg: posted.append((level, msg))
+    S.probe(c, None)
+    assert c.sh_impl.calls == ["dt-cloud static-names runs lag 2026-10-16T1200"]
+    assert posted == [("warn", "static name index lags: its newest scan is 2026-10-15T1200, 2 published scans behind (2026-10-15T1800 … "
+                               "2026-10-16T1200, 18.0 h) (this deployment skips its static-names step); search refuses them until the "
+                               "catch-up appends them")]
+
+
+BUSY_REASON = ("another coordinator or a compaction holds the static-names store's lease; search for this scan comes "
+               "with its append or the next run")
+
+
+def probe_ctx(tmp_path, env, stored, code=0, summary="3 passed, 0 skipped, 0 failed"):
+    """A probe step whose run's record holds the phases `stored` (`(phase, note)`), its probe exiting `code` with
+    `summary` as the record's verdict line."""
+    env.update(SITE_TOKEN="st", SITE_URL="https://site.example.org")
+    rec = json.dumps({"results": [], "summary": {"line": summary}})
+    c = ctx(tmp_path, env, runner=Runner(tmp_path, stdout={"dt-cloud probe -c": rec}, codes={"dt-cloud probe -c": code}))
+    calls = []
+    c.run.phases = lambda: [{"phase": p, "seq": i, "status": "done", "note": n} for i, (p, n) in enumerate(stored)]
+    c.run.begin = lambda name: calls.append(("begin", name))
+    c.run.end = lambda name, rc=0, **kw: calls.append(("end", name, rc, kw))
+    return c, calls
+
+
+def test_probe_skip_reason_comes_from_the_record(tmp_path, env):
+    """The run's own static-names phase record says it was skipped: the probe gets that reason (`-i`), so the scan's
+    `scan-not-indexed` refusals count as skipped; the phase's note is the verdict, skips named; the phase is not failed."""
+    skip = f"skipped (busy): {BUSY_REASON}"
+    verdict = f"2 passed, 2 skipped (static-names {skip}), 0 failed"
+    c, calls = probe_ctx(tmp_path, env, [("list", None), ("static-names", f"overlapped, {skip}")], summary=verdict)
+    S.probe(c, None)
+    assert c.sh_impl.calls == [
+        f"dt-cloud probe -c -u https://site.example.org -o <tmp>/data/probes/sub/ -j -i static-names {skip}",
+        "dt-cloud static-names runs lag 2026-10-16T1200",
+    ]
+    assert calls == [("begin", "probe"), ("end", "probe", 0, {"note": verdict})]
+
+
+def test_probe_without_a_recorded_skip_fails_on_a_refusal(tmp_path, env):
+    """static-names ran (its `overlapped` lane note is no skip): no `-i`, so a `scan-not-indexed` refusal fails the
+    probe, and the phase fails with the verdict."""
+    verdict = "2 passed, 0 skipped, 2 failed"
+    c, calls = probe_ctx(tmp_path, env, [("static-names", "overlapped")], code=1, summary=verdict)
+    S.probe(c, None)
+    assert c.sh_impl.calls == ["dt-cloud probe -c -u https://site.example.org -o <tmp>/data/probes/sub/ -j", "dt-cloud static-names runs lag 2026-10-16T1200"]
+    assert calls == [("begin", "probe"), ("end", "probe", 1, {
+        "warn": True, "msg": f"serving probe failed for 2026-10-16T1200: {verdict}", "note": verdict})]
 
 
 def test_interval_store_without_a_generation(tmp_path, env):
@@ -1258,3 +1346,28 @@ def test_cf_usage_failure_fails_its_phase_not_the_run(tmp_path, env):
         [("begin", "cf-usage"), ("end", "cf-usage", 1, True, "cf-usage snapshots failed (the scan's outputs stand; the next run backfills)")],
         ["dt-cloud cf-usage -c site/wrangler.toml -d 7 -o <tmp>/data/snapshots/usage"],
     )
+
+
+@pytest.mark.parametrize("files, want", [
+    ({}, "38GB"),                                          # no cgroup files: the machine's 64 GiB
+    ({"memory.max": "max\n"}, "38GB"),                     # v2 without a limit
+    ({"memory.max": f"{16 * 2**30}\n"}, "9GB"),            # v2 limit below the machine
+    ({"memory/memory.limit_in_bytes": f"{2**63 - 4096}\n"}, "38GB"),  # v1's unlimited
+    ({"memory/memory.limit_in_bytes": f"{8 * 2**30}\n"}, "4GB"),      # v1 limit
+])
+def test_mem_budget(tmp_path, monkeypatch, files, want):
+    """60% of the smaller of the machine's RAM and the cgroup's limit, in whole GB (DuckDB's size syntax)."""
+    monkeypatch.setattr(os, "sysconf", lambda k: {"SC_PAGE_SIZE": 4096, "SC_PHYS_PAGES": 64 * 2**30 // 4096}[k])
+    for name, text in files.items():
+        (tmp_path / name).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / name).write_text(text)
+    assert S.mem_budget(tmp_path) == want
+
+
+def test_import_args_mem(tmp_path, env, monkeypatch):
+    """`{mem}` in `import_args` is the task machine's DuckDB budget (a profile shared by machines of every size)."""
+    monkeypatch.setattr(S.Ctx, "nproc", property(lambda self: 4))
+    monkeypatch.setattr(S.Ctx, "mem", property(lambda self: "9GB"))
+    c = ctx(tmp_path, env, options={"list": {"import": True, "import_args": ["-e", "stream", "-j", "{nproc}", "-M", "{mem}"]},
+                                    "static-names": {"profile": "sn.json"}, "digest": {"template": "t", "config": "c.yml"}})
+    assert c.expand(c.opt("list", "import_args")) == ["-e", "stream", "-j", "4", "-M", "9GB"]

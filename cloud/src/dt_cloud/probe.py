@@ -22,6 +22,11 @@ otherwise they run concurrently. `-c` changes subtree/diff response-cache
 keys only: it does not flush underlying metadata/row-group caches or the
 series cache. Records retain the complete Server-Timing header and a bounded
 error-body excerpt for failed responses.
+
+A search refusal for a scan the static name index doesn't hold (400 `scan-not-indexed`) is a FAILED request, unless
+the run's own phase record says its static-names step was skipped (`-i REASON`, which the scan step passes from that
+record): then it is SKIPPED, for that reason. Skips are counted apart (`n passed, n skipped (reason), n failed`) and
+never read as passes; 5xx, timeouts and every other refusal stay failed.
 """
 
 from __future__ import annotations
@@ -41,6 +46,7 @@ from typing import Callable
 UA = "dt-cloud-probe/1.0"  # a real UA — CF edge-blocks bot UAs (1010)
 MISS_TERM = "zz-probe-no-match-zz"
 CACHED = ("hit", "kv")  # `x-cache` values served without a read
+NOT_INDEXED = "scan-not-indexed"  # the search's refusal for a scan the static name index doesn't hold (`indexedOnly.ts`)
 
 
 @dataclass(frozen=True)
@@ -65,6 +71,8 @@ class Result:
     server_ms: int | None
     server_timing: str | None = None
     error: str | None = None
+    #: Why this request's refusal is skipped, not failed (`run`'s `unindexed`); None: not skipped
+    skip: str | None = None
 
 
 # Injected in tests: (path) -> Resp.
@@ -189,8 +197,20 @@ def request_paths(paths: tuple[str, ...], cold: str = "") -> list[str]:
     return out
 
 
-def run(fetch: Fetch, scens: dict[str, list[str]], *, parallel: bool = True) -> list[Result]:
-    """Scenarios in turn; each one's requests concurrently (a page load)."""
+def not_indexed(r: Resp) -> bool:
+    """Whether `r` is the search's `scan-not-indexed` refusal: a 400 whose JSON body carries that code."""
+    if r.status != 400:
+        return False
+    try:
+        body = json.loads(r.body)
+    except (ValueError, UnicodeDecodeError):
+        return False
+    return isinstance(body, dict) and body.get("code") == NOT_INDEXED
+
+
+def run(fetch: Fetch, scens: dict[str, list[str]], *, parallel: bool = True, unindexed: str | None = None) -> list[Result]:
+    """Scenarios in turn; each one's requests concurrently (a page load). `unindexed`: the run's static-names step was
+    skipped, for this reason (from its phase record), so a `scan-not-indexed` refusal is skipped for it, not failed."""
     out: list[Result] = []
     for name, paths in scens.items():
         with ThreadPoolExecutor(len(paths) if parallel else 1) as ex:
@@ -201,7 +221,8 @@ def run(fetch: Fetch, scens: dict[str, list[str]], *, parallel: bool = True) -> 
                         json.loads(r.body)
                     except (ValueError, UnicodeDecodeError):
                         error = "invalid JSON response: " + r.body.decode(errors="replace")[:1000]
-                out.append(Result(name, path, r.status, r.ms, r.bytes, r.cache, r.server_ms, r.server_timing, error))
+                skip = unindexed if unindexed and not_indexed(r) else None
+                out.append(Result(name, path, r.status, r.ms, r.bytes, r.cache, r.server_ms, r.server_timing, error, skip))
     return out
 
 
@@ -232,12 +253,28 @@ def compare_requests(fetch: Fetch, baseline: Fetch, paths: list[str], *, paralle
 
 
 def failed(r: Result) -> bool:
-    return r.status not in (200, 409) or r.error is not None
+    return r.skip is None and (r.status not in (200, 409) or r.error is not None)
+
+
+def counts(results: list[Result]) -> tuple[int, int, int]:
+    """(passed, skipped, failed) requests."""
+    skipped = sum(r.skip is not None for r in results)
+    bad = sum(failed(r) for r in results)
+    return len(results) - skipped - bad, skipped, bad
+
+
+def summary_line(results: list[Result]) -> str:
+    """`n passed, n skipped (reason), n failed`: each distinct skip reason named, so a skip never reads as a pass."""
+    passed, skipped, bad = counts(results)
+    reasons = "; ".join(dict.fromkeys(r.skip for r in results if r.skip is not None))
+    return f"{passed} passed, {skipped} skipped{f' ({reasons})' if reasons else ''}, {bad} failed"
 
 
 def summarize(results: list[Result], budget_ms: int | None = None) -> tuple[bool, list[str]]:
     """Per-scenario lines (the slowest request = the page's wall time) and
-    pass/fail: only 200 and the site's explicit view refusal (409) pass. With `budget_ms`, a slower scenario fails."""
+    pass/fail: only 200 and the site's explicit view refusal (409) pass; a skipped request (`run`'s `unindexed`) is
+    listed with its reason and neither passes nor fails (`–`: every request skipped). With `budget_ms`, a slower
+    scenario fails."""
     ok = True
     lines = []
     for name in dict.fromkeys(r.scenario for r in results):
@@ -247,12 +284,19 @@ def summarize(results: list[Result], budget_ms: int | None = None) -> tuple[bool
         over = budget_ms is not None and wall > budget_ms
         ok &= not bad and not over
         hits = sum(r.cache in CACHED for r in rs)
-        lines.append(f"  {'✗' if bad or over else '✓'} {name:<12} {wall / 1000:6.2f}s  {len(rs)} reqs, {hits} cached" + (f", {len(bad)} failed" if bad else ""))
+        skipped = [r for r in rs if r.skip is not None]
+        mark = "✗" if bad or over else "–" if len(skipped) == len(rs) else "✓"
+        lines.append(f"  {mark} {name:<12} {wall / 1000:6.2f}s  {len(rs)} reqs, {hits} cached"
+                     + (f", {len(skipped)} skipped" if skipped else "") + (f", {len(bad)} failed" if bad else ""))
         for r in bad:
             lines.append(f"      {r.status} {r.ms / 1000:.2f}s {r.path}")
+        for r in skipped:
+            lines.append(f"      skipped {r.status} {r.ms / 1000:.2f}s {r.path}: {r.skip}")
     return ok, lines
 
 
 def record(base: str, t: Targets, results: list[Result], now: dt.datetime | None = None) -> dict:
     now = now or dt.datetime.now(dt.timezone.utc)
-    return {"ts": now.strftime("%Y-%m-%dT%H:%M:%SZ"), "base": base, **asdict(t), "results": [asdict(r) for r in results]}
+    passed, skipped, bad = counts(results)
+    return {"ts": now.strftime("%Y-%m-%dT%H:%M:%SZ"), "base": base, **asdict(t), "results": [asdict(r) for r in results],
+            "summary": {"passed": passed, "skipped": skipped, "failed": bad, "line": summary_line(results)}}

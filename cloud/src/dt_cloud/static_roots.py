@@ -1115,14 +1115,14 @@ class ChunkSpill:
     chunks, else `SPILL_PARTS`) partitions of consecutive chunks (`root/in/<name>/sp=<p>/`), and read back chunk by chunk in order (`files`): a partition holding
     several chunks is split by chunk (`root/by-chunk/sp=<p>/ch=<k>/`: one more pass over its rows, a fan-out of at most
     ⌈n / parts⌉) when the reader first reaches it, and removed when the reader moves on. Each chunk's files hold exactly
-    its rows, whatever `parts` (the files keep `ch`, which readers don't select)."""
+    its rows, whatever `parts` (the files keep `ch`, which readers don't select). A reader running chunks concurrently
+    takes whole partitions instead (`prepare`, then `release`)."""
 
     def __init__(self, con, root: Path, n: int, parts: int | None = None):
         self.con, self.root, self.n = con, root, n
         self.p = max(1, min(parts or (n if n <= SPILL_DIRECT else SPILL_PARTS), n))
         self.cur: int | None = None
-        self.held: list[Path] = []
-        self.split, self.src = False, []
+        self.held: dict[int, list[Path]] = {}
         for d in ("in", "by-chunk"):
             (root / d).mkdir(parents=True, exist_ok=True)
 
@@ -1134,36 +1134,40 @@ class ChunkSpill:
         """Partition `part`'s chunks."""
         return range(-(-part * self.n // self.p), -(-(part + 1) * self.n // self.p))
 
-    def write(self, sql: str, name: str) -> None:
-        """Query `sql`'s rows (with `ch`) → `root/in/<name>/` by partition."""
-        self.con.execute(f"""COPY (SELECT *, (ch * {self.p} // {self.n})::INTEGER AS sp FROM ({sql})) TO {q(str(self.root / 'in' / name))}
+    def write(self, sql: str, name: str, con=None) -> None:
+        """Query `sql`'s rows (with `ch`) → `root/in/<name>/` by partition (on `con`, default the spill's: writes to distinct
+        names may run concurrently, each on its own cursor)."""
+        (con or self.con).execute(f"""COPY (SELECT *, (ch * {self.p} // {self.n})::INTEGER AS sp FROM ({sql})) TO {q(str(self.root / 'in' / name))}
             (FORMAT parquet, PARTITION_BY (sp), COMPRESSION zstd)""")
 
     def files(self, k: int) -> list[Path]:
         """Chunk `k`'s files (chunks are read in order: the previous partition's files are removed on reaching the next)."""
         part = self.part(k)
         if part != self.cur:
-            self._drop()
+            if self.cur is not None:
+                self.release(self.cur)
             self.cur = part
-            src = sorted(self.root.glob(f"in/*/sp={part}/*.parquet"))
-            self.held = sorted({f.parent for f in src})
-            self.split = len(self.chunks(part)) > 1 and bool(src)
-            if self.split:
-                out = self.root / "by-chunk" / f"sp={part}"
-                self.con.execute(f"""COPY (SELECT * FROM read_parquet([{', '.join(q(str(f)) for f in src)}], hive_partitioning = false))
-                    TO {q(str(out))} (FORMAT parquet, PARTITION_BY (ch), COMPRESSION zstd)""")
-                self._drop()
-                self.held = [out]
-            else:
-                self.src = src
-        if not self.split:
-            return self.src
-        return sorted((self.root / "by-chunk" / f"sp={part}" / f"ch={k}").glob("*.parquet"))
+            self.held = self.prepare(part)
+        return self.held[k]
 
-    def _drop(self) -> None:
-        for d in self.held:
+    def prepare(self, part: int) -> dict[int, list[Path]]:
+        """Partition `part`'s files per chunk (split by chunk when it holds several, its inputs then removed): readable
+        in any order, from any thread, until `release(part)`."""
+        src = sorted(self.root.glob(f"in/*/sp={part}/*.parquet"))
+        ks = self.chunks(part)
+        if len(ks) <= 1 or not src:
+            return {k: src for k in ks}
+        out = self.root / "by-chunk" / f"sp={part}"
+        self.con.execute(f"""COPY (SELECT * FROM read_parquet([{', '.join(q(str(f)) for f in src)}], hive_partitioning = false))
+            TO {q(str(out))} (FORMAT parquet, PARTITION_BY (ch), COMPRESSION zstd)""")
+        for d in sorted({f.parent for f in src}):
             shutil.rmtree(d, ignore_errors=True)
-        self.held = []
+        return {k: sorted((out / f"ch={k}").glob("*.parquet")) for k in ks}
+
+    def release(self, part: int) -> None:
+        """Partition `part`'s files removed (its chunks read)."""
+        for d in [*self.root.glob(f"in/*/sp={part}"), self.root / "by-chunk" / f"sp={part}"]:
+            shutil.rmtree(d, ignore_errors=True)
 
     def close(self) -> None:
         shutil.rmtree(self.root, ignore_errors=True)

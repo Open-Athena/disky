@@ -336,17 +336,35 @@ INSERT_BYTES = 64_000
 D1_DELETE_ROWS = 5000
 
 
+#: The smallest statement `d1_delete` halves down to after D1 resets one for its CPU time (7429).
+D1_DELETE_MIN_ROWS = 250
+
+
+class D1CpuLimit(RuntimeError):
+    """D1 reset a statement for exceeding its CPU time limit (error 7429), after `_d1_query`'s retries."""
+
+
 def d1_delete(table: str, where: str, acct: str, tok: str, db_id: str = "", *, batch: int | None = None) -> int:
     """Delete `table`'s rows matching `where` (a SQL predicate, no `WHERE`; it may refer to `table` by name) in
     statements of at most `batch` rows (default `D1_DELETE_ROWS`), until one deletes none; returns rows deleted.
     **Every D1 delete that can match more than a few thousand rows goes through this**, never one `DELETE … WHERE`.
-    A failure part way leaves the rest, and a rerun deletes them."""
+    A statement D1 resets for its CPU time (7429; cw's 2026-10-23T1801 `gc_d1` on `index_row_groups`, where the same
+    delete had always passed) is retried at half the rows, down to `D1_DELETE_MIN_ROWS`. A failure part way leaves
+    the rest, and a rerun deletes them."""
     batch = batch or D1_DELETE_ROWS
     n = 0
-    while k := len(_d1_query(f"DELETE FROM {table} WHERE rowid IN (SELECT rowid FROM {table} WHERE {where} LIMIT {batch}) RETURNING 1 AS n;",
-                             acct, tok, db_id)):
+    while True:
+        try:
+            k = len(_d1_query(f"DELETE FROM {table} WHERE rowid IN (SELECT rowid FROM {table} WHERE {where} LIMIT {batch}) RETURNING 1 AS n;",
+                              acct, tok, db_id))
+        except D1CpuLimit:
+            if batch <= D1_DELETE_MIN_ROWS:
+                raise
+            batch = max(batch // 2, D1_DELETE_MIN_ROWS)
+            continue
+        if not k:
+            return n
         n += k
-    return n
 
 
 def _d1_query(sql: str, acct: str, tok: str, db_id: str = "") -> list[dict]:
@@ -376,14 +394,16 @@ def _d1_query(sql: str, acct: str, tok: str, db_id: str = "") -> list[dict]:
                 time.sleep(D1_RETRY_SLEEP * 2**attempt)
                 continue
             # Surface D1's error body (scope/SQL) without echoing the token.
-            raise RuntimeError(f"D1 query failed ({e.code}): {e.read().decode()[:300]}") from None
+            body = e.read().decode()
+            raise (D1CpuLimit if "7429" in body else RuntimeError)(f"D1 query failed ({e.code}): {body[:300]}") from None
         except (urllib.error.URLError, TimeoutError) as e:  # no answer / no route
             if attempt < D1_RETRIES:
                 time.sleep(D1_RETRY_SLEEP * 2**attempt)
                 continue
             raise RuntimeError(f"D1 query gave no answer after {D1_RETRIES + 1} tries: {e}") from None
         if not resp.get("success"):
-            raise RuntimeError(f"D1 query error: {resp.get('errors')}")
+            errors = resp.get("errors") or []
+            raise (D1CpuLimit if any(e.get("code") == 7429 for e in errors if isinstance(e, dict)) else RuntimeError)(f"D1 query error: {errors}")
         return [row for r in resp.get("result", []) for row in r.get("results", [])]
     raise AssertionError("unreachable")
 

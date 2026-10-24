@@ -216,6 +216,23 @@ def latest_key(keys: Collection[str], before: str | None = None) -> str | None:
     return ms[-1] if ms else None
 
 
+#: A scan's run listed before its publish: `pending/<scan>.json`, a manifest's `runs` through it, written by `prepare`. A
+#: pipelined backlog's later scans build over it while the earlier ones are still in flight; `publish` removes it
+#: (specs/static-backlog-pipeline.md).
+PENDING = "pending/"
+
+
+def prior_key(keys: Collection[str], before: str) -> str | None:
+    """The listing of the runs before scan `before` among generation-relative `keys`: the newest pending listing of a scan
+    after the newest manifest before `before` (`latest_key`) and before `before`, else that manifest; None without
+    either."""
+    m = latest_key(keys, before)
+    floor = parse_manifest(m.removeprefix("manifests/"))[0] if m else ""
+    pend = sorted(k for k in keys if k.startswith(PENDING) and SCAN_ID.fullmatch(s := k.removeprefix(PENDING).removesuffix(".json"))
+                  and floor < s < before)
+    return pend[-1] if pend else m
+
+
 def scans_of(base: dict, runs: list[dict]) -> list[str]:
     """The generation's scans: its base's (`scans.json`), then the runs'."""
     return [*(s["id"] for s in base["scans"]), *(s for r in runs for s in r["scans"])]
@@ -1715,11 +1732,15 @@ class Runner:
             return []
         if len(todo) > 1:
             self.log(f"catching up {len(todo)} scans: {', '.join(todo)}")
+        self.run_scans(todo)
+        self.carries()
+        return todo
+
+    def run_scans(self, todo: list[str]) -> None:
+        """Each scan's chain (`one`), in turn."""
         for s in todo:
             self.wait_compaction()
             self.one(s)
-        self.carries()
-        return todo
 
     def wait_compaction(self) -> None:
         """`Busy` while a live compaction holds the generation (`compaction_holds`): a scan appended to it would supersede
@@ -2172,6 +2193,20 @@ class Compactor:
     md5s: bool = False
     #: What the fold reads of the generation (generation-relative keys): what a read from another copy mirrors.
     keep: Callable[[str], bool] = lambda rel: True
+    #: `blobstore.upload_new`'s `tier` over `publish_order`'s keys (None: every file in turn): consecutive keys of one
+    #: tier go up together, a key of tier None alone. `compaction.json` always goes up alone, last.
+    publish_tier: Callable[[str], object] | None = None
+
+
+#: Files hashed at a time for `compaction.json`'s md5s (hashlib releases the GIL over each 1 MiB block).
+MD5_WORKERS = 16
+
+
+def md5s(root: Path, workers: int = MD5_WORKERS) -> dict[str, str]:
+    """`{relative path: md5}` of every file under `root`, in path order, `workers` files at a time."""
+    files = sorted(p for p in root.rglob("*") if p.is_file())
+    with ThreadPoolExecutor(max(1, workers)) as ex:
+        return {p.relative_to(root).as_posix(): h for p, h in zip(files, ex.map(_md5, files))}
 
 
 def _md5(p: Path) -> str:
@@ -2259,7 +2294,7 @@ def compact_store(store, c: Compactor, gen: str, gen_dir: Path, work: Path, *, p
     comp = {"from": gen, "manifest": manifest, "runs": [r["key"] for r in runs], "base_scans": base_scans,
             "scans": len(json.loads((out / "scans.json").read_text())["scans"]), **compaction_doc(policy, why)}
     if c.md5s:
-        comp["files"] = {p.relative_to(out).as_posix(): _md5(p) for p in sorted(out.rglob("*")) if p.is_file()}
+        comp["files"] = md5s(out)
     (out / COMPACTION).write_text(json.dumps(comp, indent=1) + "\n")
     t1 = monotonic()
 
@@ -2267,7 +2302,8 @@ def compact_store(store, c: Compactor, gen: str, gen_dir: Path, work: Path, *, p
         return [*c.publish_order([k for k in keys if k != COMPACTION]), *([COMPACTION] if COMPACTION in keys else [])]
 
     with phase(rec, "upload") as ph:
-        files = upload_new(store, out, new_prefix, {}, order)
+        tier = (lambda k: None if k == COMPACTION else c.publish_tier(k)) if c.publish_tier else None
+        files = upload_new(store, out, new_prefix, {}, order, tier=tier)
         up_s = round(monotonic() - t1, 1)
         ph.note = f"{len(files)} files, {gib(sum(p.stat().st_size for p in out.rglob('*') if p.is_file()))} to {store.root}/{new_prefix}/ in {up_s}s"
     folded = run_scans(runs)
@@ -2311,7 +2347,12 @@ def compact_store(store, c: Compactor, gen: str, gen_dir: Path, work: Path, *, p
     return summary
 
 
-def r2_publish_gen(bucket: str, prefix: str, new: str, old: str, *, last: tuple[str, ...] = ("scans.json",), workers: int = 8,
+#: Objects a generation's R2 copy (`r2_publish_gen`) keeps in flight: thousands of files, ~300 GiB for a compacted
+#: static generation, each one streamed GCS → R2 at ~100 MB/s.
+R2_WORKERS = 32
+
+
+def r2_publish_gen(bucket: str, prefix: str, new: str, old: str, *, last: tuple[str, ...] = ("scans.json",), workers: int = R2_WORKERS,
                    log: Callable[[str], None] = err) -> dict:
     """A compacted generation to R2 from GCS (`gs://<bucket>/<prefix>/<new>/`, under the same keys): its files, those its
     readers open it by (`last`, generation-relative) after the rest and `compaction.json` after them; checked there; then
@@ -2439,7 +2480,7 @@ def compact_options(fn):
         option("-C", "--compact", "policy", type=PolicyType(), default=str(COMPACT_LEVEL), help=POLICY_HELP),
         option("-F", "--read-from", type=Choice(READ_FROM), default="gcs", help="Read the generation from the data bucket's mount (gcs) or the R2 copy (r2, mirrored locally; the job's R2 env)"),
         option("-G", "--grace-s", default=GRACE_S, type=int, help=f"Keep a compacted predecessor this many seconds (default {GRACE_S})"),
-        option("-j", "--jobs", default=1, type=int, help="Key ranges / sorts folded at a time (the interval store's fold)"),
+        option("-j", "--jobs", default=1, type=int, help="Folded at a time: the interval store's key ranges / sorts; the static store's drill-fold chunks"),
         option("-K", "--compact-now", "force", is_flag=True, help="Compact whatever the policy says (when the generation has runs)"),
         option("-m", "--mount", required=True, help="Local mount of the data bucket (the fold reads the generation from it)"),
         option("-M", "--mem", default="100GB", help="DuckDB memory limit"),

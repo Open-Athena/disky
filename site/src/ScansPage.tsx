@@ -21,7 +21,7 @@ import { useStore } from './store'
 import { useMinSlug } from './scan'
 import {
   batchHref, isLost, isMaintenance, liveness, logsHref, maintStore, mapHref, metaHref, type OutputDelta, phaseOrder, type PhaseSpan, type RunSummary, type ScanRun,
-  type ScanRunPhase, type PhaseIssue, type PhaseRecovery, overlappingFailures, phaseFill, phaseOutcome, runOutcome, runTasks, type RunTask, taskLogsHref,
+  type ScanRunPhase, type PhaseIssue, type PhaseRecovery, overlappingFailures, phaseFill, phaseOutcome, runOutcome, runOutcomeLine, runTasks, type RunTask, taskLogsHref,
 } from './scanRunsModel'
 import { colorer, fmtDur, fmtRunTime, getJson, type Links, PhaseBar, QUIET_TIP, runDay, RunWhen, scanRunsApi, scansHref, scansStore, Status, useScanRuns } from './scanRunsUi'
 import { brushRole, dagNodes, processOf, type DagNode, type Hl, type RunDagRow } from './runDag'
@@ -239,7 +239,7 @@ function Legend({ order, color, run }: { order: string[]; color: (p: string) => 
     <span key={key} className={cls || undefined} style={style}>{sw}<span className="lbl">{label}</span><span className="dur">{dur}</span></span>
   return <div className={`sr-phases${run ? ' readout' : ''}`}>
     <div className="sr-phases-head">{run
-      ? <><b>{fmtRunTime(run.run.started_ts!)}</b> · {run.run.kind} · {runOutcome(run.run, run.phase_issues)}{run.secs != null && <> · {fmtDur(run.secs)}</>}{where}{[...by.values()].some(e => e.beside) && <span className="dim"> · ∥ beside the main sequence</span>}</>
+      ? <><b>{fmtRunTime(run.run.started_ts!)}</b> · {run.run.kind} · {runOutcomeLine(run.run, run.phase_issues)}{run.secs != null && <> · {fmtDur(run.secs)}</>}{where}{[...by.values()].some(e => e.beside) && <span className="dim"> · ∥ beside the main sequence</span>}</>
       : <span className="dim">Hover a bar or a row for its phases.</span>}</div>
     <div className="sr-phases-grid">
       {order.map(p => {
@@ -679,7 +679,10 @@ export function ScanRunPage() {
           {' · '}<Links run={r} links={d} />
         </p>
         {r.status === 'failed' && <div className="sr-failure"><b>Failed {d.failed_at ? (d.failed_at.startsWith('after') ? d.failed_at : `in ${d.failed_at}`) : ''}</b>{r.error && <div><code>{r.error}</code></div>}</div>}
-        {d.phase_issues?.map(i => <div className={`sr-failure${i.recovery ? ' recovered' : ''}`} key={i.phase}>
+        {d.phase_issues?.map(i => i.reason ? <div className={`sr-failure${i.recovery ? ' recovered' : ''}`} key={i.phase}>
+          <b>{i.phase} {i.reason}</b>{' '}
+          {i.recovery ? <>Done by <Link to={scanHref(i.recovery.run_id)}>a subsequent attempt</Link> at {fmtRunTime(i.recovery.finished_ts)}.</> : 'The run is partial until it is done; a later step that depends on it says so instead of failing.'}
+        </div> : <div className={`sr-failure${i.recovery ? ' recovered' : ''}`} key={i.phase}>
           <b>{i.phase}: {i.outcome} in the original attempt.</b>{' '}
           {i.recovery ? <>Recovered by <Link to={scanHref(i.recovery.run_id)}>a subsequent attempt</Link> at {fmtRunTime(i.recovery.finished_ts)}.</> : 'The Batch job completed, but this phase did not. No successful recovery is recorded.'}
         </div>)}
@@ -699,7 +702,7 @@ export function ScanRunPage() {
           {pinnedNode && <StepDrawer node={pinnedNode} run={r} project={d.project} onClose={() => brush.toggle(pinnedNode.id)} />}
         </>}
         <h3>Phases</h3>
-        {!!d.phase_issues?.length && <p className="dim">Original attempt: failed bars include time spent waiting until failure or timeout, not successful build time. Later recoveries are separate below.</p>}
+        {d.phase_issues?.some(i => !i.reason) && <p className="dim">Original attempt: failed bars include time spent waiting until failure or timeout, not successful build time. Later recoveries are separate below.</p>}
         <PhaseTimeline spans={d.spans} secs={d.secs} color={color} brush={d.dag ? brush : undefined} />
         {d.spans.some(p => p.note) && <PhaseNotes spans={d.spans} color={color} />}
         {!!tasks.length && <>

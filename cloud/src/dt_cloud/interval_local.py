@@ -61,7 +61,7 @@ PREFIX = ist.PREFIX
 #: Key ranges: one machine, so a few (DuckDB parallelizes within each).
 RANGES = 8
 #: What `add` never reads from the base: its served sorts, the read versions (folded into `pvl/`), the digests.
-UNREAD = ("served/", "rd/", "digest/", "sv-digest/", "verify/")
+UNREAD = ("served/", "rd/", "digest/", "sv-digest/", "attribution-digest/", "verify/")
 
 
 def publish_order(keys: list[str]) -> list[str]:
@@ -76,17 +76,43 @@ def publish_order(keys: list[str]) -> list[str]:
     return sorted(keys, key=rank)
 
 
+def publish_tier(key: str) -> int | None:
+    """`blobstore.upload_new`'s tier of a key in `publish_order`: the data files go up together; a run's `meta.json`, the
+    base's `scans.json` and each manifest alone, after everything before it."""
+    if key == "scans.json" or key.split("/", 1)[0] == "manifests" or key.rsplit("/", 1)[-1] == "meta.json":
+        return None
+    return 0
+
+
 # ── build: a base generation ───────────────────────────────────────────────
 
 
+def attach_attribution(scans: dict, root: str, local: Path) -> dict:
+    """`scans` (`find_scans`' doc) with each scan's `attribution.parquet` beside its `path` sort named in its entry
+    (`interval_store.ATTRIBUTION_SRC`) where `root` has one — a URL root's copied into `local` beside the sort, as
+    `find_scans` copies the sorts; a scan without one is uncovered."""
+    src = Store(root)
+    mount = Path(scans["mount"])
+    for s in scans["scans"]:
+        key = ist.attribution_src(s)
+        if not src.exists(key):
+            err(f"{s['id']}: no {key}: the attribution table doesn't cover the scan")
+            continue
+        if src.url and not (mount / key).is_file():
+            src.get(key, mount / key)
+        s[ist.ATTRIBUTION_SRC] = key
+    return scans
+
+
 def build_gen(scans: dict, mount: str, gen_dir: Path, work: Path, *, gen: str, k: int = RANGES, rg_rows: int = ist.SERVED_RG,
-              threads: int = 4, mem: str = "4GB", jobs: int = 1) -> dict:
+              threads: int = 4, mem: str = "4GB", jobs: int = 1, attribution: bool = False) -> dict:
     """A base generation over `scans` (`find_scans`' doc; their files under `mount`) in `gen_dir`, every stage in turn
     (with `"generation": true` in its `scans.json` when some scan's sort carries the objects' `generation`):
     ranges → path and read versions (`build_range`, checked against every scan) → folded (`fold_range`) → owner slices
-    (`build_slices_range`, checked) → slices with their path's total (`slice_totals_range`) → the served sorts (`cut`,
-    dyadic segments over the scans' stamps) and their churn (`stats.json`). Returns a summary (rows, and per stage its
-    seconds, peak work-disk GiB and peak RSS GiB so far)."""
+    (`build_slices_range`, checked) → slices with their path's total (`slice_totals_range`) → with `attribution`, the
+    attribution table over the covered scans (`build_attribution_range`, checked; `"attribution": true`) → the served
+    sorts (`cut`, dyadic segments over the scans' stamps) and their churn (`stats.json`). Returns a summary (rows, and per
+    stage its seconds, peak work-disk GiB and peak RSS GiB so far)."""
     t0, times, peaks = monotonic(), {}, {}
     gen_dir.mkdir(parents=True, exist_ok=True)
     work.mkdir(parents=True, exist_ok=True)
@@ -121,6 +147,12 @@ def build_gen(scans: dict, mount: str, gen_dir: Path, work: Path, *, gen: str, k
             bad += [(r["i"], s["id"]) for s in d["scans"] if not s["eq"]]
             ist.slice_totals_range(str(gen_dir), r["i"], gen_dir, con)
         t = done("slices", t)
+    if attribution:
+        doc[ist.ATTRIBUTION] = True
+        for r in ranges["ranges"]:
+            d = ist.build_attribution_range(doc, ranges, r["i"], gen_dir, con, mount=mount)
+            bad += [(r["i"], s["id"]) for s in d["scans"] if not s["eq"]]
+        t = done(ist.ATTRIBUTION, t)
     if bad:
         raise RuntimeError(f"build {gen}: the versions don't reconstruct every scan: (range, scan) {bad}")
     sorts, stats = ist.cut_gen(con, gen_dir, doc, rg_rows=rg_rows, jobs=jobs)
@@ -134,16 +166,20 @@ def build_gen(scans: dict, mount: str, gen_dir: Path, work: Path, *, gen: str, k
 # ── add: scans appended as runs ────────────────────────────────────────────
 
 
-def open_state_sql(root: str, runs: list[str], name: str, sliced: bool = True, generation: bool = False) -> dict[str, str]:
+def open_state_sql(root: str, runs: list[str], name: str, sliced: bool = True, generation: bool = False, attributed: bool = False) -> dict[str, str]:
     """Key range `name`'s open versions after the newest of `runs` (run dirs, the manifest's order), refolded: the base's
     (`interval_append.base_state_sql` over the range files under `root`) and every run's delta rows (opened versions and
     close records, `pvf` carried), one row per version (`IDENT`) with the smallest `vt`, those still open. What the staged
-    path reads from `state/<prev>/`, as `STATE_SCHEMA` relations (`interval_append.tables(sliced)`)."""
-    base = ia.base_state_sql(root, name, sliced, generation)
+    path reads from `state/<prev>/`, as `STATE_SCHEMA` relations (`interval_append.tables(sliced, attributed)`; the
+    attribution table's from the base and runs holding it)."""
+    base = ia.base_state_sql(root, name, sliced, generation, attributed)
     out = {}
-    for t in ia.tables(sliced):
-        cols = ", ".join(ia.state_schema(t, generation).names)
-        parts = [f"SELECT {cols} FROM ({base[t]})", *(f"SELECT {cols} FROM read_parquet({q(f'{r}/{t}/{name}.parquet')})" for r in runs)]
+    for t in ia.tables(sliced, attributed):
+        cols = ist.qcols(ia.state_schema(t, generation).names)
+        files = [f"{r}/{t}/{name}.parquet" for r in runs]
+        if t in ist.ATTRIBUTION_SUBS:
+            files = [f for f in files if Path(f).exists()]
+        parts = [f"SELECT {cols} FROM ({base[t]})", *(f"SELECT {cols} FROM read_parquet({q(f)})" for f in files)]
         if len(parts) == 1:
             out[t] = parts[0]
             continue
@@ -153,10 +189,12 @@ def open_state_sql(root: str, runs: list[str], name: str, sliced: bool = True, g
     return out
 
 
-def append_scan(con, gen_dir: Path, scan: dict, mount: str, work: Path, *, gen: str, rg_rows: int = ist.SERVED_RG) -> dict:
+def append_scan(con, gen_dir: Path, scan: dict, mount: str, work: Path, *, gen: str, rg_rows: int = ist.SERVED_RG,
+                attributed: bool = False) -> dict:
     """Scan `scan` appended to the generation in `gen_dir` (the base, its runs and manifests) as the run `deltas/<id>/`, and
     published (`manifests/<id>.json`): per key range `append_range` over the refolded open versions (`open_state_sql`),
-    the run's served sorts (`cut_run`) and `meta.json`, then `publish_run`."""
+    the run's served sorts (`cut_run`) and `meta.json`, then `publish_run`. `attributed`: the run carries the attribution
+    table (`scan` covered when its entry names an `attribution.parquet`), as the staged chain's `prepare` pins it."""
     t0 = monotonic()
     disk = DiskPeak(work)
     d = scan["id"]
@@ -176,13 +214,14 @@ def append_scan(con, gen_dir: Path, scan: dict, mount: str, work: Path, *, gen: 
     if run.exists():
         shutil.rmtree(run)  # an unpublished run (no manifest lists it): redo it whole
     run.mkdir(parents=True)
-    (run / "scans.json").write_text(json.dumps({"bucket": base["bucket"], "scans": [scan]}, indent=1) + "\n")
+    pinned = {"bucket": base["bucket"], "scans": [scan], **({ist.ATTRIBUTION: True} if attributed else {})}
+    (run / "scans.json").write_text(json.dumps(pinned, indent=1) + "\n")
     ranges = store.read_json("ranges.json")
     roots = [str(gen_dir / r["key"]) for r in runs]
     for r in ranges["ranges"]:
         name = f"r{r['i']:04d}"
-        doc = ia.append_range(con, open_state_sql(str(gen_dir), roots, name, sliced, gen_col), scan, r, name, run, bucket=base["bucket"], mount=mount,
-                              sliced=sliced, generation=gen_col, check=[str(gen_dir), *roots])
+        doc = ia.append_range(con, open_state_sql(str(gen_dir), roots, name, sliced, gen_col, attributed), scan, r, name, run, bucket=base["bucket"],
+                              mount=mount, sliced=sliced, generation=gen_col, check=[str(gen_dir), *roots], attributed=attributed)
         doc["prev"] = have[-1]
         doc["check"]["runs"] = [x["key"] for x in runs]
         (run / "ranges").mkdir(exist_ok=True)
@@ -193,7 +232,8 @@ def append_scan(con, gen_dir: Path, scan: dict, mount: str, work: Path, *, gen: 
     cut_s = round(monotonic() - t1, 1)
     cut = ia.check_cut(con, str(run), run / "served", sliced=sliced, generation=gen_col)
     new = {"key": rk, "first": d, "last": d, "level": 0, "scans": [d]}
-    meta = {**ia.run_meta(gen, new, {d: scan["ts"]}, docs), "cut_s": cut_s, "check": cut, "check_s": round(monotonic() - t1 - cut_s, 1)}
+    meta = {**ia.run_meta(gen, new, {d: scan["ts"]}, docs, ia.run_attribution(pinned)), "cut_s": cut_s, "check": cut,
+            "check_s": round(monotonic() - t1 - cut_s, 1)}
     (run / "meta.json").write_text(json.dumps(meta, indent=1) + "\n")
     manifest = ia.publish_run(store, d)
     # The scan's parity marker (`scan retire`'s gate), uploaded with the run's files.
@@ -221,6 +261,7 @@ def merge_due(gen_dir: Path, work: Path, *, gen: str, k: int, compact_level: int
 
 
 @command("build")
+@option("-A", "--attribution", is_flag=True, help="Build the attribution table (specs/attr-interval-table.md) from each scan's `attribution.parquet` beside its `path` sort (a scan without one is uncovered)")
 @option("-g", "--gen", required=True, help="The generation to write: `<store>/interval-store/GEN/` (never over an existing one)")
 @option("-j", "--jobs", default=1, type=IntRange(min=1), help="Served sorts cut this many at a time, on cursors of one DuckDB database (-p threads and -M memory shared): each ends in a serial parquet writer. The output's bytes don't depend on it")
 @option("-k", "--ranges", "k", default=RANGES, type=IntRange(min=1), help="Key ranges (each one DuckDB pass over every scan)")
@@ -232,7 +273,7 @@ def merge_due(gen_dir: Path, work: Path, *, gen: str, k: int, compact_level: int
 @option("-s", "--scans", "scans_root", required=True, help="Where the scans are: a dir or URL, the root of -L's keys")
 @option("-t", "--through", help="Last scan id (inclusive; default: the newest)")
 @option("-w", "--work", help="Local work dir (default: a temporary one, removed after)")
-def build_cmd(gen, jobs, k, layouts, mem, store_root, threads, rg_rows, scans_root, through, work) -> None:
+def build_cmd(attribution, gen, jobs, k, layouts, mem, store_root, threads, rg_rows, scans_root, through, work) -> None:
     """Build a base generation of the interval store on this machine, every stage in-process: the staged (Batch) path's
     stages over a local work dir, then the generation copied into the store (data first, `scans.json` last). Prints a
     JSON summary."""
@@ -245,11 +286,14 @@ def build_cmd(gen, jobs, k, layouts, mem, store_root, threads, rg_rows, scans_ro
         scans = find_scans(scans_root, list(layouts), w / "scans", through=through)
         if not scans["scans"]:
             raise SystemExit(f"no scans under {scans_root} matching {list(layouts)}")
+        if attribution:
+            attach_attribution(scans, scans_root, w / "scans")
         gen_dir = w / "store" / prefix
         if gen_dir.exists():
             shutil.rmtree(gen_dir)
-        summary = build_gen(scans, scans["mount"], gen_dir, w / "build", gen=gen, k=k, rg_rows=rg_rows, threads=threads, mem=mem, jobs=jobs)
-        summary["files"] = len(upload_new(store, gen_dir, prefix, {}, publish_order))
+        summary = build_gen(scans, scans["mount"], gen_dir, w / "build", gen=gen, k=k, rg_rows=rg_rows, threads=threads, mem=mem, jobs=jobs,
+                            attribution=attribution)
+        summary["files"] = len(upload_new(store, gen_dir, prefix, {}, publish_order, tier=publish_tier))
     if ic.current(store) is None:
         ic.set_current(store, gen)  # the store's first generation: what unpinned readers and `add` follow
         summary["current"] = True
@@ -257,6 +301,7 @@ def build_cmd(gen, jobs, k, layouts, mem, store_root, threads, rg_rows, scans_ro
 
 
 @command("add")
+@option("-A", "--attribution", is_flag=True, help="Append each scan's `attribution.parquet` to the store's attribution table, opening it in a generation without one (specs/attr-interval-table.md); a generation that carries it continues it without -A")
 @option("-C", "--compact", "--compact-level", "compact", type=ar.PolicyType(), default=str(ar.COMPACT_LEVEL), envvar=["INTERVAL_STORE_COMPACT", "INTERVAL_STORE_COMPACT_LEVEL"],
         show_envvar=True, help=ar.POLICY_HELP)
 @option("-F", "--read-from", help="Read the generation from this copy of the store (a dir or URL, e.g. the R2 copy of a GCS store) instead of -o (refused when it lacks a file -o has); writes still go to -o")
@@ -274,8 +319,8 @@ def build_cmd(gen, jobs, k, layouts, mem, store_root, threads, rg_rows, scans_ro
 @option("-s", "--scans", "scans_root", required=True, help="Where the scans are: a dir or URL, the root of -L's keys")
 @option("-t", "--through", help="Last scan id to append (inclusive; default: the newest)")
 @option("-w", "--work", help="Local work dir (default: a temporary one, removed after); a URL store's generation is mirrored into it")
-def add_cmd(compact, read_from, gen, grace_s, compact_now, jobs, layouts, mem, prune_dry_run, no_merge, store_root, threads, rg_rows, scans_root, through,
-            work) -> None:
+def add_cmd(attribution, compact, read_from, gen, grace_s, compact_now, jobs, layouts, mem, prune_dry_run, no_merge, store_root, threads, rg_rows, scans_root,
+            through, work) -> None:
     """Append every scan after the generation's newest (base + runs), oldest first, each as a run published by its
     manifest; then the binary counter's due carries. The generation's published files are never rewritten; new ones go
     to the store data first, `meta.json`s next, manifests last. Then the runs a carry folded are deleted from the store
@@ -300,6 +345,9 @@ def add_cmd(compact, read_from, gen, grace_s, compact_now, jobs, layouts, mem, p
         have = scans_of(base, lstore.read_json(newest)["runs"] if newest else [])
         scans = find_scans(scans_root, list(layouts), w / "scans", start=have[-1], through=through)
         pending = [s for s in scans["scans"] if s["id"] > have[-1]]
+        attributed = attribution or ia.lineage_attributed(base, lstore.read_json(newest) if newest else None)
+        if attributed:
+            attach_attribution({**scans, "scans": pending}, scans_root, w / "scans")
         # A pending scan's run dir on the store is an earlier, unpublished attempt: redone whole, its keys replaced.
         redo = tuple(f"{prefix}/{run_key(s['id'], s['id'])}/" for s in pending)
         stale = sorted(key for key in before if key.startswith(redo)) if redo else []
@@ -315,13 +363,13 @@ def add_cmd(compact, read_from, gen, grace_s, compact_now, jobs, layouts, mem, p
             if late := [s["id"] for s in pending if s.get("version") == 2 and ist.source_has_generation(con, sn._src(base["bucket"], s["src"], scans["mount"]))]:
                 err(f"{', '.join(late)}: the sorts carry `{ist.GENERATION}`, generation {gen} doesn't; appended without it "
                     "(`interval-store backfill-generation` folds it into a new generation that does)")
-        added = [append_scan(con, gen_dir, s, scans["mount"], w, gen=gen, rg_rows=rg_rows) for s in pending]
+        added = [append_scan(con, gen_dir, s, scans["mount"], w, gen=gen, rg_rows=rg_rows, attributed=attributed) for s in pending]
         k = lstore.read_json("ranges.json")["k"]
         merged = None if no_merge or not pending else merge_due(gen_dir, w, gen=gen, k=k, compact_level=compact.carry_level, rg_rows=rg_rows,
                                                                 threads=threads, mem=mem)
         ours = {f"{prefix}/{p.relative_to(gen_dir).as_posix()}" for p in gen_dir.rglob("*") if p.is_file()}
         store.delete([key for key in stale if key not in ours])
-        uploaded = upload_new(store, gen_dir, prefix, before, publish_order)
+        uploaded = upload_new(store, gen_dir, prefix, before, publish_order, tier=publish_tier)
         prune = ar.prune_folded(GenStore(store, prefix), now=sl.now(), grace_s=grace_s, retain=ia.FOLDED_RETAIN, dry_run=prune_dry_run, log=err)
         if not prune_dry_run:
             ar.rm_local(gen_dir, prune["keys"])  # the mirror too: a later `add` over this work dir must not upload them again

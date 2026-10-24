@@ -67,6 +67,12 @@ def test_probe_join_state_is_bounded_by_the_current_key_batch(tmp_path):
             yield from joins(child)
 
     class Observed:
+        def register(self, name, table):
+            return con.register(name, table)
+
+        def unregister(self, name):
+            return con.unregister(name)
+
         def execute(self, sql):
             result = con.execute(sql)
             if sql.startswith('INSERT INTO prows'):
@@ -106,28 +112,34 @@ def test_candidate_bounds_include_unknown_statistics_and_exact_edges():
     ]
 
 
-def test_run_tiers_bound_by_the_lesser_of_their_groups_and_the_keys_rows():
-    """The base by its groups; the run tiers by their groups or the key's rows over them, whichever is less: a run
-    group holding other keys spans their paths, so it meets every `dir`, but `foo` has only 3 rows there."""
+def test_run_tiers_bound_by_their_pure_groups_and_the_keys_other_rows():
+    """The base by its groups; the run tiers by their pure groups (only the key's rows) meeting the range, plus the key's
+    rows outside them (its count less the pure groups'), at most its count. A mixed run group spans other keys' paths,
+    so it would meet every `dir` with all its rows: `foo` has only 3 rows in the runs, all in mixed groups; `big` 5,000,
+    4,300 in pure groups under `b/` and `c/`, so 700 elsewhere."""
     con = duckdb.connect()
     con.execute('CREATE TABLE cand(k VARCHAR, lvl INTEGER, dir VARCHAR, n BIGINT)')
-    con.executemany('INSERT INTO cand VALUES (?, ?, ?, ?)', [('foo', 0, '', 1), ('foo', 1, 'a', 1), ('foo', 1, 'b', 1), ('big', 1, 'b', 1)])
-    con.execute('CREATE TABLE ktk(k VARCHAR, t INTEGER, p_min VARCHAR, p_max VARCHAR, rows BIGINT)')
-    con.executemany('INSERT INTO ktk VALUES (?, ?, ?, ?, ?)', [
-        ('foo', 0, 'a/a', 'a/m', 200),   # the base: only foo's rows, under a/
-        ('foo', 1, 'a', 'z/z', 8000),    # a run: a group of many keys
-        ('foo', 2, 'a', 'z/z', 8000),    # another
-        ('big', 1, 'b/a', 'b/z', 300),   # a run group of big's own rows: tighter than its count
+    con.executemany('INSERT INTO cand VALUES (?, ?, ?, ?)', [
+        ('foo', 0, '', 1), ('foo', 1, 'a', 1), ('foo', 1, 'b', 1), ('big', 1, 'b', 1), ('big', 1, 'c', 1), ('big', 1, 'd', 1)])
+    con.execute('CREATE TABLE ktk(k VARCHAR, t INTEGER, s_min VARCHAR, s_max VARCHAR, p_min VARCHAR, p_max VARCHAR, rows BIGINT)')
+    con.executemany('INSERT INTO ktk VALUES (?, ?, ?, ?, ?, ?, ?)', [
+        ('foo', 0, 'foo', 'foo', 'a/a', 'a/m', 200),   # the base: only foo's rows, under a/
+        ('foo', 1, 'a', 'zz', 'a', 'z/z', 8000),       # a run: a group of many keys
+        ('foo', 2, 'a', 'zz', 'a', 'z/z', 8000),       # another
+        ('big', 1, 'a', 'zz', 'a', 'z/z', 8000),       # the first, as big's
+        ('big', 1, 'big', 'big', 'b/a', 'b/z', 300),   # run groups of big's own rows
+        ('big', 2, 'big', 'big', 'c/a', 'c/z', 4000),
     ])
     con.execute('CREATE TABLE rc(k VARCHAR, n BIGINT)')
     con.executemany('INSERT INTO rc VALUES (?, ?)', [('foo', 3), ('big', 5000)])
     an.near_candidates(con, 100, "rc")
     assert con.execute('SELECT * FROM near ORDER BY k, lvl, dir').fetchall() == [
-        ('big', 1, 'b', 1, 300), ('foo', 0, '', 1, 203), ('foo', 1, 'a', 1, 203),
+        ('big', 1, 'b', 1, 1000), ('big', 1, 'c', 1, 4700), ('big', 1, 'd', 1, 700),
+        ('foo', 0, '', 1, 203), ('foo', 1, 'a', 1, 203),
     ]
     an.near_candidates(con, 100, None)
     assert con.execute('SELECT k, dir, bound FROM near ORDER BY k, lvl, dir').fetchall() == [
-        ('big', 'b', 300), ('foo', '', 16200), ('foo', 'a', 16200), ('foo', 'b', 16000),
+        ('big', 'b', 8300), ('big', 'c', 12000), ('big', 'd', 8000), ('foo', '', 16200), ('foo', 'a', 16200), ('foo', 'b', 16000),
     ]
 
 
@@ -231,3 +243,81 @@ def test_probe_batches_split_where_the_rows_between_keys_pass_the_gap(tmp_path):
     tier = SimpleNamespace(shard_file=lambda mode, key: file)
     assert an.probe_prior_rows(con, [tier], "end") == 1
     assert con.execute("SELECT k, count(*) FROM prows GROUP BY k ORDER BY k").fetchall() == [(k, 100) for k in keys]
+
+
+def test_probe_batches_read_only_the_row_groups_meeting_their_keys(tmp_path):
+    """Keys `k00`..`k99`, 100 rows each, one 100-row group per key (`k50`'s split over two): a batch reads its keys'
+    groups, never those between, up to `max_rows` (a key's groups are never split) and `batch_keys`; keys in no group are
+    dropped."""
+    con = duckdb.connect()
+    con.execute("""CREATE TABLE source AS SELECT printf('k%02d', i // 100) AS s, 3::UTINYINT AS depth, printf('b/a/%04d', i) AS path,
+        NULL::VARCHAR AS usr, TIMESTAMP '2026-10-01' AS vf, TIMESTAMP '2027-01-01' AS vt, 1::BIGINT AS size, 1::BIGINT AS n_files
+        FROM range(10000) AS r(i) ORDER BY s, path""")
+    file = str(tmp_path / "source.parquet")
+    table = con.execute("SELECT * FROM source").to_arrow_table()
+    with pq.ParquetWriter(file, table.schema) as w:
+        for lo, hi in [(i, i + 100) for i in range(0, 5000, 100)] + [(5000, 5050), (5050, 5100)] + [(i, i + 100) for i in range(5100, 10000, 100)]:
+            w.write_table(table.slice(lo, hi - lo))
+    keys = ["k00", "k01", "k03", "k10", "k11", "k50", "k99", "zz"]
+    assert an.key_group_batches(file, keys) == [([0, 1, 3, 10, 11, 50, 51, 100], keys[:-1])]
+    assert an.key_group_batches(file, keys, max_rows=250) == [
+        ([0, 1], ["k00", "k01"]), ([3, 10], ["k03", "k10"]), ([11, 50, 51], ["k11", "k50"]), ([100], ["k99"])]
+    assert an.key_group_batches(file, ["k49", "k50"], max_rows=50) == [([49], ["k49"]), ([50, 51], ["k50"])]
+    assert an.key_group_batches(file, keys, batch_keys=3) == [([0, 1, 3], ["k00", "k01", "k03"]), ([10, 11, 50, 51], ["k10", "k11", "k50"]), ([100], ["k99"])]
+    con.execute("CREATE TABLE near AS SELECT unnest(?) AS k, 'b/a' AS dir", [keys[:-1]])
+    con.execute(f"CREATE TABLE prows({an.AR_COLS})")
+    tier = SimpleNamespace(shard_file=lambda mode, key: file)
+    assert an.probe_prior_rows(con, [tier], "end", batch_keys=3) == 3
+    assert con.execute("SELECT k, count(*) FROM prows GROUP BY k ORDER BY k").fetchall() == [(k, 100) for k in keys[:-1]]
+
+
+@pytest.mark.parametrize("runs", [False, True])
+def test_level_pruning_keeps_exactly_the_unpruned_near(runs):
+    """`near_candidates` bounds a level's candidates only under parents that can pass R (or weren't candidates: already
+    heavy); `n + bound` shrinks parent → child, so that prunes nothing that would pass. Random directory trees per key
+    (`cand` with the ancestors a run's rows give, some missing as already heavy), random groups (pure and mixed, null
+    statistics): equal to bounding every candidate."""
+    import random
+
+    rng = random.Random(7)
+    con = duckdb.connect()
+    con.execute("CREATE TABLE cand(k VARCHAR, lvl INTEGER, dir VARCHAR, n BIGINT)")
+    con.execute("CREATE TABLE ktk(k VARCHAR, t INTEGER, s_min VARCHAR, s_max VARCHAR, p_min VARCHAR, p_max VARCHAR, rows BIGINT)")
+    con.execute("CREATE TABLE rc(k VARCHAR, n BIGINT)")
+    for key in ("k1", "k2", "k3"):
+        # the run's rows (paths), and each of their directories with its rows under it, as `rd` counts them
+        paths = ["/".join(rng.choice("abc") for _ in range(rng.randint(2, 5))) for _ in range(300)]
+        under: dict[str, int] = {}
+        for p in paths:
+            parts = p.split("/")
+            for i in range(len(parts)):
+                d = "/".join(parts[:i])
+                under[d] = under.get(d, 0) + 1
+        dirs = set(under)
+        cand = [(key, 0 if d == "" else d.count("/") + 1, d, under[d]) for d in sorted(dirs) if rng.random() > 0.1]
+        con.executemany("INSERT INTO cand VALUES (?, ?, ?, ?)", cand)
+        for _ in range(30):
+            lo, hi = sorted(rng.choice(sorted(dirs - {""})) + "/" + rng.choice("xyz") for _ in range(2))
+            lo, hi = (None if rng.random() < 0.05 else lo), (None if rng.random() < 0.05 else hi)
+            s_min, s_max = (key, key) if rng.random() < 0.5 else ("k0", "k9")  # pure, or mixed
+            con.execute("INSERT INTO ktk VALUES (?, ?, ?, ?, ?, ?, ?)", (key, rng.choice([0, 1, 2]), s_min, s_max, lo, hi, rng.randint(1, 60)))
+        con.execute("INSERT INTO rc VALUES (?, ?)", (key, rng.randint(0, 100)))
+    rc = "rc" if runs else None
+    for R in (0, 100, 300, 600):
+        an.near_candidates(con, R, rc)
+        got = con.execute("SELECT * FROM near ORDER BY ALL").fetchall()
+        # unpruned: every candidate bounded
+        if runs:
+            an.group_prefix(con, "SELECT * FROM ktk WHERE t = 0", "gb")
+            an.group_prefix(con, "SELECT * FROM ktk WHERE t > 0 AND s_min = s_max", "gr")
+            an.group_bound(con, "gb", "cand", "wb")
+            an.group_bound(con, "gr", "cand", "wr")
+            runs = "least(r.bound + greatest(coalesce(rc.n, 0) - coalesce(pt.n, 0), 0), coalesce(rc.n, 0))"
+            want = con.execute(f"""SELECT b.k, b.lvl, b.dir, b.n, b.bound + {runs} FROM wb AS b JOIN wr AS r USING (k, lvl, dir)
+                LEFT JOIN rc USING (k) LEFT JOIN gr_t AS pt USING (k) WHERE b.n + b.bound + {runs} > {R} ORDER BY ALL""").fetchall()
+        else:
+            an.group_prefix(con, "SELECT * FROM ktk", "g")
+            an.group_bound(con, "g", "cand", "w")
+            want = con.execute(f"SELECT * FROM w WHERE n + bound > {R} ORDER BY ALL").fetchall()
+        assert got == want
+        assert got or R >= 300  # a vacuous comparison would prove nothing

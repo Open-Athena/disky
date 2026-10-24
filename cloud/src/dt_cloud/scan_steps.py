@@ -140,6 +140,12 @@ class _Printer:
         err(phase_line(name, self._clock(), note))
         return 0 if warn else rc
 
+    def alert(self, level: str, message: str) -> None:
+        err(f"alert ({level}, no run recorded): {message}")
+
+    def phases(self) -> list[dict]:
+        return []
+
 
 def cpu_quota(cgroup: Path) -> int | None:
     """The CPUs a cgroup's quota allows, rounded up (v2 `cpu.max`, else v1 `cpu.cfs_quota_us` / `cpu.cfs_period_us`);
@@ -155,6 +161,25 @@ def cpu_quota(cgroup: Path) -> int | None:
     except (OSError, ValueError):
         return None
     return -(-q // p) if q > 0 else None
+
+
+#: The share of the task's memory `{mem}` names: room for a DuckDB process's RSS above its `memory_limit` (some tens of
+#: percent) and whatever else the task runs beside it.
+MEM_SHARE = 0.6
+
+
+def mem_budget(cgroup: Path, share: float = MEM_SHARE) -> str:
+    """`share` of the task's memory as a DuckDB size (`"38GB"`): the machine's RAM, or the cgroup's limit when lower
+    (v2 `memory.max`, v1 `memory.limit_in_bytes`; v1's unlimited is ≥ 2^60)."""
+    total = os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES")
+    for f in ("memory.max", "memory/memory.limit_in_bytes"):
+        try:
+            limit = int((cgroup / f).read_text())
+        except (OSError, ValueError):  # absent, or v2's "max"
+            continue
+        if limit < 2**60:
+            total = min(total, limit)
+    return f"{max(1, int(total * share / 2**30))}GB"
 
 
 @dataclass
@@ -174,6 +199,12 @@ class Ctx:
     failure: tuple[int, str] | None = None
     #: The open phase's heartbeat line source (`beating`); None outside a phase or without a recorded run
     tail: Tail | None = None
+    #: The last command `sh` ran (its exit code; its stdout when captured, a failed one's too)
+    last: subprocess.CompletedProcess | None = None
+    #: The open phase's explicit skip (`skip`): its end's note says `skipped (<kind>): <reason>`
+    skipped: str | None = None
+    #: The open phase's end note, set by its body (e.g. the probe's verdict); None: `phase`'s own `note`
+    note: str | None = None
 
     # layout
 
@@ -259,6 +290,10 @@ class Ctx:
         quota = cpu_quota(Path(self.env.get("DT_CGROUP") or "/sys/fs/cgroup"))
         return min(cpus, quota) if quota else cpus
 
+    @property
+    def mem(self) -> str:
+        return mem_budget(Path(self.env.get("DT_CGROUP") or "/sys/fs/cgroup"))
+
     def fill_env(self, template: str) -> str:
         """`template` with each `{env:NAME}` filled from the task's env (a step fails on an unset one)."""
         def var(m: re.Match[str]) -> str:
@@ -269,9 +304,12 @@ class Ctx:
         return re.sub(r"\{env:([A-Za-z_][A-Za-z0-9_]*)\}", var, template)
 
     def expand(self, args: Sequence[str], **extra: object) -> list[str]:
-        """`args` with `{nproc}`, `{scan}`, `{date}`, `{gen}`, `{work}`, `{data}` (the data store's local root,
-        `data_root`) (+ `extra`) filled; an arg that is exactly `{<key>}` of a list value expands to its items."""
+        """`args` with `{nproc}`, `{mem}` (`mem_budget`: a DuckDB `memory_limit` sized to the task's machine), `{scan}`,
+        `{date}`, `{gen}`, `{work}`, `{data}` (the data store's local root, `data_root`) (+ `extra`) filled; an arg that
+        is exactly `{<key>}` of a list value expands to its items."""
         vals: dict[str, object] = dict(nproc=self.nproc, scan=self.scan, date=self.date, gen=self.gen, work=self.work, **extra)
+        if any("{mem}" in a for a in args):
+            vals["mem"] = self.mem
         if any("{data}" in a for a in args):
             vals["data"] = self.data_root
         out: list[str] = []
@@ -294,7 +332,7 @@ class Ctx:
         argv = [str(a) for a in argv]
         err("+ " + " ".join(argv))
         teed = {"tail": self.tail} if self.tail is not None and self.sh_impl is run_teed else {}
-        r = self.sh_impl(argv, env={**self.env, **(env or {})}, stdout=subprocess.PIPE if capture else None, text=True, **teed)
+        r = self.last = self.sh_impl(argv, env={**self.env, **(env or {})}, stdout=subprocess.PIPE if capture else None, text=True, **teed)
         if r.returncode and r.returncode not in allowed_codes:
             if fatal:
                 raise StepFailed(r.returncode, f"exit {r.returncode}: {' '.join(argv[:3])}")
@@ -308,10 +346,10 @@ class Ctx:
     @contextmanager
     def phase(self, name: str, note: str | None = None) -> Iterator[None]:
         """A `scan_runs` phase: begun, then ended (failed, with the exit code, when the body raises; failed with a warn
-        alert after a nonfatal command's failure)."""
+        alert after a nonfatal command's failure; done, with its reason in the note and a warn alert, after `skip`)."""
         self.run.begin(name)
         set_stage(name)
-        self.failure = None
+        self.failure = self.skipped = self.note = None
         try:
             with self.beating(name):
                 yield
@@ -322,11 +360,32 @@ class Ctx:
             self.run.end(name, 1)
             raise
         finally:
-            failure, self.failure = self.failure, None
+            failure, skipped, set_note = self.failure, self.skipped, self.note
+            self.failure = self.skipped = self.note = None
+        note = set_note or note
         if failure:
             self.run.end(name, failure[0], warn=True, msg=failure[1], note=note)
+        elif skipped:
+            self.run.end(name, 0, note=f"{note}, {skipped}" if note else skipped)
+            self.run.alert("warn", f"{name} {skipped}")
         else:
             self.run.end(name, 0, note=note)
+
+    def skip(self, kind: str, reason: str) -> None:
+        """The open phase's work was skipped, for `reason`: it ends done, its note's `skipped (<kind>): <reason>`
+        (`scan_runs.phase_skip`) making the run `partial` on /scans with that reason, and a warn alert names it."""
+        self.skipped = f"skipped ({kind}): {reason}"
+
+    def recorded_skip(self, phase: str) -> str | None:
+        """`<phase> skipped (<kind>): <reason>` when this run's record says `phase`'s latest closed attempt was skipped
+        (`scan_runs.phase_skip`), else None: never guessed, only read from the record (a running phase's note is a
+        heartbeat's output line, not its verdict)."""
+        from .scan_runs import phase_skip
+
+        read = getattr(self.run, "phases", None)  # a recorder that can't read the record: nothing recorded
+        rows = [p for p in (read() if read else []) if p["phase"] == phase and p.get("status") != "running"]
+        clause = phase_skip(max(rows, key=lambda p: p["seq"])["note"]) if rows else None
+        return f"{phase} {clause}" if clause else None
 
     @contextmanager
     def beating(self, name: str) -> Iterator[Tail | None]:
@@ -971,10 +1030,40 @@ def static_names(ctx: Ctx, arg: str | None) -> None:
     from .append_runner import BUSY
 
     prof = ctx.opt("static-names", "profile") or ctx.env["STATIC_NAMES_PROFILE"]
-    # exit 4: another coordinator (a catch-up, or an earlier scan's run) holds the store's lease; it appends this scan too
+    # exit 4: another coordinator (a catch-up, or an earlier scan's run) or a compaction holds the store's lease; it
+    # appends this scan too, else the next run does. Until then search refuses the scan: an explicit skip (the probe
+    # reads it from the record and skips those refusals; /scans shows the run `partial`, with this reason)
     with ctx.phase("static-names", note="overlapped"):
         ctx.sh(["dt-cloud", "static-names", "runs", "add", "-c", ctx.scan], env={"STATIC_NAMES_PROFILE": str(prof)},
                fatal=False, warn=f"static-names runs add failed for {ctx.scan}", allowed_codes=(BUSY,))
+        if ctx.last is not None and ctx.last.returncode == BUSY:
+            ctx.skip("busy", STATIC_NAMES_BUSY)
+    static_lag(ctx)
+
+
+def static_lag(ctx: Ctx) -> None:
+    """One alert per lag episode of the static name index (`static-names runs lag`): more than a scan (or one for 12 h)
+    behind the newest published scan, search refusing those. Run after `runs add` and again by `probe`, which a
+    deployment skipping its static-names step (cw since 10-22: the outage this is for) or a step dying first still runs;
+    the episode's marker keeps it to one alert. Not on the one-machine path (`options.static-names.gen`) nor without a
+    static-names profile."""
+    prof = ctx.opt("static-names", "profile") or ctx.env.get("STATIC_NAMES_PROFILE")
+    if ctx.reproc or ctx.opt("static-names", "gen") or not prof:
+        return
+    out = ctx.sh(["dt-cloud", "static-names", "runs", "lag", ctx.scan], env={"STATIC_NAMES_PROFILE": str(prof)}, fatal=False,
+                 warn=f"static-names runs lag failed for {ctx.scan}", capture=True)
+    lag = json.loads(out) if out else None
+    if lag and lag["episode"] == "start":
+        why = " (this deployment skips its static-names step)" if "static-names" in ctx.profile.skip else (
+            f" (static-names skipped: {r})" if (r := ctx.recorded_skip("static-names")) else "")
+        ctx.run.alert("warn", f"static name index lags: its newest scan is {lag['newest']}, {len(lag['behind'])} published scans behind "
+                              f"({lag['behind'][0]} … {lag['behind'][-1]}, {lag['s'] / 3600:.1f} h){why}; search refuses them until the "
+                              "catch-up appends them")
+
+
+#: Why a scan's static-names step was skipped (`runs add` exit `BUSY`): its phase note's reason, and the probe's.
+STATIC_NAMES_BUSY = ("another coordinator or a compaction holds the static-names store's lease; search for this scan "
+                     "comes with its append or the next run")
 
 
 @step("publish-r2", stage="serve", soft=True, options={"args": list, "require": list, "keys": list, "barrier": bool})
@@ -1385,13 +1474,33 @@ def warm_cache(ctx: Ctx, arg: str | None) -> None:
 
 @step("probe", soft=True, requires=primary_only("probe", "its requests carry no `store=`: it would probe the primary's views"))
 def probe(ctx: Ctx, arg: str | None) -> None:
-    """Replay the site's page loads uncached (`probe -c`): one cold-latency record per scan under `probes/<subdir>/`."""
-    with ctx.phase("probe"):
-        if ctx.reproc or not ctx.has("SITE_TOKEN", "SITE_URL"):
-            return
-        sub = ctx.profile.layout.snapshots
-        ctx.sh(["dt-cloud", "probe", "-c", "-u", ctx.env["SITE_URL"], "-o", f"{ctx.data_uri}/probes/{sub + '/' if sub else ''}"],
-               fatal=False, warn=f"serving probe failed for {ctx.scan} (an HTTP or transport error; data is fine)")
+    """Replay the site's page loads uncached (`probe -c`): one cold-latency record per scan under `probes/<subdir>/`.
+    When this run's record says its static-names step was skipped (`Ctx.recorded_skip`), the probe gets that reason
+    (`-i`) and skips the search's `scan-not-indexed` refusals for it; otherwise they fail it. The phase's note is the
+    probe's verdict (`n passed, n skipped (reason), n failed`), on a failure too."""
+    try:
+        with ctx.phase("probe"):
+            if ctx.reproc or not ctx.has("SITE_TOKEN", "SITE_URL"):
+                return
+            sub = ctx.profile.layout.snapshots
+            unindexed = ctx.recorded_skip("static-names")
+            ctx.sh(["dt-cloud", "probe", "-c", "-u", ctx.env["SITE_URL"], "-o", f"{ctx.data_uri}/probes/{sub + '/' if sub else ''}",
+                    "-j", *(["-i", unindexed] if unindexed else [])], fatal=False, capture=True,
+                   warn=f"serving probe failed for {ctx.scan} (an HTTP or transport error; data is fine)")
+            verdict = ctx.note = _probe_verdict(ctx.last.stdout if ctx.last is not None else None)
+            if ctx.failure and verdict:
+                ctx.failure = (ctx.failure[0], f"serving probe failed for {ctx.scan}: {verdict}")
+    finally:
+        # whatever the probe did, or without a site to probe
+        static_lag(ctx)
+
+
+def _probe_verdict(stdout: str | None) -> str | None:
+    """`probe -j`'s record's verdict line (`summary.line`); None when it printed no record (it crashed first)."""
+    try:
+        return json.loads(stdout or "")["summary"]["line"]
+    except (ValueError, KeyError, TypeError):
+        return None
 
 
 #: A digest platform → the env its transport needs (`dt-cloud digest -P`).

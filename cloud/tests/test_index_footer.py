@@ -465,3 +465,36 @@ def test_d1_queries_read_the_database_id_when_they_run(monkeypatch):
     monkeypatch.setenv("D1_DB_ID", "late-db")
     assert F._d1_query("SELECT 1;", "acct", "tok") == []
     assert urls == ["https://api.cloudflare.com/client/v4/accounts/acct/d1/database/late-db/query"]
+
+
+def test_d1_delete_halves_a_statement_d1_resets_for_cpu_time(monkeypatch, d1_db):
+    """D1 resets a 5,000- and a 2,500-row delete for its CPU time (7429): `d1_delete` retries at half the rows until
+    one passes, keeps that size, and stops at the first statement deleting none."""
+    import re
+
+    con = d1_db
+    row = "(?, 'path', 'old', ?, 1, 1, 'a', 'b', 1, NULL, NULL, 0, 1, '[]')"
+    con.executemany(f"INSERT INTO index_row_groups (date, variant, gen, rg, d_min, d_max, p_min, p_max, b_max, u_min, u_max, row_start, row_end, rg_json) VALUES {row}",
+                    [("2026-09-01", i) for i in range(3000)])
+    limits: list[int] = []
+
+    def fake_query(sql, acct, tok, db_id):
+        limits.append(int(re.search(r"LIMIT (\d+)", sql).group(1)))
+        if limits[-1] > 1250:
+            raise index_footer.D1CpuLimit("D1 query failed (429): 7429 D1 DB exceeded its CPU time limit and was reset")
+        cur = con.execute(sql)
+        return cur.fetchall()
+
+    monkeypatch.setattr(index_footer, "_d1_query", fake_query)
+    assert index_footer.d1_delete("index_row_groups", "gen = 'old'", "acct", "tok") == 3000
+    assert limits == [5000, 2500, 1250, 1250, 1250, 1250]
+    assert con.execute("SELECT count(*) FROM index_row_groups").fetchone() == (0,)
+
+
+def test_d1_delete_gives_up_at_its_smallest_statement(monkeypatch):
+    def fake_query(sql, acct, tok, db_id):
+        raise index_footer.D1CpuLimit("7429")
+
+    monkeypatch.setattr(index_footer, "_d1_query", fake_query)
+    with pytest.raises(index_footer.D1CpuLimit, match="^7429$"):
+        index_footer.d1_delete("index_row_groups", "true", "acct", "tok")

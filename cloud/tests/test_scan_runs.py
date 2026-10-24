@@ -963,3 +963,23 @@ def test_one_verified_repair_can_link_multiple_scans_without_rewriting_failures(
         ('recovery/second/names', 'second', '2026-10-09', 'phase-recovery', 'succeeded', 'retry-names', 300, 360, None),
     ]
     assert s.query("SELECT * FROM scan_run_phases WHERE run_id IN ('original', 'second') ORDER BY run_id, seq") == original
+
+
+def test_phase_skip_is_an_explicit_skip_clause():
+    """A phase note's `skipped[ (kind)]: reason` clause, at its start or after a comma; a verdict's `n skipped` and an
+    `overlapped` lane note are not skips."""
+    assert [scan_runs.phase_skip(n) for n in (
+        "overlapped, skipped (busy): another coordinator holds the lease",
+        "skipped: no current generation",
+        "overlapped",
+        "2 passed, 2 skipped (static-names skipped (busy): x), 0 failed",
+        "failed (exit 1), overlapped",
+        None,
+    )] == [
+        "skipped (busy): another coordinator holds the lease",
+        "skipped: no current generation",
+        None,
+        None,
+        None,
+        None,
+    ]

@@ -581,6 +581,7 @@ def healthcheck(date: str | None, max_age_days: int, as_json: bool, subdir: str 
 @option("-b", "--budget", default=None, type=float, help="Fail a scenario whose slowest request exceeds this many seconds")
 @option("-c", "--cold", is_flag=True, help="Key subtree and diff reads past the edge cache (a random `minArea` ≈ the default), to measure uncached cost")
 @option("-d", "--date", default=None, help="Query-set mode: the scan to query (default: the truth set's)")
+@option("-i", "--unindexed", default=None, help="The run's static-names step was skipped, for this reason (its phase record's; the scan step passes it): a `scan-not-indexed` search refusal is SKIPPED for it, not failed")
 @option("-j", "--json", "as_json", is_flag=True, help="Emit the run record (every request) as JSON to stdout")
 @option("-k", "--only", multiple=True, help="Query-set mode: run only these query ids (repeatable)")
 @option("-o", "--out", default=None, help="Write the run record to this path or prefix (`…/` or `gs://…/` → `<prefix><ts>.json`)")
@@ -594,14 +595,15 @@ def healthcheck(date: str | None, max_age_days: int, as_json: bool, subdir: str 
 @option("-T", "--truth", default=None, help="Query-set mode: the ground truth (`dt-cloud bench-truth -o`'s dir or gs:// prefix)")
 @option("-u", "--url", default=None, help="Site base URL (default: $SITE_URL)")
 @option("-x", "--param", "params", multiple=True, help="Query-set mode: extra query params for every request, e.g. `ps=iv` (repeatable)")
-def probe(against: str | None, budget: float | None, cold: bool, date: str | None, as_json: bool, only: tuple[str, ...], out: str | None, hit: str | None, queries: str | None, requests: tuple[str, ...], repeat: int, subdir: str | None, serial: bool, token: str | None, truth: str | None, url: str | None, params: tuple[str, ...]) -> None:
+def probe(against: str | None, budget: float | None, cold: bool, date: str | None, unindexed: str | None, as_json: bool, only: tuple[str, ...], out: str | None, hit: str | None, queries: str | None, requests: tuple[str, ...], repeat: int, subdir: str | None, serial: bool, token: str | None, truth: str | None, url: str | None, params: tuple[str, ...]) -> None:
     """Replay the site's page loads (root, largest bucket, a matching and a
     non-matching path filter) against a live deployment.
 
     Each scenario's API requests go out concurrently, like the browser's, and
     each response's status, wall time, edge-cache tier and server time is
     recorded. Exits nonzero on any HTTP error except the site's explicit view refusal (409), on transport failure, or a scenario
-    over `--budget`). `-o` keeps the record, so a prefix of runs is a latency
+    over `--budget`). `-i REASON`: a `scan-not-indexed` search refusal is skipped (counted and named apart, never a
+    pass), for a run whose static-names step was skipped; without it, that refusal is a failure. `-o` keeps the record, so a prefix of runs is a latency
     time series.
 
     Query-set mode (`-Q queries.yml -T <truth>`): every query × view root of
@@ -615,12 +617,14 @@ def probe(against: str | None, budget: float | None, cold: bool, date: str | Non
 
     import random
 
-    from .probe import Targets, cold_min_area, compare_requests, http_fetch, record, request_paths, resolve_targets, run, scenarios, summarize
+    from .probe import Targets, cold_min_area, compare_requests, http_fetch, record, request_paths, resolve_targets, run, scenarios, summarize, summary_line
     from .site import creds
 
     base, tok = creds(token, url)
     if against and not requests:
         raise UsageError("--against requires exact --request paths")
+    if (queries or truth) and unindexed:
+        raise UsageError("--unindexed applies to page-load and exact-request modes, not query-set mode")
     if requests and (queries or truth or params or only or repeat != 1 or hit or subdir):
         raise UsageError("exact-request mode cannot combine with query-set or automatic scenario options")
     if queries or truth:
@@ -673,14 +677,14 @@ def probe(against: str | None, budget: float | None, cold: bool, date: str | Non
         results, before, parity = compare_requests(fetch, http_fetch(against, tok), paths, parallel=not serial)
         comparison = {"base": against, "results": [asdict(r) for r in before], "parity": parity}
     else:
-        results = run(fetch, cases, parallel=not serial)
+        results = run(fetch, cases, parallel=not serial, unindexed=unindexed)
     ok, lines = summarize(results, round(budget * 1000) if budget is not None else None)
     if comparison:
         ok = ok and all(p["equal"] for p in comparison["parity"])
         err(f"complete JSON parity: {sum(p['equal'] for p in comparison['parity'])}/{len(paths)} against {against}")
     for line in lines:
         err(line)
-    err("PASS" if ok else "FAIL")
+    err(f"{'PASS' if ok else 'FAIL'}: {summary_line(results)}")
     rec = {**record(base, t, results), "cold": cold}
     if comparison:
         rec["comparison"] = comparison
@@ -3349,7 +3353,7 @@ def publish_r2(
 from .static_append import cli as _static_append  # noqa: E402
 from .static_catalog import cli as _static_catalog  # noqa: E402
 from .static_drill import cli as _static_drill  # noqa: E402
-from .static_runner import add_cmd as _static_runs_add, merge_cmd as _static_runs_merge  # noqa: E402
+from .static_runner import add_cmd as _static_runs_add, check_priors_cmd as _static_runs_check_priors, lag_cmd as _static_runs_lag, merge_cmd as _static_runs_merge  # noqa: E402
 from .static_merge import carry_cmd as _static_runs_carry  # noqa: E402
 from .static_names import cli as _static_names  # noqa: E402
 from .static_roots import cli as _static_roots  # noqa: E402
@@ -3360,6 +3364,8 @@ _static_names.add_command(_static_catalog)
 _static_append.add_command(_static_drill)
 _static_append.add_command(_static_runs_add)
 _static_append.add_command(_static_runs_merge)
+_static_append.add_command(_static_runs_lag)
+_static_append.add_command(_static_runs_check_priors)
 _static_append.add_command(_static_runs_carry)
 _static_names.add_command(_static_append)
 _static_names.add_command(_static_roots)
@@ -3377,6 +3383,7 @@ from .interval_export import export_cmd as _interval_export  # noqa: E402
 from .interval_backfill import backfill_cmd as _interval_backfill  # noqa: E402
 from .interval_identity import migrate_cmd as _interval_identity  # noqa: E402
 from .interval_backfill import verify_generation_cmd as _interval_verify_generation  # noqa: E402
+from .interval_attribution import backfill_attribution_cmd as _interval_backfill_attribution, convert_cmd as _interval_attribution_convert  # noqa: E402
 
 _interval_store.add_command(_interval_local_build)
 _interval_store.add_command(_interval_local_add)
@@ -3385,6 +3392,8 @@ _interval_store.add_command(_interval_export)
 _interval_store.add_command(_interval_backfill)
 _interval_store.add_command(_interval_identity)
 _interval_store.add_command(_interval_verify_generation)
+_interval_store.add_command(_interval_backfill_attribution)
+_interval_store.add_command(_interval_attribution_convert)
 _interval_store.add_command(_interval_append)
 _interval_store.add_command(_interval_merge)
 _interval_store.add_command(_interval_runs)
