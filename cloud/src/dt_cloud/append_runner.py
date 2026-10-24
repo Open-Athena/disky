@@ -1880,9 +1880,14 @@ class Runner:
                  "spot": "1" if inst["provisioningModel"] == "SPOT" else "0", "image": image}
         v.update({FACT_ENV[k]: x for k, x in facts.items() if x})
         secrets = dict(getattr(self.p, "record_secrets", None) or {})
-        if secrets and all((self.environ.get(k) or "").strip() for k in ("D1_DB_ID", "CLOUDFLARE_ACCOUNT_ID")):
+        missing = [k for k in ("D1_DB_ID", "CLOUDFLARE_ACCOUNT_ID") if not (self.environ.get(k) or "").strip()]
+        if secrets and not missing:
             v.update({k: self.environ[k].strip() for k in PASS_ENV if (self.environ.get(k) or "").strip()})
             env.setdefault("secretVariables", {}).update({k: f"projects/{self.p.project}/secrets/{x}/versions/latest" for k, x in sorted(secrets.items())})
+        else:
+            # said here, where it's decided: the job only logs that it isn't recorded (c001's 16 h compaction never reached /scans)
+            self.log(f"{name}: not recorded on /scans: " + (f"no {', '.join('$' + k for k in missing)} in the submitter's environment"
+                                                            if secrets else "the profile names no `record_secrets`"))
         return spec
 
     def compact_jobs(self, scan: str) -> list[tuple[str, dict]]:
