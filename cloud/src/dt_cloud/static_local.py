@@ -390,6 +390,13 @@ MEASURE_THREADS = 4
 #: Overrides `MEASURE_THREADS`: fewer, wider measurement processes, each with a bigger share of `memory_limit` (a range
 #: whose working set passes its share spills to its temp dir and re-reads it per statement).
 MEASURE_THREADS_ENV = "DT_MEASURE_THREADS"
+#: A `q` range whose spilled roots pass this many bytes is heavy (gcs c001's: single-`q` ranges of 100M–440M roots,
+#: 0.8–5.2 GB zstd, against a median of 64 MB / 4M roots): `measure_ranges` measures the heavy ones first, `HEAVY_THREADS`
+#: DuckDB threads each (fewer processes, each a bigger share of `memory_limit`); at a light range's 1/13 they spilled
+#: 20–37 GiB apiece and set the stage's wall clock. `$DT_MEASURE_HEAVY_BYTES` overrides it.
+HEAVY_BYTES = 1 << 30
+HEAVY_BYTES_ENV = "DT_MEASURE_HEAVY_BYTES"
+HEAVY_THREADS = 16
 
 
 def measure_jobs(con, ranges: int) -> int:
@@ -458,10 +465,11 @@ def measure_ranges(con, work: Path, kind: str, n: int, dirs_into: str, rup_into:
     are `q`-disjoint and in `q` order, so the files are what `static_drill.write_kind` streams (`chunks`) instead of
     sorting every root again. The sorted files, in `q` order.
 
-    `jobs` ranges at a time (default `measure_jobs`), each in a process of its own (spawned; `con`'s threads and memory
-    limit split between them, `con`'s own limit lowered to a share meanwhile); 1: in turn on `con`. Each range's
-    measurement and rollups go to parquet first and into the tables in `q`-range order, so `jobs` never changes what the
-    tables hold; their consumers sort them (`write_kind`, `roots-measure/`)."""
+    The heavy ranges (spilled bytes ≥ `HEAVY_BYTES`) first, heaviest first, `HEAVY_THREADS` threads each; then the rest,
+    heaviest first, `jobs` at a time (default `measure_jobs`). Each range in a process of its own (spawned; `con`'s threads
+    and memory limit split between them, `con`'s own limit lowered to a share meanwhile); 1: in turn on `con`. Each
+    range's measurement and rollups go to parquet first and into the tables in `q`-range order, so neither the order nor
+    `jobs` changes what the tables hold; their consumers sort them (`write_kind`, `roots-measure/`)."""
     from concurrent.futures import as_completed
 
     for tb, cols in ((dirs_into, "q VARCHAR, k INTEGER, dir VARCHAR, rows BIGINT"), (rup_into, sd.ROLLUP_COLS)):
@@ -475,21 +483,37 @@ def measure_ranges(con, work: Path, kind: str, n: int, dirs_into: str, rup_into:
         if files:
             tasks.append((g, [str(f) for f in files], str(out / f"g{g:06d}.parquet"), str(meas / f"dirs-g{g:06d}.parquet"),
                           str(meas / f"rup-g{g:06d}.parquet")))
-    jobs = measure_jobs(con, len(tasks)) if jobs is None else max(1, min(jobs, len(tasks) or 1))
+    size = {t[0]: sum(Path(f).stat().st_size for f in t[1]) for t in tasks}
+    by_size = sorted(tasks, key=lambda t: (-size[t[0]], t[0]))
+    heavy_bytes = int(os.environ.get(HEAVY_BYTES_ENV) or HEAVY_BYTES)
+    heavy = [t for t in by_size if size[t[0]] >= heavy_bytes]
+    light = [t for t in by_size if size[t[0]] < heavy_bytes]
+    fixed = jobs
     prog = hb.Progress(f"drill/measure/{kind}", n, unit="ranges")
     prog.tick(n - len(tasks), nbytes=0)  # the ranges without roots
     t0, done = monotonic(), {}
-    if jobs == 1:
-        for g, files, so, do, ro in tasks:
-            done[g] = _measure_one(con, files, so, do, ro, floor=floor, R=R, K=K)
-            prog.tick(nbytes=done[g]["nbytes"])
-    else:
-        with sn.ConPool(con, jobs, f"drill/measure/{kind}") as pool:
+
+    def measure(group: list, jobs: int, label: str) -> None:
+        if not group:
+            return
+        if jobs == 1:
+            for g, files, so, do, ro in group:
+                done[g] = _measure_one(con, files, so, do, ro, floor=floor, R=R, K=K)
+                prog.tick(nbytes=done[g]["nbytes"])
+            return
+        with sn.ConPool(con, jobs, label) as pool:
             futs = {pool.submit(_measure_task, files, so, do, ro, floor, R, K, pool.task_threads, pool.mem,
-                                str(work / "measure-tmp" / f"{kind}-g{g:06d}")): g for g, files, so, do, ro in tasks}
+                                str(work / "measure-tmp" / f"{kind}-g{g:06d}")): g for g, files, so, do, ro in group}
             for f in as_completed(futs):
                 done[futs[f]] = f.result()
                 prog.tick(nbytes=done[futs[f]]["nbytes"])
+
+    if heavy:
+        hj = max(1, min(fixed, len(heavy))) if fixed is not None else sn.pool_jobs(con, len(heavy), HEAVY_THREADS)
+        sn.err(f"drill/measure/{kind}: {len(heavy)} heavy ranges (≥ {heavy_bytes:,} B spilled, up to {max(size.values()):,}) first, {hj} at a time")
+        measure(heavy, hj, f"drill/measure/{kind} (heavy)")
+    jobs = measure_jobs(con, len(light)) if fixed is None else max(1, min(fixed, len(light) or 1))
+    measure(light, jobs, f"drill/measure/{kind}")
     prog.done()
     if done:
         measure_report(kind, done)

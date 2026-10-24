@@ -207,13 +207,18 @@ def test_build_chunked_drill_is_the_unchunked_one(built, tmp_path):
     assert summary["drill"]["pieces"] > files
 
 
-def test_parallel_tail_is_the_serial_one(built, tmp_path, monkeypatch):
+@pytest.mark.parametrize("heavy_bytes", [None, "1"])
+def test_parallel_tail_is_the_serial_one(built, tmp_path, monkeypatch, heavy_bytes):
     """The drill's tail over process pools — each `q` range measured in a process of its own (`MEASURE_THREADS` 1 at
-    `-p 4`: 4 at a time), the anchors' rollups and starts-with catalog shard by shard (`ANCHOR_THREADS` 1; `write_kind`'s
-    file pool: `test_writing_sorted_chunks_writes_the_same_bytes`) — writes `drill/`, `roots-measure/`, `names/` and
-    `anchors/` byte for byte as the build at `-p 2` (one range, file and kind at a time on one database)."""
+    `-p 4`: 4 at a time; or every range heavy, `HEAVY_THREADS` 2: 2 at a time, heaviest first), the anchors' rollups and
+    starts-with catalog shard by shard (`ANCHOR_THREADS` 1; `write_kind`'s file pool:
+    `test_writing_sorted_chunks_writes_the_same_bytes`) — writes `drill/`, `roots-measure/`, `names/` and `anchors/`
+    byte for byte as the build at `-p 2` (one range, file and kind at a time on one database)."""
     from dt_cloud import static_drill as sd
 
+    if heavy_bytes:
+        monkeypatch.setenv(sl.HEAVY_BYTES_ENV, heavy_bytes)
+        monkeypatch.setattr(sl, "HEAVY_THREADS", 2)
     monkeypatch.setattr(sl, "MEASURE_THREADS", 1)
     monkeypatch.setattr(an, "ANCHOR_THREADS", 1)
     monkeypatch.setattr(sd, "WRITE_JOBS", 3)
