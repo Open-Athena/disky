@@ -1305,3 +1305,27 @@ def test_cf_usage_failure_fails_its_phase_not_the_run(tmp_path, env):
         [("begin", "cf-usage"), ("end", "cf-usage", 1, True, "cf-usage snapshots failed (the scan's outputs stand; the next run backfills)")],
         ["dt-cloud cf-usage -c site/wrangler.toml -d 7 -o <tmp>/data/snapshots/usage"],
     )
+
+
+@pytest.mark.parametrize("files, want", [
+    ({}, "38GB"),                                          # no cgroup files: the machine's 64 GiB
+    ({"memory.max": "max\n"}, "38GB"),                     # v2 without a limit
+    ({"memory.max": f"{16 * 2**30}\n"}, "9GB"),            # v2 limit below the machine
+    ({"memory/memory.limit_in_bytes": f"{2**63 - 4096}\n"}, "38GB"),  # v1's unlimited
+    ({"memory/memory.limit_in_bytes": f"{8 * 2**30}\n"}, "4GB"),      # v1 limit
+])
+def test_mem_budget(tmp_path, monkeypatch, files, want):
+    """60% of the smaller of the machine's RAM and the cgroup's limit, in whole GB (DuckDB's size syntax)."""
+    monkeypatch.setattr(os, "sysconf", lambda k: {"SC_PAGE_SIZE": 4096, "SC_PHYS_PAGES": 64 * 2**30 // 4096}[k])
+    for name, text in files.items():
+        (tmp_path / name).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / name).write_text(text)
+    assert S.mem_budget(tmp_path) == want
+
+
+def test_import_args_mem(tmp_path, env, monkeypatch):
+    """`{mem}` in `import_args` is the task machine's DuckDB budget (a profile shared by machines of every size)."""
+    monkeypatch.setattr(S.Ctx, "nproc", property(lambda self: 4))
+    monkeypatch.setattr(S.Ctx, "mem", property(lambda self: "9GB"))
+    c = ctx(tmp_path, env, options={"list": {"import": True, "import_args": ["-e", "stream", "-j", "{nproc}", "-M", "{mem}"]}})
+    assert c.expand(c.opt("list", "import_args")) == ["-e", "stream", "-j", "4", "-M", "9GB"]
