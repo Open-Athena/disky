@@ -31,7 +31,7 @@
  },
  "spot": true,
  "append_tasks": 16,
- "measure_tasks": 16,
+ "measure_tasks": 1,
  "drill": true,
  "anchors": true,
  "src": [],
