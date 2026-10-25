@@ -467,8 +467,9 @@ def _tier_parallel(con, sx_files: list[str], names_files: list[str], out: Path, 
                     total_bytes=sum(os.path.getsize(t[2]) for t in local), unit="shard tasks")
     with ConPool(con, jobs, "anchors") as pool:
         futs = {}
+        total = sum(os.path.getsize(t[2]) for t in local)
         for kind, i, f in sorted(local, key=lambda t: -os.path.getsize(t[2])):
-            futs[pool.submit(_shard_task, kind, [f], R, K, rule, parts[kind][i], pool.task_threads, pool.mem,
+            futs[pool.submit(_shard_task, kind, [f], R, K, rule, parts[kind][i], pool.threads_for(os.path.getsize(f), total), pool.mem,
                              str(work / "tmp" / f"{kind}-{i:05d}"))] = (kind, f)
         for fut in as_completed(futs):
             kind, f = futs[fut]

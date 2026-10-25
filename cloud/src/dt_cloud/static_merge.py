@@ -1075,11 +1075,12 @@ def anchor_shard_cmd(checkpoint, index, mem, threads, plan, tmp, code, workers) 
     try:
         with ConPool(con, pool_jobs(con, max(1, len(todo)), ANCHOR_THREADS), "anchor-shard") as pool:
             futs = {}
-            for k, s in sorted(todo, key=lambda t: -inputs[anchor_input_key(*t)].stat().st_size):
+            size = {t: inputs[anchor_input_key(*t)].stat().st_size for t in todo}
+            for k, s in sorted(todo, key=lambda t: -size[t]):
                 cells = work / "out" / f"{k}-{s:05d}.parquet"
                 cells.parent.mkdir(parents=True, exist_ok=True)
                 futs[pool.submit(_timed_shard_task, k, [str(inputs[anchor_input_key(k, s)])], doc["R"], doc["K"], rule, str(cells),
-                                 pool.task_threads, pool.mem, str(work / "tmp" / f"{k}-{s:05d}"))] = (k, s, cells)
+                                 pool.threads_for(size[(k, s)], sum(size.values())), pool.mem, str(work / "tmp" / f"{k}-{s:05d}"))] = (k, s, cells)
             for fut in as_completed(futs):
                 k, s, cells = futs[fut]
                 d, secs = fut.result()

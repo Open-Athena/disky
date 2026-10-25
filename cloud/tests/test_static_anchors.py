@@ -470,3 +470,18 @@ def test_a_mutated_reader_fails(world, monkeypatch):
             return list(best.values())
         m.setattr(an, "combine", worst)
         assert differs()
+
+
+def test_pool_threads_for_scales_heavy_tasks():
+    """`ConPool.threads_for`: a task's threads by its share of the pool's bytes, at least the even split, at most all."""
+    import duckdb
+
+    con = duckdb.connect()
+    con.execute("SET threads=32")
+    pool = sn.ConPool(con, 8, "test")
+    assert pool.task_threads == 4
+    total = 1000
+    assert [pool.threads_for(w, total) for w in (500, 250, 100, 50, 0)] == [16, 8, 4, 4, 4]
+    assert pool.threads_for(1000, total) == 32
+    assert pool.threads_for(5, 0) == 4
+    con.close()
