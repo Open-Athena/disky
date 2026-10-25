@@ -32,6 +32,7 @@ params.list_default = [:]  // the profile's `machines.list`: [machine:, disk:]
 params.steps = []          // every enabled step (core minus `skip`, plus the profile's `steps`)
 params.pre = []            // enabled extra steps beside `list`, before `index` (soft: index runs without them)
 params.pre_label = 'small'
+params.static_label = 'small'
 params.side = []           // enabled `side` steps: their own task, waited on by publish-r2 and serving, never by index
 params.side_label = 'small'
 params.interval_label = 'big'
@@ -141,7 +142,7 @@ process index {
 }
 
 process static_names {
-    label 'small'
+    label params.static_label
     time '6h'
     input: val indexed
     output: path 'done'

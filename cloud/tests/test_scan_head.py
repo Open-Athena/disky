@@ -121,6 +121,20 @@ def test_params_golden():
     assert got == json.loads((FIX / "cw-s3.params.json").read_text())
 
 
+def test_static_names_can_have_its_own_machine():
+    from dataclasses import replace
+
+    from dt_cloud.scan_profile import Machine
+
+    default = load(FIX / "cw-s3.yml")
+    sized = replace(default, machines={**default.machines, "static": Machine(type="e2-standard-4", cpus=4, memory="14 GB")})
+    args = ("{}", "2026-10-20T0716", "G", "1", "run-1", "session", LABELS)
+    assert [H.params(p, *args).get("static_label") for p in (default, sized)] == ["small", "static"]
+    assert [line for line in H.executor_config(sized).splitlines() if line.startswith("    withLabel: static ")] == [
+        "    withLabel: static { machineType = 'e2-standard-4'; cpus = 4; memory = '14 GB' }",
+    ]
+
+
 def test_params_reproc_fresh_and_extras():
     from dt_cloud.scan_profile import parse
 

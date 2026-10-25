@@ -322,16 +322,24 @@ def build_base_anchors(con, gen_dir: Path, *, R: int, K: int, scans: list[str], 
     (`names/`, from the coalesced versions, as `static-names anchors names`), then `anchors/` — the `q$` rollups over the
     suffix shards, the `^q$` ones over the name index and the starts-with catalog `anchors/start/` (`build_tier_local`,
     each `meta.json` written last), at the drill's R and K. `fanout()`: the rollups' `static_fanout.AnchorFanout` (a
-    compaction's helper tasks; made once `names/` is written, its shards being their inputs)."""
+    compaction's helper tasks), its job submitted before `names/` is written (`presubmit`: the helpers boot meanwhile)
+    and dealt once it is, its shards being their inputs."""
     cint = sorted(str(f) for f in (gen_dir / "cintervals").glob("*.parquet"))
-    t = monotonic()
-    hb.set_stage("anchors/names")
-    names = an.write_names(con, an.files_sql(cint, an.VERSION_COLS), gen_dir / an.NAMES, jobs=sn.pool_jobs(con, 1 << 30, an.ANCHOR_THREADS))
-    sn.err(f"anchors/names: {names['rows']:,} rows in {names['shards']} shards in {monotonic() - t:.0f}s")
-    tier = an.Tier(gen_dir)
-    t = monotonic()
-    doc = an.build_tier_local(con, tier.files("end"), tier.files("exact"), gen_dir / an.ANCHORS, R, K, scans, rule,
-                              fanout=fanout() if fanout is not None else None)
+    fan = fanout() if fanout is not None else None
+    if fan is not None:
+        fan.presubmit()
+    try:
+        t = monotonic()
+        hb.set_stage("anchors/names")
+        names = an.write_names(con, an.files_sql(cint, an.VERSION_COLS), gen_dir / an.NAMES, jobs=sn.pool_jobs(con, 1 << 30, an.ANCHOR_THREADS))
+        sn.err(f"anchors/names: {names['rows']:,} rows in {names['shards']} shards in {monotonic() - t:.0f}s")
+        tier = an.Tier(gen_dir)
+        t = monotonic()
+        doc = an.build_tier_local(con, tier.files("end"), tier.files("exact"), gen_dir / an.ANCHORS, R, K, scans, rule, fanout=fan)
+    except BaseException:
+        if fan is not None:
+            fan.abandon()
+        raise
     sn.err(f"anchors/rollups: {', '.join(f'{k} {v['rows']:,} rows' for k, v in doc['sets'].items())} in {monotonic() - t:.0f}s")
     return {"names": {k: names[k] for k in ("rows", "shards")}, **{k: v["rows"] for k, v in doc["sets"].items()}}
 

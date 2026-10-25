@@ -30,7 +30,7 @@ each file and its group index rows to `written/<kind>/r<i>/`; `WriteFanout.colle
 would be, so the drill is a single VM's.
 
 `AnchorFanout` (the base anchors, `static_anchors._tier_parallel`): each `(kind, shard)` rollup task (`end` over the
-suffix shards, `exact` and `start` over the name shards) dealt by input bytes; the inputs of the tasks dealt away
+suffix shards, `exact` and `start` over the name shards) dealt by input rows (footer); the inputs of the tasks dealt away
 uploaded under `anchors-in/` (once each, skipped when there); a helper (`static_merge anchor-shard`) runs
 `_shard_task` on each of its tasks and uploads its sorted cells to `anchored/<kind>/s<i>/cells.parquet`.
 `AnchorFanout.collect` downloads them where the local pool's would be, so `write_rollup_parts` streams a single VM's
@@ -126,6 +126,8 @@ class Helpers:
         # the helper jobs before the current wave's (`FoldFanout`'s waves each get `retries` re-deals of their own)
         self.base = 0
         self.thread: threading.Thread | None = None
+        # a presubmitted job's plan key, until the first `_submit` writes it
+        self.early: str | None = None
         self.error: BaseException | None = None
 
     def unit_key(self, kind: str, i: int) -> str:
@@ -142,36 +144,65 @@ class Helpers:
     def done_in(self, listing: dict[str, int], units) -> set[tuple[str, int]]:
         return {u for u in units if self.ck.key(f"{self.unit_key(*u)}/done.json") in listing}
 
-    def deal(self, weights: dict[tuple[str, int], int]) -> tuple[set[tuple[str, int]], list[list[list]]]:
-        """`weights`' units dealt over the shares (`static_merge.deal`): share 0 (kept), and the other shares' units not
-        done already (an earlier attempt's helpers'), as plan entries; `away` = every unit not in share 0."""
+    def deal(self, weights: dict[tuple[str, int], int], away: set[tuple[str, int]] = frozenset()) -> tuple[set[tuple[str, int]], list[list[list]]]:
+        """`weights`' units dealt over the shares (`static_merge.deal`; a unit of `away` never to share 0): share 0
+        (kept), and the other shares' units not done already (an earlier attempt's helpers'), as plan entries; `away` =
+        every unit not in share 0."""
         from .static_merge import deal
 
-        shares = deal(weights, self.tasks)
+        shares = deal(weights, self.tasks, away)
         done = self.done_in(self.listed(), weights)
         # share 0's units already in the checkpoint (a seeded or resumed run's) are fetched, not built again
         mine = set(shares[0]) - done
         self.away = set(weights) - mine
         return mine, [[[k, i] for k, i in share if (k, i) not in done] for share in shares[1:]]
 
-    def _submit(self, shares: list[list]) -> None:
-        if not shares:
-            return
-        self.attempt += 1
-        plan = f"{self.root}/plan-{self.attempt}.json"
+    def _write_plan(self, plan: str, shares: list[list]) -> None:
         self.ck.store.write_text(self.ck.key(plan), json.dumps({"tasks": shares, "code": self.code, **self.params}) + "\n")
+
+    def _run(self, plan: str, n: int) -> None:
         url = self.ck.store.uri(self.ck.prefix)
-        self.log(f"{self.label}: {plan}: {len(shares)} helper tasks submitted")
 
         def run() -> None:
             try:
-                self.submit(url, plan, len(shares), self.code, self.scan)
+                self.submit(url, plan, n, self.code, self.scan)
             except BaseException as e:  # noqa: BLE001 — the waiting side reports it, with the units it left
                 self.error = e
 
         self.error = None
         self.thread = threading.Thread(target=run, name=f"{self.root}-helpers-{self.attempt}", daemon=True)
         self.thread.start()
+
+    def presubmit(self) -> None:
+        """Submit the first helper job now, before its plan exists (`plan-1.json`, a stale one from an earlier run of
+        this checkpoint deleted first), with a task per helper share: its VMs boot while this VM still works (gcs's
+        anchors: ~2 min of boot beside `anchors/names`' ~3 min). Its tasks wait for the plan, which the first
+        `_submit` writes instead of submitting; one past the plan's shares ends at once (`abandon`: an empty plan)."""
+        self.attempt += 1
+        self.early = f"{self.root}/plan-{self.attempt}.json"
+        self.ck.store.delete([self.ck.key(self.early)])
+        self.log(f"{self.label}: {self.early}: {self.tasks - 1} helper tasks submitted ahead of their plan")
+        self._run(self.early, self.tasks - 1)
+
+    def abandon(self) -> None:
+        """A presubmitted job's plan never coming: an empty one, so its tasks end instead of waiting."""
+        if self.early is not None:
+            plan, self.early = self.early, None
+            self._write_plan(plan, [])
+
+    def _submit(self, shares: list[list]) -> None:
+        if self.early is not None:
+            plan, self.early = self.early, None
+            self._write_plan(plan, shares)
+            self.log(f"{self.label}: {plan}: {len(shares)} shares for the presubmitted helper tasks")
+            return
+        if not shares:
+            return
+        self.attempt += 1
+        plan = f"{self.root}/plan-{self.attempt}.json"
+        self._write_plan(plan, shares)
+        self.log(f"{self.label}: {plan}: {len(shares)} helper tasks submitted")
+        self._run(plan, len(shares))
 
     def wait(self, units: list[tuple[str, int]], what: str, ids: Callable[[list[tuple[str, int]]], list],
              fetch: Callable[[list[tuple[str, int]], dict[str, int]], None] | None = None) -> None:
@@ -375,7 +406,7 @@ class WriteFanout(Helpers):
 
 
 class AnchorFanout(Helpers):
-    """The base anchors' fan-out: `start` deals the `(kind, shard)` rollup tasks by input bytes, uploads the inputs of
+    """The base anchors' fan-out: `start` deals the `(kind, shard)` rollup tasks by input rows, uploads the inputs of
     the tasks dealt away and submits them; `collect` waits for and fetches their cells. `ck`: the compaction's
     checkpoint."""
 
@@ -385,28 +416,37 @@ class AnchorFanout(Helpers):
         return anchor_task_key(kind, i)
 
     def start(self, tasks: list[tuple[str, int, str]], *, R: int, K: int, rule=None, workers: int = 16) -> set[tuple[str, int]]:
-        """Deal `tasks` (`(kind, shard index, input file)`) over the shares by input bytes, keep share 0, upload the
+        """Deal `tasks` (`(kind, shard index, input file)`) over the shares by input rows (footers), keep share 0, upload the
         inputs the other shares' tasks not done yet read (each once; one already there is kept: a resumed compaction's
         shards are the same bytes), and submit the helpers. The plan carries `R`, `K` and the hex-run `rule`. Returns
         the tasks dealt away."""
         import os
         from concurrent.futures import ThreadPoolExecutor
 
+        import pyarrow.parquet as pq
+
         from . import heartbeat as hb
         from .hex_runs import rule_json
+        from .static_anchors import heavy_rows
 
         self.params = {"R": R, "K": K, **rule_json(rule)}
         hb.set_stage("anchors/fan-out plan")
-        weights = {(kind, i): os.path.getsize(f) for kind, i, f in tasks}
+        # by the inputs' footer rows, as `anchor-shard` orders and threads them (bytes put gcs's ~108M-row, ~300 MB `end`
+        # shards under the median: tasks of 245–874s)
+        weights = {(kind, i): pq.ParquetFile(f).metadata.num_rows for kind, i, f in tasks}
         files = {(kind, i): f for kind, i, f in tasks}
-        mine, todo = self.deal(weights)
+        # a heavy shard to a helper, which builds it alone on all its threads (`anchor-shard`); this VM's pool would give it
+        # `ANCHOR_THREADS` (gcs's deal race: a 261M-row `end` shard in share 0, 1170s at 4 threads)
+        # the bar over every task (the plan carries it: each helper judges its own by the same one)
+        heavy = self.params["heavy_rows"] = heavy_rows(list(weights.values()))
+        mine, todo = self.deal(weights, {u for u, w in weights.items() if w >= heavy})
         need = {anchor_input_key(k, i): files[(k, i)] for share in todo for k, i in share}
         have = self.ck.store.listing(self.ck.key(ANCHORS_IN))
         put = {key: f for key, f in need.items() if have.get(self.ck.key(key)) != os.path.getsize(f)}
         hb.set_stage(f"anchors/fan-out inputs: {len(put)} shard files")
         with ThreadPoolExecutor(workers) as ex:
             list(ex.map(lambda kf: self.ck.store.put(Path(kf[1]), self.ck.key(kf[0])), sorted(put.items())))
-        self.log(f"anchors fan-out: {len(mine)} shard tasks here ({sum(weights[t] for t in mine):,} B), {len(self.away)} on "
+        self.log(f"anchors fan-out: {len(mine)} shard tasks here ({sum(weights[t] for t in mine):,} rows), {len(self.away)} on "
                  f"{self.tasks - 1} helper tasks ({sum(len(t) for t in todo)} to build; {len(put)} of {len(need)} inputs uploaded, "
                  f"{sum(os.path.getsize(f) for f in put.values()):,} B)")
         self._submit([t for t in todo if t])

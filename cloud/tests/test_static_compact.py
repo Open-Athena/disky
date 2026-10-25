@@ -697,6 +697,23 @@ def test_deal_balances_ranges_heaviest_first_to_the_least_loaded_task():
     assert deal({"a": 1}, 3) == [["a"], [], []]
 
 
+def test_heavy_rows_is_relative_to_the_median_shard():
+    from dt_cloud.static_anchors import ANCHOR_HEAVY_MIN_ROWS, heavy_rows
+
+    assert heavy_rows([49_000_000] * 10 + [108_000_000, 260_000_000]) == 196_000_000
+    assert heavy_rows([1_000, 2_000, 3_000]) == ANCHOR_HEAVY_MIN_ROWS
+    assert heavy_rows([]) == ANCHOR_HEAVY_MIN_ROWS
+
+
+def test_deal_keeps_away_keys_off_task_0_while_there_are_others():
+    from dt_cloud.static_merge import deal
+
+    weights = {"a": 10, "b": 9, "c": 5, "d": 4, "e": 1}
+    assert deal(weights, 3, {"a"}) == [["b", "e"], ["a"], ["c", "d"]]
+    assert deal(weights, 3, {"a", "b"}) == [["c", "d", "e"], ["a"], ["b"]]
+    assert deal({"a": 1}, 1, {"a"}) == [["a"]]
+
+
 def _fanned_fold(world, tmp_path, submit, retries: int = 2, root: str = "scratch", out: str = "out", log=lambda m: None, write_submit=None):
     """C's fold with its drill measurement over 3 tasks (`static_fanout.Fanout`, logging to `log`), `submit` running the
     helper jobs (`write_submit`: the drill write's, `WriteFanout`); its checkpoint under `tmp_path / root`, the generation
@@ -1160,13 +1177,14 @@ class OutOfMemoryException(Exception):
 def test_fanned_out_anchors_write_the_single_vm_fold(world, tmp_path, monkeypatch, mode):
     """The fold builds its share of the anchors' shard tasks, 2 helper tasks theirs (from the shards uploaded under
     `anchors-in/`, their cells under `anchored/`): `g.c001`'s files (built at `anchor_tasks` 1), md5 for md5. The helper
-    job is named by the newest scan folded, never by the plan. `alone`: every shard over `ANCHOR_HEAVY_ROWS`, so each
+    job is named by the newest scan folded, never by the plan. `alone`: every shard over the heavy bar (`ANCHOR_HEAVY_X` 0, no floor), so each
     is built by itself on all the task's threads; `oom`: every pooled shard runs out of memory once, and is built again
     alone after the pool; the same bytes."""
     from dt_cloud import static_anchors as an
     from dt_cloud import static_merge as sm
 
-    monkeypatch.setattr(an, "ANCHOR_HEAVY_ROWS", 0 if mode == "alone" else 1 << 40)
+    monkeypatch.setattr(an, "ANCHOR_HEAVY_X", 0 if mode == "alone" else 1e9)
+    monkeypatch.setattr(an, "ANCHOR_HEAVY_MIN_ROWS", 0)
     failed: list = []
     if mode == "oom":
         built = sm._timed_shard_task
@@ -1183,6 +1201,34 @@ def test_fanned_out_anchors_write_the_single_vm_fold(world, tmp_path, monkeypatc
     assert calls == [("anchored/plan-1.json", 2, world["ids"][3])]
     assert _md5s(tmp_path / "out") == _md5s(world["c_store"] / "g.c001")
     assert bool(failed) == (mode == "oom")
+
+
+def test_a_presubmitted_anchors_job_ends_on_an_abandoned_plan(tmp_path):
+    """`presubmit` submits the helper job before its plan exists (a task per helper share, the stale plan deleted);
+    `abandon` (the step failed before dealing) writes an empty plan, and every waiting task ends with nothing to do."""
+    from dt_cloud import static_merge as sm
+    from dt_cloud.checkpoint import Checkpoint, code_version
+    from dt_cloud.static_fanout import AnchorFanout
+
+    ck = Checkpoint(str(tmp_path / "scratch"), "p", work=tmp_path / "ck")
+    (tmp_path / "scratch" / "p" / "anchored").mkdir(parents=True)
+    (tmp_path / "scratch" / "p" / "anchored" / "plan-1.json").write_text(json.dumps({"tasks": [[["end", 0]]]}) + "\n")
+    calls: list = []
+
+    def submit(url: str, plan: str, n: int, code: str, scan: str) -> None:
+        calls.append((plan, n, scan))
+        for i in range(n):
+            sm.anchor_shard_cmd.callback(checkpoint=url, index=i, mem="1GB", threads=2, plan=plan, tmp=str(tmp_path / f"a{i}"), code=code,
+                                         workers=1)
+
+    fan = AnchorFanout(ck, 3, submit, code=code_version(), scan="2026-10-25", poll_s=0.01, log=lambda m: None)
+    fan.presubmit()
+    fan.abandon()
+    fan.thread.join(30)
+    assert (fan.thread.is_alive(), fan.error) == (False, None)
+    assert calls == [("anchored/plan-1.json", 2, "2026-10-25")]
+    assert json.loads((tmp_path / "scratch" / "p" / "anchored" / "plan-1.json").read_text())["tasks"] == []
+    ck.close()
 
 
 def test_anchor_tasks_a_helper_job_left_are_dealt_again(world, tmp_path):
