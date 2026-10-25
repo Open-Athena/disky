@@ -61,7 +61,7 @@ def test_queued_task_falls_back_and_a_real_failure_does_not(tmp_path):
     prof = tmp_path / "fixture.yml"
     prof.write_text(PROFILE)
     launch = tmp_path / "launch"
-    env = {"SNAP_ID": "2026-10-16T1200", "GEN": "G1", "DT_JOB_START": "1"}
+    env = {"SNAP_ID": "2026-10-16T1200", "GEN": "G1", "DT_JOB_START": "1", "DISKY_LABELS": "app=disky,deployment=fixture"}
     assert H.head(prof, REPO / "job/nf", launch, dry_run=True, env=env) == 0
     # the generated timeout is the profile's (minutes); 3 s here, so the test doesn't wait two minutes
     cfg = (launch / "executor.config").read_text()
