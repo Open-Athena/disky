@@ -1164,13 +1164,18 @@ def anchor_shard_cmd(checkpoint, index, mem, threads, plan, tmp, code, workers) 
     todo.sort(key=lambda t: -size(t))
     # a heavy shard alone, on every thread and all the memory: at an even `ANCHOR_THREADS` share gcs's 1.35 GB `end` shards
     # took ~2240s each (one OOMing a neighbour); alone on 16 threads, 769s
-    heavy = [t for t in todo if size(t) >= ANCHOR_HEAVY_BYTES]
-    for k, s in heavy:
-        err(f"anchor-shard {plan} #{i}: {k} s{s:05d} alone ({size((k, s)):,} B, {threads} threads)")
+    def alone(k: str, s: int, why: str) -> None:
+        err(f"anchor-shard {plan} #{i}: {k} s{s:05d} alone ({why}; {size((k, s)):,} B, {threads} threads)")
         cells = cells_of(k, s)
+        shutil.rmtree(work / "tmp" / f"{k}-{s:05d}", ignore_errors=True)
         put(k, s, cells, *_timed_shard_task(k, [str(inputs[anchor_input_key(k, s)])], doc["R"], doc["K"], rule, str(cells), threads, mem,
                                             str(work / "tmp" / f"{k}-{s:05d}")))
+
+    heavy = [t for t in todo if size(t) >= ANCHOR_HEAVY_BYTES]
+    for k, s in heavy:
+        alone(k, s, "heavy")
     rest = todo[len(heavy):]
+    oom: list[tuple[str, int]] = []
     con = connect(threads, mem, work / "duckdb")
     try:
         with ConPool(con, pool_jobs(con, max(1, len(rest)), ANCHOR_THREADS), "anchor-shard") as pool:
@@ -1180,9 +1185,22 @@ def anchor_shard_cmd(checkpoint, index, mem, threads, plan, tmp, code, workers) 
                 futs[pool.submit(_timed_shard_task, k, [str(inputs[anchor_input_key(k, s)])], doc["R"], doc["K"], rule, str(cells),
                                  pool.task_threads, pool.mem, str(work / "tmp" / f"{k}-{s:05d}"))] = (k, s, cells)
             for fut in as_completed(futs):
-                put(*futs[fut], *fut.result())
+                k, s, cells = futs[fut]
+                try:
+                    d, secs = fut.result()
+                except Exception as e:
+                    # a pooled shard over its memory share (gcs: a 0.35 GB one at 18.6 GiB failed its whole Batch task):
+                    # built again alone once the pool is done
+                    if type(e).__name__ != "OutOfMemoryException":
+                        raise
+                    err(f"anchor-shard {plan} #{i}: {k} s{s:05d} over its {pool.mem}: {e}")
+                    oom.append((k, s))
+                    continue
+                put(k, s, cells, d, secs)
     finally:
         con.close()
+    for k, s in oom:
+        alone(k, s, "out of memory in the pool")
     ck.store.write_text(ck.key(f"{ANCHORED}/tasks/{name}-{i}.json"), json.dumps({"tasks": len(todo), "s": round(monotonic() - t0, 1)}) + "\n")
     err(f"anchor-shard {plan} #{i}: {len(todo)} shard tasks in {monotonic() - t0:.0f}s")
 
