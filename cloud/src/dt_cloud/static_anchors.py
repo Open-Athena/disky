@@ -522,8 +522,10 @@ def anchors_meta(R: int, K: int, sets: dict, scans: list[str] | None = None, **e
 #: DuckDB threads per shard process when `build_tier_local` builds a tier's rollups shard by shard (`jobs` > 1).
 ANCHOR_THREADS = 4
 
-#: A shard input this big or bigger is built alone on every thread of an `anchor-shard` helper task, before the rest.
-ANCHOR_HEAVY_BYTES = int(os.environ.get("DT_ANCHOR_HEAVY_BYTES", 1 << 30))
+#: A shard input of this many rows or more (its footer's) is built alone on every thread of an `anchor-shard` helper
+#: task, before the rest. Rows, not bytes: a shard's work tracks its rows (gcs: ~300 MB shards of ~108M rows took 470–600s
+#: at 4 threads, ~500 MB ones of ~49M under 60s); gcs's three ~260M-row `end` shards are the ones over it.
+ANCHOR_HEAVY_ROWS = int(os.environ.get("DT_ANCHOR_HEAVY_ROWS", 200_000_000))
 
 
 def _sorted_cells(con, table: str, out: str) -> None:
