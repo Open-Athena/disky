@@ -1117,7 +1117,7 @@ def _timed_shard_task(*args) -> tuple[dict, float]:
 def anchor_shard_cmd(checkpoint, index, mem, threads, plan, tmp, code, workers) -> None:
     """A compaction's base anchors helper (`static_fanout.AnchorFanout`, specs/static-anchors-fanout.md): task INDEX's
     share of the plan's `(kind, shard)` rollup tasks, each one's input shard fetched from `anchors-in/`, its rollups
-    built (`static_anchors._shard_task`: a shard of `ANCHOR_HEAVY_ROWS` or more alone first, on all `-p` threads and
+    built (`static_anchors._shard_task`: a shard of the plan's `heavy_rows` or more alone first, on all `-p` threads and
     `-M`; the rest biggest first, each on threads by its rows out of the `-p` free, `-M` shared in proportion) and
     uploaded as `anchored/<kind>/s<i>/cells.parquet`, then its `done.json` (the task's doc, seconds, rows). A task whose
     `done.json` is there is skipped (a retry resumes); then `anchored/tasks/<plan>-<index>.json`. Refuses to run other
@@ -1129,7 +1129,7 @@ def anchor_shard_cmd(checkpoint, index, mem, threads, plan, tmp, code, workers) 
 
     from .checkpoint import Checkpoint, code_version
     from .hex_runs import rule_from_json
-    from .static_anchors import ANCHOR_HEAVY_ROWS, ANCHOR_THREADS
+    from .static_anchors import ANCHOR_THREADS
     from .static_append import _Inline
     from .static_fanout import ANCHORED, anchor_input_key, anchor_task_key
     from .static_names import _pool_init, mem_bytes
@@ -1179,7 +1179,7 @@ def anchor_shard_cmd(checkpoint, index, mem, threads, plan, tmp, code, workers) 
         put(k, s, cells, *_timed_shard_task(k, [str(inputs[anchor_input_key(k, s)])], doc["R"], doc["K"], rule, str(cells), threads, mem,
                                             str(work / "tmp" / f"{k}-{s:05d}")))
 
-    heavy = [t for t in todo if size(t) >= ANCHOR_HEAVY_ROWS]
+    heavy = [t for t in todo if size(t) >= doc["heavy_rows"]]
     for k, s in heavy:
         alone(k, s, "heavy")
     rest = todo[len(heavy):]

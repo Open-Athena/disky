@@ -397,7 +397,7 @@ class AnchorFanout(Helpers):
 
         from . import heartbeat as hb
         from .hex_runs import rule_json
-        from .static_anchors import ANCHOR_HEAVY_ROWS
+        from .static_anchors import heavy_rows
 
         self.params = {"R": R, "K": K, **rule_json(rule)}
         hb.set_stage("anchors/fan-out plan")
@@ -407,7 +407,9 @@ class AnchorFanout(Helpers):
         files = {(kind, i): f for kind, i, f in tasks}
         # a heavy shard to a helper, which builds it alone on all its threads (`anchor-shard`); this VM's pool would give it
         # `ANCHOR_THREADS` (gcs's deal race: a 261M-row `end` shard in share 0, 1170s at 4 threads)
-        mine, todo = self.deal(weights, {u for u, w in weights.items() if w >= ANCHOR_HEAVY_ROWS})
+        # the bar over every task (the plan carries it: each helper judges its own by the same one)
+        heavy = self.params["heavy_rows"] = heavy_rows(list(weights.values()))
+        mine, todo = self.deal(weights, {u for u, w in weights.items() if w >= heavy})
         need = {anchor_input_key(k, i): files[(k, i)] for share in todo for k, i in share}
         have = self.ck.store.listing(self.ck.key(ANCHORS_IN))
         put = {key: f for key, f in need.items() if have.get(self.ck.key(key)) != os.path.getsize(f)}

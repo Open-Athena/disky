@@ -697,6 +697,14 @@ def test_deal_balances_ranges_heaviest_first_to_the_least_loaded_task():
     assert deal({"a": 1}, 3) == [["a"], [], []]
 
 
+def test_heavy_rows_is_relative_to_the_median_shard():
+    from dt_cloud.static_anchors import ANCHOR_HEAVY_MIN_ROWS, heavy_rows
+
+    assert heavy_rows([49_000_000] * 10 + [108_000_000, 260_000_000]) == 196_000_000
+    assert heavy_rows([1_000, 2_000, 3_000]) == ANCHOR_HEAVY_MIN_ROWS
+    assert heavy_rows([]) == ANCHOR_HEAVY_MIN_ROWS
+
+
 def test_deal_keeps_away_keys_off_task_0_while_there_are_others():
     from dt_cloud.static_merge import deal
 
@@ -1169,13 +1177,14 @@ class OutOfMemoryException(Exception):
 def test_fanned_out_anchors_write_the_single_vm_fold(world, tmp_path, monkeypatch, mode):
     """The fold builds its share of the anchors' shard tasks, 2 helper tasks theirs (from the shards uploaded under
     `anchors-in/`, their cells under `anchored/`): `g.c001`'s files (built at `anchor_tasks` 1), md5 for md5. The helper
-    job is named by the newest scan folded, never by the plan. `alone`: every shard over `ANCHOR_HEAVY_ROWS`, so each
+    job is named by the newest scan folded, never by the plan. `alone`: every shard over the heavy bar (`ANCHOR_HEAVY_X` 0, no floor), so each
     is built by itself on all the task's threads; `oom`: every pooled shard runs out of memory once, and is built again
     alone after the pool; the same bytes."""
     from dt_cloud import static_anchors as an
     from dt_cloud import static_merge as sm
 
-    monkeypatch.setattr(an, "ANCHOR_HEAVY_ROWS", 0 if mode == "alone" else 1 << 40)
+    monkeypatch.setattr(an, "ANCHOR_HEAVY_X", 0 if mode == "alone" else 1e9)
+    monkeypatch.setattr(an, "ANCHOR_HEAVY_MIN_ROWS", 0)
     failed: list = []
     if mode == "oom":
         built = sm._timed_shard_task
