@@ -589,6 +589,27 @@ def check_priors_cmd(gen: str | None, scans: tuple[str, ...]) -> None:
         raise SystemExit(1)
 
 
+@command("r2")
+@option("-g", "--gen", help="Base generation (default: the profile's, $STATIC_NAMES_GEN)")
+@option("-m", "--manifest", help="The manifest's stem (`2026-10-24T1952.m001`; default: the newest)")
+@option("-n", "--dry-run", is_flag=True, help="Say what the job would copy; submit nothing")
+def r2_cmd(gen: str | None, manifest: str | None, dry_run: bool) -> None:
+    """The R2 job for one manifest (default the newest; a scan's or a carry's revision), as `runs add`'s r2 stage runs it
+    (`StaticRunner.r2`): each run it lists copied (its liveness markers last), every served file checked on R2, then the
+    manifest alone, then the runs a carry folded off R2. Each copy skips what R2 holds, so a rerun only fills what's
+    missing: a recovery (a run whose files R2 lacked, a merge published with `-w 0`). Exit 1 when the job fails."""
+    cfg = ready(profile(), gen)
+    runner = gcs_runner(cfg, dry_run=dry_run)
+    runner.follow()
+
+    def run() -> None:
+        if manifest is None:
+            runner.r2_newest()
+        else:
+            runner.r2(ar.parse_manifest(f"{manifest}.json")[0], manifest)
+    exit_on("static-names runs r2", run, lambda m: err(m))
+
+
 @command("merge")
 @option("-g", "--gen", help="Base generation (default: the profile's, $STATIC_NAMES_GEN)")
 @option("-n", "--dry-run", is_flag=True, help="Report the due carries; submit and write nothing")
