@@ -1006,3 +1006,21 @@ def test_check_priors_compares_each_tiers_recorded_priors_with_its_manifest():
     check = lambda s: sd.check_priors(keys.__getitem__, keys.__contains__, ROOT, s)  # noqa: E731
     assert check(b) == {"scan": b, "want": ["base", f"deltas/{a}"], "drill": "ok", "anchors": {"differs": ["base"]}}
     assert check(a) == {"scan": a, "want": ["base"], "drill": "absent", "anchors": "unrecorded"}
+
+
+def test_the_r2_cli_reruns_a_manifests_r2_job(monkeypatch):
+    """`runs r2`: the newest manifest's R2 job (its runs, then it), or `-m`'s, as `runs add`'s r2 stage runs it: a
+    recovery (R2 lacking a run's files, a merge's revision published with `-w 0`)."""
+    from click.testing import CliRunner
+
+    f = Fake({}, SCANS[:2])
+    f.daily(merge=False).run(SCANS[1], catch_up=True)
+    monkeypatch.setattr(sd, "ready", lambda p, gen: CFG)
+    monkeypatch.setattr(sd, "profile", lambda: CFG)
+    monkeypatch.setattr(sd, "gcs_runner", lambda cfg, **kw: f.daily(cfg, merge=False))
+    f.calls = []
+    r = CliRunner().invoke(sd.r2_cmd, [])
+    assert (r.exit_code, f.calls) == (0, [_r2(SCANS[1], SCANS[:2])])
+    f.calls = []
+    r = CliRunner().invoke(sd.r2_cmd, ["-m", SCANS[0]])
+    assert (r.exit_code, f.calls) == (0, [_r2(SCANS[0], SCANS[:1])])

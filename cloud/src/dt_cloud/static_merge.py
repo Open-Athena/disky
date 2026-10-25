@@ -416,7 +416,7 @@ def _helper_runner(gen: str):
 
 def measure_fanout(tasks: int, gen: str) -> Callable:
     """The compaction's drill measurement over `tasks` tasks (`static_fanout.Fanout`, given the fold's checkpoint): its
-    helper jobs (`helper_job`, stage `measure`) run by `_helper_runner`."""
+    helper jobs (`helper_job`, stage `measure`) run by `_helper_runner`, and its drill write's (`write_helper_job`)."""
     from .checkpoint import code_version
     from .static_fanout import Fanout
 
@@ -425,7 +425,10 @@ def measure_fanout(tasks: int, gen: str) -> Callable:
     def submit(url: str, plan: str, n: int, code: str, scan: str) -> None:
         runner.run_job(*helper_job(runner, url, plan, n, code, scan))
 
-    return lambda ck, scan: Fanout(ck, tasks, submit, code=code_version(), scan=scan)
+    def write(url: str, plan: str, n: int, code: str, scan: str) -> None:
+        runner.run_job(*write_helper_job(runner, url, plan, n, code, scan))
+
+    return lambda ck, scan: Fanout(ck, tasks, submit, code=code_version(), scan=scan, write_submit=write)
 
 
 def anchor_fanout(tasks: int, gen: str) -> Callable:
@@ -478,6 +481,13 @@ def helper_job(runner, url: str, plan: str, n: int, code: str, scan: str) -> tup
     from .append_runner import duckdb_args
 
     args = ["measure-shard", "-c", url, "-P", plan, "-V", code, *duckdb_args(runner.cfg.machine_for("measure"))]
+    return _helper_recorded(runner, *runner.job("measure", scan, n, "static_merge", args, mount=False), scan)
+
+
+def write_helper_job(runner, url: str, plan: str, n: int, code: str, scan: str) -> tuple[str, dict]:
+    """The drill write fan-out's helper job (`runner.job`, the measurement's stage and machine, named and labelled by
+    the compaction's newest `scan`): `n` tasks of `write-shard` over the plan `plan` of the fold's checkpoint `url`."""
+    args = ["write-shard", "-c", url, "-P", plan, "-V", code]
     return _helper_recorded(runner, *runner.job("measure", scan, n, "static_merge", args, mount=False), scan)
 
 
@@ -639,6 +649,7 @@ def probe_cmd(
 @option("-L", "--fold-tasks", default=1, type=IntRange(min=1), help="The drill fold over this many tasks (`static_fanout.FoldFanout`; needs -K and the profile in $STATIC_NAMES_PROFILE)")
 @option("-m", "--mount", required=True, help="Read-only local mount of the data bucket")
 @option("-M", "--mem", default="100GB", help="DuckDB memory limit")
+@option("-N", "--no-units", is_flag=True, help="With -R: seed the steps only, not the fan-outs' finished units of the step after -t, so its helpers rebuild them (a race timing them)")
 @option("-o", "--out", required=True, help="New local output directory outside the mount: the folded generation")
 @option("-p", "--threads", default=16, type=int, help="DuckDB threads")
 @option("-R", "--resume-from", help="Another run's checkpoint root of this same fold (e.g. the running compaction's scratch bucket): its steps through -t seeded into -K (`seed_checkpoint`; the source never written)")
@@ -647,8 +658,8 @@ def probe_cmd(
 @option("-T", "--tmp", default="/stage/tmp/compact-probe", help="Local work dir")
 @option("-u", "--report", help="Also write the JSON report to this URL (`gs://<scratch>/…/<name>.json`: the VM's disks go with it)")
 @option("-U", "--upload", help="Upload the folded generation to this URL (`<url>/gen/`, then `<url>/probe.json`, last): what `compact --prebuilt` publishes")
-def compact_probe_cmd(anchor_tasks, bucket, chunk_rows, measure_tasks, gen, jobs, ck_root, fold_tasks, mount, mem, out, threads, resume_from, stage, through, tmp,
-                      report, upload) -> None:
+def compact_probe_cmd(anchor_tasks, bucket, chunk_rows, measure_tasks, gen, jobs, ck_root, fold_tasks, mount, mem, no_units, out, threads, resume_from, stage,
+                      through, tmp, report, upload) -> None:
     """Fold the generation into its next one locally (`static_compact.fold_gen`, the compaction's own fold), read in place
     from the mount: no upload, no successor / pointer / manifests in the bucket, no lease, no checkpoint, no pruning; only
     OUT and TMP are written. Logs the fold's stage lines; prints a JSON of the summary (per-part seconds and peaks) and
@@ -690,7 +701,7 @@ def compact_probe_cmd(anchor_tasks, bucket, chunk_rows, measure_tasks, gen, jobs
     hook = PhaseHook(rec, "fold", note_s=ar.NOTE_S)
     try:
         if resume_from:
-            seed_checkpoint(resume_from, ck_root, gen, new_gen, runs, through)
+            seed_checkpoint(resume_from, ck_root, gen, new_gen, runs, through, units=not no_units)
         ck = compact_checkpoint(ck_root, gen, new_gen, runs, work=work / "ckpt") if ck_root else None
         hook.begin()
         try:
@@ -1017,6 +1028,70 @@ def fold_shard_cmd(checkpoint, index, jobs, mem, threads, plan, tmp, code) -> No
     err(f"fold-shard {plan} #{i}: {got['units']} units, {got['rows']:,} rows in {got['s']}s")
 
 
+@cli.command("write-shard")
+@option("-c", "--checkpoint", required=True, help="The fold's checkpoint (its measured ranges' sorted roots under `measured/`), as a URL")
+@option("-i", "--index", type=int, help="This task's share of the plan (default: $BATCH_TASK_INDEX)")
+@option("-j", "--jobs", type=IntRange(min=1), help="Files written at a time, each in a process (default: every core)")
+@option("-P", "--plan", required=True, help="The fan-out's plan, its key under the checkpoint (`written/plan-<n>.json`)")
+@option("-T", "--tmp", default="/stage/tmp/write-shard", help="Local work dir")
+@option("-V", "--code", required=True, help="The fold's code version (`checkpoint.code_version`): another refuses")
+@_task_recorded("write-shard")
+def write_shard_cmd(checkpoint, index, jobs, plan, tmp, code) -> None:
+    """A compaction's drill write helper (`static_fanout.WriteFanout`, specs/static-write-fanout.md): task INDEX's share
+    of the plan's roots files, their measured ranges' sorted roots fetched from the checkpoint, each file written as the
+    fold VM writes it (`static_drill._write_chunk_file`) and uploaded with its group index rows as
+    `written/<kind>/r<i>/{file,index}.parquet`, then its `done.json` (rows, bytes). A file whose `done.json` is there is
+    skipped (a retry resumes); then `written/tasks/<plan>-<index>.json`. Refuses to run other code than the fold's."""
+    from concurrent.futures import ProcessPoolExecutor, as_completed
+    from multiprocessing import get_context
+
+    import pyarrow.parquet as pq
+
+    from . import static_drill as sd
+    from . import static_roots as sr
+    from .checkpoint import Checkpoint, code_version
+    from .static_fanout import WRITTEN, fetch_files, write_key
+
+    if (mine := code_version()) != code:
+        raise SystemExit(f"write-shard: this is code {mine}, the fold's is {code}: refusing to write for it")
+    root, _, prefix = checkpoint.rstrip("/").rpartition("/")
+    i = index if index is not None else int(os.environ.get("BATCH_TASK_INDEX", "0"))
+    name = plan.rsplit("/", 1)[-1].removesuffix(".json")
+    work = Path(tmp) / f"{name}-{i}"
+    shutil.rmtree(work, ignore_errors=True)
+    ck = Checkpoint(root, prefix, work=work / "ckpt")
+    doc = ck.store.read_json(ck.key(plan))
+    kind, rg = doc["kind"], doc["rg"]
+    share = [int(u) for _, u in doc["tasks"][i]]
+    todo = [u for u in share if not ck.store.exists(ck.key(f"{write_key(kind, u)}/done.json"))]
+    err(f"write-shard {plan} #{i}: {len(share)} {kind} files, {len(todo)} to write")
+    t0 = monotonic()
+    files = {u: doc["files"][str(u)] for u in todo}
+    need = sorted({k for f in files.values() for k, _, _ in f["spans"]})
+    listing = ck.store.listing(ck.key("measured"))
+    fetch_files(ck, {k: work / "in" / k for k in need}, listing, "write-shard: sorted ranges", label="write-shard")
+    out = work / "out"
+    pool = ProcessPoolExecutor(jobs or os.cpu_count() or 1, mp_context=get_context("spawn"), initializer=sd._writer_init)
+    with pool:
+        futs = {pool.submit(sd._write_chunk_file, [(work / "in" / k, a, b) for k, a, b in f["spans"]], sr.ROOT_SCHEMA, f["lo"], f["hi"], out,
+                            f["name"], "path", ["q", "usr"], rg): u for u, f in files.items()}
+        for fut in as_completed(futs):
+            u = futs[fut]
+            rows, idx, size = fut.result()
+            base = write_key(kind, u)
+            local = out / files[u]["name"]
+            ck.store.put(local, ck.key(f"{base}/file.parquet"))
+            ix = work / "idx" / f"r{u:04d}.parquet"
+            ix.parent.mkdir(parents=True, exist_ok=True)
+            pq.write_table(idx, ix)
+            ck.store.put(ix, ck.key(f"{base}/index.parquet"))
+            ck.store.write_text(ck.key(f"{base}/done.json"), json.dumps({"rows": rows, "bytes": size}) + "\n")
+            local.unlink()
+            ix.unlink()
+    ck.store.write_text(ck.key(f"{WRITTEN}/tasks/{name}-{i}.json"), json.dumps({"files": len(todo), "s": round(monotonic() - t0, 1)}) + "\n")
+    err(f"write-shard {plan} #{i}: {len(todo)} {kind} files in {monotonic() - t0:.0f}s")
+
+
 def _timed_shard_task(*args) -> tuple[dict, float]:
     """`static_anchors._shard_task(*args)`'s doc and its seconds (top-level: a spawned pool process runs it)."""
     from .static_anchors import _shard_task
@@ -1039,9 +1114,9 @@ def _timed_shard_task(*args) -> tuple[dict, float]:
 def anchor_shard_cmd(checkpoint, index, mem, threads, plan, tmp, code, workers) -> None:
     """A compaction's base anchors helper (`static_fanout.AnchorFanout`, specs/static-anchors-fanout.md): task INDEX's
     share of the plan's `(kind, shard)` rollup tasks, each one's input shard fetched from `anchors-in/`, its rollups
-    built (`static_anchors._shard_task`, as the fold VM's pool does: `ANCHOR_THREADS` threads each, as many at once as
-    `-p` allows) and uploaded as `anchored/<kind>/s<i>/cells.parquet`, then its `done.json` (the task's doc, seconds,
-    rows). A task whose `done.json` is there is skipped (a retry resumes); then `anchored/tasks/<plan>-<index>.json`.
+    built (`static_anchors._shard_task`: a shard of `ANCHOR_HEAVY_BYTES` or more alone first, on all `-p` threads and `-M`;
+    the rest as the fold VM's pool does, `ANCHOR_THREADS` threads each, as many at once as `-p` allows) and uploaded as
+    `anchored/<kind>/s<i>/cells.parquet`, then its `done.json` (the task's doc, seconds, rows). A task whose `done.json` is there is skipped (a retry resumes); then `anchored/tasks/<plan>-<index>.json`.
     Refuses to run other code than the fold's (its bytes would differ)."""
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -1049,7 +1124,7 @@ def anchor_shard_cmd(checkpoint, index, mem, threads, plan, tmp, code, workers) 
 
     from .checkpoint import Checkpoint, code_version
     from .hex_runs import rule_from_json
-    from .static_anchors import ANCHOR_THREADS
+    from .static_anchors import ANCHOR_HEAVY_BYTES, ANCHOR_THREADS
     from .static_fanout import ANCHORED, anchor_input_key, anchor_task_key
     from .static_names import ConPool, pool_jobs
 
@@ -1071,25 +1146,61 @@ def anchor_shard_cmd(checkpoint, index, mem, threads, plan, tmp, code, workers) 
     inputs = {anchor_input_key(k, s): work / "in" / anchor_input_key(k, s) for k, s in todo}
     with ThreadPoolExecutor(workers) as ex:
         list(ex.map(lambda kv: ck.store.get(ck.key(kv[0]), kv[1]), sorted(inputs.items())))
+
+    def size(t: tuple[str, int]) -> int:
+        return inputs[anchor_input_key(*t)].stat().st_size
+
+    def cells_of(k: str, s: int) -> Path:
+        cells = work / "out" / f"{k}-{s:05d}.parquet"
+        cells.parent.mkdir(parents=True, exist_ok=True)
+        return cells
+
+    def put(k: str, s: int, cells: Path, d: dict, secs: float) -> None:
+        base = anchor_task_key(k, s)
+        ck.store.put(cells, ck.key(f"{base}/cells.parquet"))
+        ck.store.write_text(ck.key(f"{base}/done.json"), json.dumps({"doc": d, "s": secs, "rows": pq.ParquetFile(cells).metadata.num_rows}) + "\n")
+        cells.unlink()
+
+    todo.sort(key=lambda t: -size(t))
+    # a heavy shard alone, on every thread and all the memory: at an even `ANCHOR_THREADS` share gcs's 1.35 GB `end` shards
+    # took ~2240s each (one OOMing a neighbour); alone on 16 threads, 769s
+    def alone(k: str, s: int, why: str) -> None:
+        err(f"anchor-shard {plan} #{i}: {k} s{s:05d} alone ({why}; {size((k, s)):,} B, {threads} threads)")
+        cells = cells_of(k, s)
+        shutil.rmtree(work / "tmp" / f"{k}-{s:05d}", ignore_errors=True)
+        put(k, s, cells, *_timed_shard_task(k, [str(inputs[anchor_input_key(k, s)])], doc["R"], doc["K"], rule, str(cells), threads, mem,
+                                            str(work / "tmp" / f"{k}-{s:05d}")))
+
+    heavy = [t for t in todo if size(t) >= ANCHOR_HEAVY_BYTES]
+    for k, s in heavy:
+        alone(k, s, "heavy")
+    rest = todo[len(heavy):]
+    oom: list[tuple[str, int]] = []
     con = connect(threads, mem, work / "duckdb")
     try:
-        with ConPool(con, pool_jobs(con, max(1, len(todo)), ANCHOR_THREADS), "anchor-shard") as pool:
+        with ConPool(con, pool_jobs(con, max(1, len(rest)), ANCHOR_THREADS), "anchor-shard") as pool:
             futs = {}
-            for k, s in sorted(todo, key=lambda t: -inputs[anchor_input_key(*t)].stat().st_size):
-                cells = work / "out" / f"{k}-{s:05d}.parquet"
-                cells.parent.mkdir(parents=True, exist_ok=True)
+            for k, s in rest:
+                cells = cells_of(k, s)
                 futs[pool.submit(_timed_shard_task, k, [str(inputs[anchor_input_key(k, s)])], doc["R"], doc["K"], rule, str(cells),
                                  pool.task_threads, pool.mem, str(work / "tmp" / f"{k}-{s:05d}"))] = (k, s, cells)
             for fut in as_completed(futs):
                 k, s, cells = futs[fut]
-                d, secs = fut.result()
-                base = anchor_task_key(k, s)
-                ck.store.put(cells, ck.key(f"{base}/cells.parquet"))
-                ck.store.write_text(ck.key(f"{base}/done.json"),
-                                    json.dumps({"doc": d, "s": secs, "rows": pq.ParquetFile(cells).metadata.num_rows}) + "\n")
-                cells.unlink()
+                try:
+                    d, secs = fut.result()
+                except Exception as e:
+                    # a pooled shard over its memory share (gcs: a 0.35 GB one at 18.6 GiB failed its whole Batch task):
+                    # built again alone once the pool is done
+                    if type(e).__name__ != "OutOfMemoryException":
+                        raise
+                    err(f"anchor-shard {plan} #{i}: {k} s{s:05d} over its {pool.mem}: {e}")
+                    oom.append((k, s))
+                    continue
+                put(k, s, cells, d, secs)
     finally:
         con.close()
+    for k, s in oom:
+        alone(k, s, "out of memory in the pool")
     ck.store.write_text(ck.key(f"{ANCHORED}/tasks/{name}-{i}.json"), json.dumps({"tasks": len(todo), "s": round(monotonic() - t0, 1)}) + "\n")
     err(f"anchor-shard {plan} #{i}: {len(todo)} shard tasks in {monotonic() - t0:.0f}s")
 

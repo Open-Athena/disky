@@ -22,6 +22,13 @@ ranges' spills, measures them (`measure_ranges`) and uploads each range's sorted
 rows to `measured/<kind>/g<g>/`. `Fanout.collect` downloads them where its own measurement's would be: the tables and
 files, so the drill's bytes, are a single VM's.
 
+`WriteFanout` (the drill write, `static_drill.write_kind`; specs/static-write-fanout.md): with the measurement fanned
+out, every range's sorted roots are under the checkpoint (`measured/<kind>/g<g>/sorted.parquet`: the helpers' and share
+0's, `Fanout.keep`); the roots' output files (cut at `q` boundaries from the ranges' counts, as one VM cuts them) are
+dealt by rows, share 0 written here, a helper (`static_merge write-shard`) fetching its files' ranges and uploading
+each file and its group index rows to `written/<kind>/r<i>/`; `WriteFanout.collect` downloads them where this VM's
+would be, so the drill is a single VM's.
+
 `AnchorFanout` (the base anchors, `static_anchors._tier_parallel`): each `(kind, shard)` rollup task (`end` over the
 suffix shards, `exact` and `start` over the name shards) dealt by input bytes; the inputs of the tasks dealt away
 uploaded under `anchors-in/` (once each, skipped when there); a helper (`static_merge anchor-shard`) runs
@@ -41,6 +48,8 @@ from .static_names import err
 
 #: Under the fold's checkpoint: the measurement helpers' outputs, per range, and the plans that deal them.
 MEASURED = "measured"
+#: Under the fold's checkpoint: the write helpers' drill files and group index rows, per output file, and their plans.
+WRITTEN = "written"
 #: Under the compaction's checkpoint: the anchors helpers' sorted cells, per task, and the plans that deal them.
 ANCHORED = "anchored"
 #: Under the compaction's checkpoint: the shard files the anchors helpers read (`anchor_input_key`).
@@ -49,6 +58,15 @@ ANCHORS_IN = "anchors-in"
 
 def range_key(kind: str, g: int) -> str:
     return f"{MEASURED}/{kind}/g{g:06d}"
+
+
+def write_key(kind: str, i: int) -> str:
+    return f"{WRITTEN}/{kind}/r{i:04d}"
+
+
+def sorted_key(kind: str, f: Path | str) -> str:
+    """A measured range's sorted roots under the checkpoint, by its local file (`<kind>-sorted/g<g>.parquet`)."""
+    return f"{range_key(kind, int(Path(f).stem.removeprefix('g')))}/sorted.parquet"
 
 
 def anchor_task_key(kind: str, i: int) -> str:
@@ -201,8 +219,19 @@ class Fanout(Helpers):
 
     root, label, undone = MEASURED, "measure fan-out", "unmeasured"
 
+    def __init__(self, *args, write_submit: Callable[[str, str, int, str, str], None] | None = None, **kw):
+        super().__init__(*args, **kw)
+        self.write_submit = write_submit
+
     def unit_key(self, kind: str, g: int) -> str:
         return range_key(kind, g)
+
+    def writer(self) -> WriteFanout | None:
+        """The drill write's fan-out over the same tasks and checkpoint (`write_submit` its helper jobs), or None."""
+        if self.write_submit is None:
+            return None
+        return WriteFanout(self.ck, self.tasks, self.write_submit, code=self.code, scan=self.scan, poll_s=self.poll_s, retries=self.retries,
+                           log=self.log)
 
     def start(self, work: Path, groups: dict[str, int], *, R: int, K: int, floor: int, measure: bool = True) -> None:
         """Deal `groups` (`{kind: ranges}`) over the shares by spilled bytes (the checkpoint's `spilled` marker's files
@@ -276,6 +305,73 @@ class Fanout(Helpers):
         shutil.rmtree(docdir, ignore_errors=True)
         self.log(f"measure fan-out: {len(out)} {kind} ranges from the helpers ({nbytes / 2**30:,.1f} GiB)")
         return {g: out[g] for g in paths}
+
+
+class WriteFanout(Helpers):
+    """The drill write's fan-out (the roots of a kind): `start` deals the output files by rows and submits the helpers,
+    `collect` waits for and fetches their files and group index rows. `ck`: the fold's checkpoint (`measured/` there)."""
+
+    root, label, undone = WRITTEN, "write fan-out", "unwritten"
+
+    def unit_key(self, kind: str, i: int) -> str:
+        return write_key(kind, i)
+
+    def start(self, kind: str, files: list[tuple[str, str | None, str | None, list[tuple[Path, str, str]], int]], *, rg: int) -> set[int]:
+        """Deal `files` (`(name, lo, hi, spans, rows)` per output file in order; `spans`: the sorted range files it
+        reads, `(local file, first q, last q)`) by rows, keep share 0, and submit the helpers for the rest (the files an
+        earlier attempt's helpers wrote aren't dealt again); the plan carries each file's name, `q` bounds and its spans'
+        checkpoint keys (`sorted_key`), and the row-group size `rg`. Returns the files dealt away."""
+        from . import heartbeat as hb
+
+        hb.set_stage(f"drill/write/{kind}/fan-out plan")
+        self.base = self.attempt  # each kind's files get `retries` re-deals of their own
+        weights = {(kind, i): max(1, f[4]) for i, f in enumerate(files)}
+        mine, todo = self.deal(weights)
+        away = sorted(i for _, i in self.away)
+        self.params = {"kind": kind, "rg": rg, "files": {str(i): {"name": files[i][0], "lo": files[i][1], "hi": files[i][2],
+                                                                 "spans": [[sorted_key(kind, f), a, b] for f, a, b in files[i][3]]} for i in away}}
+        self.log(f"write fan-out: {kind}: {len(mine)} files here ({sum(weights[u] for u in mine):,} rows), {len(away)} on "
+                 f"{self.tasks - 1} helper tasks ({sum(len(t) for t in todo)} to write)")
+        self._submit([t for t in todo if t])
+        return set(away)
+
+    def collect(self, kind: str, paths: dict[int, Path]) -> dict[int, tuple[int, object, int]]:
+        """Wait until every file of `paths` (`{i: local target}`) is written by a helper, dealing the missing ones again
+        when a helper job ends without them; then download each with its group index rows. Each file's `(rows, group
+        index table, bytes)`, as `static_drill._write_chunk_file` returns them."""
+        import shutil
+
+        import pyarrow.parquet as pq
+
+        from . import heartbeat as hb
+        from .static_roots import GROUP_INDEX_SCHEMA
+
+        out: dict[int, tuple[int, object, int]] = {}
+        if not paths:
+            return out
+        side = Path(next(iter(paths.values()))).parent / ".fetch-written"
+        hb.set_stage(f"drill/write/{kind}: 0/{len(paths)} helper files collected")
+
+        def fetch(units: list[tuple[str, int]], listing: dict[str, int]) -> None:
+            files = {}
+            for _, i in units:
+                base = write_key(kind, i)
+                files[f"{base}/file.parquet"] = paths[i]
+                files[f"{base}/index.parquet"] = side / f"r{i:04d}-index.parquet"
+                files[f"{base}/done.json"] = side / f"r{i:04d}.json"
+            self.fetch(files, listing, f"write fan-out: {kind} files")
+            for _, i in units:
+                doc = json.loads((side / f"r{i:04d}.json").read_text())
+                # as the writer made it: the parquet round trip changes the schema, which the index's concat would keep
+                out[i] = (doc["rows"], pq.read_table(side / f"r{i:04d}-index.parquet").cast(GROUP_INDEX_SCHEMA).replace_schema_metadata(None),
+                          doc["bytes"])
+            hb.set_stage(f"drill/write/{kind}: {len(out)}/{len(paths)} helper files collected")
+
+        self.wait([(kind, i) for i in paths], f"{kind} files", lambda us: [i for _, i in us], fetch)
+        shutil.rmtree(side, ignore_errors=True)
+        self.log(f"write fan-out: {len(out)} {kind} files from the helpers ({sum(v[2] for v in out.values()) / 2**30:,.1f} GiB)")
+        self.finish()
+        return out
 
 
 class AnchorFanout(Helpers):
@@ -437,9 +533,10 @@ class FoldFanout(Helpers):
     def unit_key(self, kind: str, i: int) -> str:
         return fold_unit_key(kind, i)
 
-    def wave(self, n: int, weights: dict[tuple[str, int], int], here: Callable[[list[tuple[str, int]]], None]) -> None:
-        """Wave `n`: `weights`' units (estimated rows) not done already, cut into contiguous shares (`contiguous`; each
-        share's estimated rows logged), share 0 run here (`here(units)`), the rest submitted as one helper job; then wait
+    def wave(self, n: int, weights: dict[tuple[str, int], int], here: Callable[[list[tuple[str, int]]], None],
+             basis: str = "estimated") -> None:
+        """Wave `n`: `weights`' units (their rows: `basis` says which are exact, the persisted digests' counts, and which
+        estimated) not done already, cut into contiguous shares (`contiguous`; each share's rows logged), share 0 run here (`here(units)`), the rest submitted as one helper job; then wait
         for every unit (re-dealing what a job left, `retries` times in this wave) and for the job's end."""
         from . import heartbeat as hb
 
@@ -454,7 +551,7 @@ class FoldFanout(Helpers):
         rows = [sum(max(1, pending[u]) for u in s) for s in shares]
         mean = sum(rows) / len(rows)
         self.log(f"fold fan-out: wave {n}: {len(pending):,} of {len(weights):,} units to fold ({len(done):,} done), {len(mine):,} here, "
-                 f"{len(self.away):,} on {self.tasks - 1} helper tasks; estimated rows per share {rows} "
+                 f"{len(self.away):,} on {self.tasks - 1} helper tasks; rows per share ({basis}) {rows} "
                  f"(mean {mean:,.0f}, max/mean {max(rows) / mean if mean else 0:.2f})")
         self._submit([[[k, i] for k, i in s] for s in shares[1:] if s])
         hb.set_stage(f"drill/fold/wave {n}: {len(mine):,} units here")
@@ -462,6 +559,7 @@ class FoldFanout(Helpers):
         hb.set_stage(f"drill/fold/wave {n}: waiting for {len(self.away):,} helper units")
         self.wait(sorted(self.away), "units", lambda us: [fold_unit_key(k, i).removeprefix(f"{FOLDED}/") for k, i in us])
         self.finish()
+        hb.set_stage(f"drill/fold/wave {n}: done")  # not left "waiting" through what follows (gathering, the classes)
 
     def unit_docs(self, units: list[tuple[str, int]], workers: int = 32) -> dict[tuple[str, int], dict]:
         """Each unit's `done.json`."""
