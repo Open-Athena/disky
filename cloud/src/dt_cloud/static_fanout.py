@@ -463,6 +463,7 @@ class FoldFanout(Helpers):
         hb.set_stage(f"drill/fold/wave {n}: waiting for {len(self.away):,} helper units")
         self.wait(sorted(self.away), "units", lambda us: [fold_unit_key(k, i).removeprefix(f"{FOLDED}/") for k, i in us])
         self.finish()
+        hb.set_stage(f"drill/fold/wave {n}: done")  # not left "waiting" through what follows (gathering, the classes)
 
     def unit_docs(self, units: list[tuple[str, int]], workers: int = 32) -> dict[tuple[str, int], dict]:
         """Each unit's `done.json`."""

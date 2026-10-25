@@ -313,7 +313,7 @@ def fold_drill(con, tiers: list[sd.Tier], out: Path, work: Path, *, R: int, K: i
         if gen_dir is None:
             raise ValueError("fold_drill: the fold fan-out needs gen_dir (its roots files' generation-relative names)")
         t, groups = _fanned_fold(con, tiers, out, work, fold_fanout(ck, scan), gen_dir=gen_dir, source=source or str(gen_dir), chunk_rows=chunk_rows,
-                                 jobs=jobs, step=step, log=log, t=t)
+                                 jobs=jobs, step=step, log=log, t=t, staged=staged)
         if fanout is None:
             # measured here: every range's spills (share 0's fold kept its own)
             ck.load_files("spilled", work, missing_only=True)
@@ -934,7 +934,7 @@ def fold_units(con, ck: Checkpoint, units: list[tuple[str, int]], scratch: Path,
 
 
 def _fanned_fold(con, tiers: list[sd.Tier], out: Path, work: Path, ff, *, gen_dir: Path, source: str, chunk_rows: int, jobs: int, step,
-                 log: Callable[[str], None], t: float) -> tuple[float, dict]:
+                 log: Callable[[str], None], t: float, staged: Callable[[], Staged | None] = lambda: None) -> tuple[float, dict]:
     """`fold_drill`'s classes and spills over the fold fan-out `ff` (`static_fanout.FoldFanout`, on the fold's checkpoint):
     the plan and the runs' spill here (saved: `fan/runs`, `fan/members`, `fan/plan`), then the waves (`FoldFanout.wave`,
     `fold_units`): `ff.classes`' (`tdig`'s) with the short ranges, the classes (`_classes`: saved as `classes`), the long
@@ -954,7 +954,11 @@ def _fanned_fold(con, tiers: list[sd.Tier], out: Path, work: Path, ff, *, gen_di
         chunks, derived = _plan(con, tiers, out, long_files, chunk_rows, lambda: ff.classes.derive(con, tiers, log))
         t = step("drill/fold/plan", t, tuples=sl.count(con, "tup"), chunks=len(chunks))
         if not ck.done("fan/runs"):
-            runs = _runs_spill(con, work, len(chunks), long_files, jobs, log)
+            # the runs' long roots from their staged copies (`staged()`: `fold_gen` copies only those for a fan-out)
+            st = staged()
+            runs = _runs_spill(con, work, len(chunks), [long_files[0], *(_roots_files(tr, "long", st) for tr in tiers[1:])], jobs, log)
+            if st is not None:
+                st.drop("long")
             rels = _files(work / "runs", "in")
             nbytes = sum((work / "runs" / r).stat().st_size for r in rels)
             # the runs' long roots by chunk, for every unit's combine (kept here too: share 0 reads them)
@@ -1191,8 +1195,13 @@ def _fold_gen(gen_dir: Path, out: Path, work: Path, *, gen: str, new_gen: str, r
     # drill or its spills were saved, only the short roots once the long roots were; none for a fold fan-out: each of its
     # tasks stages its own share)
     fck = ck.sub("fold") if ck is not None else None
-    if (ck is not None and ck.done("drill")) or (fck is not None and (fck.done("spilled") or fold_fanout is not None)):
+    stage_runs_only = False
+    if (ck is not None and ck.done("drill")) or (fck is not None and fck.done("spilled")):
         kinds: tuple[str, ...] = ()
+    elif fck is not None and fold_fanout is not None:
+        # a fold fan-out: the units' tasks stage their own shares; the fold VM's runs spill (every run's long roots by
+        # chunk) reads only the runs' long roots, staged (in place over gcsfuse, gcs's first fan-out spent 24 min there)
+        kinds, stage_runs_only = (() if fck.done("fan/runs") else ("long",)), True
     else:
         kinds = ("short",) if fck is not None and fck.done("long-roots") else sd.KINDS
     staging: Future | None = None
@@ -1202,7 +1211,7 @@ def _fold_gen(gen_dir: Path, out: Path, work: Path, *, gen: str, new_gen: str, r
         stage_log.append(line)
         log(f"compact {gen} → {new_gen}: {line}")
     if kinds:
-        tdirs = ["drill", *(f"{r['key']}/drill" for r in runs)]
+        tdirs = [*([] if stage_runs_only else ["drill"]), *(f"{r['key']}/drill" for r in runs)]
         staging = bg.submit(stage_roots, gen_dir, tdirs, kinds, work / STAGE, source=source, mode=stage, log=slog)
     merging: Future | None = None
     if ck is None or not ck.done("catalog"):
