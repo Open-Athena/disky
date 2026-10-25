@@ -414,13 +414,6 @@ class ConPool:
         self.ex = ProcessPoolExecutor(self.jobs, mp_context=get_context("spawn"), initializer=_pool_init)
         return self
 
-    def threads_for(self, weight: int, total: int) -> int:
-        """A task's DuckDB threads by its share of the pool's work (`weight` of `total`): at least `task_threads`, a task
-        heavier than its even share more, up to all of them. Tasks run heaviest first, so a giant one otherwise ends the
-        pool alone on `task_threads` while the rest of the cores sit idle (gcs's anchors helper: one shard's last ~18 min
-        at 400% CPU on 32 cores); while lighter tasks still run, the cores are oversubscribed by at most `threads`."""
-        return min(self.threads, max(self.task_threads, round(self.threads * weight / total) if total > 0 else 0))
-
     def submit(self, fn, *args):
         return self.ex.submit(fn, *args)
 
