@@ -30,7 +30,7 @@ each file and its group index rows to `written/<kind>/r<i>/`; `WriteFanout.colle
 would be, so the drill is a single VM's.
 
 `AnchorFanout` (the base anchors, `static_anchors._tier_parallel`): each `(kind, shard)` rollup task (`end` over the
-suffix shards, `exact` and `start` over the name shards) dealt by input bytes; the inputs of the tasks dealt away
+suffix shards, `exact` and `start` over the name shards) dealt by input rows (footer); the inputs of the tasks dealt away
 uploaded under `anchors-in/` (once each, skipped when there); a helper (`static_merge anchor-shard`) runs
 `_shard_task` on each of its tasks and uploads its sorted cells to `anchored/<kind>/s<i>/cells.parquet`.
 `AnchorFanout.collect` downloads them where the local pool's would be, so `write_rollup_parts` streams a single VM's
@@ -375,7 +375,7 @@ class WriteFanout(Helpers):
 
 
 class AnchorFanout(Helpers):
-    """The base anchors' fan-out: `start` deals the `(kind, shard)` rollup tasks by input bytes, uploads the inputs of
+    """The base anchors' fan-out: `start` deals the `(kind, shard)` rollup tasks by input rows, uploads the inputs of
     the tasks dealt away and submits them; `collect` waits for and fetches their cells. `ck`: the compaction's
     checkpoint."""
 
@@ -385,19 +385,23 @@ class AnchorFanout(Helpers):
         return anchor_task_key(kind, i)
 
     def start(self, tasks: list[tuple[str, int, str]], *, R: int, K: int, rule=None, workers: int = 16) -> set[tuple[str, int]]:
-        """Deal `tasks` (`(kind, shard index, input file)`) over the shares by input bytes, keep share 0, upload the
+        """Deal `tasks` (`(kind, shard index, input file)`) over the shares by input rows (footers), keep share 0, upload the
         inputs the other shares' tasks not done yet read (each once; one already there is kept: a resumed compaction's
         shards are the same bytes), and submit the helpers. The plan carries `R`, `K` and the hex-run `rule`. Returns
         the tasks dealt away."""
         import os
         from concurrent.futures import ThreadPoolExecutor
 
+        import pyarrow.parquet as pq
+
         from . import heartbeat as hb
         from .hex_runs import rule_json
 
         self.params = {"R": R, "K": K, **rule_json(rule)}
         hb.set_stage("anchors/fan-out plan")
-        weights = {(kind, i): os.path.getsize(f) for kind, i, f in tasks}
+        # by the inputs' footer rows, as `anchor-shard` orders and threads them (bytes put gcs's ~108M-row, ~300 MB `end`
+        # shards under the median: tasks of 245–874s)
+        weights = {(kind, i): pq.ParquetFile(f).metadata.num_rows for kind, i, f in tasks}
         files = {(kind, i): f for kind, i, f in tasks}
         mine, todo = self.deal(weights)
         need = {anchor_input_key(k, i): files[(k, i)] for share in todo for k, i in share}
@@ -406,7 +410,7 @@ class AnchorFanout(Helpers):
         hb.set_stage(f"anchors/fan-out inputs: {len(put)} shard files")
         with ThreadPoolExecutor(workers) as ex:
             list(ex.map(lambda kf: self.ck.store.put(Path(kf[1]), self.ck.key(kf[0])), sorted(put.items())))
-        self.log(f"anchors fan-out: {len(mine)} shard tasks here ({sum(weights[t] for t in mine):,} B), {len(self.away)} on "
+        self.log(f"anchors fan-out: {len(mine)} shard tasks here ({sum(weights[t] for t in mine):,} rows), {len(self.away)} on "
                  f"{self.tasks - 1} helper tasks ({sum(len(t) for t in todo)} to build; {len(put)} of {len(need)} inputs uploaded, "
                  f"{sum(os.path.getsize(f) for f in put.values()):,} B)")
         self._submit([t for t in todo if t])
