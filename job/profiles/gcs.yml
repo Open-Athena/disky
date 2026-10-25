@@ -4,7 +4,10 @@ deployment: gcs
 executor:
   kind: google-batch
   project: oa-internal-450019
-  region: us-central1
+  # beside the data bucket (`oa-gcs-usage-dvx`, us-east1): every step reads and writes it, and from us-central1 those
+  # reads were billed as inter-region transfer. The head (the cron's Batch job, infra/gcp) stays in us-central1: it
+  # only orchestrates
+  region: us-east1
   service_account: gcs-usage-job@oa-internal-450019.iam.gserviceaccount.com
   image: us-central1-docker.pkg.dev/oa-internal-450019/cloud-run-source-deploy/gcs-usage-snapshot:latest
   boot_disk: 50
@@ -16,7 +19,7 @@ layout:
   listing: listing/{scan}/
 # One `list` task per bucket, written straight to `listing/<scan>/<bucket>/`. marin-eu-west4 was listed from a
 # europe-west4 VM (cross-ocean list pages pay full RTT); nf-google has no per-task location, so it lists from
-# us-central1 here.
+# the executor's region (us-east1) here.
 sources:
   - {uri: gcs://marin-us-central2, procs: 24}
   - {uri: gcs://marin-eu-west4, procs: 24}
