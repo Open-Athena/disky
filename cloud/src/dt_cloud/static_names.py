@@ -1567,8 +1567,10 @@ def manifest_cmd(bucket, gen, subdirs) -> None:
 #: (not its census or per-shard cells).
 R2_SERVED = ("sx/", "sidecar/", "sidecar.parquet", "shards.json", "scans.json", "catalog/cells.parquet", "catalog/index.parquet",
              "catalog/meta.json", "catalog/members.json",
-             # the drilldown (static_roots): roots, rollups, their two-level indexes, aliases, meta
-             "drill/meta.json", "drill/aliases.parquet", "drill/long/roots/", "drill/long/rollups/", "drill/short/roots/",
+             # the drilldown (static_roots): roots, rollups, their two-level indexes, aliases, meta; a run's roots new to
+             # the stack (the fleet root's rows) and digest changes (a compaction reading R2: its classes)
+             "drill/meta.json", "drill/aliases.parquet", "drill/long-fresh.parquet", "drill/short-fresh.parquet",
+             "drill/digests-long.parquet", "drill/long/roots/", "drill/long/rollups/", "drill/short/roots/",
              "drill/short/rollups/", "drill/long-roots-index", "drill/long-rollups-index", "drill/short-roots-index",
              "drill/short-rollups-index",
              # anchored search (static_anchors): the name index, the `q$` / `^q$` rollups, their indexes, meta (not `anchors/keys*`, GCS only)
