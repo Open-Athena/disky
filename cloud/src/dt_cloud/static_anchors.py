@@ -334,17 +334,27 @@ def _running(con, src: str, keys: str, vals: tuple[str, ...], tag: str, batch_ro
             yield p, b.column(1), ys
 
 
-def rollup_cells(con, roots: str, heads: str, K: int, into: str, closed: bool = False) -> None:
+def rollup_cells(con, roots: str, heads: str, K: int, into: str, closed: bool = False, label: str | None = None) -> None:
     """Full rollups (`static_roots.ROLLUP_SCHEMA` rows, header first) into table `into` for `heads(k, lvl, dir, rows)`
     from `roots` (`AR_COLS`, every first hit under them): per child of `dir` (its next segment; a bucket for `''`)
     the running Σ size, n_files of the roots at or under it, `+` at `vf` and `−` at `vt`, one cell per change; the K
     children with the largest peak bytes (ties by name) kept, the rest summed into the remainder (`kind` 2). Header
     (`kind` 0): `vf` = kept, `b` = `rows`, `o` = children holding roots. `closed`: the heads are closed upwards (a
-    head's parent directory is one), so each level's roots are a subset of the last's."""
+    head's parent directory is one), so each level's roots are a subset of the last's. `label`: log each part's seconds
+    and table sizes under it (where a heavy shard's ~25 min go)."""
+    clock = [monotonic()]
+    laps: list[str] = []
+
+    def lap(name: str, table: str | None = None) -> None:
+        if label is not None:
+            n = f" {con.execute(f'SELECT count(*) FROM {table}').fetchone()[0]:,} rows" if table else ""
+            laps.append(f"{name} {monotonic() - clock[0]:.1f}s{n}")
+        clock[0] = monotonic()
     con.execute(f"CREATE TABLE IF NOT EXISTS {into} (q VARCHAR, dir VARCHAR, kind TINYINT, child VARCHAR, vf BIGINT, b BIGINT, o BIGINT)")
     con.execute("CREATE OR REPLACE TABLE rev (k VARCHAR, dir VARCHAR, child VARCHAR, t BIGINT, db HUGEINT, dn HUGEINT)")
     top = con.execute(f"SELECT coalesce(max(lvl), -1) FROM {heads}").fetchone()[0]
     con.execute(f"CREATE OR REPLACE TABLE hc AS SELECT k, string_split(path, '/') AS segs, vf, vt, size, n_files FROM {roots} SEMI JOIN (SELECT DISTINCT k FROM {heads}) USING (k)")
+    lap("hc", "hc")
     for lvl in range(0, top + 1):
         con.execute(f"""CREATE OR REPLACE TABLE hl AS SELECT hc.* FROM hc SEMI JOIN (SELECT k, dir FROM {heads} WHERE lvl = {lvl}) AS h
             ON hc.k = h.k AND array_to_string(hc.segs[1:{lvl}], '/') = h.dir AND len(hc.segs) > {lvl}""")
@@ -356,6 +366,7 @@ def rollup_cells(con, roots: str, heads: str, K: int, into: str, closed: bool = 
                 UNION ALL SELECT k, dir, child, vt AS t, -size, -n_files FROM ({hit}) WHERE vt <> {OPEN}
             ) GROUP BY k, dir, child, t""")
     con.execute("DROP TABLE IF EXISTS hc; DROP TABLE IF EXISTS hl")
+    lap(f"levels({top + 1})", "rev")
     # each child's peak bytes: the max of its running Σ db over t (`_running`, a sorted pass, not a window)
     import numpy as np
 
@@ -372,35 +383,43 @@ def rollup_cells(con, roots: str, heads: str, K: int, into: str, closed: bool = 
         WHERE r <= {K}""")
     con.unregister("rk_peaks")
     con.execute("DROP TABLE rk_p")
+    lap("rkeep", "rkeep")
     del peaks, pk, pv
     con.execute("""CREATE OR REPLACE TABLE rev2 AS
             SELECT k, dir, 1::TINYINT AS kind, child, t, db, dn FROM rev SEMI JOIN rkeep USING (k, dir, child)
             UNION ALL SELECT k, dir, 2::TINYINT, '', t, sum(db), sum(dn) FROM rev ANTI JOIN rkeep USING (k, dir, child) GROUP BY k, dir, t""")
+    lap("rev2", "rev2")
     con.execute(f"""INSERT INTO {into}
         SELECT h.k, h.dir, 0, '', (SELECT count(*) FROM rkeep AS r WHERE r.k = h.k AND r.dir = h.dir),
             h.rows, (SELECT count(DISTINCT child) FROM rev AS e WHERE e.k = h.k AND e.dir = h.dir) FROM {heads} AS h""")
+    lap("header")
     # each cell's running Σ size, n_files over t: a sorted pass (`_running`) streamed through a parquet file, not windows
     con.execute("""CREATE OR REPLACE TABLE rcell AS SELECT k, dir, kind, child, t, sum(db) AS db, sum(dn) AS dn FROM rev2
         GROUP BY ALL HAVING sum(db) <> 0 OR sum(dn) <> 0""")
+    lap("rcell", "rcell")
     tmp = Path(con.execute("SELECT current_setting('temp_directory')").fetchone()[0] or ".") / f"rcell-{id(con):x}.parquet"
     tmp.parent.mkdir(parents=True, exist_ok=True)
     schema = pa.schema([("p", pa.int64()), ("t", pa.int64()), ("b", pa.int64()), ("o", pa.int64())])
     with pq.ParquetWriter(tmp, schema) as w:
         for p, t, (b, o) in _running(con, "rcell", "k, dir, kind, child", ("db", "dn"), "rc"):
             w.write_table(pa.table({"p": p, "t": t.cast(pa.int64()), "b": b, "o": o}, schema=schema))
+    lap("running")
     con.execute(f"INSERT INTO {into} SELECT k, dir, kind, child, t, b, o FROM read_parquet({q(str(tmp))}) JOIN rc_p USING (p)")
+    lap("insert")
     tmp.unlink()
     con.execute("DROP TABLE rcell; DROP TABLE rc_p")
-    for t in ("rev", "rev2", "rkeep"):
-        con.execute(f"DROP TABLE IF EXISTS {t}")
+    for tb in ("rev", "rev2", "rkeep"):
+        con.execute(f"DROP TABLE IF EXISTS {tb}")
+    if label is not None:
+        err(f"rollup_cells {label}: {'; '.join(laps)}")
 
 
 def base_rollups(con, files: list[str], mode: str, R: int, K: int, into: str, rule: HexRule | None = None,
-                 steps: dict[str, float] | None = None) -> dict:
+                 steps: dict[str, float] | None = None, label: str | None = None) -> dict:
     """A base shard set's rollups (`mode` `end` over suffix shards, `exact` over name shards) into table `into`: the
     keys holding more than R rows, their heavy directories (`heavy_dirs`) and the rollups of their first hits
     (`rollup_cells`; under the generation's hex-run `rule`). Heaviness counts stored rows, as the reader's bound.
-    `steps`: each step's seconds put there."""
+    `steps`: each step's seconds put there; `label`: `rollup_cells`' parts logged under it."""
     steps = {} if steps is None else steps
     t = monotonic()
 
@@ -418,7 +437,7 @@ def base_rollups(con, files: list[str], mode: str, R: int, K: int, into: str, ru
     first_hits(con, "SELECT * FROM ar", "rt", mode, rule)
     lap("first-hits")
     con.execute("DROP TABLE ar; DROP TABLE hk")
-    rollup_cells(con, "rt", "hv", K, into, closed=True)
+    rollup_cells(con, "rt", "hv", K, into, closed=True, label=label)
     lap("cells")
     keys, dirs = con.execute("SELECT count(DISTINCT k), count(*) FROM hv").fetchone()
     for t in ("ar", "rt", "hv"):
@@ -483,7 +502,7 @@ def _shard_task(kind: str, files: list[str], R: int, K: int, rule: HexRule | Non
             doc = start_base(con, files, start_heads_sql(prefix_counts_sql(files), R), R, K, "cells")
             steps["start"] = round(monotonic() - t0, 1)
         else:
-            doc = base_rollups(con, files, kind, R, K, "cells", rule, steps=steps)
+            doc = base_rollups(con, files, kind, R, K, "cells", rule, steps=steps, label=f"{kind} {Path(files[0]).name}")
         con.execute("CREATE TABLE IF NOT EXISTS cells (q VARCHAR, dir VARCHAR, kind TINYINT, child VARCHAR, vf BIGINT, b BIGINT, o BIGINT)")
         t1 = monotonic()
         _sorted_cells(con, "cells", out)
