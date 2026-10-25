@@ -697,9 +697,10 @@ def test_deal_balances_ranges_heaviest_first_to_the_least_loaded_task():
     assert deal({"a": 1}, 3) == [["a"], [], []]
 
 
-def _fanned_fold(world, tmp_path, submit, retries: int = 2, root: str = "scratch", out: str = "out", log=lambda m: None):
+def _fanned_fold(world, tmp_path, submit, retries: int = 2, root: str = "scratch", out: str = "out", log=lambda m: None, write_submit=None):
     """C's fold with its drill measurement over 3 tasks (`static_fanout.Fanout`, logging to `log`), `submit` running the
-    helper jobs; its checkpoint under `tmp_path / root`, the generation at `tmp_path / out`."""
+    helper jobs (`write_submit`: the drill write's, `WriteFanout`); its checkpoint under `tmp_path / root`, the generation
+    at `tmp_path / out`."""
     from dt_cloud.checkpoint import code_version
     from dt_cloud.static_fanout import Fanout
 
@@ -709,9 +710,42 @@ def _fanned_fold(world, tmp_path, submit, retries: int = 2, root: str = "scratch
     try:
         with _small_groups():
             sk.fold_gen(gen_dir, tmp_path / out, tmp_path / f"w-{root}", gen="g", new_gen="g.c001", runs=runs, threads=2, mem="1GB", chunk_rows=3, ck=ck,
-                        fanout=lambda c, scan: Fanout(c, 3, submit, code=code_version(), scan=scan, poll_s=0.01, retries=retries, log=log))
+                        fanout=lambda c, scan: Fanout(c, 3, submit, code=code_version(), scan=scan, poll_s=0.01, retries=retries, log=log,
+                                                      write_submit=write_submit))
     finally:
         ck.close()
+
+
+def _writers(tmp_path, calls: list, skip=lambda attempt, i: False):
+    """A fake drill-write helper job: each task's `write-shard` in turn, in-process (`skip(attempt, i)`: never runs)."""
+    from dt_cloud import static_merge as sm
+
+    def submit(url: str, plan: str, n: int, code: str, scan: str) -> None:
+        calls.append((plan, n))
+        for i in range(n):
+            if not skip(len(calls), i):
+                sm.write_shard_cmd.callback(checkpoint=url, index=i, jobs=1, plan=plan, tmp=str(tmp_path / f"wr{len(calls)}-{i}"), code=code)
+    return submit
+
+
+@pytest.mark.parametrize("lost", [False, True])
+def test_a_fanned_out_drill_write_writes_the_single_vm_drill(world, tmp_path, monkeypatch, lost):
+    """With the measurement fanned out, the roots' files (cut small: several per kind) dealt over 3 tasks, 2 helper
+    tasks writing theirs from the checkpoint's sorted ranges: the generation's files, md5 for md5, as the fold writing
+    every file itself. `lost`: the first helper job's second task never runs; its files go to a second job."""
+    from dt_cloud import static_drill as sd
+
+    monkeypatch.setattr(sd, "FILE_ROWS", 4)
+    _fanned_fold(world, tmp_path, _helpers(tmp_path, []), root="ck-one", out="one")
+    calls: list = []
+    _fanned_fold(world, tmp_path, _helpers(tmp_path, []), root="ck-fan", out="fan",
+                 write_submit=_writers(tmp_path, calls, skip=(lambda attempt, i: attempt == 1 and i == 1) if lost else (lambda attempt, i: False)))
+    n = {k: len(list((tmp_path / "fan" / "drill" / k / "roots").glob("*.parquet"))) for k in ("long", "short")}
+    # a kind deals files away once it has 2 (share 0 keeps the heaviest); long's 4+ give the first job 2 tasks to lose one of
+    assert n["long"] > 3
+    long_plans = 2 if lost else 1
+    assert [c[0] for c in calls] == [f"written/plan-{j}.json" for j in range(1, long_plans + 1 + (n["short"] >= 2))]
+    assert _md5s(tmp_path / "fan") == _md5s(tmp_path / "one")
 
 
 def _helpers(tmp_path, calls: list, skip=lambda attempt, i: False):

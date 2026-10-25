@@ -416,7 +416,7 @@ def _helper_runner(gen: str):
 
 def measure_fanout(tasks: int, gen: str) -> Callable:
     """The compaction's drill measurement over `tasks` tasks (`static_fanout.Fanout`, given the fold's checkpoint): its
-    helper jobs (`helper_job`, stage `measure`) run by `_helper_runner`."""
+    helper jobs (`helper_job`, stage `measure`) run by `_helper_runner`, and its drill write's (`write_helper_job`)."""
     from .checkpoint import code_version
     from .static_fanout import Fanout
 
@@ -425,7 +425,10 @@ def measure_fanout(tasks: int, gen: str) -> Callable:
     def submit(url: str, plan: str, n: int, code: str, scan: str) -> None:
         runner.run_job(*helper_job(runner, url, plan, n, code, scan))
 
-    return lambda ck, scan: Fanout(ck, tasks, submit, code=code_version(), scan=scan)
+    def write(url: str, plan: str, n: int, code: str, scan: str) -> None:
+        runner.run_job(*write_helper_job(runner, url, plan, n, code, scan))
+
+    return lambda ck, scan: Fanout(ck, tasks, submit, code=code_version(), scan=scan, write_submit=write)
 
 
 def anchor_fanout(tasks: int, gen: str) -> Callable:
@@ -478,6 +481,13 @@ def helper_job(runner, url: str, plan: str, n: int, code: str, scan: str) -> tup
     from .append_runner import duckdb_args
 
     args = ["measure-shard", "-c", url, "-P", plan, "-V", code, *duckdb_args(runner.cfg.machine_for("measure"))]
+    return _helper_recorded(runner, *runner.job("measure", scan, n, "static_merge", args, mount=False), scan)
+
+
+def write_helper_job(runner, url: str, plan: str, n: int, code: str, scan: str) -> tuple[str, dict]:
+    """The drill write fan-out's helper job (`runner.job`, the measurement's stage and machine, named and labelled by
+    the compaction's newest `scan`): `n` tasks of `write-shard` over the plan `plan` of the fold's checkpoint `url`."""
+    args = ["write-shard", "-c", url, "-P", plan, "-V", code]
     return _helper_recorded(runner, *runner.job("measure", scan, n, "static_merge", args, mount=False), scan)
 
 
@@ -1016,6 +1026,70 @@ def fold_shard_cmd(checkpoint, index, jobs, mem, threads, plan, tmp, code) -> No
         ck.close()
     ck.store.write_text(ck.key(f"{FOLDED}/tasks/{name}-{i}.json"), json.dumps(got) + "\n")
     err(f"fold-shard {plan} #{i}: {got['units']} units, {got['rows']:,} rows in {got['s']}s")
+
+
+@cli.command("write-shard")
+@option("-c", "--checkpoint", required=True, help="The fold's checkpoint (its measured ranges' sorted roots under `measured/`), as a URL")
+@option("-i", "--index", type=int, help="This task's share of the plan (default: $BATCH_TASK_INDEX)")
+@option("-j", "--jobs", type=IntRange(min=1), help="Files written at a time, each in a process (default: every core)")
+@option("-P", "--plan", required=True, help="The fan-out's plan, its key under the checkpoint (`written/plan-<n>.json`)")
+@option("-T", "--tmp", default="/stage/tmp/write-shard", help="Local work dir")
+@option("-V", "--code", required=True, help="The fold's code version (`checkpoint.code_version`): another refuses")
+@_task_recorded("write-shard")
+def write_shard_cmd(checkpoint, index, jobs, plan, tmp, code) -> None:
+    """A compaction's drill write helper (`static_fanout.WriteFanout`, specs/static-write-fanout.md): task INDEX's share
+    of the plan's roots files, their measured ranges' sorted roots fetched from the checkpoint, each file written as the
+    fold VM writes it (`static_drill._write_chunk_file`) and uploaded with its group index rows as
+    `written/<kind>/r<i>/{file,index}.parquet`, then its `done.json` (rows, bytes). A file whose `done.json` is there is
+    skipped (a retry resumes); then `written/tasks/<plan>-<index>.json`. Refuses to run other code than the fold's."""
+    from concurrent.futures import ProcessPoolExecutor, as_completed
+    from multiprocessing import get_context
+
+    import pyarrow.parquet as pq
+
+    from . import static_drill as sd
+    from . import static_roots as sr
+    from .checkpoint import Checkpoint, code_version
+    from .static_fanout import WRITTEN, fetch_files, write_key
+
+    if (mine := code_version()) != code:
+        raise SystemExit(f"write-shard: this is code {mine}, the fold's is {code}: refusing to write for it")
+    root, _, prefix = checkpoint.rstrip("/").rpartition("/")
+    i = index if index is not None else int(os.environ.get("BATCH_TASK_INDEX", "0"))
+    name = plan.rsplit("/", 1)[-1].removesuffix(".json")
+    work = Path(tmp) / f"{name}-{i}"
+    shutil.rmtree(work, ignore_errors=True)
+    ck = Checkpoint(root, prefix, work=work / "ckpt")
+    doc = ck.store.read_json(ck.key(plan))
+    kind, rg = doc["kind"], doc["rg"]
+    share = [int(u) for _, u in doc["tasks"][i]]
+    todo = [u for u in share if not ck.store.exists(ck.key(f"{write_key(kind, u)}/done.json"))]
+    err(f"write-shard {plan} #{i}: {len(share)} {kind} files, {len(todo)} to write")
+    t0 = monotonic()
+    files = {u: doc["files"][str(u)] for u in todo}
+    need = sorted({k for f in files.values() for k, _, _ in f["spans"]})
+    listing = ck.store.listing(ck.key("measured"))
+    fetch_files(ck, {k: work / "in" / k for k in need}, listing, "write-shard: sorted ranges", label="write-shard")
+    out = work / "out"
+    pool = ProcessPoolExecutor(jobs or os.cpu_count() or 1, mp_context=get_context("spawn"), initializer=sd._writer_init)
+    with pool:
+        futs = {pool.submit(sd._write_chunk_file, [(work / "in" / k, a, b) for k, a, b in f["spans"]], sr.ROOT_SCHEMA, f["lo"], f["hi"], out,
+                            f["name"], "path", ["q", "usr"], rg): u for u, f in files.items()}
+        for fut in as_completed(futs):
+            u = futs[fut]
+            rows, idx, size = fut.result()
+            base = write_key(kind, u)
+            local = out / files[u]["name"]
+            ck.store.put(local, ck.key(f"{base}/file.parquet"))
+            ix = work / "idx" / f"r{u:04d}.parquet"
+            ix.parent.mkdir(parents=True, exist_ok=True)
+            pq.write_table(idx, ix)
+            ck.store.put(ix, ck.key(f"{base}/index.parquet"))
+            ck.store.write_text(ck.key(f"{base}/done.json"), json.dumps({"rows": rows, "bytes": size}) + "\n")
+            local.unlink()
+            ix.unlink()
+    ck.store.write_text(ck.key(f"{WRITTEN}/tasks/{name}-{i}.json"), json.dumps({"files": len(todo), "s": round(monotonic() - t0, 1)}) + "\n")
+    err(f"write-shard {plan} #{i}: {len(todo)} {kind} files in {monotonic() - t0:.0f}s")
 
 
 def _timed_shard_task(*args) -> tuple[dict, float]:

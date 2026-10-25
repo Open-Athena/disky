@@ -638,7 +638,8 @@ def finish_drill(con, gen_dir: Path, work: Path, *, aliases, long_groups: int, s
         t = step("drill/rollup/incremental", t, rup=count(con, "lrup") + count(con, "srup"))
     sd.write_digests(con, gen_dir / "drill")
     meta = sd.build_drill(con, gen_dir / "drill", long_roots=None, short_roots=None, aliases=aliases, R=R, K=K, meta={"floor": floor},
-                          rollups={"long": "lrup", "short": "srup"}, sorted_roots={"long": lcan, "short": sall}, step=step)
+                          rollups={"long": "lrup", "short": "srup"}, sorted_roots={"long": lcan, "short": sall}, step=step,
+                          write_fanout=fanout.writer() if fanout is not None else None)
     for tb in ("dmem", "dg", "dgq", "al", "canon", "qg", "ldirs", "sdirs", "lrup", "srup", "mem"):
         con.execute(f"DROP TABLE IF EXISTS {tb}")
     shutil.rmtree(work)
