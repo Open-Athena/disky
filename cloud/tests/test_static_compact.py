@@ -433,6 +433,50 @@ def test_stage_roots_modes(world, tmp_path, monkeypatch):
         assert not (tmp_path / "w" / "stage").exists()
 
 
+
+def test_stage_shards_modes(world, tmp_path, monkeypatch):
+    """`stage_shards`: `off` and a generation on the work disk read in place, as does `auto` without room for the
+    shards × (1 + `SX_STAGE_HEADROOM`) and any file not staged (the merge reads whole dirs); staged, the merge's input
+    dirs are the base's and the runs' `sx/` copied byte for byte, in the same layout."""
+    from dt_cloud import blobstore as bs
+
+    gen_dir = world["c_store"] / "g"
+    runs = [r["key"] for r in ar.newest_runs(gen_dir)[1]]
+    files = [f for t in [gen_dir, *(gen_dir / r for r in runs)] for f in sorted((t / "sx").glob("*.parquet"))]
+    need = sum(f.stat().st_size for f in files)
+    dst = tmp_path / "w" / sk.SX_STAGE
+    logs: list[str] = []
+
+    def stage(mode: str, free: int | None = None, same: bool = False) -> list[Path] | None:
+        monkeypatch.setattr(sk, "_same_disk", lambda a, b: same)
+        monkeypatch.setattr(sk, "_free", lambda p: free if free is not None else need * 100)
+        return sk.stage_shards(gen_dir, runs, dst, mode=mode, log=logs.append)
+
+    gib = lambda n: f"{n / 2**30:,.1f} GiB"  # noqa: E731
+    assert [stage("off"), stage("auto", same=True), stage("auto", free=2 * need - 1)] == [None, None, None]
+    assert logs == [f"stage sx: off; shards read in place from {gen_dir}",
+                    f"stage sx: skipped, {gen_dir} is on the work disk already",
+                    f"stage sx: skipped, the work disk has {gib(2 * need - 1)} free, under {gib(need)} of shards × 2; read in place from {gen_dir}"]
+    assert not dst.exists()
+    assert stage("auto", free=2 * need) == [dst, *(dst / r for r in runs)]
+    copies = sorted(dst.rglob("*.parquet"))
+    assert [c.relative_to(dst) for c in copies] == sorted(f.relative_to(gen_dir) for f in files)
+    assert all((gen_dir / c.relative_to(dst)).read_bytes() == c.read_bytes() for c in copies)
+    assert len(runs) >= 1 and len(files) > len(runs) + 1
+
+    get = bs.Store.get
+    broken = files[0].relative_to(gen_dir).as_posix()
+
+    def flaky(self, key: str, d: Path) -> None:
+        if key == broken:
+            raise OSError("injected")
+        get(self, key, d)
+    monkeypatch.setattr(bs.Store, "get", flaky)
+    logs.clear()
+    assert stage("on") is None
+    assert (logs[-1], dst.exists()) == (f"stage sx: 1 of {len(files)} files not staged; shards read in place from {gen_dir}", False)
+
+
 @pytest.mark.parametrize("stage", ["off", "on", "auto", "on-fail-one", "on-fail-all"])
 def test_compact_probe_folds_read_only_to_the_published_bytes(world, tmp_path, monkeypatch, stage):
     """`static_merge compact-probe` over C's store as the mount (4 chunks at a time): the published `g.c001`'s files, md5
@@ -476,10 +520,18 @@ def test_compact_probe_folds_read_only_to_the_published_bytes(world, tmp_path, m
     lines = [ln for ln in summary["stage_log"] if ln.startswith("stage:")]
     fin = [re.sub(r" in \d+s \([\d,]+ MB/s\)", " in <s> (<rate>)", ln) for ln in summary["stage_log"] if ln.endswith("(done)")]
     stage_dir = tmp_path / "w" / "stage"
+    # the suffix shards' staging (`stage_shards`): its own decision and progress lines, its copies gone after the merge
+    sx = [f for t in [gen_dir, *(gen_dir / r["key"] for r in ar.newest_runs(gen_dir)[1])] for f in sorted((t / "sx").glob("*.parquet"))]
+    sx_need = sum(f.stat().st_size for f in sx)
+    sx_lines = [ln.partition(" in ")[0] for ln in summary["stage_log"] if ln.startswith("stage sx:")]
+    assert not (tmp_path / "w" / sk.SX_STAGE).exists()
     if stage == "on":
         assert [ln.partition(" in ")[0] for ln in lines] == [
             f"stage: {len(files)} files, {need / 2**30:,.1f} GiB of long+short roots from {gen_dir} → {stage_dir}"]
-        assert fin == [f"stage long+short roots {len(files)}/{len(files)} files, {need / 2**30:,.2f} of {need / 2**30:,.2f} GiB in <s> (<rate>) (done)"]
+        assert sx_lines == [f"stage sx: {len(sx)} files, {sx_need / 2**30:,.1f} GiB from {gen_dir} → {tmp_path / 'w' / sk.SX_STAGE}"]
+        assert sorted(fin) == sorted([
+            f"stage long+short roots {len(files)}/{len(files)} files, {need / 2**30:,.2f} of {need / 2**30:,.2f} GiB in <s> (<rate>) (done)",
+            f"stage sx {len(sx)}/{len(sx)} files, {sx_need / 2**30:,.2f} of {sx_need / 2**30:,.2f} GiB in <s> (<rate>) (done)"])
     elif stage == "on-fail-one":
         rest = need - (gen_dir / broken).stat().st_size
         assert [ln.partition(" in ")[0] for ln in lines] == [
@@ -487,7 +539,14 @@ def test_compact_probe_folds_read_only_to_the_published_bytes(world, tmp_path, m
         assert [ln for ln in summary["stage_log"] if " not staged " in ln] == [
             f"stage long+short roots: {broken} not staged (OSError: injected); read in place"]
         assert summary["staged"]["failed"] == [broken]
+        # the roots' broken copy is the roots' alone: the shards stage whole
+        assert sx_lines == [f"stage sx: {len(sx)} files, {sx_need / 2**30:,.1f} GiB from {gen_dir} → {tmp_path / 'w' / sk.SX_STAGE}"]
     else:
+        sx_full = [ln for ln in summary["stage_log"] if ln.startswith("stage sx:")]
+        assert sx_full == [{"off": f"stage sx: off; shards read in place from {gen_dir}",
+                            "auto": f"stage sx: skipped, the work disk has 0.0 GiB free, under {sx_need / 2**30:,.1f} GiB of shards × 2; "
+                                    f"read in place from {gen_dir}",
+                            "on-fail-all": f"stage sx: failed (RuntimeError: injected); shards read in place from {gen_dir}"}[stage]]
         assert lines == [{"off": f"stage: off; roots read in place from {gen_dir}",
                           "auto": f"stage: skipped, the work disk has 0.0 GiB free, under {need / 2**30:,.1f} GiB of long+short roots × 5; "
                                   f"roots read in place from {gen_dir}",
@@ -638,9 +697,10 @@ def test_deal_balances_ranges_heaviest_first_to_the_least_loaded_task():
     assert deal({"a": 1}, 3) == [["a"], [], []]
 
 
-def _fanned_fold(world, tmp_path, submit, retries: int = 2, root: str = "scratch", out: str = "out", log=lambda m: None):
+def _fanned_fold(world, tmp_path, submit, retries: int = 2, root: str = "scratch", out: str = "out", log=lambda m: None, write_submit=None):
     """C's fold with its drill measurement over 3 tasks (`static_fanout.Fanout`, logging to `log`), `submit` running the
-    helper jobs; its checkpoint under `tmp_path / root`, the generation at `tmp_path / out`."""
+    helper jobs (`write_submit`: the drill write's, `WriteFanout`); its checkpoint under `tmp_path / root`, the generation
+    at `tmp_path / out`."""
     from dt_cloud.checkpoint import code_version
     from dt_cloud.static_fanout import Fanout
 
@@ -650,9 +710,42 @@ def _fanned_fold(world, tmp_path, submit, retries: int = 2, root: str = "scratch
     try:
         with _small_groups():
             sk.fold_gen(gen_dir, tmp_path / out, tmp_path / f"w-{root}", gen="g", new_gen="g.c001", runs=runs, threads=2, mem="1GB", chunk_rows=3, ck=ck,
-                        fanout=lambda c, scan: Fanout(c, 3, submit, code=code_version(), scan=scan, poll_s=0.01, retries=retries, log=log))
+                        fanout=lambda c, scan: Fanout(c, 3, submit, code=code_version(), scan=scan, poll_s=0.01, retries=retries, log=log,
+                                                      write_submit=write_submit))
     finally:
         ck.close()
+
+
+def _writers(tmp_path, calls: list, skip=lambda attempt, i: False):
+    """A fake drill-write helper job: each task's `write-shard` in turn, in-process (`skip(attempt, i)`: never runs)."""
+    from dt_cloud import static_merge as sm
+
+    def submit(url: str, plan: str, n: int, code: str, scan: str) -> None:
+        calls.append((plan, n))
+        for i in range(n):
+            if not skip(len(calls), i):
+                sm.write_shard_cmd.callback(checkpoint=url, index=i, jobs=1, plan=plan, tmp=str(tmp_path / f"wr{len(calls)}-{i}"), code=code)
+    return submit
+
+
+@pytest.mark.parametrize("lost", [False, True])
+def test_a_fanned_out_drill_write_writes_the_single_vm_drill(world, tmp_path, monkeypatch, lost):
+    """With the measurement fanned out, the roots' files (cut small: several per kind) dealt over 3 tasks, 2 helper
+    tasks writing theirs from the checkpoint's sorted ranges: the generation's files, md5 for md5, as the fold writing
+    every file itself. `lost`: the first helper job's second task never runs; its files go to a second job."""
+    from dt_cloud import static_drill as sd
+
+    monkeypatch.setattr(sd, "FILE_ROWS", 4)
+    _fanned_fold(world, tmp_path, _helpers(tmp_path, []), root="ck-one", out="one")
+    calls: list = []
+    _fanned_fold(world, tmp_path, _helpers(tmp_path, []), root="ck-fan", out="fan",
+                 write_submit=_writers(tmp_path, calls, skip=(lambda attempt, i: attempt == 1 and i == 1) if lost else (lambda attempt, i: False)))
+    n = {k: len(list((tmp_path / "fan" / "drill" / k / "roots").glob("*.parquet"))) for k in ("long", "short")}
+    # a kind deals files away once it has 2 (share 0 keeps the heaviest); long's 4+ give the first job 2 tasks to lose one of
+    assert n["long"] > 3
+    long_plans = 2 if lost else 1
+    assert [c[0] for c in calls] == [f"written/plan-{j}.json" for j in range(1, long_plans + 1 + (n["short"] >= 2))]
+    assert _md5s(tmp_path / "fan") == _md5s(tmp_path / "one")
 
 
 def _helpers(tmp_path, calls: list, skip=lambda attempt, i: False):
@@ -833,6 +926,52 @@ def test_a_fanned_out_fold_writes_the_single_vm_fold(world, tmp_path, classes):
     assert (calls, stale, _waves(lines), doc["drill"]["classes"], doc["drill"]["fixed"]) == {
         "digests": ([("folded/plan-1.json", 2)], [], [(2, n, n)], "digests", 0),
         "roots": ([("folded/plan-1.json", 2), ("folded/plan-2.json", 2)], [], [(1, n, n), (2, plan["chunks"], n)], "roots", 0)}[classes]
+    assert _md5s(tmp_path / "out") == _md5s(world["c_store"] / "g.c001")
+
+
+#: A wave's dealing line's tail (`FoldFanout.wave`): its wave, which rows are exact, and each share's rows.
+SHARES = re.compile(r"fold fan-out: wave (\d): .*; rows per share \((.+)\) \[([\d, ]*)\] \(mean .*")
+
+
+@pytest.mark.parametrize("classes", ["digests", "roots"])
+def test_the_fold_plan_takes_its_chunks_rows_from_the_persisted_digests(world, tmp_path, classes):
+    """With the tiers' persisted digests, the plan's chunks hold their tuples' exact combined-root counts (`tdig`'s `n`;
+    the units' count checks found none off), and the deal's per-share rows are those plus the short ranges' estimates.
+    Without, the roots indexes' estimates in every wave (the digest wave's `tdig` comes after the plan). Same bytes."""
+    from dt_cloud.blobstore import Store
+    from dt_cloud.static_fanout import DIGEST, LONG, SHORT, contiguous
+
+    lines: list[str] = []
+    doc = _fold_fanned(world, tmp_path, _fold_helpers(tmp_path, []), log=lines.append, gen_dir=_gen(world, tmp_path, classes))
+    plan = _plan_doc(world, tmp_path)
+    _, runs = ar.newest_runs(world["c_store"] / "g")
+    store, prefix = Store(str(tmp_path / "scratch")), sk.checkpoint_prefix("g", "g.c001", runs)
+
+    def table(key: str) -> list[dict]:
+        dst = tmp_path / "ck-tables" / f"{key}.parquet"
+        store.get(f"{prefix}/fold/{key}.parquet", dst)
+        return pq.read_table(dst).to_pylist()
+
+    fch = {r["ch"]: r["est"] for r in table("fan/plan/fch")}
+    sqg = {r["grp"]: r["est"] for r in table("fan/plan/sqg")}
+    n = {r["tid"]: r["n"] for r in table("classes/tdig")}
+    exact: dict[int, int] = {}
+    for r in table("fan/plan/tch"):
+        exact[r["ch"]] = exact.get(r["ch"], 0) + n.get(r["tid"], 0)
+
+    def per_share(kind: str, short: bool = True) -> list[int]:
+        w = {**{(kind, ch): e for ch, e in fch.items()}, **({(SHORT, g): e for g, e in sqg.items()} if short else {})}
+        return [sum(max(1, w[u]) for u in s) for s in contiguous(w, 3)]
+
+    logged = [(int(m[1]), m[2], [int(x) for x in m[3].split(", ")]) for m in map(SHARES.fullmatch, lines) if m]
+    assert (doc["drill"]["fixed"], len(fch), sorted(exact)) == (0, plan["chunks"], sorted(fch))
+    if classes == "digests":
+        assert (plan["rows"], fch) == ("exact", exact)
+        assert logged == [(2, "long chunks exact, short ranges estimated", per_share(LONG))]
+    else:
+        assert plan["rows"] == "estimated"
+        # wave 2 deals only the long units: the short ranges were done in wave 1
+        assert logged == [(1, "estimated", per_share(DIGEST)), (2, "estimated", per_share(LONG, short=False))]
     assert _md5s(tmp_path / "out") == _md5s(world["c_store"] / "g.c001")
 
 
@@ -1133,14 +1272,17 @@ def test_a_seed_through_the_spills_carries_the_finished_measured_ranges(tmp_path
                 "anchors-in/sx/s00000.parquet"):
         src.write_text(f"{pre}/{rel}", rel)
 
-    def seeded(through: str, dst: str) -> list[str]:
-        sk.seed_checkpoint(str(tmp_path / "src"), str(tmp_path / dst), "g", "g.c001", runs, through, log=lambda m: None)
+    def seeded(through: str, dst: str, units: bool = True) -> list[str]:
+        sk.seed_checkpoint(str(tmp_path / "src"), str(tmp_path / dst), "g", "g.c001", runs, through, units=units, log=lambda m: None)
         return sorted(k[len(pre) + 1:] for k in Store(str(tmp_path / dst)).keys(f"{pre}/"))
 
     assert seeded("fold/spilled", "a") == ["code.json", "fold/measured/long/g000001/done.json", "fold/measured/long/g000001/sorted.parquet",
                                            "fold/spilled/done.json", "fold/spilled/long/x.parquet"]
     assert seeded("drill", "b") == ["anchored/end/s00000/cells.parquet", "anchored/end/s00000/done.json", "anchors-in/sx/s00000.parquet",
                                     "code.json", "drill/d.parquet", "drill/done.json", "fold/spilled/done.json", "fold/spilled/long/x.parquet"]
+    # `units` false (`compact-probe -N`): the steps (and the anchors' uploaded inputs) only; the helpers rebuild every unit
+    assert seeded("drill", "c", units=False) == ["anchors-in/sx/s00000.parquet", "code.json", "drill/d.parquet", "drill/done.json",
+                                                 "fold/spilled/done.json", "fold/spilled/long/x.parquet"]
 
 
 def test_a_compactions_record_phases_its_fold_drill_and_anchors(world, tmp_path, monkeypatch):

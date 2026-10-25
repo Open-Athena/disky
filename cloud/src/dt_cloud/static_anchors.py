@@ -340,16 +340,31 @@ def rollup_cells(con, roots: str, heads: str, K: int, into: str, closed: bool = 
         con.execute(f"DROP TABLE IF EXISTS {t}")
 
 
-def base_rollups(con, files: list[str], mode: str, R: int, K: int, into: str, rule: HexRule | None = None) -> dict:
+def base_rollups(con, files: list[str], mode: str, R: int, K: int, into: str, rule: HexRule | None = None,
+                 steps: dict[str, float] | None = None) -> dict:
     """A base shard set's rollups (`mode` `end` over suffix shards, `exact` over name shards) into table `into`: the
     keys holding more than R rows, their heavy directories (`heavy_dirs`) and the rollups of their first hits
-    (`rollup_cells`; under the generation's hex-run `rule`). Heaviness counts stored rows, as the reader's bound."""
+    (`rollup_cells`; under the generation's hex-run `rule`). Heaviness counts stored rows, as the reader's bound.
+    `steps`: each step's seconds put there."""
+    steps = {} if steps is None else steps
+    t = monotonic()
+
+    def lap(name: str) -> None:
+        nonlocal t
+        steps[name] = round(monotonic() - t, 1)
+        t = monotonic()
+
     con.execute(f"CREATE OR REPLACE TABLE hk AS SELECT s AS k FROM ({files_sql(files, 's')}) GROUP BY s HAVING count(*) > {R}")
+    lap("keys")
     con.execute(f"CREATE OR REPLACE TABLE ar AS SELECT x.* FROM ({shard_rows_sql(files)}) AS x SEMI JOIN hk USING (k)")
+    lap("rows")
     heavy_dirs(con, "ar", R)
+    lap("heavy-dirs")
     first_hits(con, "SELECT * FROM ar", "rt", mode, rule)
+    lap("first-hits")
     con.execute("DROP TABLE ar; DROP TABLE hk")
     rollup_cells(con, "rt", "hv", K, into, closed=True)
+    lap("cells")
     keys, dirs = con.execute("SELECT count(DISTINCT k), count(*) FROM hv").fetchone()
     for t in ("ar", "rt", "hv"):
         con.execute(f"DROP TABLE IF EXISTS {t}")
@@ -402,16 +417,25 @@ def _shard_task(kind: str, files: list[str], R: int, K: int, rule: HexRule | Non
     """One shard's rollups of `kind` (`end`, `exact`: `base_rollups`; `start`: `start_base` over its own prefix census),
     sorted → parquet `out`, on a database of its own. A key (`s`; a `^q` prefix, ≥ 3 characters) lies in one shard, so a
     shard's cells are exactly the tier's cells of its keys."""
+    import os
     import shutil
 
     con = connect(threads, mem, tmp)
+    t0 = monotonic()
+    steps: dict[str, float] = {}
     try:
         if kind == START:
             doc = start_base(con, files, start_heads_sql(prefix_counts_sql(files), R), R, K, "cells")
+            steps["start"] = round(monotonic() - t0, 1)
         else:
-            doc = base_rollups(con, files, kind, R, K, "cells", rule)
+            doc = base_rollups(con, files, kind, R, K, "cells", rule, steps=steps)
         con.execute("CREATE TABLE IF NOT EXISTS cells (q VARCHAR, dir VARCHAR, kind TINYINT, child VARCHAR, vf BIGINT, b BIGINT, o BIGINT)")
+        t1 = monotonic()
         _sorted_cells(con, "cells", out)
+        steps["sort"] = round(monotonic() - t1, 1)
+        # a shard task's line: which shard, how big, and where its seconds went (gcs's straggler sat ~20 min at ~4 cores)
+        err(f"anchors {kind} {Path(files[0]).name}: {sum(os.path.getsize(f) for f in files):,} B, {threads} threads, "
+            f"{monotonic() - t0:.1f}s ({', '.join(f'{k} {v}s' for k, v in steps.items())})")
         return doc
     finally:
         con.close()

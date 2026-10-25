@@ -1836,14 +1836,27 @@ def _write_chunk_file(spans, schema: pa.Schema, lo: str | None, hi: str | None, 
     return n, t, (out / name).stat().st_size
 
 
-def write_kind(con, out: Path, kind: str, roots: str = "dr", rollups: str = "rup", file_rows: int = FILE_ROWS, rg: int | None = None,
-               chunks: dict[str, list[Path]] | None = None, jobs: int | None = None) -> dict:
+def _cut_rows(counts, cuts: list[tuple[str | None, str | None]]) -> list[int]:
+    """Each cut's rows, from `counts` `(q, rows)` in `q` order (`_cut_counts`' cuts of them)."""
+    rows = [0] * len(cuts)
+    i = 0
+    for qq, c in counts:
+        while cuts[i][1] is not None and qq >= cuts[i][1]:
+            i += 1
+        rows[i] += c
+    return rows
+
+
+def write_kind(con, out: Path, kind: str, roots: str = "dr", rollups: str = "rup", file_rows: int | None = None, rg: int | None = None,
+               chunks: dict[str, list[Path]] | None = None, jobs: int | None = None, fanout=None) -> dict:
     """Tables `roots` (`ROOT_COLS`) and `rollups` (`ROLLUP_COLS`) → `out/<kind>/{roots,rollups}/r####.parquet` (sorted, `ROOT_RG`-row
     groups, files cut at `q` boundaries) and the two-level indexes `out/<kind>-{roots,rollups}-index{,.top}.parquet`.
     `chunks` `{sub: files}`: a sub's rows as files already in its order, `q`-disjoint and in `q` order (`merge_tiers`' folded
     ranges), streamed in turn instead of sorted again (gcs's 10-22 L3 carry: 69 of its drill's 185 min in this sort), `jobs`
     files at a time (default `write_jobs()`), each in a spawned process reading only its own `q` range of the chunks; the
-    same bytes (the row-group size is resolved here: a process sees the modules' defaults)."""
+    same bytes (the row-group size is resolved here: a process sees the modules' defaults). `fanout`
+    (`static_fanout.WriteFanout`): the roots' files dealt by rows, those dealt away written by its helpers from the
+    chunks' checkpoint copies and collected here; the same bytes."""
     from concurrent.futures import ProcessPoolExecutor
     from multiprocessing import get_context
 
@@ -1851,6 +1864,7 @@ def write_kind(con, out: Path, kind: str, roots: str = "dr", rollups: str = "rup
 
     doc = {}
     rg = rg or sr.ROOT_RG
+    file_rows = file_rows or FILE_ROWS
     jobs = write_jobs() if jobs is None else jobs
     for sub, table, order, schema, key, dic in (("roots", roots, "q, path, usr, vf", sr.ROOT_SCHEMA, "path", ["q", "usr"]),
                                                ("rollups", rollups, "q, dir, kind, child, vf", sr.ROLLUP_SCHEMA, "dir", ["q", "dir", "child"])):
@@ -1865,16 +1879,29 @@ def write_kind(con, out: Path, kind: str, roots: str = "dr", rollups: str = "rup
         prog = heartbeat.Progress(f"drill/write/{kind}/{sub}", len(cuts), unit="files")
         names = [f"{kind}/{sub}/r{i:04d}.parquet" for i in range(len(cuts))]
         if chunks is not None and sub in chunks:
-            procs = max(1, min(jobs, len(cuts)))
+            away: set[int] = set()
+            if fanout is not None and sub == "roots" and cuts:
+                per = _cut_rows(counts, cuts)
+                away = fanout.start(kind, [(name, lo, hi, _overlapping(spans, lo, hi), n) for (lo, hi), name, n in zip(cuts, names, per)], rg=rg)
+                # the plan's stage would otherwise name this VM's files' writing
+                heartbeat.set_stage(prog.label)
+            here = [i for i in range(len(cuts)) if i not in away]
+            got: dict[int, tuple] = {}
+            procs = max(1, min(jobs, len(here)))
             pool = _Inline() if procs == 1 else ProcessPoolExecutor(procs, mp_context=get_context("spawn"), initializer=_writer_init)
             with pool:
-                futs = [pool.submit(_write_chunk_file, _overlapping(spans, lo, hi), schema, lo, hi, out, name, key, dic, rg)
-                        for (lo, hi), name in zip(cuts, names)]
-                for f in futs:
-                    n, t, size = f.result()
-                    rows, nbytes = rows + n, nbytes + size
-                    idx.append(t)
-                    prog.tick(rows=n, nbytes=size)
+                futs = {i: pool.submit(_write_chunk_file, _overlapping(spans, *cuts[i]), schema, *cuts[i], out, names[i], key, dic, rg) for i in here}
+                for i, f in futs.items():
+                    got[i] = f.result()
+                    prog.tick(rows=got[i][0], nbytes=got[i][2])
+            if away:
+                theirs = fanout.collect(kind, {i: out / names[i] for i in sorted(away)})
+                got.update(theirs)
+                prog.tick(len(theirs), rows=sum(v[0] for v in theirs.values()), nbytes=sum(v[2] for v in theirs.values()))
+            for i in range(len(cuts)):
+                n, t, size = got[i]
+                rows, nbytes = rows + n, nbytes + size
+                idx.append(t)
         else:
             def one(lo, hi, name):
                 where = " AND ".join(x for x in (f"q >= {q(lo)}" if lo is not None else "", f"q < {q(hi)}" if hi is not None else "") if x) or "true"
@@ -2319,14 +2346,15 @@ def _count(con, table: str) -> int:
 
 
 def build_drill(con, out: Path, *, long_roots: str | None, short_roots: str | None, aliases: pa.Table, R: int, K: int, meta: dict | None = None,
-                rollups: dict[str, str] | None = None, sorted_roots: dict[str, list[Path]] | None = None, step=None) -> dict:
+                rollups: dict[str, str] | None = None, sorted_roots: dict[str, list[Path]] | None = None, step=None, write_fanout=None) -> dict:
     """A tier holding every root: tables `long_roots` (canonical members only) and `short_roots` (`ROOT_COLS`) → `out`
     (`static_roots.build_roots` per kind, its rows written as `write_kind` writes them), with `aliases` and `meta.json`.
     `rollups` `{kind: table}` (`ROLLUP_COLS`): a kind's rollup cells already cut (by `q` range, as `static_local`'s
     chunked build does), written as they are. `sorted_roots` `{kind: files}` (with that kind's `rollups`): its roots as
     files each sorted, `q`-disjoint and in `q` order (`static_local.measure_ranges`'), streamed (`write_kind`'s `chunks`)
     instead of sorting a roots table again; the same bytes. `step(name, t, **counts)` (optional) reports each kind's
-    rollup and write (`drill/rollup/<kind>`, `drill/write/<kind>`)."""
+    rollup and write (`drill/rollup/<kind>`, `drill/write/<kind>`). `write_fanout` (`static_fanout.WriteFanout`, with
+    `sorted_roots`): their files written in part by helper tasks (`write_kind`'s `fanout`)."""
     out.mkdir(parents=True, exist_ok=True)
     doc = {**base_meta(R, K), **(meta or {})}
     con.register("al_in", aliases)
@@ -2337,7 +2365,7 @@ def build_drill(con, out: Path, *, long_roots: str | None, short_roots: str | No
     for kind, table in (("long", long_roots), ("short", short_roots)):
         if rollups and kind in rollups:
             chunks = {"roots": sorted_roots[kind]} if sorted_roots and kind in sorted_roots else None
-            doc.update(write_kind(con, out, kind, roots=table, rollups=rollups[kind], chunks=chunks))
+            doc.update(write_kind(con, out, kind, roots=table, rollups=rollups[kind], chunks=chunks, fanout=write_fanout if chunks else None))
             if step:
                 t = step(f"drill/write/{kind}", t)
             continue
