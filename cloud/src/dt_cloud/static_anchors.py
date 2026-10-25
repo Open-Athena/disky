@@ -299,6 +299,41 @@ def heavy_dirs(con, rows: str, R: int) -> None:
         con.execute(f"DROP TABLE IF EXISTS {t}")
 
 
+def _running(con, src: str, keys: str, vals: tuple[str, ...], tag: str, batch_rows: int = 1 << 20):
+    """`src`'s rows (columns `keys`, `t` unique within a partition, `vals`) partitioned by `keys`, each partition's
+    `vals` running sums in `t` order: the partitions numbered (table `{tag}_p`: `keys`, `p`), the rows streamed sorted
+    by `(p, t)`, the sums carried across batches. Yields `(p, t, [running sum of each val])` per batch (int64; a sum
+    wraps as two's complement, so a result that fits is exact). DuckDB's windows instead give a partition one
+    thread: a heavy key's partitions held gcs's biggest `end` shards' rollups at ~4 cores for ~26 min."""
+    import numpy as np
+
+    con.execute(f"CREATE OR REPLACE TABLE {tag}_p AS SELECT {keys}, (row_number() OVER ())::BIGINT AS p FROM (SELECT DISTINCT {keys} FROM {src})")
+    cols = ", ".join(f"{v}::BIGINT AS {v}" for v in vals)
+    reader = con.execute(f"SELECT p, t, {cols} FROM {src} JOIN {tag}_p USING ({keys}) ORDER BY p, t").fetch_record_batch(batch_rows)
+    last, carry = None, [0] * len(vals)
+    with np.errstate(over="ignore"):
+        for b in reader:
+            if not b.num_rows:
+                continue
+            p = b.column(0).to_numpy()
+            n = len(p)
+            brk = np.ones(n, bool)
+            brk[1:] = p[1:] != p[:-1]
+            go_on = last is not None and p[0] == last
+            if go_on:
+                brk[0] = False
+            start = np.maximum.accumulate(np.where(brk, np.arange(n), 0))
+            ys = []
+            for j in range(len(vals)):
+                x = b.column(2 + j).to_numpy().copy()
+                if go_on:
+                    x[0] += carry[j]
+                cs = np.cumsum(x)
+                ys.append(cs - (cs - x)[start])
+            last, carry = p[-1], [y[-1] for y in ys]
+            yield p, b.column(1), ys
+
+
 def rollup_cells(con, roots: str, heads: str, K: int, into: str, closed: bool = False) -> None:
     """Full rollups (`static_roots.ROLLUP_SCHEMA` rows, header first) into table `into` for `heads(k, lvl, dir, rows)`
     from `roots` (`AR_COLS`, every first hit under them): per child of `dir` (its next segment; a bucket for `''`)
@@ -321,21 +356,41 @@ def rollup_cells(con, roots: str, heads: str, K: int, into: str, closed: bool = 
                 UNION ALL SELECT k, dir, child, vt AS t, -size, -n_files FROM ({hit}) WHERE vt <> {OPEN}
             ) GROUP BY k, dir, child, t""")
     con.execute("DROP TABLE IF EXISTS hc; DROP TABLE IF EXISTS hl")
-    run = """sum(db) OVER (PARTITION BY k, dir, child ORDER BY t ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS b"""
+    # each child's peak bytes: the max of its running Σ db over t (`_running`, a sorted pass, not a window)
+    import numpy as np
+
+    pk, pv = [], []
+    for p, _, (b,) in _running(con, "rev", "k, dir, child", ("db",), "rk"):
+        starts = np.flatnonzero(np.concatenate([[True], p[1:] != p[:-1]]))
+        pk.append(p[starts])
+        pv.append(np.maximum.reduceat(b, starts))
+    peaks = pa.table({"p": np.concatenate(pk) if pk else np.zeros(0, np.int64), "peak": np.concatenate(pv) if pv else np.zeros(0, np.int64)})
+    con.register("rk_peaks", peaks)
     con.execute(f"""CREATE OR REPLACE TABLE rkeep AS SELECT k, dir, child FROM (
             SELECT k, dir, child, row_number() OVER (PARTITION BY k, dir ORDER BY peak DESC, child) AS r FROM (
-                SELECT k, dir, child, max(b) AS peak FROM (SELECT k, dir, child, {run} FROM rev) GROUP BY k, dir, child))
+                SELECT k, dir, child, peak FROM (SELECT p, max(peak) AS peak FROM rk_peaks GROUP BY p) JOIN rk_p USING (p)))
         WHERE r <= {K}""")
+    con.unregister("rk_peaks")
+    con.execute("DROP TABLE rk_p")
+    del peaks, pk, pv
     con.execute("""CREATE OR REPLACE TABLE rev2 AS
             SELECT k, dir, 1::TINYINT AS kind, child, t, db, dn FROM rev SEMI JOIN rkeep USING (k, dir, child)
             UNION ALL SELECT k, dir, 2::TINYINT, '', t, sum(db), sum(dn) FROM rev ANTI JOIN rkeep USING (k, dir, child) GROUP BY k, dir, t""")
     con.execute(f"""INSERT INTO {into}
         SELECT h.k, h.dir, 0, '', (SELECT count(*) FROM rkeep AS r WHERE r.k = h.k AND r.dir = h.dir),
             h.rows, (SELECT count(DISTINCT child) FROM rev AS e WHERE e.k = h.k AND e.dir = h.dir) FROM {heads} AS h""")
-    con.execute(f"""INSERT INTO {into} SELECT k, dir, kind, child, t,
-            sum(db) OVER (PARTITION BY k, dir, kind, child ORDER BY t ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)::BIGINT,
-            sum(dn) OVER (PARTITION BY k, dir, kind, child ORDER BY t ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)::BIGINT
-        FROM (SELECT k, dir, kind, child, t, sum(db) AS db, sum(dn) AS dn FROM rev2 GROUP BY ALL HAVING sum(db) <> 0 OR sum(dn) <> 0)""")
+    # each cell's running Σ size, n_files over t: a sorted pass (`_running`) streamed through a parquet file, not windows
+    con.execute("""CREATE OR REPLACE TABLE rcell AS SELECT k, dir, kind, child, t, sum(db) AS db, sum(dn) AS dn FROM rev2
+        GROUP BY ALL HAVING sum(db) <> 0 OR sum(dn) <> 0""")
+    tmp = Path(con.execute("SELECT current_setting('temp_directory')").fetchone()[0] or ".") / f"rcell-{id(con):x}.parquet"
+    tmp.parent.mkdir(parents=True, exist_ok=True)
+    schema = pa.schema([("p", pa.int64()), ("t", pa.int64()), ("b", pa.int64()), ("o", pa.int64())])
+    with pq.ParquetWriter(tmp, schema) as w:
+        for p, t, (b, o) in _running(con, "rcell", "k, dir, kind, child", ("db", "dn"), "rc"):
+            w.write_table(pa.table({"p": p, "t": t.cast(pa.int64()), "b": b, "o": o}, schema=schema))
+    con.execute(f"INSERT INTO {into} SELECT k, dir, kind, child, t, b, o FROM read_parquet({q(str(tmp))}) JOIN rc_p USING (p)")
+    tmp.unlink()
+    con.execute("DROP TABLE rcell; DROP TABLE rc_p")
     for t in ("rev", "rev2", "rkeep"):
         con.execute(f"DROP TABLE IF EXISTS {t}")
 

@@ -892,7 +892,10 @@ def fold_units(con, ck: Checkpoint, units: list[tuple[str, int]], scratch: Path,
         return rels
 
     def mark(kind: str, i: int, t: float, rows: int, **extra) -> None:
-        ck.store.write_text(ck.key(f"{fold_unit_key(kind, i)}/done.json"), json.dumps({"rows": rows, "s": round(monotonic() - t, 1), **extra}) + "\n")
+        secs = round(monotonic() - t, 1)
+        ck.store.write_text(ck.key(f"{fold_unit_key(kind, i)}/done.json"), json.dumps({"rows": rows, "s": secs, **extra}) + "\n")
+        # a unit's line: which one set a helper's pace (gcs's wave 1 ran 830–1109s run to run)
+        log(f"fold unit {kind}/{i}: {rows:,} rows in {secs}s")
         with lock:
             total[0] += rows
 
