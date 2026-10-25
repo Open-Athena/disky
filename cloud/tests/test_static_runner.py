@@ -347,7 +347,7 @@ def test_r2_job_spec():
                 "runnables": [{"container": {"imageUri": "img@sha256:0", "entrypoint": "bash", "commands": ["-c", cmds[0]],
                                              "volumes": ["/mnt/disks/gcs/data:/gcs/data:ro", "/mnt/disks/stage:/stage:rw"]}}],
                 "environment": {
-                    "variables": {"STATIC_NAMES_BUCKET": "data", "STATIC_NAMES_SCRATCH": "scr", "R2_BUCKET": "idx"},
+                    "variables": {"STATIC_NAMES_BUCKET": "data", "STATIC_NAMES_SCRATCH": "scr", "R2_BUCKET": "idx", "DISKY_LABELS": "app=disky,deployment=test"},
                     "secretVariables": {"R2_ACCESS_KEY_ID": "projects/proj/secrets/s-id/versions/latest",
                                         "R2_ENDPOINT": "projects/proj/secrets/s-end/versions/latest",
                                         "R2_SECRET_ACCESS_KEY": "projects/proj/secrets/s-key/versions/latest"},
@@ -363,8 +363,9 @@ def test_r2_job_spec():
                                       "disks": [{"newDisk": {"type": "local-ssd", "sizeGb": "375"}, "deviceName": "stage"}]}}],
             "serviceAccount": {"email": "copy@proj"},
             "location": {"allowedLocations": ["regions/us-east1"]},
+            "labels": {"app": "disky", "deployment": "test", "component": "static-names"},
         },
-        "labels": {"purpose": "static-names", "stage": "r2", "gen": "2026-10-09cw"},
+        "labels": {"purpose": "static-names", "stage": "r2", "gen": "2026-10-09cw", "app": "disky", "deployment": "test", "component": "static-names"},
         "logsPolicy": {"destination": "CLOUD_LOGGING"},
     }
 
@@ -624,7 +625,8 @@ def test_the_merge_job_has_the_r2_env_when_it_runs_as_the_r2_account(r2_sa, r2_e
     r2 = {"R2_ACCESS_KEY_ID": "projects/proj/secrets/s-id/versions/latest", "R2_ENDPOINT": "projects/proj/secrets/s-end/versions/latest",
           "R2_SECRET_ACCESS_KEY": "projects/proj/secrets/s-key/versions/latest"}
     assert (spec["allocationPolicy"]["serviceAccount"]["email"], spec["taskGroups"][0]["taskSpec"]["environment"]) == ("build@proj", {
-        "variables": {"STATIC_NAMES_BUCKET": "data", "STATIC_NAMES_SCRATCH": "scr", **({"R2_BUCKET": "idx"} if r2_env else {}), "DT_JOB_NAME": name,
+        "variables": {"STATIC_NAMES_BUCKET": "data", "STATIC_NAMES_SCRATCH": "scr", **({"R2_BUCKET": "idx"} if r2_env else {}),
+                      "DISKY_LABELS": "app=disky,deployment=test", "SCAN_ID": SCANS[1], "DT_JOB_NAME": name,
                       # its run's job facts (`maint_runs`); no `record_secrets` in the profile: no D1 env
                       "DT_JOB_REGION": "us-east1", "DT_JOB_MACHINE": "n2-highmem-16", "DT_JOB_SPOT": "1", "DT_JOB_IMAGE": "img@sha256:0"},
         **({"secretVariables": r2} if r2_env else {}),

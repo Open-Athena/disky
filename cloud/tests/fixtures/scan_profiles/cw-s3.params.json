@@ -80,11 +80,13 @@
   "SITE_URL": "https://site.example.org",
   "R2_BUCKET": "example-r2",
   "DT_RECORD": "off",
+  "DISKY_LABELS": "app=disky,deployment=cw-s3,stack=prod,team=x",
   "DT_DATA_MOUNT": "/mnt/disks"
  },
  "profile_json": "<profile>",
  "labels": {
   "deployment": "cw-s3",
+  "app": "disky",
   "stack": "prod",
   "team": "x",
   "component": "scan",

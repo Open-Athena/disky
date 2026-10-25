@@ -32,7 +32,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from urllib.parse import urlparse
 
-from .cost_labels import check_label
+from .cost_labels import ENV as LABELS_ENV, check_label, deployment_labels
 from .scan_profile import PRIMARY_STORE, Disk, Machine, ScanProfile
 from .scan_steps import DATA_MOUNT_ENV, PROFILE_JSON_ENV, STEPS, index_parts, profile_env_value
 
@@ -68,14 +68,10 @@ def history_line(now: dt.datetime, scan: str, session: str) -> str:
 
 
 def labels(profile: ScanProfile, env: Mapping[str, str], scan: str) -> dict[str, str]:
-    """The tasks' Batch labels: the profile's, the stack's (`$DISKY_LABELS`, `k=v,…`), `component: scan`, `scan_id`
-    (lowercased, as `cost_labels` writes it); scan.nf adds `nf-session` and each task's `step`, so a billing export
-    groups a scan's spend by scan and step."""
-    out = dict(profile.labels)
-    for i in (env.get("DISKY_LABELS") or "").split(","):
-        if i.strip():
-            k, _, v = i.strip().partition("=")
-            out[k] = v
+    """The tasks' Batch labels: the profile's, the stack's (`$DISKY_LABELS`, `k=v,…`, refused without `app` and
+    `deployment`: `cost_labels.deployment_labels`), `component: scan`, `scan_id` (lowercased, as `cost_labels` writes
+    it); scan.nf adds `nf-session` and each task's `step`, so a billing export groups a scan's spend by scan and step."""
+    out = {**profile.labels, **deployment_labels(dict(env))}
     out["component"] = "scan"
     out["scan_id"] = scan.lower()
     check_label("scan_id", out["scan_id"])
@@ -99,9 +95,12 @@ def step_secrets(profile: ScanProfile) -> dict[str, list[str]]:
 def params(profile: ScanProfile, profile_json: str, scan: str, gen: str, job_start: str, run_id: str, session: str,
            env: Mapping[str, str], *, reproc: bool = False, fresh: bool = False) -> dict:
     """`scan.nf`'s params file."""
+    task_labels = labels(profile, env, scan)
     enabled = profile.enabled()
     step_env = dict(profile.env)
     step_env.update({k: env[k] for k in profile.passthrough if k in env})
+    # every step's Batch helpers (static names, the interval store, …) label themselves from it (`label_batch_spec`)
+    step_env[LABELS_ENV] = env[LABELS_ENV]
     if reproc:
         step_env["REPROC"] = "1"
     if profile.executor.kind == "google-batch":
@@ -136,7 +135,7 @@ def params(profile: ScanProfile, profile_json: str, scan: str, gen: str, job_sta
         "secrets_project": profile.executor.project or "",
         "env": step_env,
         "profile_json": profile_json,
-        "labels": labels(profile, env, scan),
+        "labels": task_labels,
         "cache": not fresh,
         "static_after_publish": not urlparse(profile.data).scheme and "publish-r2" in enabled,
         "queue_size": profile.queue_size,
@@ -447,9 +446,11 @@ def head(profile_path: Path, nf_dir: Path, launch: Path | None, *, reproc: bool 
     trigger = trigger_of(env)
     run_id = env.get("DT_RUN_ID") or env.get("BATCH_JOB_UID") or ""
     env.update(SNAP_ID=scan, SCAN_ID=scan, GEN=gen, DT_JOB_START=job_start, DT_RUN_ID=run_id)
-    for k in (PROFILE_ENV, "D1_DB_ID", "D1_DB_NAME", "SLACK_ALERT_CHANNEL", "DT_ALERTS"):
+    for k in (PROFILE_ENV, "D1_DB_ID", "D1_DB_NAME", "SLACK_ALERT_CHANNEL", "DT_ALERTS", LABELS_ENV):
         if k in profile.env:
             env.setdefault(k, profile.env[k])
+    # no unlabelled scan: refuse before anything starts or records (specs/done/cost-labels-required.md)
+    deployment_labels(dict(env))
     if reproc:
         env.update(REPROC="1", DT_RECORD="off")
     batch = bool(env.get("BATCH_JOB_UID"))

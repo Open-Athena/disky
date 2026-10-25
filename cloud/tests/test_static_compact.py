@@ -1160,13 +1160,13 @@ class OutOfMemoryException(Exception):
 def test_fanned_out_anchors_write_the_single_vm_fold(world, tmp_path, monkeypatch, mode):
     """The fold builds its share of the anchors' shard tasks, 2 helper tasks theirs (from the shards uploaded under
     `anchors-in/`, their cells under `anchored/`): `g.c001`'s files (built at `anchor_tasks` 1), md5 for md5. The helper
-    job is named by the newest scan folded, never by the plan. `alone`: every shard over `ANCHOR_HEAVY_BYTES`, so each
+    job is named by the newest scan folded, never by the plan. `alone`: every shard over `ANCHOR_HEAVY_ROWS`, so each
     is built by itself on all the task's threads; `oom`: every pooled shard runs out of memory once, and is built again
     alone after the pool; the same bytes."""
     from dt_cloud import static_anchors as an
     from dt_cloud import static_merge as sm
 
-    monkeypatch.setattr(an, "ANCHOR_HEAVY_BYTES", 0 if mode == "alone" else 1 << 30)
+    monkeypatch.setattr(an, "ANCHOR_HEAVY_ROWS", 0 if mode == "alone" else 1 << 40)
     failed: list = []
     if mode == "oom":
         built = sm._timed_shard_task

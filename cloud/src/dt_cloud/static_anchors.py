@@ -300,66 +300,79 @@ def heavy_dirs(con, rows: str, R: int) -> None:
         con.execute(f"DROP TABLE IF EXISTS {t}")
 
 
-def _running(con, src: str, keys: str, vals: tuple[str, ...], tag: str, batch_rows: int = 1 << 20):
+def _running(con, src: str, keys: tuple[str, ...], vals: tuple[str, ...], batch_rows: int = 1 << 20):
     """`src`'s rows (columns `keys`, `t` unique within a partition, `vals`) partitioned by `keys`, each partition's
-    `vals` running sums in `t` order: the partitions numbered (table `{tag}_p`: `keys`, `p`), the rows streamed sorted
-    by `(p, t)`, the sums carried across batches. Yields `(p, t, [running sum of each val])` per batch (int64; a sum
-    wraps as two's complement, so a result that fits is exact). DuckDB's windows instead give a partition one
-    thread: a heavy key's partitions held gcs's biggest `end` shards' rollups at ~4 cores for ~26 min."""
+    `vals` running sums in `t` order: the rows streamed sorted by `(keys, t)`, a partition's start where any key differs
+    from the row before (Arrow's compare, across batches too), the sums carried across batches. Yields `(batch, starts,
+    [running sum of each val])` per batch (`batch`: `keys`, `t`; `starts`: the rows beginning a partition here, the first
+    one included even when it goes on from the last batch; int64 sums, wrapping as two's complement, so a result that
+    fits is exact). DuckDB's windows instead give a partition one thread: a heavy key's partitions held gcs's biggest
+    `end` shards' rollups at ~4 cores for ~26 min; numbering the partitions first (a `DISTINCT` and a join on the keys)
+    was most of the mid shards' `rkeep` after that."""
     import numpy as np
+    import pyarrow.compute as pc
 
-    con.execute(f"CREATE OR REPLACE TABLE {tag}_p AS SELECT {keys}, (row_number() OVER ())::BIGINT AS p FROM (SELECT DISTINCT {keys} FROM {src})")
     cols = ", ".join(f"{v}::BIGINT AS {v}" for v in vals)
-    reader = con.execute(f"SELECT p, t, {cols} FROM {src} JOIN {tag}_p USING ({keys}) ORDER BY p, t").fetch_record_batch(batch_rows)
+    reader = con.execute(f"SELECT {', '.join(keys)}, t, {cols} FROM {src} ORDER BY {', '.join(keys)}, t").fetch_record_batch(batch_rows)
     last, carry = None, [0] * len(vals)
+    nk = len(keys)
     with np.errstate(over="ignore"):
         for b in reader:
-            if not b.num_rows:
+            n = b.num_rows
+            if not n:
                 continue
-            p = b.column(0).to_numpy()
-            n = len(p)
             brk = np.ones(n, bool)
-            brk[1:] = p[1:] != p[:-1]
-            go_on = last is not None and p[0] == last
+            if n > 1:
+                diff = None
+                for j in range(nk):
+                    c = b.column(j)
+                    d = pc.not_equal(c.slice(1), c.slice(0, n - 1))
+                    diff = d if diff is None else pc.or_(diff, d)
+                brk[1:] = diff.to_numpy(zero_copy_only=False)
+            first = tuple(b.column(j)[0].as_py() for j in range(nk))
+            go_on = last is not None and first == last
             if go_on:
                 brk[0] = False
             start = np.maximum.accumulate(np.where(brk, np.arange(n), 0))
             ys = []
             for j in range(len(vals)):
-                x = b.column(2 + j).to_numpy().copy()
+                x = b.column(nk + 1 + j).to_numpy().copy()
                 if go_on:
                     x[0] += carry[j]
                 cs = np.cumsum(x)
                 ys.append(cs - (cs - x)[start])
-            last, carry = p[-1], [y[-1] for y in ys]
-            yield p, b.column(1), ys
+            last, carry = tuple(b.column(j)[n - 1].as_py() for j in range(nk)), [y[-1] for y in ys]
+            brk[0] = True
+            yield b.select(list(range(nk + 1))), np.flatnonzero(brk), ys
 
 
-def _closed_levels(con, heads: str, top: int, lap) -> None:
-    """`rollup_cells`' levels over heads closed upwards, into `rev`: each head numbered (`h`), linked to its parent's
-    number by its last segment, so a level's rows carry their head's number and the next level's are those whose next
-    segment is a child head's: an integer and one segment per row, not every row's dir rebuilt as a string and joined
-    at every level (gcs's three biggest `end` shards: ~1170s of their ~1560s). `lap(name, table)`: each level's seconds and rows."""
-    con.execute(f"CREATE OR REPLACE TABLE hd AS SELECT k, lvl, dir, (row_number() OVER ())::BIGINT AS h FROM {heads}")
+def _closed_levels(con, top: int, lap) -> None:
+    """`rollup_cells`' levels over heads closed upwards, into `rev`: each head (`hd`, numbered `h`) linked to its
+    parent's number by its last segment, so a level's rows carry their head's number and the next level's are those
+    whose next segment is a child head's: an integer and one segment per row, not every row's dir rebuilt as a string
+    and joined at every level (gcs's three biggest `end` shards: ~1170s of their ~1560s). `lap(name, table)`: each
+    level's seconds and rows."""
     con.execute("""CREATE OR REPLACE TABLE hlk AS SELECT c.lvl, p.h AS parent, string_split(c.dir, '/')[-1] AS child, c.h FROM hd AS c
         JOIN hd AS p ON p.k = c.k AND p.lvl = c.lvl - 1 AND p.dir = array_to_string(string_split(c.dir, '/')[1:c.lvl - 1], '/')
         WHERE c.lvl > 0""")
-    con.execute("CREATE OR REPLACE TABLE revh (h BIGINT, child VARCHAR, t BIGINT, db HUGEINT, dn HUGEINT)")
     con.execute("CREATE OR REPLACE TABLE hl AS SELECT hd.h, segs, vf, vt, size, n_files FROM hc JOIN hd ON hd.k = hc.k AND hd.lvl = 0 WHERE len(segs) > 0")
     for lvl in range(0, top + 1):
         if lvl:
             con.execute(f"""CREATE OR REPLACE TABLE hl AS SELECT l.h, segs, vf, vt, size, n_files FROM hl
                 JOIN (SELECT parent, child, h FROM hlk WHERE lvl = {lvl}) AS l ON l.parent = hl.h AND l.child = hl.segs[{lvl}]
                 WHERE len(segs) > {lvl}""")
-        hit = f"SELECT h, segs[{lvl + 1}] AS child, vf, vt, size, n_files FROM hl"
-        con.execute(f"""INSERT INTO revh SELECT h, child, t, sum(db), sum(dn) FROM (
-                SELECT h, child, vf AS t, size AS db, n_files AS dn FROM ({hit})
-                UNION ALL SELECT h, child, vt AS t, -size, -n_files FROM ({hit}) WHERE vt <> {OPEN}
-            ) GROUP BY h, child, t""")
+        _rev_level(con, lvl)
         lap(f"level {lvl}", "hl")
-    con.execute("INSERT INTO rev SELECT k, dir, child, t, db, dn FROM revh JOIN hd USING (h)")
-    for t in ("hd", "hlk", "revh", "hl"):
-        con.execute(f"DROP TABLE IF EXISTS {t}")
+    con.execute("DROP TABLE hlk")
+
+
+def _rev_level(con, lvl: int) -> None:
+    """Level `lvl`'s rows (table `hl`: `h`, `segs`, …) into `rev`: per head and child, `+` at `vf` and `−` at `vt`."""
+    hit = f"SELECT h, segs[{lvl + 1}] AS child, vf, vt, size, n_files FROM hl"
+    con.execute(f"""INSERT INTO rev SELECT h, child, t, sum(db), sum(dn) FROM (
+            SELECT h, child, vf AS t, size AS db, n_files AS dn FROM ({hit})
+            UNION ALL SELECT h, child, vt AS t, -size, -n_files FROM ({hit}) WHERE vt <> {OPEN}
+        ) GROUP BY h, child, t""")
 
 
 def rollup_cells(con, roots: str, heads: str, K: int, into: str, closed: bool = False, label: str | None = None) -> None:
@@ -368,8 +381,10 @@ def rollup_cells(con, roots: str, heads: str, K: int, into: str, closed: bool = 
     the running Σ size, n_files of the roots at or under it, `+` at `vf` and `−` at `vt`, one cell per change; the K
     children with the largest peak bytes (ties by name) kept, the rest summed into the remainder (`kind` 2). Header
     (`kind` 0): `vf` = kept, `b` = `rows`, `o` = children holding roots. `closed`: the heads are closed upwards (a
-    head's parent directory is one), so each level's roots are a subset of the last's. `label`: log each part's seconds
-    and table sizes under it (where a heavy shard's ~25 min go)."""
+    head's parent directory is one), so each level's roots are a subset of the last's. The heads are numbered (`h`)
+    throughout, `(k, dir)` put back at the end. `label`: log each part's seconds and table sizes under it."""
+    import numpy as np
+
     clock = [monotonic()]
     laps: list[str] = []
 
@@ -379,64 +394,61 @@ def rollup_cells(con, roots: str, heads: str, K: int, into: str, closed: bool = 
             laps.append(f"{name} {monotonic() - clock[0]:.1f}s{n}")
         clock[0] = monotonic()
     con.execute(f"CREATE TABLE IF NOT EXISTS {into} (q VARCHAR, dir VARCHAR, kind TINYINT, child VARCHAR, vf BIGINT, b BIGINT, o BIGINT)")
-    con.execute("CREATE OR REPLACE TABLE rev (k VARCHAR, dir VARCHAR, child VARCHAR, t BIGINT, db HUGEINT, dn HUGEINT)")
-    top = con.execute(f"SELECT coalesce(max(lvl), -1) FROM {heads}").fetchone()[0]
-    con.execute(f"CREATE OR REPLACE TABLE hc AS SELECT k, string_split(path, '/') AS segs, vf, vt, size, n_files FROM {roots} SEMI JOIN (SELECT DISTINCT k FROM {heads}) USING (k)")
+    con.execute(f"CREATE OR REPLACE TABLE hd AS SELECT k, lvl, dir, rows, (row_number() OVER ())::BIGINT AS h FROM {heads}")
+    con.execute("CREATE OR REPLACE TABLE rev (h BIGINT, child VARCHAR, t BIGINT, db HUGEINT, dn HUGEINT)")
+    top = con.execute("SELECT coalesce(max(lvl), -1) FROM hd").fetchone()[0]
+    con.execute(f"CREATE OR REPLACE TABLE hc AS SELECT k, string_split(path, '/') AS segs, vf, vt, size, n_files FROM {roots} SEMI JOIN (SELECT DISTINCT k FROM hd) USING (k)")
     lap("hc", "hc")
     if closed:
-        _closed_levels(con, heads, top, lap)
-    for lvl in range(0, top + 1) if not closed else ():
-        con.execute(f"""CREATE OR REPLACE TABLE hl AS SELECT hc.* FROM hc SEMI JOIN (SELECT k, dir FROM {heads} WHERE lvl = {lvl}) AS h
-            ON hc.k = h.k AND array_to_string(hc.segs[1:{lvl}], '/') = h.dir AND len(hc.segs) > {lvl}""")
-        hit = f"SELECT k, array_to_string(segs[1:{lvl}], '/') AS dir, segs[{lvl + 1}] AS child, vf, vt, size, n_files FROM hl"
-        con.execute(f"""INSERT INTO rev SELECT k, dir, child, t, sum(db), sum(dn) FROM (
-                SELECT k, dir, child, vf AS t, size AS db, n_files AS dn FROM ({hit})
-                UNION ALL SELECT k, dir, child, vt AS t, -size, -n_files FROM ({hit}) WHERE vt <> {OPEN}
-            ) GROUP BY k, dir, child, t""")
+        _closed_levels(con, top, lap)
+    else:
+        for lvl in range(0, top + 1):
+            con.execute(f"""CREATE OR REPLACE TABLE hl AS SELECT d.h, hc.segs, vf, vt, size, n_files FROM hc JOIN (SELECT k, dir, h FROM hd WHERE lvl = {lvl}) AS d
+                ON hc.k = d.k AND array_to_string(hc.segs[1:{lvl}], '/') = d.dir AND len(hc.segs) > {lvl}""")
+            _rev_level(con, lvl)
     con.execute("DROP TABLE IF EXISTS hc; DROP TABLE IF EXISTS hl")
     lap(f"levels({top + 1})", "rev")
-    # each child's peak bytes: the max of its running Σ db over t (`_running`, a sorted pass, not a window)
-    import numpy as np
-
-    pk, pv = [], []
-    for p, _, (b,) in _running(con, "rev", "k, dir, child", ("db",), "rk"):
-        starts = np.flatnonzero(np.concatenate([[True], p[1:] != p[:-1]]))
-        pk.append(p[starts])
-        pv.append(np.maximum.reduceat(b, starts))
-    peaks = pa.table({"p": np.concatenate(pk) if pk else np.zeros(0, np.int64), "peak": np.concatenate(pv) if pv else np.zeros(0, np.int64)})
+    # each child's peak bytes: the max of its running Σ db over t (`_running`, a sorted pass, not a window); a child
+    # going on into the next batch gets a peak in each, maxed in SQL
+    hs, cs, pv = [], [], []
+    for b, starts, (y,) in _running(con, "rev", ("h", "child"), ("db",)):
+        hs.append(b.column(0).take(starts))
+        cs.append(b.column(1).take(starts))
+        pv.append(np.maximum.reduceat(y, starts))
+    peaks = pa.table({"h": pa.chunked_array(hs, pa.int64()), "child": pa.chunked_array([c.cast(pa.string()) for c in cs], pa.string()),
+                      "peak": np.concatenate(pv) if pv else np.zeros(0, np.int64)})
     con.register("rk_peaks", peaks)
-    con.execute(f"""CREATE OR REPLACE TABLE rkeep AS SELECT k, dir, child FROM (
-            SELECT k, dir, child, row_number() OVER (PARTITION BY k, dir ORDER BY peak DESC, child) AS r FROM (
-                SELECT k, dir, child, peak FROM (SELECT p, max(peak) AS peak FROM rk_peaks GROUP BY p) JOIN rk_p USING (p)))
+    con.execute(f"""CREATE OR REPLACE TABLE rkeep AS SELECT h, child FROM (
+            SELECT h, child, row_number() OVER (PARTITION BY h ORDER BY peak DESC, child) AS r FROM (
+                SELECT h, child, max(peak) AS peak FROM rk_peaks GROUP BY h, child))
         WHERE r <= {K}""")
     con.unregister("rk_peaks")
-    con.execute("DROP TABLE rk_p")
     lap("rkeep", "rkeep")
-    del peaks, pk, pv
+    del peaks, hs, cs, pv
     con.execute("""CREATE OR REPLACE TABLE rev2 AS
-            SELECT k, dir, 1::TINYINT AS kind, child, t, db, dn FROM rev SEMI JOIN rkeep USING (k, dir, child)
-            UNION ALL SELECT k, dir, 2::TINYINT, '', t, sum(db), sum(dn) FROM rev ANTI JOIN rkeep USING (k, dir, child) GROUP BY k, dir, t""")
+            SELECT h, 1::TINYINT AS kind, child, t, db, dn FROM rev SEMI JOIN rkeep USING (h, child)
+            UNION ALL SELECT h, 2::TINYINT, '', t, sum(db), sum(dn) FROM rev ANTI JOIN rkeep USING (h, child) GROUP BY h, t""")
     lap("rev2", "rev2")
     con.execute(f"""INSERT INTO {into}
-        SELECT h.k, h.dir, 0, '', (SELECT count(*) FROM rkeep AS r WHERE r.k = h.k AND r.dir = h.dir),
-            h.rows, (SELECT count(DISTINCT child) FROM rev AS e WHERE e.k = h.k AND e.dir = h.dir) FROM {heads} AS h""")
+        SELECT d.k, d.dir, 0, '', (SELECT count(*) FROM rkeep AS r WHERE r.h = d.h),
+            d.rows, (SELECT count(DISTINCT child) FROM rev AS e WHERE e.h = d.h) FROM hd AS d""")
     lap("header")
     # each cell's running Σ size, n_files over t: a sorted pass (`_running`) streamed through a parquet file, not windows
-    con.execute("""CREATE OR REPLACE TABLE rcell AS SELECT k, dir, kind, child, t, sum(db) AS db, sum(dn) AS dn FROM rev2
+    con.execute("""CREATE OR REPLACE TABLE rcell AS SELECT h, kind, child, t, sum(db) AS db, sum(dn) AS dn FROM rev2
         GROUP BY ALL HAVING sum(db) <> 0 OR sum(dn) <> 0""")
     lap("rcell", "rcell")
     tmp = Path(con.execute("SELECT current_setting('temp_directory')").fetchone()[0] or ".") / f"rcell-{id(con):x}.parquet"
     tmp.parent.mkdir(parents=True, exist_ok=True)
-    schema = pa.schema([("p", pa.int64()), ("t", pa.int64()), ("b", pa.int64()), ("o", pa.int64())])
+    schema = pa.schema([("h", pa.int64()), ("kind", pa.int8()), ("child", pa.string()), ("t", pa.int64()), ("b", pa.int64()), ("o", pa.int64())])
     with pq.ParquetWriter(tmp, schema) as w:
-        for p, t, (b, o) in _running(con, "rcell", "k, dir, kind, child", ("db", "dn"), "rc"):
-            w.write_table(pa.table({"p": p, "t": t.cast(pa.int64()), "b": b, "o": o}, schema=schema))
+        for b, _, (y, o) in _running(con, "rcell", ("h", "kind", "child"), ("db", "dn")):
+            w.write_table(pa.table({"h": b.column(0).cast(pa.int64()), "kind": b.column(1).cast(pa.int8()), "child": b.column(2).cast(pa.string()),
+                                    "t": b.column(3).cast(pa.int64()), "b": y, "o": o}, schema=schema))
     lap("running")
-    con.execute(f"INSERT INTO {into} SELECT k, dir, kind, child, t, b, o FROM read_parquet({q(str(tmp))}) JOIN rc_p USING (p)")
+    con.execute(f"INSERT INTO {into} SELECT d.k, d.dir, c.kind, c.child, c.t, c.b, c.o FROM read_parquet({q(str(tmp))}) AS c JOIN hd AS d USING (h)")
     lap("insert")
     tmp.unlink()
-    con.execute("DROP TABLE rcell; DROP TABLE rc_p")
-    for tb in ("rev", "rev2", "rkeep"):
+    for tb in ("rev", "rev2", "rkeep", "rcell", "hd"):
         con.execute(f"DROP TABLE IF EXISTS {tb}")
     if label is not None:
         err(f"rollup_cells {label}: {'; '.join(laps)}")
@@ -510,8 +522,10 @@ def anchors_meta(R: int, K: int, sets: dict, scans: list[str] | None = None, **e
 #: DuckDB threads per shard process when `build_tier_local` builds a tier's rollups shard by shard (`jobs` > 1).
 ANCHOR_THREADS = 4
 
-#: A shard input this big or bigger is built alone on every thread of an `anchor-shard` helper task, before the rest.
-ANCHOR_HEAVY_BYTES = int(os.environ.get("DT_ANCHOR_HEAVY_BYTES", 1 << 30))
+#: A shard input of this many rows or more (its footer's) is built alone on every thread of an `anchor-shard` helper
+#: task, before the rest. Rows, not bytes: a shard's work tracks its rows (gcs: ~300 MB shards of ~108M rows took 470–600s
+#: at 4 threads, ~500 MB ones of ~49M under 60s); gcs's three ~260M-row `end` shards are the ones over it.
+ANCHOR_HEAVY_ROWS = int(os.environ.get("DT_ANCHOR_HEAVY_ROWS", 200_000_000))
 
 
 def _sorted_cells(con, table: str, out: str) -> None:

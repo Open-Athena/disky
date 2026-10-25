@@ -20,7 +20,7 @@ from pathlib import Path
 
 import duckdb
 import pandas as pd
-from click import Choice, UsageError, argument, group, option
+from click import Choice, Context, File, UsageError, argument, group, option, pass_context
 
 from .identity import IDENTITIES_ENV, load_identities
 from .deploy import data_bucket, layer2_prefix as resolve_layer2, site_token, site_url as resolve_site_url
@@ -1341,16 +1341,64 @@ def index_dir_cmd(store: str, variant: str, date: str) -> None:
     print(d)
 
 
-@main.command("cost-labels")
-@option("-c", "--component", help="This job's `component` label (scan, listing, static-names, sweep, …)")
+@main.group("cost-labels", invoke_without_command=True)
+@option("-c", "--component", help="This job's `component` label (scan, listing, static-names, sweep, …); required unless a subcommand runs")
 @option("-j", "--json", "as_json", is_flag=True, help="A JSON object (default: `k=v,…`, for gcloud's `--labels` / `--update-labels`)")
-def cost_labels_cmd(component: str | None, as_json: bool) -> None:
-    """Print the cost-attribution labels: `$DISKY_LABELS` plus `component` (empty when unset).
+@pass_context
+def cost_labels_cmd(ctx: Context, component: str | None, as_json: bool) -> None:
+    """Print the cost-attribution labels: `$DISKY_LABELS` (`app`, `deployment` required) plus `component`.
 
-    For shell submitters and `gcloud … --update-labels` (spec specs/done/cost-labels.md)."""
+    For shell submitters and `gcloud … --update-labels` (specs/done/cost-labels.md, specs/done/cost-labels-required.md);
+    `audit` finds Batch spend that carries none."""
+    if ctx.invoked_subcommand is not None:
+        return
     from .cost_labels import render
 
     print(render(component, "json" if as_json else "gcloud"))
+
+
+@cost_labels_cmd.command("audit")
+@option("-d", "--days", type=int, default=7, show_default=True, help="The window: cost lines whose usage started in the last DAYS days")
+@option("-p", "--project", help="The project the BigQuery job runs (and bills) in (default: `$GCP_PROJECT` / ADC's)")
+@option("-t", "--table", "billing_table", required=True, help="The billing export table, `project.dataset.table` (`gcp_billing_export_v1_…`)")
+def cost_labels_audit(days: int, project: str | None, billing_table: str) -> None:
+    """Batch VMs no deployment owns: the window's Compute Engine cost lines with a `batch-job-id` label but no `deployment`.
+
+    Read-only BigQuery over the billing export. Prints `job_id  first_day  $net` per job (net = cost + credits) and a
+    total, and exits 1 if there are any; nothing, exit 0, when every Batch VM in the window is labelled."""
+    from .cost_labels import audit_lines, audit_sql, query_rows
+    from .gcp import gcp_project
+
+    lines = audit_lines(query_rows(audit_sql(billing_table, days), project or gcp_project()))
+    for line in lines:
+        print(line)
+    if lines:
+        err(f"cost-labels audit: {len(lines) - 1} Batch jobs in the last {days} days carry no `deployment` label")
+        raise SystemExit(1)
+
+
+@main.group("batch")
+def batch_group() -> None:
+    """Batch jobs from shell: submitted through the same labelled choke point as dt-cloud's own (`batch.submit_job`)."""
+
+
+@batch_group.command("submit")
+@option("-c", "--component", required=True, help="The job's `component` cost label (e.g. `race`, `analysis`, `access`)")
+@option("-L", "--region", help="Batch region (default: `$BATCH_REGION`, else us-central1)")
+@option("-p", "--project", help="GCP project (default: `$GCP_PROJECT` / ADC's)")
+@argument("job_id")
+@argument("spec_file", type=File("r"))
+def batch_submit(component: str, region: str | None, project: str | None, job_id: str, spec_file) -> None:
+    """Submit SPEC_FILE (a Batch job's JSON, `-` = stdin) as JOB_ID, labelled from `$DISKY_LABELS` + `-c` (and
+    `$SCAN_RUN_ID` / `$SCAN_ID` when set) on the job and its allocation policy, `$DISKY_LABELS` forwarded into its tasks'
+    env. Deployment scripts and ad-hoc jobs (races, analysis) submit through it, never gcloud's own submit: a spec
+    missing a required label is refused (`batch.submit_job`). Prints the job's name."""
+    from .batch import submit_job
+    from .cost_labels import label_batch_spec
+    from .gcp import REGION
+
+    spec = label_batch_spec(json.load(spec_file), component)
+    print(submit_job(spec, job_id, region or REGION, project))
 
 
 @main.command("labels")
@@ -2671,8 +2719,6 @@ def job_watch(interval: int, no_logs: bool, name: str | None) -> None:
     """Poll a Batch job to terminal state, then print its key log markers."""
     import time
     from datetime import datetime, timezone
-
-    from click import Context
 
     j = _resolve_job(name or "latest")
     short = j["name"].rsplit("/", 1)[-1]
