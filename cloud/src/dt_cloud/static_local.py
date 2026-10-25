@@ -355,10 +355,10 @@ def q_bounds(counts: list[tuple[str, int]], chunk_rows: int) -> list[str]:
     return bounds
 
 
-def spill_roots(con, table: str, out: Path) -> None:
-    """Table `table`'s roots (`ROOT_COLS`) → `out/grp=<g>/*.parquet` by `q` range (table `qg (lo, grp)`)."""
+def spill_roots(con, table: str, out: Path, bounds: str = "qg") -> None:
+    """Table `table`'s roots (`ROOT_COLS`) → `out/grp=<g>/*.parquet` by `q` range (table `bounds (lo, grp)`)."""
     out.parent.mkdir(parents=True, exist_ok=True)
-    con.execute(f"COPY ({sr.ranged(table, 'qg', 'grp')}) TO {q(str(out))} (FORMAT parquet, PARTITION_BY (grp), COMPRESSION zstd)")
+    con.execute(f"COPY ({sr.ranged(table, bounds, 'grp')}) TO {q(str(out))} (FORMAT parquet, PARTITION_BY (grp), COMPRESSION zstd)")
 
 
 def read_roots(files: list[Path]) -> str:
@@ -520,12 +520,13 @@ def measure_ranges(con, work: Path, kind: str, n: int, dirs_into: str, rup_into:
     meas.mkdir(parents=True, exist_ok=True)
     tasks = []
     spilled = spill_files(work, kind)
+    # the ranges dealt away need no spills here (a resumed fold fetches only its own share's: `Fanout.start`)
+    away = remote.groups(kind) if remote is not None else set()
     for g in range(n):
         files = spilled.get(g, [])
-        if files:
+        if files or g in away:
             tasks.append((g, [str(f) for f in files], str(out / f"g{g:06d}.parquet"), str(meas / f"dirs-g{g:06d}.parquet"),
                           str(meas / f"rup-g{g:06d}.parquet")))
-    away = remote.groups(kind) if remote is not None else set()
     local = [t for t in tasks if t[0] not in away]
     size = {t[0]: sum(Path(f).stat().st_size for f in t[1]) for t in local}
     by_size = sorted(local, key=lambda t: (-size[t[0]], t[0]))
