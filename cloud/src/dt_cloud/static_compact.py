@@ -1327,8 +1327,8 @@ def same_bucket(a: str, b: str) -> tuple[str, str, str] | None:
     return (sa[0], sa[1], sb[1]) if sa and sb and sa[0] == sb[0] else None
 
 
-def seed_checkpoint(src_root: str, dst_root: str, gen: str, new_gen: str, runs: list[dict], through: str, *, workers: int = 32,
-                    log: Callable[[str], None] = err) -> dict:
+def seed_checkpoint(src_root: str, dst_root: str, gen: str, new_gen: str, runs: list[dict], through: str, *, units: bool = True,
+                    workers: int = 32, log: Callable[[str], None] = err) -> dict:
     """Another run's checkpoint of the same fold (`src_root`'s), its saved steps up to and including `through`
     (`STEPS`' order), copied under `dst_root` and claimed for this code (`code.json`: the steps after `through` run on
     it): a fold resumed there on new code, the source never written (a run still holding it goes on). The copied steps
@@ -1336,8 +1336,9 @@ def seed_checkpoint(src_root: str, dst_root: str, gen: str, new_gen: str, runs: 
     drill's measurement at any pool width, fan-out, staging). So are the fan-outs' finished units of the step after
     `through` (`helper_units`): the drill fold's units (each with the spill files its `done.json` lists) when its plan is
     copied but not the spills, the drill measurement's ranges when the drill isn't copied, the anchors' shard tasks when
-    the anchors aren't; the resumed fold deals only the rest. Same bucket: copied server side. Returns the steps, files
-    and units copied."""
+    the anchors aren't; the resumed fold deals only the rest. `units` false: none of them (a race timing that step's
+    helpers rebuilds them all; units are copied whatever code made them). Same bucket: copied server side. Returns the
+    steps, files and units copied."""
     from concurrent.futures import ThreadPoolExecutor
 
     from .blobstore import Store, store_url
@@ -1353,16 +1354,17 @@ def seed_checkpoint(src_root: str, dst_root: str, gen: str, new_gen: str, runs: 
     src = Store(src_root)
     steps = [st for st in STEPS[:STEPS.index(through) + 1] if src.exists(f"{prefix}/{st}/done.json")]
     keys = [k for st in steps for k in src.keys(f"{prefix}/{st}/")]
-    units = []
+    found: list[list[str]] = []
     if "fold/fan/plan" in steps and "fold/spilled" not in steps:
         # a unit's chunk numbers are its plan's: only with the plan copied
-        units += helper_units(src, f"{prefix}/fold/{FOLDED}/", lambda d: [f"{prefix}/fold/{SPILLED_FILES}/{r}" for r in d.get("files", [])])
+        found += helper_units(src, f"{prefix}/fold/{FOLDED}/", lambda d: [f"{prefix}/fold/{SPILLED_FILES}/{r}" for r in d.get("files", [])])
     if "fold/spilled" in steps and "drill" not in steps:
-        units += helper_units(src, f"{prefix}/fold/{MEASURED}/")
+        found += helper_units(src, f"{prefix}/fold/{MEASURED}/")
     if "drill" in steps and "anchors" not in steps:
-        units += helper_units(src, f"{prefix}/{ANCHORED}/")
+        found += helper_units(src, f"{prefix}/{ANCHORED}/")
         keys += src.keys(f"{prefix}/{ANCHORS_IN}/")
-    keys += [k for u in units for k in u]
+    chosen = found if units else []
+    keys += [k for u in chosen for k in u]
     same = same_bucket(src_root, dst_root)
     if same is not None:
         base, src_in, dst_in = same
@@ -1381,9 +1383,9 @@ def seed_checkpoint(src_root: str, dst_root: str, gen: str, new_gen: str, runs: 
     with ThreadPoolExecutor(workers) as ex:
         list(ex.map(copy, keys))
     Store(dst_root).write_text(f"{prefix}/code.json", json.dumps({"code": code_version()}) + "\n")
-    log(f"seed checkpoint: {len(keys)} files of steps {', '.join(steps)} (+ {len(units)} finished helper units) from {src_root} to "
+    log(f"seed checkpoint: {len(keys)} files of steps {', '.join(steps)} (+ {len(chosen)} of {len(found)} finished helper units) from {src_root} to "
         f"{dst_root}/{prefix}/")
-    return {"steps": steps, "files": len(keys), "units": len(units)}
+    return {"steps": steps, "files": len(keys), "units": len(chosen)}
 
 
 def helper_units(src, root: str, listed: Callable[[dict], list[str]] | None = None) -> list[list[str]]:

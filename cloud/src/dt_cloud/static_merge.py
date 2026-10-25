@@ -639,6 +639,7 @@ def probe_cmd(
 @option("-L", "--fold-tasks", default=1, type=IntRange(min=1), help="The drill fold over this many tasks (`static_fanout.FoldFanout`; needs -K and the profile in $STATIC_NAMES_PROFILE)")
 @option("-m", "--mount", required=True, help="Read-only local mount of the data bucket")
 @option("-M", "--mem", default="100GB", help="DuckDB memory limit")
+@option("-N", "--no-units", is_flag=True, help="With -R: seed the steps only, not the fan-outs' finished units of the step after -t, so its helpers rebuild them (a race timing them)")
 @option("-o", "--out", required=True, help="New local output directory outside the mount: the folded generation")
 @option("-p", "--threads", default=16, type=int, help="DuckDB threads")
 @option("-R", "--resume-from", help="Another run's checkpoint root of this same fold (e.g. the running compaction's scratch bucket): its steps through -t seeded into -K (`seed_checkpoint`; the source never written)")
@@ -647,8 +648,8 @@ def probe_cmd(
 @option("-T", "--tmp", default="/stage/tmp/compact-probe", help="Local work dir")
 @option("-u", "--report", help="Also write the JSON report to this URL (`gs://<scratch>/…/<name>.json`: the VM's disks go with it)")
 @option("-U", "--upload", help="Upload the folded generation to this URL (`<url>/gen/`, then `<url>/probe.json`, last): what `compact --prebuilt` publishes")
-def compact_probe_cmd(anchor_tasks, bucket, chunk_rows, measure_tasks, gen, jobs, ck_root, fold_tasks, mount, mem, out, threads, resume_from, stage, through, tmp,
-                      report, upload) -> None:
+def compact_probe_cmd(anchor_tasks, bucket, chunk_rows, measure_tasks, gen, jobs, ck_root, fold_tasks, mount, mem, no_units, out, threads, resume_from, stage,
+                      through, tmp, report, upload) -> None:
     """Fold the generation into its next one locally (`static_compact.fold_gen`, the compaction's own fold), read in place
     from the mount: no upload, no successor / pointer / manifests in the bucket, no lease, no checkpoint, no pruning; only
     OUT and TMP are written. Logs the fold's stage lines; prints a JSON of the summary (per-part seconds and peaks) and
@@ -690,7 +691,7 @@ def compact_probe_cmd(anchor_tasks, bucket, chunk_rows, measure_tasks, gen, jobs
     hook = PhaseHook(rec, "fold", note_s=ar.NOTE_S)
     try:
         if resume_from:
-            seed_checkpoint(resume_from, ck_root, gen, new_gen, runs, through)
+            seed_checkpoint(resume_from, ck_root, gen, new_gen, runs, through, units=not no_units)
         ck = compact_checkpoint(ck_root, gen, new_gen, runs, work=work / "ckpt") if ck_root else None
         hook.begin()
         try:

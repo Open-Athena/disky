@@ -1179,14 +1179,17 @@ def test_a_seed_through_the_spills_carries_the_finished_measured_ranges(tmp_path
                 "anchors-in/sx/s00000.parquet"):
         src.write_text(f"{pre}/{rel}", rel)
 
-    def seeded(through: str, dst: str) -> list[str]:
-        sk.seed_checkpoint(str(tmp_path / "src"), str(tmp_path / dst), "g", "g.c001", runs, through, log=lambda m: None)
+    def seeded(through: str, dst: str, units: bool = True) -> list[str]:
+        sk.seed_checkpoint(str(tmp_path / "src"), str(tmp_path / dst), "g", "g.c001", runs, through, units=units, log=lambda m: None)
         return sorted(k[len(pre) + 1:] for k in Store(str(tmp_path / dst)).keys(f"{pre}/"))
 
     assert seeded("fold/spilled", "a") == ["code.json", "fold/measured/long/g000001/done.json", "fold/measured/long/g000001/sorted.parquet",
                                            "fold/spilled/done.json", "fold/spilled/long/x.parquet"]
     assert seeded("drill", "b") == ["anchored/end/s00000/cells.parquet", "anchored/end/s00000/done.json", "anchors-in/sx/s00000.parquet",
                                     "code.json", "drill/d.parquet", "drill/done.json", "fold/spilled/done.json", "fold/spilled/long/x.parquet"]
+    # `units` false (`compact-probe -N`): the steps (and the anchors' uploaded inputs) only; the helpers rebuild every unit
+    assert seeded("drill", "c", units=False) == ["anchors-in/sx/s00000.parquet", "code.json", "drill/d.parquet", "drill/done.json",
+                                                 "fold/spilled/done.json", "fold/spilled/long/x.parquet"]
 
 
 def test_a_compactions_record_phases_its_fold_drill_and_anchors(world, tmp_path, monkeypatch):
