@@ -126,6 +126,8 @@ class Helpers:
         # the helper jobs before the current wave's (`FoldFanout`'s waves each get `retries` re-deals of their own)
         self.base = 0
         self.thread: threading.Thread | None = None
+        # a presubmitted job's plan key, until the first `_submit` writes it
+        self.early: str | None = None
         self.error: BaseException | None = None
 
     def unit_key(self, kind: str, i: int) -> str:
@@ -155,24 +157,52 @@ class Helpers:
         self.away = set(weights) - mine
         return mine, [[[k, i] for k, i in share if (k, i) not in done] for share in shares[1:]]
 
-    def _submit(self, shares: list[list]) -> None:
-        if not shares:
-            return
-        self.attempt += 1
-        plan = f"{self.root}/plan-{self.attempt}.json"
+    def _write_plan(self, plan: str, shares: list[list]) -> None:
         self.ck.store.write_text(self.ck.key(plan), json.dumps({"tasks": shares, "code": self.code, **self.params}) + "\n")
+
+    def _run(self, plan: str, n: int) -> None:
         url = self.ck.store.uri(self.ck.prefix)
-        self.log(f"{self.label}: {plan}: {len(shares)} helper tasks submitted")
 
         def run() -> None:
             try:
-                self.submit(url, plan, len(shares), self.code, self.scan)
+                self.submit(url, plan, n, self.code, self.scan)
             except BaseException as e:  # noqa: BLE001 — the waiting side reports it, with the units it left
                 self.error = e
 
         self.error = None
         self.thread = threading.Thread(target=run, name=f"{self.root}-helpers-{self.attempt}", daemon=True)
         self.thread.start()
+
+    def presubmit(self) -> None:
+        """Submit the first helper job now, before its plan exists (`plan-1.json`, a stale one from an earlier run of
+        this checkpoint deleted first), with a task per helper share: its VMs boot while this VM still works (gcs's
+        anchors: ~2 min of boot beside `anchors/names`' ~3 min). Its tasks wait for the plan, which the first
+        `_submit` writes instead of submitting; one past the plan's shares ends at once (`abandon`: an empty plan)."""
+        self.attempt += 1
+        self.early = f"{self.root}/plan-{self.attempt}.json"
+        self.ck.store.delete([self.ck.key(self.early)])
+        self.log(f"{self.label}: {self.early}: {self.tasks - 1} helper tasks submitted ahead of their plan")
+        self._run(self.early, self.tasks - 1)
+
+    def abandon(self) -> None:
+        """A presubmitted job's plan never coming: an empty one, so its tasks end instead of waiting."""
+        if self.early is not None:
+            plan, self.early = self.early, None
+            self._write_plan(plan, [])
+
+    def _submit(self, shares: list[list]) -> None:
+        if self.early is not None:
+            plan, self.early = self.early, None
+            self._write_plan(plan, shares)
+            self.log(f"{self.label}: {plan}: {len(shares)} shares for the presubmitted helper tasks")
+            return
+        if not shares:
+            return
+        self.attempt += 1
+        plan = f"{self.root}/plan-{self.attempt}.json"
+        self._write_plan(plan, shares)
+        self.log(f"{self.label}: {plan}: {len(shares)} helper tasks submitted")
+        self._run(plan, len(shares))
 
     def wait(self, units: list[tuple[str, int]], what: str, ids: Callable[[list[tuple[str, int]]], list],
              fetch: Callable[[list[tuple[str, int]], dict[str, int]], None] | None = None) -> None:
@@ -397,7 +427,7 @@ class AnchorFanout(Helpers):
 
         from . import heartbeat as hb
         from .hex_runs import rule_json
-        from .static_anchors import ANCHOR_HEAVY_ROWS
+        from .static_anchors import heavy_rows
 
         self.params = {"R": R, "K": K, **rule_json(rule)}
         hb.set_stage("anchors/fan-out plan")
@@ -407,7 +437,9 @@ class AnchorFanout(Helpers):
         files = {(kind, i): f for kind, i, f in tasks}
         # a heavy shard to a helper, which builds it alone on all its threads (`anchor-shard`); this VM's pool would give it
         # `ANCHOR_THREADS` (gcs's deal race: a 261M-row `end` shard in share 0, 1170s at 4 threads)
-        mine, todo = self.deal(weights, {u for u, w in weights.items() if w >= ANCHOR_HEAVY_ROWS})
+        # the bar over every task (the plan carries it: each helper judges its own by the same one)
+        heavy = self.params["heavy_rows"] = heavy_rows(list(weights.values()))
+        mine, todo = self.deal(weights, {u for u, w in weights.items() if w >= heavy})
         need = {anchor_input_key(k, i): files[(k, i)] for share in todo for k, i in share}
         have = self.ck.store.listing(self.ck.key(ANCHORS_IN))
         put = {key: f for key, f in need.items() if have.get(self.ck.key(key)) != os.path.getsize(f)}

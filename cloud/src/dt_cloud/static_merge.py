@@ -23,7 +23,7 @@ from collections.abc import Callable
 from datetime import datetime, timezone
 from faulthandler import enable
 from pathlib import Path
-from time import monotonic
+from time import monotonic, sleep
 
 from click import Choice, IntRange, UsageError, argument, group, option
 
@@ -1104,6 +1104,11 @@ def _timed_shard_task(*args) -> tuple[dict, float]:
     return doc, round(monotonic() - t0, 1)
 
 
+
+#: How long an `anchor-shard` task submitted ahead of its plan waits for it, and the longest pause between looks.
+PLAN_WAIT_S = 1800
+PLAN_POLL_S = 10
+
 @cli.command("anchor-shard")
 @option("-c", "--checkpoint", required=True, help="The compaction's checkpoint (its `anchors-in/` uploaded), as a URL")
 @option("-i", "--index", type=int, help="This task's share of the plan (default: $BATCH_TASK_INDEX)")
@@ -1117,7 +1122,7 @@ def _timed_shard_task(*args) -> tuple[dict, float]:
 def anchor_shard_cmd(checkpoint, index, mem, threads, plan, tmp, code, workers) -> None:
     """A compaction's base anchors helper (`static_fanout.AnchorFanout`, specs/static-anchors-fanout.md): task INDEX's
     share of the plan's `(kind, shard)` rollup tasks, each one's input shard fetched from `anchors-in/`, its rollups
-    built (`static_anchors._shard_task`: a shard of `ANCHOR_HEAVY_ROWS` or more alone first, on all `-p` threads and
+    built (`static_anchors._shard_task`: a shard of the plan's `heavy_rows` or more alone first, on all `-p` threads and
     `-M`; the rest biggest first, each on threads by its rows out of the `-p` free, `-M` shared in proportion) and
     uploaded as `anchored/<kind>/s<i>/cells.parquet`, then its `done.json` (the task's doc, seconds, rows). A task whose
     `done.json` is there is skipped (a retry resumes); then `anchored/tasks/<plan>-<index>.json`. Refuses to run other
@@ -1129,7 +1134,7 @@ def anchor_shard_cmd(checkpoint, index, mem, threads, plan, tmp, code, workers) 
 
     from .checkpoint import Checkpoint, code_version
     from .hex_runs import rule_from_json
-    from .static_anchors import ANCHOR_HEAVY_ROWS, ANCHOR_THREADS
+    from .static_anchors import ANCHOR_THREADS
     from .static_append import _Inline
     from .static_fanout import ANCHORED, anchor_input_key, anchor_task_key
     from .static_names import _pool_init, mem_bytes
@@ -1143,7 +1148,17 @@ def anchor_shard_cmd(checkpoint, index, mem, threads, plan, tmp, code, workers) 
     work = Path(tmp) / f"{name}-{i}"
     shutil.rmtree(work, ignore_errors=True)
     ck = Checkpoint(root, prefix, work=work / "ckpt")
+    # a job submitted ahead of its plan (`Helpers.presubmit`): wait for it
+    deadline, pause = monotonic() + PLAN_WAIT_S, 0.5
+    while not ck.store.exists(ck.key(plan)):
+        if monotonic() > deadline:
+            raise SystemExit(f"anchor-shard {plan} #{i}: no plan after {PLAN_WAIT_S}s")
+        sleep(pause)
+        pause = min(2 * pause, PLAN_POLL_S)
     doc = ck.store.read_json(ck.key(plan))
+    if i >= len(doc["tasks"]):
+        err(f"anchor-shard {plan} #{i}: nothing dealt to this task ({len(doc['tasks'])} shares)")
+        return
     rule = rule_from_json(doc.get("hex_runs"))
     share = [(k, s) for k, s in doc["tasks"][i]]
     todo = [(k, s) for k, s in share if not ck.store.exists(ck.key(f"{anchor_task_key(k, s)}/done.json"))]
@@ -1179,7 +1194,7 @@ def anchor_shard_cmd(checkpoint, index, mem, threads, plan, tmp, code, workers) 
         put(k, s, cells, *_timed_shard_task(k, [str(inputs[anchor_input_key(k, s)])], doc["R"], doc["K"], rule, str(cells), threads, mem,
                                             str(work / "tmp" / f"{k}-{s:05d}")))
 
-    heavy = [t for t in todo if size(t) >= ANCHOR_HEAVY_ROWS]
+    heavy = [t for t in todo if size(t) >= doc["heavy_rows"]]
     for k, s in heavy:
         alone(k, s, "heavy")
     rest = todo[len(heavy):]

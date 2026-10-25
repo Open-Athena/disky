@@ -522,10 +522,22 @@ def anchors_meta(R: int, K: int, sets: dict, scans: list[str] | None = None, **e
 #: DuckDB threads per shard process when `build_tier_local` builds a tier's rollups shard by shard (`jobs` > 1).
 ANCHOR_THREADS = 4
 
-#: A shard input of this many rows or more (its footer's) is built alone on every thread of an `anchor-shard` helper
-#: task, before the rest. Rows, not bytes: a shard's work tracks its rows (gcs: ~300 MB shards of ~108M rows took 470–600s
-#: at 4 threads, ~500 MB ones of ~49M under 60s); gcs's three ~260M-row `end` shards are the ones over it.
-ANCHOR_HEAVY_ROWS = int(os.environ.get("DT_ANCHOR_HEAVY_ROWS", 200_000_000))
+#: A shard input of `ANCHOR_HEAVY_X` × the median shard's rows or more (footers'; at least `ANCHOR_HEAVY_MIN_ROWS`) is
+#: heavy: dealt to a helper, which builds it alone on all its threads before the rest. Rows, not bytes: a shard's work
+#: tracks its rows (gcs: ~300 MB shards of ~108M rows took 470–600s at 4 threads, ~500 MB ones of ~49M under 60s);
+#: relative to the median, not a constant tuned to one deployment (gcs: 4 × 49M picks its three ~260M-row `end` shards,
+#: its next biggest 121M).
+ANCHOR_HEAVY_X = float(os.environ.get("DT_ANCHOR_HEAVY_X", 4))
+ANCHOR_HEAVY_MIN_ROWS = 1 << 24
+
+
+def heavy_rows(rows: list[int]) -> int:
+    """The heavy bar over shard tasks of `rows` (each input's footer rows): `ANCHOR_HEAVY_X` × their median, at least
+    `ANCHOR_HEAVY_MIN_ROWS` (a corpus of tiny shards builds none alone)."""
+    if not rows:
+        return ANCHOR_HEAVY_MIN_ROWS
+    mid = sorted(rows)[len(rows) // 2]
+    return max(ANCHOR_HEAVY_MIN_ROWS, round(ANCHOR_HEAVY_X * mid))
 
 
 def _sorted_cells(con, table: str, out: str) -> None:
