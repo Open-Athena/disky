@@ -697,6 +697,15 @@ def test_deal_balances_ranges_heaviest_first_to_the_least_loaded_task():
     assert deal({"a": 1}, 3) == [["a"], [], []]
 
 
+def test_deal_keeps_away_keys_off_task_0_while_there_are_others():
+    from dt_cloud.static_merge import deal
+
+    weights = {"a": 10, "b": 9, "c": 5, "d": 4, "e": 1}
+    assert deal(weights, 3, {"a"}) == [["b", "e"], ["a"], ["c", "d"]]
+    assert deal(weights, 3, {"a", "b"}) == [["c", "d", "e"], ["a"], ["b"]]
+    assert deal({"a": 1}, 1, {"a"}) == [["a"]]
+
+
 def _fanned_fold(world, tmp_path, submit, retries: int = 2, root: str = "scratch", out: str = "out", log=lambda m: None, write_submit=None):
     """C's fold with its drill measurement over 3 tasks (`static_fanout.Fanout`, logging to `log`), `submit` running the
     helper jobs (`write_submit`: the drill write's, `WriteFanout`); its checkpoint under `tmp_path / root`, the generation

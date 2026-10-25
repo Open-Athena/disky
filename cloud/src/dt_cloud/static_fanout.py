@@ -142,12 +142,13 @@ class Helpers:
     def done_in(self, listing: dict[str, int], units) -> set[tuple[str, int]]:
         return {u for u in units if self.ck.key(f"{self.unit_key(*u)}/done.json") in listing}
 
-    def deal(self, weights: dict[tuple[str, int], int]) -> tuple[set[tuple[str, int]], list[list[list]]]:
-        """`weights`' units dealt over the shares (`static_merge.deal`): share 0 (kept), and the other shares' units not
-        done already (an earlier attempt's helpers'), as plan entries; `away` = every unit not in share 0."""
+    def deal(self, weights: dict[tuple[str, int], int], away: set[tuple[str, int]] = frozenset()) -> tuple[set[tuple[str, int]], list[list[list]]]:
+        """`weights`' units dealt over the shares (`static_merge.deal`; a unit of `away` never to share 0): share 0
+        (kept), and the other shares' units not done already (an earlier attempt's helpers'), as plan entries; `away` =
+        every unit not in share 0."""
         from .static_merge import deal
 
-        shares = deal(weights, self.tasks)
+        shares = deal(weights, self.tasks, away)
         done = self.done_in(self.listed(), weights)
         # share 0's units already in the checkpoint (a seeded or resumed run's) are fetched, not built again
         mine = set(shares[0]) - done
@@ -396,6 +397,7 @@ class AnchorFanout(Helpers):
 
         from . import heartbeat as hb
         from .hex_runs import rule_json
+        from .static_anchors import ANCHOR_HEAVY_ROWS
 
         self.params = {"R": R, "K": K, **rule_json(rule)}
         hb.set_stage("anchors/fan-out plan")
@@ -403,7 +405,9 @@ class AnchorFanout(Helpers):
         # shards under the median: tasks of 245–874s)
         weights = {(kind, i): pq.ParquetFile(f).metadata.num_rows for kind, i, f in tasks}
         files = {(kind, i): f for kind, i, f in tasks}
-        mine, todo = self.deal(weights)
+        # a heavy shard to a helper, which builds it alone on all its threads (`anchor-shard`); this VM's pool would give it
+        # `ANCHOR_THREADS` (gcs's deal race: a 261M-row `end` shard in share 0, 1170s at 4 threads)
+        mine, todo = self.deal(weights, {u for u, w in weights.items() if w >= ANCHOR_HEAVY_ROWS})
         need = {anchor_input_key(k, i): files[(k, i)] for share in todo for k, i in share}
         have = self.ck.store.listing(self.ck.key(ANCHORS_IN))
         put = {key: f for key, f in need.items() if have.get(self.ck.key(key)) != os.path.getsize(f)}

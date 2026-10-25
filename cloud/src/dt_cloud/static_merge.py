@@ -912,15 +912,18 @@ def _fetch_spills(ck, spills: Path, by: dict[tuple[str, int], list[str]], ranges
     return rels
 
 
-def deal(weights: dict, n: int) -> list[list]:
+def deal(weights: dict, n: int, away: set | frozenset = frozenset()) -> list[list]:
     """`weights`' keys dealt to `n` tasks, the heaviest first, each to the least-loaded task so far (ties: the lower
-    task, then the lower key): a few heavy ranges don't serialize one task."""
+    task, then the lower key): a few heavy ranges don't serialize one task. A key of `away` never goes to task 0 (a
+    fan-out's own share, which may not build it as its helpers do) while there are others."""
     import heapq
 
     tasks: list[list] = [[] for _ in range(n)]
     heap = [(0, i) for i in range(n)]
     for key in sorted(weights, key=lambda k: (-weights[k], k)):
         load, i = heapq.heappop(heap)
+        if i == 0 and key in away and heap:
+            load, i = heapq.heapreplace(heap, (load, i))
         tasks[i].append(key)
         heapq.heappush(heap, (load + weights[key], i))
     return tasks
