@@ -117,7 +117,7 @@ options:
   # after each scan, the per-scan files the interval store + static index hold (specs/lean-scans.md §2) and the raw
   # listing shards (`layer1`, once the store's `generation` matches them), retired for real since the hand-run retires
   # of 2026-10-18/19; the interval-store append writes each scan's verify marker (a row-for-row check), and a scan
-  # without one is verified in the task first; dvx's 7-day soft delete is the undo
+  # without one is verified in the task first; there is no undo (dvx's soft delete is off since 2026-10-25: deletes are final, TTL'd prefixes hold what must stay recoverable)
   # `cache`: the scan's `dir-cache/` (path-index's rollup cache; only a re-run of that scan reads it) goes too
   retire: {keep: 2, execute: true, layer1: true, cache: true, store: gs://oa-gcs-usage-dvx, static_gen: 2026-10-08c,
            static_store: gs://oa-gcs-usage-dvx}
