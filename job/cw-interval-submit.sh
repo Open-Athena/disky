@@ -69,7 +69,7 @@ print(json.dumps({
             "maxRunDuration": "21600s",
             "environment": {
                 "variables": {"R2_BUCKET": os.environ["R2_BUCKET"], "AWS_DEFAULT_REGION": "auto", "AWS_EC2_METADATA_DISABLED": "true",
-                              "DISKY_LABELS": "app=disky,deployment=cw-s3"},
+                              "DISKY_LABELS": "app=disky,deployment=cw"},
                 "secretVariables": {
                     "R2_ENDPOINT": f"projects/{P}/secrets/cw-s3-r2-endpoint/versions/latest",
                     "R2_ACCESS_KEY_ID": f"projects/{P}/secrets/cw-s3-isolated-r2-access-key-id/versions/latest",
@@ -93,6 +93,6 @@ EOF
 )
 
 if [ -n "${DRY:-}" ]; then echo "$body"; exit 0; fi
-gcloud batch jobs submit "$JOB_ID" --project "$PROJECT" --location "$REGION" --config - <<<"$body" >/dev/null
+DISKY_LABELS=${DISKY_LABELS:-app=disky,deployment=cw} dt-cloud batch submit -c interval-store -p "$PROJECT" -L "$REGION" "$JOB_ID" - <<<"$body" >/dev/null
 echo "submitted $JOB_ID ($CMD $GEN on $MACHINE)"
 echo "  gcloud batch jobs describe $JOB_ID --project $PROJECT --location $REGION --format='value(status.state)'"

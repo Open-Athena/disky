@@ -84,6 +84,6 @@ EOF
 
 if [ -n "${DRY:-}" ]; then echo "$body"; exit 0; fi
 echo "$body" > "tmp/$JOB_ID.json" 2>/dev/null || true
-gcloud batch jobs submit "$JOB_ID" --project "$PROJECT" --location "$REGION" --config - <<<"$body" >/dev/null
+DISKY_LABELS=${DISKY_LABELS:-app=disky,deployment=cw} dt-cloud batch submit -c publish -p "$PROJECT" -L "$REGION" "$JOB_ID" - <<<"$body" >/dev/null
 echo "submitted $JOB_ID (${#SCANS[@]} scans, parallelism $PARALLELISM)"
 echo "  gcloud batch jobs describe $JOB_ID --project $PROJECT --location $REGION --format='value(status.state)'"

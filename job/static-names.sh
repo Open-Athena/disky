@@ -169,7 +169,7 @@ PYTHONPATH=/stage/src python3 -u -m dt_cloud.${MODULE:-static_names} $KIND $MOUN
 }
 EOF
   if [ -n "${DRY:-}" ]; then cat "$spec"; rm -f "$spec"; exit 0; fi
-  gcloud batch jobs submit "$JOB_ID" --project "$PROJECT" --location "$REGION" --config "$spec" >&2
+  DISKY_LABELS=${DISKY_LABELS:-app=disky,deployment=cw} dt-cloud batch submit -c static-names -p "$PROJECT" -L "$REGION" "$JOB_ID" "$spec" >&2
   rm -f "$spec"
   echo "submitted $JOB_ID (src $SRC, $TASKS tasks on $MACHINE $MODEL)" >&2
   wait_job "$JOB_ID"

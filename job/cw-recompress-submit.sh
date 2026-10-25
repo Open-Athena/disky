@@ -121,6 +121,6 @@ EOF
 )
 if [ -n "${DRY:-}" ]; then echo "$body"; exit 0; fi
 spec=$(mktemp); echo "$body" > "$spec"
-gcloud batch jobs submit "$JOB_ID" --project "$PROJECT" --location "$REGION" --config "$spec" >&2
+DISKY_LABELS=${DISKY_LABELS:-app=disky,deployment=cw} dt-cloud batch submit -c recompress -p "$PROJECT" -L "$REGION" "$JOB_ID" "$spec" >&2
 rm -f "$spec"
 echo "$JOB_ID"

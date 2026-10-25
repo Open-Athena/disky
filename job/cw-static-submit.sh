@@ -56,6 +56,6 @@ EOF
 )
 
 if [ -n "${DRY:-}" ]; then echo "$body"; exit 0; fi
-gcloud batch jobs submit "$JOB_ID" --project "$PROJECT" --location "$REGION" --config - <<<"$body" >/dev/null
+DISKY_LABELS=${DISKY_LABELS:-app=disky,deployment=cw} dt-cloud batch submit -c static-names -p "$PROJECT" -L "$REGION" "$JOB_ID" - <<<"$body" >/dev/null
 echo "submitted $JOB_ID (static-names runs add -c $SCAN${NO_MERGE:+ -M} on $MACHINE)"
 echo "  gcloud batch jobs describe $JOB_ID --project $PROJECT --location $REGION --format='value(status.state)'"

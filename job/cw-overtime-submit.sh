@@ -83,6 +83,6 @@ cat > "$spec" <<EOF
 EOF
 
 if [ -n "${DRY:-}" ]; then cat "$spec"; rm -f "$spec"; exit 0; fi
-gcloud batch jobs submit "$JOB_ID" --project "$PROJECT" --location "$REGION" --config "$spec" >&2
+DISKY_LABELS=${DISKY_LABELS:-app=disky,deployment=cw} dt-cloud batch submit -c over-time -p "$PROJECT" -L "$REGION" "$JOB_ID" "$spec" >&2
 rm -f "$spec"
 echo "$JOB_ID"
