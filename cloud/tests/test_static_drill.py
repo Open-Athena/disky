@@ -1023,3 +1023,16 @@ def test_the_build_inputs_checkpoint_round_trips(world, tmp_path):
     assert other.execute("SELECT * FROM pnew ORDER BY ALL").fetchall() == [(2, "b1/x"), (3, "b2/zoo/zebra9.txt")]
     got = other.execute("SELECT * FROM nmh").to_arrow_table()
     assert (got.schema, got.to_pylist()) == (history.schema, history.to_pylist())
+
+
+def test_every_file_a_run_drill_writes_is_served_to_r2_but_its_dcounts():
+    """`tier_files` (what a run's `drill/` holds, `fresh` and `digests` marked) against `static_names.R2_SERVED` (what
+    `r2-copy` sends and `r2-verify` checks): only the newly-heavy sums' state stays GCS-only. gcs 2026-10-25: a new
+    `<kind>-fresh.parquet` missing from R2 cut every later run off the Worker's drilldown, and the check passed."""
+    from dt_cloud.static_drill import DIGESTS_DELTA, FRESH_ROWS, tier_files
+    from dt_cloud.static_names import R2_SERVED
+
+    meta = {"fresh": FRESH_ROWS, "digests": DIGESTS_DELTA,
+            **{f"{k}_{s}": {"files": 1} for k in ("long", "short") for s in ("roots", "rollups")}}
+    assert [f for f in tier_files(meta) if not any(f"drill/{f}".startswith(p) for p in R2_SERVED)] == [
+        "state/dcount-long.parquet", "state/dcount-short.parquet"]
