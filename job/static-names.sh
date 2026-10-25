@@ -190,7 +190,7 @@ PY
 }
 EOF
   if [ -n "${DRY:-}" ]; then cat "$spec"; rm -f "$spec"; exit 0; fi
-  gcloud batch jobs submit "$JOB_ID" --project "$PROJECT" --location "$REGION" --config "$spec" >&2
+  dt-cloud batch submit -c static-names -p "$PROJECT" -L "$REGION" "$JOB_ID" "$spec" >&2  # refuses a spec without the cost labels
   rm -f "$spec"
   echo "submitted $JOB_ID (src $SRC, $TASKS tasks on $MACHINE $MODEL)" >&2
   wait_job "$JOB_ID"

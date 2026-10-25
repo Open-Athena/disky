@@ -215,6 +215,6 @@ fi
 
 # DRY=1: print the job spec (e.g. for the Cloud Scheduler daily body) instead of submitting
 if [ -n "${DRY:-}" ]; then cat "$spec"; rm -f "$spec"; exit 0; fi
-gcloud batch jobs submit "$JOB_ID" --project "$PROJECT" --location "$REGION" --config "$spec" >&2
+dt-cloud batch submit -c scan -p "$PROJECT" -L "$REGION" "$JOB_ID" "$spec" >&2  # refuses a spec without the cost labels
 rm -f "$spec"
 echo "$JOB_ID"
