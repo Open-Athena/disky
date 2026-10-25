@@ -334,6 +334,33 @@ def _running(con, src: str, keys: str, vals: tuple[str, ...], tag: str, batch_ro
             yield p, b.column(1), ys
 
 
+def _closed_levels(con, heads: str, top: int, lap) -> None:
+    """`rollup_cells`' levels over heads closed upwards, into `rev`: each head numbered (`h`), linked to its parent's
+    number by its last segment, so a level's rows carry their head's number and the next level's are those whose next
+    segment is a child head's: an integer and one segment per row, not every row's dir rebuilt as a string and joined
+    at every level (gcs's three biggest `end` shards: ~1170s of their ~1560s). `lap(name, table)`: each level's seconds and rows."""
+    con.execute(f"CREATE OR REPLACE TABLE hd AS SELECT k, lvl, dir, (row_number() OVER ())::BIGINT AS h FROM {heads}")
+    con.execute("""CREATE OR REPLACE TABLE hlk AS SELECT c.lvl, p.h AS parent, string_split(c.dir, '/')[-1] AS child, c.h FROM hd AS c
+        JOIN hd AS p ON p.k = c.k AND p.lvl = c.lvl - 1 AND p.dir = array_to_string(string_split(c.dir, '/')[1:c.lvl - 1], '/')
+        WHERE c.lvl > 0""")
+    con.execute("CREATE OR REPLACE TABLE revh (h BIGINT, child VARCHAR, t BIGINT, db HUGEINT, dn HUGEINT)")
+    con.execute("CREATE OR REPLACE TABLE hl AS SELECT hd.h, segs, vf, vt, size, n_files FROM hc JOIN hd ON hd.k = hc.k AND hd.lvl = 0 WHERE len(segs) > 0")
+    for lvl in range(0, top + 1):
+        if lvl:
+            con.execute(f"""CREATE OR REPLACE TABLE hl AS SELECT l.h, segs, vf, vt, size, n_files FROM hl
+                JOIN (SELECT parent, child, h FROM hlk WHERE lvl = {lvl}) AS l ON l.parent = hl.h AND l.child = hl.segs[{lvl}]
+                WHERE len(segs) > {lvl}""")
+        hit = f"SELECT h, segs[{lvl + 1}] AS child, vf, vt, size, n_files FROM hl"
+        con.execute(f"""INSERT INTO revh SELECT h, child, t, sum(db), sum(dn) FROM (
+                SELECT h, child, vf AS t, size AS db, n_files AS dn FROM ({hit})
+                UNION ALL SELECT h, child, vt AS t, -size, -n_files FROM ({hit}) WHERE vt <> {OPEN}
+            ) GROUP BY h, child, t""")
+        lap(f"level {lvl}", "hl")
+    con.execute("INSERT INTO rev SELECT k, dir, child, t, db, dn FROM revh JOIN hd USING (h)")
+    for t in ("hd", "hlk", "revh", "hl"):
+        con.execute(f"DROP TABLE IF EXISTS {t}")
+
+
 def rollup_cells(con, roots: str, heads: str, K: int, into: str, closed: bool = False, label: str | None = None) -> None:
     """Full rollups (`static_roots.ROLLUP_SCHEMA` rows, header first) into table `into` for `heads(k, lvl, dir, rows)`
     from `roots` (`AR_COLS`, every first hit under them): per child of `dir` (its next segment; a bucket for `''`)
@@ -355,11 +382,11 @@ def rollup_cells(con, roots: str, heads: str, K: int, into: str, closed: bool = 
     top = con.execute(f"SELECT coalesce(max(lvl), -1) FROM {heads}").fetchone()[0]
     con.execute(f"CREATE OR REPLACE TABLE hc AS SELECT k, string_split(path, '/') AS segs, vf, vt, size, n_files FROM {roots} SEMI JOIN (SELECT DISTINCT k FROM {heads}) USING (k)")
     lap("hc", "hc")
-    for lvl in range(0, top + 1):
+    if closed:
+        _closed_levels(con, heads, top, lap)
+    for lvl in range(0, top + 1) if not closed else ():
         con.execute(f"""CREATE OR REPLACE TABLE hl AS SELECT hc.* FROM hc SEMI JOIN (SELECT k, dir FROM {heads} WHERE lvl = {lvl}) AS h
             ON hc.k = h.k AND array_to_string(hc.segs[1:{lvl}], '/') = h.dir AND len(hc.segs) > {lvl}""")
-        if closed:
-            con.execute("CREATE OR REPLACE TABLE hc AS SELECT * FROM hl")
         hit = f"SELECT k, array_to_string(segs[1:{lvl}], '/') AS dir, segs[{lvl + 1}] AS child, vf, vt, size, n_files FROM hl"
         con.execute(f"""INSERT INTO rev SELECT k, dir, child, t, sum(db), sum(dn) FROM (
                 SELECT k, dir, child, vf AS t, size AS db, n_files AS dn FROM ({hit})
