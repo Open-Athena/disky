@@ -912,15 +912,18 @@ def _fetch_spills(ck, spills: Path, by: dict[tuple[str, int], list[str]], ranges
     return rels
 
 
-def deal(weights: dict, n: int) -> list[list]:
+def deal(weights: dict, n: int, away: set | frozenset = frozenset()) -> list[list]:
     """`weights`' keys dealt to `n` tasks, the heaviest first, each to the least-loaded task so far (ties: the lower
-    task, then the lower key): a few heavy ranges don't serialize one task."""
+    task, then the lower key): a few heavy ranges don't serialize one task. A key of `away` never goes to task 0 (a
+    fan-out's own share, which may not build it as its helpers do) while there are others."""
     import heapq
 
     tasks: list[list] = [[] for _ in range(n)]
     heap = [(0, i) for i in range(n)]
     for key in sorted(weights, key=lambda k: (-weights[k], k)):
         load, i = heapq.heappop(heap)
+        if i == 0 and key in away and heap:
+            load, i = heapq.heapreplace(heap, (load, i))
         tasks[i].append(key)
         heapq.heappush(heap, (load + weights[key], i))
     return tasks
@@ -1114,19 +1117,22 @@ def _timed_shard_task(*args) -> tuple[dict, float]:
 def anchor_shard_cmd(checkpoint, index, mem, threads, plan, tmp, code, workers) -> None:
     """A compaction's base anchors helper (`static_fanout.AnchorFanout`, specs/static-anchors-fanout.md): task INDEX's
     share of the plan's `(kind, shard)` rollup tasks, each one's input shard fetched from `anchors-in/`, its rollups
-    built (`static_anchors._shard_task`: a shard of `ANCHOR_HEAVY_BYTES` or more alone first, on all `-p` threads and `-M`;
-    the rest as the fold VM's pool does, `ANCHOR_THREADS` threads each, as many at once as `-p` allows) and uploaded as
-    `anchored/<kind>/s<i>/cells.parquet`, then its `done.json` (the task's doc, seconds, rows). A task whose `done.json` is there is skipped (a retry resumes); then `anchored/tasks/<plan>-<index>.json`.
-    Refuses to run other code than the fold's (its bytes would differ)."""
-    from concurrent.futures import ThreadPoolExecutor, as_completed
+    built (`static_anchors._shard_task`: a shard of `ANCHOR_HEAVY_ROWS` or more alone first, on all `-p` threads and
+    `-M`; the rest biggest first, each on threads by its rows out of the `-p` free, `-M` shared in proportion) and
+    uploaded as `anchored/<kind>/s<i>/cells.parquet`, then its `done.json` (the task's doc, seconds, rows). A task whose
+    `done.json` is there is skipped (a retry resumes); then `anchored/tasks/<plan>-<index>.json`. Refuses to run other
+    code than the fold's (its bytes would differ)."""
+    from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, ThreadPoolExecutor, wait
+    from multiprocessing import get_context
 
     import pyarrow.parquet as pq
 
     from .checkpoint import Checkpoint, code_version
     from .hex_runs import rule_from_json
-    from .static_anchors import ANCHOR_HEAVY_BYTES, ANCHOR_THREADS
+    from .static_anchors import ANCHOR_HEAVY_ROWS, ANCHOR_THREADS
+    from .static_append import _Inline
     from .static_fanout import ANCHORED, anchor_input_key, anchor_task_key
-    from .static_names import ConPool, pool_jobs
+    from .static_names import _pool_init, mem_bytes
 
     if (mine := code_version()) != code:
         raise SystemExit(f"anchor-shard: this is code {mine}, the fold's is {code}: refusing to build for it")
@@ -1147,8 +1153,10 @@ def anchor_shard_cmd(checkpoint, index, mem, threads, plan, tmp, code, workers) 
     with ThreadPoolExecutor(workers) as ex:
         list(ex.map(lambda kv: ck.store.get(ck.key(kv[0]), kv[1]), sorted(inputs.items())))
 
+    rows_of = {t: pq.ParquetFile(inputs[anchor_input_key(*t)]).metadata.num_rows for t in todo}
+
     def size(t: tuple[str, int]) -> int:
-        return inputs[anchor_input_key(*t)].stat().st_size
+        return rows_of[t]
 
     def cells_of(k: str, s: int) -> Path:
         cells = work / "out" / f"{k}-{s:05d}.parquet"
@@ -1165,27 +1173,40 @@ def anchor_shard_cmd(checkpoint, index, mem, threads, plan, tmp, code, workers) 
     # a heavy shard alone, on every thread and all the memory: at an even `ANCHOR_THREADS` share gcs's 1.35 GB `end` shards
     # took ~2240s each (one OOMing a neighbour); alone on 16 threads, 769s
     def alone(k: str, s: int, why: str) -> None:
-        err(f"anchor-shard {plan} #{i}: {k} s{s:05d} alone ({why}; {size((k, s)):,} B, {threads} threads)")
+        err(f"anchor-shard {plan} #{i}: {k} s{s:05d} alone ({why}; {size((k, s)):,} rows, {threads} threads)")
         cells = cells_of(k, s)
         shutil.rmtree(work / "tmp" / f"{k}-{s:05d}", ignore_errors=True)
         put(k, s, cells, *_timed_shard_task(k, [str(inputs[anchor_input_key(k, s)])], doc["R"], doc["K"], rule, str(cells), threads, mem,
                                             str(work / "tmp" / f"{k}-{s:05d}")))
 
-    heavy = [t for t in todo if size(t) >= ANCHOR_HEAVY_BYTES]
+    heavy = [t for t in todo if size(t) >= ANCHOR_HEAVY_ROWS]
     for k, s in heavy:
         alone(k, s, "heavy")
     rest = todo[len(heavy):]
     oom: list[tuple[str, int]] = []
-    con = connect(threads, mem, work / "duckdb")
-    try:
-        with ConPool(con, pool_jobs(con, max(1, len(rest)), ANCHOR_THREADS), "anchor-shard") as pool:
-            futs = {}
-            for k, s in rest:
+    # the rest, biggest first, each on threads by its rows (its input's footer: `ANCHOR_THREADS` per median shard, at
+    # least that) out of those free, and memory in proportion: never more threads in flight than the task's (gcs's rkeep
+    # race: the tasks' tails were ~108M-row shards at a flat 4 threads, `levels` most of them; by bytes they were under
+    # the median and kept 4; f26321b2's weights over every shard oversubscribed the cores)
+    slots = max(1, min(len(rest), threads // ANCHOR_THREADS))
+    mid = max(1, size(rest[len(rest) // 2])) if rest else 1
+    total = mem_bytes(mem)
+    queue, running, free = list(rest), {}, threads
+    with _Inline() if slots == 1 else ProcessPoolExecutor(slots, mp_context=get_context("spawn"), initializer=_pool_init) as pool:
+        while queue or running:
+            while queue and len(running) < slots and free >= min(ANCHOR_THREADS, threads):
+                k, s = queue.pop(0)
+                t = min(free, max(ANCHOR_THREADS, round(ANCHOR_THREADS * size((k, s)) / mid)))
+                m = f"{max(1 << 30, total * t // (threads + ANCHOR_THREADS)) >> 20}MiB"
                 cells = cells_of(k, s)
-                futs[pool.submit(_timed_shard_task, k, [str(inputs[anchor_input_key(k, s)])], doc["R"], doc["K"], rule, str(cells),
-                                 pool.task_threads, pool.mem, str(work / "tmp" / f"{k}-{s:05d}"))] = (k, s, cells)
-            for fut in as_completed(futs):
-                k, s, cells = futs[fut]
+                fut = pool.submit(_timed_shard_task, k, [str(inputs[anchor_input_key(k, s)])], doc["R"], doc["K"], rule, str(cells), t, m,
+                                  str(work / "tmp" / f"{k}-{s:05d}"))
+                running[fut] = (k, s, cells, t, m)
+                free -= t
+            done, _ = wait(running, return_when=FIRST_COMPLETED)
+            for fut in done:
+                k, s, cells, t, m = running.pop(fut)
+                free += t
                 try:
                     d, secs = fut.result()
                 except Exception as e:
@@ -1193,12 +1214,10 @@ def anchor_shard_cmd(checkpoint, index, mem, threads, plan, tmp, code, workers) 
                     # built again alone once the pool is done
                     if type(e).__name__ != "OutOfMemoryException":
                         raise
-                    err(f"anchor-shard {plan} #{i}: {k} s{s:05d} over its {pool.mem}: {e}")
+                    err(f"anchor-shard {plan} #{i}: {k} s{s:05d} over its {m}: {e}")
                     oom.append((k, s))
                     continue
                 put(k, s, cells, d, secs)
-    finally:
-        con.close()
     for k, s in oom:
         alone(k, s, "out of memory in the pool")
     ck.store.write_text(ck.key(f"{ANCHORED}/tasks/{name}-{i}.json"), json.dumps({"tasks": len(todo), "s": round(monotonic() - t0, 1)}) + "\n")
