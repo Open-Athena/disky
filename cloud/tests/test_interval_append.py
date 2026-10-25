@@ -1065,6 +1065,8 @@ def test_jobs_are_the_profiles_and_carry_the_cost_label(monkeypatch):
         "sa@x", "n2-highmem-16", {**R2_ENV, "variables": {**R2_ENV["variables"], **context, "SCAN_ID": "2026-08-04T1236", "DT_JOB_NAME": merge_name, **MERGE_FACTS}})
 
 
+#: The tests' deployment labels (`conftest`), forwarded into every job's tasks (`label_batch_spec`).
+LABELS_ENV = {"DISKY_LABELS": "app=disky,deployment=test"}
 #: The merge job's run facts (`Runner.record_env`, for its record on /scans); no `record_secrets`: no D1 env.
 MERGE_FACTS = {"DT_JOB_REGION": "us-east1", "DT_JOB_MACHINE": "n2-highmem-16", "DT_JOB_SPOT": "1", "DT_JOB_IMAGE": "img"}
 
@@ -1077,7 +1079,8 @@ def test_the_merge_job_gets_no_r2_env_when_the_r2_account_differs():
     f.runner().run("2026-08-04T1236")
     merge_name, merge = next((n, s) for n, s in f.jobs if s["labels"]["stage"] == "merge")
     assert (merge["allocationPolicy"]["serviceAccount"]["email"], merge["taskGroups"][0]["taskSpec"]["environment"]) == (
-        "sa@x", {"variables": {"STATIC_NAMES_BUCKET": "data", "STATIC_NAMES_SCRATCH": "scr", "DT_JOB_NAME": merge_name, **MERGE_FACTS}})
+        "sa@x", {"variables": {"STATIC_NAMES_BUCKET": "data", "STATIC_NAMES_SCRATCH": "scr", **LABELS_ENV, "SCAN_ID": "2026-08-04T1236",
+                               "DT_JOB_NAME": merge_name, **MERGE_FACTS}})
 
 
 def test_the_profile_drives_the_append(tmp_path):
@@ -1118,7 +1121,8 @@ def test_publish_and_the_r2_copy_are_one_task_in_order():
         ["-c", f"{PREP} r2 -d 2026-08-04 -b data -g g1 -R g0 -S scr"],
     ]
     assert [r["container"]["imageUri"] for r in tg["taskSpec"]["runnables"]] == ["img", "img"]
-    assert [tg["taskCount"], tg["taskSpec"]["maxRetryCount"], tg["taskSpec"]["environment"]] == [1, 3, R2_ENV]
+    assert [tg["taskCount"], tg["taskSpec"]["maxRetryCount"], tg["taskSpec"]["environment"]] == [
+        1, 3, {**R2_ENV, "variables": {**R2_ENV["variables"], **LABELS_ENV, "SCAN_ID": "2026-08-04"}}]
     assert [spec["labels"]["stage"], spec["allocationPolicy"]["serviceAccount"]["email"],
             spec["allocationPolicy"]["instances"][0]["policy"]["machineType"]] == ["publish", "sa@x", "n2-highmem-16"]
 

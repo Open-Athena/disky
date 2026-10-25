@@ -1,5 +1,7 @@
 # Cost labels: required, not opt-in
 
+Status: implemented on `cloud` (10-25); the deployment branches' shell submits and the audit remain (below).
+
 Ryan (10-25): "everything any disky deploy does should be labeled … it should default on from US, and error if appropriate label md isn't set."
 
 ## Why
@@ -39,6 +41,31 @@ Root causes:
 
 - **Cloud Build:** builds have tags, not billing labels. Its ~$1–2/day stays unattributed unless builds move to a labeled Batch job; not worth it now.
 - **Buckets:** already labeled (`shared`/`data`, `cw-s3`/`data`).
+
+## Implementation (10-25, `cloud`)
+
+- **Required labels** (`cost_labels.py`): `MissingCostLabels` (a `ValueError`; `.missing`, `.where`) names the missing keys, e.g. `cost labels: missing app, deployment ($DISKY_LABELS carries app=…,deployment=…; each job names its component)`. `deployment_labels(env)` requires `app` + `deployment` (non-empty); `cost_labels(component, env)` adds `component` (required) and the scan context (`scan_run` / `scan_id`). `env_labels` still parses whatever is set; nothing returns `{}` for a job any more.
+- **Choke point:** `batch.submit_job(spec, job_id, region, project=None)` runs `check_spec` (both `labels` and `allocationPolicy.labels` carry `app`, `deployment`, `component`) before the POST. Every Batch create in `cloud/src` already went through it: `BatchRunner` (static names, interval store, every fan-out helper: `measure_fanout` / `anchor_fanout` / `fold_fanout`, `compact-probe`'s through `_helper_runner`), `scan task`, `job submit-listing`, `job submit-reviewed`. No module used `batch_v1` or `gcloud batch jobs submit`. `test_one_batch_create_call_site` walks `cloud/src` with `ast`: the only function that both names `batch.googleapis.com` and POSTs is `batch.submit_job`, and no line matches the client library or a `gcloud … batch jobs submit` (string or argv form). `sweep_batch`'s Storage Batch Operations jobs are another API (no VMs) and stay out of scope.
+- **Inheritance:** `label_batch_spec` always writes `$DISKY_LABELS` (raw) into every task group's env, plus `$SCAN_RUN_ID` / `$SCAN_ID` when set. `stage` reaches `allocationPolicy.labels` under a scan's context only, as before.
+- **`dt-cloud batch submit -c COMPONENT [-L REGION] [-p PROJECT] JOB_ID SPEC_FILE`** (`-` = stdin): `label_batch_spec` (env + `-c`), then `submit_job`, printing the job's name.
+- **Nextflow:** `scan head` takes `DISKY_LABELS` from the profile's `env` when its own env lacks it (as `D1_DB_ID` & co.), then refuses (`deployment_labels`) before writing or recording anything. `params.labels` = profile `labels` + `$DISKY_LABELS` + `component: scan` + `scan_id`; `params.env` always carries `DISKY_LABELS`, so a google-batch step that submits Batch jobs (static names, the interval store) labels them.
+- **Audit:** `dt-cloud cost-labels audit [-d DAYS] [-p PROJECT] -t BILLING_TABLE` (default 7 days) runs `audit_sql` as a BigQuery job over REST (`query_rows`, ADC; `-p` is the project the query bills to). It prints `job_id<TAB>first_day<TAB>$net` per job and a total line, sorted by net desc, and exits 1 when any are found. `net` = `cost` + credits. The window prunes by `_PARTITIONTIME` (the export is ingestion-time partitioned, so a line's partition is never before its usage day).
+- `dt-cloud cost-labels [-c] [-j]` is now a group (`invoke_without_command`) and still prints labels; without `-c` it raises (`component` missing).
+- `deploy/sheet-mirror/deploy.sh` always passes `--update-labels "$(dt-cloud cost-labels -c sheet-sync)"`: an unset `$DISKY_LABELS` fails the deploy.
+- **Tests:** `conftest` sets `DISKY_LABELS=app=disky,deployment=test` for every test. Exact-spec tests now include the labels and the forwarded env. `test_cost_labels.py` covers:
+  - the missing-label raises (env, component, `check_spec`, `submit_job` before the network);
+  - the choke-point walk;
+  - grandchild inheritance without a scan context;
+  - the `batch submit` round trip (the exact spec `submit_job` receives);
+  - `audit_sql` / `audit_rows` / `audit_lines` and the `audit` CLI's exit codes.
+
+  `test_scan_head.py` covers `head`'s refusal and the profile-env fallback.
+
+## Deployment follow-ups (not on `cloud`)
+
+- gcs: switch `job/batch-submit.sh`, `job/static-names.sh`, `job/access-submit.sh` and its race tooling from `gcloud batch jobs submit --config` to `dt-cloud batch submit -c <component>`. Make sure every job env that runs dt-cloud (heads, race drivers, laptop drivers) exports `DISKY_LABELS`.
+- cw / hf: the same for their own submit scripts; their scan profiles (or the Batch head's env) carry `DISKY_LABELS`.
+- Each deployment: run `dt-cloud cost-labels audit -d 2 -t <billing export>` after a day with a race; it should be clean.
 
 ## Done when
 
