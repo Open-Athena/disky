@@ -1114,9 +1114,9 @@ def _timed_shard_task(*args) -> tuple[dict, float]:
 def anchor_shard_cmd(checkpoint, index, mem, threads, plan, tmp, code, workers) -> None:
     """A compaction's base anchors helper (`static_fanout.AnchorFanout`, specs/static-anchors-fanout.md): task INDEX's
     share of the plan's `(kind, shard)` rollup tasks, each one's input shard fetched from `anchors-in/`, its rollups
-    built (`static_anchors._shard_task`, as the fold VM's pool does: `ANCHOR_THREADS` threads each, as many at once as
-    `-p` allows) and uploaded as `anchored/<kind>/s<i>/cells.parquet`, then its `done.json` (the task's doc, seconds,
-    rows). A task whose `done.json` is there is skipped (a retry resumes); then `anchored/tasks/<plan>-<index>.json`.
+    built (`static_anchors._shard_task`: a shard of `ANCHOR_HEAVY_BYTES` or more alone first, on all `-p` threads and `-M`;
+    the rest as the fold VM's pool does, `ANCHOR_THREADS` threads each, as many at once as `-p` allows) and uploaded as
+    `anchored/<kind>/s<i>/cells.parquet`, then its `done.json` (the task's doc, seconds, rows). A task whose `done.json` is there is skipped (a retry resumes); then `anchored/tasks/<plan>-<index>.json`.
     Refuses to run other code than the fold's (its bytes would differ)."""
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -1124,7 +1124,7 @@ def anchor_shard_cmd(checkpoint, index, mem, threads, plan, tmp, code, workers) 
 
     from .checkpoint import Checkpoint, code_version
     from .hex_runs import rule_from_json
-    from .static_anchors import ANCHOR_THREADS
+    from .static_anchors import ANCHOR_HEAVY_BYTES, ANCHOR_THREADS
     from .static_fanout import ANCHORED, anchor_input_key, anchor_task_key
     from .static_names import ConPool, pool_jobs
 
@@ -1146,25 +1146,61 @@ def anchor_shard_cmd(checkpoint, index, mem, threads, plan, tmp, code, workers) 
     inputs = {anchor_input_key(k, s): work / "in" / anchor_input_key(k, s) for k, s in todo}
     with ThreadPoolExecutor(workers) as ex:
         list(ex.map(lambda kv: ck.store.get(ck.key(kv[0]), kv[1]), sorted(inputs.items())))
+
+    def size(t: tuple[str, int]) -> int:
+        return inputs[anchor_input_key(*t)].stat().st_size
+
+    def cells_of(k: str, s: int) -> Path:
+        cells = work / "out" / f"{k}-{s:05d}.parquet"
+        cells.parent.mkdir(parents=True, exist_ok=True)
+        return cells
+
+    def put(k: str, s: int, cells: Path, d: dict, secs: float) -> None:
+        base = anchor_task_key(k, s)
+        ck.store.put(cells, ck.key(f"{base}/cells.parquet"))
+        ck.store.write_text(ck.key(f"{base}/done.json"), json.dumps({"doc": d, "s": secs, "rows": pq.ParquetFile(cells).metadata.num_rows}) + "\n")
+        cells.unlink()
+
+    todo.sort(key=lambda t: -size(t))
+    # a heavy shard alone, on every thread and all the memory: at an even `ANCHOR_THREADS` share gcs's 1.35 GB `end` shards
+    # took ~2240s each (one OOMing a neighbour); alone on 16 threads, 769s
+    def alone(k: str, s: int, why: str) -> None:
+        err(f"anchor-shard {plan} #{i}: {k} s{s:05d} alone ({why}; {size((k, s)):,} B, {threads} threads)")
+        cells = cells_of(k, s)
+        shutil.rmtree(work / "tmp" / f"{k}-{s:05d}", ignore_errors=True)
+        put(k, s, cells, *_timed_shard_task(k, [str(inputs[anchor_input_key(k, s)])], doc["R"], doc["K"], rule, str(cells), threads, mem,
+                                            str(work / "tmp" / f"{k}-{s:05d}")))
+
+    heavy = [t for t in todo if size(t) >= ANCHOR_HEAVY_BYTES]
+    for k, s in heavy:
+        alone(k, s, "heavy")
+    rest = todo[len(heavy):]
+    oom: list[tuple[str, int]] = []
     con = connect(threads, mem, work / "duckdb")
     try:
-        with ConPool(con, pool_jobs(con, max(1, len(todo)), ANCHOR_THREADS), "anchor-shard") as pool:
+        with ConPool(con, pool_jobs(con, max(1, len(rest)), ANCHOR_THREADS), "anchor-shard") as pool:
             futs = {}
-            for k, s in sorted(todo, key=lambda t: -inputs[anchor_input_key(*t)].stat().st_size):
-                cells = work / "out" / f"{k}-{s:05d}.parquet"
-                cells.parent.mkdir(parents=True, exist_ok=True)
+            for k, s in rest:
+                cells = cells_of(k, s)
                 futs[pool.submit(_timed_shard_task, k, [str(inputs[anchor_input_key(k, s)])], doc["R"], doc["K"], rule, str(cells),
                                  pool.task_threads, pool.mem, str(work / "tmp" / f"{k}-{s:05d}"))] = (k, s, cells)
             for fut in as_completed(futs):
                 k, s, cells = futs[fut]
-                d, secs = fut.result()
-                base = anchor_task_key(k, s)
-                ck.store.put(cells, ck.key(f"{base}/cells.parquet"))
-                ck.store.write_text(ck.key(f"{base}/done.json"),
-                                    json.dumps({"doc": d, "s": secs, "rows": pq.ParquetFile(cells).metadata.num_rows}) + "\n")
-                cells.unlink()
+                try:
+                    d, secs = fut.result()
+                except Exception as e:
+                    # a pooled shard over its memory share (gcs: a 0.35 GB one at 18.6 GiB failed its whole Batch task):
+                    # built again alone once the pool is done
+                    if type(e).__name__ != "OutOfMemoryException":
+                        raise
+                    err(f"anchor-shard {plan} #{i}: {k} s{s:05d} over its {pool.mem}: {e}")
+                    oom.append((k, s))
+                    continue
+                put(k, s, cells, d, secs)
     finally:
         con.close()
+    for k, s in oom:
+        alone(k, s, "out of memory in the pool")
     ck.store.write_text(ck.key(f"{ANCHORED}/tasks/{name}-{i}.json"), json.dumps({"tasks": len(todo), "s": round(monotonic() - t0, 1)}) + "\n")
     err(f"anchor-shard {plan} #{i}: {len(todo)} shard tasks in {monotonic() - t0:.0f}s")
 

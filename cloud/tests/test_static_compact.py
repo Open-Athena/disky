@@ -1152,14 +1152,37 @@ def _anchor_helpers(tmp_path, calls: list, skip=lambda attempt, i: False):
     return submit
 
 
-def test_fanned_out_anchors_write_the_single_vm_fold(world, tmp_path):
+class OutOfMemoryException(Exception):
+    """Named as DuckDB's (what `anchor-shard` catches by name: a pool process's comes back unpickled)."""
+
+
+@pytest.mark.parametrize("mode", ["pooled", "alone", "oom"])
+def test_fanned_out_anchors_write_the_single_vm_fold(world, tmp_path, monkeypatch, mode):
     """The fold builds its share of the anchors' shard tasks, 2 helper tasks theirs (from the shards uploaded under
     `anchors-in/`, their cells under `anchored/`): `g.c001`'s files (built at `anchor_tasks` 1), md5 for md5. The helper
-    job is named by the newest scan folded, never by the plan."""
+    job is named by the newest scan folded, never by the plan. `alone`: every shard over `ANCHOR_HEAVY_BYTES`, so each
+    is built by itself on all the task's threads; `oom`: every pooled shard runs out of memory once, and is built again
+    alone after the pool; the same bytes."""
+    from dt_cloud import static_anchors as an
+    from dt_cloud import static_merge as sm
+
+    monkeypatch.setattr(an, "ANCHOR_HEAVY_BYTES", 0 if mode == "alone" else 1 << 30)
+    failed: list = []
+    if mode == "oom":
+        built = sm._timed_shard_task
+
+        def once(kind, files, *rest):
+            if (kind, files[0].rsplit("/", 1)[-1]) not in failed:
+                failed.append((kind, files[0].rsplit("/", 1)[-1]))
+                raise OutOfMemoryException("failed to pin block")
+            return built(kind, files, *rest)
+
+        monkeypatch.setattr(sm, "_timed_shard_task", once)
     calls: list = []
     _anchors_fanned_fold(world, tmp_path, _anchor_helpers(tmp_path, calls))
     assert calls == [("anchored/plan-1.json", 2, world["ids"][3])]
     assert _md5s(tmp_path / "out") == _md5s(world["c_store"] / "g.c001")
+    assert bool(failed) == (mode == "oom")
 
 
 def test_anchor_tasks_a_helper_job_left_are_dealt_again(world, tmp_path):
