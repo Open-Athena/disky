@@ -1152,10 +1152,15 @@ def _anchor_helpers(tmp_path, calls: list, skip=lambda attempt, i: False):
     return submit
 
 
-def test_fanned_out_anchors_write_the_single_vm_fold(world, tmp_path):
+@pytest.mark.parametrize("heavy", [1 << 30, 0], ids=["pooled", "alone"])
+def test_fanned_out_anchors_write_the_single_vm_fold(world, tmp_path, monkeypatch, heavy):
     """The fold builds its share of the anchors' shard tasks, 2 helper tasks theirs (from the shards uploaded under
     `anchors-in/`, their cells under `anchored/`): `g.c001`'s files (built at `anchor_tasks` 1), md5 for md5. The helper
-    job is named by the newest scan folded, never by the plan."""
+    job is named by the newest scan folded, never by the plan. `alone`: every shard over `ANCHOR_HEAVY_BYTES`, so each
+    is built by itself on all the task's threads; the same bytes."""
+    from dt_cloud import static_anchors as an
+
+    monkeypatch.setattr(an, "ANCHOR_HEAVY_BYTES", heavy)
     calls: list = []
     _anchors_fanned_fold(world, tmp_path, _anchor_helpers(tmp_path, calls))
     assert calls == [("anchored/plan-1.json", 2, world["ids"][3])]

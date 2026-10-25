@@ -32,6 +32,7 @@ records included), as the reader's bound. Merged runs stack per `(k, dir)` (`mer
 from __future__ import annotations
 
 import json
+import os
 import sys
 from bisect import bisect_left, bisect_right
 from dataclasses import dataclass, field
@@ -508,6 +509,9 @@ def anchors_meta(R: int, K: int, sets: dict, scans: list[str] | None = None, **e
 
 #: DuckDB threads per shard process when `build_tier_local` builds a tier's rollups shard by shard (`jobs` > 1).
 ANCHOR_THREADS = 4
+
+#: A shard input this big or bigger is built alone on every thread of an `anchor-shard` helper task, before the rest.
+ANCHOR_HEAVY_BYTES = int(os.environ.get("DT_ANCHOR_HEAVY_BYTES", 1 << 30))
 
 
 def _sorted_cells(con, table: str, out: str) -> None:
