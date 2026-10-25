@@ -14,6 +14,13 @@
 name = "disk-tree-demo"
 pages_build_output_dir = "dist"
 compatibility_date = "2026-06-01"
+# Usage attribution (`functions/_lib/usage.ts`, specs/usage-metrics.md): one Analytics Engine point per Functions
+# request; `nodejs_als` gives the point its R2/D1/KV counters and cache tier.
+compatibility_flags = ["nodejs_als"]
+
+[[analytics_engine_datasets]]
+binding = "USAGE"
+dataset = "disky_usage_r2_demo"
 
 # D1: this public deploy reads only the index footer (index_schema +
 # index_row_groups); its other tables (auth, grants, plans) stay empty

@@ -18,9 +18,7 @@ Key goals:
 **Listing** (`find/bulk*.py`): `bulk-list` shards a bucket's object listing (`gcs://`, `s3://`,
 `r2://` via its S3 endpoint) across worker processes into layer-1 listing parquet shards
 (`hf://<namespace>`: a Hugging Face org's buckets + repos over the Hub API, one rate-limited process). The
-canonical columns are `bucket, name, size_bytes, created, storage_class_id, generation`; generation
-is the exact GCS object identity (nullable for S3/R2 and old listings), retained so a reviewed
-deletion manifest can never resolve to a replacement object at the same path.
+canonical columns include `bucket, name, size_bytes, created, storage_class_id, generation, version`. `generation` is the legacy nullable GCS integer; `version` is the shared nullable opaque string (exact decimal GCS generation or S3/R2 ETag). Listing adapters, every import engine and CW's index union preserve it on file rows. ETags are content validators rather than unique rewrite identities; deletion also checks reviewed size/mtime and sends the reviewed token as an atomic precondition. Historical missing tokens stay NULL.
 
 **Aggregation** (`find/import_listing.py`, `find/index.py`, `find/aggregate_{duckdb,stream}.py`):
 `import` aggregates a listing bottom-up into the canonical layer-2 frame — columns `path`, `size`,
@@ -37,7 +35,8 @@ cw-s3's jobs read that blob back (`ls $DISK_TREE_ROOT/scans/*.parquet`) as `dt-c
 **CLI** (`cli/`):
 ```bash
 disk-tree bulk-list URI    # Shard URI's object listing (gcs:// | s3:// | r2:// with `-E <endpoint>`) into
-                          # layer-1 parquet shards at `-o` (`-a` adaptive range-splitting, `-P` procs).
+                          # layer-1 parquet shards at `-o` (`-a` adaptive range-splitting, `-P` procs;
+                          # gcs:// `-c`: each object's CRC32C as a `crc32c` column, what `dt-cloud dups -l` proves copies by).
                           # `hf://<ns>[/<kind>[/<name>]]` (`find/bulk_hf.py`, `HF_TOKEN`) lists a Hugging Face
                           # namespace as bucket `<ns>`: `buckets/<b>/…`, `{models,datasets,spaces}/<repo>/…`
                           # (current tree; LFS deduped by oid) + `<repo>/@history/@unlisted` (what
@@ -93,7 +92,9 @@ dt-cloud index-recut SRC OUT  # Re-cut a published generation's `bysize` from it
 dt-cloud dups -o OUT INDEX  # A scan's duplicate-candidate groups (specs/dups.md): `tree` (same relative path, size,
                           # `n_files` in ≥2 buckets) and `moved` (same basename, size, `n_files`, other paths) over paths ≥
                           # `-f` (1 GiB; slices summed first, the `bysize` sort's `tot` prunes); maximal groups, per-copy
-                          # `nested` / `suspect` / `keep`, `-g N` crc32c spot checks on GCS → `dups.parquet` + `dups.json`
+                          # `nested` / `suspect` / `keep`, `-l` the scan's `bulk-list -c` listing proves copies by every object's
+                          # crc32c (`exact`; a differing `moved` copy dropped), `-g N` crc32c spot checks on GCS (groups `-l` left
+                          # unsettled) → `dups.parquet` + `dups.json`
                           # (the `dups` scan step writes them beside the index; `/api/dups` + `/dups` read them, `DUPS=1`)
 dt-cloud interval-store append [-c] [-n] SCAN_ID  # Append one scan to the interval store as a run beside its
                           # base generation (spec `interval-store.md` §2.7; profile `-P`/$INTERVAL_STORE_PROFILE):
@@ -114,6 +115,10 @@ dt-cloud static-names add -g GEN -L LAYOUT -s SCANS -o STORE  # Append every sca
                           # gets them only by a rebuild into a new GEN — `manifests/<id>.json`), then the binary counter's carries; a URL
                           # store's generation is mirrored into `-w`, new files go up data → `meta.json`s → manifests.
                           # Small deployments' path (the r2 demo's daily ingest); gcs/cw run the stages on Batch
+dt-cloud interval-store migrate-object-version -g OLD -O NEW -o STORE  # Adopt string object versions without raw listings:
+                          # fold existing ranges/runs; native GCS generations become exact strings, unknowns stay NULL.
+                          # `-R` names borrowed source ranges. Source and CURRENT stay unchanged pending verification/cutover.
+                          # A first-observed future token opens its own interval; it never fills earlier unknown history.
 dt-cloud interval-store build -g GEN -L LAYOUT -s SCANS -o STORE  # The interval store's base generation on ONE machine
                           # (`interval_local.py`, spec `interval-store.md` §2.8): ranges, path/read versions, fold,
                           # owner slices, every served sort — the staged stages in-process over `-w` — then copied to
@@ -128,11 +133,20 @@ dt-cloud interval-store add [-g GEN] -L LAYOUT -s SCANS -o STORE  # Append every
                           # base + runs into a new generation (`interval_compact`: a fresh build's bytes), then moves
                           # `interval-store/CURRENT.json` to it (the site follows it when `INTERVAL_STORE_GEN` is unset);
                           # `-g` defaults to that pointer. `interval-store current -o STORE [-s GEN]` prints / sets it
+dt-cloud interval-store backfill-attribution -O NEW -o STORE [-s ROOT]  # The roster attribution table
+                          # (specs/attr-interval-table.md): each scan's `attribution.parquet` (`path-index -a` writes it
+                          # beside the sorts; key `(depth, path)`, change columns `user`, `source`, `evidence`) versioned
+                          # in the store's ranges, runs (`append.attribution` / `build|add -A`; a scan without one is
+                          # uncovered), carries and compaction; served sort `attribution` `(path, vf)` (`extras.ts`). This
+                          # folds GEN into NEW with the table over every scan, checked against GEN's runs' table;
+                          # `attribution-convert` first writes the parquet beside older scans' `attr.tsv`
 dt-cloud interval-store backfill-generation -O NEW -o STORE -s ROOT -l TEMPLATE  # A generation folded into NEW (a dir or
                           # URL store; never over one) whose object versions carry their GCS `generation`, read once from
                           # the raw listings (`{id}` templates under ROOT): each version the first listed within it, earlier
                           # ones NULL. Source and `CURRENT.json` untouched: verify, then `current -s NEW`. Opt-in per
                           # deployment (gcs: `path-index -G`); off, no file carries the column (specs/lean-scans.md §3.1).
+                          # `-N` (a repair): GEN already carries it; only its NULL object versions are filled (with `-S`,
+                          # from the scans whose listings have them all: gcs's depth-2/3 objects had none before 2026-10-22)
                           # `-j N` (also `add`'s compaction; `build`'s cut): N key ranges, then N served sorts, at a time on
                           # cursors of one DuckDB database (`-p`/`-M` shared; each ends in a serial pyarrow writer), same bytes
 disk-tree tiers plan SIDECAR P THR  # The reader's span selection run offline over a tier's `.groups.json`

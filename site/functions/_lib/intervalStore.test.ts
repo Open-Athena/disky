@@ -77,7 +77,10 @@ function flatten(t: ViewNode): Tiles {
   const rec = (n: ViewNode, p: string) => {
     let k = p
     for (let i = 2; k in out; i++) k = `${p}#${i}`
-    const { c, ...rest } = n
+    // `t` (the newest write's instant) isn't in the Python reference's views: it must name the same day as `d`, then
+    // the rest is compared exactly.
+    const { c, t, ...rest } = n
+    if (t !== undefined) expect([k, Math.floor((t as number) / 86400)]).toEqual([k, rest.d])
     const us = rest.us as [string, number][] | undefined
     out[k] = { ...rest, ...(us ? { us: [...us].sort((a, b) => b[1] - a[1] || (a[0] < b[0] ? -1 : 1)) } : {}) }
     const kids = [...(c ?? [])].sort((a, b) => b.b - a.b || (a.n < b.n ? -1 : a.n > b.n ? 1 : 0) || (canon(a) < canon(b) ? -1 : canon(a) > canon(b) ? 1 : 0))
@@ -102,6 +105,11 @@ beforeAll(async () => {
 })
 
 describe('interval store', () => {
+  it('prunes depth-boundary groups by the interval writer\'s exact path bounds', async () => {
+    const h = await openIndex(env, '2026-08-03', 'path')
+    expect(await planRects(h, [{ dLo: 2, dHi: 1e9, pLo: 'zzzz/', pHi: 'zzzz0' }])).toEqual([])
+  })
+
   it('opens a held date as of its scan, and nothing else', async () => {
     const h = await openIndex(env, '2026-08-03', 'bysize')
     expect([h.mode, h.version, h.variant, h.asOf, h.gen]).toEqual(['pq', 3, 'bysize', 1785715200, 'iv:g1'])
@@ -109,11 +117,33 @@ describe('interval store', () => {
     await expect(openIndex(env, '2026-08-03', 'bysize-user')).rejects.toThrow("index variant 'bysize-user' not synced for 2026-08-03")
   })
 
-  it('opts a request in with `ps=iv` under `PATH_STORE=opt-in`, out with `ps=scan` under `intervals`, never for a secondary store', async () => {
+  it('opts a configured store in with `ps=iv` under `opt-in`, out with `ps=scan` under `intervals`', async () => {
     const at = async (q: string, mode = 'opt-in') => (await withPathStore({ request: new Request(`https://x/api/subtree?${q}`), env: { ...env, PATH_STORE: mode } })).env.PATH_STORE
     expect(await Promise.all([at('date=d'), at('date=d&ps=iv'), at('date=d&ps=iv&store=meta'), at('date=d', 'intervals'), at('date=d&store=meta', 'intervals'),
       at('date=d&ps=scan', 'intervals'), at('date=d&ps=scan')]))
-      .toEqual([undefined, 'intervals', undefined, 'intervals', undefined, undefined, undefined])
+      .toEqual([undefined, 'intervals', 'intervals', 'intervals', 'intervals', undefined, undefined])
+  })
+
+  it('isolates equal generation names under different interval prefixes, including handles and decoded groups', async () => {
+    const base = r2([])
+    const seen: string[] = []
+    const bucket = {
+      get: async (key: string, options?: unknown) => {
+        seen.push(key)
+        const rewritten = key.replace(/^history\/[ab]\/interval-store/, 'interval-store')
+        return (base.get as (k: string, o?: unknown) => Promise<unknown>)(rewritten, options)
+      },
+      head: async () => ({}),
+      list: async () => ({ objects: [], truncated: false }),
+    } as unknown as R2Bucket
+    const a = { ...env, STORE_KEY: 'isolated-prefix', INDEX_R2: bucket, INTERVAL_STORE_PREFIX: 'history/a/interval-store' }
+    const b = { ...a, INTERVAL_STORE_PREFIX: 'history/b/interval-store' }
+    const ha = await openIndex(a, '2026-08-03', 'path')
+    const hb = await openIndex(b, '2026-08-03', 'path')
+    const ra = await readRows(ha, 0, 99, '', '\uffff')
+    const rb = await readRows(hb, 0, 99, '', '\uffff')
+    expect([ha.dir, hb.dir, ra.length > 0, rb]).toEqual(['history/a/interval-store/g1/served', 'history/b/interval-store/g1/served', true, ra])
+    expect([...new Set(seen.map(k => k.split('/').slice(0, 2).join('/')))].sort()).toEqual(['history/a', 'history/b'])
   })
 
   it('serves the store\'s current generation when unpinned, and a pin over it', async () => {
@@ -259,9 +289,8 @@ describe('interval store', () => {
         expect(a.trees).toEqual(views.map(c => Object.fromEntries(Object.entries(c.tiles).map(([k, n]) => [k, n.f === null ? Object.fromEntries(Object.entries(n).filter(([f]) => f !== 'f')) : n]))))
         expect(b.trees).toEqual(a.trees)
         expect([a.ds, b.ds]).toEqual([diffs, diffs])
-        // g3's 08-05 run's `bysize` data is read by nothing here: only 08-05's reads open that run, and they plan `path`
-        // (a small subtree reads the sort holding fewer rows).
-        const data = (d: string) => [...(d === 'deltas/2026-08-05/' ? [] : [`${d}served/bysize.parquet`]), `${d}served/path.parquet`]
+        // The runs' small subtree reads now prefer the path sort after exact boundary pruning.
+        const data = (d: string) => [...(d === '' ? [`${d}served/bysize.parquet`] : []), `${d}served/path.parquet`]
         const dirs = ['', ...(gen === 'g3' ? ['deltas/2026-08-04/', 'deltas/2026-08-05/'] : [])]
         expect([a.files, b.files]).toEqual([
           [...(gen === 'g3' ? ['manifests/2026-08-05.json'] : []), 'scans.json', ...dirs.flatMap(d => [`${d}served/bysize.groups.parquet`, `${d}served/path.groups.parquet`, ...data(d)])].sort(),
@@ -660,7 +689,7 @@ describe('interval store: base + runs', () => {
       '2026-07-31': base().sort(),
       '2026-08-02': base().sort(),
       '2026-08-03': base(false).sort(),
-      '2026-08-04': [...base(), ...run('2026-08-04')].sort(),
+      '2026-08-04': [...base(false), ...run('2026-08-04', false)].sort(),
       '2026-08-05': [...base(false), ...run('2026-08-04', false), ...run('2026-08-05', false)].sort(),
     })
   })

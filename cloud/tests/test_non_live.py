@@ -107,3 +107,18 @@ def test_json_merges_each_buckets_rows_replacing_its_own(tmp_path):
             expires_min="2026-10-22T00:00:00Z", expires_max="2026-10-25T00:00:00Z"),
         row("b2", "mpu", 7, 2),
     ]}
+
+
+def test_cli_measures_several_buckets_into_one_json_and_a_parquet_each(monkeypatch, tmp_path):
+    """Several URIs: each bucket measured (`-P` at once), its own parquet through `-o …/{bucket}.parquet`, and the
+    scan's JSON merged once with every bucket's rows; `-o` without `{bucket}` is refused for several."""
+    sizes = {"a": 40, "b": 7, "c": 0}
+    monkeypatch.setattr(nl, "gcs_soft_deleted", lambda bucket, prefix: nl.Total(bucket, "soft-deleted", bytes=sizes[bucket], objects=sizes[bucket] // 7))
+    snap = tmp_path / "snap" / "non-live.json"
+    res = CliRunner().invoke(nl.non_live_cmd, ["-c", "soft-deleted", "-P", "3", "-j", str(snap), "-o", str(tmp_path / "l2" / "{bucket}.parquet"),
+                                               "gs://a", "gs://b", "gs://c"], catch_exceptions=False)
+    assert res.exit_code == 0, res.output
+    assert {b: pq.read_table(tmp_path / "l2" / f"{b}.parquet").column("bytes").to_pylist() for b in "abc"} == {"a": [40], "b": [7], "c": [0]}
+    assert [(r["bucket"], r["bytes"], r["objects"]) for r in json.loads(snap.read_text())["rows"]] == [("a", 40, 5), ("b", 7, 1), ("c", 0, 0)]
+    res = CliRunner().invoke(nl.non_live_cmd, ["-c", "soft-deleted", "-o", str(tmp_path / "x.parquet"), "gs://a", "gs://b"])
+    assert (res.exit_code, res.output.strip().splitlines()[-1]) == (1, "-o: several URIs need `{bucket}` in the path")

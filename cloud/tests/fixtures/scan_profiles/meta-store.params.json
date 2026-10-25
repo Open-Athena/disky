@@ -38,6 +38,8 @@
  ],
  "pre": [],
  "pre_label": "small",
+ "side": [],
+ "side_label": "small",
  "interval_label": "big",
  "index_parts": [],
  "index_part_label": "big",
@@ -69,11 +71,13 @@
  "env": {
   "R2_ENDPOINT": "https://example-account.r2.example.org",
   "R2_BUCKET": "example-serving",
+  "DISKY_LABELS": "app=disky,deployment=example",
   "DT_DATA_MOUNT": "/mnt/disks"
  },
  "profile_json": "<profile>",
  "labels": {
   "deployment": "example",
+  "app": "disky",
   "component": "scan",
   "scan_id": "2026-10-16t1200"
  },

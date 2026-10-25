@@ -11,12 +11,24 @@
 name = "disk-tree-demo-dev"
 pages_build_output_dir = "dist"
 compatibility_date = "2026-06-01"
+# Usage attribution (`functions/_lib/usage.ts`, specs/usage-metrics.md): one Analytics Engine point per Functions
+# request; `nodejs_als` gives the point its R2/D1/KV counters and cache tier.
+compatibility_flags = ["nodejs_als"]
+
+[[analytics_engine_datasets]]
+binding = "USAGE"
+dataset = "disky_usage_r2_demo_dev"
 
 [[d1_databases]]
 binding = "DB"
 database_name = "disk-tree-demo-db"
 database_id = "261d0c80-8f73-442e-979a-4e25725b2271"
 remote = true
+
+# The static name index and the interval store, as wrangler.r2.toml's (the same bucket, read through the binding).
+[[r2_buckets]]
+binding = "INDEX_R2"
+bucket_name = "disk-tree-demo"
 
 [observability]
 enabled = true
@@ -35,6 +47,13 @@ STORE_SCHEME = "r2://"
 PUBLIC_READ = "1"
 SNAPSHOTS_SUBDIR = "r2"
 FILTER_INDEXED_ONLY = "1"        # search is the static name index only (every deployment): a form it can't answer is refused, never walked
+# Search and the Map's path store, as wrangler.r2.toml's (the static name index's generation; the interval store following
+# `interval-store/CURRENT.json`): without them dev searched nothing and read per-scan sorts (parity, 2026-10-22).
+STATIC_GEN = "2026-10-15"
+PATH_STORE = "intervals"
+FILTER_STATIC = "1"
+FILTER_STATIC_HEAVY = "1"        # heavy literals (catalog members, 1–2 characters) from the drilldown (`drill/`)
+# No CACHE_NS: dev's response-cache keys carry its host (`cacheEnvTag`), so its newer code never answers for prod.
 STORE_BUCKET = "disk-tree-demo"
 STORE_REGION = "auto"
 # The `/meta` store, as wrangler.r2.toml's (the same bucket, prefixes, static generation and read secrets).

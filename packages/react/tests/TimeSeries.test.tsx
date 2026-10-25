@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import { fireEvent, render } from '@testing-library/react'
-import { BytesOverTime, gapStretches, placeMarkers, splitAtGaps, TimeSeries } from '../src/TimeSeries'
+import { BytesOverTime, gapStretches, placeMarkers, plotExtent, splitAtGaps, TimeSeries } from '../src/TimeSeries'
+import type { Series } from '../src/TimeSeries'
 
 // jsdom has no `PointerEvent`: without one, `fireEvent.pointer*` builds a bare
 // `Event` that drops `clientX`/`button`/`isPrimary`.
@@ -356,6 +357,15 @@ describe('<TimeSeries>', () => {
     expect(bandOf(container)!.edges).toEqual([[56, '2 3'], [220, '2 3']])
   })
 
+  it('a window reaching past the plotted span (a zoomed chart) is clipped to it; one wholly outside draws no band', () => {
+    const band = (w: [number, number]) => bandOf(withSize(() => render(<TimeSeries series={brushSeries} getX={p => p.t} getY={p => p.y} window={w} />)).container)
+    expect([band([-5, 1]), band([1, 9]), band([5, 9])]).toEqual([
+      { x: 56, width: 164, fill: 'var(--dt-ts-window, rgba(255,255,255,0.07))', edges: [[56, '2 3'], [220, '2 3']] },
+      { x: 220, width: 164, fill: 'var(--dt-ts-window, rgba(255,255,255,0.07))', edges: [[220, '2 3'], [384, '2 3']] },
+      null,
+    ])
+  })
+
   // Mirror the component's own pixel math so expected path `d`s are exact
   // (same float→string as production), not eyeballed.
   function geom(w: number, h: number, xMin: number, xMax: number, yMin: number, yMax: number) {
@@ -650,5 +660,45 @@ describe('markers (vertical notes at an x)', () => {
     expect([lines(inView), labels(inView), yAxis(inView)]).toEqual([[['220', '2', '176']], [['n1', 'scope change']], ['28', '176']])
     const none = draw([{ key: 'late', x: 11, label: 'after' }])
     expect([lines(none), labels(none), yAxis(none)]).toEqual([[], [], ['12', '176']])
+  })
+})
+
+describe('plotExtent', () => {
+  type P = { x: number; y: number }
+  const X = (p: P) => p.x
+  const Y = (p: P) => p.y
+  const pts = (ys: number[]): P[] => ys.map((y, i) => ({ x: i, y }))
+  // Per-root lines with the total beside them, tooltip-only (`plot: false`): the total is ~3.6× the biggest line.
+  const lines: Series<P>[] = [
+    { key: 'a', points: pts([100, 150, 200, 180]) },
+    { key: 'b', points: pts([300, 320, 400, 350]) },
+    { key: 'total', plot: false, points: pts([1400, 1470, 1600, 1530]) },
+  ]
+
+  it('lines, from 0: the drawn lines set the top, never the tooltip-only total', () => {
+    expect(plotExtent(lines, X, Y, 'linear', 'zero')).toEqual({ xMin: 0, xMax: 3, yMin: 0, yMax: 420 })
+  })
+
+  it('lines, fit: the drawn lines’ min..max, padded 5% of their span each side', () => {
+    expect(plotExtent(lines, X, Y, 'linear', 'data')).toEqual({ xMin: 0, xMax: 3, yMin: 85, yMax: 415 })
+  })
+
+  it('lines over a zoomed x-window: only the window’s points (as the chart is handed them) set the range', () => {
+    const win = lines.map(s => ({ ...s, points: s.points.filter(p => p.x >= 2) }))
+    expect(plotExtent(win, X, Y, 'linear', 'zero')).toEqual({ xMin: 2, xMax: 3, yMin: 0, yMax: 420 })
+    expect(plotExtent(win, X, Y, 'linear', 'data')).toEqual({ xMin: 2, xMax: 3, yMin: 169, yMax: 411 })
+  })
+
+  it('stacked, fit: the `fit`-marked total sets the range, the bands below are clipped', () => {
+    const stacked: Series<P>[] = [
+      { key: 'a', points: pts([100, 150]) },
+      { key: 'total', fit: true, points: pts([1000, 1200]) },
+    ]
+    expect(plotExtent(stacked, X, Y, 'linear', 'data')).toEqual({ xMin: 0, xMax: 1, yMin: 990, yMax: 1210 })
+    expect(plotExtent(stacked, X, Y, 'linear', 'zero')).toEqual({ xMin: 0, xMax: 1, yMin: 0, yMax: 1260 })
+  })
+
+  it('a negative (Δ) line reaches below 0 when zero-anchored', () => {
+    expect(plotExtent([{ key: 'd', points: pts([-100, 0, 200]) }], X, Y, 'linear', 'zero')).toEqual({ xMin: 0, xMax: 2, yMin: -105, yMax: 210 })
   })
 })

@@ -9,7 +9,7 @@ import { bareEmpty, legacyOwner, ownerParam } from './ownerParam'
 import { AGE_MODES, AgeChart } from './AgeChart'
 import { canonId, shortName, shortUserKey } from './UserChip'
 import { signInUrl, useCanAssign, useCanStage, useIdent as useIdentity, useIsAdmin } from './auth'
-import { AttributionRules } from './AttributionRules'
+import { OwnershipHelp, PageFacts } from './PageFacts'
 import { DiffTreemap, DiffHeader, useDiffModel } from './DiffTreemap'
 import { DiffTable } from './DiffTable'
 import { Allowances } from './Allowances'
@@ -25,7 +25,8 @@ import { FitSelect } from './FitSelect'
 import { PathPopover } from './PathPopover'
 import { fromUrlPath, mountedSegs, pathCopy, pathText, urlSegsOf } from './pathCrumbs'
 import { listsObjects, openHref, treeHref } from './objects'
-import { Busy, Skeleton } from './Busy'
+import { useFolderSearch } from './folderSearch'
+import { Busy, Loading, Skeleton } from './Busy'
 import { useRules } from './rules'
 import { useSectionSpy, withoutSection, type SectionMode } from 'use-prms/sections'
 import { LEGACY_ANCHORS, SECTION_IDS, SECTION_KEY } from './homeSections'
@@ -139,7 +140,7 @@ const SPANS: [string, number][] = [['1d', 1], ['3d', 3], ['7d', 7], ['14d', 14],
 // HTTP copy of a pre-deploy answer (they were kept a day until 2026-09-17,
 // five minutes since) is never replayed after a reader rule changes. Bump
 // with `CACHE_V` in functions/_lib/edgeCache.ts.
-const API_CV = '2'
+const API_CV = '3'
 // The section in view lives in the query (`?section=diff`), where a link preview's unfurler sees it; an incoming
 // `#diff` (or a retired `#changes`) is adopted into it. A module constant: `useSectionSpy` re-resolves its mode,
 // and re-binds its scroll listener, whenever this object's identity changes.
@@ -781,6 +782,9 @@ function AppContent() {
   const [openP, setOpenP] = useUrlState('open', stringParam(), true)
   // Without the router's section: the spy names the one in view on the reader's next scroll.
   const openObject = (segs: string[]) => navigate(openHref(store, segs, withoutSection(search)))
+  // ⌘K: the folders and files named for the query, largest first, at this scan; a pick drills there (`folderSearch.ts`).
+  const omniIndexed = useIndexedScans(indexedOnly0)
+  useFolderSearch({ fetcher: sfetch, date: asof ?? null, indexed: omniIndexed, at: endAt, qs: syntax.id, drill: drillTo, open: openObject, filter: q => setFq(q), size: fmtBytes })
   // Read-recency lens domain: the access-log observation window (meta), not
   // the tree's own min/max — "no reads" is only meaningful vs when logging began.
   // Where the scan's read data ends (`access.through`, spec `access-log-freshness.md`): the lens is then
@@ -1321,7 +1325,7 @@ function AppContent() {
         )}
         {bar.ownerFilter && (
           <span className="tb-axis">
-            <span className="lbl">owner</span>
+            <Explain text={<OwnershipHelp />} label="owner"><span className="lbl">owner</span></Explain>
             {ownerSelect}
           </span>
         )}
@@ -1458,7 +1462,7 @@ function AppContent() {
           )}
           {/* The opened object (`?open=`), under the map it was picked from. */}
           {openP && mapPath && (
-            <Suspense fallback={<p className="loading">loading the viewer…</p>}>
+            <Suspense fallback={<Loading label="Loading the viewer…" />}>
               <ObjectPanel
                 segs={[...segs, openP]}
                 node={mapPath.length - 1 === segs.length ? mapPath[mapPath.length - 1].c?.find(c => c.n === openP) : undefined}
@@ -1489,6 +1493,15 @@ function AppContent() {
               access={meta?.access}
             /></div>
           )}
+          {/* The drilled node's storage-class mix and the ownership share, one compact row under the map's own
+              listing (it follows the drill); the per-class table opens from its disclosure (`?cx`). */}
+          {blindShown(!!fq) && (
+            <PageFacts
+              mix={meta && store.prices && mapPath ? classMix(mapPath[mapPath.length - 1]) : undefined}
+              scope={mapPath && mapPath.length > 1 ? mapPath.slice(1).map(n => n.n).join('/') : store.rootLabel}
+              tree={hasAttr ? mapTree ?? undefined : undefined}
+            />
+          )}
         </>
       ) : miss ? (
         <NoScanMatch miss={miss} fmt={fmtS} hrefFor={scan => hrefWithScan(pathname, search, selOf(new URLSearchParams(search)), scan, true, times, scans)} />
@@ -1513,7 +1526,7 @@ function AppContent() {
         // First paint only — before even the depth-1 tree has landed (later
         // loads hold the previous tree instead): reserve the map's slot at its
         // fetch aspect (w : 0.6w), so nothing below it jumps when it arrives.
-        <div id="tree-map" className="tm-skel" aria-busy="true" aria-label="loading tree" />
+        <div id="tree-map" className="tm-skel busy-host" aria-busy="true"><Busy label="Loading storage map…" /></div>
       )}
 
       {/* Bytes per scan under the drilled prefix, scoped like the map (a user
@@ -1616,7 +1629,7 @@ function AppContent() {
             </span>
             {diffHead ? (
               <>
-                {diffStale && <span className="loading"> · aligning the rows…</span>}
+                {diffStale && <Loading label="Aligning the rows…" />}
               </>
             ) : diffErr && !diffStale && /^(404|409)/.test(diffErr.message) ? (
               <span className="tab-note">
@@ -1628,7 +1641,7 @@ function AppContent() {
               // The filter's refusal as its reason; any other failure as its message, a 5xx with a retry.
               <>{' · '}<LoadFailure as="span" className="tab-note" err={diffErr} what={`diff ${fmtS(diffPrev)} → ${fmtS(asof)}`} onRetry={() => void diffQ.refetch()} /></>
             ) : (
-              <span className="loading"> · aligning {fmtS(diffPrev)} → {fmtS(asof)}…</span>
+              <Loading label={`Aligning ${fmtS(diffPrev)} → ${fmtS(asof)}…`} />
             )}
           </span>} />
           <DiskSpaceDiff before={beforeMetaQ.data?.disk_space} after={meta?.disk_space} />
@@ -1646,7 +1659,7 @@ function AppContent() {
               {/* The map's tabular twin: the same cells as rows, sortable; a
                   row's name drills like its cell (and scrolls the maps up). */}
               <DiffTable model={diffModel} scheme={store.scheme} segs={diffSegs} onDrill={rel => openPath([...diffSegs, ...rel])} onOpen={rel => openObject([...diffSegs, ...rel])} />
-              {diffStaleOther
+              {diffStaleOther || diffStale
                 ? <Busy label={`aligning ${fmtS(diffPrev)} → ${fmtS(asof)}…`} />
                 : diffRefining
                   ? <Busy label="aligning rows…" corner />
@@ -1703,48 +1716,6 @@ function AppContent() {
           note={<>Intended state is tracked in <code>{store.lifecycle.tracked}</code> (<code>dt-cloud lifecycle diff|push</code>).</>}
         />
       )}
-
-      {blindShown(!!fq) && meta && store.prices && (() => {
-        // Class mix of the *drilled* node (each node carries descendant-inclusive
-        // `cb`), so this tracks the treemap instead of always showing fleet totals.
-        const node = mapPath ? mapPath[mapPath.length - 1] : tree
-        if (!node) return null
-        const mix = classMix(node)
-        const total = node.b || 1
-        const scope = mapPath && mapPath.length > 1 ? mapPath.slice(1).map(n => n.n).join('/') : store.rootLabel
-        return (
-          <section id="storage-classes">
-            <h2>Storage classes</h2>
-            <p className="sub">
-              Class mix + list-price estimate for <code>{scope}</code> — updates as you drill the treemap.
-            </p>
-            <table className="classes">
-              <thead>
-                <tr><th>class</th><th>bytes</th><th>est. $/mo (list, US)</th></tr>
-              </thead>
-              <tbody>
-                {Object.entries(mix)
-                  .sort((a, b) => b[1] - a[1])
-                  .map(([c, b]) => (
-                    <tr key={c}>
-                      <td>
-                        <Tooltip cell content={<>${CLASS_PRICE_US[c] ?? 0.02}/GiB·mo · {((100 * b) / total).toFixed(1)}% of these bytes</>}>
-                          <span className="dotted">{CLASS_NAMES[c] ?? c}</span>
-                        </Tooltip>
-                      </td>
-                      <td>{fmtBytes(b)}</td>
-                      <td>${Math.round((b / 1024 ** 3) * (CLASS_PRICE_US[c] ?? 0.02)).toLocaleString()}</td>
-                    </tr>
-                  ))}
-              </tbody>
-            </table>
-          </section>
-        )
-      })()}
-
-      {/* Static attribution reference — how ownership is inferred + the rule tables.
-          Reference material, so it sits last rather than sandwiched mid-page. */}
-      {blindShown(!!fq) && hasAttr && mapTree && <AttributionRules tree={mapTree} />}
 
       <SiteKbd
         placeholder={store.owners ? 'Users, color modes, scans, pages…' : 'Color modes, scans, pages, actions…'}

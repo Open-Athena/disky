@@ -11,7 +11,7 @@
  *                                { pattern, owner, kind?, set_owner?, memo?, scan? }.
  *                                `owner: null` clears; `'@me'` resolves to the
  *                                actor's canonical user id. `kind` says what
- *                                `pattern` names (specs/file-assign.md):
+ *                                `pattern` names (specs/done/file-assign.md):
  *                                `'prefix'` (default) a folder `…/`, `'object'`
  *                                one exact key (no trailing slash) — owning
  *                                that key and nothing else. No regex patterns
@@ -29,6 +29,7 @@ import { actionLog } from '../_lib/actionLog.js'
 import { hasLedger } from '../_lib/ledger.js'
 import { canonicalObject, type ItemKind, NO_SHAPE, type PrefixShape, prefixShape } from '../_lib/plans.js'
 import { isScanId } from '../../src/scanSlug.js'
+import { noteActivity } from '../_lib/activityHook.js'
 
 const reEscape = (s: string): string => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 /** `<scheme><bucket>/<path>/` over the scanned buckets (`STORE_SCHEME` /
@@ -145,6 +146,12 @@ export const onRequest = async (ctx: Ctx): Promise<Response> => {
       )
     }
     await env.DB.batch(stmts)
+    noteActivity(ctx, ...ok.map(p => ({
+      line: `\`${p.pattern}\` → ${p.owner ?? 'nobody'}${p.memo ? ` ("${p.memo.slice(0, 80)}")` : ''}`,
+      pattern: p.pattern,
+      owner: p.owner,
+      ...(p.kind === 'object' ? { object: true } : {}),
+    })))
     return json({ ok: true, count: parsed.length, ts })
   }
 

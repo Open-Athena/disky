@@ -142,7 +142,7 @@ export interface Store {
 
 /** The registry: one module per store under `stores/`, each `export default`ing
  * a `Store`. `cloud` carries r2's; a deployment branch adds its own, so the
- * shared base carries no deployment's entry (specs/oa-decoupling.md step 6). */
+ * shared base carries no deployment's entry (specs/done/oa-decoupling.md step 6). */
 const MODULES = Object.values(import.meta.glob<{ default: Store }>('./stores/*.{ts,tsx}', { eager: true })).map(m => m.default)
 
 const REGISTRY: Store[] = MODULES

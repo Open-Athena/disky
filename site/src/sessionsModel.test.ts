@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
-import { fmtClock, fmtDuration, fmtOffset, ticks, timeline, uaLabel, viewerOf } from './sessionsModel'
+import { fmtClock, fmtDuration, fmtOffset, pagerLabel, sessionsQuery, ticks, timeline, uaLabel, viewerOf } from './sessionsModel'
 import { buildRegistry } from './identityRegistry'
-import type { StoredEvent } from '../functions/_lib/sessionLogShape'
+import type { SessionRow, StoredEvent } from '../functions/_lib/sessionLogShape'
 
 const T = 1_791_817_200_000
 const e = (dt: number, k: StoredEvent['k'], f: Record<string, unknown> = {}, pid = 'p1'): StoredEvent =>
@@ -119,5 +119,33 @@ describe('session view model', () => {
     ])
     // No `user_emails` map (not loaded, or a lineage without the table): the registry alone.
     expect(viewerOf(rows[0], undefined, reg)).toEqual({ kind: 'email', email: 'Ada@Lab.example', guest: false })
+  })
+})
+
+describe('session list paging', () => {
+  it('the URL\'s filters and cursor → the API query (after wins over before; empties dropped)', () => {
+    const none = { email: '', since: '', errors: false, after: null, before: null }
+    expect([
+      sessionsQuery(none),
+      sessionsQuery({ ...none, email: 'ann', since: '2026-10-01', errors: true }),
+      sessionsQuery({ ...none, errors: true, after: '1791817200000.sid-aaaaaa' }),
+      sessionsQuery({ ...none, before: '1791817200000.sid-aaaaaa' }),
+      sessionsQuery({ ...none, after: '1.sid-aaaaaa', before: '2.sid-bbbbbb' }),
+    ]).toEqual([
+      '',
+      'email=ann&since=2026-10-01&errors=1',
+      'errors=1&after=1791817200000.sid-aaaaaa',
+      'before=1791817200000.sid-aaaaaa',
+      'after=1.sid-aaaaaa',
+    ])
+  })
+  it('the pager label: the page\'s range of the total', () => {
+    const rows = (n: number) => Array.from({ length: n }, () => ({}) as SessionRow)
+    expect([
+      pagerLabel({ sessions: rows(50), total: 1234, offset: 0 }),
+      pagerLabel({ sessions: rows(34), total: 1234, offset: 1200 }),
+      pagerLabel({ sessions: [], total: 0, offset: 0 }),
+      pagerLabel({ sessions: [], total: 12, offset: 12 }),
+    ]).toEqual(['1–50 of 1,234', '1,201–1,234 of 1,234', '0 of 0', 'none of 12'])
   })
 })

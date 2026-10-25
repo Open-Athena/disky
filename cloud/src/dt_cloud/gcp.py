@@ -73,13 +73,17 @@ def batch_jobs(project: str | None = None, region: str = REGION) -> list[dict]:
 
 
 def _pages(url: str, key: str) -> list[dict]:
-    rows: list[dict] = []
-    params: dict[str, str] = {}
+    return [row for page in pages(url) for row in page.get(key, [])]
+
+
+def pages(url: str, **params: str) -> list[dict]:
+    """Every page a GET list endpoint answers with `params`, following `nextPageToken`."""
+    out: list[dict] = []
     while True:
         page = _get(url, **params)
-        rows.extend(page.get(key, []))
+        out.append(page)
         if not (token := page.get("nextPageToken")):
-            return rows
+            return out
         params["pageToken"] = token
 
 

@@ -358,7 +358,7 @@ describe('the cold footer tier (`.groups.parquet`)', () => {
 
 describe('buildView on a store generation', () => {
   const base = { w: 1280, h: 800, minArea: 12, atten: 1 }
-  const node = (n: string, k: 'file' | 'dir', b: number, o: number, rest: Partial<ViewNode> = {}): ViewNode => ({ n, k, b, o, d: DAY, ...rest })
+  const node = (n: string, k: 'file' | 'dir', b: number, o: number, rest: Partial<ViewNode> = {}): ViewNode => ({ n, k, b, o, d: DAY, t: DAY * 86400, ...rest })
   const flatKids = (): ViewNode[] => [...flatAt(15).map(p => node(p.split('/').pop()!, 'file', 32 * KiB, 1)), node('(other)', 'dir', 32767500 - 500 * 32 * KiB, 7500, { f: 7500 })]
   const nestTree = (): ViewNode => node('nest', 'dir', 4456448, 5, { c: [
     node('a', 'dir', 4456448, 5, { c: [

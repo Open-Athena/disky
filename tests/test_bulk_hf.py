@@ -112,6 +112,16 @@ def test_list_namespace():
     assert {h["Authorization"] for _, h in replay.calls} == {"Bearer t0k"}
 
 
+def test_bucket_uses_maximum_page_size_and_follows_server_pagination():
+    c, replay = client()
+    rows, totals = bulk_hf.list_bucket(c, "open-athena", "biotasks", False, 1110)
+    assert (rows, totals) == (EXPECTED_ROWS[:3], EXPECTED_TOTALS[0])
+    assert replay.calls == [
+        (f"{E}/api/buckets/open-athena/biotasks/tree?recursive=true&limit=5000", {"Authorization": "Bearer t0k"}),
+        (f"{E}/api/buckets/open-athena/biotasks/tree?limit=2&recursive=true&cursor=p2", {"Authorization": "Bearer t0k"}),
+    ]
+
+
 def test_list_namespace_logs_progress(capsys):
     # One line per finished unit (an interval of 0), the last excepted: its totals line follows from the caller.
     c, _ = client()
@@ -280,9 +290,10 @@ def test_list_hf_to_parquet(tmp_path: Path):
     assert bulk_hf.list_hf_to_parquet("hf://open-athena", str(out), threads=2, client=c) == 10
     assert sorted(p.name for p in out.iterdir()) == ["_SUCCESS.json", "shard-0000.parquet"]
     df = pd.read_parquet(out / "shard-0000.parquet")
-    assert df.columns.tolist() == ["bucket", "name", "size_bytes", "created", "storage_class_id", "generation"]
+    assert df.columns.tolist() == ["bucket", "name", "size_bytes", "created", "storage_class_id", "generation", "version"]
+    assert df["version"].isna().tolist() == [True] * len(EXPECTED_ROWS)  # HF has no object versions
     assert [
-        (b, n, s, c_.isoformat(), k, g) for b, n, s, c_, k, g in df.astype(object).itertuples(index=False)
+        (b, n, s, c_.isoformat(), k, g) for b, n, s, c_, k, g in df.drop(columns='version').astype(object).itertuples(index=False)
     ] == [
         ("open-athena", n, s, pd.Timestamp(t).isoformat(), {"public": 1, "git": 6}[k], pd.NA)
         for n, s, t, k, _ in EXPECTED_ROWS

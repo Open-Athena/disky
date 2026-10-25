@@ -7,7 +7,11 @@
 //   bucket-check, pre ─┐
 //   list ×source ──────┴→ [index ×part →] index ─┬→ static-names ─────────────────┐
 //                                ├→ publish-r2 → interval-store ──┼→ index-sync → post (over-time, index-gc, …)
+//   side ────────────────────────┘ (publish-r2's, and serving's)  │
 //                                └→ index-rows ───────────────────┘
+//
+// `params.side` (steps of stage `side`: `non-live`): their own task from the start, beside `list` and `index`, which
+// never wait on it; `publish-r2` does (its outputs reach R2 with the scan's), and so does everything after serving.
 //
 // `params.index_parts` (`options.index.parts`): the index sharded, one `index_part` task per part (`scan step index
 // <part>`: a bucket, or a key range of one), then `index` merges them into the one pass's outputs (`index_parts`).
@@ -29,6 +33,8 @@ params.steps = []          // every enabled step (core minus `skip`, plus the pr
 params.pre = []            // enabled extra steps beside `list`, before `index` (soft: index runs without them)
 params.pre_label = 'small'
 params.static_label = 'small'
+params.side = []           // enabled `side` steps: their own task, waited on by publish-r2 and serving, never by index
+params.side_label = 'small'
 params.interval_label = 'big'
 params.index_parts = []    // the sharded index's part ids (`options.index.parts`), each its own task before `index`
 params.index_part_label = 'big'
@@ -100,6 +106,12 @@ process pre {
     label params.pre_label  // `pre` when the profile sizes it (`machines.pre`: gcs's access ingest wants ~64 GB), else `small`
     output: path 'done'
     script: stepScript(task, params.pre)
+}
+
+process side {
+    label params.side_label  // `side` when the profile sizes it (`machines.side`), else `small`
+    output: path 'done'
+    script: stepScript(task, params.side)
 }
 
 process list_source {
@@ -192,12 +204,13 @@ workflow {
     def listed = gathered(ready)
     def indexed = index(params.index_parts ? gathered(index_part(Channel.fromList(params.index_parts), listed)) : listed)
     def none = Channel.value('skipped')
-    def pub = on('publish-r2') ? publish_r2(indexed) : indexed
+    def sided = params.side ? side() : none
+    def pub = on('publish-r2') ? publish_r2(params.side ? gathered(indexed.mix(sided)) : indexed) : indexed
     // On a local data dir the static index reads earlier scans from the serving store, so it waits for this one's publish
     def st = on('static-names') ? static_names(params.static_after_publish ? pub : indexed) : none
     def iv = on('interval-store') ? interval_store(pub) : pub
     def rows = index_rows(indexed)
-    def serving = gathered(rows.mix(st, iv))
+    def serving = gathered(rows.mix(st, iv, sided))
     def synced = folded('index-sync') ? serving : gathered(index_sync(serving))
     if (params.post || folded('index-sync')) post(synced)
     if (params.over_time) over_time(synced)

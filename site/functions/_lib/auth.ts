@@ -18,7 +18,8 @@
  */
 import { type Auth, createGate, type Gate, hasScope, type Subject } from '@open-athena/auth'
 import { d1AuditSink, d1GrantStore, d1ProfileStore, d1RequestStore } from '@open-athena/auth/d1'
-import type { D1Database, KVNamespace, R2Bucket } from '@cloudflare/workers-types'
+import type { AnalyticsEngineDataset, D1Database, KVNamespace, R2Bucket } from '@cloudflare/workers-types'
+import { grantCaller, meterOf } from './usage.js'
 
 export interface Env {
   DB?: D1Database
@@ -113,10 +114,18 @@ export interface Env {
   /** The interval store generation (`interval-store/<gen>/` on `INDEX_R2`), a pin; unset: the store's current one,
    *  `interval-store/CURRENT.json` (`index.ts` `ivGen`), which a compaction moves. */
   INTERVAL_STORE_GEN?: string
+  /** Store-relative namespace; secondary and age stores use independent pointers and generations. */
+  INTERVAL_STORE_PREFIX?: string
+  /** Root holding the age histogram's interval store (without the trailing `interval-store`). */
+  AGE_STORE_PREFIX?: string
   /** A revision of the generation's files (rewritten in place): keys every cache over them apart. */
   INTERVAL_STORE_REV?: string
-  /** The static name index's generation in `INDEX_R2` (`static-names/<gen>/`); required with `FILTER_STATIC` / `NAME_SUMMARY_STATIC`. */
+  /** The static name index's generation in `INDEX_R2` (`static-names/<gen>/`): a pin; unset, the primary's is
+   *  `static-names/CURRENT.json`'s (`index.ts` `withStaticGen`, resolved per request). Required (pinned or pointed) with
+   *  `FILTER_STATIC` / `NAME_SUMMARY_STATIC`. */
   STATIC_GEN?: string
+  /** Optional independent pointer for this static lineage; a STATIC_GEN pin still wins. */
+  STATIC_CURRENT_KEY?: string
   STORE_ACCESS_KEY_ID?: string
   STORE_SECRET_ACCESS_KEY?: string
   /** Global second cache tier behind the colo cache (`_lib/edgeCache.ts`). */
@@ -157,11 +166,15 @@ export interface Env {
   FOOTER_CACHE_MAX_ROWS?: string
   /** …and, when set, the most bytes (their text columns + 64 per row; unset = no byte cap). */
   FOOTER_CACHE_MAX_BYTES?: string
+  /** The Analytics Engine dataset the usage points go to (`_lib/usage.ts`, specs/usage-metrics.md); unset = none. */
+  USAGE?: AnalyticsEngineDataset
 }
 
 export interface Ctx {
   request: Request
   env: Env
+  /** Pages' per-request object, shared by the middleware and the route (each gets its own `Request` copy). */
+  data?: Record<string, unknown>
 }
 
 export const GCS_SCOPE = 'gcs'
@@ -291,12 +304,20 @@ export async function identify(ctx: Ctx): Promise<Identity | null> {
   // gcs.oa.dev request's URL host is never `localhost`/`127.0.0.1`.
   const host = new URL(ctx.request.url).hostname
   if (host === 'localhost' || host === '127.0.0.1') {
+    meterOf(ctx)?.identified('session', 'session')
     return withAdmin({ email: ctx.env.DEV_EMAIL ?? 'dev@example.test', name: null, scopes: allScopes(ctx.env), via: 'session', subject: null })
   }
   const gate = gateFor(ctx.env)
   if (!gate) return null
   const auth = await gate.authenticate(ctx.request)
-  return auth ? authIdentity(auth) : null
+  if (!auth) return null
+  // The usage point's caller (`_lib/usage.ts`): what this lookup just proved, so the middleware needs none of its own.
+  const m = meterOf(ctx)
+  if (m) {
+    if (auth.kind === 'sso') m.identified('session', 'session')
+    else { const c = grantCaller(ctx.request, auth.grant); m.identified(c.via, c.caller) }
+  }
+  return authIdentity(auth)
 }
 
 /** Gate a handler on a scope; 401/403 as JSON. */
