@@ -433,6 +433,50 @@ def test_stage_roots_modes(world, tmp_path, monkeypatch):
         assert not (tmp_path / "w" / "stage").exists()
 
 
+
+def test_stage_shards_modes(world, tmp_path, monkeypatch):
+    """`stage_shards`: `off` and a generation on the work disk read in place, as does `auto` without room for the
+    shards × (1 + `SX_STAGE_HEADROOM`) and any file not staged (the merge reads whole dirs); staged, the merge's input
+    dirs are the base's and the runs' `sx/` copied byte for byte, in the same layout."""
+    from dt_cloud import blobstore as bs
+
+    gen_dir = world["c_store"] / "g"
+    runs = [r["key"] for r in ar.newest_runs(gen_dir)[1]]
+    files = [f for t in [gen_dir, *(gen_dir / r for r in runs)] for f in sorted((t / "sx").glob("*.parquet"))]
+    need = sum(f.stat().st_size for f in files)
+    dst = tmp_path / "w" / sk.SX_STAGE
+    logs: list[str] = []
+
+    def stage(mode: str, free: int | None = None, same: bool = False) -> list[Path] | None:
+        monkeypatch.setattr(sk, "_same_disk", lambda a, b: same)
+        monkeypatch.setattr(sk, "_free", lambda p: free if free is not None else need * 100)
+        return sk.stage_shards(gen_dir, runs, dst, mode=mode, log=logs.append)
+
+    gib = lambda n: f"{n / 2**30:,.1f} GiB"  # noqa: E731
+    assert [stage("off"), stage("auto", same=True), stage("auto", free=2 * need - 1)] == [None, None, None]
+    assert logs == [f"stage sx: off; shards read in place from {gen_dir}",
+                    f"stage sx: skipped, {gen_dir} is on the work disk already",
+                    f"stage sx: skipped, the work disk has {gib(2 * need - 1)} free, under {gib(need)} of shards × 2; read in place from {gen_dir}"]
+    assert not dst.exists()
+    assert stage("auto", free=2 * need) == [dst, *(dst / r for r in runs)]
+    copies = sorted(dst.rglob("*.parquet"))
+    assert [c.relative_to(dst) for c in copies] == sorted(f.relative_to(gen_dir) for f in files)
+    assert all((gen_dir / c.relative_to(dst)).read_bytes() == c.read_bytes() for c in copies)
+    assert len(runs) >= 1 and len(files) > len(runs) + 1
+
+    get = bs.Store.get
+    broken = files[0].relative_to(gen_dir).as_posix()
+
+    def flaky(self, key: str, d: Path) -> None:
+        if key == broken:
+            raise OSError("injected")
+        get(self, key, d)
+    monkeypatch.setattr(bs.Store, "get", flaky)
+    logs.clear()
+    assert stage("on") is None
+    assert (logs[-1], dst.exists()) == (f"stage sx: 1 of {len(files)} files not staged; shards read in place from {gen_dir}", False)
+
+
 @pytest.mark.parametrize("stage", ["off", "on", "auto", "on-fail-one", "on-fail-all"])
 def test_compact_probe_folds_read_only_to_the_published_bytes(world, tmp_path, monkeypatch, stage):
     """`static_merge compact-probe` over C's store as the mount (4 chunks at a time): the published `g.c001`'s files, md5
@@ -476,10 +520,18 @@ def test_compact_probe_folds_read_only_to_the_published_bytes(world, tmp_path, m
     lines = [ln for ln in summary["stage_log"] if ln.startswith("stage:")]
     fin = [re.sub(r" in \d+s \([\d,]+ MB/s\)", " in <s> (<rate>)", ln) for ln in summary["stage_log"] if ln.endswith("(done)")]
     stage_dir = tmp_path / "w" / "stage"
+    # the suffix shards' staging (`stage_shards`): its own decision and progress lines, its copies gone after the merge
+    sx = [f for t in [gen_dir, *(gen_dir / r["key"] for r in ar.newest_runs(gen_dir)[1])] for f in sorted((t / "sx").glob("*.parquet"))]
+    sx_need = sum(f.stat().st_size for f in sx)
+    sx_lines = [ln.partition(" in ")[0] for ln in summary["stage_log"] if ln.startswith("stage sx:")]
+    assert not (tmp_path / "w" / sk.SX_STAGE).exists()
     if stage == "on":
         assert [ln.partition(" in ")[0] for ln in lines] == [
             f"stage: {len(files)} files, {need / 2**30:,.1f} GiB of long+short roots from {gen_dir} → {stage_dir}"]
-        assert fin == [f"stage long+short roots {len(files)}/{len(files)} files, {need / 2**30:,.2f} of {need / 2**30:,.2f} GiB in <s> (<rate>) (done)"]
+        assert sx_lines == [f"stage sx: {len(sx)} files, {sx_need / 2**30:,.1f} GiB from {gen_dir} → {tmp_path / 'w' / sk.SX_STAGE}"]
+        assert sorted(fin) == sorted([
+            f"stage long+short roots {len(files)}/{len(files)} files, {need / 2**30:,.2f} of {need / 2**30:,.2f} GiB in <s> (<rate>) (done)",
+            f"stage sx {len(sx)}/{len(sx)} files, {sx_need / 2**30:,.2f} of {sx_need / 2**30:,.2f} GiB in <s> (<rate>) (done)"])
     elif stage == "on-fail-one":
         rest = need - (gen_dir / broken).stat().st_size
         assert [ln.partition(" in ")[0] for ln in lines] == [
@@ -487,7 +539,14 @@ def test_compact_probe_folds_read_only_to_the_published_bytes(world, tmp_path, m
         assert [ln for ln in summary["stage_log"] if " not staged " in ln] == [
             f"stage long+short roots: {broken} not staged (OSError: injected); read in place"]
         assert summary["staged"]["failed"] == [broken]
+        # the roots' broken copy is the roots' alone: the shards stage whole
+        assert sx_lines == [f"stage sx: {len(sx)} files, {sx_need / 2**30:,.1f} GiB from {gen_dir} → {tmp_path / 'w' / sk.SX_STAGE}"]
     else:
+        sx_full = [ln for ln in summary["stage_log"] if ln.startswith("stage sx:")]
+        assert sx_full == [{"off": f"stage sx: off; shards read in place from {gen_dir}",
+                            "auto": f"stage sx: skipped, the work disk has 0.0 GiB free, under {sx_need / 2**30:,.1f} GiB of shards × 2; "
+                                    f"read in place from {gen_dir}",
+                            "on-fail-all": f"stage sx: failed (RuntimeError: injected); shards read in place from {gen_dir}"}[stage]]
         assert lines == [{"off": f"stage: off; roots read in place from {gen_dir}",
                           "auto": f"stage: skipped, the work disk has 0.0 GiB free, under {need / 2**30:,.1f} GiB of long+short roots × 5; "
                                   f"roots read in place from {gen_dir}",

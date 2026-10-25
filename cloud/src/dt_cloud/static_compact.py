@@ -121,6 +121,51 @@ def fold_catalog(con, tiers: list[Path], out: Path, work: Path, *, new_gen: str,
     return meta
 
 
+#: `stage_shards`' `auto` headroom: the shards' merge writes about as many bytes as it reads.
+SX_STAGE_HEADROOM = 1.0
+SX_STAGE = "stage-sx"
+
+
+def stage_shards(gen_dir: Path, runs: list[str], dst: Path, *, source: str | None = None, mode: str = "auto",
+                 log: Callable[[str], None] = err) -> list[Path] | None:
+    """The base's and `runs`' (generation-relative run dirs) suffix shards (`sx/`), what the shards' merge reads, copied
+    from `source` (as `stage_roots`; None: `gen_dir` itself) to `dst` in the same layout; the merge's input dirs there.
+    Read in place over gcsfuse, gcs's fold2 merge held a steady ~62% of 48 vCPUs for 15 min at ~200 MB/s out. None
+    (logged why, the shards read in place) as `stage_roots` (`mode`, the work disk, room for the shards ×
+    (1 + `SX_STAGE_HEADROOM`)), and when any file isn't staged: the merge reads whole dirs."""
+    if mode not in STAGE_MODES:
+        raise ValueError(f"stage mode {mode!r}: one of {STAGE_MODES}")
+    if mode == "off":
+        log(f"stage sx: off; shards read in place from {gen_dir}")
+        return None
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    if mode == "auto" and _same_disk(gen_dir, dst.parent):
+        log(f"stage sx: skipped, {gen_dir} is on the work disk already")
+        return None
+    tiers = ["", *runs]
+    keys = {f"{t}/sx/{f.name}".lstrip("/"): f.stat().st_size for t in tiers for f in sorted((gen_dir / t / "sx").glob("*.parquet"))}
+    need, free = sum(keys.values()), _free(dst.parent)
+    gib = lambda n: f"{n / 2**30:,.1f} GiB"  # noqa: E731
+    if mode == "auto" and free < need * (1 + SX_STAGE_HEADROOM):
+        log(f"stage sx: skipped, the work disk has {gib(free)} free, under {gib(need)} of shards × {1 + SX_STAGE_HEADROOM:g}; read in place from {gen_dir}")
+        return None
+    shutil.rmtree(dst, ignore_errors=True)
+    try:
+        doc = stage_files(source or str(gen_dir), keys, dst, label="stage sx", log=log)
+    except Exception as e:
+        # a cache: whatever broke the copy, the shards are still readable in place
+        shutil.rmtree(dst, ignore_errors=True)
+        log(f"stage sx: failed ({type(e).__name__}: {e}); shards read in place from {gen_dir}")
+        return None
+    if doc["failed"]:
+        shutil.rmtree(dst, ignore_errors=True)
+        log(f"stage sx: {len(doc['failed'])} of {len(keys)} files not staged; shards read in place from {gen_dir}")
+        return None
+    log(f"stage sx: {doc['files']} files, {gib(doc['bytes'])} from {source or gen_dir} → {dst} in {doc['s']}s "
+        f"({doc['bytes'] / max(doc['s'], 0.1) / 1e9:.2f} GB/s; {gib(free)} free before)")
+    return [dst / t for t in tiers]
+
+
 # ── The drill ──────────────────────────────────────────────────────────────
 
 
@@ -1209,6 +1254,9 @@ def _fold_gen(gen_dir: Path, out: Path, work: Path, *, gen: str, new_gen: str, r
     def slog(line: str) -> None:
         stage_log.append(line)
         log(f"compact {gen} → {new_gen}: {line}")
+    # the suffix shards first: the shards' merge reads them right after the intervals, the drill's roots only later
+    sx_staging = (bg.submit(stage_shards, gen_dir, [r["key"] for r in runs], work / SX_STAGE, source=source, mode=stage, log=slog)
+                  if ck is None or not ck.done("shards") else None)
     if kinds:
         tdirs = [*([] if stage_runs_only else ["drill"]), *(f"{r['key']}/drill" for r in runs)]
         staging = bg.submit(stage_roots, gen_dir, tdirs, kinds, work / STAGE, source=source, mode=stage, log=slog)
@@ -1227,7 +1275,9 @@ def _fold_gen(gen_dir: Path, out: Path, work: Path, *, gen: str, new_gen: str, r
     def shards() -> dict:
         old = json.loads((gen_dir / "shards.json").read_text())
         plan = sn.plan_shards(sorted((out / "chist").glob("*.parquet")), old["target_rows"], len(old["tasks"]))
-        sa.merge_shards([gen_dir, *run_dirs], out, plan=plan)
+        staged_sx = sx_staging.result() if sx_staging is not None else None
+        sa.merge_shards(staged_sx or [gen_dir, *run_dirs], out, plan=plan)
+        shutil.rmtree(work / SX_STAGE, ignore_errors=True)
         (out / "shards.json").write_text(json.dumps(plan, indent=1) + "\n")
         side = sn.concat_sidecars([pq.read_table(f) for f in sorted((out / "sidecar").glob("*.parquet"))])
         sn.write_sidecar(side, out / "sidecar.parquet")
