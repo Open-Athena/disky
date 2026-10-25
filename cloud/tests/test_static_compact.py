@@ -1203,6 +1203,34 @@ def test_fanned_out_anchors_write_the_single_vm_fold(world, tmp_path, monkeypatc
     assert bool(failed) == (mode == "oom")
 
 
+def test_a_presubmitted_anchors_job_ends_on_an_abandoned_plan(tmp_path):
+    """`presubmit` submits the helper job before its plan exists (a task per helper share, the stale plan deleted);
+    `abandon` (the step failed before dealing) writes an empty plan, and every waiting task ends with nothing to do."""
+    from dt_cloud import static_merge as sm
+    from dt_cloud.checkpoint import Checkpoint, code_version
+    from dt_cloud.static_fanout import AnchorFanout
+
+    ck = Checkpoint(str(tmp_path / "scratch"), "p", work=tmp_path / "ck")
+    (tmp_path / "scratch" / "p" / "anchored").mkdir(parents=True)
+    (tmp_path / "scratch" / "p" / "anchored" / "plan-1.json").write_text(json.dumps({"tasks": [[["end", 0]]]}) + "\n")
+    calls: list = []
+
+    def submit(url: str, plan: str, n: int, code: str, scan: str) -> None:
+        calls.append((plan, n, scan))
+        for i in range(n):
+            sm.anchor_shard_cmd.callback(checkpoint=url, index=i, mem="1GB", threads=2, plan=plan, tmp=str(tmp_path / f"a{i}"), code=code,
+                                         workers=1)
+
+    fan = AnchorFanout(ck, 3, submit, code=code_version(), scan="2026-10-25", poll_s=0.01, log=lambda m: None)
+    fan.presubmit()
+    fan.abandon()
+    fan.thread.join(30)
+    assert (fan.thread.is_alive(), fan.error) == (False, None)
+    assert calls == [("anchored/plan-1.json", 2, "2026-10-25")]
+    assert json.loads((tmp_path / "scratch" / "p" / "anchored" / "plan-1.json").read_text())["tasks"] == []
+    ck.close()
+
+
 def test_anchor_tasks_a_helper_job_left_are_dealt_again(world, tmp_path):
     """The first anchors helper job's second task never runs: its shard tasks go to a second job, and the fold's bytes
     are the same."""
