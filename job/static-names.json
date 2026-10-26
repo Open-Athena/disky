@@ -43,6 +43,7 @@
  "src": [],
  "hex_runs": "16,8",
  "compact_level": 5,
+ "keep": 1024,
  "standard_stages": [
   "anchors",
   "compact",
