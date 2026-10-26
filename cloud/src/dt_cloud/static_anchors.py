@@ -47,7 +47,7 @@ from click import Choice, argument, group, option
 from .hex_runs import HexRule, end_dropped_sql, rule_from_json, rule_json, segment_occurs
 from .static_catalog import PARENT
 from .static_names import (
-    CODEC, NAME, OPEN, PREFIX, SX_RG, _batches, _sx_cast, _task, connect, q, read_json,
+    CODEC, NAME, OPEN, PREFIX, SX_RG, _batches, _sx_cast, _task, base_params, connect, q, read_json,
 )
 from .static_profile import data_bucket, scratch_bucket
 from .resource_monitor import monitor_resources, resource_stage
@@ -2150,13 +2150,13 @@ def start_cmd(bucket, run, gen, K, mount, mem, threads, R, tmp) -> None:
 @option("-b", "--bucket", default=data_bucket, help="Bucket")
 @option("-d", "--run", required=True, help="The run's scan id (a level-0 run in the newest manifest)")
 @option("-g", "--gen", required=True, help="Generation")
-@option("-K", "--keep", "K", default=K_DEFAULT, type=int, help="Kept children per heavy directory")
+@option("-K", "--keep", "K", type=int, help="Kept children per heavy directory (default and only allowed value: the base's)")
 @option("-m", "--mount", required=True, help="Local mount of the bucket")
 @option("-M", "--mem", default="100GB", help="DuckDB memory limit")
 @option("-o", "--out", help="Build into this new local dir and upload nothing (a canary or probe re-run; with -P)")
 @option("-p", "--threads", default=16, type=int, help="DuckDB threads")
 @option("-P", "--manifest", help="The tiers before the run from this manifest (`manifests/<id>.json`, the one that published it), not the newest")
-@option("-R", "--read-rows", "R", default=R_DEFAULT, type=int, help="R")
+@option("-R", "--read-rows", "R", type=int, help="R (default and only allowed value: the base's)")
 @option("-T", "--tmp", default="/stage/tmp", help="Local scratch")
 @monitor_resources(prefix="ANCHOR_RESOURCE")
 def run_cmd(bucket, run, gen, K, mount, mem, out, threads, manifest, R, tmp) -> None:
@@ -2177,6 +2177,8 @@ def run_cmd(bucket, run, gen, K, mount, mem, out, threads, manifest, R, tmp) -> 
         raise SystemExit(f"{out}: already exists")
     b = None if out is not None else _gcs(bucket)
     prefix = f"{PREFIX}/{gen}/deltas/{run}"
+    bm = _tier_root(mount, gen, None) / ANCHORS / "meta.json"
+    R, K = base_params(json.loads(bm.read_text()), str(bm.parent), R=R, K=K)
     if b is not None and b.blob(f"{prefix}/{ANCHORS}/meta.json").exists():
         # Built before the starts-with catalog existed: only its `anchors/start/` (when the base carries one).
         if b.blob(f"{PREFIX}/{gen}/{START_DIR}/meta.json").exists():
