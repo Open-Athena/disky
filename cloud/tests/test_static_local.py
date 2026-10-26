@@ -213,8 +213,8 @@ def test_build_chunked_drill_is_the_unchunked_one(built, tmp_path):
     assert summary["drill"]["pieces"] > files
 
 
-@pytest.mark.parametrize("heavy_bytes", [None, "1"])
-def test_parallel_tail_is_the_serial_one(built, tmp_path, monkeypatch, heavy_bytes):
+@pytest.mark.parametrize("heavy_rows", [None, "1"])
+def test_parallel_tail_is_the_serial_one(built, tmp_path, monkeypatch, heavy_rows):
     """The drill's tail over process pools — each `q` range measured in a process of its own (`MEASURE_THREADS` 1 at
     `-p 4`: 4 at a time; or every range heavy, `HEAVY_THREADS` 2: 2 at a time, heaviest first), the anchors' rollups and
     starts-with catalog shard by shard (`ANCHOR_THREADS` 1; `write_kind`'s file pool:
@@ -222,8 +222,8 @@ def test_parallel_tail_is_the_serial_one(built, tmp_path, monkeypatch, heavy_byt
     byte for byte as the build at `-p 2` (one range, file and kind at a time on one database)."""
     from dt_cloud import static_drill as sd
 
-    if heavy_bytes:
-        monkeypatch.setenv(sl.HEAVY_BYTES_ENV, heavy_bytes)
+    if heavy_rows:
+        monkeypatch.setenv(sl.HEAVY_ROWS_ENV, heavy_rows)
         monkeypatch.setattr(sl, "HEAVY_THREADS", 2)
     monkeypatch.setattr(sl, "MEASURE_THREADS", 1)
     monkeypatch.setattr(an, "ANCHOR_THREADS", 1)
@@ -236,6 +236,13 @@ def test_parallel_tail_is_the_serial_one(built, tmp_path, monkeypatch, heavy_byt
         assert _files(par / sub) == _files(gen / sub), sub
     assert len(list((gen / "sx").glob("*.parquet"))) > 1  # the anchors' `end` rollups really ran per shard
     assert min(summary["drill"]["groups"].values()) > 1  # and the measurement per range
+
+
+def test_measure_heavy_rows_is_relative_to_the_median_range():
+    assert sl.measure_heavy_rows([4_000_000] * 10 + [108_000_000, 260_000_000]) == sl.MEASURE_HEAVY_MIN_ROWS
+    assert sl.measure_heavy_rows([20_000_000] * 10 + [108_000_000]) == 80_000_000
+    assert sl.measure_heavy_rows([1_000, 2_000, 3_000]) == sl.MEASURE_HEAVY_MIN_ROWS
+    assert sl.measure_heavy_rows([]) == sl.MEASURE_HEAVY_MIN_ROWS
 
 
 @pytest.mark.parametrize("target_rows", [1, 7])
