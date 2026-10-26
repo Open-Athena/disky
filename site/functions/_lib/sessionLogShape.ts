@@ -196,3 +196,27 @@ export function bodySummary(body: unknown): Record<string, string | number> | nu
   }
   return out
 }
+
+const str = (v: unknown): string => (v === undefined || v === null ? '' : String(v))
+
+/** One event as a line of text. */
+export function summarize(e: SlogEvent): string {
+  switch (e.k) {
+    case 'start': return `page load ${str(e.u)}${e.ref ? ` (from ${str(e.ref)})` : ''}`
+    case 'nav': return str(e.u)
+    case 'click': return [e.n && `[${str(e.n)}]`, str(e.l), e.x !== undefined && (e.x ? '☑' : '☐')].filter(Boolean).join(' ')
+    case 'filter': return `${str(e.n)} = “${str(e.q)}”`
+    case 'pick': return `${str(e.n)} → ${str(e.v)}`
+    case 'prefetch': return `${str(e.w)} ${str(e.p) || '(root)'}${e.d ? ` @ ${str(e.d)}` : ''}`
+    case 'api': {
+      const b = e.b && typeof e.b === 'object' ? ` {${Object.entries(e.b).map(([k, v]) => `${k}: ${v}`).join(', ')}}` : ''
+      return `${str(e.m) || 'GET'} ${str(e.u)}${b} → ${e.s === 0 ? 'failed' : str(e.s)} · ${str(e.ms)}ms${e.c ? ` · ${str(e.c)}` : ''}${e.qe ? ` · ${str(e.qe)}` : ''}${e.err ? ` · ${str(e.err)}` : ''}`
+    }
+    case 'error': return `${str(e.msg)}${e.src ? ` @ ${str(e.src)}` : ''}`
+    case 'reject': return `unhandled rejection: ${str(e.msg)}`
+    case 'console': return `console.error: ${str(e.msg)}`
+    case 'viewport': return `${str(e.w)}×${str(e.h)} @${str(e.dpr)}x`
+    case 'vis': return `tab ${str(e.s)}`
+    case 'dropped': return `${str(e.n)} events dropped (cap)`
+  }
+}

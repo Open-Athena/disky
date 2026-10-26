@@ -3137,6 +3137,7 @@ kbd { font: inherit; font-size: 11px; padding: 0 4px; border: 1px solid var(--li
     width: 100%; border-collapse: collapse; font-size: 13px;
     th, td { padding: 4px 8px; text-align: left; border-bottom: 1px solid var(--line); vertical-align: top; }
     .num { text-align: right; white-space: nowrap; }
+    .th-toggle { font: inherit; font-weight: inherit; color: inherit; background: none; border: 0; padding: 0; cursor: pointer; border-bottom: 1px dotted var(--ink-3); }
     tr.has-err td { background: color-mix(in srgb, var(--danger) 9%, transparent); }
     tr.load td { border-top: 2px solid var(--ink-3); }
     tr.focused td { outline: 2px solid var(--s1); outline-offset: -2px; }
