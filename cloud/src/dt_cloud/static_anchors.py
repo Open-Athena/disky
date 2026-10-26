@@ -108,7 +108,9 @@ def par_hit_sql(mode: str, key: str = "s", par: str = "par", rule: HexRule | Non
     """`first_hit_sql`'s test of the row's ancestors, a function of `(key, par)` only: no ancestor segment matches."""
     if mode == "end" and rule is not None:
         anc = f"list_bool_or(list_transform(string_split({par}, '/'), lambda seg: ends_with(seg, {key}) AND NOT {end_dropped_sql('seg', key, rule)}))"
-        return f"NOT (contains({par} || '/', {key} || '/') AND {anc})"
+        # a CASE, not `NOT (contains AND anc)`: DuckDB evaluates both sides of an AND, so the lambda ran on every pair,
+        # though `contains` settles nearly all of them (cw's s31: 2,776 cpu-s over 27.3M pairs, 489K passing it)
+        return f"CASE WHEN contains({par} || '/', {key} || '/') THEN NOT {anc} ELSE true END"
     if mode == "end":
         return f"NOT contains({par} || '/', {key} || '/')"
     if mode == "exact":
@@ -1850,7 +1852,7 @@ def brute_sql(src: str, version: int, cases: str, rule: HexRule | None = None) -
     end = "ends_with(x.l, c.k) AND NOT contains(x.par || '/', c.k || '/')"
     if rule is not None:
         anc = f"list_bool_or(list_transform(string_split(x.par, '/'), lambda seg: ends_with(seg, c.k) AND NOT {end_dropped_sql('seg', 'c.k', rule)}))"
-        end = f"ends_with(x.l, c.k) AND NOT {end_dropped_sql('x.l', 'c.k', rule)} AND NOT (contains(x.par || '/', c.k || '/') AND {anc})"
+        end = f"ends_with(x.l, c.k) AND NOT {end_dropped_sql('x.l', 'c.k', rule)} AND CASE WHEN contains(x.par || '/', c.k || '/') THEN NOT {anc} ELSE true END"
     match = f"""CASE c.m WHEN 'start' THEN starts_with(x.l, c.k) AND NOT contains('/' || x.par, '/' || c.k)
         WHEN 'end' THEN {end}
         ELSE x.l = c.k AND NOT contains('/' || x.par || '/', '/' || c.k || '/') END"""
