@@ -34,6 +34,7 @@ import json
 import re
 import secrets
 import sys
+from collections.abc import Iterable
 from dataclasses import dataclass, field, fields, replace
 from pathlib import Path
 from typing import Any, Protocol
@@ -736,15 +737,22 @@ def converge_slack_now(tpl: Template, root: str, month: dt.date, client, channel
     return converge_slack(tpl, root, month, client, channel, variant, **kw)
 
 
-def redo_replies(tpl: Template, root: str, month: dt.date, client, channel: str, variant: str | None = None, *, icons_dir=None, deploy_plot=None, reply_delay: float = 0.0, for_real: bool = False) -> dict:
+def redo_replies(tpl: Template, root: str, month: dt.date, client, channel: str, variant: str | None = None, *, since: dt.date | None = None, icons_dir=None, deploy_plot=None, reply_delay: float = 0.0, for_real: bool = False) -> dict:
     """Re-post the month's replies under the CURRENT unit rule and retire the
     old ones (a rule change, e.g. evening→morning scan). Post-new-then-delete-
     old on purpose: no empty-thread window, and the old block vanishes at
     once. No strike/edit step — the headline lives in the sender name, which
     `chat.update` can't touch, so a strike would look broken.
 
-    Dry-run (default) returns the plan — ``old`` replies (key, record) and
-    ``new`` (key, scan, headline) — and posts nothing. ``for_real``: the old
+    ``since`` redoes only the days from it on. An earlier day keeps its posted
+    reply, re-keyed to the current unit's key (the record under that exact key,
+    else under the unit's scan, else the day's earliest key); the day's other replies (an old rule's extras)
+    leave the state and stay in the thread. A unit with no reply that day is
+    posted by the converge, after the redone days.
+
+    Dry-run (default) returns the plan — ``old`` replies (key, record), ``new``
+    (key, scan, headline), ``rekey`` (current key, old key) and ``left`` (old
+    keys dropped from the state, still in the thread) — and posts nothing. ``for_real``: the old
     ts list is stashed in the state as ``stale`` first, ``posted`` is
     cleared, the normal converge appends the new replies to the same thread,
     and only if every post succeeded are the stale ts deleted (a failed
@@ -757,28 +765,62 @@ def redo_replies(tpl: Template, root: str, month: dt.date, client, channel: str,
         return {}
     path = state_path(root, month, tpl.cfg.state.format(channel=channel, variant=variant))
     state = load_state(path)
-    old = list(state.get("posted", {}).items())
-    new = [(u.key, u.scan, u.reply.username if variant == "sender" else u.reply.body) for u in tpl.units(data, variant)]
+    plan, kept = _redo_plan(tpl.units(data, variant), state.get("posted", {}), since, lambda r: r.username if variant == "sender" else r.body)
     if not for_real:
-        return {"old": old, "new": new}
+        return plan
     if not state.get("op_ts"):
         raise SystemExit(f"digest: no OP for {month:%Y-%m} in {channel} — nothing to re-thread under")
-    state["stale"] = [_ts(e) for _, e in old] + state.get("stale", [])
-    state["posted"] = {}
+    _stash(state, plan, kept)
     save_state(path, state)
     state = converge_slack(tpl, root, month, client, channel, variant, icons_dir=icons_dir, deploy_plot=deploy_plot, reply_delay=reply_delay)
+    _delete_stale(state, lambda ts: client.delete(ts, orphans_ok=True))
+    save_state(path, state)
+    return state
+
+
+def _redo_plan(units: Iterable[Any], posted: dict[str, Any], since: dt.date | None, headline) -> tuple[dict, dict[str, Any]]:
+    """A redo's plan over a thread's ``posted`` replies and the current ``units``
+    (see `redo_replies`): ``old`` (key, record) to delete, ``new`` (key, scan,
+    ``headline(reply)``) to post, ``rekey`` (current key, old key) and ``left``
+    (old keys dropped from the state) for the days before ``since``; and the
+    re-keyed records the state keeps."""
+    cut = since.isoformat() if since else ""
+    units = list(units)
+    old = [(k, e) for k, e in posted.items() if k[:10] >= cut]
+    new = [(u.key, u.scan, headline(u.reply)) for u in units if u.key[:10] >= cut]
+    kept: dict[str, Any] = {}
+    rekey = []
+    for u in units:
+        if u.key[:10] >= cut:
+            continue
+        day = sorted((k for k in posted if k[:10] == u.key[:10]), key=lambda k: (k != u.key, k != u.scan, k))
+        if day:
+            kept[u.key] = posted[day[0]]
+            rekey.append((u.key, day[0]))
+    used = {k for _, k in rekey}
+    left = [k for k in posted if k[:10] < cut and k not in used]
+    return {"old": old, "new": new, "rekey": rekey, "left": left}, kept
+
+
+def _stash(state: dict, plan: dict, kept: dict[str, Any]) -> None:
+    """A redo's first write: the old replies' ids queued as ``stale``, ``posted`` = the kept ones."""
+    state["stale"] = [_ts(e) for _, e in plan["old"]] + state.get("stale", [])
+    state["posted"] = kept
+
+
+def _delete_stale(state: dict, delete) -> None:
+    """A redo's last step, once every new reply posted: delete the ``stale`` ids; a failed delete is logged and kept
+    for a re-run (an old reply lingering is harmless)."""
     failed = []
     for ts in state.pop("stale", []):
         try:
-            client.delete(ts, orphans_ok=True)
+            delete(ts)
             _err(f"digest: deleted old reply {ts}")
         except Exception as e:  # noqa: BLE001 — leave it for a re-run; an old reply lingering is harmless
             _err(f"digest: WARN could not delete old reply {ts}: {e}")
             failed.append(ts)
     if failed:
         state["stale"] = failed
-    save_state(path, state)
-    return state
 
 
 def converge_discord(tpl: Template, data: Any, month: dt.date, state: dict, *, hook, bot, emoji: dict[str, str], plot, save=None, edit_replies: bool = False, reply_hook=None) -> dict:
@@ -828,8 +870,27 @@ def converge_discord(tpl: Template, data: Any, month: dt.date, state: dict, *, h
     return state
 
 
-def post_digest_discord(tpl: Template, root: str, month: dt.date, webhook: str, bot_token: str, plot_dir=None, edit_replies: bool = False) -> dict:
-    """`converge_discord` against real Discord: resolve the webhook's channel,
+def redo_discord(tpl: Template, data: Any, month: dt.date, state: dict, *, since: dt.date | None = None, for_real: bool = False, hook, reply_hook, bot, emoji: dict[str, str], plot, save=None) -> dict:
+    """`redo_replies` on the Discord thread: the same plan (dry-run returns it),
+    then the kept replies re-keyed, the new ones posted by `converge_discord`
+    and, only once all posted, the old ones deleted through ``reply_hook`` (the
+    thread-bound webhook client; a webhook deletes only its own messages)."""
+    save = save or (lambda s: None)
+    plan, kept = _redo_plan(tpl.units(data, tpl.variants[0], "discord"), state.get("posted", {}), since, lambda r: r.username)
+    if not for_real:
+        return plan
+    if not state.get("thread_id"):
+        raise SystemExit(f"digest: no Discord thread for {month:%Y-%m} — nothing to re-thread under")
+    _stash(state, plan, kept)
+    save(state)
+    state = converge_discord(tpl, data, month, state, hook=hook, bot=bot, emoji=emoji, plot=plot, save=save)
+    _delete_stale(state, reply_hook.delete)
+    save(state)
+    return state
+
+
+def post_digest_discord(tpl: Template, root: str, month: dt.date, webhook: str, bot_token: str, plot_dir=None, edit_replies: bool = False, redo: bool = False, since: dt.date | None = None, for_real: bool = False) -> dict:
+    """`converge_discord` (``redo``: `redo_discord`) against real Discord: resolve the webhook's channel,
     load that webhook's month state, render the plot, converge, persist. There
     is no plot-hosting step — the PNG is an attachment."""
     import tempfile
@@ -849,16 +910,17 @@ def post_digest_discord(tpl: Template, root: str, month: dt.date, webhook: str, 
     plot = Path(plot_dir or tempfile.gettempdir()) / f"{tpl.cfg.slug}-{month:%Y-%m}.png"
     tpl.render_plot(data, month, plot, root)
     thread_id = state.get("thread_id")
-    return converge_discord(
-        tpl, data, month, state,
+    clients = dict(
         hook=DiscordWebhookClient(webhook, suppress_embeds=True, allowed_mentions=NO_MENTIONS),
         reply_hook=DiscordWebhookClient(webhook, thread_id, suppress_embeds=True, allowed_mentions=NO_MENTIONS) if thread_id else None,
-        edit_replies=edit_replies,
         bot=DiscordClient(bot_token, channel),
         emoji=discord_api.app_emojis(bot_token),
         plot=plot,
         save=lambda s: save_state(path, s),
     )
+    if redo:
+        return redo_discord(tpl, data, month, state, since=since, for_real=for_real, **clients)
+    return converge_discord(tpl, data, month, state, edit_replies=edit_replies, **clients)
 
 
 def dry_run(tpl: Template, root: str, month: dt.date, variant: str | None = None, plot_dir=None) -> str:
