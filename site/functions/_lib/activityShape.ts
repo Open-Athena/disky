@@ -3,7 +3,7 @@
  * session-log events are which kind, bursts, and the Slack / Discord renderings. No Workers or DOM types; the D1 and
  * sink I/O is `activity.ts`.
  */
-import type { SlogEvent } from './sessionLogShape.js'
+import { isErrorEvent, type SlogEvent, summarize, TRUNC } from './sessionLogShape.js'
 
 export const NOTIFY = ['off', 'count', 'line'] as const
 export type Notify = typeof NOTIFY[number]
@@ -38,7 +38,7 @@ export const KIND_DEFS: KindDef[] = [
   def('click', 'client', 'Clicks on controls (buttons, links, menus, checkboxes)', ['click', 'clicks'], 'count'),
   def('filter', 'client', 'Path-filter input', ['filter', 'filters'], 'count'),
   def('pick', 'client', 'Picker choices (selects, the assign and scan pickers)', ['pick', 'picks'], 'count'),
-  def('error', 'client', 'Errors: uncaught, rejected, console, failed requests', ['error', 'errors'], 'count'),
+  def('error', 'client', 'Errors: uncaught, rejected, console, failed requests (each a thread reply)', ['error', 'errors'], 'line'),
   def('api', 'client', 'Other requests the page made', ['request', 'requests'], 'off'),
   def('prefetch', 'client', 'Hover prefetches', ['prefetch', 'prefetches'], 'off'),
   def('viewport', 'client', 'Window size', ['resize', 'resizes'], 'off'),
@@ -148,7 +148,27 @@ export interface Burst {
   counts: Record<string, number>
   /** Paths viewed (`view` / `nav`), by count. */
   pages: Record<string, number>
+  /** Paths viewed, in order: the latest `TRAIL_KEEP` stops. */
+  trail: Trail
   sids: string[]
+}
+
+/** A burst's path trail: `n` stops in all (a repeat of the previous path is the same stop, counted), the latest
+ *  `TRAIL_KEEP` kept as `[path, views]`. */
+export interface Trail { n: number; last: [string, number][] }
+export const TRAIL_KEEP = 10
+export const emptyTrail = (): Trail => ({ n: 0, last: [] })
+
+/** `trail` with `paths` (in order) appended: a path equal to the previous stop adds a view to it. */
+export function addTrail(trail: Trail, paths: readonly string[], keep = TRAIL_KEEP): Trail {
+  const last = trail.last.map(([p, n]) => [p, n] as [string, number])
+  let n = trail.n
+  for (const p of paths) {
+    const prev = last[last.length - 1]
+    if (prev && prev[0] === p) prev[1]++
+    else { last.push([p, 1]); n++ }
+  }
+  return { n, last: last.slice(-keep) }
 }
 
 /** Whether an event at `ts` joins the actor's latest burst (else it starts a new one). */
@@ -162,21 +182,34 @@ export function addPages(pages: Record<string, number>, more: Record<string, num
   return Object.fromEntries(Object.entries(all).sort((a, b) => b[1] - a[1] || (a[0] < b[0] ? -1 : 1)).slice(0, keep))
 }
 
-/** A batch's client events, per kind (the recorded kinds only), and the paths viewed. */
-export function tallyClient(events: readonly SlogEvent[], conf: KindsConf): { counts: Record<string, number>; pages: Record<string, number> } {
+/** One client error, as the feed records it: when (epoch s), its line, and the page it happened on. */
+export interface ClientError { ts: number; line: string; page: string | null }
+
+/** A batch's client events, per kind (the recorded kinds only), the paths viewed (by count, and in order), and its
+ *  errors (when `error` is recorded). An error's page is the latest `view` / `nav` before it in the batch. */
+export function tallyClient(events: readonly SlogEvent[], conf: KindsConf): {
+  counts: Record<string, number>; pages: Record<string, number>; trail: string[]; errors: ClientError[]
+} {
   const counts: Record<string, number> = {}
   const pages: Record<string, number> = {}
+  const trail: string[] = []
+  const errors: ClientError[] = []
+  let page: string | null = null
   for (const e of events) {
     const k = clientKind(e)
+    if ((e.k === 'start' || e.k === 'nav') && typeof e.u === 'string') page = pathOf(e.u)
     if (!k || !conf[k]?.log) continue
     counts[k] = (counts[k] ?? 0) + 1
-    if ((k === 'view' || k === 'nav') && typeof e.u === 'string') {
-      const p = pathOf(e.u)
-      pages[p] = (pages[p] ?? 0) + 1
+    if ((k === 'view' || k === 'nav') && page !== null) {
+      pages[page] = (pages[page] ?? 0) + 1
+      trail.push(page)
     }
+    if (k === 'error' && isErrorEvent(e)) errors.push({ ts: Math.floor(e.t / 1000), line: cutLine(summarize(e)), page })
   }
-  return { counts, pages }
+  return { counts, pages, trail, errors }
 }
+
+const cutLine = (s: string, n: number = TRUNC.msg): string => s.length > n ? `${s.slice(0, n - 1)}…` : s
 
 /** A logged URL's path (no query or hash). */
 export const pathOf = (u: string): string => {
@@ -198,16 +231,20 @@ export interface Fmt {
   bold: (s: string) => string
   link: (url: string, text: string) => string
   code: (s: string) => string
+  /** Literal text (a client's error message), escaped for the sink. */
+  esc: (s: string) => string
 }
 export const SLACK: Fmt = {
   bold: s => `*${s}*`,
   link: (url, text) => `<${url}|${text.replace(/[<>|]/g, '')}>`,
   code: s => `\`${s.replace(/`/g, "'")}\``,
+  esc: s => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'),
 }
 export const DISCORD: Fmt = {
   bold: s => `**${s}**`,
   link: (url, text) => `[${text.replace(/[[\]]/g, '')}](<${url}>)`,
   code: s => `\`${s.replace(/`/g, "'")}\``,
+  esc: s => s.replace(/([*_~`|\\])/g, '\\$1'),
 }
 
 const fmtN = (n: number): string => n.toLocaleString('en-US')
@@ -282,23 +319,57 @@ export function renderSummary(b: Burst, o: SummaryOpts): string {
   const h = o.highlights
   if (h.largest) lines.push(`Largest assignment: ${fmt.code(h.largest.pattern)} (${fmtBytes(h.largest.bytes)}) → ${h.largest.owner ?? 'nobody'}`)
   if (h.owners && (h.owners.length > 1 || !h.largest)) lines.push(`Owners: ${h.owners.map(x => x ?? 'cleared').join(', ')}`)
-  const top = Object.entries(b.pages).slice(0, o.topPages ?? 3)
-  if (top.length && conf.view?.notify !== 'off') lines.push(`Pages: ${top.map(([p, n]) => `${fmt.code(p)}${n > 1 ? ` ×${n}` : ''}`).join(', ')}`)
-  const links = [fmt.link(`${b.origin}/admin/activity?burst=${b.id}`, 'activity')]
-  if (b.sids.length) links.push(fmt.link(`${b.origin}/admin/sessions?u=${encodeURIComponent(b.actor)}`, b.sids.length === 1 ? 'session' : `${b.sids.length} sessions`))
+  if (conf.view?.notify !== 'off') lines.push(...pageLines(b, fmt, o.topPages ?? 5))
+  const links = [fmt.link(`${b.origin}/admin/activity?burst=${b.id}`, 'activity'), ...sessionLinks(b, fmt)]
   for (const p of h.plans ?? []) links.push(fmt.link(`${b.origin}/staged?plan=${p}`, `plan ${p}`))
   lines.push(links.join(' · '))
   return lines.join('\n')
 }
 
+const stop = (fmt: Fmt, [p, n]: [string, number]): string => `${fmt.code(p)}${n > 1 ? ` ×${n}` : ''}`
+
+/** Where the burst went: up to `TRAIL_KEEP` stops, in order; past that, the most-viewed `top` paths, then the last
+ *  `TRAIL_KEEP` stops. A burst from before trails were kept lists its most-viewed paths. */
+export function pageLines(b: Pick<Burst, 'pages' | 'trail'>, fmt: Fmt, top: number): string[] {
+  const hist = (n: number) => Object.entries(b.pages).slice(0, n).map(e => stop(fmt, e)).join(', ')
+  if (!b.trail.n) return Object.keys(b.pages).length ? [`Pages: ${hist(top)}`] : []
+  const path = b.trail.last.map(e => stop(fmt, e)).join(' → ')
+  if (b.trail.n <= b.trail.last.length) return [`Pages: ${path}`]
+  return [`Pages (${fmtN(b.trail.n)} stops): ${hist(top)}`, `Last ${b.trail.last.length}: ${path}`]
+}
+
+/** Sessions linked one by one (their sid's first 8 characters) up to this many; past it, the actor's session list. */
+export const MAX_SESSION_LINKS = 3
+
+/** `session 9109d590` links, each to its timeline. */
+export function sessionLinks(b: Pick<Burst, 'origin' | 'actor' | 'sids'>, fmt: Fmt, max = MAX_SESSION_LINKS): string[] {
+  if (!b.sids.length) return []
+  if (b.sids.length > max) return [fmt.link(`${b.origin}/admin/sessions?u=${encodeURIComponent(b.actor)}`, `${b.sids.length} sessions`)]
+  return b.sids.map(sid => fmt.link(sessionUrl(b.origin, sid), `session ${sid.slice(0, 8)}`))
+}
+
+/** A session's timeline, optionally filtered (`show=errors`). */
+export const sessionUrl = (origin: string, sid: string, show?: string): string =>
+  `${origin}/admin/sessions/${encodeURIComponent(sid)}${show ? `?show=${show}` : ''}`
+
 /** Lines one reply (or Discord section) lists, before `+N more`. */
 export const MAX_LINES = 30
 
-/** A `line` kind's list: a header, then one line per event (oldest first), cut at `max`. */
-export function renderLines(kind: string, events: readonly Pick<ServerEvent, 'ts' | 'line'>[], fmt: Fmt, max = MAX_LINES): string {
-  const shown = events.slice(0, max)
-  const out = [fmt.bold(countText(kind, events.length)), ...shown.map(e => `• ${hm(e.ts)} ${e.line}`)]
-  if (events.length > max) out.push(`+${fmtN(events.length - max)} more`)
+/** A `line` kind's list: a header, then one line per distinct line (oldest first; repeats folded in as `×N`, from
+ *  the first's time), cut at `max`. An event's `href` (an error's session) links its time. */
+export function renderLines(kind: string, events: readonly (Pick<ServerEvent, 'ts' | 'line'> & { href?: string })[], fmt: Fmt, max = MAX_LINES): string {
+  const groups = new Map<string, { ts: number; href?: string; n: number }>()
+  for (const e of events) {
+    const g = groups.get(e.line)
+    if (g) g.n++
+    else groups.set(e.line, { ts: e.ts, href: e.href, n: 1 })
+  }
+  const all = [...groups]
+  const out = [
+    fmt.bold(countText(kind, events.length)),
+    ...all.slice(0, max).map(([line, g]) => `• ${g.href ? fmt.link(g.href, hm(g.ts)) : hm(g.ts)} ${line}${g.n > 1 ? ` ×${fmtN(g.n)}` : ''}`),
+  ]
+  if (all.length > max) out.push(`+${fmtN(all.length - max)} more`)
   return out.join('\n')
 }
 

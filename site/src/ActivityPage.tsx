@@ -2,7 +2,7 @@ import { useQuery } from '@tanstack/react-query'
 import { Fragment } from 'react'
 import { Link, useSearchParams } from 'react-router-dom'
 import type { StoredBurst } from '../functions/_lib/activity'
-import { KIND_DEFS, type ServerEvent } from '../functions/_lib/activityShape'
+import { KIND_DEFS, MAX_SESSION_LINKS, type ServerEvent } from '../functions/_lib/activityShape'
 import { countsText, getJson, Line } from './ActivityKinds'
 import { NO_AUTOFILL } from './noAutofill'
 import { relAgo } from './prefixes'
@@ -93,17 +93,30 @@ function BurstDetail({ id }: { id: number }) {
   return (
     <div className="burst-detail">
       <p className="session-meta">
-        {burst.sids.length > 0 && <><Link to={`/admin/sessions?u=${encodeURIComponent(burst.actor)}`}>{burst.sids.length === 1 ? 'its session' : `${burst.sids.length} sessions`}</Link> · </>}
+        {burst.sids.length > MAX_SESSION_LINKS
+          ? <><Link to={`/admin/sessions?u=${encodeURIComponent(burst.actor)}`}>{burst.sids.length} sessions</Link> · </>
+          : burst.sids.map(sid => <Fragment key={sid}><Link to={`/admin/sessions/${sid}`}>session <code>{sid.slice(0, 8)}</code></Link> · </Fragment>)}
         {slack ? <a href={slack} target="_blank" rel="noreferrer">Slack thread</a> : <span className="dim">not posted to Slack</span>}
       </p>
-      {pages.length > 0 && <p className="session-meta">pages: {pages.slice(0, 8).map(([p, n]) => <Fragment key={p}><code>{p}</code>{n > 1 ? ` ×${n}` : ''} </Fragment>)}</p>}
+      {burst.trail.n > 0
+        ? <p className="session-meta">
+          {burst.trail.n > burst.trail.last.length && <>{burst.trail.n} stops, the last {burst.trail.last.length}: </>}
+          {burst.trail.last.map(([p, n], i) => <Fragment key={i}>{i > 0 && ' → '}<code>{p}</code>{n > 1 ? ` ×${n}` : ''}</Fragment>)}
+        </p>
+        : pages.length > 0 && <p className="session-meta">pages: {pages.slice(0, 8).map(([p, n]) => <Fragment key={p}><code>{p}</code>{n > 1 ? ` ×${n}` : ''} </Fragment>)}</p>}
       {events.length
         ? (
           <table className="sessions timeline">
             <thead><tr><th className="num">time</th><th>kind</th><th>what</th></tr></thead>
             <tbody>
               {events.map((e, i) => (
-                <tr key={i}><td className="num"><code className="dim">{fmtClock(e.ts)}</code></td><td>{e.kind}</td><td className="ev"><Line text={e.line} /></td></tr>
+                <tr key={i} className={e.kind === 'error' ? 'has-err' : ''}>
+                  <td className="num"><code className="dim">{fmtClock(e.ts)}</code></td><td>{e.kind}</td>
+                  <td className="ev">
+                    {e.kind === 'error' ? <>{e.line}{e.route && <> on <code>{e.route}</code></>}</> : <Line text={e.line} />}
+                    {typeof e.detail?.sid === 'string' && <> · <Link to={`/admin/sessions/${e.detail.sid}?show=errors`}>its session</Link></>}
+                  </td>
+                </tr>
               ))}
             </tbody>
           </table>

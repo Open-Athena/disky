@@ -9,8 +9,9 @@ import { BATCH_GAP_S } from './batchGroups.js'
 import { slackApi, type SlackEnv } from './slack.js'
 import type { SlogEvent } from './sessionLogShape.js'
 import {
-  addPages, type Burst, DISCORD, highlights, joins, KIND_DEFS, type KindConf, type KindRow, type KindsConf, mergeKinds,
-  renderDiscord, renderLines, renderSummary, reported, type ServerEvent, SLACK, tallyClient,
+  addPages, addTrail, type Burst, type ClientError, DISCORD, emptyTrail, type Fmt, highlights, joins, KIND_DEFS, type KindConf,
+  type KindRow, type KindsConf, mergeKinds, renderDiscord, renderLines, renderSummary, reported, type ServerEvent, sessionUrl,
+  SLACK, tallyClient,
 } from './activityShape.js'
 
 export interface ActivityEnv extends SlackEnv {
@@ -65,13 +66,13 @@ export async function writeKind(db: D1Database, kind: string, conf: KindConf, wh
 
 interface BurstRow {
   id: number; actor: string; via: string; origin: string; first_ts: number; last_ts: number
-  counts: string; pages: string; sids: string; rendered_ms: number | null; dirty: number
+  counts: string; pages: string; trail: string; sids: string; rendered_ms: number | null; dirty: number
 }
 export type StoredBurst = Burst & { rendered_ms: number | null; dirty: boolean }
 
 const parse = (r: BurstRow): StoredBurst => ({
   id: r.id, actor: r.actor, via: r.via, origin: r.origin, first_ts: r.first_ts, last_ts: r.last_ts,
-  counts: JSON.parse(r.counts), pages: JSON.parse(r.pages), sids: JSON.parse(r.sids),
+  counts: JSON.parse(r.counts), pages: JSON.parse(r.pages), trail: JSON.parse(r.trail), sids: JSON.parse(r.sids),
   rendered_ms: r.rendered_ms, dirty: !!r.dirty,
 })
 
@@ -90,26 +91,28 @@ export async function burstFor(db: D1Database, actor: string, via: string, origi
     return latest.id
   }
   const r = await db.prepare(
-    `INSERT INTO activity_bursts (actor, via, origin, first_ts, last_ts, counts, pages, sids, dirty)
-     VALUES (?, ?, ?, ?, ?, '{}', '{}', '[]', 0) RETURNING id`,
-  ).bind(actor, via, origin, ts, ts).first<{ id: number }>()
+    `INSERT INTO activity_bursts (actor, via, origin, first_ts, last_ts, counts, pages, trail, sids, dirty)
+     VALUES (?, ?, ?, ?, ?, '{}', '{}', ?, '[]', 0) RETURNING id`,
+  ).bind(actor, via, origin, ts, ts, JSON.stringify(emptyTrail())).first<{ id: number }>()
   return r!.id
 }
 
-/** Add to a burst's counts (atomically, per kind), its pages and its sessions. */
-export async function bump(db: D1Database, id: number, counts: Record<string, number>, pages: Record<string, number> = {}, sid?: string): Promise<void> {
+/** Add to a burst's counts (atomically, per kind), its pages (by count, and `trail`: in order) and its sessions. */
+export async function bump(
+  db: D1Database, id: number, counts: Record<string, number>, pages: Record<string, number> = {}, sid?: string, trail: readonly string[] = [],
+): Promise<void> {
   const kinds = Object.entries(counts).filter(([, n]) => n > 0)
   if (kinds.length) {
     const set = kinds.map((_, i) => `'$.${kinds[i][0]}', CAST(COALESCE(json_extract(counts, '$.${kinds[i][0]}'), 0) + ?${i + 2} AS INTEGER)`).join(', ')
     await db.prepare(`UPDATE activity_bursts SET counts = json_set(counts, ${set}) WHERE id = ?1`).bind(id, ...kinds.map(([, n]) => n)).run()
   }
-  if (Object.keys(pages).length || sid) {
-    const r = await db.prepare('SELECT pages, sids FROM activity_bursts WHERE id = ?').bind(id).first<{ pages: string; sids: string }>()
+  if (Object.keys(pages).length || trail.length || sid) {
+    const r = await db.prepare('SELECT pages, trail, sids FROM activity_bursts WHERE id = ?').bind(id).first<{ pages: string; trail: string; sids: string }>()
     if (!r) return
     const sids: string[] = JSON.parse(r.sids)
     if (sid && !sids.includes(sid)) sids.push(sid)
-    await db.prepare('UPDATE activity_bursts SET pages = ?, sids = ? WHERE id = ?')
-      .bind(JSON.stringify(addPages(JSON.parse(r.pages), pages)), JSON.stringify(sids.slice(-50)), id).run()
+    await db.prepare('UPDATE activity_bursts SET pages = ?, trail = ?, sids = ? WHERE id = ?')
+      .bind(JSON.stringify(addPages(JSON.parse(r.pages), pages)), JSON.stringify(addTrail(JSON.parse(r.trail), trail)), JSON.stringify(sids.slice(-50)), id).run()
   }
 }
 
@@ -145,23 +148,41 @@ export async function recordServer(env: ActivityEnv, who: Actor, events: ServerE
   }
 }
 
-/** Count a session-log batch's events into its actor's burst, then report it (throttled). */
+/** Client errors a burst keeps as events (its thread's lines); past this they are only counted. */
+export const MAX_ERROR_EVENTS = 100
+
+/** Count a session-log batch's events into its actor's burst, keep its errors as events (`MAX_ERROR_EVENTS` a burst;
+ *  `detail.sid` links each to its session), then report it: at once when an error is a `line` kind, else throttled. */
 export async function feedClient(env: ActivityEnv, who: Actor, sid: string, events: readonly SlogEvent[], wait: Wait, now: number = Date.now()): Promise<number | null> {
   const db = env.DB
   if (!db || !events.length) return null
   try {
     const conf = await readKinds(db, now)
-    const { counts, pages } = tallyClient(events, conf)
+    const { counts, pages, trail, errors } = tallyClient(events, conf)
     if (!Object.keys(counts).length) return null
     const ts = Math.floor(Math.max(...events.map(e => e.t)) / 1000)
     const id = await burstFor(db, who.actor, who.via, who.origin, Math.min(ts, Math.floor(now / 1000)))
-    await bump(db, id, counts, pages, sid)
-    await report(env, id, false, wait, now)
+    const kept = await keepErrors(db, id, who, sid, errors)
+    await bump(db, id, counts, pages, sid, trail)
+    await report(env, id, kept > 0 && conf.error?.notify === 'line', wait, now)
     return id
   } catch (e) {
     if (!missingTable(e)) console.log(`activity: client feed failed: ${(e as Error).message}`)
     return null
   }
+}
+
+/** Insert a batch's errors as the burst's `error` events, up to `MAX_ERROR_EVENTS` in all; returns how many. */
+async function keepErrors(db: D1Database, id: number, who: Actor, sid: string, errors: readonly ClientError[]): Promise<number> {
+  if (!errors.length) return 0
+  const r = await db.prepare("SELECT COUNT(*) AS n FROM activity_events WHERE burst_id = ? AND kind = 'error'").bind(id).first<{ n: number }>()
+  const room = Math.max(0, MAX_ERROR_EVENTS - (r?.n ?? 0))
+  const kept = errors.slice(0, room)
+  if (!kept.length) return 0
+  await db.batch(kept.map(e => db.prepare(
+    "INSERT INTO activity_events (burst_id, ts, kind, actor, via, method, route, line, detail) VALUES (?, ?, 'error', ?, ?, '', ?, ?, ?)",
+  ).bind(id, e.ts, who.actor, who.via, e.page ?? '', e.line, JSON.stringify({ sid }))))
+  return kept.length
 }
 
 // ---- sinks ----
@@ -231,6 +252,12 @@ async function render(env: ActivityEnv, b: StoredBurst, conf: KindsConf, now: nu
   const events = await burstEvents(db, b.id)
   const h = highlights(events)
   const lineKinds = KIND_DEFS.filter(d => conf[d.kind]?.notify === 'line').map(d => [d.kind, events.filter(e => e.kind === d.kind)] as const).filter(([, es]) => es.length)
+  /** A client error's line is its own text (escaped for the sink), on its page, its time linked to its session's errors. */
+  const lineEvents = (es: readonly ServerEvent[], fmt: Fmt) => es.map(e => {
+    const sid = e.kind === 'error' && typeof e.detail?.sid === 'string' ? e.detail.sid : null
+    if (!sid) return e
+    return { ...e, line: `${fmt.esc(e.line)}${e.route ? ` on ${fmt.code(e.route)}` : ''}`, href: sessionUrl(b.origin, sid, 'errors') }
+  })
   const s = sinks(env)
   if (s.slack) {
     const channel = env.SLACK_ADMIN_CHANNEL!
@@ -240,7 +267,7 @@ async function render(env: ActivityEnv, b: StoredBurst, conf: KindsConf, now: nu
       ts => slackApi(env, 'chat.update', { channel, ts, text }))
     if (parent) {
       for (const [kind, es] of lineKinds) {
-        const reply = renderLines(kind, es, SLACK)
+        const reply = renderLines(kind, lineEvents(es, SLACK), SLACK)
         await ensurePost(db, b.id, 'slack', kind, now,
           async () => (await slackApi(env, 'chat.postMessage', { channel, thread_ts: parent, text: reply, unfurl_links: false, unfurl_media: false })).ts ?? null,
           ts => slackApi(env, 'chat.update', { channel, ts, text: reply }))
@@ -251,7 +278,7 @@ async function render(env: ActivityEnv, b: StoredBurst, conf: KindsConf, now: nu
     const url = env.DISCORD_ADMIN_WEBHOOK!
     const content = renderDiscord(
       renderSummary(b, { fmt: DISCORD, conf, highlights: h }),
-      lineKinds.map(([kind, es]) => renderLines(kind, es, DISCORD)),
+      lineKinds.map(([kind, es]) => renderLines(kind, lineEvents(es, DISCORD), DISCORD)),
       `${b.origin}/admin/activity?burst=${b.id}`,
     )
     const body = JSON.stringify({ content, allowed_mentions: { parse: [] } })
