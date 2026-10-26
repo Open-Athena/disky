@@ -1405,6 +1405,10 @@ def seed_checkpoint(src_root: str, dst_root: str, gen: str, new_gen: str, runs: 
     prefix = checkpoint_prefix(gen, new_gen, runs)
     src = Store(src_root)
     steps = [st for st in STEPS[:STEPS.index(through) + 1] if src.exists(f"{prefix}/{st}/done.json")]
+    if "fold/spilled" not in steps and "fold/fan/runs" not in steps and (fan := [st for st in steps if st in ("fold/fan/members", "fold/fan/plan", "fold/classes")]):
+        # a fold fan-out's units read the runs' spill (`fold_units`); a fold drops it once its spills are saved
+        raise SystemExit(f"--through {through}: {src_root} has {', '.join(fan)} but not fold/fan/runs, which their units read "
+                         f"(dropped once the fold's spills were saved): seed through fold/spilled, or through catalog to fold again")
     keys = [k for st in steps for k in src.keys(f"{prefix}/{st}/")]
     found: list[list[str]] = []
     if "fold/fan/plan" in steps and "fold/spilled" not in steps:

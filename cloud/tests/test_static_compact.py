@@ -9,6 +9,7 @@ import hashlib
 import json
 import re
 import shutil
+from functools import partial
 from pathlib import Path
 
 import pyarrow as pa
@@ -852,6 +853,21 @@ def test_a_fanned_out_measurement_resumed_after_the_spills_fetches_only_its_shar
     fetched = [int(m[1]) for m in map(fetch.fullmatch, lines) if m]
     assert (restored, calls, fetched) == ([], [("measured/plan-1.json", 2)], [sum(len(by[u]) for u in share0)])
     assert _md5s(tmp_path / "out") == _md5s(world["c_store"] / "g.c001")
+
+
+def test_seeding_a_fold_fan_out_step_without_its_runs_spill_is_refused(world, tmp_path):
+    """A finished fold fan-out's checkpoint keeps `fold/fan/members`, `fold/fan/plan` and `fold/classes` but drops
+    `fold/fan/runs`, which their units read: seeding through one of them is refused by name (gcs's 10-26 race failed 16
+    min in, on `fan/runs/done.json`); through `fold/spilled` it's seeded."""
+    _fold_fanned(world, tmp_path, _fold_helpers(tmp_path, []))
+    _, runs = ar.newest_runs(world["c_store"] / "g")
+    seed = partial(sk.seed_checkpoint, str(tmp_path / "scratch"), gen="g", new_gen="g.c001", runs=runs, log=lambda m: None)
+    with pytest.raises(SystemExit) as e:
+        seed(dst_root=str(tmp_path / "race"), through="fold/classes")
+    assert str(e.value) == (f"--through fold/classes: {tmp_path / 'scratch'} has fold/fan/members, fold/fan/plan, fold/classes but not "
+                            "fold/fan/runs, which their units read (dropped once the fold's spills were saved): seed through fold/spilled, "
+                            "or through catalog to fold again")
+    assert seed(dst_root=str(tmp_path / "race2"), through="fold/spilled")["steps"][-1] == "fold/spilled"
 
 
 def _fold_fanned(world, tmp_path, submit, *, retries: int = 2, root: str = "scratch", out: str = "out", log=lambda m: None, on_save=None, before=None,
