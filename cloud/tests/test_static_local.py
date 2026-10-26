@@ -691,7 +691,7 @@ def test_query_reads_a_non_gcs_store(built):
 def test_anchors_rerun_over_a_pinned_manifest_reproduces_a_published_run(appended, tmp_path):
     """`static_anchors run -P manifests/<a>.json -o OUT` (a canary's re-run, specs/stage-canaries.md) after the carry
     merged `a`: over the tiers `a`'s own manifest listed before it, into OUT, nothing uploaded: `a`'s published `anchors/`,
-    md5 for md5, in the report."""
+    md5 for md5, in the report. R and K are the base's (no flags); a `-K` other than the base's is refused."""
     import hashlib
 
     ids = scan_ids(appended["scans"])
@@ -699,9 +699,12 @@ def test_anchors_rerun_over_a_pinned_manifest_reproduces_a_published_run(appende
     out = tmp_path / "rerun"
     with _small_groups(1):
         # `-b`: its default reads the deployment profile; `-o` never touches a bucket
-        res = CliRunner().invoke(an.cli, ["run", "-b", "unused", "-g", "g", "-d", a, "-m", str(gen.parent.parent), "-P", f"manifests/{a}.json", "-o", str(out),
-                                          "-T", str(tmp_path / "t"), "-R", str(R), "-K", str(KEEP), "-p", "2", "-M", "1GB"], catch_exceptions=False)
+        args = ["run", "-b", "unused", "-g", "g", "-d", a, "-m", str(gen.parent.parent), "-P", f"manifests/{a}.json", "-T", str(tmp_path / "t"), "-p", "2", "-M", "1GB"]
+        res = CliRunner().invoke(an.cli, [*args, "-o", str(out)], catch_exceptions=False)
+        refused = CliRunner().invoke(an.cli, [*args, "-o", str(tmp_path / "other-k"), "-K", str(KEEP + 1)])
     assert res.exit_code == 0, res.output
+    assert (refused.exit_code, str(refused.exception)) == (
+        1, f"{gen / an.ANCHORS}: K {KEEP + 1} (the base's: {KEEP}): a run is built as its generation's base")
     report = json.loads((out / "report.json").read_text())
     published = gen / sa.run_key(a, a)
     want = {f.relative_to(published).as_posix(): hashlib.md5(f.read_bytes()).hexdigest() for f in sorted((published / an.ANCHORS).rglob("*")) if f.is_file()}
