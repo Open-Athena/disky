@@ -11,7 +11,7 @@ snapshot root, state layout, plot host, bucket labels and quotas, prices.
 What differs in the posts lives in two TEMPLATES — opinionated styles,
 neither intrinsic to one store:
 
-- ``gcs`` (`digest_gcs`): a reply per scan, the headline as the sender name,
+- ``gcs`` (`digest_gcs`): a reply per day (its first scheduled scan), the headline as the sender name,
   $/mo by storage class in the body, the site's storage-class image.
 - ``cw`` (`digest_cw`): a reply per UTC day in two variants (``sender``: the
   headline as the sender name, posted once from the morning scan — optionally

@@ -2217,6 +2217,8 @@ def merge_tiers(con, tiers: list[Tier], out: Path, tier: dict, file_rows: int = 
     out.mkdir(parents=True, exist_ok=True)
     if len({t.rg for t in tiers}) != 1:
         raise ValueError(f"inputs' row groups differ: {[t.rg for t in tiers]}")
+    if len({(t.meta["R"], t.meta["K"]) for t in tiers}) != 1:
+        raise ValueError(f"inputs' R, K differ: {[(t.name, t.meta['R'], t.meta['K']) for t in tiers]}")
     own = work is None
     work = Path(work if work is not None else out.parent / f".{out.name}.merge")
     shutil.rmtree(work, ignore_errors=True)
@@ -2428,19 +2430,19 @@ def _new_members(mount: str, prefix: str, run: str, prev: pa.Table) -> list[str]
 @option("-c", "--chunk-rows", default=1 << 24, type=int, help="Suffix rows per member-loop chunk")
 @option("-C", "--cache-gb", type=float, help=f"Prefetched group bytes held at most (default: min(2 GiB, {CACHE_RAM_FRACTION:g} of the RAM))")
 @option("-d", "--scan", "date", required=True, help="The run's scan id")
-@option("-f", "--floor", "floor_rows", default=10_000, type=int, help="The base measurement's floor (`roots measure -f`)")
+@option("-f", "--floor", "floor_rows", type=int, help="The base measurement's floor (`roots measure -f`; default and only allowed value: the base's)")
 @option("-F", "--fuse-reads", is_flag=True, help="Read the prior tiers' groups through the mount, not by ranged GCS reads")
 @option("-g", "--gen", required=True, help="Base generation")
 @option("-j", "--fetch-threads", default=FETCH_THREADS, type=int, help="Concurrent group reads of the prior tiers (≤ 1: no prefetch)")
 @option("-k", "--kind", default="both", type=Choice(["both", "long", "short", "task"]),
         help="Build one kind (`task`: long for Batch task 0, short for task 1): the two run as parallel tasks, the second to finish writes `meta.json`")
-@option("-K", "--keep", "K", default=256, type=int, help="Children kept by name per heavy directory")
+@option("-K", "--keep", "K", type=int, help="Children kept by name per heavy directory (default and only allowed value: the base's)")
 @option("-m", "--mount", required=True, help="Local mount of the bucket")
 @option("-M", "--mem", default="100GB", help="DuckDB memory limit")
 @option("-n", "--dry-run", is_flag=True, help="Build locally; upload nothing")
 @option("-o", "--out", default="/stage/out", help="Local output dir")
 @option("-p", "--threads", default=16, type=int, help="DuckDB threads")
-@option("-R", "--read-rows", "R", default=100_000, type=int, help="Heavy: more stored root rows under the directory")
+@option("-R", "--read-rows", "R", type=int, help="Heavy: more stored root rows under the directory (default and only allowed value: the base's)")
 @option("-S", "--checkpoint", "ckpt_url", envvar="STATIC_NAMES_DRILL_CHECKPOINT",
         help="Save each step under this store root (a dir or `gs://` / `r2://` / `s3://` URL; $STATIC_NAMES_DRILL_CHECKPOINT), so a "
              "rerun (a reclaimed spot task's retry) resumes after the last one saved; cleared once the drill is uploaded")
@@ -2483,6 +2485,8 @@ def build_cmd(bucket, chunk_rows, cache_gb, date, floor_rows, fuse_reads, gen, f
     for t in prior[1:]:
         if t.meta.get("last") != t.name.split("/")[-1].split("_")[-1]:
             raise SystemExit(f"{t.name}: its drill is for {t.meta.get('last')}")
+    R, K, floor_rows = sn.base_params(prior[0].meta, f"{prefix}/drill", R=R, K=K, floor=floor_rows)
+    floor_rows = 10_000 if floor_rows is None else floor_rows  # a base measured before its floor was recorded
     sx = [str(p) for p in sorted((base / run / "sx").glob("*.parquet"))]
     cdelta = [str(p) for p in sorted((base / run / "cdelta").glob("*.parquet"))]
     ranges = read_json(f"gs://{bucket}/{prefix}/ranges.json")

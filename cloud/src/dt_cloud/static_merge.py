@@ -549,11 +549,12 @@ def _helper_recorded(runner, name: str, spec: dict, scan: str) -> tuple[str, dic
 @option("-g", "--gen", required=True, help="Base generation (followed to its newest successor)")
 @option("-A", "--anchor-tasks", default=1, type=IntRange(min=1), help="The base anchors' rollups over this many tasks: this one and helper Batch tasks (`static_fanout.AnchorFanout`; needs -S and the profile in $STATIC_NAMES_PROFILE)")
 @option("-D", "--measure-tasks", default=1, type=IntRange(min=1), help="The drill measurement over this many tasks: this one and helper Batch tasks (`static_fanout`; needs -S and the profile in $STATIC_NAMES_PROFILE)")
+@option("-k", "--keep", type=IntRange(min=1), help="The new generation's kept children per heavy directory (its drill's and anchors' K; default: the generation's): another K measures and rolls up every root")
 @option("-L", "--fold-tasks", default=1, type=IntRange(min=1), help="The drill fold over this many tasks: this one and helper Batch tasks, a job per wave (`static_fanout.FoldFanout`; needs -S and the profile in $STATIC_NAMES_PROFILE)")
 @option("-P", "--prebuilt", help="Publish a fold done elsewhere (`compact-probe -U URL`) instead of folding: checked against its report, then published as this compaction's")
 @option("-S", "--scratch", help="Scratch bucket: the compaction lease, held throughout (none: appends aren't held off)")
 @ar.compact_options
-def compact_cmd(anchor_tasks, bucket, chunk_rows, fold_tasks, gen, measure_tasks, prebuilt, scratch, policy, read_from, grace_s, jobs, force, mount, mem, threads,
+def compact_cmd(anchor_tasks, bucket, chunk_rows, fold_tasks, gen, keep, measure_tasks, prebuilt, scratch, policy, read_from, grace_s, jobs, force, mount, mem, threads,
                 to_r2, tmp) -> None:
     """The compaction stage (`append_runner.run_compaction` with `static_compact`): when the policy fires (or `-K`), the
     generation's base and runs folded into `<gen>.c<NNN>` (a rebuild's bytes), published on GCS (`compaction.json`
@@ -571,7 +572,7 @@ def compact_cmd(anchor_tasks, bucket, chunk_rows, fold_tasks, gen, measure_tasks
     afan = anchor_fanout(anchor_tasks, gen) if anchor_tasks > 1 else None
     ffan = fold_fanout(fold_tasks, gen) if fold_tasks > 1 else None
     try:
-        doc = ar.run_compaction(Store(f"gs://{bucket}"), compactor(chunk_rows, checkpoint=scratch, fanout=fanout, prebuilt=prebuilt, anchor_fanout=afan,
+        doc = ar.run_compaction(Store(f"gs://{bucket}"), compactor(chunk_rows, checkpoint=scratch, fanout=fanout, prebuilt=prebuilt, anchor_fanout=afan, keep=keep,
                                                                    fold_fanout=ffan), gen,
                                 Path(mount), Path(tmp),
                                 lease=ar.gcs_compaction_lease_file(scratch, PREFIX), policy=policy, force=force, r2_bucket=bucket if to_r2 else None,
@@ -645,6 +646,7 @@ def probe_cmd(
 @option("-F", "--measure-tasks", default=1, type=IntRange(min=1), help="The drill measurement over this many tasks (`static_fanout`; needs -K and the profile in $STATIC_NAMES_PROFILE)")
 @option("-g", "--gen", required=True, help="The generation whose base and newest manifest's runs are folded")
 @option("-j", "--jobs", default=1, type=IntRange(min=1), help="The drill fold's chunks at a time")
+@option("-k", "--keep", type=IntRange(min=1), help="The new generation's kept children per heavy directory (its drill's and anchors' K; default: the generation's): another K measures and rolls up every root")
 @option("-K", "--checkpoint", "ck_root", help="This fold's own checkpoint root (a scratch URL, never the compaction's): its steps saved there, resumed from there")
 @option("-L", "--fold-tasks", default=1, type=IntRange(min=1), help="The drill fold over this many tasks (`static_fanout.FoldFanout`; needs -K and the profile in $STATIC_NAMES_PROFILE)")
 @option("-m", "--mount", required=True, help="Read-only local mount of the data bucket")
@@ -652,14 +654,15 @@ def probe_cmd(
 @option("-N", "--no-units", is_flag=True, help="With -R: seed the steps only, not the fan-outs' finished units of the step after -t, so its helpers rebuild them (a race timing them)")
 @option("-o", "--out", required=True, help="New local output directory outside the mount: the folded generation")
 @option("-p", "--threads", default=16, type=int, help="DuckDB threads")
+@option("-Q", "--resume-keep", type=IntRange(min=0), help="With -R: the K its fold kept (its -k; 0: the generation's; default: -k's). Across a K change only steps through fold/spilled are seeded")
 @option("-R", "--resume-from", help="Another run's checkpoint root of this same fold (e.g. the running compaction's scratch bucket): its steps through -t seeded into -K (`seed_checkpoint`; the source never written)")
 @option("-s", "--stage", default="auto", type=Choice(["auto", "on", "off"]), help="Stage the drill's roots on the work disk first (`static_compact.STAGE_MODES`; auto: when it has room)")
 @option("-t", "--through", default="fold/spilled", help="With -R: the last step seeded (`static_compact.STEPS`); the rest run on this code")
 @option("-T", "--tmp", default="/stage/tmp/compact-probe", help="Local work dir")
 @option("-u", "--report", help="Also write the JSON report to this URL (`gs://<scratch>/…/<name>.json`: the VM's disks go with it)")
 @option("-U", "--upload", help="Upload the folded generation to this URL (`<url>/gen/`, then `<url>/probe.json`, last): what `compact --prebuilt` publishes")
-def compact_probe_cmd(anchor_tasks, bucket, chunk_rows, measure_tasks, gen, jobs, ck_root, fold_tasks, mount, mem, no_units, out, threads, resume_from, stage,
-                      through, tmp, report, upload) -> None:
+def compact_probe_cmd(anchor_tasks, bucket, chunk_rows, measure_tasks, gen, jobs, keep, ck_root, fold_tasks, mount, mem, no_units, out, threads, resume_keep,
+                      resume_from, stage, through, tmp, report, upload) -> None:
     """Fold the generation into its next one locally (`static_compact.fold_gen`, the compaction's own fold), read in place
     from the mount: no upload, no successor / pointer / manifests in the bucket, no lease, no checkpoint, no pruning; only
     OUT and TMP are written. Logs the fold's stage lines; prints a JSON of the summary (per-part seconds and peaks) and
@@ -688,7 +691,7 @@ def compact_probe_cmd(anchor_tasks, bucket, chunk_rows, measure_tasks, gen, jobs
     new_gen = ar.next_gen(gen)
     err(f"compact-probe {gen} → {new_gen}: manifest {manifest}, {len(runs)} runs, -j {jobs} -M {mem} -p {threads} -c {chunk_rows} -s {stage}"
         + (f" -F {measure_tasks}" if measure_tasks > 1 else "") + (f" -A {anchor_tasks}" if anchor_tasks > 1 else "") + (f" -L {fold_tasks}" if fold_tasks > 1 else "")
-        + (f", resumed from {resume_from} through {through}" if resume_from else ""))
+        + (f" -k {keep}" if keep else "") + (f", resumed from {resume_from} through {through}" if resume_from else ""))
     from .static_compact import compact_checkpoint, seed_checkpoint
 
     from .maint_runs import PhaseHook, from_env, phase
@@ -701,15 +704,16 @@ def compact_probe_cmd(anchor_tasks, bucket, chunk_rows, measure_tasks, gen, jobs
     hook = PhaseHook(rec, "fold", note_s=ar.NOTE_S)
     try:
         if resume_from:
-            seed_checkpoint(resume_from, ck_root, gen, new_gen, runs, through, units=not no_units)
-        ck = compact_checkpoint(ck_root, gen, new_gen, runs, work=work / "ckpt") if ck_root else None
+            seed_checkpoint(resume_from, ck_root, gen, new_gen, runs, through, units=not no_units, keep=keep,
+                            src_keep=keep if resume_keep is None else resume_keep or None)
+        ck = compact_checkpoint(ck_root, gen, new_gen, runs, keep=keep, work=work / "ckpt") if ck_root else None
         hook.begin()
         try:
             summary = fold_gen(gen_dir, output, work, gen=gen, new_gen=new_gen, runs=runs, threads=threads, mem=mem, chunk_rows=chunk_rows, jobs=jobs,
                                source=f"gs://{bucket}/{PREFIX}/{gen}" if bucket else None, stage=stage, ck=ck, progress=hook,
                                fanout=measure_fanout(measure_tasks, gen) if measure_tasks > 1 else None,
                                anchor_fanout=anchor_fanout(anchor_tasks, gen) if anchor_tasks > 1 else None,
-                               fold_fanout=fold_fanout(fold_tasks, gen) if fold_tasks > 1 else None)
+                               fold_fanout=fold_fanout(fold_tasks, gen) if fold_tasks > 1 else None, keep=keep)
         except BaseException as e:
             hook.end(f"failed: {type(e).__name__}: {e}", failed=True)
             raise

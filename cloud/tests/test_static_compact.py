@@ -9,6 +9,7 @@ import hashlib
 import json
 import re
 import shutil
+from functools import partial
 from pathlib import Path
 
 import pyarrow as pa
@@ -184,6 +185,46 @@ def test_a_run_counting_closes_measures_every_root_to_the_same_bytes(world, tmp_
     got, want = _md5s(tmp_path / "out"), _md5s(world["c_store"] / "g.c001")
     assert sorted(got) == sorted(want)
     assert got == want
+
+
+def test_a_fold_keeping_another_k_is_that_ks_rebuild(world, tmp_path):
+    """C's fold with `keep` 1 (the generation's `K` is 2): every root measured and rolled up again (the tiers' rollups kept
+    2 children), and the files a build with `-K 1` writes, its drill's and anchors' `meta.json` among them."""
+    root, ids = world["root"], world["ids"]
+    gen_dir = tmp_path / "g"
+    shutil.copytree(world["c_store"] / "g", gen_dir)
+    _, runs = ar.newest_runs(gen_dir)
+    with _small_groups():
+        doc = sk.fold_gen(gen_dir, tmp_path / "out", tmp_path / "w", gen="g", new_gen="g.c001", runs=runs, threads=2, mem="1GB", chunk_rows=3, keep=1)
+        _build(root, world["scans"], tmp_path / "ref", tmp_path / "wr", gen="g.c001", through=ids[3],
+               extra=("-r", str(gen_dir / "ranges.json"), "-K", "1"))
+    assert doc["drill"]["measure"] == "roots"
+    want_dir = tmp_path / "ref" / sn.PREFIX / "g.c001"
+    assert [json.loads((d / sub / "meta.json").read_text())["K"] for d in (tmp_path / "out", want_dir) for sub in ("drill", "anchors")] == [1] * 4
+    got, want = _md5s(tmp_path / "out"), _md5s(want_dir)
+    assert sorted(got) == sorted(want)
+    assert got == want
+
+
+def test_a_k_change_blocks_the_incremental_measurement(world):
+    root = world["c_store"]
+    tiers = [sd.Tier(root / "g" / "drill", "base"), *(sd.Tier(root / "g" / r["key"] / "drill", r["key"]) for r in ar.newest_runs(root / "g")[1])]
+    assert [sme.blocker(tiers, root / "g" / "roots-measure", floor=2, R=3, K=k) for k in (None, 2, 1024)] == [None, None, "K 2 → 1024"]
+
+
+def test_a_k_change_keys_its_own_checkpoint_and_seeds_only_the_steps_before_the_measurement(tmp_path):
+    runs = [{"key": "r1"}]
+    assert sk.checkpoint_prefix("g", "g.c001", runs) == sk.checkpoint_prefix("g", "g.c001", runs, None)
+    assert len({sk.checkpoint_prefix("g", "g.c001", runs, k) for k in (None, 256, 1024)}) == 3
+    seed = partial(sk.seed_checkpoint, str(tmp_path / "src"), str(tmp_path / "dst"), "g", "g.c001", runs, keep=1024)
+    with pytest.raises(SystemExit) as e:
+        seed("drill")
+    assert str(e.value) == ("--through drill: K the generation’s → 1024: only steps through fold/spilled "
+                            "(the drill's measurement and rollups keep K children)")
+    with pytest.raises(SystemExit) as e:
+        seed("drill", src_keep=256)
+    assert str(e.value) == ("--through drill: K 256 → 1024: only steps through fold/spilled "
+                            "(the drill's measurement and rollups keep K children)")
 
 
 def test_compactions_find_their_classes_from_digests(world):
@@ -852,6 +893,30 @@ def test_a_fanned_out_measurement_resumed_after_the_spills_fetches_only_its_shar
     fetched = [int(m[1]) for m in map(fetch.fullmatch, lines) if m]
     assert (restored, calls, fetched) == ([], [("measured/plan-1.json", 2)], [sum(len(by[u]) for u in share0)])
     assert _md5s(tmp_path / "out") == _md5s(world["c_store"] / "g.c001")
+
+
+def test_seeding_a_fold_fan_out_step_without_its_runs_spill_is_refused(world, tmp_path):
+    """A finished fold fan-out's checkpoint keeps `fold/fan/members`, `fold/fan/plan` and `fold/classes` but drops
+    `fold/fan/runs`, which their units read: seeding through one of them is refused by name (gcs's 10-26 race failed 16
+    min in, on `fan/runs/done.json`); through `fold/spilled` it's seeded."""
+    _fold_fanned(world, tmp_path, _fold_helpers(tmp_path, []))
+    _, runs = ar.newest_runs(world["c_store"] / "g")
+    seed = partial(sk.seed_checkpoint, str(tmp_path / "scratch"), gen="g", new_gen="g.c001", runs=runs, log=lambda m: None)
+    with pytest.raises(SystemExit) as e:
+        seed(dst_root=str(tmp_path / "race"), through="fold/classes")
+    assert str(e.value) == (f"--through fold/classes: {tmp_path / 'scratch'} has fold/fan/members, fold/fan/plan, fold/classes but not "
+                            "fold/fan/runs, which their units read (dropped once the fold's spills were saved): seed through fold/spilled, "
+                            "or through catalog to fold again")
+    same = seed(dst_root=str(tmp_path / "race2"), through="fold/spilled")
+    assert same["steps"][-1] == "fold/spilled"
+    # a race keeping another K: the same steps under its own prefix, without the measurement's units (measured at the old K)
+    other = seed(dst_root=str(tmp_path / "race3"), through="fold/spilled", keep=1)
+    assert (other["steps"], other["units"]) == (same["steps"], 0)
+
+    def files(d: str, keep: int | None) -> list[str]:
+        top = tmp_path / d / sk.checkpoint_prefix("g", "g.c001", runs, keep)
+        return sorted(p.relative_to(top).as_posix() for p in top.rglob("*") if p.is_file())
+    assert files("race3", 1) == [f for f in files("race2", None) if not f.startswith("fold/measured/")]
 
 
 def _fold_fanned(world, tmp_path, submit, *, retries: int = 2, root: str = "scratch", out: str = "out", log=lambda m: None, on_save=None, before=None,

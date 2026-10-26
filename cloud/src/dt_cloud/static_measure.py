@@ -137,10 +137,13 @@ def incremental_measure(con, tiers: list[sd.Tier], meas: Path, members: str, out
     return doc
 
 
-def blocker(tiers: list[sd.Tier], meas: Path, *, floor: int, R: int) -> str | None:
+def blocker(tiers: list[sd.Tier], meas: Path, *, floor: int, R: int, K: int | None = None) -> str | None:
     """Why a compaction over `tiers` (the base's drill, then the runs') can't measure and roll up from base ⊕ runs
     (`incremental_measure`, `incremental_rollups`), or `None`: a run whose `dcount` counts closes too, a base without its
-    measurement `meas`, or a floor above `R + 1` (the measurement would miss heavy directories)."""
+    measurement `meas`, a floor above `R + 1` (the measurement would miss heavy directories), or a tier whose kept
+    children per heavy directory aren't `K` (its rollups kept another set)."""
+    if K is not None and (other := sorted({t.meta["K"] for t in tiers if t.meta["K"] != K})):
+        return f"K {', '.join(map(str, other))} → {K}"
     if stale := [t.name for t in tiers[1:] if t.meta.get("dcount") != sd.DCOUNT_FRESH]:
         return f"runs without `dcount: {sd.DCOUNT_FRESH}`: {', '.join(stale)}"
     if not (meas / SUBS["long"]).is_dir():

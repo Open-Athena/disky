@@ -3113,7 +3113,7 @@ def _digest_options(template_default: str):
         option("-r", "--root", help="Snapshots root: a dir or URL (`r2://<bucket>/snapshots`, `gs://…`; the month's state lives beside it); default the config's `root` (presets: gs://$DATA_BUCKET/snapshots)"),
         option("-R", "--redo-replies", is_flag=True, help="Re-post the month's replies under the current day rule, then delete the old ones (Slack; dry-run unless --for-real)"),
         option("-t", "--token", help="Slack bot token (default $SLACK_BOT_TOKEN)"),
-        option("-T", "--template", type=Choice(["gcs", "cw"]), default=template_default, help=f"Post style + preset config (default {template_default}): gcs = a reply per scan, $/mo by storage class, class mosaic; cw = a reply per day, % of quota per bucket, quota sparkline + diff treemap"),
+        option("-T", "--template", type=Choice(["gcs", "cw"]), default=template_default, help=f"Post style + preset config (default {template_default}): gcs = a reply per day, $/mo by storage class, class mosaic; cw = a reply per day, % of quota per bucket, quota sparkline + diff treemap"),
         option("-u", "--url", "site_url", default=None, help="Site base for links (default the config's `site_url`, else $SITE_URL)"),
         option("-V", "--variant", type=Choice(["sender", "body"]), default=None, help="Reply style (cw template): headline as the sender name, posted once from the day's morning scan (sender, default) or bold in the body, edited as the day's scans land (body)"),
         option("-w", "--webhook", help="Discord webhook URL in the digest channel (default $<config discord_webhook_env>: gcs $DISCORD_GCS_USAGE_WEBHOOK, cw none; with -P discord)"),
@@ -3218,8 +3218,7 @@ def _digest(
 @_digest_options("gcs")
 def digest(**kw) -> None:
     """Converge the monthly digest thread: an OP (month-to-date headline,
-    per-week bullets, plot) edited in place + one reply per scan (gcs template)
-    or per UTC day (cw), in Slack (default) or its Discord twin (`-P discord`:
+    per-week bullets, plot) edited in place + one reply per UTC day, in Slack (default) or its Discord twin (`-P discord`:
     webhook OP with the plot attached, bot-opened thread, webhook replies).
     State beside the snapshots, per the config's `state`/`discord_state`
     (gcs: digest/<YYYY-MM>.json; cw: digest/cw/<channel>/<variant>/<YYYY-MM>.json).
