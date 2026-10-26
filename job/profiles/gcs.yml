@@ -45,7 +45,7 @@ machines:
   # default disk filled on 2026-10-21 and every step after retire failed; and its DuckDB is tuned for 80 GB (a 32 GB
   # machine was killed mid-verify the same day). Scans appended since the check need neither (specs/scan-cs3.md item 4)
   post: {type: e2-highmem-16, disk: 400}
-steps: [access-ingest, healthcheck, retire, dups, cf-usage]
+steps: [access-ingest, healthcheck, retire, dups, cf-usage, gcp-cost]
 # over-time groups and the generation-file sweep (`index-gc -F`) aren't in the one-VM job yet: each is its own change
 skip: [bucket-check, over-time, index-gc]
 secrets:
@@ -114,6 +114,8 @@ options:
   access-ingest: {poller: true}
   # the Nextflow task's cwd isn't the image's `/app`, so the relative default missed it (2026-10-22: exit 2)
   cf-usage: {config: /app/site/wrangler.toml}
+  # the deployment's own buckets (labeled `deployment=shared`, so named here) and its Batch jobs (`$DISKY_LABELS`)
+  gcp-cost: {buckets: [oa-gcs-usage-dvx, oa-gcs-usage-scratch, oa-gcs-usage-backups]}
   # after each scan, the per-scan files the interval store + static index hold (specs/lean-scans.md §2) and the raw
   # listing shards (`layer1`, once the store's `generation` matches them), retired for real since the hand-run retires
   # of 2026-10-18/19; the interval-store append writes each scan's verify marker (a row-for-row check), and a scan

@@ -68,6 +68,9 @@ job = JobAccount(
         "roles/batch.agentReporter",
         "roles/batch.jobsEditor",
         "roles/logging.logWriter",
+        # the `gcp-cost` step: buckets' bytes (Monitoring) and their soft-delete / lifecycle policies
+        "roles/monitoring.viewer",
+        "roles/storage.bucketViewer",
     ],
     actors=[sa("gcs-usage-dispatch")],
     adopt=adopt,
