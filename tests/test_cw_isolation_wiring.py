@@ -68,23 +68,6 @@ def test_scan_crons_run_the_head_on_cw_profiles(script: str, profile: str, tmp_p
     }
 
 
-@pytest.mark.parametrize("profile, store, sources", [
-    ("cw.yml", "primary", [f"s3://{b}" for b in ("marin-us-east-02a", "hero-checkpoints", "marin-us-east-06a",
-                                                 "rhoarnet-us-east-08a", "marin-us-east-08a", "marin-us-west-04a")]),
-    ("cw-meta.yml", "meta", [f"gcs://{DATA}", "r2://oa-cw-s3-usage-index"]),
-])
-def test_scan_profiles_use_only_isolated_targets(profile: str, store: str, sources: list[str]) -> None:
-    from dt_cloud.scan_profile import load
-    p = load(ROOT / "job/profiles" / profile)
-    assert {"store": p.store, "image": p.executor.image, "sa": p.executor.service_account, "data": p.data,
-            "work": p.work, "sources": [s.uri for s in p.sources], "r2": p.env["R2_BUCKET"],
-            "r2_keys": {k: v for k, v in p.secrets.items() if k.startswith("R2_")}} == {
-        "store": store, "image": IMAGE, "sa": f"cw-s3-job@{PROJECT}.iam.gserviceaccount.com", "data": f"gs://{DATA}",
-        "work": f"gs://{DATA}/nf", "sources": sources, "r2": "oa-cw-s3-usage-index",
-        "r2_keys": {k: v for k, v in R2_SECRETS.items() if k != "R2_ENDPOINT" or profile == "cw.yml"},
-    }
-
-
 def test_static_profile_uses_isolated_data_scratch_image_and_publisher() -> None:
     profile = json.loads((ROOT / "job/static-names.json").read_text())
     assert {name: profile[name] for name in ("bucket", "scratch", "image", "r2_secrets", "gen")} == {

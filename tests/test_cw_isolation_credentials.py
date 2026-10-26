@@ -188,7 +188,7 @@ def test_live_verifier_compares_all_routes_without_exposing_the_grant(tmp_path: 
             elif "/meta.json" in url:
                 body = {"total_bytes": 123}
             elif "/api/subtree" in url:
-                name = "Marin CoreWeave (dev)" if "dev.cw-s3.oa.dev" in url else "Marin CoreWeave"
+                name = "Marin CoreWeave (dev)" if "dev.cw.oa.dev" in url else "Marin CoreWeave"
                 body = {"path": "", "tree": {"n": name, "b": 123}, "nodes": 1}
             else:
                 body = {"fixture": "same on both hosts"}
