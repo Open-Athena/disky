@@ -62,6 +62,8 @@ job = JobAccount(
         "roles/batch.agentReporter",
         "roles/batch.jobsEditor",
         "roles/logging.logWriter",
+        # `gcp-cost` (`dt-cloud cost`): the buckets' `total_bytes` from Cloud Monitoring
+        "roles/monitoring.viewer",
     ],
     actors=["cw-s3-dispatch@" + f"{project}.iam.gserviceaccount.com"],
     actor_deps=[dispatch],

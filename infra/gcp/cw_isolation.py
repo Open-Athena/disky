@@ -35,8 +35,15 @@ def prepare_isolation(
             role="roles/storage.objectAdmin",
             member=member,
         )
+        # `gcp-cost` (`dt-cloud cost`) reads the bucket's lifecycle and soft-delete settings (`storage.buckets.get`)
+        viewer = gcp.storage.BucketIAMMember(
+            f"cw-isolation-{component}-job-viewer",
+            bucket=bucket.name,
+            role="roles/storage.bucketViewer",
+            member=member,
+        )
         buckets.append(bucket)
-        resources.extend([bucket, grant])
+        resources.extend([bucket, grant, viewer])
     repository = gcp.artifactregistry.Repository(
         "cw-isolation-images",
         project=project,
