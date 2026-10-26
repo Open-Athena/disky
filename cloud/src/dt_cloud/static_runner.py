@@ -152,6 +152,7 @@ class Runner(ar.Runner):
                                                            *(["-D", str(self.cfg.measure_tasks)] if self.cfg.measure_tasks > 1 else []),
                                                            *(["-A", str(self.cfg.anchor_tasks)] if self.cfg.anchor_tasks > 1 else []),
                                                            *(["-L", str(self.cfg.fold_tasks)] if self.cfg.fold_tasks > 1 else []),
+                                                           *(["-k", str(self.cfg.keep)] if self.cfg.keep else []),
                                                            *duckdb_args(self.cfg.machine_for("compact"))], r2=r2)]
         if self.cfg.measure_tasks > 1 or self.cfg.anchor_tasks > 1 or self.cfg.fold_tasks > 1:
             # its helper jobs are built from the profile, as this runner's are

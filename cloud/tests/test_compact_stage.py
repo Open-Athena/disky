@@ -374,6 +374,21 @@ def test_a_fold_fanned_out_compaction_gets_its_task_count_and_the_profile():
     assert (params["fold_tasks"], params["measure_tasks"], params["anchor_tasks"]) == (3, 2, 4)
 
 
+def test_a_profiles_keep_is_the_compactions_k():
+    """`keep` 1024: the compaction runs `-k 1024`, which `compact` parses as its new generation's K; unset, no `-k` (the
+    generation's K). `STATIC_NAMES_KEEP` sets it too."""
+    from dt_cloud.static_profile import load_profile
+
+    r = _static_runner(1)
+    plain = r.compact_jobs("2026-10-10")[0][1]["taskGroups"][0]["taskSpec"]["runnables"][0]["container"]["commands"][1]
+    r.cfg = replace(r.cfg, keep=1024)
+    cmd = r.compact_jobs("2026-10-10")[0][1]["taskGroups"][0]["taskSpec"]["runnables"][0]["container"]["commands"][1]
+    assert (plain, cmd) == (_py("static_merge", "compact", "-g", GEN, "-S", "scr", "-C", "level:1", "-j", "2", "-M", "90GB", "-p", "16"),
+                            _py("static_merge", "compact", "-g", GEN, "-S", "scr", "-C", "level:1", "-j", "2", "-k", "1024", "-M", "90GB", "-p", "16"))
+    assert (_compact_params(plain)["keep"], _compact_params(cmd)["keep"]) == (None, 1024)
+    assert load_profile({"STATIC_NAMES_PROFILE": "", "STATIC_NAMES_KEEP": "1024"}).keep == 1024
+
+
 def test_the_anchors_fan_outs_helper_job_is_a_real_stage_job_named_by_the_compactions_scan():
     """`anchor_helper_job` through the static runner's own `job()` (no fake submitter): stage `anchor-shard`, named and
     labelled by the compaction's newest scan (never the plan's key), `n` tasks of `anchor-shard` over the plan, on the

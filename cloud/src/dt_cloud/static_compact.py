@@ -394,7 +394,7 @@ def fold_drill(con, tiers: list[sd.Tier], out: Path, work: Path, *, R: int, K: i
     aliases = con.execute("SELECT q, canonical FROM al ORDER BY q").to_arrow_table()
     # the measurement's helper tasks fetch the spills the checkpoint just saved (specs/static-measure-fanout.md)
     fan = fanout(ck, scan) if fanout is not None and ck is not None else None
-    why = sme.blocker(tiers, meas, floor=floor, R=R) if meas is not None else "no base measurement given"
+    why = sme.blocker(tiers, meas, floor=floor, R=R, K=K) if meas is not None else "no base measurement given"
     log(f"drill measurement: {'incremental (base ⊕ runs; each range only sorted)' if why is None else f'every root ({why})'}")
     done = sl.finish_drill(con, out, work, aliases=aliases, long_groups=groups["long"], short_groups=groups["short"], R=R, K=K, floor=floor,
                            step=step, t=t, fanout=fan, incremental=(tiers, meas) if why is None else None)
@@ -1128,7 +1128,7 @@ def fold_gen(gen_dir: Path, out: Path, work: Path, *, gen: str, new_gen: str, ru
              chunk_rows: int = sl.CHUNK_ROWS, jobs: int = 1, log: Callable[[str], None] = err, progress: Callable[..., None] | None = None,
              ck: Checkpoint | None = None, source: str | None = None, stage: str = "auto",
              fanout: Callable[[Checkpoint, str], object] | None = None, anchor_fanout: Callable[[Checkpoint, str], object] | None = None,
-             fold_fanout: Callable[[Checkpoint, str], object] | None = None) -> dict:
+             fold_fanout: Callable[[Checkpoint, str], object] | None = None, keep: int | None = None) -> dict:
     """Generation `gen` (its base in `gen_dir`, the runs `runs`: the newest manifest's, oldest first) folded into `new_gen`
     in `out` (every part but `compaction.json`); its `manifests/<last>.json` lists no runs. Returns a summary (rows, and
     per part its seconds, peak work-disk GiB and peak RSS GiB). `progress(note)`: the run record's hook
@@ -1149,17 +1149,22 @@ def fold_gen(gen_dir: Path, out: Path, work: Path, *, gen: str, new_gen: str, ru
     `fanout(ck, scan)`, `anchor_fanout(ck, scan)` (both need `ck`): the drill measurement's and the base anchors'
     rollups' helper tasks (`static_fanout.Fanout`, `AnchorFanout`), named by the newest scan folded. `fold_fanout(ck,
     scan)` (needs `ck`): the drill fold's (`static_fanout.FoldFanout`): nothing staged here, each task stages its own
-    share's roots from `source` (None: `gen_dir`)."""
+    share's roots from `source` (None: `gen_dir`).
+
+    `keep`: the new generation's kept children per heavy directory (its drill's and anchors' `K`); None: `gen`'s. Another
+    `K` than the tiers' measures and rolls up every root (`static_measure.blocker`); its checkpoint is another
+    (`checkpoint_prefix`)."""
     with ThreadPoolExecutor(3, thread_name_prefix="compact") as bg:
         return _fold_gen(gen_dir, out, work, gen=gen, new_gen=new_gen, runs=runs, threads=threads, mem=mem, chunk_rows=chunk_rows, jobs=jobs,
                          log=log, progress=progress, ck=ck, bg=bg, source=source, stage=stage, fanout=fanout, anchor_fanout=anchor_fanout,
-                         fold_fanout=fold_fanout)
+                         fold_fanout=fold_fanout, keep=keep)
 
 
 def _fold_gen(gen_dir: Path, out: Path, work: Path, *, gen: str, new_gen: str, runs: list[dict], threads: int, mem: str, chunk_rows: int, jobs: int,
               log: Callable[[str], None], progress: Callable[..., None] | None, ck: Checkpoint | None, bg: ThreadPoolExecutor, source: str | None,
               stage: str, fanout: Callable[[Checkpoint, str], object] | None = None,
-              anchor_fanout: Callable[[Checkpoint, str], object] | None = None, fold_fanout: Callable[[Checkpoint, str], object] | None = None) -> dict:
+              anchor_fanout: Callable[[Checkpoint, str], object] | None = None, fold_fanout: Callable[[Checkpoint, str], object] | None = None,
+              keep: int | None = None) -> dict:
     """`fold_gen`, its background work (the catalogs' merge, the parts' saves) on `bg` (waited on as `fold_gen` returns or
     fails)."""
     t0, times, peaks = monotonic(), {}, {}
@@ -1296,7 +1301,7 @@ def _fold_gen(gen_dir: Path, out: Path, work: Path, *, gen: str, new_gen: str, r
     dm = json.loads((gen_dir / "drill" / "meta.json").read_text())
     tiers = [sd.Tier(gen_dir / "drill", "base"), *(sd.Tier(d / "drill", r["key"]) for d, r in zip(run_dirs, runs))]
     drill = resumed("drill", ("drill", "roots-measure"), lambda: fold_drill(
-        con, tiers, out, work / "drill", R=dm["R"], K=dm["K"], floor=dm.get("floor", sl.FLOOR), chunk_rows=chunk_rows, jobs=jobs, step=step,
+        con, tiers, out, work / "drill", R=dm["R"], K=keep or dm["K"], floor=dm.get("floor", sl.FLOOR), chunk_rows=chunk_rows, jobs=jobs, step=step,
         log=lambda s: log(f"compact {gen} → {new_gen}: {s}"), ck=fck, staged=staging.result if staging is not None else lambda: None,
         fanout=fanout, meas=gen_dir / "roots-measure", scan=days[-1], fold_fanout=fold_fanout, gen_dir=gen_dir, source=source), after_saves=True)
     staged = staging.result() if staging is not None else None
@@ -1308,7 +1313,7 @@ def _fold_gen(gen_dir: Path, out: Path, work: Path, *, gen: str, new_gen: str, r
         # the rollups' helper tasks read the name and suffix shards uploaded under `ck` (specs/static-anchors-fanout.md)
         afan = (lambda: anchor_fanout(ck, days[-1])) if anchor_fanout is not None and ck is not None else None
         anchors = resumed("anchors", (an.NAMES, an.ANCHORS),
-                          lambda: sl.build_base_anchors(con, out, R=am["R"], K=am["K"], scans=[s["id"] for s in doc["scans"]], rule=rule, fanout=afan))
+                          lambda: sl.build_base_anchors(con, out, R=am["R"], K=keep or am["K"], scans=[s["id"] for s in doc["scans"]], rule=rule, fanout=afan))
         t = done("anchors", t)
     (out / "manifests").mkdir()
     ids = [s["id"] for s in doc["scans"]]
@@ -1325,16 +1330,18 @@ def _fold_gen(gen_dir: Path, out: Path, work: Path, *, gen: str, new_gen: str, r
 def fold(gen_dir: Path, out: Path, work: Path, *, gen: str, new_gen: str, runs: list[dict], threads: int = 4, mem: str = "4GB",
          chunk_rows: int = sl.CHUNK_ROWS, jobs: int = 1, progress: Callable[..., None] | None = None, checkpoint: str | None = None,
          source: str | None = None, stage: str = "auto", fanout: Callable[[Checkpoint, str], object] | None = None,
-         anchor_fanout: Callable[[Checkpoint, str], object] | None = None, fold_fanout: Callable[[Checkpoint, str], object] | None = None) -> dict:
+         anchor_fanout: Callable[[Checkpoint, str], object] | None = None, fold_fanout: Callable[[Checkpoint, str], object] | None = None,
+         keep: int | None = None) -> dict:
     """`append_runner.Compactor.fold` for the static store (`fold_gen`; `jobs`: key ranges and drill-fold chunks at a time).
     `checkpoint`: a store root (the scratch bucket) for `compact_checkpoint`. `source`, `stage`: the drill's roots staged
     from the generation's store URL (`stage_roots`). `fanout`, `anchor_fanout`, `fold_fanout`: the drill measurement's,
     the base anchors' and the drill fold's helper tasks, given the checkpoint (`static_fanout.Fanout`, `AnchorFanout`,
-    `FoldFanout`; need `checkpoint`)."""
-    ck = compact_checkpoint(checkpoint, gen, new_gen, runs, work=work / "ckpt") if checkpoint else None
+    `FoldFanout`; need `checkpoint`). `keep`: the new generation's `K` (`fold_gen`)."""
+    ck = compact_checkpoint(checkpoint, gen, new_gen, runs, keep=keep, work=work / "ckpt") if checkpoint else None
     try:
         return fold_gen(gen_dir, out, work, gen=gen, new_gen=new_gen, runs=runs, threads=threads, mem=mem, chunk_rows=chunk_rows, jobs=jobs,
-                        progress=progress, ck=ck, source=source, stage=stage, fanout=fanout, anchor_fanout=anchor_fanout, fold_fanout=fold_fanout)
+                        progress=progress, ck=ck, source=source, stage=stage, fanout=fanout, anchor_fanout=anchor_fanout, fold_fanout=fold_fanout,
+                        keep=keep)
     finally:
         if ck is not None:
             ck.close()
@@ -1344,12 +1351,13 @@ def fold(gen_dir: Path, out: Path, work: Path, *, gen: str, new_gen: str, runs: 
 CHECKPOINTS = f"{PREFIX}/compact-checkpoints"
 
 
-def compact_checkpoint(root: str, gen: str, new_gen: str, runs: list[dict], **kw) -> Checkpoint:
+def compact_checkpoint(root: str, gen: str, new_gen: str, runs: list[dict], *, keep: int | None = None, **kw) -> Checkpoint:
     """The fold of `gen` and `runs` into `new_gen`'s checkpoint under `root`: keyed by its inputs (a later compaction
-    into the same `new_gen` folds more runs) and, as every `Checkpoint`, by the code (another build's isn't resumed)."""
+    into the same `new_gen` folds more runs; `keep`, `fold_gen`'s) and, as every `Checkpoint`, by the code (another
+    build's isn't resumed)."""
     from .blobstore import store_url
 
-    return Checkpoint(store_url(root), checkpoint_prefix(gen, new_gen, runs), code=code_version(), **kw)
+    return Checkpoint(store_url(root), checkpoint_prefix(gen, new_gen, runs, keep), code=code_version(), **kw)
 
 
 #: A fold's checkpoint steps, in the order it saves them (`fold_gen`'s parts, the drill's own within it): a single-VM
@@ -1358,9 +1366,10 @@ STEPS = ("intervals", "shards", "catalog", "fold/long-roots-tables", "fold/long-
          "fold/classes", "fold/spilled-tables", "fold/spilled", "drill", "anchors")
 
 
-def checkpoint_prefix(gen: str, new_gen: str, runs: list[dict]) -> str:
-    """`compact_checkpoint`'s prefix under its root: the fold of `gen` and `runs` into `new_gen`."""
-    inputs = hashlib.sha256(json.dumps([gen, [r["key"] for r in runs]]).encode()).hexdigest()[:16]
+def checkpoint_prefix(gen: str, new_gen: str, runs: list[dict], keep: int | None = None) -> str:
+    """`compact_checkpoint`'s prefix under its root: the fold of `gen` and `runs` into `new_gen`, with `keep`'s `K`
+    (`fold_gen`; None: `gen`'s, the prefix without it), so a fold never resumes or seeds steps kept at another `K`."""
+    inputs = hashlib.sha256(json.dumps([gen, [r["key"] for r in runs], *([keep] if keep is not None else [])]).encode()).hexdigest()[:16]
     return f"{CHECKPOINTS}/{new_gen}/{inputs}"
 
 
@@ -1380,7 +1389,7 @@ def same_bucket(a: str, b: str) -> tuple[str, str, str] | None:
 
 
 def seed_checkpoint(src_root: str, dst_root: str, gen: str, new_gen: str, runs: list[dict], through: str, *, units: bool = True,
-                    workers: int = 32, log: Callable[[str], None] = err) -> dict:
+                    keep: int | None = None, src_keep: int | None = None, workers: int = 32, log: Callable[[str], None] = err) -> dict:
     """Another run's checkpoint of the same fold (`src_root`'s), its saved steps up to and including `through`
     (`STEPS`' order), copied under `dst_root` and claimed for this code (`code.json`: the steps after `through` run on
     it): a fold resumed there on new code, the source never written (a run still holding it goes on). The copied steps
@@ -1390,7 +1399,11 @@ def seed_checkpoint(src_root: str, dst_root: str, gen: str, new_gen: str, runs: 
     copied but not the spills, the drill measurement's ranges when the drill isn't copied, the anchors' shard tasks when
     the anchors aren't; the resumed fold deals only the rest. `units` false: none of them (a race timing that step's
     helpers rebuilds them all; units are copied whatever code made them). Same bucket: copied server side. Returns the
-    steps, files and units copied."""
+    steps, files and units copied.
+
+    `keep`, `src_keep`: this fold's and the source fold's `K` (`fold_gen`'s `keep`; each keys its checkpoint). Across a
+    `K` change only the steps before the drill's measurement are seeded (none of them reads `K`), and none of the
+    measurement's units."""
     from concurrent.futures import ThreadPoolExecutor
 
     from .blobstore import Store, store_url
@@ -1402,7 +1415,10 @@ def seed_checkpoint(src_root: str, dst_root: str, gen: str, new_gen: str, runs: 
     src_root, dst_root = store_url(src_root).rstrip("/"), store_url(dst_root).rstrip("/")
     if src_root == dst_root:
         raise SystemExit(f"{dst_root}: the seeded checkpoint must be another root than its source")
-    prefix = checkpoint_prefix(gen, new_gen, runs)
+    prefix, dst_prefix = checkpoint_prefix(gen, new_gen, runs, src_keep), checkpoint_prefix(gen, new_gen, runs, keep)
+    if keep != src_keep and STEPS.index(through) > STEPS.index("fold/spilled"):
+        raise SystemExit(f"--through {through}: K {src_keep or 'the generation’s'} → {keep or 'the generation’s'}: only steps through fold/spilled "
+                         f"(the drill's measurement and rollups keep K children)")
     src = Store(src_root)
     steps = [st for st in STEPS[:STEPS.index(through) + 1] if src.exists(f"{prefix}/{st}/done.json")]
     if "fold/spilled" not in steps and "fold/fan/runs" not in steps and (fan := [st for st in steps if st in ("fold/fan/members", "fold/fan/plan", "fold/classes")]):
@@ -1414,18 +1430,19 @@ def seed_checkpoint(src_root: str, dst_root: str, gen: str, new_gen: str, runs: 
     if "fold/fan/plan" in steps and "fold/spilled" not in steps:
         # a unit's chunk numbers are its plan's: only with the plan copied
         found += helper_units(src, f"{prefix}/fold/{FOLDED}/", lambda d: [f"{prefix}/fold/{SPILLED_FILES}/{r}" for r in d.get("files", [])])
-    if "fold/spilled" in steps and "drill" not in steps:
+    if "fold/spilled" in steps and "drill" not in steps and keep == src_keep:
         found += helper_units(src, f"{prefix}/fold/{MEASURED}/")
     if "drill" in steps and "anchors" not in steps:
         found += helper_units(src, f"{prefix}/{ANCHORED}/")
         keys += src.keys(f"{prefix}/{ANCHORS_IN}/")
     chosen = found if units else []
     keys += [k for u in chosen for k in u]
+    moved = lambda k: f"{dst_prefix}{k.removeprefix(prefix)}"  # noqa: E731
     same = same_bucket(src_root, dst_root)
     if same is not None:
         base, src_in, dst_in = same
         within = Store(base)
-        copy = lambda k: within.copy(f"{src_in}{k}", f"{dst_in}{k}")  # noqa: E731
+        copy = lambda k: within.copy(f"{src_in}{k}", f"{dst_in}{moved(k)}")  # noqa: E731
     else:
         import tempfile
 
@@ -1434,13 +1451,13 @@ def seed_checkpoint(src_root: str, dst_root: str, gen: str, new_gen: str, runs: 
         def copy(k: str) -> None:
             f = tmp / k
             src.get(k, f)
-            dst.put(f, k)
+            dst.put(f, moved(k))
             f.unlink()
     with ThreadPoolExecutor(workers) as ex:
         list(ex.map(copy, keys))
-    Store(dst_root).write_text(f"{prefix}/code.json", json.dumps({"code": code_version()}) + "\n")
+    Store(dst_root).write_text(f"{dst_prefix}/code.json", json.dumps({"code": code_version()}) + "\n")
     log(f"seed checkpoint: {len(keys)} files of steps {', '.join(steps)} (+ {len(chosen)} of {len(found)} finished helper units) from {src_root} to "
-        f"{dst_root}/{prefix}/")
+        f"{dst_root}/{dst_prefix}/")
     return {"steps": steps, "files": len(keys), "units": len(chosen)}
 
 
@@ -1511,14 +1528,15 @@ def prebuilt_fold(url: str) -> Callable[..., dict]:
 def compactor(chunk_rows: int = sl.CHUNK_ROWS, checkpoint: str | None = None, stage: str = "auto",
               fanout: Callable[[Checkpoint, str], object] | None = None, prebuilt: str | None = None,
               anchor_fanout: Callable[[Checkpoint, str], object] | None = None,
-              fold_fanout: Callable[[Checkpoint, str], object] | None = None) -> ar.Compactor:
+              fold_fanout: Callable[[Checkpoint, str], object] | None = None, keep: int | None = None) -> ar.Compactor:
     """The static store's plug into the shared compaction (`append_runner.compact_store`): its fold and upload order; its
     predecessors are left to `store-gc -k` (readers pin `STATIC_GEN`, so a compacted generation may still be served).
     `checkpoint`: the folds' checkpoint root (`fold`). `stage`: the drill's roots staged on the work disk (`STAGE_MODES`;
     from the store, given as the fold's `source`). `fanout`, `anchor_fanout`, `fold_fanout`: its drill measurement's,
-    base anchors' and drill fold's helper tasks (`fold`). `prebuilt`: adopt a fold done elsewhere instead (`prebuilt_fold`)."""
+    base anchors' and drill fold's helper tasks (`fold`). `keep`: the new generation's `K` (`fold_gen`). `prebuilt`: adopt a
+    fold done elsewhere instead (`prebuilt_fold`)."""
     folder = prebuilt_fold(prebuilt) if prebuilt else (lambda *a, **kw: fold(*a, **kw, chunk_rows=chunk_rows, checkpoint=checkpoint, stage=stage, fanout=fanout,
-                                                                                         anchor_fanout=anchor_fanout, fold_fanout=fold_fanout))
+                                                                                         anchor_fanout=anchor_fanout, fold_fanout=fold_fanout, keep=keep))
     return ar.Compactor(prefix=PREFIX, fold=folder,
                         publish_order=sl.publish_order, last=("scans.json", "catalog/meta.json", "drill/meta.json", f"{an.ANCHORS}/meta.json"),
                         prune=False, md5s=True, keep=reads, publish_tier=sl.publish_tier, source=True)
@@ -1542,12 +1560,13 @@ def reads(rel: str) -> bool:
 @option("-c", "--chunk-rows", default=sl.CHUNK_ROWS, type=IntRange(min=1), help="The drill's chunks: roots per measurement / rollup q range")
 @option("-g", "--gen", required=True, help="The generation (`<store>/static-names/GEN/`); one compacted already is followed to its newest successor")
 @option("-j", "--jobs", default=1, type=IntRange(min=1), help="Key ranges and drill-fold chunks folded this many at a time, on cursors of one DuckDB database (-p threads and -M memory shared); the bytes don't depend on it")
+@option("-k", "--keep", type=IntRange(min=1), help="The new generation's kept children per heavy directory (its drill's and anchors' K; default: the generation's): another K measures and rolls up every root")
 @option("-M", "--mem", default="4GB", help="DuckDB memory limit")
 @option("-o", "--out", "store_root", required=True, help="The store: a dir or URL (`r2://bucket[/prefix]`, `s3://…`, `gs://…`)")
 @option("-p", "--threads", default=4, type=IntRange(min=1), help="DuckDB threads")
 @option("-s", "--stage", default="auto", type=Choice(STAGE_MODES), help="Stage the drill's roots on the work disk (auto: when the generation isn't there already and the disk has room)")
 @option("-w", "--work", help="Local work dir (default: a temporary one, removed after); the generation is mirrored into it")
-def compact_cmd(chunk_rows, gen, jobs, mem, store_root, stage, threads, work) -> None:
+def compact_cmd(chunk_rows, gen, jobs, keep, mem, store_root, stage, threads, work) -> None:
     """Fold the generation's base and its newest manifest's runs into a new generation now (`<gen>.c<NNN>`, equal to
     `build -r <gen>/ranges.json` through the last scan), whatever the compaction policy says; published (data, then
     `compaction.json`), then `successor.json` in the old generation and `static-names/CURRENT.json` when it named it (or
@@ -1564,5 +1583,5 @@ def compact_cmd(chunk_rows, gen, jobs, mem, store_root, stage, threads, work) ->
         why = ar.forced(gen_dir, "forced (compact)")
         if why is None:
             raise SystemExit(f"{store.root}/{prefix}: no runs to compact")
-        out = ar.compact_store(store, compactor(chunk_rows, stage=stage), gen, gen_dir, w, policy=ar.NEVER, why=why, threads=threads, mem=mem, jobs=jobs)
+        out = ar.compact_store(store, compactor(chunk_rows, stage=stage, keep=keep), gen, gen_dir, w, policy=ar.NEVER, why=why, threads=threads, mem=mem, jobs=jobs)
     print(json.dumps(out, indent=1))
