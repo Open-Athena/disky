@@ -9,8 +9,8 @@ import {
   THROTTLE_MS, writeKind,
 } from './activity'
 import {
-  authLine, type Burst, clientKind, DISCORD, highlights, joins, keptEvents, mergeKinds, renderDiscord, renderLines,
-  renderSummary, type ServerEvent, serverKind, SLACK, tallyClient,
+  addTrail, authLine, type Burst, clientKind, DISCORD, emptyTrail, highlights, joins, keptEvents, mergeKinds, pageLines,
+  renderDiscord, renderLines, renderSummary, type ServerEvent, serverKind, sessionLinks, SLACK, tallyClient,
 } from './activityShape'
 import { captureWrite, noteActivity } from './activityHook'
 import type { SlogEvent } from './sessionLogShape'
@@ -99,15 +99,35 @@ describe('bursts (pure)', () => {
       { t: 4, k: 'click', n: 'scan' }, { t: 5, k: 'api', u: '/api/series', s: 200 }, { t: 6, k: 'dropped', n: 3 },
     ] as SlogEvent[]
     const conf = mergeKinds([{ kind: 'api', log: 0, notify: 'off' }])
-    expect(tallyClient(events, conf)).toEqual({ counts: { view: 1, nav: 2, click: 1 }, pages: { '/scans': 2, '/gcs/a': 1 } })
+    expect(tallyClient(events, conf)).toEqual({
+      counts: { view: 1, nav: 2, click: 1 }, pages: { '/scans': 2, '/gcs/a': 1 }, trail: ['/scans', '/scans', '/gcs/a'], errors: [],
+    })
     expect(keptEvents(events, conf).map(e => e.k)).toEqual(['start', 'nav', 'nav', 'click', 'dropped'])
+  })
+
+  it('tallies errors with the page they happened on', () => {
+    const events = [
+      { t: 1000, k: 'start', u: '/scans' }, { t: 2500, k: 'api', u: '/api/scan-runs', s: 0, ms: 3214, err: 'TypeError: Failed to fetch' },
+      { t: 3000, k: 'nav', u: '/users?o=bob' }, { t: 4000, k: 'reject', msg: 'boom' }, { t: 5000, k: 'api', u: '/api/x', s: 404, ms: 9 },
+    ] as SlogEvent[]
+    expect(tallyClient(events, mergeKinds([])).errors).toEqual([
+      { ts: 2, line: 'GET /api/scan-runs → failed · 3214ms · TypeError: Failed to fetch', page: '/scans' },
+      { ts: 4, line: 'unhandled rejection: boom', page: '/users' },
+    ])
+  })
+
+  it('keeps a trail: repeats of the previous path fold in, the latest stops kept', () => {
+    const t = addTrail(emptyTrail(), ['/', '/', '/a', '/'])
+    expect(t).toEqual({ n: 3, last: [['/', 2], ['/a', 1], ['/', 1]] })
+    expect(addTrail(t, ['/', '/b', '/c'], 3)).toEqual({ n: 5, last: [['/', 2], ['/b', 1], ['/c', 1]] })
   })
 })
 
 describe('rendering', () => {
   const burst: Burst = {
     id: 7, actor: 'ann@example.test', via: 'session', origin: ORIGIN, first_ts: S - 2400, last_ts: S,
-    counts: { assign: 3, view: 4, nav: 9, api: 30 }, pages: { '/': 3, '/users': 1 }, sids: ['sid-a'],
+    counts: { assign: 3, view: 4, nav: 9, api: 30 }, pages: { '/': 3, '/users': 1 }, trail: { n: 2, last: [['/', 3], ['/users', 1]] },
+    sids: ['sid-aaaaaaaaaa'],
   }
   const events: Pick<ServerEvent, 'ts' | 'kind' | 'line' | 'detail'>[] = [
     { ts: S - 2400, kind: 'assign', line: '`gs://b/x/` (1.0 GiB) → bob', detail: { pattern: 'gs://b/x/', owner: 'bob', bytes: 2 ** 30 } },
@@ -122,8 +142,29 @@ describe('rendering', () => {
       '3 assignments · 4 page loads · 9 URL changes',
       'Largest assignment: `gs://b/y/` (2.0 PiB) → bob',
       'Owners: bob, cleared',
-      'Pages: `/` ×3, `/users`',
-      `<${ORIGIN}/admin/activity?burst=7|activity> · <${ORIGIN}/admin/sessions?u=ann%40example.test|session>`,
+      'Pages: `/` ×3 → `/users`',
+      `<${ORIGIN}/admin/activity?burst=7|activity> · <${ORIGIN}/admin/sessions/sid-aaaaaaaaaa|session sid-aaaa>`,
+    ])
+  })
+
+  it('a long trail: the most-viewed paths, then the last stops; many sessions link to the list', () => {
+    const long: Burst = {
+      ...burst, pages: { '/': 9, '/a': 4, '/b': 2 }, trail: { n: 14, last: [['/a', 1], ['/', 2]] },
+      sids: ['s1aaaaaa', 's2aaaaaa', 's3aaaaaa', 's4aaaaaa'],
+    }
+    expect(pageLines(long, SLACK, 2)).toEqual(['Pages (14 stops): `/` ×9, `/a` ×4', 'Last 2: `/a` → `/` ×2'])
+    expect(pageLines({ pages: { '/': 2 }, trail: emptyTrail() }, SLACK, 2)).toEqual(['Pages: `/` ×2'])
+    expect(sessionLinks(long, SLACK)).toEqual([`<${ORIGIN}/admin/sessions?u=ann%40example.test|4 sessions>`])
+  })
+
+  it('folds repeated lines, linking each one\'s time', () => {
+    const es = [
+      { ts: S, line: 'GET /api/x → failed', href: 'https://h/s?show=errors' },
+      { ts: S + 60, line: 'GET /api/x → failed', href: 'https://h/s?show=errors' },
+      { ts: S + 60, line: 'boom' },
+    ]
+    expect(renderLines('error', es, SLACK).split('\n')).toEqual([
+      '*3 errors*', '• <https://h/s?show=errors|15:00> GET /api/x → failed ×2', '• 15:01 boom',
     ])
   })
 
@@ -186,7 +227,7 @@ describe('D1 and sinks', () => {
     expect([a, b, c]).toEqual([1, 1, 2])
     expect((await loadBurst(db, 1))).toEqual({
       id: 1, actor: who.actor, via: 'session', origin: ORIGIN, first_ts: S, last_ts: S + 600,
-      counts: { assign: 3 }, pages: {}, sids: [], rendered_ms: null, dirty: false,
+      counts: { assign: 3 }, pages: {}, trail: { n: 0, last: [] }, sids: [], rendered_ms: null, dirty: false,
     })
     expect((await burstEvents(db, 1)).map(e => e.line)).toEqual(['`gs://b/x/` → bob', '`gs://b/y/` → bob', '`gs://b/z/` → bob'])
   })
@@ -198,7 +239,27 @@ describe('D1 and sinks', () => {
     const events = [{ t: NOW + 1000, k: 'start', u: '/' }, { t: NOW + 2000, k: 'click', n: 'x' }, { t: NOW + 3000, k: 'nav', u: '/users?o=bob' }] as SlogEvent[]
     expect(await feedClient(env, who, 'sid-aaaaaa', events, wait, NOW + 5000)).toBe(1)
     const b = await loadBurst(db, 1)
-    expect([b!.counts, b!.pages, b!.sids]).toEqual([{ assign: 1, view: 1, nav: 1 }, { '/': 1, '/users': 1 }, ['sid-aaaaaa']])
+    expect([b!.counts, b!.pages, b!.trail, b!.sids]).toEqual([
+      { assign: 1, view: 1, nav: 1 }, { '/': 1, '/users': 1 }, { n: 2, last: [['/', 1], ['/users', 1]] }, ['sid-aaaaaa'],
+    ])
+  })
+
+  it('Slack: client errors post at once as a reply, each linked to its session, repeats folded', async () => {
+    const calls = stubFetch()
+    const { db, env, wait } = await setup({ SLACK_BOT_TOKEN: 'xoxb', SLACK_ADMIN_CHANNEL: 'C1' })
+    const fail = (t: number, u: string) => ({ t, k: 'api', u, s: 0, ms: 3300, err: 'TypeError: Failed to fetch' })
+    const events = [{ t: NOW, k: 'start', u: '/admin' }, fail(NOW + 1, '/api/auth/whoami'), fail(NOW + 2, '/api/auth/whoami'), { t: NOW + 3, k: 'console', msg: 'a<b' }] as SlogEvent[]
+    await feedClient(env, who, 'sid-aaaaaa', events, wait, NOW + 5000)
+    expect((await burstEvents(db, 1)).map(e => [e.kind, e.route, e.line, e.detail])).toEqual([
+      ['error', '/admin', 'GET /api/auth/whoami → failed · 3300ms · TypeError: Failed to fetch', { sid: 'sid-aaaaaa' }],
+      ['error', '/admin', 'GET /api/auth/whoami → failed · 3300ms · TypeError: Failed to fetch', { sid: 'sid-aaaaaa' }],
+      ['error', '/admin', 'console.error: a<b', { sid: 'sid-aaaaaa' }],
+    ])
+    const link = `<${ORIGIN}/admin/sessions/sid-aaaaaa?show=errors|15:00>`
+    expect(calls.map(c => [c.body.thread_ts ?? null, String(c.body.text).split('\n')])).toEqual([
+      [null, ['*ann* (browser) · 2026-10-21 15:00Z', '1 page load · 3 errors', 'Pages: `/admin`', `<${ORIGIN}/admin/activity?burst=1|activity> · <${ORIGIN}/admin/sessions/sid-aaaaaa|session sid-aaaa>`]],
+      ['1.000001', ['*3 errors*', `• ${link} GET /api/auth/whoami → failed · 3300ms · TypeError: Failed to fetch on \`/admin\` ×2`, `• ${link} console.error: a&lt;b on \`/admin\``]],
+    ])
   })
 
   it('config writes land in admin_edits and apply at once', async () => {

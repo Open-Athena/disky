@@ -69,7 +69,7 @@ CREATE TABLE activity_bursts (
   sids        TEXT NOT NULL,
   rendered_ms INTEGER,
   dirty       INTEGER NOT NULL DEFAULT 0
-);
+, trail TEXT NOT NULL DEFAULT '{"n":0,"last":[]}');
 
 CREATE TABLE activity_events (
   id       INTEGER PRIMARY KEY AUTOINCREMENT,
