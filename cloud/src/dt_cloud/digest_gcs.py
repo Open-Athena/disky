@@ -1,4 +1,8 @@
-"""The `gcs` digest template: a reply per scan, cost by storage class.
+"""The `gcs` digest template: a reply per day, cost by storage class.
+
+A day's reply is over its sender scan (`senders`): its first scan not started by hand (`Scan.trigger`, the site's
+`digest_cw.site_triggers`); a manual scan stands in only for a day without one, once a later day has a scan (or the
+month is over). Deltas run sender to sender.
 
 Each reply's SENDER is the scan's size headline (date · TiB · Δ), its BODY the
 $/mo (priced from the scan's storage-class bytes, ``cfg.prices``) + a linked
@@ -7,17 +11,18 @@ arrow to the day's diff, its avatar the colour-coded trend arrow
 (TiB + $/mo), and a storage-class image drawn by the site (`POST /api/digest-image`, `kind: tiers`, with the
 month-to-date diff map).
 Scan ids are `YYYY-MM-DD` or sub-daily `YYYY-MM-DDTHHMM` (UTC): a day may hold
-several scans, each its own reply, delta and link (specs/done/scan-ids-not-dates.md);
+several scans, its sender's link its own (specs/done/scan-ids-not-dates.md);
 meta.json carries `total_bytes` + `class_bytes`. Design + rationale: specs/done/slack-digest-shape-c.md; the
 engine: `digest`."""
 from __future__ import annotations
 
 import datetime as dt
 from collections import OrderedDict
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from .digest import AVATAR_REV, GIB, LINK_ARROW, MINUS, TIB, DigestConfig, PlotUnavailable, Reply, Unit, _dlink, _pct, _pct_val, _span, _tb, deg, load_window, scan_slugs, scan_ts
+from .digest import AVATAR_REV, GIB, LINK_ARROW, MINUS, TIB, DigestConfig, PlotUnavailable, Reply, Unit, _dlink, _pct, _pct_val, _span, _tb, deg, list_scans, load_window, scan_slugs, scan_ts
 
 
 def _usd(v: float) -> str:
@@ -52,15 +57,16 @@ def _cost(class_bytes: dict, prices: dict[str, float]) -> float:
     return sum(class_bytes.get(c, 0) / GIB * prices[c] for c in prices)
 
 
-def rows_from_meta(dated_meta: list[tuple[str, dict]], prices: dict[str, float], now: dt.datetime | None = None) -> list[Scan]:
+def rows_from_meta(dated_meta: list[tuple[str, dict]], prices: dict[str, float], now: dt.datetime | None = None,
+                   slugs: Mapping[str, str] | None = None) -> list[Scan]:
     """Build ``Scan`` rows from ``(date, meta.json)`` pairs in date order, each with its canonical slug
-    (`scan_slugs`, as of ``now``).
+    (``slugs``; default `scan_slugs` over the pairs, as of ``now``).
 
     The first pair seeds the delta for the second; callers pass one scan of
     lead-in before the window they want, then slice it off."""
     out: list[Scan] = []
     ptb = pcost = prev = None
-    slugs = scan_slugs(dated_meta, now)
+    slugs = scan_slugs(dated_meta, now) if slugs is None else slugs
     for date, m in dated_meta:
         tb = m["total_bytes"] / TIB
         cb = m["class_bytes"]
@@ -135,7 +141,7 @@ TIERS = (("arch", "Archive"), ("cold", "Coldline"), ("near", "Nearline"), ("std"
 
 
 def image_body(rows: list[Scan], month: dt.date, cfg: DigestConfig) -> dict:
-    """`POST /api/digest-image`'s request for ``month`` (`kind: tiers`): each day's latest scan's bytes per storage
+    """`POST /api/digest-image`'s request for ``month`` (`kind: tiers`): each day's sender's bytes per storage
     class, bottom → top (cold → hot), drawn as the month's total line over the stacked classes, over the month-to-date
     diff map (the first scan's lead-in → the latest, the OP's headline span; none until the month spans two scans)."""
     by_day: dict[str, Scan] = {}
@@ -157,8 +163,24 @@ def image_body(rows: list[Scan], month: dt.date, cfg: DigestConfig) -> dict:
     return body
 
 
+def senders(scans: list[str], triggers: Mapping[str, str], closed: bool = False) -> list[str]:
+    """Each day's sender among ``scans`` (sorted ids): its first scan whose trigger (``triggers``, `scan_triggers`) isn't
+    `manual` (unrecorded counts as scheduled); a day with only manual scans its last, once a later day has a scan or
+    the month is ``closed`` (until then the day has none: its scheduled scan may yet land)."""
+    days: OrderedDict[str, list[str]] = OrderedDict()
+    for s in scans:
+        days.setdefault(s[:10], []).append(s)
+    out = []
+    for i, ss in enumerate(days.values()):
+        if (s := next((s for s in ss if triggers.get(s) != "manual"), None)) is not None:
+            out.append(s)
+        elif i + 1 < len(days) or closed:
+            out.append(ss[-1])
+    return out
+
+
 def reply(r: Scan, cfg: DigestConfig, platform: str = "slack") -> Reply:
-    """One scan's reply.
+    """One day's reply, over its sender scan ``r``.
 
     Style B, mobile-first: the SENDER is the size headline (bold, plain text --
     Slack renders no links/emoji/markdown there), sized to not wrap on a phone;
@@ -171,9 +193,7 @@ def reply(r: Scan, cfg: DigestConfig, platform: str = "slack") -> Reply:
     d = r.day
     dtb = r.dtb or 0
     dcost = r.dcost or 0
-    # A sub-daily scan names its UTC time: a day's scans are distinct replies.
-    when = f"{d.month}/{d.day}" + (f" {r.date[11:13]}:{r.date[13:15]}Z" if "T" in r.date else "")
-    sender = f"{when} — {r.tb:,.0f} TiB ({_tb(dtb)}, {_pct(dtb, r.tb)}%)"
+    sender = f"{d.month}/{d.day} — {r.tb:,.0f} TiB ({_tb(dtb)}, {_pct(dtb, r.tb)}%)"
     url = f"{cfg.site_url}/?d={_dlink(r.date, r.slug)}#diff"
     link = f"· [view →]({url})" if platform == "discord" else f"[{LINK_ARROW}]({url})"
     body = f"${r.cost:,}/mo ({_usd(dcost)}) {link}"
@@ -184,15 +204,19 @@ def reply(r: Scan, cfg: DigestConfig, platform: str = "slack") -> Reply:
     return Reply(sender, body, icon_url=avatar)
 
 
-def load_month(root: str, month: dt.date, prices: dict[str, float]) -> list[Scan]:
-    """Per-scan ``Scan`` rows for ``month`` (UTC), from ``root``'s snapshots
-    (``gs://<bucket>/snapshots``: one ``<date>/meta.json`` per scan); the
-    lead-in scan seeds the first delta and is sliced off. ``[]`` if none."""
-    w = load_window(root, month)
+def load_month(root: str, month: dt.date, prices: dict[str, float], triggers: Mapping[str, str] | None = None) -> list[Scan]:
+    """Per-day ``Scan`` rows for ``month`` (UTC), over each day's sender (`senders`, by ``triggers``), from ``root``'s
+    snapshots (``gs://<bucket>/snapshots``: one ``<id>/meta.json`` per scan), each delta vs. the day before's sender;
+    the lead-in day's seeds the first and is sliced off. ``[]`` if none."""
+    scans = list_scans(root)
+    w = load_window(root, month, scans)
     if w is None:
         return []
     lead, in_month = w
-    return rows_from_meta(lead + in_month, prices)[len(lead):]
+    pairs = lead + in_month
+    keep = set(senders([s for s, _ in pairs], triggers or {}, closed=scans[-1] > in_month[-1][0]))
+    rows = rows_from_meta([p for p in pairs if p[0] in keep], prices, slugs=scan_slugs(pairs))
+    return rows[len([s for s, _ in lead if s in keep]):]
 
 
 class Gcs:
@@ -206,7 +230,9 @@ class Gcs:
         self.cfg = cfg
 
     def load(self, root: str, month: dt.date) -> list[Scan]:
-        return load_month(root, month, self.cfg.prices)
+        from . import digest_cw
+
+        return load_month(root, month, self.cfg.prices, digest_cw.site_triggers(self.cfg))
 
     def n_scans(self, rows: list[Scan]) -> int:
         return len(rows)
@@ -215,10 +241,10 @@ class Gcs:
         return op_body(rows, month, plot_url, self.cfg)
 
     def units(self, rows: list[Scan], variant: str, platform: str = "slack") -> list[Unit]:
-        return [Unit(r.date, r.date, reply(r, self.cfg, platform)) for r in rows]
+        return [Unit(r.date[:10], r.date, reply(r, self.cfg, platform)) for r in rows]
 
     def provisional(self, rows: list[Scan], variant: str) -> None:
-        """A reply per scan is never provisional."""
+        """A day's reply is posted once its sender is known: never provisional."""
         return None
 
     def render_plot(self, rows: list[Scan], month: dt.date, out: Path, root: str | None = None) -> None:
