@@ -34,8 +34,8 @@ def post_digest(root, m, token, channel, variant="sender", client=None, reply_ho
     return E.converge_slack(_tpl(reply_hour), root, m, client, channel, variant)
 
 
-def redo_replies(root, m, token, channel, variant="sender", client=None, reply_hour=12, for_real=False):
-    return E.redo_replies(_tpl(reply_hour), root, m, client, channel, variant, for_real=for_real)
+def redo_replies(root, m, token, channel, variant="sender", client=None, reply_hour=12, for_real=False, since=None):
+    return E.redo_replies(_tpl(reply_hour), root, m, client, channel, variant, since=since, for_real=for_real)
 
 TIB = 1024**4
 UTC = dt.timezone.utc
@@ -726,6 +726,8 @@ def test_redo_replies(tmp_path: Path):
     assert redo_replies(str(root), SEP, "xoxb", "C1", "sender", client=fake) == {
         "old": [("2026-09-01", {"ts": "m2", "scan": "2026-09-01T0000"}), ("2026-09-02", {"ts": "m3", "scan": "2026-09-02T0000"})],
         "new": [("2026-09-01", "2026-09-01T1200", "9/1 — 713 TiB (+8.0, 1.1%)"), ("2026-09-02", "2026-09-02T1200", "9/2 — 715 TiB (+2.0, 0.3%)")],
+        "rekey": [],
+        "left": [],
     }
     assert fake.calls == []
     # for real: OP refreshed, the new replies appended to the same thread, THEN the old ones deleted in order
@@ -744,6 +746,46 @@ def test_redo_replies(tmp_path: Path):
     fake.calls.clear()
     redo_replies(str(root), SEP, "xoxb", "C1", "sender", client=fake, for_real=True)
     assert [_call(c) for c in fake.calls] == [("edit", "m1"), ("post", "m1", "9/1 — 713 TiB (+8.0, 1.1%)", f"{AV}50.png?v=4", None), ("post", "m1", "9/2 — 715 TiB (+2.0, 0.3%)", f"{AV}30.png?v=4", None), ("delete", "m4"), ("delete", "m5")]
+
+
+def test_redo_replies_since(tmp_path: Path):
+    # only 9/2 on is redone; 9/1 keeps its reply (m2), and an old rule's extra 9/1 reply (m9) leaves the state, not the thread
+    root, fake = _old_rule_thread(tmp_path)
+    path = tmp_path / "digest" / "cw" / "C1" / "sender" / "2026-09.json"
+    st = json.loads(path.read_text())
+    st["posted"]["2026-09-01T1800"] = {"ts": "m9", "scan": "2026-09-01T1200"}
+    path.write_text(json.dumps(st))
+    assert redo_replies(str(root), SEP, "xoxb", "C1", "sender", client=fake, since=date(2026, 9, 2)) == {
+        "old": [("2026-09-02", {"ts": "m3", "scan": "2026-09-02T0000"})],
+        "new": [("2026-09-02", "2026-09-02T1200", "9/2 — 715 TiB (+2.0, 0.3%)")],
+        "rekey": [("2026-09-01", "2026-09-01")],
+        "left": ["2026-09-01T1800"],
+    }
+    assert fake.calls == []
+    state = redo_replies(str(root), SEP, "xoxb", "C1", "sender", client=fake, since=date(2026, 9, 2), for_real=True)
+    assert [_call(c) for c in fake.calls] == [
+        ("edit", "m1"),
+        ("post", "m1", "9/2 — 715 TiB (+2.0, 0.3%)", f"{AV}30.png?v=4", None),
+        ("delete", "m3"),
+    ]
+    assert state["posted"] == {"2026-09-01": {"ts": "m2", "scan": "2026-09-01T0000"}, "2026-09-02": {"ts": "m4", "scan": "2026-09-02T1200"}}
+
+
+def test_redo_replies_since_rekeys_to_the_days_earliest(tmp_path: Path):
+    # a day whose only replies are under old-rule keys keeps one, under the current key: its earliest
+    root, fake = _old_rule_thread(tmp_path)
+    path = tmp_path / "digest" / "cw" / "C1" / "sender" / "2026-09.json"
+    st = json.loads(path.read_text())
+    m2 = st["posted"].pop("2026-09-01")
+    st["posted"] = {"2026-09-01T1800": {"ts": "m9", "scan": "2026-09-01T1200"}, "2026-09-01T0000": m2, **st["posted"]}
+    path.write_text(json.dumps(st))
+    plan = redo_replies(str(root), SEP, "xoxb", "C1", "sender", client=fake, since=date(2026, 9, 2))
+    assert (plan["rekey"], plan["left"]) == ([("2026-09-01", "2026-09-01T0000")], ["2026-09-01T1800"])
+    # one keyed by the unit's own scan (9/1's is the 12:00 one under the current rule) wins over the earliest
+    st["posted"]["2026-09-01T1200"] = {"ts": "m8", "scan": "2026-09-01T1200"}
+    path.write_text(json.dumps(st))
+    plan = redo_replies(str(root), SEP, "xoxb", "C1", "sender", client=fake, since=date(2026, 9, 2))
+    assert (plan["rekey"], plan["left"]) == ([("2026-09-01", "2026-09-01T1200")], ["2026-09-01T1800", "2026-09-01T0000"])
 
 
 def test_redo_replies_post_failure_deletes_nothing(tmp_path: Path):
