@@ -7,7 +7,7 @@ executor:
   project: oa-internal-450019
   region: us-central1
   service_account: cw-s3-job@oa-internal-450019.iam.gserviceaccount.com
-  image: us-central1-docker.pkg.dev/oa-internal-450019/cw-s3-usage/scan:cw
+  image: us-central1-docker.pkg.dev/oa-internal-450019/cw-s3-usage/scan:latest
   boot_disk: 50
 work: gs://oa-cw-s3-usage-data/nf
 data: gs://oa-cw-s3-usage-data
@@ -65,7 +65,7 @@ env:
   AWS_DEFAULT_REGION: us-east-1
   AWS_EC2_METADATA_DISABLED: "true"
   DT_S3_ADDRESSING_STYLE: virtual
-  STATIC_NAMES_IMAGE: us-central1-docker.pkg.dev/oa-internal-450019/cw-s3-usage/scan:cw
+  STATIC_NAMES_IMAGE: us-central1-docker.pkg.dev/oa-internal-450019/cw-s3-usage/scan:latest
   # cost labels (specs/done/cost-labels-required.md): `scan head` refuses without them; every Batch job it and its
   # steps submit inherits them
   DISKY_LABELS: app=disky,deployment=cw

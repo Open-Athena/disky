@@ -4,7 +4,7 @@
 # and the disk-tree engine per the root Dockerfile; `.gcloudignore` trims the
 # context.
 #
-# The scheduled scan (cw-batch-submit.sh) runs `IMAGE:cw`, so a rebuild is how
+# The scheduled scan (cw-batch-submit.sh) runs `IMAGE:latest`, so a rebuild is how
 # cw-run.sh / pipeline changes reach prod. Immutable per-scan snapshots mean
 # this is safe to run any time; the next scan picks it up.
 #
@@ -13,10 +13,10 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 PROJECT=${PROJECT:-oa-internal-450019}
-# Which job script the image runs (`job/<JOB>`); the tag defaults to `cw`, never
-# `latest` (the gcs deployment's image, built from its own branch).
+# Which job script the image runs (`job/<JOB>`); the tag defaults to `latest`, the
+# deployment's (repo `cw-s3-usage` is cw's alone: `DeploymentImages` in infra/gcp).
 JOB=${JOB:-cw-run.sh}
-TAG=${TAG:-cw}
+TAG=${TAG:-latest}
 IMAGE=${IMAGE:-us-central1-docker.pkg.dev/$PROJECT/cw-s3-usage/scan:$TAG}
 
 echo "building $IMAGE (Cloud Build; context = repo root, minus .gcloudignore)" >&2

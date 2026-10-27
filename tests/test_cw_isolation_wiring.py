@@ -8,7 +8,7 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 PROJECT = "oa-internal-450019"
-IMAGE = f"us-central1-docker.pkg.dev/{PROJECT}/cw-s3-usage/scan:cw"
+IMAGE = f"us-central1-docker.pkg.dev/{PROJECT}/cw-s3-usage/scan:latest"
 DATA = "oa-cw-s3-usage-data"
 R2_SECRETS = {
     "R2_ENDPOINT": "cw-s3-r2-endpoint",

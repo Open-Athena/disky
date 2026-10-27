@@ -13,7 +13,7 @@ set -euo pipefail
 PROJECT=oa-internal-450019
 REGION=us-central1
 SA=cw-s3-job@$PROJECT.iam.gserviceaccount.com
-IMAGE=${IMAGE:-us-central1-docker.pkg.dev/$PROJECT/cw-s3-usage/scan:cw}
+IMAGE=${IMAGE:-us-central1-docker.pkg.dev/$PROJECT/cw-s3-usage/scan:latest}
 MACHINE=${MACHINE:-n2-standard-8}
 MEMORY_MIB=${MEMORY_MIB:-30000}
 MAX_RUN_SECONDS=${MAX_RUN_SECONDS:-28800}  # up to ~78 scans × a few min each

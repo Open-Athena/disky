@@ -19,7 +19,7 @@ SCAN=$1
 PROJECT=oa-internal-450019
 REGION=us-east1
 SA=cw-s3-job@$PROJECT.iam.gserviceaccount.com
-IMAGE=${IMAGE:-us-central1-docker.pkg.dev/$PROJECT/cw-s3-usage/scan:cw}
+IMAGE=${IMAGE:-us-central1-docker.pkg.dev/$PROJECT/cw-s3-usage/scan:latest}
 MACHINE=${MACHINE:-e2-standard-4}
 JOB_ID=${JOB_ID:-cw-sn-catchup-$(date -u +%Y%m%d-%H%M%S)}
 

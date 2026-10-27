@@ -3,6 +3,8 @@
 import pulumi
 import pulumi_gcp as gcp
 
+from gcp_jobs import Adopt, DeploymentImages
+
 
 def prepare_isolation(
     project: str,
@@ -44,16 +46,19 @@ def prepare_isolation(
         )
         buckets.append(bucket)
         resources.extend([bucket, grant, viewer])
-    repository = gcp.artifactregistry.Repository(
-        "cw-isolation-images",
+    # `DeploymentImages`: `:latest` and the newest 10 builds kept, the rest deleted after 14 days. The repo keeps its
+    # resource name (moved under the component by alias); the job's read grant stays this stack's own resource.
+    images = DeploymentImages(
+        "cw",
         project=project,
-        location="us-central1",
+        region="us-central1",
         repository_id="cw-s3-usage",
-        format="DOCKER",
-        description="CW deployment images; no GCS image tags",
-        labels={**labels, "component": "images"},
-        opts=pulumi.ResourceOptions(protect=True),
+        logical="cw-isolation-images",
+        description="cw deployment images (`scan`; `:latest` is the deployment's)",
+        adopt=Adopt(False),
+        aliases=[pulumi.Alias(parent=pulumi.ROOT_STACK_RESOURCE)],
     )
+    repository = images.repository
     reader = gcp.artifactregistry.RepositoryIamMember(
         "cw-isolation-images-job",
         project=project,

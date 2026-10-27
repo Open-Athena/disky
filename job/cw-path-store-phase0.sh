@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Path-store phase 0 (specs/path-store.md §5, phase 0): measure the store's two
 # sorts on the daily job's machine class, over one cw layer-2 — the production
-# cost of the phase-1 writer, not a laptop's. Runs inside the `:cw` image as one
+# cost of the phase-1 writer, not a laptop's. Runs inside the `:latest` image as one
 # GCP Batch task (job/cw-path-store-phase0-submit.sh). Writes nothing under
 # `cw-l2/` or `snapshots/`; everything lands under OUT_URI (a scratch prefix).
 #

@@ -22,7 +22,7 @@ case $CMD in build|add|verify) ;; *) echo "$0: build, add or verify, not $CMD" >
 PROJECT=oa-internal-450019
 REGION=us-central1
 SA=cw-s3-job@$PROJECT.iam.gserviceaccount.com
-IMAGE=${IMAGE:-us-central1-docker.pkg.dev/$PROJECT/cw-s3-usage/scan:cw}
+IMAGE=${IMAGE:-us-central1-docker.pkg.dev/$PROJECT/cw-s3-usage/scan:latest}
 R2_BUCKET=${R2_BUCKET:-oa-cw-s3-usage-index}
 GEN=${INTERVAL_STORE_GEN:-2026-10-14cw}
 MACHINE=${MACHINE:-n2-highmem-16}

@@ -9,7 +9,7 @@
 # Nothing is written to any bucket.
 #
 # The churn module rides IN the job body (copied from this tree's
-# `cloud/src/dt_cloud/churn.py`), so this runs on the current `:cw` image
+# `cloud/src/dt_cloud/churn.py`), so this runs on the current `:latest` image
 # before an image with `dt-cloud churn` ships.
 #
 #   job/cw-churn-submit.sh -p 2026-10-01T0003:2026-10-02T1201 2026-10-01T0003 2026-10-01T1201 2026-10-02T0001 2026-10-02T1201
@@ -21,7 +21,7 @@ set -euo pipefail
 PROJECT=oa-internal-450019
 REGION=us-central1
 SA=cw-s3-job@$PROJECT.iam.gserviceaccount.com
-IMAGE=${IMAGE:-us-central1-docker.pkg.dev/$PROJECT/cw-s3-usage/scan:cw}
+IMAGE=${IMAGE:-us-central1-docker.pkg.dev/$PROJECT/cw-s3-usage/scan:latest}
 DATA_BUCKET=${DATA_BUCKET:-oa-cw-s3-usage-data}
 MACHINE=${MACHINE:-n2-standard-8}
 JOB_ID=${JOB_ID:-cw-churn-$(date -u +%Y%m%d-%H%M%S)}

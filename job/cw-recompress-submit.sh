@@ -30,14 +30,14 @@
 # size + md5, so it re-uploads exactly the rewritten files); if the mirror is to
 # drop raw listings instead, that is a `publish-r2` prefix change, not this job.
 #
-# Needs the `:cw` image built from a tree that has `disk-tree recompress`
+# Needs the `:latest` image built from a tree that has `disk-tree recompress`
 # (cloud `e957f8d` or later). Run `-l`'s first scan alone before the rest, and
 # read its report (`recompress` prints old → new per file and a totals line).
 set -euo pipefail
 PROJECT=oa-internal-450019
 REGION=us-central1
 SA=cw-s3-job@$PROJECT.iam.gserviceaccount.com
-IMAGE=${IMAGE:-us-central1-docker.pkg.dev/$PROJECT/cw-s3-usage/scan:cw}
+IMAGE=${IMAGE:-us-central1-docker.pkg.dev/$PROJECT/cw-s3-usage/scan:latest}
 DATA_BUCKET=${DATA_BUCKET:-oa-cw-s3-usage-data}
 PARALLELISM=${PARALLELISM:-4}
 JOB_ID=${JOB_ID:-cw-recompress-$(date -u +%Y%m%d-%H%M%S)}

@@ -10,14 +10,14 @@
 #   DRY=1 ./job/cw-path-store-phase0-submit.sh            # print the spec
 #   L2_URI=gs://… OUT_URI=gs://… ./job/cw-path-store-phase0-submit.sh
 #
-# Needs the `:cw` image built from a tree that has `disk-tree tiers` (cloud
+# Needs the `:latest` image built from a tree that has `disk-tree tiers` (cloud
 # `0ebb173` or later) and this script's task file. Same job SA as the scans
 # (reads + writes the data bucket via ADC); no secrets.
 set -euo pipefail
 PROJECT=oa-internal-450019
 REGION=us-central1
 SA=cw-s3-job@$PROJECT.iam.gserviceaccount.com
-IMAGE=${IMAGE:-us-central1-docker.pkg.dev/$PROJECT/cw-s3-usage/scan:cw}
+IMAGE=${IMAGE:-us-central1-docker.pkg.dev/$PROJECT/cw-s3-usage/scan:latest}
 MACHINE=${MACHINE:-n2-standard-8}
 MEMORY_MIB=${MEMORY_MIB:-30000}
 L2_URI=${L2_URI:-gs://oa-cw-s3-usage-data/cw-l2/2026-09-30T1203/marin-us-east-02a.parquet}

@@ -69,7 +69,7 @@ SWEEP_REVIEW_STORE = "r2://oa-cw-s3-usage-index"
 SWEEP_REVIEW_SECRETS = '{"R2_ENDPOINT":"cw-s3-r2-endpoint","R2_ACCESS_KEY_ID":"cw-s3-isolated-r2-access-key-id","R2_SECRET_ACCESS_KEY":"cw-s3-isolated-r2-secret-access-key"}'
 GCP_PROJECT = "oa-internal-450019"
 META_TREE_URL = "https://cw.oa.dev/meta"  # /scans outputs link into the meta tree
-SWEEP_IMAGE = "us-central1-docker.pkg.dev/oa-internal-450019/cw-s3-usage/scan:cw"
+SWEEP_IMAGE = "us-central1-docker.pkg.dev/oa-internal-450019/cw-s3-usage/scan:latest"
 DISKY_LABELS = "app=disky,deployment=cw-s3"  # cost labels on executor jobs (specs/cost-labels.md)
 SWEEP_S3_ENDPOINT = "https://cwobject.com"
 REPO_URL = "https://github.com/Open-Athena/marin-gcs-usage"  # the site's "Source on GitHub" link (build-time)
@@ -204,7 +204,7 @@ SWEEP_REVIEW_STORE = "r2://oa-cw-s3-usage-index"
 SWEEP_REVIEW_SECRETS = '{"R2_ENDPOINT":"cw-s3-r2-endpoint","R2_ACCESS_KEY_ID":"cw-s3-isolated-r2-access-key-id","R2_SECRET_ACCESS_KEY":"cw-s3-isolated-r2-secret-access-key"}'
 GCP_PROJECT = "oa-internal-450019"
 META_TREE_URL = "https://cw.oa.dev/meta"  # /scans outputs link into the meta tree
-SWEEP_IMAGE = "us-central1-docker.pkg.dev/oa-internal-450019/cw-s3-usage/scan:cw"
+SWEEP_IMAGE = "us-central1-docker.pkg.dev/oa-internal-450019/cw-s3-usage/scan:latest"
 DISKY_LABELS = "app=disky,deployment=cw-s3"  # cost labels on executor jobs (specs/cost-labels.md)
 SWEEP_S3_ENDPOINT = "https://cwobject.com"
 VIEWER_DOMAINS = "coreweave.com"

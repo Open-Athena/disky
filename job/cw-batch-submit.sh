@@ -27,7 +27,7 @@ if [ -n "${PIN:-}" ]; then unset IMAGE MACHINE MEMORY_MIB DATA_BUCKET SWEEP_BUCK
 PROJECT=oa-internal-450019
 REGION=us-central1
 SA=cw-s3-job@$PROJECT.iam.gserviceaccount.com
-export IMAGE=${IMAGE:-us-central1-docker.pkg.dev/$PROJECT/cw-s3-usage/scan:cw}  # exported: stage 4f runs on it
+export IMAGE=${IMAGE:-us-central1-docker.pkg.dev/$PROJECT/cw-s3-usage/scan:latest}  # exported: stage 4f runs on it
 # Measured on a 92M-object scan: 1.1 GB RSS listing, 1.8 GB import. The listing
 # is CPU-bound (92% of 8 vCPUs on 02a, 10/13), but 16 vCPUs (10/14) only moved
 # the run's critical path onto the static-names stage it waits on, at twice the
