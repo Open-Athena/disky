@@ -230,8 +230,7 @@ function SessionView({ sid }: { sid: string }) {
 }
 
 const AT_TIP: Record<AtMode, string> = {
-  start: 'Time since the session’s first event.',
-  prev: 'Time since the row above (as filtered).',
+  start: 'Time since the session’s first event, and (in parentheses) since the row above, as filtered.',
   ago: 'How long ago, from when this page loaded.',
 }
 
