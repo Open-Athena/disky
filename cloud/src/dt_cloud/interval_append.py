@@ -785,10 +785,10 @@ class Runner(ar.Runner):
     def compact_jobs(self, scan: str) -> list[tuple[str, dict]]:
         r2 = self.merge_r2()
         out = [self.job("compact", scan, 1, "interval_append", ["compact", "-C", str(self.p.policy), *(["-K"] if self.compact_now else []), *self.read_args(),
-                                                              *(["-r"] if r2 else []), "-j", str(self.p.compact_jobs),
+                                                              *(["-r"] if r2 else []), "-j", str(self.p.compact_jobs), *(["-N"] if self.candidate else []),
                                                               *duckdb_args(self.p.machine_for("compact"))], r2=r2)]
         if not r2:
-            out.append(self.job("compact-r2", scan, 1, "interval_append", ["compact-r2"], r2=True, mount=False))
+            out.append(self.job("compact-r2", scan, 1, "interval_append", ["compact-r2", *(["-N"] if self.candidate else [])], r2=True, mount=False))
         return out
 
     def with_gen(self, gen: str) -> Config:
@@ -1249,10 +1249,14 @@ def promote_cmd(bucket, to_r2, gen) -> None:
 
 @cli.command("compact-r2")
 @stage_options
-def compact_r2_cmd(bucket, gen, ranges_gen, scratch) -> None:
+@option("-N", "--candidate", is_flag=True, help="Instead: the candidate compacted from it (`compact -N`), without its pointers")
+def compact_r2_cmd(bucket, gen, ranges_gen, scratch, candidate) -> None:
     """Every compaction from the generation on, to R2 (the R2 account's job): each new generation, then its pointer, last."""
     if (b := gs_bucket(bucket)) is None:
         raise SystemExit(f"interval store: {bucket!r} is not a GCS bucket")
+    if candidate:
+        print(json.dumps(ar.publish_r2_candidate(b, PREFIX, gen, last=("scans.json",)), indent=1))
+        return
     print(json.dumps(ar.publish_r2_chain(b, PREFIX, gen, last=("scans.json",)), indent=1))
 
 
@@ -1311,10 +1315,11 @@ def ready(profile: str | None) -> Config:
 @option("-K", "--compact-now", is_flag=True, help="After the merge stage, compact into a new generation whatever the policy says (when the generation has runs)")
 @option("-M", "--no-merge", is_flag=True, help="Skip the merge stage (the due carries wait for a later run, or `interval-store merge`)")
 @option("-n", "--dry-run", is_flag=True, help="Report each stage's state and what would run; submit and write nothing")
+@option("-N", "--candidate", is_flag=True, help="The compaction (due, or -K) writes a candidate: published, nothing pointed at it, appends not held off (`interval_append promote` points prod at it)")
 @option("-P", "--profile", help="Deployment profile JSON (default $INTERVAL_STORE_PROFILE)")
 @option("-w", "--merge-wait", default=0, type=float, help="Seconds to wait on the merge job (default 0: submit it and go; it publishes on GCS when done)")
 @argument("scan_id")
-def append_cmd(catch_up: bool, compact_now: bool, no_merge: bool, dry_run: bool, profile: str | None, merge_wait: float, scan_id: str) -> None:
+def append_cmd(catch_up: bool, compact_now: bool, no_merge: bool, dry_run: bool, candidate: bool, profile: str | None, merge_wait: float, scan_id: str) -> None:
     """Append SCAN_ID to the interval store: prepare → ranges → publish → R2 → prune, each stage skipped when its output
     exists; then the merge stage (the due carries, non-fatal), and when the compaction policy fires (or `-K`) the
     compaction stage (`compact`: GCS, then R2 with its pointer last). A generation compacted since the profile named it
@@ -1323,6 +1328,7 @@ def append_cmd(catch_up: bool, compact_now: bool, no_merge: bool, dry_run: bool,
     cfg = ready(profile)
     runner = store_runner(cfg, dry_run=dry_run, merge=not no_merge, merge_wait=merge_wait)
     runner.compact_now = compact_now
+    runner.candidate = candidate
     t0 = monotonic()
     done = exit_on(f"interval-store append {scan_id}", lambda: runner.run(scan_id, catch_up=catch_up), lambda m: err(m))
     print(json.dumps({"gen": runner.p.gen, "scan": scan_id, "appended": done, "dry_run": dry_run, "s": round(monotonic() - t0, 1),

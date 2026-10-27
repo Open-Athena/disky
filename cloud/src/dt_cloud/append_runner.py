@@ -1661,6 +1661,8 @@ class Runner:
     compaction: str | None = None
     #: Compact after the carries whatever the policy says (`-K`), when the generation has runs.
     compact_now: bool = False
+    #: The compaction stage writes a candidate (`compact -N`): no compaction lease taken, nothing pointed at it.
+    candidate: bool = False
     #: The submitter's env: what its merge and compaction jobs record their runs with (`record_env`).
     environ: Mapping[str, str] = field(default_factory=lambda: dict(os.environ))
     #: The coordinator lease (`coordinator_lease`), held for all of `run`; yields its check, which `stage` calls before and
@@ -1925,7 +1927,7 @@ class Runner:
         if jobs:
             # the first job folds and publishes: its run is recorded (`compact-r2`, the R2 account's, isn't)
             jobs[0] = (jobs[0][0], self.record_env(*jobs[0]))
-            if self.compacting is not None and not self.dry_run:
+            if self.compacting is not None and not self.dry_run and not self.candidate:
                 lease = CoordinatorLease(self.compacting(), holder=jobs[0][0], now=self.now, ttl_s=COMPACT_START_S, extra={"gen": self.p.gen},
                                          what="compaction lease", log=self.log)
                 try:
@@ -2544,6 +2546,19 @@ def publish_r2_chain(bucket: str, prefix: str, gen: str, *, last: tuple[str, ...
 
     gens = chain(Store(f"gs://{bucket}"), prefix, gen)
     return [r2_publish_gen(bucket, prefix, new, old, last=last, log=log) for old, new in zip(gens, gens[1:])]
+
+
+def publish_r2_candidate(bucket: str, prefix: str, gen: str, *, last: tuple[str, ...] = ("scans.json",), log: Callable[[str], None] = err) -> dict:
+    """`compact-r2 -N`: the candidate compacted from `gen` (followed to its newest successor) to R2, without its pointers
+    (`r2_publish_gen(promote=False)`); `promote -r` moves those."""
+    from .blobstore import Store
+
+    store = Store(f"gs://{bucket}")
+    src = chain(store, prefix, gen)[-1]
+    new = next_gen(src)
+    if not store.exists(f"{prefix}/{new}/{CANDIDATE}"):
+        raise SystemExit(f"gs://{bucket}/{prefix}/{new}: no candidate compacted from {src}")
+    return r2_publish_gen(bucket, prefix, new, src, last=last, promote=False, log=log)
 
 
 def compact_options(fn):

@@ -93,6 +93,16 @@ def test_static_compact_jobs_split_by_account():
     assert ROOT == f"static-names/{GEN}"
 
 
+def test_a_candidate_runners_compact_jobs_pass_n():
+    """`runs add -N`: the `compact` job writes a candidate (`-N`), and `compact-r2` copies that candidate (`-N`)."""
+    r = _static_runner(1)
+    r.candidate = True
+    assert [spec["taskGroups"][0]["taskSpec"]["runnables"][0]["container"]["commands"][1] for _, spec in r.compact_jobs("2026-10-10")] == [
+        _py("static_merge", "compact", "-g", GEN, "-S", "scr", "-C", "level:1", "-j", "2", "-N", "-M", "90GB", "-p", "16"),
+        _py("static_merge", "compact-r2", "-g", GEN, "-N", mount=False),
+    ]
+
+
 def _compact_params(command: str) -> dict:
     """The `static_merge compact` job command `command`'s arguments as `compact` itself parses them (`-b`: the profile's
     bucket, from the job's env)."""
