@@ -27,7 +27,8 @@ import { lensParam, ME_UNRESOLVED, resolveLens } from '../_lib/me.js'
 import { isScanId } from '../../src/scanSlug.js'
 import { scanArg } from '../_lib/scanArg.js'
 import { traceJoins } from '../_lib/shared.js'
-import { cutoffOf, memberOf, memberRequest, membersAt, openUnion, UnionOverlap, unionFor } from '../_lib/union.js'
+import { cutoffOf, type FilteredRoot, memberOf, memberRequest, membersAt, openUnion, type Refusal, refusalOf, refusalResponse, UnionOverlap, unionFilterFields, unionFor } from '../_lib/union.js'
+import { filterThreshold } from '../_lib/filter.js'
 import type { UnionView } from '../_lib/stores.js'
 
 type DiffCtx = { request: Request; env: Env; waitUntil?: (p: Promise<unknown>) => void }
@@ -225,12 +226,22 @@ async function unionDiff(ctx0: DiffCtx, view: UnionView): Promise<Response> {
       if (p.change === 'unknown') return json({ error: `store '${p.store}' has no scan by ${p.from ? ct.date : cf.date}: its change is unknown`, union: { view: view.key, sources } }, 409)
       return ask(p, { id: un.id })
     }
-    const scoped = (['lens', 'o', 'cl', 'q'] as const).filter(k => sp.get(k))
+    const scoped = (['lens', 'o', 'cl'] as const).filter(k => sp.get(k))
     if (scoped.length) return new Response(`a union view's root is unscoped (${scoped.join(', ')}: drill into one store)`, { status: 400 })
     const w = Math.ceil((Number(sp.get('w')) || 1280) / QUANT) * QUANT
     const h = Math.ceil((Number(sp.get('h')) || 800) / QUANT) * QUANT
     const minArea = Number(sp.get('minArea')) || MIN_AREA_DEFAULT
     const comparable = pairs.filter(p => p.change !== 'unknown')
+    const q = sp.get('q') ?? ''
+    if (q.trim()) {
+      const answer = await unionFilteredDiff(view, comparable, (p, threshold) => ask(p, { id: un.id, ...(threshold === undefined ? {} : { threshold }) }), { w, h, minArea })
+      if (answer instanceof Response) return answer
+      const { reads, refused, ...body } = answer
+      return new Response(JSON.stringify({ prev: cf.date, curr: ct.date, path, q, ...body, union: { view: view.key, sources: sources.map(s => refusedOf(s, refused)) } }), { headers: {
+        'content-type': 'application/json; charset=utf-8',
+        'cache-control': reads.map(r => r.headers.get('cache-control')).find(c => c === 'no-store') ?? reads[0]?.headers.get('cache-control') ?? 'no-store',
+      } })
+    }
     const roots = await Promise.all(comparable.map(p => Promise.all([p.from!, p.to!].map(date => ivRetry(() => readRootAgg(p.env, { date, path: '' }))))))
     const side = (k: 0 | 1) => roots.reduce((n, r) => n + (r[k]?.b ?? 0), 0)
     const threshold = (Math.max(side(0), side(1)) * minArea) / (w * h)
@@ -267,6 +278,69 @@ async function unionDiff(ctx0: DiffCtx, view: UnionView): Promise<Response> {
     if (e instanceof UnionOverlap) return new Response(msg, { status: 500 })
     if (/D1_ERROR|internal error/i.test(msg)) return new Response(`index backend unavailable, retry: ${msg}`, { status: 503, headers: { 'retry-after': '5' } })
     return new Response(`diff failed: ${msg}`, { status: 500 })
+  }
+}
+
+type MemberDiffBody = { rows: DiffRow[]; total_a: number; total_b: number; objects_a: number; objects_b: number; expansions: number; truncated: boolean; tier: string; lookups: number; lookups_capped: boolean; lookups_late?: true; searchLate?: true; budgetCut?: true } & Omit<FilteredRoot, 'tree'>
+type Comparable = { store: string; change: MemberChange }
+
+/** A union source with its member's refusal of the filter beside it (`filteredVector`'s, for a diff's sources). */
+const refusedOf = <S extends { store: string }>(s: S, refused: readonly Refusal[]) => {
+  const x = refused.find(f => f.store === s.store)
+  return x ? { ...s, refused: { code: x.code, error: x.error } } : s
+}
+
+/**
+ * A union root's filtered diff (`q=`): every comparable member's filtered diff of its own scans (an unchanged one
+ * its scan against itself: its matches' totals on both sides, no rows), the changed members' rows drawn under one
+ * threshold from the members' matched totals (`filterThreshold`, re-asked when more than one member drew bytes),
+ * merged as the plain root diff merges, with the filter fields by `unionFilterFields`. A member that refused the
+ * filter for its mount contributes nothing and is named (partial); every member refusing is that refusal.
+ */
+async function unionFilteredDiff<P extends Comparable>(
+  view: UnionView,
+  comparable: readonly P[],
+  ask: (p: P, threshold?: number) => Promise<Response>,
+  o: { w: number; h: number; minArea: number },
+): Promise<Response | Record<string, unknown> & { reads: Response[]; refused: Refusal[] }> {
+  const reads = await Promise.all(comparable.map(p => ask(p)))
+  const refused: Refusal[] = []
+  const bodies = new Map<number, MemberDiffBody>()
+  for (const [i, r] of reads.entries()) {
+    if (r.ok) { bodies.set(i, await r.json() as MemberDiffBody); continue }
+    const x = await refusalOf(comparable[i].store, r)
+    if (!x) return r
+    refused.push(x)
+  }
+  if (!bodies.size && refused.length) return refusalResponse(refused[0])
+  const all = [...bodies.values()]
+  const threshold = filterThreshold(Math.max(all.reduce((n, b) => n + b.total_a, 0), all.reduce((n, b) => n + b.total_b, 0)), o.w, o.h, o.minArea)
+  const drawn = [...bodies.keys()].filter(i => comparable[i].change === 'changed' && (bodies.get(i)!.total_a > 0 || bodies.get(i)!.total_b > 0))
+  if (drawn.length > 1) {
+    const again = await Promise.all(drawn.map(i => ask(comparable[i], threshold)))
+    const bad = again.find(r => !r.ok)
+    if (bad) return bad
+    for (const [k, i] of drawn.entries()) { reads[i] = again[k]; bodies.set(i, await again[k].json() as MemberDiffBody) }
+  }
+  const answered = [...bodies.keys()].sort((a, b) => a - b)
+  const members = answered.map(i => ({ store: comparable[i].store, change: comparable[i].change, body: bodies.get(i)! }))
+  const bs = members.map(m => m.body)
+  const sum = (k: 'total_a' | 'total_b' | 'objects_a' | 'objects_b' | 'expansions' | 'lookups') => bs.reduce((n, b) => n + b[k], 0)
+  return {
+    rows: unionDiffRows(view, members.filter(m => m.change === 'changed').map(m => ({ store: m.store, rows: m.body.rows }))),
+    total_a: sum('total_a'), total_b: sum('total_b'), objects_a: sum('objects_a'), objects_b: sum('objects_b'),
+    expansions: sum('expansions'),
+    truncated: bs.some(b => b.truncated),
+    threshold: Math.round(threshold),
+    tier: bs[0]?.tier ?? 'none',
+    lookups: sum('lookups'),
+    lookups_capped: bs.some(b => b.lookups_capped),
+    ...(bs.some(b => b.lookups_late) ? { lookups_late: true } : {}),
+    ...(bs.some(b => b.searchLate) ? { searchLate: true } : {}),
+    ...(bs.some(b => b.budgetCut) ? { budgetCut: true } : {}),
+    ...unionFilterFields(members, refused),
+    reads: answered.map(i => reads[i]),
+    refused,
   }
 }
 
