@@ -905,7 +905,7 @@ def store_runner(cfg: Config, *, dry_run: bool = False, merge: bool = True, merg
         dry_run=dry_run,
         merge=merge,
         merge_wait=merge_wait,
-        coordination=None if dry_run else lambda: ar.gcs_coordinator_lease(gs_bucket(p.scratch), PREFIX, client),
+        coordination=None if dry_run else lambda: ar.gcs_coordinator_lease(gs_bucket(p.scratch), ar.coordinator_prefix(store, PREFIX, runner.p.gen), client),
         compacting=None if dry_run or not gs_bucket(p.scratch) else lambda: ar.gcs_compaction_lease_file(gs_bucket(p.scratch), PREFIX, client),
     )
     return runner

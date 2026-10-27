@@ -685,6 +685,16 @@ def heartbeat(lease: CoordinatorLease, heartbeat_s: float) -> Iterator[None]:
         lease.release()
 
 
+def coordinator_prefix(store, prefix: str, gen: str) -> str:
+    """Where appends to `gen` take their coordinator lease: the store's `prefix`, or while `gen` is a candidate nothing
+    points at yet (`candidate.json`, its source without `successor.json`) its own `<prefix>/<gen>`: a candidate's
+    catch-up never holds off the current generation's appends. Once promoted, the store's again."""
+    marker = f"{prefix}/{gen}/{CANDIDATE}"
+    if not store.exists(marker):
+        return prefix
+    return prefix if store.exists(f"{prefix}/{store.read_json(marker)['from']}/{SUCCESSOR}") else f"{prefix}/{gen}"
+
+
 def gcs_coordinator_lease(scratch: str, prefix: str, client=None) -> AbstractContextManager[Callable[[], None]]:
     """`coordinator_lease` at `gs://<scratch>/<prefix>/coordinator.lease.json`."""
     return coordinator_lease(GcsLeaseFile(scratch, f"{prefix}/{COORD_LEASE}", client))
@@ -1943,7 +1953,8 @@ class Runner:
                     self.run_job(name, spec, wait=wait)
                 self.stage(f"compact: {self.compaction}" if i == 0 else f"compact: {spec['labels']['stage']}", one)
         except StillRunning as e:
-            self.log(f"compact: {e}; it publishes the new generation (GCS, then R2) when done, and the next run appends to it")
+            self.log(f"compact: {e}; it publishes the new generation (GCS, then R2) when done, "
+                     + ("a candidate: `promote` points prod at it" if self.candidate else "and the next run appends to it"))
 
     def carries(self, fatal: bool = False) -> None:
         """The merge stage, once after the scans: the newest manifest's due carries (`plan_carries`), when any, as one Batch

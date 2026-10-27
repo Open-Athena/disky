@@ -432,6 +432,7 @@ def gcs_runner(cfg: Profile, *, dry_run: bool = False, verify_terms: str | None 
     from google.cloud import storage
 
     from . import static_append as sa
+    from .blobstore import Store
     from .static_names import list_scans, read_json
 
     client = storage.Client(project=cfg.project)
@@ -474,7 +475,8 @@ def gcs_runner(cfg: Profile, *, dry_run: bool = False, verify_terms: str | None 
         merge=merge,
         merge_wait=merge_wait,
         list_keys=lambda prefix: [x.name for x in client.list_blobs(cfg.bucket, prefix=prefix)],
-        coordination=None if dry_run else lambda: ar.gcs_coordinator_lease(cfg.scratch, PREFIX, client),
+        coordination=None if dry_run else lambda: ar.gcs_coordinator_lease(cfg.scratch, ar.coordinator_prefix(Store(f"gs://{cfg.bucket}"), PREFIX, runner.cfg.gen),
+                                                                           client),
         compacting=None if dry_run or not cfg.scratch else lambda: ar.gcs_compaction_lease_file(cfg.scratch, PREFIX, client),
     )
     return runner
