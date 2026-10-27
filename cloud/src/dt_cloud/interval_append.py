@@ -1213,24 +1213,38 @@ def _summary(doc: dict) -> dict:
 @stage_options
 @ar.compact_options
 @option("-w", "--rg-rows", "rg_rows", default=ist.SERVED_RG, type=IntRange(min=1), help="Rows per served row group (the compacted generation's)")
-def compact_cmd(bucket, gen, ranges_gen, scratch, policy, read_from, grace_s, jobs, force, mount, mem, threads, to_r2, tmp, rg_rows) -> None:
+def compact_cmd(bucket, gen, ranges_gen, scratch, policy, read_from, grace_s, jobs, force, mount, mem, promote, threads, to_r2, tmp, rg_rows) -> None:
     """The compaction stage (`append_runner.run_compaction` with `interval_compact`): when the policy fires (or `-K`),
     the generation's base and runs folded into `<gen>.c<NNN>` (a fresh build's bytes), published on GCS (`scans.json`,
     then `compaction.json`, `successor.json`, `interval-store/CURRENT.json`), then with `--r2` on R2 (its pointer last);
     predecessors past the grace leave GCS. Holds the compaction lease (the scratch bucket's `interval-store/compacting.lease.json`)
-    throughout: appends to the generation wait; exit 4 (`BUSY`) while another compaction holds it. Prints a JSON summary."""
+    throughout: appends to the generation wait; exit 4 (`BUSY`) while another compaction holds it. `-N`: a candidate (no
+    lease, no pointer; `promote` points at it). Prints a JSON summary."""
     from . import interval_compact as ic
 
     if (b := gs_bucket(bucket)) is None:
         raise SystemExit(f"interval store: the staged compaction reads a mounted GCS bucket; {bucket!r} is not one")
     try:
-        doc = ar.run_compaction(Store(f"gs://{b}"), ic.compactor(rg_rows), gen, Path(mount), Path(tmp), lease=ar.gcs_compaction_lease_file(gs_bucket(scratch), PREFIX),
-                                policy=policy, force=force, r2_bucket=b if to_r2 else None, grace_s=grace_s, threads=threads, mem=mem, jobs=jobs,
-                                read_from=read_from, rec=from_env("compact"))
+        doc = ar.run_compaction(Store(f"gs://{b}"), ic.compactor(rg_rows), gen, Path(mount), Path(tmp),
+                                lease=ar.gcs_compaction_lease_file(gs_bucket(scratch), PREFIX) if promote else None, policy=policy, force=force,
+                                r2_bucket=b if to_r2 else None, grace_s=grace_s, threads=threads, mem=mem, jobs=jobs, read_from=read_from,
+                                promote=promote, rec=from_env("compact"))
     except ar.Busy as e:
         err(f"compact: {e}")
         raise SystemExit(ar.BUSY)
     print(json.dumps(doc, indent=1))
+
+
+@cli.command("promote")
+@option("-b", "--bucket", required=True, help="The store: a bucket name (gs://) or URL")
+@option("-r", "--r2", "to_r2", is_flag=True, help="Then the R2 copy's pointers (the candidate must be on R2 already: `compact -N --r2`)")
+@argument("gen")
+def promote_cmd(bucket, to_r2, gen) -> None:
+    """Point prod at candidate generation GEN (`compact -N`): its source's `successor.json`, then `interval-store/CURRENT.json`
+    (when it named the source), then with `-r` the R2 copy's. Refused unless GEN holds every scan its source does."""
+    if (b := gs_bucket(bucket)) is None:
+        raise SystemExit(f"interval store: promote moves a GCS bucket's pointers; {bucket!r} is not one")
+    print(json.dumps(ar.promote_gen(Store(f"gs://{b}"), PREFIX, gen, r2_bucket=b if to_r2 else None), indent=1))
 
 
 @cli.command("compact-r2")
