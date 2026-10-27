@@ -603,10 +603,14 @@ def promote_cmd(bucket, to_r2, gen) -> None:
 @cli.command("compact-r2")
 @option("-b", "--bucket", default=data_bucket, help="Data bucket")
 @option("-g", "--gen", required=True, help="The generation a compaction started from (its successors are copied)")
-def compact_r2_cmd(bucket, gen) -> None:
+@option("-N", "--candidate", is_flag=True, help="Instead: the candidate compacted from it (`compact -N`), without its pointers")
+def compact_r2_cmd(bucket, gen, candidate) -> None:
     """Every compaction from the generation on, to R2 (the R2 account's job): each new generation, then its pointer, last."""
     from .static_compact import compactor
 
+    if candidate:
+        print(json.dumps(ar.publish_r2_candidate(bucket, PREFIX, gen, last=compactor().last), indent=1))
+        return
     print(json.dumps(ar.publish_r2_chain(bucket, PREFIX, gen, last=compactor().last), indent=1))
 @cli.command("probe")
 @option("-d", "--manifest", required=True, help="Frozen manifest stem (scan id, optionally .mNNN), whose first due carry is built")
