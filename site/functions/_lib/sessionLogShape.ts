@@ -43,6 +43,12 @@ export const LIMITS = {
 /** Client-side truncation, per field family. */
 export const TRUNC = { label: 60, filter: 200, url: 300, msg: 300, stack: 1500 } as const
 
+/** Browser reports that aren't faults: `ResizeObserver loop …` is Chrome saying a resize callback deferred a frame. */
+const BENIGN_ERRORS = [/^ResizeObserver loop /]
+
+/** Whether an error message is one of `BENIGN_ERRORS` (neither logged by the client nor counted by the feed). */
+export const benignError = (msg: unknown): boolean => typeof msg === 'string' && BENIGN_ERRORS.some(r => r.test(msg))
+
 /** Kinds (and api statuses) that count as errors in the session summary. */
 export const isErrorEvent = (e: Pick<SlogEvent, 'k'> & { s?: unknown }): boolean =>
   e.k === 'error' || e.k === 'reject' || e.k === 'console' || (e.k === 'api' && typeof e.s === 'number' && (e.s === 0 || e.s >= 500))

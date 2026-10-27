@@ -3,7 +3,7 @@
  * session-log events are which kind, bursts, and the Slack / Discord renderings. No Workers or DOM types; the D1 and
  * sink I/O is `activity.ts`.
  */
-import { isErrorEvent, type SlogEvent, summarize, TRUNC } from './sessionLogShape.js'
+import { benignError, isErrorEvent, type SlogEvent, summarize, TRUNC } from './sessionLogShape.js'
 
 export const NOTIFY = ['off', 'count', 'line'] as const
 export type Notify = typeof NOTIFY[number]
@@ -199,7 +199,7 @@ export function tallyClient(events: readonly SlogEvent[], conf: KindsConf): {
   for (const e of events) {
     const k = clientKind(e)
     if ((e.k === 'start' || e.k === 'nav') && typeof e.u === 'string') page = pathOf(e.u)
-    if (!k || !conf[k]?.log) continue
+    if (!k || !conf[k]?.log || (k === 'error' && benignError(e.msg))) continue
     counts[k] = (counts[k] ?? 0) + 1
     if ((k === 'view' || k === 'nav') && page !== null) {
       pages[page] = (pages[page] ?? 0) + 1
