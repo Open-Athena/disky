@@ -93,6 +93,16 @@ def test_static_compact_jobs_split_by_account():
     assert ROOT == f"static-names/{GEN}"
 
 
+def test_a_candidate_runners_compact_jobs_pass_n():
+    """`runs add -N`: the `compact` job writes a candidate (`-N`), and `compact-r2` copies that candidate (`-N`)."""
+    r = _static_runner(1)
+    r.candidate = True
+    assert [spec["taskGroups"][0]["taskSpec"]["runnables"][0]["container"]["commands"][1] for _, spec in r.compact_jobs("2026-10-10")] == [
+        _py("static_merge", "compact", "-g", GEN, "-S", "scr", "-C", "level:1", "-j", "2", "-N", "-M", "90GB", "-p", "16"),
+        _py("static_merge", "compact-r2", "-g", GEN, "-N", mount=False),
+    ]
+
+
 def _compact_params(command: str) -> dict:
     """The `static_merge compact` job command `command`'s arguments as `compact` itself parses them (`-b`: the profile's
     bucket, from the job's env)."""
@@ -260,6 +270,81 @@ def test_compaction_rolls_back_when_an_append_lands_with_its_successor(tmp_path)
     newest, runs = ar.store_newest_runs(Store(str(store_dir)), f"{ist.PREFIX}/g")
     assert (doc["compact"]["superseded"], ar.run_scans(runs)[-1]) == (newest, DATES[3])
     assert (_gens(store_dir), (store_dir / ist.PREFIX / "g" / ar.SUCCESSOR).exists(), ar.current(Store(str(store_dir)), ist.PREFIX)) == (["g"], False, "g")
+
+
+# ── A candidate: compacted, published, pointed at only by `promote` ─────────
+
+
+def _candidate(tmp_path):
+    """`g` (a base through DATES[1], DATES[2:4] appended), current; compacted into candidate `g.c001`."""
+    world = make_world(tmp_path / "scans", False)
+    store_dir = tmp_path / "store"
+    build(world, store_dir, tmp_path / "wb", "g", DATES[1])
+    for d in DATES[2:4]:
+        add(world, store_dir, tmp_path / "wa", "-t", d, "-C", "none")
+    store = Store(str(store_dir))
+    ar.set_current(store, ist.PREFIX, "g")
+    doc = ar.run_compaction(store, ic.compactor(RG), "g", store_dir, tmp_path / "w1", threads=2, mem="1GB", log=lambda m: None, now=0.0, force=True,
+                            policy=ar.NEVER, promote=False)
+    return world, store_dir, store, doc
+
+
+def test_a_candidate_points_nothing_until_promoted(tmp_path):
+    """`compact -N`: `g.c001` published whole (`candidate.json`, `compaction.json` marked) but no successor, the pointer
+    on `g`, nothing pruned; `promote_gen` then moves both."""
+    world, store_dir, store, doc = _candidate(tmp_path)
+    assert (doc["compact"]["gen"], doc["compact"]["candidate"], doc["compact"]["current"], doc["predecessors"]) == ("g.c001", True, False, [])
+    g, c = store_dir / ist.PREFIX / "g", store_dir / ist.PREFIX / "g.c001"
+    assert ((g / ar.SUCCESSOR).exists(), ar.current(store, ist.PREFIX), json.loads((c / ar.CANDIDATE).read_text()),
+            json.loads((c / ar.COMPACTION).read_text())["candidate"]) == (False, "g", {"from": "g"}, True)
+    # appends to the candidate coordinate under its own lease; to `g`, the store's
+    assert [ar.coordinator_prefix(store, ist.PREFIX, x) for x in ("g", "g.c001")] == [ist.PREFIX, f"{ist.PREFIX}/g.c001"]
+    assert ar.promote_gen(store, ist.PREFIX, "g.c001", log=lambda m: None) == {"from": "g", "gen": "g.c001", "current": True}
+    assert (json.loads((g / ar.SUCCESSOR).read_text()), ar.current(store, ist.PREFIX)) == ({"gen": "g.c001"}, "g.c001")
+    assert ar.coordinator_prefix(store, ist.PREFIX, "g.c001") == ist.PREFIX
+    with pytest.raises(SystemExit) as e:
+        ar.promote_gen(store, ist.PREFIX, "g.c001", log=lambda m: None)
+    assert str(e.value) == f"{store.root}/{ist.PREFIX}/g: already compacted into g.c001"
+
+
+def test_promote_wants_the_scans_appended_since_the_fold(tmp_path):
+    """A scan appended to `g` after the candidate's fold: `promote_gen` refuses (nothing moved) until it's appended to
+    the candidate too; an append to the candidate leaves the pointer on `g`."""
+    world, store_dir, store, _ = _candidate(tmp_path)
+    add(world, store_dir, tmp_path / "wa", "-t", DATES[4], "-C", "none")
+    with pytest.raises(SystemExit) as e:
+        ar.promote_gen(store, ist.PREFIX, "g.c001", log=lambda m: None)
+    assert str(e.value) == f"g.c001 lacks 1 scan g holds ({DATES[4]}): append it to g.c001 first"
+    assert ((store_dir / ist.PREFIX / "g" / ar.SUCCESSOR).exists(), ar.current(store, ist.PREFIX)) == (False, "g")
+    add(world, store_dir, tmp_path / "wc", "-g", "g.c001", "-t", DATES[4], "-C", "none")
+    assert ar.current(store, ist.PREFIX) == "g"
+    assert ar.promote_gen(store, ist.PREFIX, "g.c001", log=lambda m: None) == {"from": "g", "gen": "g.c001", "current": True}
+    assert ar.gen_scans(store, f"{ist.PREFIX}/g.c001")[-1] == DATES[4]
+
+
+def test_a_promoting_compaction_refuses_a_candidate(tmp_path):
+    """The scheduled (promoting) compaction of `g` won't replace a waiting candidate `g.c001`."""
+    _, store_dir, store, _ = _candidate(tmp_path)
+    with pytest.raises(SystemExit) as e:
+        ar.run_compaction(store, ic.compactor(RG), "g", store_dir, tmp_path / "w2", threads=2, mem="1GB", log=lambda m: None, now=0.0, force=True,
+                          policy=ar.NEVER)
+    assert str(e.value) == f"{store.root}/{ist.PREFIX}/g.c001: a candidate generation (`compact -N`): promote it or delete it before compacting g again"
+    assert ((store_dir / ist.PREFIX / "g" / ar.SUCCESSOR).exists(), ar.current(store, ist.PREFIX)) == (False, "g")
+
+
+def test_r2_publish_gen_candidate_skips_the_pointers(monkeypatch):
+    """A candidate's R2 copy: the generation, no `successor.json`, no `CURRENT.json`."""
+    class Obj:
+        def __init__(self, key):
+            self.key, self.size = key, 1
+
+    keys = {"p/g.c001/": ["p/g.c001/a.parquet", "p/g.c001/compaction.json", "p/g.c001/scans.json"]}
+    copied: list[list[str]] = []
+    monkeypatch.setattr(ar, "r2_objects", lambda bucket, prefixes: [Obj(k) for p in prefixes for k in keys[p]])
+    monkeypatch.setattr(ar, "r2_copy", lambda bucket, objs, **kw: copied.append([o.key for o in objs]) or {"copied": len(objs), "bytes": len(objs)})
+    monkeypatch.setattr(ar, "r2_missing", lambda objs, **kw: [])
+    ar.r2_publish_gen("data", "p", "g.c001", "g", promote=False, log=lambda m: None)
+    assert copied == [["p/g.c001/a.parquet"], ["p/g.c001/scans.json"], ["p/g.c001/compaction.json"]]
 
 
 def test_publish_scan_never_into_a_compacted_generation(tmp_path):

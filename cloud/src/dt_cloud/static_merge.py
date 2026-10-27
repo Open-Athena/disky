@@ -554,15 +554,16 @@ def _helper_recorded(runner, name: str, spec: dict, scan: str) -> tuple[str, dic
 @option("-P", "--prebuilt", help="Publish a fold done elsewhere (`compact-probe -U URL`) instead of folding: checked against its report, then published as this compaction's")
 @option("-S", "--scratch", help="Scratch bucket: the compaction lease, held throughout (none: appends aren't held off)")
 @ar.compact_options
-def compact_cmd(anchor_tasks, bucket, chunk_rows, fold_tasks, gen, keep, measure_tasks, prebuilt, scratch, policy, read_from, grace_s, jobs, force, mount, mem, threads,
-                to_r2, tmp) -> None:
+def compact_cmd(anchor_tasks, bucket, chunk_rows, fold_tasks, gen, keep, measure_tasks, prebuilt, scratch, policy, read_from, grace_s, jobs, force, mount, mem, promote,
+                threads, to_r2, tmp) -> None:
     """The compaction stage (`append_runner.run_compaction` with `static_compact`): when the policy fires (or `-K`), the
     generation's base and runs folded into `<gen>.c<NNN>` (a rebuild's bytes), published on GCS (`compaction.json`
     last, `successor.json`, `static-names/CURRENT.json`), then with `-r` on R2 (its pointer last). The old generation
     stays (readers pin `STATIC_GEN`; `store-gc -k`). With `-S`, holds the compaction lease (`static-names/compacting.lease.json`)
     throughout: appends to the generation wait; exit 4 (`BUSY`) while another compaction holds it. With `-S`, the fold is also
     checkpointed there part by part (`static_compact.compact_checkpoint`): a resubmitted job resumes it; cleared once the new
-    generation is published (or superseded). Prints a JSON summary."""
+    generation is published (or superseded). `-N`: a candidate (no lease, no pointer; `promote` points at it). Prints a
+    JSON summary."""
     from .blobstore import Store
     from .static_compact import clear_checkpoints, compactor
 
@@ -575,8 +576,9 @@ def compact_cmd(anchor_tasks, bucket, chunk_rows, fold_tasks, gen, keep, measure
         doc = ar.run_compaction(Store(f"gs://{bucket}"), compactor(chunk_rows, checkpoint=scratch, fanout=fanout, prebuilt=prebuilt, anchor_fanout=afan, keep=keep,
                                                                    fold_fanout=ffan), gen,
                                 Path(mount), Path(tmp),
-                                lease=ar.gcs_compaction_lease_file(scratch, PREFIX), policy=policy, force=force, r2_bucket=bucket if to_r2 else None,
-                                grace_s=grace_s, threads=threads, mem=mem, jobs=jobs, read_from=read_from, rec=from_env("compact"))
+                                lease=ar.gcs_compaction_lease_file(scratch, PREFIX) if promote else None, policy=policy, force=force,
+                                r2_bucket=bucket if to_r2 else None, grace_s=grace_s, threads=threads, mem=mem, jobs=jobs, read_from=read_from,
+                                promote=promote, rec=from_env("compact"))
     except ar.Busy as e:
         err(f"compact: {e}")
         raise SystemExit(ar.BUSY)
@@ -586,13 +588,29 @@ def compact_cmd(anchor_tasks, bucket, chunk_rows, fold_tasks, gen, keep, measure
     print(json.dumps(doc, indent=1))
 
 
+@cli.command("promote")
+@option("-b", "--bucket", default=data_bucket, help="Data bucket")
+@option("-r", "--r2", "to_r2", is_flag=True, help="Then the R2 copy's pointers (the candidate must be on R2 already: `compact -N -r`)")
+@argument("gen")
+def promote_cmd(bucket, to_r2, gen) -> None:
+    """Point prod at candidate generation GEN (`compact -N`): its source's `successor.json`, then `static-names/CURRENT.json`
+    (when it named the source), then with `-r` the R2 copy's. Refused unless GEN holds every scan its source does."""
+    from .blobstore import Store
+
+    print(json.dumps(ar.promote_gen(Store(f"gs://{bucket}"), PREFIX, gen, r2_bucket=bucket if to_r2 else None), indent=1))
+
+
 @cli.command("compact-r2")
 @option("-b", "--bucket", default=data_bucket, help="Data bucket")
 @option("-g", "--gen", required=True, help="The generation a compaction started from (its successors are copied)")
-def compact_r2_cmd(bucket, gen) -> None:
+@option("-N", "--candidate", is_flag=True, help="Instead: the candidate compacted from it (`compact -N`), without its pointers")
+def compact_r2_cmd(bucket, gen, candidate) -> None:
     """Every compaction from the generation on, to R2 (the R2 account's job): each new generation, then its pointer, last."""
     from .static_compact import compactor
 
+    if candidate:
+        print(json.dumps(ar.publish_r2_candidate(bucket, PREFIX, gen, last=compactor().last), indent=1))
+        return
     print(json.dumps(ar.publish_r2_chain(bucket, PREFIX, gen, last=compactor().last), indent=1))
 @cli.command("probe")
 @option("-d", "--manifest", required=True, help="Frozen manifest stem (scan id, optionally .mNNN), whose first due carry is built")
