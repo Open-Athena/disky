@@ -81,6 +81,7 @@ class BlobRow:
     storage_class: Optional[str]
     generation: Optional[int] = None
     crc32c: Optional[int] = None
+    version: Optional[str] = None
 
 
 def crc32c_int(b64: Optional[str]) -> Optional[int]:
@@ -174,7 +175,11 @@ def generic_discover(
                 err(f"WARN: skipping unparseable listing entry {e2['name']!r} under {e1['name']!r}")
                 continue
             if e2["type"] == "file":
-                shallow.append((rel[1], e2["size"], e2.get("timeCreated"), e2.get("storageClass"), None, crc32c_int(e2.get("crc32c"))))
+                stamp = e2.get("timeCreated") or e2.get("LastModified")
+                if hasattr(stamp, "isoformat"):
+                    stamp = stamp.isoformat()
+                shallow.append((rel[1], e2["size"], stamp, e2.get("storageClass") or e2.get("StorageClass"), e2.get("generation"),
+                                crc32c_int(e2.get("crc32c")), e2.get("ETag")))
             else:
                 stream_prefixes.append(rel[1] + "/")
     return shallow, stream_prefixes, self_dirs
@@ -296,14 +301,16 @@ def entries_to_frame(
     """Backend tuples → canonical listing columns.
 
     Four-field rows are the historical/S3 shape; a fifth field is the GCS
-    generation, a sixth its CRC32C. Accepting all three keeps discovery plug-ins
-    simple while every written shard has one stable schema: the `crc32c` column
-    is written iff ``crc32c`` (a run's every shard alike), never from the rows'
-    shape. ``class_ids`` maps the raw class string to ``storage_class_id``
-    (unknown → 0); Hugging Face passes :data:`~disk_tree.listing.HF_CLASS_IDS`.
+    generation, a sixth its CRC32C, a seventh the opaque version (exact GCS
+    generation or S3/R2 ETag). Accepting each keeps discovery plug-ins simple
+    while every written shard has one stable schema: `version` is always
+    written, the `crc32c` column iff ``crc32c`` (a run's every shard alike),
+    never from the rows' shape. ``class_ids`` maps the raw class string to
+    ``storage_class_id`` (unknown → 0); Hugging Face passes
+    :data:`~disk_tree.listing.HF_CLASS_IDS`.
     """
-    normalized = [(*row, *(None,) * (6 - len(row))) for row in rows]
-    names, sizes, created, classes, generations, crcs = zip(*normalized) if normalized else ((), (), (), (), (), ())
+    normalized = [(*row, *([None] * (7 - len(row)))) for row in rows]
+    names, sizes, created, classes, generations, crcs, versions = zip(*normalized) if normalized else ((),) * 7
     frame = pd.DataFrame(
         {
             "bucket": bucket,
@@ -316,6 +323,7 @@ def entries_to_frame(
             "created": pd.to_datetime(list(created), utc=True, format='ISO8601'),
             "storage_class_id": [class_ids.get(c or "", 0) for c in classes],
             "generation": pd.array(generations, dtype="Int64"),
+            "version": pd.array([v if v is not None else str(g) if g is not None else None for g, v in zip(generations, versions)], dtype="string"),
         }
     )
     if crc32c:
@@ -362,7 +370,7 @@ def write_empty_shard(out_dir: str, name: str, crc32c: bool = False) -> None:
 
     schema = pa.schema([("bucket", pa.large_string()), ("name", pa.large_string()), ("size_bytes", pa.int64()),
                         ("created", pa.timestamp("us", tz="UTC")), ("storage_class_id", pa.int64()), ("generation", pa.int64()),
-                        *([("crc32c", pa.int64())] if crc32c else [])])
+                        ("version", pa.large_string()), *([("crc32c", pa.int64())] if crc32c else [])])
     out_fs, out_root = fsspec.core.url_to_fs(out_dir)
     out_fs.makedirs(out_root, exist_ok=True)
     pq.write_table(schema.empty_table(), f"{out_root}/{name}.parquet", filesystem=out_fs)
@@ -425,7 +433,7 @@ def _stream_prefixes_worker(
         pfx, start, end = item if isinstance(item, tuple) else (item, None, None)
         rows: "list[tuple]" = []
         for blob in lister.stream_prefix(bucket, pfx, start, end):
-            rows.append((blob.name, blob.size, blob.created, blob.storage_class, blob.generation, blob.crc32c))
+            rows.append((blob.name, blob.size, blob.created, blob.storage_class, blob.generation, blob.crc32c, blob.version))
             if len(rows) >= BATCH_ROWS:
                 q.put(entries_to_frame(bucket, rows, crc32c=crc))
                 rows = []

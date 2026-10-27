@@ -10,19 +10,15 @@
  * on those). Folders collapse at depth ≥ 2 only: a whole bucket is never a cover item unless its own name
  * matched. `complete: false` (with `reason`) when the search can't list every match here; the items are
  * then not offered for actions. Unscoped (no owner lens, pool or class): a scoped match isn't a prefix. */
-import { type Env, requireViewer } from '../_lib/auth.js'
-import { storeReady, withStaticGen } from '../_lib/index.js'
-import { queryParam, QueryError } from '../_lib/scope.js'
+import { type Env } from '../_lib/auth.js'
+import { matchQuery } from '../_lib/matchQuery.js'
 import { allMatchRoots, FILTER_VIEW_V, NotFound, pathTotals } from '../_lib/view.js'
 import { COVER_V, coverFloor, coverSet, overCapReason } from '../_lib/cover.js'
-import { hexQuery, indexedGate, staticTag } from '../_lib/staticFilter.js'
-import { FilterRejected, indexedOnly, pathTerms, rejectBody, rejectQuery } from '../_lib/indexedOnly.js'
-import { cacheEnvTag, cacheKeyFor, cacheMatch, cacheStore, keepFor, serverTiming } from '../_lib/edgeCache.js'
-import { storeKey, type UnionView, withStore } from '../_lib/stores.js'
+import { staticTag } from '../_lib/staticFilter.js'
+import { FilterRejected, rejectBody } from '../_lib/indexedOnly.js'
+import { cacheEnvTag, cacheKeyFor, cacheMatch, cacheStore, keepFor } from '../_lib/edgeCache.js'
+import { storeKey, type UnionView } from '../_lib/stores.js'
 import { filteredVector, type Member, memberOf, memberRequest, type Refusal, refusalOf, refusalResponse, resolveUnion, UnionOverlap, unionFor } from '../_lib/union.js'
-import { isScanId } from '../../src/scanSlug.js'
-import { indexedScan, noScan, scanArg } from '../_lib/scanArg.js'
-import { traceJoins } from '../_lib/shared.js'
 
 /** The most items a response lists; past it, none (`complete: false`). A deployment's `COVER_ITEMS_MAX` env
  *  overrides it (tests). */
@@ -104,50 +100,13 @@ async function unionCover(ctx0: Ctx, view: UnionView): Promise<Response> {
 }
 
 async function cover(ctx0: Ctx): Promise<Response> {
-  const sc = withStore(ctx0)
-  if (sc instanceof Response) return sc
-  // The static name index's generation, fixed for the request (`withStaticGen`).
-  const ctx = { ...sc, env: await withStaticGen(sc.env) }
-  const st = serverTiming()
-  traceJoins(ctx.env, st.trace)
-  if (!storeReady(ctx.env)) return new Response('filter-cover API not configured (missing index store creds)', { status: 503 })
-  const url = new URL(ctx.request.url)
-  let date = url.searchParams.get('date') ?? ''
-  const path = (url.searchParams.get('path') ?? '').replace(/\/+$/, '')
-  if (!isScanId(date) && !url.searchParams.has('d')) return new Response('bad date', { status: 400 })
-  if (path.includes('..') || path.startsWith('/')) return new Response('bad path', { status: 400 })
-  const qRaw = url.searchParams.get('q') ?? ''
-  let qp: ReturnType<typeof queryParam>
   try {
-    qp = queryParam(url.searchParams, ctx.env.QUERY_SYNTAX, indexedOnly(ctx.env))
-  } catch (e) {
-    const r = e instanceof QueryError && indexedOnly(ctx.env) ? rejectQuery(qRaw, pathTerms(ctx.env)) : null
-    if (r) return new Response(rejectBody(r), { status: 400, headers: { 'content-type': 'application/json' } })
-    if (e instanceof QueryError) return new Response(`bad query: ${e.message}`, { status: 400 })
-    throw e
-  }
-  let query = qp.query
-  if (!query) return jsonRes({ error: 'q= (a filter) is required' }, 400)
-  const refused = indexedOnly(ctx.env) ? rejectQuery(qRaw, pathTerms(ctx.env)) : null
-  if (refused) return new Response(rejectBody(refused), { status: 400, headers: { 'content-type': 'application/json' } })
-  // An exclusion (`-x`) leaves holes inside its match roots: a root is then no exact prefix.
-  if (query.neg) return jsonRes({ error: 'A filter with exclusions can’t be turned into whole folders or files to act on; drop the exclusion to act on the matches.', code: 'cover-exclusions' }, 400)
-
-  const gated = await st.time('auth', requireViewer(ctx as never))
-  if (gated instanceof Response) return gated
-  try {
-    if (!url.searchParams.has('date')) {
-      const scan = await scanArg(ctx.env, url.searchParams)
-      if (scan instanceof Response) return scan
-      date = scan
-    }
-    if (!await st.time('pre', indexedScan(ctx.env, date, true))) return noScan('date', date)
-    // The static index's hex-run rule: the cover's roots are the filter's, matched as the map matches them.
-    query = (await hexQuery(ctx.env, query)).query!
-    if (indexedOnly(ctx.env)) {
-      const r = await st.time('indexed', indexedGate(ctx.env, query.ast, path, [date]))
-      if (r) return new Response(rejectBody(r), { status: 400, headers: { 'content-type': 'application/json' } })
-    }
+    // An exclusion (`-x`) leaves holes inside its match roots: a root is then no exact prefix.
+    const m = await matchQuery(ctx0, 'filter-cover', {
+      error: 'A filter with exclusions can’t be turned into whole folders or files to act on; drop the exclusion to act on the matches.', code: 'cover-exclusions',
+    })
+    if (m instanceof Response) return m
+    const { ctx, st, date, path, qRaw, qp, query } = m
     const cacheKey = cacheKeyFor('filter-cover', cacheEnvTag(ctx.env, ctx.request), `${date}/${encodeURIComponent(path)}?qs=${qp.syntax}&q=${encodeURIComponent(qRaw)}&st=${staticTag(ctx.env, query)}&fv=${FILTER_VIEW_V}&cv=${COVER_V}`, storeKey(ctx.env))
     const hit = await st.time('match', cacheMatch(ctx.env, cacheKey))
     if (hit) return hit

@@ -77,7 +77,10 @@ function flatten(t: ViewNode): Tiles {
   const rec = (n: ViewNode, p: string) => {
     let k = p
     for (let i = 2; k in out; i++) k = `${p}#${i}`
-    const { c, ...rest } = n
+    // `t` (the newest write's instant) isn't in the Python reference's views: it must name the same day as `d`, then
+    // the rest is compared exactly.
+    const { c, t, ...rest } = n
+    if (t !== undefined) expect([k, Math.floor((t as number) / 86400)]).toEqual([k, rest.d])
     const us = rest.us as [string, number][] | undefined
     out[k] = { ...rest, ...(us ? { us: [...us].sort((a, b) => b[1] - a[1] || (a[0] < b[0] ? -1 : 1)) } : {}) }
     const kids = [...(c ?? [])].sort((a, b) => b.b - a.b || (a.n < b.n ? -1 : a.n > b.n ? 1 : 0) || (canon(a) < canon(b) ? -1 : canon(a) > canon(b) ? 1 : 0))
@@ -102,6 +105,11 @@ beforeAll(async () => {
 })
 
 describe('interval store', () => {
+  it('prunes depth-boundary groups by the interval writer\'s exact path bounds', async () => {
+    const h = await openIndex(env, '2026-08-03', 'path')
+    expect(await planRects(h, [{ dLo: 2, dHi: 1e9, pLo: 'zzzz/', pHi: 'zzzz0' }])).toEqual([])
+  })
+
   it('opens a held date as of its scan, and nothing else', async () => {
     const h = await openIndex(env, '2026-08-03', 'bysize')
     expect([h.mode, h.version, h.variant, h.asOf, h.gen]).toEqual(['pq', 3, 'bysize', 1785715200, 'iv:g1'])
@@ -281,9 +289,8 @@ describe('interval store', () => {
         expect(a.trees).toEqual(views.map(c => Object.fromEntries(Object.entries(c.tiles).map(([k, n]) => [k, n.f === null ? Object.fromEntries(Object.entries(n).filter(([f]) => f !== 'f')) : n]))))
         expect(b.trees).toEqual(a.trees)
         expect([a.ds, b.ds]).toEqual([diffs, diffs])
-        // g3's 08-05 run's `bysize` data is read by nothing here: only 08-05's reads open that run, and they plan `path`
-        // (a small subtree reads the sort holding fewer rows).
-        const data = (d: string) => [...(d === 'deltas/2026-08-05/' ? [] : [`${d}served/bysize.parquet`]), `${d}served/path.parquet`]
+        // The runs' small subtree reads now prefer the path sort after exact boundary pruning.
+        const data = (d: string) => [...(d === '' ? [`${d}served/bysize.parquet`] : []), `${d}served/path.parquet`]
         const dirs = ['', ...(gen === 'g3' ? ['deltas/2026-08-04/', 'deltas/2026-08-05/'] : [])]
         expect([a.files, b.files]).toEqual([
           [...(gen === 'g3' ? ['manifests/2026-08-05.json'] : []), 'scans.json', ...dirs.flatMap(d => [`${d}served/bysize.groups.parquet`, `${d}served/path.groups.parquet`, ...data(d)])].sort(),
@@ -682,7 +689,7 @@ describe('interval store: base + runs', () => {
       '2026-07-31': base().sort(),
       '2026-08-02': base().sort(),
       '2026-08-03': base(false).sort(),
-      '2026-08-04': [...base(), ...run('2026-08-04')].sort(),
+      '2026-08-04': [...base(false), ...run('2026-08-04', false)].sort(),
       '2026-08-05': [...base(false), ...run('2026-08-04', false), ...run('2026-08-05', false)].sort(),
     })
   })

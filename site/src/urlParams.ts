@@ -51,6 +51,12 @@ export const URL_PARAMS: Record<string, UrlParamDoc> = {
     examples: ['300', '900', '3600'],
     pages: ['/staged', '/runs'],
   },
+  attr: {
+    label: 'Usage by',
+    description: 'Groups the Cloudflare usage page\'s attribution table by `caller` (a grant, token or `session`) or `route`. Defaults to `caller`.',
+    examples: ['route'],
+    pages: ['/admin/usage'],
+  },
   axis: {
     label: 'Right axis',
     description: 'On a run\'s progress chart, adds a second metric on the right axis: `rate`, `objects`, `bytes` or `byteRate`. Defaults to `none`, and a value equal to the left metric is ignored.',
@@ -82,6 +88,11 @@ export const URL_PARAMS: Record<string, UrlParamDoc> = {
     description: 'Limits the view\'s bytes to the listed storage classes, one letter each, in order: `s` Standard, `n` Nearline, `c` Coldline, `a` Archive. When absent (or when all four are listed), every class is counted.',
     examples: ['s', 'nc', 'sna'],
   },
+  cx: {
+    label: 'Class table open',
+    description: 'When present, the storage-class row under the map\'s listing is expanded into its table: each class\'s bytes, share, list price and estimated $/mo for the drilled path. When absent, the row shows only the stacked bar (its tooltip has the same numbers).',
+    examples: [''],
+  },
   d: {
     label: 'Scan',
     description: 'Picks the scan the page shows, and optionally the diff\'s start. A slug is a compact `YYMMDD[HH[MM]]` prefix that resolves to the latest matching scan. `END-START` pins both ends, a trailing `-7d`/`-12h` sets a look-back span, and a leading `-` keeps the end on the latest scan. When absent, the page follows the latest scan and diffs against the previous one. The map and `/names` share it, and a slug that matches no scan shows a "no scan matches" notice instead of falling back. On `/dups`, the scan whose duplicate report shows (a slug or a scan id; when absent, the newest scan with a report).',
@@ -92,6 +103,12 @@ export const URL_PARAMS: Record<string, UrlParamDoc> = {
     label: 'Scan (legacy)',
     description: 'Legacy spelling of the scan selection: an ISO or compact scan id for the shown scan. It is folded into `d` and rewritten on load.',
     examples: ['2026-10-06'],
+  },
+  days: {
+    label: 'Usage window',
+    description: 'The Cloudflare usage and cloud cost pages\' window: the last `7` or `30` days of daily snapshots. Defaults to 30.',
+    examples: ['7'],
+    pages: ['/admin/usage', '/admin/cost/gcp'],
   },
   denied: {
     label: 'Denied address',
@@ -414,6 +431,12 @@ export const URL_PARAMS: Record<string, UrlParamDoc> = {
   u: {
     label: 'Viewer / legend pin',
     description: 'On `/admin/sessions`, filters sessions to viewers whose address contains this text. On the map it is a legacy legend pin, rewritten to `o=<key>` on load.',
+  },
+  um: {
+    label: 'Usage ranking',
+    description: 'The metric the Cloudflare usage page\'s attribution table ranks its top rows by: `requests`, `r2_reads`, `d1_rows_read` or `d1_rows_written`. Defaults to `requests`.',
+    examples: ['d1_rows_written'],
+    pages: ['/admin/usage'],
   },
   w: {
     label: 'Run window',

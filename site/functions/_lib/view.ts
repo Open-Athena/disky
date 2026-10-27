@@ -29,7 +29,7 @@
  * `f = n_children(P) − kept` — objects and dirs alike.
  */
 import type { Env } from './auth.js'
-import { asOfScans, folded, type IndexHandle, isStore, ivHeldDates, ivLastRead, type Lens, openIndex, pathStoreKey, perScan, planRects, slices, planSizeRects, readAsks, readRects, readRows, readRootHistoryRows, readSizeRects, type Rect, type Row, sizeVariant, type Span, TooWide, type Trace, withTrace } from './index.js'
+import { asOfScans, folded, type IndexHandle, isStore, ivHeldDates, ivLastRead, type Lens, openIndex, pathStoreKey, perScan, planRects, slices, planSizeRects, readAsks, readFits, readRects, readRows, readRootHistoryRows, readSizeRects, type Rect, type Row, sizeVariant, type Span, TooWide, type Trace, withTrace } from './index.js'
 import { type FoldedLens, ownerLens, poolLens } from './owners.js'
 import { type ClassScope, classRow, nameFilter, type NamePred, ownerKey, ownerOk, type OwnerScope } from './scope.js'
 import { filterThreshold, looseThreshold, matchRoots, pickTier, rebasedThreshold, rootRects } from './filter.js'
@@ -62,7 +62,7 @@ const COARSE_EXPS = [16, 20, 24]
  * ~1.3M rows from `path`). The two span queries cost ~20 ms. */
 export const SMALL_SUBTREE_ROWS = 0
 /** On the interval store, a subtree with more rows than this (or an unknown count) reads `bysize`
- * without planning `path` (`planSubtree`). */
+ * without planning `path`, unless the size plan exceeds the read budget (`planSubtree`). */
 export const IV_PATH_PLAN_ROWS = 1 << 18
 /** On the interval store, a depth-band read (every rect depth-bounded) takes `path` when its plan holds
  *  at most this many rows (`planSubtree`). */
@@ -337,7 +337,11 @@ function display(a: Agg): Record<string, unknown> {
   // A folder's date is its newest write, not a byte-weighted mean: a mean of
   // half-July, half-September reads "August", a date nothing was written on.
   // An mtime of 0 is a listing's "unknown" (no object was written in 1970): no date, as for none.
-  if (a.m) out.d = Math.floor(a.m / 86400)
+  if (a.m) {
+    out.d = Math.floor(a.m / 86400)
+    // …and that write's instant (epoch seconds): the map's "last created" reads it with a time of day.
+    out.t = a.m
+  }
   if (a.a != null) out.a = a.a
   const desc = (m: Record<string, number>) =>
     Object.fromEntries(Object.entries(m).sort((x, y) => y[1] - x[1]))
@@ -433,6 +437,7 @@ async function planSubtree(
 ): Promise<SubtreePlan> {
   const held = (plan: Span[]) => plan.reduce((n, x) => n + (x.rowEnd - x.rowStart), 0)
   const of = (variant: string, plan: Span[], read: SubtreePlan['read']): SubtreePlan => ({ variant, groups: plan.length, rows: held(plan), read })
+  const fromPath = (plan: Span[]) => of(pathIdx.variant, plan, stop => readRects(pathIdx, rects, thrAt, lens, plan, stop))
   // A store generation: plan the read on both sorts (span queries only, no
   // decode) and decode whichever holds fewer rows. The cost of a `path` read
   // is ~one group per depth of the subtree, of a `bysize` read ~one group per
@@ -450,13 +455,16 @@ async function planSubtree(
   // at depth 1: 3 groups against 24). Taken when it holds at most `IV_BAND_ROWS`; past that (a flat
   // directory's children) the size sort is planned too and the one holding fewer rows read.
   if (!pathOnly && pathIdx.asOf != null && (nDesc == null || nDesc > ivPlanRows)) {
-    const pp = !lens && rects.every(q => q.dHi < 1e9) ? await planRects(pathIdx, rects, thrAt) : null
-    if (pp && held(pp) <= IV_BAND_ROWS) return of(pathIdx.variant, pp, stop => readRects(pathIdx, rects, thrAt, lens, pp, stop))
+    let pp = !lens && rects.every(q => q.dHi < 1e9) ? await planRects(pathIdx, rects, thrAt) : null
+    if (pp && held(pp) <= IV_BAND_ROWS) return fromPath(pp)
     const sized = (lens ? await tryOpen(env, date, 'bysize-user') : null) ?? await tryOpen(env, date, 'bysize')
     if (sized) {
       const sh = withTrace(sized, tr)
       const sp = await planSizeRects(sh, rects, thrAt, lens)
-      if (pp && held(pp) < held(sp)) return of(pathIdx.variant, pp, stop => readRects(pathIdx, rects, thrAt, lens, pp, stop))
+      // A tiny subtree can have an unknown row count and a low byte floor: the size sort's
+      // boundary groups then exceed the decode budget though its path range fits easily.
+      if (!readFits(sp) && !pp) pp = await planRects(pathIdx, rects, thrAt, lens)
+      if (pp && (held(pp) < held(sp) || !readFits(sp) && readFits(pp))) return fromPath(pp)
       return of(sized.variant, sp, stop => readSizeRects(sh, rects, thrAt, lens, sp, stop))
     }
   }
@@ -867,7 +875,7 @@ async function readView(env: Env, o: ViewOpts, cov: Coverage = {}): Promise<Read
       return { all, mine, depth }
     }
     // Phase 1. A store generation with the search sidecars answers from
-    // them (specs/path-store-search.md): the match roots anywhere under P,
+    // them (specs/done/path-store-search.md): the match roots anywhere under P,
     // exact unless a budget cut the search; anything else reads as before.
     t0 = performance.now()
     let roots: string[] = []
@@ -1936,6 +1944,10 @@ async function rollupRead(env: Env, o: ViewOpts, rollup: Rollup, x: {
     rootAll: x.rootAll, rootAgg: total, kept, aggDepth, foldedOf,
     threshold: T, thrAt, tier: 'rollup', idx: x.idx, truncated: false,
     matches: matched.map(m => m.path).sort(), matched: matched.map(m => ({ path: m.path, b: Math.round(m.b), o: Math.round(m.o) })),
+    // `n`: the rollup's root rows under P over every scan (every version of every owner slice, closed ones too), not
+    // this scan's live match roots; a child answered by its roots (`matchLists`) counts those instead, so a heavy
+    // literal's fleet-root `n` exceeds the sum of its buckets' wherever some bucket is light (gcs 10-24, `checkpoint`:
+    // 191,988 at the root, 185,709 over the six buckets; `.parquet`, every bucket heavy, equal). Definitional, not drift.
     matchCount: { n: rollup.rows ?? matched.length, b: Math.round(total.b), o: Math.round(total.o) },
     rollup: { children: rollup.children, kept: rollup.kept, rows: rollup.rows, ...(rollup.bucketsOnly ? { bucketsOnly: true as const } : {}), ...(rollup.scopedBelow ? { scopedBelow: true as const } : {}) },
     exact, complete, nested: insideDone.size || absent.size ? new Set([...fetched, ...insideDone, ...absent]) : fetched,

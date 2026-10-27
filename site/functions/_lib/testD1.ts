@@ -85,7 +85,7 @@ export async function sqliteD1(): Promise<{ db: D1Database; raw: Sqlite }> {
   return { db: d1Of(raw), raw }
 }
 
-/** The ownership ledger's tables (specs/file-assign.md), exactly as gcs's schema has them. */
+/** The ownership ledger's tables (specs/done/file-assign.md), exactly as gcs's schema has them. */
 const LEDGER_TABLES = ['actions', 'owner_prefixes', 'owner_totals', 'claims'] as const
 const LEDGER_DDL = `
   CREATE TABLE actions (id INTEGER PRIMARY KEY, actor TEXT NOT NULL, ts INTEGER NOT NULL, scan TEXT NOT NULL, pattern TEXT NOT NULL, set_owner INTEGER NOT NULL DEFAULT 0, owner TEXT, set_keep INTEGER NOT NULL DEFAULT 0, keep TEXT, memo TEXT, kind TEXT CHECK (kind IS NULL OR kind = 'object'), CHECK (set_owner OR set_keep));

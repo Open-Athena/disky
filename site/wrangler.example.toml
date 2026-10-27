@@ -38,6 +38,16 @@ remote = true
 # binding = "CACHE_KV"
 # id = "00000000000000000000000000000000"
 
+# Optional: usage attribution (`_lib/usage.ts`, specs/usage-metrics.md), one Analytics
+# Engine point per Functions request (route, caller, cache tier, R2/D1/KV reads). Unset =
+# no points. The R2/D1/KV counters and the cache tier also need the `nodejs_als`
+# compatibility flag (the request's async context); without it a point carries no
+# counters and cache `none`.
+# compatibility_flags = ["nodejs_als"]
+# [[analytics_engine_datasets]]
+# binding = "USAGE"
+# dataset = "disky_usage_<deployment>"
+
 [observability]
 enabled = true
 
@@ -104,6 +114,8 @@ ROOT_LABEL = "my buckets"                   # the store root's crumb label
 # BUCKET_REGIONS = '{"my-bucket": "us-east1"}'  # a one-region bucket cut runs its job there, beside the data; unset = BATCH_REGION
 # DATA_BUCKET = "my-data"                      # the bucket a run's plan.json, manifest and logs land in (dispatch requires it)
 # SWEEP_IMAGE = "<region>-docker.pkg.dev/<project>/<repo>/<image>:<tag>"  # the executor's image (dispatch requires it)
+# SWEEP_REVIEW_STORE = "r2://<index-bucket>"  # historical review inputs after per-scan retirement
+# SWEEP_REVIEW_SECRETS = '{"R2_ENDPOINT":"<endpoint-secret>","R2_ACCESS_KEY_ID":"<key-secret>","R2_SECRET_ACCESS_KEY":"<secret-secret>"}'
 # SWEEP_PACING = "guided"                    # per-bucket feedback; adaptive is a faster probe, enable after a controlled benchmark
 # CF_ACCOUNT_ID = "<cf-account-id>"            # `sweep`: the Cloudflare account its runs are recorded to (D1)
 # D1_DB_ID = "<d1-database-id>"               # `sweep`: the D1 its runs are recorded to (dispatch requires it; = the `DB` binding's id)
@@ -122,6 +134,7 @@ ROOT_LABEL = "my buckets"                   # the store root's crumb label
 # FILTER_STATIC_HEAVY = "1"                 # with FILTER_STATIC: heavy literals (catalog members, and every 1–2 character one) from the drilldown under `drill/` (`_lib/staticDrill.ts`): match roots, or a heavy directory's per-child rollup; base-generation scans only
 # FILTER_STATIC_ANCHORS = "0"               # with FILTER_STATIC: turns off anchored terms (`^q`, `q$`, `^q$`) from the name index and the `q$` / `^q$` rollups under `names/`, `anchors/` (`_lib/staticAnchors.ts`; on by default, a generation without `anchors/meta.json` declines them)
 # FILTER_INDEXED_ONLY = "1"                # with FILTER_STATIC: the map's filter takes only one literal substring of a name, unscoped, on a scan the static index covers; every other form is a 400 `{ error, code }` (`_lib/indexedOnly.ts`), never a path-store scan
+# DEFAULT_SCAN = "searchable"             # with FILTER_STATIC: a view with no `?d=` opens on the newest scan the static name index covers (`src/defaultScan.ts`). Default `newest`: the newest published scan, its search box disabled (a tip linking its indexing run and the newest searchable scan) until the index appends it. A `?f=` link opens on the newest covered scan either way
 # SEARCH_PATH_TERMS = "1"                  # with FILTER_STATIC: path terms (`a/b`, `^a/b`, `a/b$`) from the static name index (its tail's range, `_lib/staticAnchors.ts`; specs/search-box-no-refusals.md). Default off: parked — a term holding `/` is a 400 `unsupported-slash` on an indexed-only deployment (every route and the box), and walked (flagged approximate) on any other
 # FILTER_DETAILS_MS = "300"                # with FILTER_STATIC: ms a filtered view waits past phase 2 for its roots' kind/ages/classes (unset: until they land)
 # FILTER_PHASE2_MS = "1500"                # ms a filtered view's phase 2 (its match roots' insides) may take; reads still running then are dropped and those roots drawn whole (`interiors` in the response; default 1500)

@@ -31,12 +31,14 @@ manifest but the newest and those superseded less than `-G` s ago, 1 h by defaul
 from __future__ import annotations
 
 import json
+import os
 import resource
 import shutil
 import sys
 import tempfile
 import threading
 import time
+from collections.abc import Callable
 from contextlib import contextmanager
 from pathlib import Path
 from time import monotonic
@@ -44,6 +46,7 @@ from time import monotonic
 import pyarrow.parquet as pq
 from click import IntRange, command, option
 
+from . import heartbeat as hb
 from . import static_anchors as an
 from . import static_append as sa
 from . import static_catalog as sc
@@ -90,16 +93,18 @@ class DiskPeak:
     `take_step()` the same within a stage (since the previous `take_step()` or `take()`), leaving the stage's peak.
     The filesystem is the job's own scratch, so other writers' bytes count too; on a shared disk this over-states."""
 
-    def __init__(self, path: Path, every_s: float = 2.0):
+    def __init__(self, path: Path, every_s: float = 2.0, usage: Callable[[], int] | None = None):
         self.path, self.every_s = path, every_s
-        self.base = shutil.disk_usage(path).used
+        # `usage`: the bytes used (a test's own sequence, not a patched `shutil`: other samplers' threads read that too)
+        self.usage = usage or (lambda: shutil.disk_usage(path).used)
+        self.base = self.usage()
         self.peak = self.total = self.step = 0
         self.stop = threading.Event()
         self.thread = threading.Thread(target=self.run, daemon=True)
         self.thread.start()
 
     def sample(self) -> None:
-        used = max(0, shutil.disk_usage(self.path).used - self.base)
+        used = max(0, self.usage() - self.base)
         self.peak, self.total, self.step = max(self.peak, used), max(self.total, used), max(self.step, used)
 
     def run(self) -> None:
@@ -160,6 +165,15 @@ def publish_order(keys: list[str]) -> list[str]:
     return sorted(keys, key=rank)
 
 
+def publish_tier(key: str) -> int | None:
+    """`blobstore.upload_new`'s tier of a key in `publish_order`: the data files (rank 0) go up together; a liveness marker,
+    a manifest, and the generation's `scans.json` (what a reader opens the generation by) each go up alone, after
+    everything before it in `publish_order`."""
+    if key == "scans.json" or key.split("/", 1)[0] == "manifests" or key.rsplit("/", 1)[-1] == "meta.json":
+        return None
+    return 0
+
+
 def read_gen(store: Store, read_from: str | None, prefix: str, gen_dir: Path, keep=lambda rel: True, *, label: str = "read") -> tuple[dict, dict[str, int]]:
     """The generation `prefix` of `store` mirrored into `gen_dir` (what `keep` takes), from `store` itself or (`read_from`,
     `-F`) another copy of it (refused when the copy lacks a file `store` has: `append_runner.read_tree`). Returns the
@@ -178,8 +192,8 @@ def read_gen(store: Store, read_from: str | None, prefix: str, gen_dir: Path, ke
 
 
 def upload_new(store: Store, local: Path, prefix: str, before: dict[str, int]) -> list[str]:
-    """`blobstore.upload_new` in this store's `publish_order`."""
-    return _upload_new(store, local, prefix, before, publish_order)
+    """`blobstore.upload_new` in this store's `publish_order` (its data files in parallel: `publish_tier`)."""
+    return _upload_new(store, local, prefix, before, publish_order, tier=publish_tier)
 
 
 # ── Scans ──────────────────────────────────────────────────────────────────
@@ -235,6 +249,7 @@ def build_gen(scans: dict, mount: str, gen_dir: Path, work: Path, *, gen: str, r
         times[stage] = round(monotonic() - t, 1)
         peaks[stage] = {"disk_gb": disk.take(), "rss_gb": rss_peak_gb()}
         err(f"build {gen}: {stage} in {times[stage]}s (work disk peak {peaks[stage]['disk_gb']} GiB, RSS peak {peaks[stage]['rss_gb']} GiB)")
+        hb.after(stage)
         return monotonic()
 
     steps: dict[str, float] = {}
@@ -244,6 +259,7 @@ def build_gen(scans: dict, mount: str, gen_dir: Path, work: Path, *, gen: str, r
         steps[name] = round(monotonic() - t, 1)
         n = "".join(f", {k} {v:,}" for k, v in counts.items())
         err(f"build {gen}: {name} in {steps[name]}s (work disk peak {disk.take_step()} GiB, RSS peak {rss_peak_gb()} GiB{n})")
+        hb.after(name)
         return monotonic()
 
     tmp = work / "duckdb"
@@ -271,11 +287,8 @@ def build_gen(scans: dict, mount: str, gen_dir: Path, work: Path, *, gen: str, r
     t = done("shards", t)
     cat = gen_dir / "catalog"
     census = work / "census"
-    census.mkdir(parents=True, exist_ok=True)
     shard_names = [f"s{s['i']:04d}" for s in plan["shards"]]
-    for name in shard_names:
-        pq.write_table(sc.census(con, f"read_parquet({q(str(gen_dir / 'sx' / f'{name}.parquet'))})", max_rows + 1), census / f"{name}.parquet",
-                       compression=sn.CODEC)
+    sc.census_shards(gen_dir / "sx", shard_names, census, max_rows + 1, sc.census_jobs(con, len(shard_names)))
     cat.mkdir(parents=True, exist_ok=True)
     members = sc.cut_members(census, cat / "members.parquet", gen=gen, max_rows=max_rows)
     (cat / "members.json").write_text(json.dumps(members, indent=1) + "\n")
@@ -304,15 +317,30 @@ def build_gen(scans: dict, mount: str, gen_dir: Path, work: Path, *, gen: str, r
             "anchors": anchors, "s": round(monotonic() - t0, 1), "stages": times, "steps": steps, "peaks": peaks}
 
 
-def build_base_anchors(con, gen_dir: Path, *, R: int, K: int, scans: list[str], rule) -> dict:
+def build_base_anchors(con, gen_dir: Path, *, R: int, K: int, scans: list[str], rule, fanout: Callable[[], object] | None = None) -> dict:
     """The base generation's anchored search (`static_anchors`; `^q`, `q$`, `^q$` and path terms): the name index
     (`names/`, from the coalesced versions, as `static-names anchors names`), then `anchors/` — the `q$` rollups over the
     suffix shards, the `^q$` ones over the name index and the starts-with catalog `anchors/start/` (`build_tier_local`,
-    each `meta.json` written last), at the drill's R and K."""
+    each `meta.json` written last), at the drill's R and K. `fanout()`: the rollups' `static_fanout.AnchorFanout` (a
+    compaction's helper tasks), its job submitted before `names/` is written (`presubmit`: the helpers boot meanwhile)
+    and dealt once it is, its shards being their inputs."""
     cint = sorted(str(f) for f in (gen_dir / "cintervals").glob("*.parquet"))
-    names = an.write_names(con, an.files_sql(cint, an.VERSION_COLS), gen_dir / an.NAMES)
-    tier = an.Tier(gen_dir)
-    doc = an.build_tier_local(con, tier.files("end"), tier.files("exact"), gen_dir / an.ANCHORS, R, K, scans, rule)
+    fan = fanout() if fanout is not None else None
+    if fan is not None:
+        fan.presubmit()
+    try:
+        t = monotonic()
+        hb.set_stage("anchors/names")
+        names = an.write_names(con, an.files_sql(cint, an.VERSION_COLS), gen_dir / an.NAMES, jobs=sn.pool_jobs(con, 1 << 30, an.ANCHOR_THREADS))
+        sn.err(f"anchors/names: {names['rows']:,} rows in {names['shards']} shards in {monotonic() - t:.0f}s")
+        tier = an.Tier(gen_dir)
+        t = monotonic()
+        doc = an.build_tier_local(con, tier.files("end"), tier.files("exact"), gen_dir / an.ANCHORS, R, K, scans, rule, fanout=fan)
+    except BaseException:
+        if fan is not None:
+            fan.abandon()
+        raise
+    sn.err(f"anchors/rollups: {', '.join(f'{k} {v['rows']:,} rows' for k, v in doc['sets'].items())} in {monotonic() - t:.0f}s")
     return {"names": {k: names[k] for k in ("rows", "shards")}, **{k: v["rows"] for k, v in doc["sets"].items()}}
 
 
@@ -332,11 +360,10 @@ def q_bounds(counts: list[tuple[str, int]], chunk_rows: int) -> list[str]:
     return bounds
 
 
-def spill_roots(con, table: str, out: Path) -> None:
-    """Table `table`'s roots (`ROOT_COLS`) → `out/grp=<g>/*.parquet` by `q` range (table `qg (lo, grp)`)."""
+def spill_roots(con, table: str, out: Path, bounds: str = "qg") -> None:
+    """Table `table`'s roots (`ROOT_COLS`) → `out/grp=<g>/*.parquet` by `q` range (table `bounds (lo, grp)`)."""
     out.parent.mkdir(parents=True, exist_ok=True)
-    con.execute(f"""COPY (SELECT r.*, g.grp FROM {table} AS r ASOF JOIN qg AS g ON r.q >= g.lo)
-        TO {q(str(out))} (FORMAT parquet, PARTITION_BY (grp), COMPRESSION zstd)""")
+    con.execute(f"COPY ({sr.ranged(table, bounds, 'grp')}) TO {q(str(out))} (FORMAT parquet, PARTITION_BY (grp), COMPRESSION zstd)")
 
 
 def read_roots(files: list[Path]) -> str:
@@ -371,52 +398,270 @@ def plan_groups(con, counts: list[tuple[str, int]], chunk_rows: int) -> int:
     return len(bounds)
 
 
-def measure_ranges(con, work: Path, kind: str, n: int, dirs_into: str, rup_into: str, *, floor: int, R: int, K: int) -> tuple[str, dict]:
+#: DuckDB threads per measurement process (`measure_ranges`): a `q` range is ~`CHUNK_ROWS` roots and a few dozen small
+#: statements (one per depth), which one DuckDB at 48 threads runs mostly serially; so the ranges run `threads //
+#: MEASURE_THREADS` at a time, each in its own process (its own database, `memory_limit` split between them).
+MEASURE_THREADS = 4
+#: Overrides `MEASURE_THREADS`: fewer, wider measurement processes, each with a bigger share of `memory_limit` (a range
+#: whose working set passes its share spills to its temp dir and re-reads it per statement).
+MEASURE_THREADS_ENV = "DT_MEASURE_THREADS"
+#: A `q` range is heavy when its spilled roots hold `MEASURE_HEAVY_X` × the median range's rows (footers), at least
+#: `MEASURE_HEAVY_MIN_ROWS` (`measure_heavy_rows`): `measure_ranges` measures the heavy ones first, `HEAVY_THREADS` DuckDB
+#: threads each (fewer processes, each a bigger share of `memory_limit`). Rows, not bytes: gcs c001's long ranges' seconds
+#: track roots rows (r 0.78; short 0.98), not spilled bytes (0.33 / 0.65). Its single-`q` ranges of ~108M roots in
+#: 730–800 MiB stayed under the old 1 GiB bar and took 800–1190s at 4 threads, the stage's tail; alone, one took 463s at 4
+#: threads and 120s at 16. `$DT_MEASURE_HEAVY_ROWS` sets the bar outright.
+MEASURE_HEAVY_X = float(os.environ.get("DT_MEASURE_HEAVY_X", 4))
+MEASURE_HEAVY_MIN_ROWS = 1 << 25
+HEAVY_ROWS_ENV = "DT_MEASURE_HEAVY_ROWS"
+HEAVY_THREADS = 16
+
+
+def measure_heavy_rows(rows: list[int]) -> int:
+    """The heavy bar over `q` ranges of `rows` (each one's spilled roots): `MEASURE_HEAVY_X` × their median, at least
+    `MEASURE_HEAVY_MIN_ROWS` (a corpus of small ranges measures none alone)."""
+    if not rows:
+        return MEASURE_HEAVY_MIN_ROWS
+    mid = sorted(rows)[len(rows) // 2]
+    return max(MEASURE_HEAVY_MIN_ROWS, round(MEASURE_HEAVY_X * mid))
+
+
+def measure_jobs(con, ranges: int) -> int:
+    """How many `q` ranges `measure_ranges` measures at a time over `con`'s threads (`MEASURE_THREADS` each, or
+    `$DT_MEASURE_THREADS`)."""
+    return sn.pool_jobs(con, ranges, int(os.environ.get(MEASURE_THREADS_ENV) or MEASURE_THREADS))
+
+
+def _measure_one(con, files: list[str], sorted_out: str, dirs_out: str, rup_out: str, *, floor: int, R: int, K: int, measure: bool = True) -> dict:
+    """One `q` range's spill `files` measured and rolled up (`measure_rollups`) → parquet `dirs_out`, `rup_out`, and its
+    roots sorted → `sorted_out`; the spill's directories removed. Its seconds and spilled bytes. `measure` false: only
+    the sorted roots (`dirs_out`, `rup_out` written empty; a compaction's incremental measurement, `static_measure`)."""
+    con.execute("CREATE OR REPLACE TABLE mr_dirs (q VARCHAR, k INTEGER, dir VARCHAR, rows BIGINT)")
+    con.execute(f"CREATE OR REPLACE TABLE mr_rup ({sd.ROLLUP_COLS})")
+    t0 = monotonic()
+    con.execute(f"CREATE OR REPLACE TABLE qg_roots AS {read_roots([Path(f) for f in files])}")
+    temp = [temp_bytes(con)]
+    m = (measure_rollups(con, "qg_roots", floor=floor, R=R, K=K, dirs_into="mr_dirs", rup_into="mr_rup") if measure
+         else {"measure_s": 0.0, "rollup_s": 0.0})
+    temp.append(temp_bytes(con))
+    for tb, f in (("mr_dirs", dirs_out), ("mr_rup", rup_out)):
+        con.execute(f"COPY {tb} TO {q(f)} (FORMAT parquet, COMPRESSION zstd)")
+    con.execute(f"COPY (SELECT {', '.join(sr.ROOT_SCHEMA.names)} FROM qg_roots ORDER BY q, path, usr, vf) TO {q(sorted_out)} (FORMAT parquet, COMPRESSION zstd)")
+    temp.append(temp_bytes(con))
+    rows = count(con, "qg_roots")
+    for tb in ("qg_roots", "mr_dirs", "mr_rup"):
+        con.execute(f"DROP TABLE IF EXISTS {tb}")
+    nbytes = sum(Path(f).stat().st_size for f in files)
+    for d in sorted({str(Path(f).parent) for f in files}):
+        shutil.rmtree(d)
+    return {**m, "nbytes": nbytes, "rows": rows, "files": len(files), "temp": temp, "s": monotonic() - t0}
+
+
+def temp_bytes(con) -> int:
+    """The bytes of `con`'s DuckDB temp files now (buffers evicted past `memory_limit`)."""
+    return int(con.execute("SELECT coalesce(sum(size), 0) FROM duckdb_temporary_files()").fetchone()[0])
+
+
+def measure_report(kind: str, done: dict[int, dict], top: int = 5) -> None:
+    """A measurement's per-range costs: how many ranges spilled past their `memory_limit` share (temp bytes after
+    loading, measuring and the sorted copy), and the `top` slowest with their rows, input files, bytes and temp."""
+    spilled = [d for d in done.values() if max(d["temp"]) > 0]
+    sn.err(f"drill/measure/{kind}: {len(spilled):,} of {len(done):,} ranges spilled to temp (largest {fmt_b(max((max(d['temp']) for d in done.values()), default=0))})")
+    for g, d in sorted(done.items(), key=lambda kv: -kv[1]["s"])[:top]:
+        sn.err(f"drill/measure/{kind}: range {g}: {d['s']:.1f}s, {d['rows']:,} roots from {d['files']:,} files ({fmt_b(d['nbytes'])}); "
+               f"temp after load / measure / sort {' / '.join(fmt_b(b) for b in d['temp'])}")
+
+
+def fmt_b(n: int) -> str:
+    return hb.fmt_bytes(n)
+
+
+def _measure_task(files: list[str], sorted_out: str, dirs_out: str, rup_out: str, floor: int, R: int, K: int, threads: int, mem: str,
+                  tmp: str, measure: bool = True) -> dict:
+    """`_measure_one` in a process of `measure_ranges`' pool, on a database of its own."""
+    con = sn.connect(threads, mem, tmp)
+    try:
+        return _measure_one(con, files, sorted_out, dirs_out, rup_out, floor=floor, R=R, K=K, measure=measure)
+    finally:
+        con.close()
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def spill_files(work: Path, kind: str) -> dict[int, list[Path]]:
+    """Each `q` range's spill files of `kind` (`work/<kind>/<producer>/grp=<g>/*.parquet`), sorted, in one walk: a glob
+    per range listed every producer's dir per range (gcs's c001: 5,371 ranges × ~4,900 fold chunks, minutes on one core
+    before the measurement or a fan-out's plan began)."""
+    import os
+
+    out: dict[int, list[Path]] = {}
+    root = work / kind
+    if not root.is_dir():
+        return out
+    with os.scandir(root) as producers:
+        for prod in producers:
+            if not prod.is_dir():
+                continue
+            with os.scandir(prod.path) as groups:
+                for grp in groups:
+                    if grp.is_dir() and grp.name.startswith("grp="):
+                        with os.scandir(grp.path) as files:
+                            out.setdefault(int(grp.name[4:]), []).extend(Path(f.path) for f in files if f.name.endswith(".parquet"))
+    return {g: sorted(fs) for g, fs in out.items()}
+
+
+def measure_ranges(con, work: Path, kind: str, n: int, dirs_into: str, rup_into: str, *, floor: int, R: int, K: int,
+                   jobs: int | None = None, remote=None, on_range: Callable[[int, tuple, dict], None] | None = None,
+                   measure: bool = True) -> tuple[list[Path], dict]:
     """Measure and roll up each of `kind`'s spilled `q` ranges (`work/<kind>/*/grp=<g>/`) into tables `dirs_into` and
-    `rup_into`; the query of all its roots."""
-    doc = {"groups": 0, "measure_s": 0.0, "rollup_s": 0.0}
+    `rup_into`, and write each range's roots sorted (`work/<kind>-sorted/g<g>.parquet`, its spill removed): the ranges
+    are `q`-disjoint and in `q` order, so the files are what `static_drill.write_kind` streams (`chunks`) instead of
+    sorting every root again. The sorted files, in `q` order.
+
+    The heavy ranges (spilled roots ≥ `measure_heavy_rows`) first, heaviest first, `HEAVY_THREADS` threads each; then the rest,
+    heaviest first, `jobs` at a time (default `measure_jobs`). Each range in a process of its own (spawned; `con`'s threads
+    and memory limit split between them, `con`'s own limit lowered to a share meanwhile); 1: in turn on `con`. Each
+    range's measurement and rollups go to parquet first and into the tables in `q`-range order, so neither the order nor
+    `jobs` changes what the tables hold; their consumers sort them (`write_kind`, `roots-measure/`).
+
+    `remote` (a `static_fanout.Fanout`): the ranges it deals to its helper tasks are not measured here; once these are,
+    `remote.collect` waits for the helpers' outputs and puts them where this measurement's would be (their spills are
+    then removed), so the tables and files are the same. `on_range(g, task, stats)`: called once range `g` is measured
+    (`task`: `(g, spill files, sorted, dirs, rup)`, before the per-range files are folded in): a helper uploads them.
+    `measure` false: each range's roots are only sorted (`_measure_one`), the tables left empty."""
+    from concurrent.futures import as_completed
+
     for tb, cols in ((dirs_into, "q VARCHAR, k INTEGER, dir VARCHAR, rows BIGINT"), (rup_into, sd.ROLLUP_COLS)):
         con.execute(f"CREATE OR REPLACE TABLE {tb} ({cols})")
+    out, meas = work / f"{kind}-sorted", work / f"{kind}-measured"
+    out.mkdir(parents=True, exist_ok=True)
+    meas.mkdir(parents=True, exist_ok=True)
+    tasks = []
+    spilled = spill_files(work, kind)
+    # the ranges dealt away need no spills here (a resumed fold fetches only its own share's: `Fanout.start`)
+    away = remote.groups(kind) if remote is not None else set()
     for g in range(n):
-        files = sorted((work / kind).glob(f"*/grp={g}/*.parquet"))
-        if not files:
-            continue
-        con.execute(f"CREATE OR REPLACE TABLE qg_roots AS {read_roots(files)}")
-        m = measure_rollups(con, "qg_roots", floor=floor, R=R, K=K, dirs_into=dirs_into, rup_into=rup_into)
-        doc = {"groups": doc["groups"] + 1, **{k: doc[k] + m[k] for k in m}}
-    con.execute("DROP TABLE IF EXISTS qg_roots")
-    files = sorted((work / kind).glob("*/grp=*/*.parquet"))
-    return (read_roots(files) if files else f"SELECT * FROM (SELECT NULL::VARCHAR AS q, NULL::UTINYINT AS depth, NULL::VARCHAR AS path, "
-            "NULL::VARCHAR AS usr, NULL::BIGINT AS vf, NULL::BIGINT AS vt, NULL::BIGINT AS size, NULL::BIGINT AS n_files) WHERE false"), doc
+        files = spilled.get(g, [])
+        if files or g in away:
+            tasks.append((g, [str(f) for f in files], str(out / f"g{g:06d}.parquet"), str(meas / f"dirs-g{g:06d}.parquet"),
+                          str(meas / f"rup-g{g:06d}.parquet")))
+    local = [t for t in tasks if t[0] not in away]
+    size = {t[0]: sum(pq.ParquetFile(f).metadata.num_rows for f in t[1]) for t in local}
+    by_size = sorted(local, key=lambda t: (-size[t[0]], t[0]))
+    heavy_rows = int(os.environ.get(HEAVY_ROWS_ENV) or measure_heavy_rows(list(size.values())))
+    heavy = [t for t in by_size if size[t[0]] >= heavy_rows]
+    light = [t for t in by_size if size[t[0]] < heavy_rows]
+    fixed = jobs
+    prog = hb.Progress(f"drill/measure/{kind}", n, unit="ranges")
+    prog.tick(n - len(tasks), nbytes=0)  # the ranges without roots
+    t0, done = monotonic(), {}
+
+    def run_group(group: list, jobs: int, label: str) -> None:
+        if not group:
+            return
+        task = {t[0]: t for t in group}
+        if jobs == 1:
+            for g, files, so, do, ro in group:
+                done[g] = _measure_one(con, files, so, do, ro, floor=floor, R=R, K=K, measure=measure)
+                prog.tick(nbytes=done[g]["nbytes"])
+                if on_range:
+                    on_range(g, task[g], done[g])
+            return
+        with sn.ConPool(con, jobs, label) as pool:
+            futs = {pool.submit(_measure_task, files, so, do, ro, floor, R, K, pool.task_threads, pool.mem,
+                                str(work / "measure-tmp" / f"{kind}-g{g:06d}"), measure): g for g, files, so, do, ro in group}
+            for f in as_completed(futs):
+                g = futs[f]
+                done[g] = f.result()
+                prog.tick(nbytes=done[g]["nbytes"])
+                if on_range:
+                    on_range(g, task[g], done[g])
+
+    if local:
+        sn.err(f"drill/measure/{kind}: {len(heavy)} of {len(local)} ranges heavy (≥ {heavy_rows:,} roots; up to {max(size.values()):,})")
+    if heavy:
+        hj = max(1, min(fixed, len(heavy))) if fixed is not None else sn.pool_jobs(con, len(heavy), HEAVY_THREADS)
+        sn.err(f"drill/measure/{kind}: the {len(heavy)} heavy ranges first, {hj} at a time")
+        run_group(heavy, hj, f"drill/measure/{kind} (heavy)")
+    jobs = measure_jobs(con, len(light)) if fixed is None else max(1, min(fixed, len(light) or 1))
+    run_group(light, jobs, f"drill/measure/{kind}")
+    if away:
+        theirs = [t for t in tasks if t[0] in away]
+        got = remote.collect(kind, {t[0]: (t[2], t[3], t[4]) for t in theirs})
+        done.update(got)
+        prog.tick(len(got), nbytes=sum(d["nbytes"] for d in got.values()))
+        for d in sorted({str(Path(f).parent) for t in theirs for f in t[1]}):
+            shutil.rmtree(d, ignore_errors=True)
+    prog.done()
+    if done:
+        measure_report(kind, done)
+    for tb, i in ((dirs_into, 3), (rup_into, 4)):
+        if tasks:
+            con.execute(f"INSERT INTO {tb} SELECT * FROM read_parquet([{', '.join(q(t[i]) for t in tasks)}])")
+    shutil.rmtree(meas)
+    # wall seconds, split as the ranges' own measure / rollup seconds were (they overlap at `jobs` > 1)
+    wall, ms, rs = monotonic() - t0, sum(d["measure_s"] for d in done.values()), sum(d["rollup_s"] for d in done.values())
+    frac = ms / (ms + rs) if ms + rs else 1.0
+    ranges = {g: {k: d[k] for k in ("s", "rows", "files", "nbytes", "temp")} for g, d in sorted(done.items())}
+    return [Path(t[2]) for t in tasks], {"groups": len(tasks), "measure_s": wall * frac, "rollup_s": wall * (1 - frac), "jobs": jobs, "ranges": ranges}
 
 
 def finish_drill(con, gen_dir: Path, work: Path, *, aliases, long_groups: int, short_groups: int, R: int, K: int, floor: int,
-                 step=_nop_step, t: float | None = None) -> dict:
+                 step=_nop_step, t: float | None = None, fanout=None, incremental: tuple[list, Path] | None = None) -> dict:
     """A base drill's second half, from roots already spilled under `work/{long,short}/*/grp=<g>/` (canonical members'
     long roots; short literals' roots) by `q` range (`long_groups`, `short_groups` ranges) and the member classes (table
-    `al (q, canonical)`, and `aliases` as Arrow): each range measured and rolled up, `roots-measure/{dirs,short/dirs}/`
-    (an alias gets its canonical's directories), then `drill/` (`static_drill.build_drill`). What `build_base_drill`
-    and a compaction's fold (`static_compact`) share. Returns the drill's `meta.json` and the groups measured."""
+    `al (q, canonical)`, and `aliases` as Arrow) and their digests (table `dgq (q, n, h1, h2)`, every long member's): each
+    range measured and rolled up, `roots-measure/{dirs,short/dirs}/` (an alias gets its canonical's directories), then
+    `drill/` (`static_drill.build_drill`) with the members' digests (`static_drill.write_digests`: what a later
+    compaction finds its classes from, specs/static-incremental-compaction.md step 3). What `build_base_drill`
+    and a compaction's fold (`static_compact`) share. Returns the drill's `meta.json` and the groups measured.
+    `fanout` (`static_fanout.Fanout`): the ranges measured in part by helper tasks (a compaction's, its spills saved).
+
+    `incremental` `(tiers, meas)` (a compaction whose runs all count only new roots: `static_measure.blocker`): the
+    ranges' roots are only sorted, and `roots-measure/` and the rollups come from base ⊕ runs instead
+    (`static_measure.incremental_measure`, `incremental_rollups`: the tiers' drills, the base's measurement `meas`,
+    `gen_dir/catalog/members.parquet`): the same bytes, with no measurement or rollup over every root."""
+    from . import static_measure as sme
+
     t = monotonic() if t is None else t
-    lcan, lm = measure_ranges(con, work, "long", long_groups, "ldirs", "lrup", floor=floor, R=R, K=K)
+    measure = incremental is None
+    if fanout is not None:
+        fanout.start(work, {"long": long_groups, "short": short_groups}, R=R, K=K, floor=floor, measure=measure)
+    lcan, lm = measure_ranges(con, work, "long", long_groups, "ldirs", "lrup", floor=floor, R=R, K=K, remote=fanout, measure=measure,
+                              on_range=fanout.keep("long") if fanout is not None else None)
     end = monotonic()
-    step("drill/measure/long", end - lm["measure_s"] - lm["rollup_s"], groups=lm["groups"], dirs=count(con, "ldirs"))
-    t = step("drill/rollup/long", end - lm["rollup_s"], rup=count(con, "lrup"))
-    sall, m = measure_ranges(con, work, "short", short_groups, "sdirs", "srup", floor=floor, R=R, K=K)
+    if measure:
+        step("drill/measure/long", end - lm["measure_s"] - lm["rollup_s"], groups=lm["groups"], dirs=count(con, "ldirs"))
+        t = step("drill/rollup/long", end - lm["rollup_s"], rup=count(con, "lrup"))
+    else:
+        t = step("drill/sort/long", t, groups=lm["groups"])
+    sall, m = measure_ranges(con, work, "short", short_groups, "sdirs", "srup", floor=floor, R=R, K=K, remote=fanout, measure=measure,
+                              on_range=fanout.keep("short") if fanout is not None else None)
+    if fanout is not None:
+        fanout.finish()
     end = monotonic()
-    step("drill/measure/short", end - m["measure_s"] - m["rollup_s"], groups=m["groups"], dirs=count(con, "sdirs"))
-    t = step("drill/rollup/short", end - m["rollup_s"], rup=count(con, "srup"))
+    if measure:
+        step("drill/measure/short", end - m["measure_s"] - m["rollup_s"], groups=m["groups"], dirs=count(con, "sdirs"))
+        t = step("drill/rollup/short", end - m["rollup_s"], rup=count(con, "srup"))
+    else:
+        t = step("drill/sort/short", t, groups=m["groups"])
     meas = gen_dir / "roots-measure"
-    # every long member's (as `roots measure` measures them): an alias's roots, so its directories, are its canonical's
-    for sub, sql in (("dirs", "SELECT al.q, d.k, d.dir, d.rows FROM ldirs d JOIN al ON al.canonical = d.q"), ("short/dirs", "SELECT * FROM sdirs")):
-        (meas / sub).mkdir(parents=True, exist_ok=True)
-        pq.write_table(con.execute(f"SELECT * FROM ({sql}) ORDER BY q, k, dir").to_arrow_table(), meas / sub / "s0000.parquet", compression=sn.CODEC)
-    t = step("drill/write/measure", t)
-    con.execute(f"CREATE OR REPLACE VIEW lcan AS {lcan}")
-    con.execute(f"CREATE OR REPLACE VIEW sall AS {sall}")
-    meta = sd.build_drill(con, gen_dir / "drill", long_roots="lcan", short_roots="sall", aliases=aliases, R=R, K=K,
-                          meta={"floor": floor}, rollups={"long": "lrup", "short": "srup"}, step=step)
-    con.execute("DROP VIEW lcan; DROP VIEW sall")
+    if measure:
+        # every long member's (as `roots measure` measures them): an alias's roots, so its directories, are its canonical's
+        for sub, sql in (("dirs", "SELECT al.q, d.k, d.dir, d.rows FROM ldirs d JOIN al ON al.canonical = d.q"), ("short/dirs", "SELECT * FROM sdirs")):
+            (meas / sub).mkdir(parents=True, exist_ok=True)
+            pq.write_table(con.execute(f"SELECT * FROM ({sql}) ORDER BY q, k, dir").to_arrow_table(), meas / sub / "s0000.parquet", compression=sn.CODEC)
+        t = step("drill/write/measure", t)
+    else:
+        tiers, base_meas = incremental
+        sme.incremental_measure(con, tiers, base_meas, str(gen_dir / "catalog" / "members.parquet"), meas, floor=floor)
+        t = step("drill/measure/incremental", t)
+        for kind, into in (("long", "lrup"), ("short", "srup")):
+            sme.incremental_rollups(con, tiers, kind, meas, into, R=R, aliases=aliases)
+        t = step("drill/rollup/incremental", t, rup=count(con, "lrup") + count(con, "srup"))
+    sd.write_digests(con, gen_dir / "drill")
+    meta = sd.build_drill(con, gen_dir / "drill", long_roots=None, short_roots=None, aliases=aliases, R=R, K=K, meta={"floor": floor},
+                          rollups={"long": "lrup", "short": "srup"}, sorted_roots={"long": lcan, "short": sall}, step=step,
+                          write_fanout=fanout.writer() if fanout is not None else None)
     for tb in ("dmem", "dg", "dgq", "al", "canon", "qg", "ldirs", "sdirs", "lrup", "srup", "mem"):
         con.execute(f"DROP TABLE IF EXISTS {tb}")
     shutil.rmtree(work)
@@ -566,6 +811,7 @@ def append_scan(con, gen_dir: Path, scan: dict, mount: str, work: Path, *, gen: 
         """A drill sub-step's line (`drill/<step>/<kind>`, as `build_gen`'s): its seconds, work-disk and RSS peaks, and counts."""
         n = "".join(f", {k} {v:,}" for k, v in counts.items())
         err(f"add {d}: {name} in {round(monotonic() - t, 1)}s (work disk peak {disk.take_step()} GiB, RSS peak {rss_peak_gb()} GiB{n})")
+        hb.after(name)
         return monotonic()
 
     drill = run_drill(con, gen_dir, run, scan, runs, days, gen=gen, rule=rule, step=step)

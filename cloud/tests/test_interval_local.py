@@ -74,7 +74,9 @@ def local(world, tmp_path_factory):
     gen = store / ist.PREFIX / "g"
     shutil.copytree(store, tmp / "base-only")
     out = _add(world, store, tmp / "work-add")
-    return {"tmp": tmp, "store": store, "gen": gen, "base_only": tmp / "base-only", "summary": summary, "out": out}
+    # The appends' parity markers, as `add` left them (later tests' `verify` runs overwrite them).
+    markers = {p.stem: json.loads(p.read_text()) for p in sorted((gen / "verify").glob("*.json"))}
+    return {"tmp": tmp, "store": store, "gen": gen, "base_only": tmp / "base-only", "summary": summary, "out": out, "markers": markers}
 
 
 @pytest.fixture(scope="module")
@@ -92,7 +94,7 @@ def staged(world, local, tmp_path_factory):
         ist.fold_range(str(base), i, base, con)
         ist.build_slices_range(doc, ranges, i, base, con, mount=str(root))
         ist.slice_totals_range(str(base), i, base, con)
-    for sort, (sub, _, _) in ist.SORTS.items():
+    for sort, (sub, _, _) in ((s, ist.SORTS[s]) for s in ist.served_sorts(True)):
         ist.write_served(con, f"read_parquet('{base}/{sub}/r*.parquet')", sort, base / "served" / f"{sort}.parquet", ist.SUB_SCHEMA[sub], rg_rows=RG,
                          stamps=[s["ts"] for s in scans[:BASE]])
     runs, prev = {}, None
@@ -115,7 +117,7 @@ def test_build_writes_the_staged_generation(world, local, staged):
         want = {k: v for k, v in _parquets(staged["base"]).items() if k.startswith(f"{sub}/")}
         assert sorted(got) == sorted(want) and got == want, sub
     assert sorted(p.name for p in (gen / "served").iterdir()) == sorted(
-        [*(f"{s}{x}" for s in ist.SORTS for x in (".parquet", ".groups.parquet", ".json")), "stats.json"])
+        [*(f"{s}{x}" for s in ist.served_sorts(True) for x in (".parquet", ".groups.parquet", ".json")), "stats.json"])
     assert json.loads((gen / "scans.json").read_text()) == {
         "bucket": str(world["root"]), "layouts": [LAYOUT],
         "scans": [{**s, "size": (world["root"] / s["src"]).stat().st_size} for s in world["scans"][:BASE]], "slices": True}
@@ -151,12 +153,12 @@ def test_each_run_is_the_staged_append(world, local, staged):
     k = staged["ranges"]["k"]
     for d, run in staged["runs"].items():
         got = _parquets(local["gen"] / "deltas" / d)
-        assert sorted(got) == sorted([*(f"{t}/r{i:04d}.parquet" for t in ia.TABLES for i in range(k)),
-                                      *(f"served/{s}{x}" for s in ia.RUN_SORTS for x in (".parquet", ".groups.parquet"))]), d
+        assert sorted(got) == sorted([*(f"{t}/r{i:04d}.parquet" for t in ia.tables() for i in range(k)),
+                                      *(f"served/{s}{x}" for s in ia.run_sorts() for x in (".parquet", ".groups.parquet"))]), d
         assert got == {key: v for key, v in _parquets(run).items() if not key.startswith("state/")}, d
 
 
-@pytest.mark.parametrize("t", ia.TABLES)
+@pytest.mark.parametrize("t", ia.tables())
 def test_base_and_runs_are_a_full_rebuild(world, local, tmp_path, t):
     """Base + the newest manifest's runs (the merged one), and base + the level-0 runs alone: `build`/`fold` over every
     scan, version for version."""
@@ -166,6 +168,27 @@ def test_base_and_runs_are_a_full_rebuild(world, local, tmp_path, t):
     newest = json.loads((gen / "manifests" / f"{DATES[-1]}.m001.json").read_text())
     for runs in ([gen / r["key"] for r in newest["runs"]], [gen / "deltas" / d for d in DATES[BASE:]]):
         assert combine([_rows(gen, t), *(_rows(r, t) for r in runs)], t) == want
+
+
+def test_add_writes_each_scans_parity_marker(world, local, tmp_path):
+    """Each appended scan's marker (`scan retire`'s gate) from its append: every row of every table equal, as many as a
+    full rebuild through the scan has live at it, checked against the base and the runs its manifest lists before its
+    own; every served sort of its run equal to its deltas."""
+    import pyarrow.parquet as pq
+
+    gen = local["gen"]
+    ids = DATES[BASE:]
+    want = {}
+    for j, d in enumerate(ids):
+        s = world["scans"][BASE + j]
+        full = build_full(world["scans"][:BASE + j + 1], world["root"], tmp_path / f"full-{d}")
+        n = {t: sum(1 for p in sorted((full / t).glob("r*.parquet")) for r in pq.read_table(p, columns=["vf", "vt"]).to_pylist() if r["vf"] <= s["ts"] < r["vt"])
+             for t in ia.tables()}
+        cut = {sort: {"rows": pq.read_metadata(gen / "deltas" / d / "served" / f"{sort}.parquet").num_rows, "missing": 0, "extra": 0} for sort in ia.run_sorts()}
+        want[d] = {"scan": d, "gen": "g", "how": "append", "pass": True, "manifest": f"manifests/{d}.json", "runs": [f"deltas/{x}" for x in ids[:j]],
+                   "ranges": 3, "tables": {t: {"rows": v, "store": v, "missing": 0, "extra": 0} for t, v in n.items()}, "cut": cut}
+    assert local["markers"] == want
+    assert all(m["tables"]["pvl"]["rows"] > 0 for m in want.values())
 
 
 def test_changes_counts_the_same_a_group_at_a_time(world, local):
@@ -240,6 +263,11 @@ def test_publish_order():
             "manifests/a.m001.json", "deltas/a_b/meta.json"]
     assert il.publish_order(keys) == ["deltas/a/scans.json", "deltas/a/served/path.parquet", "served/path.parquet", "deltas/a/meta.json",
                                       "deltas/a_b/meta.json", "scans.json", "manifests/a.json", "manifests/a.m001.json"]
+    from dt_cloud.blobstore import publish_steps
+
+    assert publish_steps(il.publish_order(keys), il.publish_tier) == [
+        ["deltas/a/scans.json", "deltas/a/served/path.parquet", "served/path.parquet"], ["deltas/a/meta.json"], ["deltas/a_b/meta.json"],
+        ["scans.json"], ["manifests/a.json"], ["manifests/a.m001.json"]]
 
 
 def test_open_state_is_the_staged_state(world, local, staged):
@@ -252,7 +280,7 @@ def test_open_state_is_the_staged_state(world, local, staged):
         name = f"r{i:04d}"
         got = il.open_state_sql(str(gen), [str(gen / r["key"]) for r in newest["runs"]], name)
         want = ia.run_state_sql(str(last / "state"), name)
-        for t in ia.TABLES:
+        for t in ia.tables():
             order = ", ".join(ia.IDENT[t])
             rows = lambda sql: con.execute(f"SELECT * FROM ({sql}) ORDER BY {order}").fetchall()  # noqa: E731
             assert rows(got[t]) == rows(want[t]), (name, t)
@@ -335,7 +363,7 @@ def test_add_prunes_the_folded_runs_after_the_grace(world, tmp_path):
     for key in pruned:
         assert sorted(p.relative_to(gen / key).as_posix() for p in (gen / key).rglob("*") if p.is_file()) == sorted(
             [*(f"ranges/{p.name}" for p in (gen / key / "ranges").glob("*")), "scans.json"]), key
-    for t in ia.TABLES:
+    for t in ia.tables():
         full = build_full(world["scans"], world["root"], tmp_path / f"full-{t}")
         assert combine([_rows(gen, t), *(_rows(gen / k, t) for k in sorted(live))], t) == combine([_rows(full, t)], t)
 
@@ -385,7 +413,7 @@ def test_an_unowned_generation_builds_and_appends_no_slices(unowned):
     assert json.loads((gen / "served" / "stats.json").read_text())["slices"] is False
     s = unowned["summary"]
     assert (s["slices"], sorted(s["stages"]), sorted(s["sorts"])) == (False, ["cut", "versions"], ["bysize", "path", "reads"])
-    assert sorted(p.name for p in gen.iterdir()) == ["deltas", "digest", "manifests", "pv", "pvl", "ranges.json", "rd", "scans.json", "served"]
+    assert sorted(p.name for p in gen.iterdir()) == ["deltas", "digest", "manifests", "pv", "pvl", "ranges.json", "rd", "scans.json", "served", "verify"]
     assert sorted(p.name for p in (gen / "served").iterdir()) == sorted(
         [*(f"{x}{e}" for x in ("path", "bysize", "reads") for e in (".parquet", ".groups.parquet", ".json")), "stats.json"])
     k = json.loads((gen / "ranges.json").read_text())["k"]
@@ -457,7 +485,7 @@ def test_the_staged_stages_agree_on_an_unowned_generation(unowned, tmp_path):
         ["fold", *common, "-i", "0", "-n", str(k)],
         ["fold", *common, "-i", "0", "-n", str(k), "-S"],
         ["cut", *common, "-r", str(RG), *(x for s in ist.SORTS for x in ("-s", s))],
-        ["cut", *common, "-i", str(len(ist.SORTS))],
+        ["cut", *common, "-i", str(ist.CUT_TASKS.index("stats"))],
     ]
     for args in stages:
         res = CliRunner().invoke(ist.cli, args, catch_exceptions=False)
@@ -468,7 +496,7 @@ def test_the_staged_stages_agree_on_an_unowned_generation(unowned, tmp_path):
     assert _parquets(prefix) == base
     # A cut into a new generation (`-O`) gives it its own ranges and base, not just the served sorts: self-contained.
     common = [*common[:4], "-o", str(tmp_path / "out2"), *common[6:]]
-    for args in [["cut", *common, "-O", "g2", "-r", str(RG), *(x for s in ist.SORTS for x in ("-s", s))], ["cut", *common, "-O", "g2", "-i", str(len(ist.SORTS))]]:
+    for args in [["cut", *common, "-O", "g2", "-r", str(RG), *(x for s in ist.SORTS for x in ("-s", s))], ["cut", *common, "-O", "g2", "-i", str(ist.CUT_TASKS.index("stats"))]]:
         res = CliRunner().invoke(ist.cli, args, catch_exceptions=False)
         assert res.exit_code == 0, (args, res.output)
     g2 = store / ist.PREFIX / "g2"

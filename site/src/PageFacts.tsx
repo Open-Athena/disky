@@ -1,16 +1,42 @@
-// One compact row under the map's sections: the drilled node's storage-class mix as a stacked bar (its bytes and
-// list-price $/mo per class in the tooltip), and the ownership share with its explainer behind an ⓘ. Both follow
-// the map's drill; both hide under a name filter (`filterBlind.ts`).
+// One compact row under the map's own section (its drawer and table): the drilled node's storage-class mix as a
+// stacked bar (its bytes and list-price $/mo per class in the tooltip, and in a table the row's disclosure opens —
+// `?cx`), and the ownership share with its explainer behind an ⓘ. The class mix follows the map's drill; both hide
+// under a name filter (`filterBlind.ts`).
 import { useEffect, type ReactNode } from 'react'
+import { boolParam, useUrlState } from 'use-prms'
 import { useStore } from './store'
 import { ClassMixTip, Tooltip } from './Tooltip'
-import { CLASS_COLORS, fmtUsd, userBytes, type TreeNode } from './types'
-import { classSegments, fracLabel } from './classStrip'
+import { useUnits } from './units'
+import { CLASS_COLORS, CLASS_PRICE_US, fmtUsd, userBytes, type TreeNode } from './types'
+import { classSegments, fracLabel, type ClassSeg } from './classStrip'
 
-/** The drilled node's class mix (`classMix`) for `scope` (the path it names). */
-export function ClassStrip({ mix, scope }: { mix: Record<string, number>; scope: ReactNode }) {
+/** The facts row: the class strip (with its table behind the disclosure) and the ownership share, either absent. */
+export function PageFacts({ mix, scope, tree }: {
+  /** The drilled node's class mix (`classMix`); absent where the store has no prices. */
+  mix?: Record<string, number>
+  /** The path the mix is of. */
+  scope: ReactNode
+  /** The map's tree, for the ownership share; absent where the store has no owners. */
+  tree?: TreeNode
+}) {
+  const [open, setOpen] = useUrlState('cx', boolParam)
+  const segs = mix ? classSegments(mix) : null
+  const classes = segs && segs.segs.length > 0
+  if (!classes && !tree) return null
+  return (
+    <div className="page-facts">
+      <div className="facts-row">
+        {classes && <ClassStrip mix={mix!} scope={scope} open={open} onToggle={() => setOpen(!open)} />}
+        {tree && <OwnershipFact tree={tree} />}
+      </div>
+      {classes && open && <ClassTable segs={segs.segs} usd={segs.usd} scope={scope} />}
+    </div>
+  )
+}
+
+/** The drilled node's class mix for `scope` (the path it names); its caret opens the per-class table. */
+function ClassStrip({ mix, scope, open, onToggle }: { mix: Record<string, number>; scope: ReactNode; open: boolean; onToggle: () => void }) {
   const { segs, usd } = classSegments(mix)
-  if (!segs.length) return null
   const tip = (
     <>
       <div className="classes-scope">Storage classes under <code>{scope}</code></div>
@@ -19,7 +45,9 @@ export function ClassStrip({ mix, scope }: { mix: Record<string, number>; scope:
   )
   return (
     <span className="fact classes-strip" id="storage-classes">
-      <span className="lbl">classes</span>
+      <button type="button" className="disclose" aria-expanded={open} aria-controls="classes-table" onClick={onToggle}>
+        <span className="caret" aria-hidden="true">{open ? '▾' : '▸'}</span><span className="lbl">classes</span>
+      </button>
       <Tooltip content={tip} pinnable>
         <span className="classbar" tabIndex={0} role="img" aria-label={segs.map(s => `${s.name} ${fracLabel(s.frac)}`).join(', ')}>
           {segs.map(s => <i key={s.c} style={{ flexGrow: s.frac, background: CLASS_COLORS[s.c] ?? 'var(--other)' }} />)}
@@ -32,6 +60,38 @@ export function ClassStrip({ mix, scope }: { mix: Record<string, number>; scope:
       </span>
       <span className="usd">≈ {fmtUsd(usd)}/mo</span>
     </span>
+  )
+}
+
+/** The disclosure's table: per class its bytes, share, list price and est. $/mo, and the total. */
+function ClassTable({ segs, usd, scope }: { segs: ClassSeg[]; usd: number; scope: ReactNode }) {
+  const { fmtBytes } = useUnits()
+  const bytes = segs.reduce((s, x) => s + x.bytes, 0)
+  return (
+    <div className="classes-table" id="classes-table">
+      <p className="cap">Storage classes under <code>{scope}</code> · list prices (US regions) × scanned bytes; actual spend depends on negotiated rates and credits</p>
+      <table>
+        <thead>
+          <tr><th>class</th><th className="num">bytes</th><th className="num">share</th><th className="num rate">list $/GiB·mo</th><th className="num">est. $/mo</th></tr>
+        </thead>
+        <tbody>
+          {segs.map(s => (
+            <tr key={s.c}>
+              <td><i className="sw" style={{ background: CLASS_COLORS[s.c] ?? 'var(--other)' }} />{s.name}</td>
+              <td className="num">{fmtBytes(s.bytes)}</td>
+              <td className="num">{fracLabel(s.frac)}</td>
+              <td className="num rate">${CLASS_PRICE_US[s.c] ?? 0.02}</td>
+              <td className="num">{fmtUsd(s.usd)}</td>
+            </tr>
+          ))}
+        </tbody>
+        {segs.length > 1 && (
+          <tfoot>
+            <tr><td>total</td><td className="num">{fmtBytes(bytes)}</td><td /><td className="rate" /><td className="num">{fmtUsd(usd)}</td></tr>
+          </tfoot>
+        )}
+      </table>
+    </div>
   )
 }
 
@@ -64,7 +124,7 @@ export function OwnershipHelp() {
 }
 
 /** The share of `tree`'s bytes that have an owner, with the explainer (pin the ⓘ to click its links). */
-export function OwnershipFact({ tree }: { tree: TreeNode }) {
+function OwnershipFact({ tree }: { tree: TreeNode }) {
   // deep-linkable: the row mounts after data loads, so honor #attribution then
   useEffect(() => {
     if (location.hash === '#attribution') document.getElementById('attribution')?.scrollIntoView()

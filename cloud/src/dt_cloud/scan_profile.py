@@ -31,7 +31,7 @@ Every problem is reported at once (`ProfileError`, one line each).
         region: <region>          #   reserved: nf-google 1.29.1 has no per-task location (refused unless = executor's)
         args: [-L, …]             #   extra lister args
         secrets: {ENV: <secret>}  #   this source's list task only, over `secrets` and `options.list.secrets`
-    machines: {<label>: <type> | {type, disk, cpus, memory, time, fallback, queue_timeout}}   # labels: small medium big list post pre interval over_time index_part (+ any)
+    machines: {<label>: <type> | {type, disk, cpus, memory, time, fallback, queue_timeout}}   # labels: small medium big list post pre side static interval over_time index_part (+ any)
                                   # `fallback: [<type>, …]` + `queue_timeout: <minutes>` (google-batch, together): a task of
                                   # the label not RUNNING `queue_timeout` min after submit (a GCE stockout leaves it QUEUED /
                                   # SCHEDULED, never failing) is deleted by Nextflow and resubmitted on the next type; the

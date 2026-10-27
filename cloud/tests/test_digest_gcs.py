@@ -6,6 +6,7 @@ Exact-equality against a hand-built month (no Slack, no GCS): a lead-in scan
 (8/2) plus two in-month scans (8/3 Mon, 8/4 Tue — same ISO week, so the label is
 unambiguous). Totals chosen so every derived string is checkable by hand."""
 from datetime import date
+from pathlib import Path
 
 import pytest
 
@@ -98,45 +99,69 @@ def test_op_body_full_week_not_partial():
     assert bullet.startswith(":arrow_deg0: [wk of 8/3](https://site.example.org/?d=260809-7d#over-time) — ")
 
 
-# ---- sub-daily scans: two scans on one day are two rows, never merged -----
+# ---- a reply per day: the day's first scheduled scan; a manual one only stands in ------------------------------------
 
-# lead-in 8/2 (date-only), then two scans on 8/3 (06:01Z +30, 18:01Z −20).
-SUB = D.rows_from_meta([
-    ("2026-08-02", _meta(3000, 300, 600, 1500, 600)),
-    ("2026-08-03T0601", _meta(3030, 330, 600, 1500, 600)),
-    ("2026-08-03T1801", _meta(3010, 310, 600, 1500, 600)),
-], CFG.prices)[1:]
+def test_senders_skip_manual_scans_unless_a_day_has_nothing_else():
+    scans = ["2026-08-02T0700", "2026-08-03T0300", "2026-08-03T0700", "2026-08-03T1500", "2026-08-04T0900", "2026-08-05T0300"]
+    manual = {s: "manual" for s in ("2026-08-03T0300", "2026-08-03T1500", "2026-08-04T0900", "2026-08-05T0300")}
+    # 8/4's manual scan stands in (8/5 has a scan); 8/5's waits for its scheduled one, unless the month is over
+    assert D.senders(scans, manual) == ["2026-08-02T0700", "2026-08-03T0700", "2026-08-04T0900"]
+    assert D.senders(scans, manual, closed=True) == ["2026-08-02T0700", "2026-08-03T0700", "2026-08-04T0900", "2026-08-05T0300"]
+    # unrecorded triggers count as scheduled: each day's first scan
+    assert D.senders(scans, {}) == ["2026-08-02T0700", "2026-08-03T0300", "2026-08-04T0900", "2026-08-05T0300"]
 
 
-def test_sub_daily_rows_keep_each_scan():
-    assert [(r.date, r.prev, r.tb, r.dtb, r.dcost) for r in SUB] == [
-        ("2026-08-03T0601", "2026-08-02", 3030.0, 30.0, 615),
-        ("2026-08-03T1801", "2026-08-03T0601", 3010.0, -20.0, -410),
+@pytest.fixture
+def sub_root(tmp_path):
+    """8/2 (date-only), then 8/3 a manual 06:01Z (+30) before the scheduled 18:01Z (−20), 8/4 07:00Z (+10), and a
+    manual 8/5 03:00Z still waiting for its day's scheduled scan."""
+    import json
+
+    for s, m in [("2026-08-02", _meta(3000, 300, 600, 1500, 600)), ("2026-08-03T0601", _meta(3030, 330, 600, 1500, 600)),
+                 ("2026-08-03T1801", _meta(3010, 310, 600, 1500, 600)), ("2026-08-04T0700", _meta(3020, 320, 600, 1500, 600)),
+                 ("2026-08-05T0300", _meta(3040, 340, 600, 1500, 600))]:
+        (tmp_path / s).mkdir()
+        (tmp_path / s / "meta.json").write_text(json.dumps(m))
+    return str(tmp_path)
+
+
+SUB_TRIGGERS = {"2026-08-02": "schedule", "2026-08-03T0601": "manual", "2026-08-03T1801": "schedule", "2026-08-04T0700": "schedule",
+                "2026-08-05T0300": "manual"}
+
+
+def test_daily_rows_run_sender_to_sender(sub_root):
+    rows = D.load_month(sub_root, AUG, CFG.prices, SUB_TRIGGERS)
+    # 8/3's row is its scheduled scan, Δ vs 8/2 (the manual 06:01Z neither replies nor baselines); 8/5 not yet
+    assert [(r.date, r.prev, r.tb, r.dtb, r.dcost, r.slug) for r in rows] == [
+        ("2026-08-02", None, 3000.0, None, None, "260802"),
+        ("2026-08-03T1801", "2026-08-02", 3010.0, 10.0, 205, "26080318"),
+        ("2026-08-04T0700", "2026-08-03T1801", 3020.0, 10.0, 205, "260804"),
     ]
 
 
-def test_sub_daily_replies_are_distinct_units():
-    # each scan its own unit, sender time and canonical `?d=` slug; the arrow
-    # projects the Δ over the real interval (30h, then 12h) to a weekly rate
-    assert TPL.units(SUB, "sender") == [
-        E.Unit("2026-08-03T0601", "2026-08-03T0601", E.Reply(
-            "8/3 06:01Z — 3,030 TiB (+30.0, 1.0%)",
-            "$19,784/mo (+$615) [\u2197\ufe0e](https://site.example.org/?d=26080306#diff)",
+def test_daily_replies_are_keyed_by_date(sub_root):
+    # one unit per day, keyed by its date, over its sender scan (whose canonical `?d=` slug names its time when the day
+    # has others); the arrow projects the Δ over the senders' real interval (42h, then 13h) to a weekly rate
+    assert TPL.units(D.load_month(sub_root, AUG, CFG.prices, SUB_TRIGGERS), "sender")[1:] == [
+        E.Unit("2026-08-03", "2026-08-03T1801", E.Reply(
+            "8/3 — 3,010 TiB (+10.0, 0.3%)",
+            "$19,374/mo (+$205) [\u2197\ufe0e](https://site.example.org/?d=26080318#diff)",
+            icon_url="https://icons.example.org/arrows/av_deg20.png?v=4",
+        )),
+        E.Unit("2026-08-04", "2026-08-04T0700", E.Reply(
+            "8/4 — 3,020 TiB (+10.0, 0.3%)",
+            "$19,579/mo (+$205) [\u2197\ufe0e](https://site.example.org/?d=260804#diff)",
             icon_url="https://icons.example.org/arrows/av_deg40.png?v=4",
         )),
-        E.Unit("2026-08-03T1801", "2026-08-03T1801", E.Reply(
-            "8/3 18:01Z — 3,010 TiB (−20.0, 0.7%)",
-            "$19,374/mo (−$410) [\u2197\ufe0e](https://site.example.org/?d=26080318#diff)",
-            icon_url="https://icons.example.org/arrows/av_deg-50.png?v=4",
-        )),
     ]
 
 
-def test_sub_daily_op_body_spans_from_the_lead_scan():
-    # one day of the week seen (partial), the span from the 8/2 lead-in to 8/3 18:01Z
-    assert D.op_body(SUB, date(2026, 8, 1), None, CFG).split("\n")[3] == (
-        ":arrow_deg0: [wk of 8/3](https://site.example.org/?d=26080318-1d18h#over-time) _(partial)_ — **3,010 TiB** (+10.0, 0.3%) · $19,374/mo (+$205)"
-    )
+def test_a_manual_scan_replies_for_its_day_once_a_later_scan_lands(sub_root):
+    import shutil
+
+    # 9/1's scan closes August: 8/5's manual scan stands in for its day
+    shutil.copytree(Path(sub_root) / "2026-08-04T0700", Path(sub_root) / "2026-09-01")
+    assert [(r.date, r.prev) for r in D.load_month(sub_root, AUG, CFG.prices, SUB_TRIGGERS)][-1] == ("2026-08-05T0300", "2026-08-04T0700")
 
 
 def test_image_body():
@@ -161,11 +186,6 @@ def test_image_body_no_diff_without_two_scans():
     # a month's lone scan with no lead-in: nothing to diff
     lone = D.rows_from_meta([("2026-08-03", _meta(3030, 330, 600, 1500, 600))], CFG.prices)
     assert "diff" not in D.image_body(lone, AUG, CFG)
-
-
-def test_image_body_sub_daily_is_per_day():
-    # a day's scans plot as its latest (8/3 18:01Z), under its own scan id
-    assert D.image_body(SUB, AUG, CFG)["points"] == [{"scan": "2026-08-03T1801", "bytes": [600 * TIB, 1500 * TIB, 600 * TIB, 310 * TIB]}]
 
 
 def test_render_plot_posts_to_site(monkeypatch, tmp_path):
@@ -252,6 +272,9 @@ class _FakeHook:
         self.calls.append(("edit", message_id, content, list(files)))
         return _Msg(message_id)
 
+    def delete(self, message_id):
+        self.calls.append(("delete", message_id))
+
 
 class _FakeBot:
     def __init__(self):
@@ -325,6 +348,29 @@ def test_converge_discord_edit_replies():
         ("edit", "m3", "$19,374/mo (−$410) \u00b7 [view \u2192](https://site.example.org/?d=260804#diff)", []),
     ]
     assert state["posted"] == {"2026-08-03": "m2", "2026-08-04": "m3"}
+
+
+def test_redo_discord_since():
+    # an old rule's thread: 8/3 under its scan's key + an extra, 8/4 under a scan key. Redo from 8/4: 8/3's reply kept
+    # (re-keyed), its extra kept as `extra` (still in the thread); 8/4 posted fresh, then its old reply deleted through the thread hook
+    hook, bot, rhook = _FakeHook(), _FakeBot(), _FakeHook()
+    hook.n = 4  # m1–m4 already posted
+    state = {"op_id": "m1", "thread_id": "t1", "posted": {"2026-08-03T0700": "m2", "2026-08-03T1500": "m3", "2026-08-04T0700": "m4"}}
+    kw = dict(hook=hook, reply_hook=rhook, bot=bot, emoji=EMOJI, plot="/x/plot.png")
+    assert E.redo_discord(TPL, ROWS, AUG, state, since=date(2026, 8, 4), **kw) == {
+        "old": [("2026-08-04T0700", "m4")],
+        "new": [("2026-08-04", "2026-08-04", "8/4 — 3,010 TiB (−20.0, 0.7%)")],
+        "rekey": [("2026-08-03", "2026-08-03T0700")],
+        "left": ["2026-08-03T1500"],
+    }
+    assert (hook.calls, rhook.calls) == ([], [])
+    state = E.redo_discord(TPL, ROWS, AUG, state, since=date(2026, 8, 4), for_real=True, **kw)
+    assert hook.calls == [
+        ("edit", "m1", OP_TWO_SCANS, ["/x/plot.png"]),
+        ("post", "$19,374/mo (−$410) \u00b7 [view \u2192](https://site.example.org/?d=260804#diff)", "t1", "8/4 — 3,010 TiB (−20.0, 0.7%)", f"{AV}-40.png?v=4", []),
+    ]
+    assert rhook.calls == [("delete", "m4")]
+    assert state == {"op_id": "m1", "thread_id": "t1", "posted": {"2026-08-03": "m2", "2026-08-04": "m5"}, "extra": {"2026-08-03T1500": "m3"}}
 
 
 def test_md_takes_sub_daily_scan_ids() -> None:

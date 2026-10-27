@@ -682,11 +682,14 @@ export function r2Bytes(r2: R2Bucket): ByteStore {
 
 /** A run a manifest lists (`interval_append.manifest`). */
 interface IvRun { key: string; first: string; last: string; level: number; scans: string[] }
-interface IvManifest { gen: string; date: string; scans: string[]; stamps: Record<string, number>; runs: IvRun[] }
+/** `attribution`: in an attributed lineage, the run scans the attribution table covers (specs/attr-interval-table.md). */
+interface IvManifest { gen: string; date: string; scans: string[]; stamps: Record<string, number>; runs: IvRun[]; attribution?: string[] }
 /** The store's scans (id → epoch), the base's alone, and the usable runs (oldest first). `cut`: a broken run cut the
  *  stack; `refused`: the scans it cut out (its and every later run's) → that run's key. `slices`: the generation has
- *  the owner axis (its slice sorts). */
-interface IvState { scans: Map<string, number>; base: Set<string>; runs: IvRun[]; cut: boolean; refused: Map<string, string>; slices: boolean }
+ *  the owner axis (its slice sorts). `atBase`: its base has the attribution table (`served/attribution.parquet`);
+ *  `attribution`: the scans the table covers (the base's covered scans, and the usable runs' the manifest names); a run
+ *  holds the table's sort when one of its scans is covered. */
+interface IvState { scans: Map<string, number>; base: Set<string>; runs: IvRun[]; cut: boolean; refused: Map<string, string>; slices: boolean; atBase: boolean; attribution: Set<string> }
 /** How long a state stands before the manifests are listed again (a new scan's run shows up within it). */
 export const IV_STATE_TTL = 60_000
 /** How long a broken run stays cut out (then it is tried again: a publish caught mid-copy heals). */
@@ -807,20 +810,22 @@ async function ivManifest(env: Env): Promise<IvManifest | null> {
 
 /** The generation's `scans.json` (its scans, and `slices`: false when the generation has no owner axis; a generation
  *  from before the flag has it) and newest manifest, as one document. */
-interface IvStateDoc { scans: { id: string; ts: number }[]; slices: boolean; manifest: IvManifest | null }
+interface IvStateDoc { scans: { id: string; ts: number }[]; slices: boolean; manifest: IvManifest | null; attribution: { base: boolean; covered: string[] } }
 
 /** `IvStateDoc` through the colo cache for `IV_STATE_TTL`: a new isolate's first read starts from it instead of
  *  three R2 operations in series (`scans.json`, the manifests' `list`, the newest's `get`). A new scan's run
  *  shows up within the colo's TTL plus the isolate's. */
 async function ivStateDoc(env: Env): Promise<IvStateDoc> {
   const gen = env.INTERVAL_STORE_GEN!
-  const ck = coloKey(env, ivKey(env, `${ivPrefix(env)}/${gen}/scans.json`), 'state=2')
+  const ck = coloKey(env, ivKey(env, `${ivPrefix(env)}/${gen}/scans.json`), 'state=3')
   const hit = await colo().match(ck)
   if (hit) return hit.json<IvStateDoc>()
   const [o, manifest] = await Promise.all([env.INDEX_R2!.get(`${ivPrefix(env)}/${gen}/scans.json`), ivManifest(env)])
   if (!o) throw new Error(`interval store ${gen}: no scans.json`)
-  const j = await o.json<{ scans: { id: string; ts: number }[]; slices?: boolean }>()
-  const doc: IvStateDoc = { scans: j.scans, slices: j.slices !== false, manifest }
+  const j = await o.json<{ scans: { id: string; ts: number; attribution_src?: string }[]; slices?: boolean; attribution?: boolean }>()
+  // The attribution table's base coverage: the scans whose entry names their map (`interval_store.ATTRIBUTION_SRC`).
+  const attribution = { base: j.attribution === true, covered: j.attribution === true ? j.scans.filter(s => s.attribution_src).map(s => s.id) : [] }
+  const doc: IvStateDoc = { scans: j.scans, slices: j.slices !== false, manifest, attribution }
   await colo().put(ck, new Response(JSON.stringify(doc), { headers: { 'content-type': 'application/json', 'cache-control': `max-age=${IV_STATE_TTL / 1000}` } }))
   return doc
 }
@@ -832,6 +837,8 @@ async function loadIvState(env: Env): Promise<IvState> {
   const m = doc.manifest
   const runs: IvState['runs'] = []
   const refused = new Map<string, string>()
+  const attribution = new Set(doc.attribution?.covered ?? [])
+  const runCovered = new Set(m?.attribution ?? [])
   let cutAt: string | null = null
   for (const r of m?.runs ?? []) {
     if (cutAt == null) {
@@ -839,14 +846,14 @@ async function loadIvState(env: Env): Promise<IvState> {
       const ts = r.scans.map(x => m!.stamps[x])
       if (!(b && Date.now() - b.at < IV_BROKEN_TTL) && !ts.some(t => typeof t !== 'number')) {
         runs.push(r)
-        r.scans.forEach((x, i) => scans.set(x, ts[i]))
+        r.scans.forEach((x, i) => { scans.set(x, ts[i]); if (runCovered.has(x)) attribution.add(x) })
         continue
       }
       cutAt = r.key
     }
     for (const x of r.scans) if (!scans.has(x)) refused.set(x, cutAt)
   }
-  return { scans, base, runs, cut: cutAt != null, refused, slices: doc.slices !== false }
+  return { scans, base, runs, cut: cutAt != null, refused, slices: doc.slices !== false, atBase: !!doc.attribution?.base, attribution }
 }
 
 /** The store's state, re-read once it is `IV_STATE_TTL` old (`IV_BROKEN_TTL` when cut); a failed re-read keeps
@@ -1023,6 +1030,111 @@ export async function ivLastRead(env: Env, date: string, paths: string[], maxGro
     }
   })
   return out
+}
+
+// --- the roster attribution table (specs/attr-interval-table.md) ---
+
+/** One attributing prefix as of a scan: the attribution table's change columns. */
+export interface IvAttribution { path: string; user: string | null; source: string | null; evidence: string | null }
+/** The most rows an attribution read decodes: past this (a bucket root over a map of hundreds of thousands of
+ *  prefixes) the read answers "too wide" (null), never part of the map. */
+export const IV_ATTR_MAX_ROWS = 200_000
+const IV_ATTR = 'attribution'
+const IV_ATTR_COLS = ['path', 'vf', 'vt', 'user', 'source', 'evidence']
+
+/** Whether `env`'s interval store answers `date`'s attribution (its table covers the scan); false when the request
+ *  doesn't read the store. */
+export async function ivAttributes(env: Env, date: string): Promise<boolean> {
+  return intervalsOn(env) && (await ivState(env)).attribution.has(date)
+}
+
+/** The attribution sort as of `date`: the base's (when it has the table) and the runs holding it (a run of which some
+ *  scan is covered; a request naming its scans, `asOfScans`, leaves out the runs begun after them), as one handle and
+ *  its runs. The first tier is a run when the table opened at one. Null when no tier holds it. */
+async function openIvAttribution(env: Env, st: IvState, date: string): Promise<IndexHandle | null> {
+  const asOf = st.scans.get(date)
+  if (asOf == null) return null
+  const named = (env as Env & { [IV_ASOF]?: string[] })[IV_ASOF]
+  const horizon = named ? Math.max(asOf, ...named.map(d => st.scans.get(d) ?? Infinity)) : Infinity
+  const runs = st.runs.filter(r => st.scans.get(r.first)! <= horizon && r.scans.some(x => st.attribution.has(x)))
+  const tiers: (string | null)[] = [...(st.atBase ? [null] : []), ...runs.map(r => r.key)]
+  if (!tiers.length) return null
+  const gen = env.INTERVAL_STORE_GEN!
+  const ck = `iv:${ivGenKey(env)}:${date}:${IV_ATTR}|${tiers.map(t => t ?? '').join(',')}`
+  return ivOwn(env, await shared(handles, ck, async (): Promise<IndexHandle> => {
+    const src = r2Bytes(env.INDEX_R2!)
+    const open = async (run: string | null): Promise<IndexHandle> => {
+      const dir = run ? `${ivPrefix(env)}/${gen}/${run}/served` : `${ivPrefix(env)}/${gen}/served`
+      const key = ivKey(env, `${dir}/${IV_ATTR}.parquet`)
+      let footer: FooterIndex
+      try {
+        footer = run ? await ivRunFooter(env, run, IV_ATTR) : await ivFooter(env, IV_ATTR)
+      } catch (e) {
+        throw run ? ivMarkBroken(env, run, e) : e
+      }
+      const kv = new Map((footer.metadata.key_value_metadata ?? []).map(e => [e.key, e.value]))
+      const file: FileSlice = { get byteLength() { return 0 }, slice: async (s0, e) => toBuffer((await src.get(key, { offset: s0, length: (e ?? s0) - s0 })).bytes) }
+      const h: PqHandle = { mode: 'pq', file, env, date, variant: IV_ATTR, gen: `iv:${gen}${ivRev(env)}${run ? `/${run}` : ''}`, dir, schema: JSON.parse(kv.get('schema')!) as SchemaElement[],
+        version: Number(kv.get('version')), columns: null, floor: null, footer, asOf, src, dataKey: key, ...(run ? { run } : {}) }
+      return h
+    }
+    const [h0, ...rest] = await Promise.all(tiers.map(open))
+    return rest.length ? { ...h0, runs: rest } : h0
+  }, 300_000, ivJoin(env, 'handle')))
+}
+
+/** The attribution table as of `date` for a view rooted at `path`: every prefix in `[path, path + '0')` (its subtree,
+ *  in the sort's path order) and each ancestor of `path`, combined across the tiers per version (the smallest `vt`) and
+ *  kept live at the scan; sorted by path. `undefined` when the store doesn't answer for the scan (not read, or its table
+ *  doesn't cover it: the per-scan sidecar's turn); null when the read would decode more than `maxRows` rows. A covered
+ *  scan with no prefixes is `[]`: nothing attributed, not unknown. */
+export async function ivAttribution(env: Env, date: string, path: string, maxRows = IV_ATTR_MAX_ROWS): Promise<IvAttribution[] | null | undefined> {
+  if (!intervalsOn(env)) return undefined
+  const st = await ivState(env)
+  const cut = ivCutOut(env, st, date)
+  if (cut) throw cut
+  if (!st.attribution.has(date)) return undefined
+  const h = await openIvAttribution(env, st, date)
+  if (!h) return undefined
+  const D = h.asOf!
+  const hi = path === '' ? '￿' : `${path}0` // '0' sorts just past '/'
+  const anc: string[] = []
+  for (let p = path; p.includes('/');) anc.push(p = p.slice(0, p.lastIndexOf('/')))
+  const rects: Rect[] = [{ dLo: 0, dHi: 255, pLo: path, pHi: hi }, ...anc.map(a => ({ dLo: 0, dHi: 255, pLo: a, pHi: a }))]
+  let spans: Span[]
+  try {
+    spans = await selectSpans(h, rects, 1 << 20)
+  } catch (e) {
+    if (e instanceof TooWide) return null
+    throw e
+  }
+  if (spans.reduce((n, s) => n + s.rowEnd - s.rowStart, 0) > maxRows) return null
+  const ancs = new Set(anc)
+  const want = (p: string) => (p >= path && p < hi) || ancs.has(p)
+  const byTier = new Map<number, Span[]>()
+  for (const s of spans) {
+    const l = byTier.get(s.tier ?? 0)
+    if (l) l.push(s)
+    else byTier.set(s.tier ?? 0, [s])
+  }
+  const best = new Map<string, { path: string; vf: number; vt: number; user: string | null; source: string | null; evidence: string | null }>()
+  await Promise.all([...byTier].map(([i, ss]) => onTier(h, i, async t => {
+    const jsons = await fetchGroupJson(t, ss.map(s => s.rg))
+    await mapLimit(ss, GROUP_READS, async s => {
+      const j = jsons.get(s.rg)
+      if (!j) return
+      for (const r of await readGroupRaw(t, j, IV_ATTR_COLS)) {
+        const p = str(r.path)
+        if (!want(p)) continue
+        const v = { path: p, vf: num(r.vf), vt: num(r.vt), user: r.user == null ? null : str(r.user), source: r.source == null ? null : str(r.source), evidence: r.evidence == null ? null : str(r.evidence) }
+        const k = `${p}\0${v.vf}`
+        const c = best.get(k)
+        if (!c || v.vt < c.vt) best.set(k, v)
+      }
+    })
+  })))
+  return [...best.values()].filter(v => v.vf <= D && D < v.vt).sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0))
+    .map(({ path: p, user, source, evidence }) => ({ path: p, user, source, evidence }))
 }
 
 /** The physical columns a `Row` decodes from, per generation — the wire
@@ -2033,7 +2145,11 @@ async function onTier<T>(h: IndexHandle, i: number, f: (t: IndexHandle) => Promi
 
 async function selectSpans1(h: IndexHandle, rects: Rect[], cap = 4000, bMin = 0, lens?: Lens): Promise<Span[]> {
   if (h.mode !== 'd1') {
-    const pass = (g: Parameters<typeof groupMatches>[0]) => groupMatches(g, rects, bMin, lens, lensSorted(h.variant))
+    // The interval writer records true path min/max even across depth boundaries. Use them
+    // to reject unrelated prefixes before the decode budget counts those boundary groups.
+    const exactPaths = h.mode === 'pq' && h.asOf != null
+    const pass = (g: Parameters<typeof groupMatches>[0]) => groupMatches(g, rects, bMin, lens, lensSorted(h.variant)) &&
+      (!exactPaths || rects.some(r => g.dMax >= r.dLo && g.dMin <= r.dHi && g.pMax >= r.pLo && g.pMin <= r.pHi))
     const out = h.mode === 'blob' ? h.groups.filter(pass) : await pqGroups(h, pass)
     if (out.length > cap) throw new TooWide(`query too wide: >${cap} row groups (drill deeper or raise minArea)`)
     return out
@@ -2158,6 +2274,11 @@ export async function planRects(
   return [...byRg.values()].sort(bySpan).filter(s => !thrAt || s.bMax >= thrAt(Math.max(s.dMin, dMin)))
 }
 
+/** Whether a span plan fits the decoder's group and row limits, before fetching any data. */
+export function readFits(spans: Span[]): boolean {
+  return spans.length <= 250 && spans.reduce((n, s) => n + (s.rowEnd - s.rowStart), 0) <= 700_000
+}
+
 /** Decode a planned set of groups (cached per isolate, `GROUP_READS` in
  * flight) and keep the rows `keep` accepts — the tail shared by both sorts'
  * subtree reads. Caps the group count and the rows decoded: a broad lens (a
@@ -2166,9 +2287,7 @@ export async function planRects(
 /** `pre`: a cheap superset of `keep` on a row's raw `depth`, `path` and `size` (`Pre`): an interval store's groups
  *  shape only the rows it passes. */
 async function decodeSpans(h: IndexHandle, kept: Span[], keep: (r: Row) => boolean, stop?: () => boolean, pre?: Pre): Promise<Row[]> {
-  if (kept.length > 250) throw new Error('query too wide: drill deeper or raise minArea')
-  const totalRows = kept.reduce((n, s) => n + (s.rowEnd - s.rowStart), 0)
-  if (totalRows > 700_000) throw new Error('query too wide: drill deeper or raise minArea')
+  if (!readFits(kept)) throw new Error('query too wide: drill deeper or raise minArea')
   let t0 = now()
   if (h.runs?.length) {
     // Every tier's groups, every version of them, combined and then tested live.
@@ -2654,14 +2773,15 @@ export type Ask = ({ depth: number; path: string } | { depth: number; under: str
 const askRect = (a: Ask): Rect =>
   'path' in a
     ? { dLo: a.depth, dHi: a.depth, pLo: a.path, pHi: a.path }
-    : { dLo: a.depth, dHi: a.depth, pLo: a.under + '/', pHi: a.under + '0' } // '0' sorts just past '/'
+    : { dLo: a.depth, dHi: a.depth, pLo: a.under ? a.under + '/' : '', pHi: a.under ? a.under + '0' : '\uffff' } // '0' sorts just past '/'
 
 const groupMayHold = (g: Span & { vfMax?: number; vtMin?: number }, a: Ask): boolean => {
   if (g.dMax < a.depth || g.dMin > a.depth) return false
   if (a.vtLe != null && g.vtMin != null && g.vtMin > a.vtLe) return false
   if (a.vfGe != null && g.vfMax != null && g.vfMax < a.vfGe) return false
   if (g.dMin !== g.dMax) return true
-  return 'path' in a ? !(g.pMax < a.path || g.pMin > a.path) : !(g.pMax < a.under + '/' || g.pMin > a.under + '0')
+  const rect = askRect(a)
+  return !(g.pMax < rect.pLo || g.pMin > rect.pHi)
 }
 
 /** Point lookups: exact `(depth, path)` rows or `(depth, under-prefix)`

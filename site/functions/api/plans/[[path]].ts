@@ -21,11 +21,14 @@
 import type { D1Database } from "@cloudflare/workers-types"
 import { type Ctx, type Env as AuthEnv, json, requireAdmin, requireStager, requireViewer } from "../../_lib/auth.js"
 import { audit, canonicalPrefix, mergeBatches, NO_SHAPE, openPlanId, planDetail, type PlanRow, type PrefixShape, prefixShape, runDetail, stageItems } from "../../_lib/plans.js"
-import { pathScans, storeReady } from "../../_lib/index.js"
+import { pathScans, storeReady, withPathStore } from "../../_lib/index.js"
 import { MAX_PREFIXES, prefixesAt } from "../../_lib/prefixes.js"
 import { notifyPlan, refreshThread, type NotifyEnv } from "../../_lib/stagedSlack.js"
+import { batchConfig, type BatchEnv } from "../../_lib/batchConfig.js"
+import { gcpToken } from "../../_lib/gcp.js"
+import { readRunJson } from "../../_lib/runReflect.js"
 
-type Env = AuthEnv & NotifyEnv & { DB?: D1Database }
+type Env = AuthEnv & NotifyEnv & BatchEnv & { DB?: D1Database }
 type Bg = (p: Promise<unknown>) => void
 
 const now = (): number => Math.floor(Date.now() / 1000)
@@ -117,7 +120,10 @@ async function editItems(
 
 const background = (ctx: { waitUntil?: Bg }, p: Promise<unknown>): void => { if (ctx.waitUntil) ctx.waitUntil(p); else void p }
 
-export const onRequest = async (ctx: Ctx & { env: Env; waitUntil?: Bg }): Promise<Response> => {
+export const onRequest = async (ctx0: Ctx & { env: Env; waitUntil?: Bg }): Promise<Response> => {
+  // The interval store for the dates it holds (`withPathStore`), as the map's own reads: never per-scan rows an
+  // unpinned deployment's job no longer writes (`index-sync -R`).
+  const ctx = await withPathStore(ctx0)
   if (!ctx.env.DB) return json({ error: "plans store not configured (no D1 binding)" }, 503)
   const db = ctx.env.DB
   const shape = prefixShape(ctx.env)
@@ -153,7 +159,7 @@ export const onRequest = async (ctx: Ctx & { env: Env; waitUntil?: Bg }): Promis
     if (!shape) return json({ error: `staging ${NO_SHAPE}` }, 503)
     const body = await readBody(ctx.request)
     const strs = (v: unknown): string[] => Array.isArray(v) ? v.filter((x): x is string => typeof x === "string") : []
-    // `prefixes`: folders; `objects`: exact keys (specs/file-assign.md) —
+    // `prefixes`: folders; `objects`: exact keys (specs/done/file-assign.md) —
     // the kind is which list an item came in, never its shape.
     const prefixes = strs(body.prefixes)
     const objects = strs(body.objects)
@@ -194,13 +200,25 @@ export const onRequest = async (ctx: Ctx & { env: Env; waitUntil?: Bg }): Promis
 
   // /api/plans/run?id=<run_id> — one run's record + per-band rows (a run id
   // may hold a `/`, so it rides in the query).
-  if (segs.length === 1 && segs[0] === "run" && method === "GET") {
+  if (segs.length === 1 && (segs[0] === "run" || segs[0] === "run-analytics") && method === "GET") {
     const gated = await requireViewer(ctx)
     if (gated instanceof Response) return gated
     const runId = new URL(ctx.request.url).searchParams.get("id") ?? ""
     if (!runId) return json({ error: "id required" }, 400)
     const d = await runDetail(db, runId)
-    return d ? json(d) : json({ error: "no such run" }, 404)
+    if (!d) return json({ error: "no such run" }, 404)
+    if (segs[0] === 'run') return json(d)
+    const cfg = batchConfig(ctx.env, ["GCP_PROJECT", "DATA_BUCKET"])
+    if (ctx.env.GCP_SA_KEY && !("missing" in cfg) && /^cw-sweep-(real|dry)-[a-z0-9-]+$/.test(runId)) {
+      const token = await gcpToken(ctx.env.GCP_SA_KEY)
+      const [review, result, analysis] = await Promise.all([
+        readRunJson(cfg, token, runId, 'plan-summary.json'),
+        readRunJson(cfg, token, runId, `${d.run.mode === 'real' ? 'deleted' : 'would-delete'}-summary.json`),
+        readRunJson(cfg, token, runId, 'preservation-analysis.json'),
+      ])
+      return json({ review, result, analysis }, 200, { 'cache-control': 'private, max-age=30' })
+    }
+    return json({ review: null, result: null, analysis: null })
   }
 
   const id = Number(segs[0])

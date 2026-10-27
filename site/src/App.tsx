@@ -9,7 +9,7 @@ import { bareEmpty, legacyOwner, ownerParam } from './ownerParam'
 import { AGE_MODES, AgeChart } from './AgeChart'
 import { canonId, shortName, shortUserKey } from './UserChip'
 import { signInUrl, useCanAssign, useCanStage, useIdent as useIdentity, useIsAdmin } from './auth'
-import { ClassStrip, OwnershipFact, OwnershipHelp } from './PageFacts'
+import { OwnershipHelp, PageFacts } from './PageFacts'
 import { DiffTreemap, DiffHeader, useDiffModel } from './DiffTreemap'
 import { DiffTable } from './DiffTable'
 import { Allowances } from './Allowances'
@@ -25,7 +25,8 @@ import { FitSelect } from './FitSelect'
 import { PathPopover } from './PathPopover'
 import { fromUrlPath, mountedSegs, pathCopy, pathText, urlSegsOf } from './pathCrumbs'
 import { listsObjects, openHref, treeHref } from './objects'
-import { Busy, Skeleton } from './Busy'
+import { useFolderSearch } from './folderSearch'
+import { Busy, Loading, Skeleton } from './Busy'
 import { useRules } from './rules'
 import { useSectionSpy, withoutSection, type SectionMode } from 'use-prms/sections'
 import { LEGACY_ANCHORS, SECTION_IDS, SECTION_KEY } from './homeSections'
@@ -34,6 +35,8 @@ import { SectionAnchor } from './SectionAnchor'
 import { barControls } from './pageBar'
 import { LifecycleFold } from './LifecycleFold'
 import { ClassMixTip, Tooltip } from './Tooltip'
+import { indexingScans, searchOff } from './defaultScan'
+import { SearchOffNote, SearchOffTip } from './SearchCatchUp'
 import { scansHref, useScanRunOf } from './scanRunsUi'
 import { ReadThroughBanner } from './ReadThroughLi'
 import { readDay, readLogged, readThrough, readThroughText, unloggedOf } from './readLens'
@@ -49,7 +52,7 @@ import { budgetCutRefetch } from './budgetCut'
 import type { RowSource } from './MatchActions'
 import { type MatchFields, seriesMatches } from './filterMatches'
 import { QueryHelpTip } from './QueryHelp'
-import { apiError, indexedSyntax, refusalOf, useFilterCaps, useIndexedScans } from './filterCaps'
+import { apiError, indexedSyntax, refusalOf, useFilterCaps, useScanPreference } from './filterCaps'
 import { RootCrumb } from './RootCrumb'
 import { actBlock, noMatches } from './matchAct'
 import { type BlindPanel, blindNote, blindShown } from './filterBlind'
@@ -139,7 +142,7 @@ const SPANS: [string, number][] = [['1d', 1], ['3d', 3], ['7d', 7], ['14d', 14],
 // HTTP copy of a pre-deploy answer (they were kept a day until 2026-09-17,
 // five minutes since) is never replayed after a reader rule changes. Bump
 // with `CACHE_V` in functions/_lib/edgeCache.ts.
-const API_CV = '2'
+const API_CV = '3'
 // The section in view lives in the query (`?section=diff`), where a link preview's unfurler sees it; an incoming
 // `#diff` (or a retired `#changes`) is adopted into it. A module constant: `useSectionSpy` re-resolves its mode,
 // and re-binds its scroll listener, whenever this object's identity changes.
@@ -195,12 +198,21 @@ function AppContent() {
   // Scan selection (`?d=YYMMDD`) + the polling scan list, shared with /users
   // and /user/:id via useScan (specs/done/scan-param-all-pages.md). Absent `?d` is
   // a first-class "latest", so a parked tab follows new scans.
-  // A filtered view with no `?d=` on an indexed-only deployment opens on the newest scan the static
-  // index covers (a just-published scan isn't searchable until the index appends it), and says so.
+  // The default scan (`defaultScan.ts`, the deployment's `DEFAULT_SCAN`): a view with no `?d=` that prefers the
+  // static index's covered scans (a filtered one, or any on a `searchable` deployment) opens on the newest of them
+  // (a just-published scan isn't searchable until the index appends it), and says so. Until the caps say which
+  // mode, nothing is picked (no fetch of a scan the mode may rule out).
   const { indexedOnly: indexedOnly0 } = useFilterCaps()
   const [fFloat] = useUrlState('f', stringParam())
-  const indexedScans = useIndexedScans(indexedOnly0 && !!fFloat)
-  const { asof, miss, pending, scans, times, label: fmtS, dMatches, dP, setDP, span, setSpan, from, setFrom, setEndPin, setRange, at, setAt, atFrom, setFromAt, scansQ } = useScan(store, indexedOnly0 && fFloat ? indexedScans : undefined)
+  const { prefer, covered } = useScanPreference(!!fFloat)
+  const { asof, miss, pending, scans, times, label: fmtS, dMatches, dP, setDP, span, setSpan, from, setFrom, setEndPin, setRange, at, setAt, atFrom, setFromAt, scansQ } = useScan(store, prefer)
+  // The page's scan isn't in the static name index yet (published, not yet appended): the search box is shown
+  // disabled, its tip linking the scan's indexing run and the newest searchable scan in this view.
+  const searchIsOff = searchOff(asof, covered)
+  const newestSearchable = Array.isArray(covered) ? scans.find(s => covered.includes(s)) ?? null : null
+  const newestHref = newestSearchable ? hrefWithScan(pathname, search, selOf(new URLSearchParams(search)), newestSearchable, true, times, scans) : null
+  const indexing = useMemo(() => new Set(indexingScans(scans, covered)), [scans, covered])
+  const pickLabel = useCallback((id: string) => (indexing.has(id) ? `${fmtS(id)} · indexing` : fmtS(id)), [indexing, fmtS])
   const rulesQ = useRules()
   const rules: Rules | null = rulesQ.data ?? null
   // Ledger actions record which scan the actor was viewing.
@@ -522,7 +534,10 @@ function AppContent() {
   const deepRefused = !rootErr && fq && refusalOf(deepErr) ? deepErr : undefined
   const viewErr = rootErr ?? deepRefused
   // The box's error: the client's own parse, else the server's 400.
-  const fErr = fParse.error ?? fScopeRefused ?? /^400: bad query: (.*)/s.exec(viewErr?.message ?? '')?.[1]
+  // On a scan the index doesn't cover yet, its `scan-not-indexed` refusal is the box's disabled state and the map
+  // slot's catch-up note (with its links), not an error.
+  const notIndexed = searchIsOff && refusalOf(viewErr)?.code === 'scan-not-indexed'
+  const fErr = fParse.error ?? fScopeRefused ?? (notIndexed ? undefined : /^400: bad query: (.*)/s.exec(viewErr?.message ?? '')?.[1])
   // useQueries returns a fresh array each render; stamp the data so the graft
   // memo re-runs exactly when a response lands.
   // Both tiers stamp the graft: a depth-1 tree landing must re-run it just
@@ -781,6 +796,8 @@ function AppContent() {
   const [openP, setOpenP] = useUrlState('open', stringParam(), true)
   // Without the router's section: the spy names the one in view on the reader's next scroll.
   const openObject = (segs: string[]) => navigate(openHref(store, segs, withoutSection(search)))
+  // ⌘K: the folders and files named for the query, largest first, at this scan; a pick drills there (`folderSearch.ts`).
+  useFolderSearch({ fetcher: sfetch, date: asof ?? null, indexed: indexedOnly0 ? covered : null, at: endAt, qs: syntax.id, drill: drillTo, open: openObject, filter: q => setFq(q), size: fmtBytes })
   // Read-recency lens domain: the access-log observation window (meta), not
   // the tree's own min/max — "no reads" is only meaningful vs when logging began.
   // Where the scan's read data ends (`access.through`, spec `access-log-freshness.md`): the lens is then
@@ -1257,8 +1274,8 @@ function AppContent() {
           <span className="tb-scan">
             {union
               ? <UnionScanPicker sources={union.sources} value={asof} at={at} scans={scans} onChange={setDP} onAt={setAt} label="Scan date" compact
-                  fallback={<ScanCombobox value={asof} scans={scans} onChange={setDP} label="Scan date" fmt={fmtS} />} />
-              : <ScanCombobox value={asof} scans={scans} onChange={setDP} label="Scan date" fmt={fmtS} />}
+                  fallback={<ScanCombobox value={asof} scans={scans} onChange={setDP} label="Scan date" fmt={pickLabel} />} />
+              : <ScanCombobox value={asof} scans={scans} onChange={setDP} label="Scan date" fmt={pickLabel} />}
           </span>
         )}
         {/* How fresh the page's scan is, at a glance (the picker shows only
@@ -1327,17 +1344,29 @@ function AppContent() {
         )}
         {bar.pathFilter && (
           <span className={fq ? 'filterbox active' : 'filterbox'}>
-            <Explain text={`Filter paths (${boxSyntax.describe().label}): ${boxSyntax.describe().summary} — the ? lists the forms.`}>
-              <input
-                value={fqDraft ?? fqRaw ?? ''}
-                onChange={e => setFqDraft(e.target.value)}
-                placeholder={boxSyntax.describe().placeholder}
-                aria-label="Filter tree by path"
-                data-log-input="filter"
-                aria-invalid={!!fErr}
-                size={30}
-              />
-            </Explain>
+            {searchIsOff && asof ? (
+              <Tooltip pinnable content={<SearchOffTip store={store} scan={asof} newest={newestSearchable} newestHref={newestHref} fmt={fmtS} />}>
+                <input
+                  value={fqDraft ?? fqRaw ?? ''}
+                  placeholder="search catches up after indexing"
+                  aria-label="Filter tree by path (not yet available for this scan)"
+                  disabled
+                  size={30}
+                />
+              </Tooltip>
+            ) : (
+              <Explain text={`Filter paths (${boxSyntax.describe().label}): ${boxSyntax.describe().summary} — the ? lists the forms.`}>
+                <input
+                  value={fqDraft ?? fqRaw ?? ''}
+                  onChange={e => setFqDraft(e.target.value)}
+                  placeholder={boxSyntax.describe().placeholder}
+                  aria-label="Filter tree by path"
+                  data-log-input="filter"
+                  aria-invalid={!!fErr}
+                  size={30}
+                />
+              </Explain>
+            )}
             {indexedOnly
               ? <QueryHelpTip syntaxes={[syntax]} active={syntax} />
               : <QueryHelpTip syntaxes={SYNTAXES} active={syntax} onPick={id => setQsP(id === storeSyntax.id ? undefined : id)} />}
@@ -1355,7 +1384,7 @@ function AppContent() {
 
       {/* Ambiguous `?d`: render the newest match (a best guess beats a dead
           end) with a strip listing every candidate to pin one. */}
-      {asof && pending.length > 0 && <p className="tab-note pending-index" role="status">{pendingNote(asof, pending)}</p>}
+      {asof && pending.length > 0 && <p className="tab-note pending-index" role="status">{pendingNote(asof, pending, undefined, !!fq)}</p>}
       {union && <UnionMissingNote union={(subtreeQs[0]?.data ?? coarseQs[0]?.data)?.union} />}
       {dMatches.length > 1 && (
         <p className="disambig">
@@ -1458,7 +1487,7 @@ function AppContent() {
           )}
           {/* The opened object (`?open=`), under the map it was picked from. */}
           {openP && mapPath && (
-            <Suspense fallback={<p className="loading">loading the viewer…</p>}>
+            <Suspense fallback={<Loading label="Loading the viewer…" />}>
               <ObjectPanel
                 segs={[...segs, openP]}
                 node={mapPath.length - 1 === segs.length ? mapPath[mapPath.length - 1].c?.find(c => c.n === openP) : undefined}
@@ -1489,6 +1518,15 @@ function AppContent() {
               access={meta?.access}
             /></div>
           )}
+          {/* The drilled node's storage-class mix and the ownership share, one compact row under the map's own
+              listing (it follows the drill); the per-class table opens from its disclosure (`?cx`). */}
+          {blindShown(!!fq) && (
+            <PageFacts
+              mix={meta && store.prices && mapPath ? classMix(mapPath[mapPath.length - 1]) : undefined}
+              scope={mapPath && mapPath.length > 1 ? mapPath.slice(1).map(n => n.n).join('/') : store.rootLabel}
+              tree={hasAttr ? mapTree ?? undefined : undefined}
+            />
+          )}
         </>
       ) : miss ? (
         <NoScanMatch miss={miss} fmt={fmtS} hrefFor={scan => hrefWithScan(pathname, search, selOf(new URLSearchParams(search)), scan, true, times, scans)} />
@@ -1497,6 +1535,9 @@ function AppContent() {
           {rootErr.message.startsWith('409') ? 'no per-user index for this scan — pick a newer scan, or clear the user'
             : 'this view is too wide for the index — drill in, or narrow the scope'}
         </p>
+      ) : viewErr && notIndexed && asof ? (
+        // A scan the static name index doesn't cover yet: why, and the ways on (its indexing run, the newest searchable scan).
+        <SearchOffNote store={store} scan={asof} newest={newestSearchable} newestHref={newestHref} fmt={fmtS} />
       ) : viewErr ? (
         // The filter's refusal as its reason, inline; any other failure as its message, a 5xx with a retry.
         <LoadFailure err={viewErr} what="view" onRetry={retryMap} />
@@ -1513,7 +1554,7 @@ function AppContent() {
         // First paint only — before even the depth-1 tree has landed (later
         // loads hold the previous tree instead): reserve the map's slot at its
         // fetch aspect (w : 0.6w), so nothing below it jumps when it arrives.
-        <div id="tree-map" className="tm-skel" aria-busy="true" aria-label="loading tree" />
+        <div id="tree-map" className="tm-skel busy-host" aria-busy="true"><Busy label="Loading storage map…" /></div>
       )}
 
       {/* Bytes per scan under the drilled prefix, scoped like the map (a user
@@ -1616,7 +1657,7 @@ function AppContent() {
             </span>
             {diffHead ? (
               <>
-                {diffStale && <span className="loading"> · aligning the rows…</span>}
+                {diffStale && <Loading label="Aligning the rows…" />}
               </>
             ) : diffErr && !diffStale && /^(404|409)/.test(diffErr.message) ? (
               <span className="tab-note">
@@ -1628,7 +1669,7 @@ function AppContent() {
               // The filter's refusal as its reason; any other failure as its message, a 5xx with a retry.
               <>{' · '}<LoadFailure as="span" className="tab-note" err={diffErr} what={`diff ${fmtS(diffPrev)} → ${fmtS(asof)}`} onRetry={() => void diffQ.refetch()} /></>
             ) : (
-              <span className="loading"> · aligning {fmtS(diffPrev)} → {fmtS(asof)}…</span>
+              <Loading label={`Aligning ${fmtS(diffPrev)} → ${fmtS(asof)}…`} />
             )}
           </span>} />
           <DiskSpaceDiff before={beforeMetaQ.data?.disk_space} after={meta?.disk_space} />
@@ -1646,7 +1687,7 @@ function AppContent() {
               {/* The map's tabular twin: the same cells as rows, sortable; a
                   row's name drills like its cell (and scrolls the maps up). */}
               <DiffTable model={diffModel} scheme={store.scheme} segs={diffSegs} onDrill={rel => openPath([...diffSegs, ...rel])} onOpen={rel => openObject([...diffSegs, ...rel])} />
-              {diffStaleOther
+              {diffStaleOther || diffStale
                 ? <Busy label={`aligning ${fmtS(diffPrev)} → ${fmtS(asof)}…`} />
                 : diffRefining
                   ? <Busy label="aligning rows…" corner />
@@ -1703,21 +1744,6 @@ function AppContent() {
           note={<>Intended state is tracked in <code>{store.lifecycle.tracked}</code> (<code>dt-cloud lifecycle diff|push</code>).</>}
         />
       )}
-
-      {/* The storage-class mix (follows the drill) and the ownership share, folded into one compact row; the
-          class bytes + $ and the ownership explainer live in their tooltips. */}
-      {blindShown(!!fq) && ((meta && store.prices) || (hasAttr && mapTree)) && (() => {
-        // Class mix of the *drilled* node (each node carries descendant-inclusive
-        // `cb`), so this tracks the treemap instead of always showing fleet totals.
-        const node = mapPath ? mapPath[mapPath.length - 1] : tree
-        const scope = mapPath && mapPath.length > 1 ? mapPath.slice(1).map(n => n.n).join('/') : store.rootLabel
-        return (
-          <div className="page-facts">
-            {meta && store.prices && node && <ClassStrip mix={classMix(node)} scope={scope} />}
-            {hasAttr && mapTree && <OwnershipFact tree={mapTree} />}
-          </div>
-        )
-      })()}
 
       <SiteKbd
         placeholder={store.owners ? 'Users, color modes, scans, pages…' : 'Color modes, scans, pages, actions…'}

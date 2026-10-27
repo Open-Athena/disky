@@ -312,9 +312,10 @@ def test_list_hf_to_parquet(tmp_path: Path):
     assert bulk_hf.list_hf_to_parquet("hf://open-athena", str(out), threads=2, client=c) == 10
     assert sorted(p.name for p in out.iterdir()) == ["_SUCCESS.json", "shard-0000.parquet"]
     df = pd.read_parquet(out / "shard-0000.parquet")
-    assert df.columns.tolist() == ["bucket", "name", "size_bytes", "created", "storage_class_id", "generation"]
+    assert df.columns.tolist() == ["bucket", "name", "size_bytes", "created", "storage_class_id", "generation", "version"]
+    assert df["version"].isna().tolist() == [True] * len(EXPECTED_ROWS)  # HF has no object versions
     assert [
-        (b, n, s, c_.isoformat(), k, g) for b, n, s, c_, k, g in df.astype(object).itertuples(index=False)
+        (b, n, s, c_.isoformat(), k, g) for b, n, s, c_, k, g in df.drop(columns='version').astype(object).itertuples(index=False)
     ] == [
         ("open-athena", n, s, pd.Timestamp(t).isoformat(), {"public": 1, "git": 6}[k], pd.NA)
         for n, s, t, k, _ in EXPECTED_ROWS
