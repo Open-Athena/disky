@@ -314,13 +314,23 @@ const named = (store: string, reason: string): string => `${store}: ${reason}`
 
 /**
  * A union root's filtered answer (`q=`): every answering member's filtered root (each read under the union's one
- * threshold), merged as the plain root merges — the tree by `unionRoot`, the match lists concatenated (each
+ * threshold), merged as the plain root merges — the tree by `unionRoot`, the filter fields by `unionFilterFields`.
+ */
+export function unionFiltered(view: UnionView, label: string, members: readonly { store: string; date: string; body: FilteredRoot }[], refused: readonly Refusal[]): Omit<FilteredRoot, 'tree'> & { tree: ViewNode; partial?: true; approximate?: true } {
+  return {
+    ...unionFilterFields(members, refused),
+    tree: unionRoot(view, label, members.map(m => ({ store: m.store, date: m.date, tree: m.body.tree }))),
+  }
+}
+
+/**
+ * The filter fields of a union root's filtered answer (a subtree's or a diff's): the match lists concatenated (each
  * member's paths are under its own roots), `matchCount` and the rollup counts summed, a flag set when any member
  * set it. A member that refused the filter for its mount (`refused`) contributes nothing and makes the answer
  * partial, named in `partialReason` (`<store>: <why>`, as each member's own partial reason is) — never a zero
  * for its mount.
  */
-export function unionFiltered(view: UnionView, label: string, members: readonly { store: string; date: string; body: FilteredRoot }[], refused: readonly Refusal[]): Omit<FilteredRoot, 'tree'> & { tree: ViewNode; partial?: true; approximate?: true } {
+export function unionFilterFields(members: readonly { store: string; body: Omit<FilteredRoot, 'tree'> }[], refused: readonly Refusal[]): Omit<FilteredRoot, 'tree'> & { partial?: true; approximate?: true } {
   const bodies = members.map(m => m.body)
   const counts = bodies.flatMap(b => (b.matchCount ? [b.matchCount] : []))
   const rollups = bodies.flatMap(b => (b.rollup ? [b.rollup] : []))
@@ -351,6 +361,5 @@ export function unionFiltered(view: UnionView, label: string, members: readonly 
     ...(partial.length ? { partial: true as const, partialReason: partial.join(' · ') } : {}),
     ...(approximate.length ? { approximate: true as const, approximateReason: approximate.join(' · ') } : {}),
     ...(bodies.some(b => b.dirsOnly) ? { dirsOnly: true as const } : {}),
-    tree: unionRoot(view, label, members.map(m => ({ store: m.store, date: m.date, tree: m.body.tree }))),
   }
 }
