@@ -749,7 +749,7 @@ def test_redo_replies(tmp_path: Path):
 
 
 def test_redo_replies_since(tmp_path: Path):
-    # only 9/2 on is redone; 9/1 keeps its reply (m2), and an old rule's extra 9/1 reply (m9) leaves the state, not the thread
+    # only 9/2 on is redone; 9/1 keeps its reply (m2), and an old rule's extra 9/1 reply (m9) stays in the thread, as `extra`
     root, fake = _old_rule_thread(tmp_path)
     path = tmp_path / "digest" / "cw" / "C1" / "sender" / "2026-09.json"
     st = json.loads(path.read_text())
@@ -769,6 +769,12 @@ def test_redo_replies_since(tmp_path: Path):
         ("delete", "m3"),
     ]
     assert state["posted"] == {"2026-09-01": {"ts": "m2", "scan": "2026-09-01T0000"}, "2026-09-02": {"ts": "m4", "scan": "2026-09-02T1200"}}
+    assert state["extra"] == {"2026-09-01T1800": {"ts": "m9", "scan": "2026-09-01T1200"}}
+    # a later unrestricted redo still finds m9, and deletes it with the rest
+    fake.calls.clear()
+    state = redo_replies(str(root), SEP, "xoxb", "C1", "sender", client=fake, for_real=True)
+    assert [c for c in fake.calls if c[0] == "delete"] == [("delete", "m9"), ("delete", "m2"), ("delete", "m4")]
+    assert state.get("extra") is None
 
 
 def test_redo_replies_since_rekeys_to_the_days_earliest(tmp_path: Path):

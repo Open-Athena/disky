@@ -747,12 +747,13 @@ def redo_replies(tpl: Template, root: str, month: dt.date, client, channel: str,
     ``since`` redoes only the days from it on. An earlier day keeps its posted
     reply, re-keyed to the current unit's key (the record under that exact key,
     else under the unit's scan, else the day's earliest key); the day's other replies (an old rule's extras)
-    leave the state and stay in the thread. A unit with no reply that day is
+    stay in the thread and move to the state's ``extra`` (never edited; a later redo over their days deletes
+    them, as an unrestricted one does all). A unit with no reply that day is
     posted by the converge, after the redone days.
 
     Dry-run (default) returns the plan — ``old`` replies (key, record), ``new``
     (key, scan, headline), ``rekey`` (current key, old key) and ``left`` (old
-    keys dropped from the state, still in the thread) — and posts nothing. ``for_real``: the old
+    keys kept in the thread, as ``extra``) — and posts nothing. ``for_real``: the old
     ts list is stashed in the state as ``stale`` first, ``posted`` is
     cleared, the normal converge appends the new replies to the same thread,
     and only if every post succeeded are the stale ts deleted (a failed
@@ -765,7 +766,7 @@ def redo_replies(tpl: Template, root: str, month: dt.date, client, channel: str,
         return {}
     path = state_path(root, month, tpl.cfg.state.format(channel=channel, variant=variant))
     state = load_state(path)
-    plan, kept = _redo_plan(tpl.units(data, variant), state.get("posted", {}), since, lambda r: r.username if variant == "sender" else r.body)
+    plan, kept = _redo_plan(tpl.units(data, variant), _replies(state), since, lambda r: r.username if variant == "sender" else r.body)
     if not for_real:
         return plan
     if not state.get("op_ts"):
@@ -782,7 +783,7 @@ def _redo_plan(units: Iterable[Any], posted: dict[str, Any], since: dt.date | No
     """A redo's plan over a thread's ``posted`` replies and the current ``units``
     (see `redo_replies`): ``old`` (key, record) to delete, ``new`` (key, scan,
     ``headline(reply)``) to post, ``rekey`` (current key, old key) and ``left``
-    (old keys dropped from the state) for the days before ``since``; and the
+    (old keys the state keeps as ``extra``) for the days before ``since``; and the
     re-keyed records the state keeps."""
     cut = since.isoformat() if since else ""
     units = list(units)
@@ -802,10 +803,20 @@ def _redo_plan(units: Iterable[Any], posted: dict[str, Any], since: dt.date | No
     return {"old": old, "new": new, "rekey": rekey, "left": left}, kept
 
 
+def _replies(state: dict) -> dict[str, Any]:
+    """Every reply a thread's state tracks: ``posted`` and an earlier ``since`` redo's ``extra``."""
+    return {**state.get("extra", {}), **state.get("posted", {})}
+
+
 def _stash(state: dict, plan: dict, kept: dict[str, Any]) -> None:
-    """A redo's first write: the old replies' ids queued as ``stale``, ``posted`` = the kept ones."""
+    """A redo's first write: the old replies' ids queued as ``stale``, ``posted`` = the kept ones, ``extra`` = the
+    left ones (still in the thread)."""
+    replies = _replies(state)
     state["stale"] = [_ts(e) for _, e in plan["old"]] + state.get("stale", [])
     state["posted"] = kept
+    state.pop("extra", None)
+    if plan["left"]:
+        state["extra"] = {k: replies[k] for k in plan["left"]}
 
 
 def _delete_stale(state: dict, delete) -> None:
@@ -876,7 +887,7 @@ def redo_discord(tpl: Template, data: Any, month: dt.date, state: dict, *, since
     and, only once all posted, the old ones deleted through ``reply_hook`` (the
     thread-bound webhook client; a webhook deletes only its own messages)."""
     save = save or (lambda s: None)
-    plan, kept = _redo_plan(tpl.units(data, tpl.variants[0], "discord"), state.get("posted", {}), since, lambda r: r.username)
+    plan, kept = _redo_plan(tpl.units(data, tpl.variants[0], "discord"), _replies(state), since, lambda r: r.username)
     if not for_real:
         return plan
     if not state.get("thread_id"):
