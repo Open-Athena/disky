@@ -3226,7 +3226,7 @@ def _print_redo_plan(plan: dict, where: str, since: dt.date | None) -> None:
         print(f"  kept before {since} (re-keyed): {len(plan['rekey'])}")
         for key, was in plan["rekey"]:
             print(f"    {key}" + (f"  <- {was}" if was != key else ""))
-        print(f"  left in the thread, dropped from the state: {len(plan['left'])}")
+        print(f"  left in the thread, kept as `extra`: {len(plan['left'])}")
         for key in plan["left"]:
             print(f"    {key}")
 

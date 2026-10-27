@@ -352,7 +352,7 @@ def test_converge_discord_edit_replies():
 
 def test_redo_discord_since():
     # an old rule's thread: 8/3 under its scan's key + an extra, 8/4 under a scan key. Redo from 8/4: 8/3's reply kept
-    # (re-keyed), its extra dropped from the state; 8/4 posted fresh, then its old reply deleted through the thread hook
+    # (re-keyed), its extra kept as `extra` (still in the thread); 8/4 posted fresh, then its old reply deleted through the thread hook
     hook, bot, rhook = _FakeHook(), _FakeBot(), _FakeHook()
     hook.n = 4  # m1–m4 already posted
     state = {"op_id": "m1", "thread_id": "t1", "posted": {"2026-08-03T0700": "m2", "2026-08-03T1500": "m3", "2026-08-04T0700": "m4"}}
@@ -370,7 +370,7 @@ def test_redo_discord_since():
         ("post", "$19,374/mo (−$410) \u00b7 [view \u2192](https://site.example.org/?d=260804#diff)", "t1", "8/4 — 3,010 TiB (−20.0, 0.7%)", f"{AV}-40.png?v=4", []),
     ]
     assert rhook.calls == [("delete", "m4")]
-    assert state == {"op_id": "m1", "thread_id": "t1", "posted": {"2026-08-03": "m2", "2026-08-04": "m5"}}
+    assert state == {"op_id": "m1", "thread_id": "t1", "posted": {"2026-08-03": "m2", "2026-08-04": "m5"}, "extra": {"2026-08-03T1500": "m3"}}
 
 
 def test_md_takes_sub_daily_scan_ids() -> None:
