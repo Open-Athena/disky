@@ -2032,6 +2032,9 @@ SUCCESSOR = "successor.json"
 #: In a generation a compaction wrote, uploaded last (its completion marker): `{from, manifest, runs, base_scans, scans,
 #: level[, rule, why]}`, and with `Compactor.md5s` each file's md5.
 COMPACTION = "compaction.json"
+#: In a candidate generation (`compact_store(promote=False)`), written before any of its other files: `{"from": <gen>}`.
+#: Nothing points at a candidate until `promote`; a compaction of `<from>` refuses to replace one.
+CANDIDATE = "candidate.json"
 #: The least seconds between a fold's progress notes on its run record (`compact_store`).
 NOTE_S = 30.0
 GEN_SUFFIX = re.compile(r"(?P<root>.+)\.c(?P<n>\d{3,})")
@@ -2241,7 +2244,7 @@ def store_newest_runs(store, prefix: str) -> tuple[str | None, list[dict]]:
 
 def compact_store(store, c: Compactor, gen: str, gen_dir: Path, work: Path, *, policy: Policy | int | None, why: str, threads: int = 4,
                   mem: str = "4GB", jobs: int = 1, r2: Callable[[str, str], dict] | None = None, reads: dict | None = None,
-                  rec: Recorder | None = None, log: Callable[[str], None] = err) -> dict:
+                  promote: bool = True, rec: Recorder | None = None, log: Callable[[str], None] = err) -> dict:
     """Generation `gen` of `store` (a `blobstore.Store`; its files readable in `gen_dir`: a mirror or a mount) folded
     into the next one (`next_gen`, by `c.fold`) and published: an earlier, unpublished attempt's keys removed; the new
     generation's files in `c.publish_order`, `compaction.json` last; `successor.json` in `gen`; `CURRENT.json` when it
@@ -2255,6 +2258,11 @@ def compact_store(store, c: Compactor, gen: str, gen_dir: Path, work: Path, *, p
     manifest, so one of the two sees the other). A scan that landed: the new generation is deleted (and the successor
     record, when written), nothing else moves, and the summary says `superseded`; the next compaction folds it all.
 
+    `promote` off: a candidate. `candidate.json` goes up first, then the generation as above (`r2` copies it too), but
+    no `successor.json` and no pointer: readers and appends stay on `gen` until `promote_gen` (or the candidate is
+    deleted). Appends landing on `gen` meanwhile don't supersede it; `promote_gen` wants them in the candidate. An
+    existing candidate is replaced only by another candidate; a promoting compaction refuses it.
+
     `rec`: the run's record (`maint_runs`): phases `fold` (the interval store's then `sorts`: the fold's `progress`
     hook moves it on), `upload`, `pointer`, `r2`, each with its note (rows, files, GiB, seconds, work-disk / RSS peaks)."""
     from .blobstore import upload_new
@@ -2266,8 +2274,14 @@ def compact_store(store, c: Compactor, gen: str, gen_dir: Path, work: Path, *, p
     new = next_gen(gen)
     new_prefix = f"{c.prefix}/{new}"
     if stale := store.listing(new_prefix):
-        # Not yet recorded as `gen`'s successor (`resolve_gen` would have followed it): an interrupted compaction's.
-        log(f"compact {gen}: {len(stale)} objects of an unpublished {new}: replaced")
+        # Not yet recorded as `gen`'s successor (`resolve_gen` would have followed it): an interrupted compaction's, or a
+        # candidate (whole or not) awaiting `promote_gen`.
+        cand = f"{new_prefix}/{CANDIDATE}" in stale
+        if cand != (not promote):
+            raise SystemExit(f"{store.root}/{new_prefix}: " + (
+                f"a candidate generation (`compact -N`): promote it or delete it before compacting {gen} again" if cand else
+                f"{len(stale)} objects of an unpublished compaction (not a candidate; maybe one running now): not replacing them with a candidate"))
+        log(f"compact {gen}: {len(stale)} objects of an unpublished {'candidate ' if cand else ''}{new}: replaced")
         store.delete(sorted(stale))
     manifest, runs = newest_runs(gen_dir)
     if not runs:
@@ -2276,7 +2290,9 @@ def compact_store(store, c: Compactor, gen: str, gen_dir: Path, work: Path, *, p
     out = work / "store" / new_prefix
     work.mkdir(parents=True, exist_ok=True)
     t0, disk = monotonic(), DiskPeak(work)
-    log(f"compact {gen} → {new} under {as_policy(policy)} ({why}): {len(runs)} runs and the base")
+    if not promote:
+        store.write_text(f"{new_prefix}/{CANDIDATE}", json.dumps({"from": gen}) + "\n")
+    log(f"compact {gen} → {new}{'' if promote else ' (a candidate)'} under {as_policy(policy)} ({why}): {len(runs)} runs and the base")
     # the fold's hook: notes on its running phase (at most every `NOTE_S`: a range ends every few seconds), the next phase
     progress = PhaseHook(rec, "fold", note_s=NOTE_S, suffix=lambda: f"; work disk peak {disk.take()} GiB, RSS peak {rss_peak_gb()} GiB")
     progress.begin()
@@ -2289,7 +2305,7 @@ def compact_store(store, c: Compactor, gen: str, gen_dir: Path, work: Path, *, p
         raise
     progress.end(f"{fold_note(summary)}; work disk peak {disk.take()} GiB, RSS peak {rss_peak_gb()} GiB")
     comp = {"from": gen, "manifest": manifest, "runs": [r["key"] for r in runs], "base_scans": base_scans,
-            "scans": len(json.loads((out / "scans.json").read_text())["scans"]), **compaction_doc(policy, why)}
+            "scans": len(json.loads((out / "scans.json").read_text())["scans"]), **compaction_doc(policy, why), **({} if promote else {"candidate": True})}
     if c.md5s:
         comp["files"] = md5s(out)
     (out / COMPACTION).write_text(json.dumps(comp, indent=1) + "\n")
@@ -2317,21 +2333,27 @@ def compact_store(store, c: Compactor, gen: str, gen_dir: Path, work: Path, *, p
         store.delete(sorted(store.listing(new_prefix)))
         return {**summary, "runs": comp["runs"], "scans": comp["scans"], "superseded": key, "s": round(monotonic() - t0, 1)}
 
-    with phase(rec, "pointer") as ph:
-        if key := landed():
-            ph.note = f"superseded: {key} landed on {gen} during the fold; {new} deleted, not published"
-            return superseded(key, successor=False)
-        store.write_text(f"{c.prefix}/{gen}/{SUCCESSOR}", json.dumps({"gen": new}) + "\n")
-        if key := landed():
-            ph.note = f"superseded: {key} landed on {gen} during the fold; {new} and its successor record deleted, not published"
-            return superseded(key, successor=True)
+    if promote:
+        with phase(rec, "pointer") as ph:
+            if key := landed():
+                ph.note = f"superseded: {key} landed on {gen} during the fold; {new} deleted, not published"
+                return superseded(key, successor=False)
+            store.write_text(f"{c.prefix}/{gen}/{SUCCESSOR}", json.dumps({"gen": new}) + "\n")
+            if key := landed():
+                ph.note = f"superseded: {key} landed on {gen} during the fold; {new} and its successor record deleted, not published"
+                return superseded(key, successor=True)
+            summary.update(runs=comp["runs"], scans=comp["scans"], why=why, files=len(files), upload_s=up_s,
+                           bytes=sum(p.stat().st_size for p in out.rglob("*") if p.is_file()), reads=reads)
+            was = current(store, c.prefix)
+            summary["current"] = was in (None, gen)
+            if summary["current"]:
+                set_current(store, c.prefix, new)
+            ph.note = f"{gen}/{SUCCESSOR} → {new}; " + (f"{CURRENT} → {new}" if summary["current"] else f"{CURRENT} names {was}: unchanged")
+    else:
         summary.update(runs=comp["runs"], scans=comp["scans"], why=why, files=len(files), upload_s=up_s,
-                       bytes=sum(p.stat().st_size for p in out.rglob("*") if p.is_file()), reads=reads)
-        was = current(store, c.prefix)
-        summary["current"] = was in (None, gen)
-        if summary["current"]:
-            set_current(store, c.prefix, new)
-        ph.note = f"{gen}/{SUCCESSOR} → {new}; " + (f"{CURRENT} → {new}" if summary["current"] else f"{CURRENT} names {was}: unchanged")
+                       bytes=sum(p.stat().st_size for p in out.rglob("*") if p.is_file()), reads=reads, current=False, candidate=True)
+        with phase(rec, "pointer") as ph:
+            ph.note = f"a candidate: no {gen}/{SUCCESSOR}, {CURRENT} unchanged (`promote` moves them)"
     if r2 is not None:
         with phase(rec, "r2") as ph:
             summary["r2"] = r2(new, gen)
@@ -2350,12 +2372,12 @@ R2_WORKERS = 32
 
 
 def r2_publish_gen(bucket: str, prefix: str, new: str, old: str, *, last: tuple[str, ...] = ("scans.json",), workers: int = R2_WORKERS,
-                   log: Callable[[str], None] = err) -> dict:
+                   promote: bool = True, log: Callable[[str], None] = err) -> dict:
     """A compacted generation to R2 from GCS (`gs://<bucket>/<prefix>/<new>/`, under the same keys): its files, those its
     readers open it by (`last`, generation-relative) after the rest and `compaction.json` after them; checked there; then
     the old generation's `successor.json`; then `<prefix>/CURRENT.json` (as GCS has it), last: an R2 reader following
     the pointer never finds a generation that isn't whole. Raises (`SystemExit`, the pointer not moved) when the check
-    fails."""
+    fails. `promote` off (a candidate): the generation only; `r2_promote` copies the two pointers later."""
     t0 = monotonic()
     root = f"{prefix}/{new}/"
     tail_names = [*last, COMPACTION]
@@ -2367,9 +2389,62 @@ def r2_publish_gen(bucket: str, prefix: str, new: str, old: str, *, last: tuple[
         r2_copy(bucket, [o], workers=1, log=log)
     if bad := r2_missing([*body, *tail], workers=workers):
         raise SystemExit(f"r2 {prefix}/{new}: {len(bad)} of {len(objs)} files not on R2 after the copy (e.g. {bad[0]}): pointer not moved")
+    if promote:
+        r2_promote(bucket, prefix, old, log=log)
+    return {"objects": len(objs), "copied": doc["copied"] + len(tail), "bytes": doc["bytes"] + sum(o.size for o in tail), "s": round(monotonic() - t0, 1)}
+
+
+def r2_promote(bucket: str, prefix: str, old: str, *, log: Callable[[str], None] = err) -> None:
+    """The R2 copy's pointers to a generation already on R2: `old`'s `successor.json`, then `<prefix>/CURRENT.json`, as
+    the data bucket has them."""
     for key in (f"{prefix}/{old}/{SUCCESSOR}", f"{prefix}/{CURRENT}"):
         r2_copy(bucket, r2_objects(bucket, [key]), workers=1, log=log)
-    return {"objects": len(objs), "copied": doc["copied"] + len(tail), "bytes": doc["bytes"] + sum(o.size for o in tail), "s": round(monotonic() - t0, 1)}
+
+
+def gen_scans(store, prefix: str) -> list[str]:
+    """The scans generation `prefix` holds: its base's (`scans.json`), then its newest manifest's runs'."""
+    _, runs = store_newest_runs(store, prefix)
+    return [s["id"] for s in store.read_json(f"{prefix}/scans.json")["scans"]] + run_scans(runs)
+
+
+def promote_gen(store, prefix: str, new: str, *, r2_bucket: str | None = None, log: Callable[[str], None] = err) -> dict:
+    """Candidate `new` (`compact_store(promote=False)`) made the successor of the generation it was compacted from and,
+    when `CURRENT.json` named that one (or nothing), the current generation; with `r2_bucket` (the data bucket the R2
+    copy mirrors), then the R2 copy's pointers (`r2_promote`). Refused, nothing moved: `new` not a whole candidate
+    (`candidate.json`, `compaction.json`), its source already compacted, `new` lacking a scan its source holds (append
+    those to `new` first), or R2 lacking a file of `new`. A scan appended to the source as its successor record is
+    written: the record removed again, refused. Returns `{from, gen, current}`."""
+    new_prefix = f"{prefix}/{new}"
+    for marker, what in ((CANDIDATE, "not a candidate"), (COMPACTION, "not whole: its compaction didn't finish")):
+        if not store.exists(f"{new_prefix}/{marker}"):
+            raise SystemExit(f"{store.root}/{new_prefix}: {what} ({marker} missing)")
+    old = store.read_json(f"{new_prefix}/{CANDIDATE}")["from"]
+    old_prefix = f"{prefix}/{old}"
+    if store.exists(f"{old_prefix}/{SUCCESSOR}"):
+        raise SystemExit(f"{store.root}/{old_prefix}: already compacted into {store.read_json(f'{old_prefix}/{SUCCESSOR}')['gen']}")
+
+    def lacking() -> list[str]:
+        have = set(gen_scans(store, new_prefix))
+        return [s for s in gen_scans(store, old_prefix) if s not in have]
+
+    if lack := lacking():
+        raise SystemExit(f"{new} lacks {len(lack)} scan{'s' * (len(lack) != 1)} {old} holds ({lack[0]}" + (f" … {lack[-1]}" if len(lack) > 1 else "")
+                         + f"): append {'them' if len(lack) > 1 else 'it'} to {new} first")
+    if r2_bucket and (bad := r2_missing(r2_objects(r2_bucket, [f"{new_prefix}/"]))):
+        raise SystemExit(f"r2 {new_prefix}: {len(bad)} files not on R2 (e.g. {bad[0]}): copy the candidate there first")
+    store.write_text(f"{old_prefix}/{SUCCESSOR}", json.dumps({"gen": new}) + "\n")
+    if lack := lacking():
+        store.delete([f"{old_prefix}/{SUCCESSOR}"])
+        raise SystemExit(f"{lack[-1]} landed on {old} as {new} was promoted: its successor record removed; append it to {new}, then promote again")
+    was = current(store, prefix)
+    moved = was in (None, old)
+    if moved:
+        set_current(store, prefix, new)
+    log(f"promote {new}: {old}/{SUCCESSOR} → {new}; " + (f"{CURRENT} → {new}" if moved else f"{CURRENT} names {was}: unchanged"))
+    if r2_bucket:
+        r2_promote(r2_bucket, prefix, old, log=log)
+        log(f"promote {new}: the R2 copy's pointers moved")
+    return {"from": old, "gen": new, "current": moved}
 
 
 def run_compaction(store, c: Compactor, gen: str, mount: Path, work: Path, *, lease: LeaseFile | None = None, log: Callable[[str], None] = err,
@@ -2386,7 +2461,8 @@ def run_compaction(store, c: Compactor, gen: str, mount: Path, work: Path, *, le
 
 def compact_generation(store, c: Compactor, gen: str, mount: Path, work: Path, *, policy: Policy | int | None, force: bool = False,
                        r2_bucket: str | None = None, grace_s: float = GRACE_S, now: float | None = None, threads: int = 4, mem: str = "4GB",
-                       jobs: int = 1, read_from: str = "gcs", source=None, rec: Recorder | None = None, log: Callable[[str], None] = err) -> dict:
+                       jobs: int = 1, read_from: str = "gcs", source=None, promote: bool = True, rec: Recorder | None = None,
+                       log: Callable[[str], None] = err) -> dict:
     """The Batch `compact` stage (both stores): generation `gen` of `store` (the data bucket, a `blobstore.Store`)
     followed to its newest successor; when `policy` fires (or `force`, with runs), folded into the next one and published
     (`compact_store`) — GCS first, then, with `r2_bucket` (the data bucket the R2 copy mirrors), R2 (`r2_publish_gen`:
@@ -2394,7 +2470,8 @@ def compact_generation(store, c: Compactor, gen: str, mount: Path, work: Path, *
     `read_from` `gcs`: the generation is read in place from `mount` (`<mount>/<prefix>/<gen>/`, the bucket's mount);
     `r2`: what the fold reads (`c.keep`) is mirrored from the R2 copy (`source`, default `R2Source()`) first, refused
     when it lacks any of it (`read_tree`). Idempotent: a rerun after a compaction finds the successor, which isn't due.
-    Returns `{gen, why, compact, predecessors}`.
+    `promote` off: a candidate (`compact_store`), nothing pruned; `promote_gen` points at it later. Returns `{gen, why,
+    compact, predecessors}`.
 
     `rec`: the run's record on `/scans` (`maint_runs`, kind `compact`): started once the generation is resolved (its
     `scan` the newest scan the generation holds: the newest the fold would fold), phases `read`, `due`, then
@@ -2430,10 +2507,10 @@ def compact_generation(store, c: Compactor, gen: str, mount: Path, work: Path, *
             return doc
         r2 = None
         if r2_bucket:
-            r2 = lambda new, old: r2_publish_gen(r2_bucket, c.prefix, new, old, last=c.last, log=log)  # noqa: E731
+            r2 = lambda new, old: r2_publish_gen(r2_bucket, c.prefix, new, old, last=c.last, promote=promote, log=log)  # noqa: E731
         doc["compact"] = compact_store(store, c, gen, gen_dir, work, policy=policy, why=why, threads=threads, mem=mem, jobs=jobs, r2=r2, reads=reads,
-                                       rec=rec, log=log)
-        if c.prune and not doc["compact"].get("superseded"):
+                                       promote=promote, rec=rec, log=log)
+        if c.prune and promote and not doc["compact"].get("superseded"):
             with phase(rec, "prune") as ph:
                 doc["predecessors"] = prune_predecessors(store, c.prefix, doc["compact"]["gen"], now=time.time() if now is None else now, grace_s=grace_s, log=log)
                 ph.note = "; ".join(f"{p['gen']}: {p['objects']} objects, {gib(p['bytes'])} " + ("deleted" if p["deleted"] else f"kept ({round(p['age_s'] / 3600)}h old)")
@@ -2445,7 +2522,7 @@ def compact_generation(store, c: Compactor, gen: str, mount: Path, work: Path, *
     if sup := doc["compact"].get("superseded"):
         rec.finish("nop", gen=f"{prefix} (superseded: {sup}, not published)")
     else:
-        rec.finish("succeeded", gen=f"{prefix} → {doc['compact']['gen']}")
+        rec.finish("succeeded", gen=f"{prefix} → {doc['compact']['gen']}" + ("" if promote else " (a candidate, not promoted)"))
     return doc
 
 
@@ -2481,6 +2558,7 @@ def compact_options(fn):
         option("-K", "--compact-now", "force", is_flag=True, help="Compact whatever the policy says (when the generation has runs)"),
         option("-m", "--mount", required=True, help="Local mount of the data bucket (the fold reads the generation from it)"),
         option("-M", "--mem", default="100GB", help="DuckDB memory limit"),
+        option("-N", "--no-promote", "promote", is_flag=True, default=True, flag_value=False, help="A candidate: the new generation published (and copied to R2 with -r) but nothing pointed at it, the compaction lease not held (appends go on); `promote` points prod at it"),
         option("-p", "--threads", default=16, type=int, help="DuckDB threads"),
         option("-r", "--r2", "to_r2", is_flag=True, help="Then the R2 copy (`r2_publish_gen`: the new generation, its pointer last): the job has the R2 env"),
         option("-T", "--tmp", default="/stage/tmp", help="Work dir (the new generation is written here, then uploaded)"),
