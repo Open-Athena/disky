@@ -6,7 +6,7 @@
  * clicks on controls, the path filter, pickers, fetches, errors, console
  * errors, viewport and visibility — and returns its undo.
  */
-import { bodySummary, LIMITS, type Kind, type SlogBatch, type SlogEvent, TRUNC } from '../functions/_lib/sessionLogShape'
+import { benignError, bodySummary, LIMITS, type Kind, type SlogBatch, type SlogEvent, TRUNC } from '../functions/_lib/sessionLogShape'
 
 export { bodySummary }
 
@@ -282,6 +282,7 @@ export function install(p: Page, logger: Logger): () => void {
   // Client exceptions and unhandled rejections.
   on(win, 'error', safe((e: Event) => {
     const ee = e as ErrorEvent
+    if (benignError(ee.message)) return
     logger.log('error', {
       msg: tr(ee.message || errMsg(ee.error), TRUNC.msg),
       ...(ee.filename ? { src: tr(`${redactUrl(ee.filename, origin)}:${ee.lineno}:${ee.colno}`, TRUNC.url) } : {}),
