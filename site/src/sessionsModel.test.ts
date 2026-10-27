@@ -81,17 +81,17 @@ describe('session view model', () => {
     expect([
       [450, 12_000, 187_000, 3_720_000, 391_380_473].map(fmtDuration),
       [0, 2_345, 62_345, 391_380_473].map(fmtOffset),
-      [fmtAt('start', { t: T + 62_345, off: 62_345 }, null, T + 90_000), fmtAt('prev', { t: T + 62_345, off: 62_345 }, { off: 60_000 }, T),
-        fmtAt('prev', { t: T, off: 0 }, null, T), fmtAt('ago', { t: T, off: 0 }, null, T + 7_380_000)],
+      [fmtAt('start', { t: T + 62_345, off: 62_345 }, null, T + 90_000), fmtAt('start', { t: T + 62_345, off: 62_345 }, { off: 60_000 }, T),
+        fmtAt('start', { t: T, off: 180_000_000 }, { off: 179_700_000 }, T), fmtAt('ago', { t: T, off: 0 }, null, T + 7_380_000)],
       [
         'Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1',
         'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36',
         null,
       ].map(uaLabel),
     ]).toEqual([
-      ['450ms', '12s', '3m 07s', '1h 02m', '4d 12h 43m'],
-      ['+0.000s', '+2.345s', '+1m 02s', '+4d 12h 43m'],
-      ['+1m 02s', '+2.345s', '—', '2h 03m ago'],
+      ['450ms', '12s', '3m 07s', '1h 02m', '4d 12h'],
+      ['+0.000s', '+2.345s', '+1m 02s', '+4d 12h'],
+      ['+1m 02s', '+1m 02s (+2.345s)', '+2d 02h (+5m 00s)', '2h 03m ago'],
       ['Safari · iOS', 'Chrome · macOS', '—'],
     ])
   })

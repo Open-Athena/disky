@@ -55,7 +55,7 @@ export const setHelpPref = help.set
 // The scroll-spy (`useSectionSpy`): the section in view named in the URL (`?section=`) as the reader scrolls; on until turned off.
 const scrollSpy = pref<'on' | 'off'>('scroll-spy', ['on', 'off'], 'on')
 export const useScrollSpyPref = scrollSpy.use
-// The session timeline's first column (`/admin/sessions/:sid`): offset into the session, gap since the row above, or ago.
+// The session timeline's first column (`/admin/sessions/:sid`): offset into the session (+ gap since the row above), or ago.
 const sessionAt = pref<AtMode>('session-at', AT_MODES, 'start')
 export const useSessionAt = sessionAt.use
 export const useTiling = tiling.use
