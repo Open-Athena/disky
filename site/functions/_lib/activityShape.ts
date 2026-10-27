@@ -38,6 +38,7 @@ export const KIND_DEFS: KindDef[] = [
   def('click', 'client', 'Clicks on controls (buttons, links, menus, checkboxes)', ['click', 'clicks'], 'count'),
   def('filter', 'client', 'Path-filter input', ['filter', 'filters'], 'count'),
   def('pick', 'client', 'Picker choices (selects, the assign and scan pickers)', ['pick', 'picks'], 'count'),
+  def('resume', 'client', 'A tab picked up again after a gap: its earlier burst (and thread) continues', ['resumption', 'resumptions'], 'line'),
   def('error', 'client', 'Errors: uncaught, rejected, console, failed requests (each a thread reply)', ['error', 'errors'], 'line'),
   def('api', 'client', 'Other requests the page made', ['request', 'requests'], 'off'),
   def('prefetch', 'client', 'Hover prefetches', ['prefetch', 'prefetches'], 'off'),
@@ -249,6 +250,17 @@ export const DISCORD: Fmt = {
 
 const fmtN = (n: number): string => n.toLocaleString('en-US')
 const hm = (ts: number): string => new Date(ts * 1000).toISOString().slice(11, 16)
+
+/** A gap in seconds, at most two units: `45s`, `3m 07s`, `4h 17m`, `2d 03h`. */
+export function fmtGap(s: number): string {
+  const t = Math.max(0, Math.round(s))
+  if (t < 60) return `${t}s`
+  const m = Math.floor(t / 60)
+  if (m < 60) return `${m}m ${String(t % 60).padStart(2, '0')}s`
+  const h = Math.floor(m / 60)
+  if (h < 24) return `${h}h ${String(m % 60).padStart(2, '0')}m`
+  return `${Math.floor(h / 24)}d ${String(h % 24).padStart(2, '0')}h`
+}
 const day = (ts: number): string => new Date(ts * 1000).toISOString().slice(0, 10)
 
 /** IEC, as the staged-deletion threads in the same channel print sizes. */
