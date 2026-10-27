@@ -3,9 +3,11 @@
 //   GET /api/activity/kinds              { kinds: KindState[], sinks }   each kind's config (defaults + `/admin` edits)
 //   PUT /api/activity/kinds/:kind        { log, notify } → the same       one kind's config; lands in `admin_edits`
 //   GET /api/activity/bursts             { bursts }                       ?actor= &kind= &since= (YYYY-MM-DD) &limit=
-//   GET /api/activity/bursts/:id         { burst, events, slack }         one burst, its server events, its thread
+//   GET /api/activity/bursts/:id         { burst, events, slack }         one burst, its events, its thread
+//   POST /api/activity/render            { rendered }                     re-render bursts in their sinks: ?burst=ID…
+//                                                                         or ?since= (YYYY-MM-DD: every burst active since)
 import { type Ctx, type Env as AuthEnv, json, requireAdmin } from '../../_lib/auth.js'
-import { type ActivityEnv, burstEvents, listBursts, loadBurst, readKinds, sinks, slackParent, writeKind } from '../../_lib/activity.js'
+import { type ActivityEnv, burstEvents, listBursts, loadBurst, readKinds, rerender, sinks, slackParent, writeKind } from '../../_lib/activity.js'
 import { KIND_BY_NAME, KIND_DEFS, NOTIFY, type Notify } from '../../_lib/activityShape.js'
 import { noteActivity } from '../../_lib/activityHook.js'
 
@@ -67,7 +69,19 @@ export const onRequest = async (ctx: C): Promise<Response> => {
       if (!burst) return json({ error: `no burst ${bid}` }, 404)
       const ts = await slackParent(db, bid)
       const channel = ctx.env.SLACK_ADMIN_CHANNEL
-      return json({ burst, events: await burstEvents(db, bid), slack: ts && channel ? permalink(channel, ts) : null }, 200, NO_STORE)
+      return json({ burst, events: await burstEvents(db, burst, await readKinds(db, Date.now())), slack: ts && channel ? permalink(channel, ts) : null }, 200, NO_STORE)
+    }
+    if (segs[0] === 'render' && segs.length === 1 && m === 'POST') {
+      const since = q.get('since')
+      const sinceMs = since ? Date.parse(since) : NaN
+      if (since && Number.isNaN(sinceMs)) return json({ error: `bad since ${since}` }, 400)
+      const ids = since
+        ? (await db.prepare('SELECT id FROM activity_bursts WHERE last_ts >= ? ORDER BY id').bind(Math.floor(sinceMs / 1000)).all<{ id: number }>()).results.map(r => r.id)
+        : q.getAll('burst').filter(b => /^\d+$/.test(b)).map(Number)
+      if (!ids.length) return json({ error: 'name bursts (?burst=ID) or ?since=YYYY-MM-DD' }, 400)
+      const rendered = await rerender(ctx.env, ids)
+      noteActivity(ctx, { line: `re-rendered ${rendered.length} activity burst${rendered.length === 1 ? '' : 's'}` })
+      return json({ rendered }, 200, NO_STORE)
     }
   } catch (e) {
     if (notSetUp(e)) return json({ error: NOT_SET_UP }, 503)

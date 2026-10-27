@@ -96,7 +96,7 @@ async function post(ctx: C): Promise<Response> {
   if (r === 'stored' && ctx.waitUntil) {
     const wait = ctx.waitUntil.bind(ctx)
     const actor = id.email ?? (id.via === 'grant' && id.name ? `grant:${id.name}` : `sid:${batch.sid}`)
-    wait(feedClient(ctx.env, { actor, via: id.via, origin: new URL(ctx.request.url).origin }, batch.sid, batch.events, wait, now))
+    wait(feedClient(ctx.env, { actor, via: id.via, origin: new URL(ctx.request.url).origin }, batch, wait, now))
   }
   return new Response(null, { status: 204 })
 }
