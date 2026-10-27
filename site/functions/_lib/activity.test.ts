@@ -244,6 +244,37 @@ describe('D1 and sinks', () => {
     ])
   })
 
+  it('a tab back after the gap continues its own burst and thread; another tab opens a new one', async () => {
+    const calls = stubFetch()
+    const { db, env, wait } = await setup({ SLACK_BOT_TOKEN: 'xoxb', SLACK_ADMIN_CHANNEL: 'C1' })
+    const page = (t: number, u: string) => [{ t, k: 'start', u }] as SlogEvent[]
+    const later = NOW + 4 * 3600_000 + 17 * 60_000
+    await feedClient(env, who, 'sid-aaaaaa', page(NOW, '/'), wait, NOW)
+    vi.setSystemTime(later)
+    expect(await feedClient(env, who, 'sid-aaaaaa', page(later, '/users'), wait, later)).toBe(1)
+    expect(await feedClient(env, who, 'sid-bbbbbb', page(later + 1000, '/'), wait, later + 1000)).toBe(1)
+    vi.setSystemTime(later + 3600_000)
+    expect(await feedClient(env, who, 'sid-bbbbbb', page(later + 3600_000, '/'), wait, later + 3600_000)).toBe(1)
+    expect(await feedClient(env, who, 'sid-cccccc', page(later + 7200_000, '/'), wait, later + 7200_000)).toBe(2)
+    const b = await loadBurst(db, 1)
+    expect([b!.first_ts, b!.last_ts, b!.counts, b!.sids]).toEqual([S, S + 3600 * 5 + 17 * 60, { view: 4, resume: 2 }, ['sid-aaaaaa', 'sid-bbbbbb']])
+    expect((await burstEvents(db, 1)).map(e => [e.kind, e.route, e.line, e.detail])).toEqual([
+      ['resume', '/users', 'after 4h 17m', { sid: 'sid-aaaaaa' }],
+      ['resume', '/', 'after 59m 59s', { sid: 'sid-bbbbbb' }],
+    ])
+    // One parent, posted once; each resumption re-renders it and the one `resume` reply.
+    expect(calls.filter(c => c.url.endsWith('chat.postMessage')).map(c => [c.body.thread_ts ?? null, String(c.body.text).split('\n')[0]])).toEqual([
+      [null, '*ann* (browser) · 2026-10-21 15:00Z'],
+      ['1.000001', '*1 resumption*'],
+      [null, '*ann* (browser) · 2026-10-21 21:17Z'],
+    ])
+    expect(String(calls.filter(c => c.url.endsWith('chat.update')).at(-1)!.body.text).split('\n')).toEqual([
+      '*2 resumptions*',
+      `• <${ORIGIN}/admin/sessions/sid-aaaaaa|19:17> after 4h 17m on \`/users\``,
+      `• <${ORIGIN}/admin/sessions/sid-bbbbbb|20:17> after 59m 59s on \`/\``,
+    ])
+  })
+
   it('Slack: client errors post at once as a reply, each linked to its session, repeats folded', async () => {
     const calls = stubFetch()
     const { db, env, wait } = await setup({ SLACK_BOT_TOKEN: 'xoxb', SLACK_ADMIN_CHANNEL: 'C1' })
@@ -327,7 +358,7 @@ describe('D1 and sinks', () => {
     const { db, env, wait } = await setup()
     await recordServer(env, who, [assign(S - 40 * 86400, 'gs://b/old/')], wait, NOW)
     await recordServer(env, { ...who, actor: 'cy@example.test' }, [assign(S, 'gs://b/x/')], wait, NOW)
-    const id = await burstFor(db, 'dee@example.test', 'session', ORIGIN, S)
+    const { id } = await burstFor(db, 'dee@example.test', 'session', ORIGIN, S)
     await bump(db, id, { view: 2 })
     expect((await listBursts(db, { kind: 'assign' })).map(b => b.actor)).toEqual(['cy@example.test', 'ann@example.test'])
     expect((await listBursts(db, { actor: 'DEE' })).map(b => b.counts)).toEqual([{ view: 2 }])

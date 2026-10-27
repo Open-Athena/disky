@@ -9,7 +9,7 @@ import { BATCH_GAP_S } from './batchGroups.js'
 import { slackApi, type SlackEnv } from './slack.js'
 import type { SlogEvent } from './sessionLogShape.js'
 import {
-  addPages, addTrail, type Burst, type ClientError, DISCORD, emptyTrail, type Fmt, highlights, joins, KIND_DEFS, type KindConf,
+  addPages, addTrail, type Burst, type ClientError, DISCORD, emptyTrail, type Fmt, fmtGap, highlights, joins, KIND_DEFS, type KindConf,
   type KindRow, type KindsConf, mergeKinds, renderDiscord, renderLines, renderSummary, reported, type ServerEvent, sessionUrl,
   SLACK, tallyClient,
 } from './activityShape.js'
@@ -81,20 +81,38 @@ export async function loadBurst(db: D1Database, id: number): Promise<StoredBurst
   return r ? parse(r) : null
 }
 
-/** The actor's burst for an event at `ts`: their latest, if within `BATCH_GAP_S`, else a new one. */
-export async function burstFor(db: D1Database, actor: string, via: string, origin: string, ts: number, gapS: number = BATCH_GAP_S): Promise<number> {
+/** How far back a tab's session resumes its own earlier burst (`burstFor`'s `sid`). */
+export const RESUME_S = 7 * 86400
+
+/** The actor's burst for an event at `ts`: their latest, if within `BATCH_GAP_S`; else, given the event's session `sid`,
+ *  the newest burst (within `RESUME_S`) that session was already in, so one tab keeps one thread (`resumed` is the gap,
+ *  in seconds); else a new one. */
+export async function burstFor(
+  db: D1Database, actor: string, via: string, origin: string, ts: number, gapS: number = BATCH_GAP_S, sid?: string,
+): Promise<{ id: number; resumed?: number }> {
   const latest = await db.prepare('SELECT id, last_ts FROM activity_bursts WHERE actor = ? ORDER BY last_ts DESC LIMIT 1')
     .bind(actor).first<{ id: number; last_ts: number }>()
+  const extend = (id: number) => db.prepare('UPDATE activity_bursts SET first_ts = MIN(first_ts, ?1), last_ts = MAX(last_ts, ?1), via = ?2 WHERE id = ?3')
+    .bind(ts, via, id).run()
   if (latest && joins(latest, ts, gapS)) {
-    await db.prepare('UPDATE activity_bursts SET first_ts = MIN(first_ts, ?1), last_ts = MAX(last_ts, ?1), via = ?2 WHERE id = ?3')
-      .bind(ts, via, latest.id).run()
-    return latest.id
+    await extend(latest.id)
+    return { id: latest.id }
+  }
+  if (sid) {
+    const prior = await db.prepare(
+      `SELECT id, last_ts FROM activity_bursts WHERE actor = ? AND last_ts >= ? AND last_ts <= ?
+       AND EXISTS (SELECT 1 FROM json_each(sids) WHERE value = ?) ORDER BY last_ts DESC LIMIT 1`,
+    ).bind(actor, ts - RESUME_S, ts, sid).first<{ id: number; last_ts: number }>()
+    if (prior) {
+      await extend(prior.id)
+      return { id: prior.id, resumed: ts - prior.last_ts }
+    }
   }
   const r = await db.prepare(
     `INSERT INTO activity_bursts (actor, via, origin, first_ts, last_ts, counts, pages, trail, sids, dirty)
      VALUES (?, ?, ?, ?, ?, '{}', '{}', ?, '[]', 0) RETURNING id`,
   ).bind(actor, via, origin, ts, ts, JSON.stringify(emptyTrail())).first<{ id: number }>()
-  return r!.id
+  return { id: r!.id }
 }
 
 /** Add to a burst's counts (atomically, per kind), its pages (by count, and `trail`: in order) and its sessions. */
@@ -133,7 +151,7 @@ export async function recordServer(env: ActivityEnv, who: Actor, events: ServerE
     const conf = await readKinds(db, now)
     const kept = events.filter(e => conf[e.kind]?.log)
     if (!kept.length) return null
-    const id = await burstFor(db, who.actor, who.via, who.origin, kept[0].ts)
+    const { id } = await burstFor(db, who.actor, who.via, who.origin, kept[0].ts)
     await db.batch(kept.map(e => db.prepare(
       'INSERT INTO activity_events (burst_id, ts, kind, actor, via, method, route, line, detail) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
     ).bind(id, e.ts, e.kind, e.actor, e.via, e.method, e.route, e.line, e.detail ? JSON.stringify(e.detail) : null)))
@@ -161,10 +179,17 @@ export async function feedClient(env: ActivityEnv, who: Actor, sid: string, even
     const { counts, pages, trail, errors } = tallyClient(events, conf)
     if (!Object.keys(counts).length) return null
     const ts = Math.floor(Math.max(...events.map(e => e.t)) / 1000)
-    const id = await burstFor(db, who.actor, who.via, who.origin, Math.min(ts, Math.floor(now / 1000)))
+    const at = Math.min(ts, Math.floor(now / 1000))
+    const { id, resumed } = await burstFor(db, who.actor, who.via, who.origin, at, BATCH_GAP_S, sid)
+    if (resumed !== undefined) {
+      // The resumption is the thread's line (where the tab came back to, after how long); counted in the summary.
+      await db.prepare("INSERT INTO activity_events (burst_id, ts, kind, actor, via, method, route, line, detail) VALUES (?, ?, 'resume', ?, ?, '', ?, ?, ?)")
+        .bind(id, at, who.actor, who.via, trail.at(-1) ?? '', `after ${fmtGap(resumed)}`, JSON.stringify({ sid })).run()
+      counts.resume = 1
+    }
     const kept = await keepErrors(db, id, who, sid, errors)
     await bump(db, id, counts, pages, sid, trail)
-    await report(env, id, kept > 0 && conf.error?.notify === 'line', wait, now)
+    await report(env, id, (kept > 0 && conf.error?.notify === 'line') || (resumed !== undefined && conf.resume?.notify === 'line'), wait, now)
     return id
   } catch (e) {
     if (!missingTable(e)) console.log(`activity: client feed failed: ${(e as Error).message}`)
@@ -252,11 +277,12 @@ async function render(env: ActivityEnv, b: StoredBurst, conf: KindsConf, now: nu
   const events = await burstEvents(db, b.id)
   const h = highlights(events)
   const lineKinds = KIND_DEFS.filter(d => conf[d.kind]?.notify === 'line').map(d => [d.kind, events.filter(e => e.kind === d.kind)] as const).filter(([, es]) => es.length)
-  /** A client error's line is its own text (escaped for the sink), on its page, its time linked to its session's errors. */
+  /** A client line (an error, a resumption) is its own text (escaped for the sink), on its page, its time linked to its
+   *  session (an error to the session's errors). */
   const lineEvents = (es: readonly ServerEvent[], fmt: Fmt) => es.map(e => {
-    const sid = e.kind === 'error' && typeof e.detail?.sid === 'string' ? e.detail.sid : null
+    const sid = (e.kind === 'error' || e.kind === 'resume') && typeof e.detail?.sid === 'string' ? e.detail.sid : null
     if (!sid) return e
-    return { ...e, line: `${fmt.esc(e.line)}${e.route ? ` on ${fmt.code(e.route)}` : ''}`, href: sessionUrl(b.origin, sid, 'errors') }
+    return { ...e, line: `${fmt.esc(e.line)}${e.route ? ` on ${fmt.code(e.route)}` : ''}`, href: sessionUrl(b.origin, sid, e.kind === 'error' ? 'errors' : undefined) }
   })
   const s = sinks(env)
   if (s.slack) {
