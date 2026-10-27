@@ -705,6 +705,15 @@ def flip_d1(flip: Flip, db_id: str = "") -> bool:
     return True
 
 
+#: A `footer_cache` row's store, from its variant (`d1_variant`: `<store>:<variant>` or the primary's bare name),
+#: so `gc_d1`'s pointer lookup is a primary-key probe of `index_schema`.
+FOOTER_CACHE_STORE = (
+    "CASE WHEN instr(footer_cache.variant, ':') > 0 "
+    "THEN substr(footer_cache.variant, 1, instr(footer_cache.variant, ':') - 1) "
+    f"ELSE '{PRIMARY_STORE}' END"
+)
+
+
 def gc_d1(date: str, db_id: str = "", store: str = PRIMARY_STORE, dry_run: bool = False) -> int:
     """Delete every row group of ``date`` whose generation is not the one its
     variant's schema row points at (leftovers of a flip, or of a sync that
@@ -717,9 +726,13 @@ def gc_d1(date: str, db_id: str = "", store: str = PRIMARY_STORE, dry_run: bool 
     # own (date, variant), so a secondary store's namespaced rows are judged by
     # their own pointer too; `store=` restricts the sweep to that store.
     sw = "" if check_store(store) == PRIMARY_STORE else f"store = '{_sql_escape(store)}' AND "
+    # The pointer lookup names `store` too, so it is a primary-key probe (`index_schema` is keyed
+    # `(store, date, variant)`): on `(date, variant)` alone D1 scans every schema row per row group,
+    # and a ~26K-group scan × ~2.3K schema rows ran out of CPU (7429; cw, 2026-10-26).
     where = (
         "WHERE {sw}date = '{d}' AND gen <> COALESCE("
-        "(SELECT s.gen FROM index_schema s WHERE s.date = index_row_groups.date AND s.variant = index_row_groups.variant), '')"
+        "(SELECT s.gen FROM index_schema s WHERE s.store = index_row_groups.store AND s.date = index_row_groups.date "
+        "AND s.variant = index_row_groups.variant), '')"
     ).format(sw=sw, d=_sql_escape(date))
     if dry_run:
         rows = _d1_query(f"SELECT COUNT(*) AS n FROM index_row_groups {where};", acct, tok, db_id)
@@ -730,7 +743,8 @@ def gc_d1(date: str, db_id: str = "", store: str = PRIMARY_STORE, dry_run: bool 
         vw = "" if store == PRIMARY_STORE else f"variant LIKE '{_sql_escape(store)}:%' AND "
         _d1_query(
             f"DELETE FROM footer_cache WHERE {vw}date = '{_sql_escape(date)}' AND gen <> COALESCE("
-            "(SELECT s.gen FROM index_schema s WHERE s.date = footer_cache.date AND s.variant = footer_cache.variant), '');",
+            f"(SELECT s.gen FROM index_schema s WHERE s.store = {FOOTER_CACHE_STORE} AND s.date = footer_cache.date "
+            "AND s.variant = footer_cache.variant), '');",
             acct, tok, db_id,
         )
     return d1_delete("index_row_groups", where.removeprefix("WHERE "), acct, tok, db_id)
