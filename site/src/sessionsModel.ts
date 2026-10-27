@@ -17,24 +17,23 @@ export function fmtDuration(ms: number): string {
   if (m < 60) return `${m}m ${String(s % 60).padStart(2, '0')}s`
   const h = Math.floor(m / 60)
   if (h < 24) return `${h}h ${String(m % 60).padStart(2, '0')}m`
-  return `${Math.floor(h / 24)}d ${String(h % 24).padStart(2, '0')}h ${String(m % 60).padStart(2, '0')}m`
+  return `${Math.floor(h / 24)}d ${String(h % 24).padStart(2, '0')}h`
 }
 
-/** An offset or gap: `+2.345s` under a minute (to the ms), else `+3m 07s`, `+1h 02m`, `+4d 12h 43m`. */
+/** An offset or gap: `+2.345s` under a minute (to the ms), else two units: `+3m 07s`, `+1h 02m`, `+4d 12h`. */
 export function fmtOffset(ms: number): string {
   const t = Math.max(0, Math.round(ms))
   return `+${t < 60_000 ? `${(t / 1000).toFixed(3)}s` : fmtDuration(t)}`
 }
 
-/** What the timeline's first column shows: the offset into the session, the gap since the row above, or how long
- *  ago (from `now`). */
-export const AT_MODES = ['start', 'prev', 'ago'] as const
+/** What the timeline's first column shows: the offset into the session with the gap since the row above
+ *  (`+2d 03h (+5m 10s)`), or how long ago (from `now`). */
+export const AT_MODES = ['start', 'ago'] as const
 export type AtMode = typeof AT_MODES[number]
-export const AT_LABEL: Record<AtMode, string> = { start: 'at', prev: 'Δ', ago: 'ago' }
+export const AT_LABEL: Record<AtMode, string> = { start: 'at (Δ)', ago: 'ago' }
 
 export function fmtAt(mode: AtMode, l: Pick<Line, 't' | 'off'>, prev: Pick<Line, 'off'> | null, now: number): string {
-  if (mode === 'start') return fmtOffset(l.off)
-  if (mode === 'prev') return prev ? fmtOffset(l.off - prev.off) : '—'
+  if (mode === 'start') return prev ? `${fmtOffset(l.off)} (${fmtOffset(l.off - prev.off)})` : fmtOffset(l.off)
   return `${fmtDuration(Math.max(0, now - l.t))} ago`
 }
 
