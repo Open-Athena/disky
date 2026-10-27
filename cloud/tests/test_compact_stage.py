@@ -297,8 +297,11 @@ def test_a_candidate_points_nothing_until_promoted(tmp_path):
     g, c = store_dir / ist.PREFIX / "g", store_dir / ist.PREFIX / "g.c001"
     assert ((g / ar.SUCCESSOR).exists(), ar.current(store, ist.PREFIX), json.loads((c / ar.CANDIDATE).read_text()),
             json.loads((c / ar.COMPACTION).read_text())["candidate"]) == (False, "g", {"from": "g"}, True)
+    # appends to the candidate coordinate under its own lease; to `g`, the store's
+    assert [ar.coordinator_prefix(store, ist.PREFIX, x) for x in ("g", "g.c001")] == [ist.PREFIX, f"{ist.PREFIX}/g.c001"]
     assert ar.promote_gen(store, ist.PREFIX, "g.c001", log=lambda m: None) == {"from": "g", "gen": "g.c001", "current": True}
     assert (json.loads((g / ar.SUCCESSOR).read_text()), ar.current(store, ist.PREFIX)) == ({"gen": "g.c001"}, "g.c001")
+    assert ar.coordinator_prefix(store, ist.PREFIX, "g.c001") == ist.PREFIX
     with pytest.raises(SystemExit) as e:
         ar.promote_gen(store, ist.PREFIX, "g.c001", log=lambda m: None)
     assert str(e.value) == f"{store.root}/{ist.PREFIX}/g: already compacted into g.c001"
