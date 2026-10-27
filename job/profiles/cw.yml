@@ -35,8 +35,9 @@ machines:
   # over-time caps DuckDB at 16 GB, all of an e2-standard-4
   post: e2-highmem-4
   # over-time's own task: seconds on most scans, but every 16th seals a group of 16 (87 min on 8 vCPUs, 2026-10-13);
-  # beside `post`, so the digest and warm-up never wait on it
-  over_time: n2-standard-8
+  # beside `post`, so the digest and warm-up never wait on it. Its DuckDB spill outgrew the boot disk (36 GiB full,
+  # group 13, 2026-10-27), so it stages on a local SSD like `big`
+  over_time: {type: n2-standard-8, disk: {request: 375, type: local-ssd}}
 secrets:
   AWS_ACCESS_KEY_ID: cw-s3-access-key-id
   AWS_SECRET_ACCESS_KEY: cw-s3-secret-access-key
