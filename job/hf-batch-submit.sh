@@ -108,6 +108,7 @@ cat > "$spec" <<EOF
 EOF
 
 if [ -n "${DRY:-}" ]; then cat "$spec"; rm -f "$spec"; exit 0; fi
-gcloud batch jobs submit "$JOB_ID" --project "$PROJECT" --location "$REGION" --config "$spec" >&2
+# Through dt-cloud, never gcloud's own submit: a spec missing a required cost label is refused (specs/done/cost-labels-required.md).
+dt-cloud batch submit -c scan -p "$PROJECT" -L "$REGION" "$JOB_ID" "$spec" >&2
 rm -f "$spec"
 echo "$JOB_ID"
