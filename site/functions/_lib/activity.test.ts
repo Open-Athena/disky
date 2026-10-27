@@ -105,11 +105,13 @@ describe('bursts (pure)', () => {
     expect(keptEvents(events, conf).map(e => e.k)).toEqual(['start', 'nav', 'nav', 'click', 'dropped'])
   })
 
-  it('tallies errors with the page they happened on', () => {
+  it('tallies errors with the page they happened on; a benign ResizeObserver report is not one', () => {
     const events = [
       { t: 1000, k: 'start', u: '/scans' }, { t: 2500, k: 'api', u: '/api/scan-runs', s: 0, ms: 3214, err: 'TypeError: Failed to fetch' },
       { t: 3000, k: 'nav', u: '/users?o=bob' }, { t: 4000, k: 'reject', msg: 'boom' }, { t: 5000, k: 'api', u: '/api/x', s: 404, ms: 9 },
+      { t: 6000, k: 'error', msg: 'ResizeObserver loop completed with undelivered notifications.', src: '/users:0:0' },
     ] as SlogEvent[]
+    expect(tallyClient(events, mergeKinds([])).counts.error).toBe(2)
     expect(tallyClient(events, mergeKinds([])).errors).toEqual([
       { ts: 2, line: 'GET /api/scan-runs → failed · 3214ms · TypeError: Failed to fetch', page: '/scans' },
       { ts: 4, line: 'unhandled rejection: boom', page: '/users' },
