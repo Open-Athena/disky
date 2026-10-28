@@ -209,6 +209,9 @@ export interface View {
   dirsOnly?: true
   /** With `q=`: the search stopped at its time budget (`Coverage.searchLate`): kept briefly, recomputed. */
   searchLate?: true
+  /** With `q=`: the match roots' own rows (kind, ages, classes) missed their time budget (`Coverage.detailsLate`):
+   *  kept briefly, recomputed. */
+  detailsLate?: true
 }
 
 /** Whether a filtered read may be missing matches, and why (the response's
@@ -223,6 +226,9 @@ export interface Coverage {
   /** A search stopped at its time budget (`SearchFound.timedOut`): unlike a read budget's cut, a run with more
    *  time may answer more — so the answer is kept briefly and recomputed (`keepFor`). */
   searchLate?: true
+  /** The match roots' detail lookups (`FILTER_DETAILS_MS`) were cut: the roots drawn without kind, ages or classes
+   *  (a file reads as a folder) — a run with more time decorates them, so kept briefly and recomputed. */
+  detailsLate?: true
 }
 export const APPROX_NO_INDEX = 'this scan has no search index; small matches may be missing'
 export const APPROX_V1_TOO_BIG = 'this scan has no search index and this view is too big to scan; small matches may be missing'
@@ -238,11 +244,12 @@ export function noteCoverage(cov: Coverage, flag: 'partial' | 'approximate' | 'd
   if (!have.includes(why)) have.push(why)
 }
 /** A coverage as response fields. */
-export const coverageFields = (c: Coverage): Pick<View, 'partial' | 'partialReason' | 'approximate' | 'approximateReason' | 'dirsOnly' | 'searchLate'> => ({
+export const coverageFields = (c: Coverage): Pick<View, 'partial' | 'partialReason' | 'approximate' | 'approximateReason' | 'dirsOnly' | 'searchLate' | 'detailsLate'> => ({
   ...(c.partial ? { partial: true as const, partialReason: c.partial.join(' · ') } : {}),
   ...(c.approximate ? { approximate: true as const, approximateReason: c.approximate.join(' · ') } : {}),
   ...(c.dirsOnly ? { dirsOnly: true as const } : {}),
   ...(c.searchLate ? { searchLate: true as const } : {}),
+  ...(c.detailsLate ? { detailsLate: true as const } : {}),
 })
 
 export class NotFound extends Error {}
@@ -957,7 +964,7 @@ async function readView(env: Env, o: ViewOpts, cov: Coverage = {}): Promise<Read
       tr?.('static', performance.now() - t0, shits ? `${skey} ${shits.rollup ? `rollup ${shits.rollup.cells.length}` : shits.hits.length}` : skey ? `declined${off ? ` (${off})` : ''}` : undefined)
       if (shits?.rollup) {
         const h = pathIdx ?? fine ?? withTrace(await openFine(env, date, 'path'), tr)
-        return rollupRead(env, o, shits.rollup, { dP, rootAll, idx, details: h, trace: tr, fetch: (p, ho) => sfs!.source.hits(skey!, p, ho), region: async T => (await regionFor(T, false)).idx, smallRows, ivPlanRows })
+        return rollupRead(env, o, shits.rollup, { dP, rootAll, idx, details: h, trace: tr, fetch: (p, ho) => sfs!.source.hits(skey!, p, ho), region: async T => (await regionFor(T, false)).idx, smallRows, ivPlanRows, cov })
       }
       if (sb) {
         p1 = aggregateHits(sb.roots)
@@ -1162,6 +1169,8 @@ async function readView(env: Env, o: ViewOpts, cov: Coverage = {}): Promise<Read
       : await Promise.race([details, new Promise<typeof late>(r => setTimeout(() => r(late), budget))]).then(x => {
         if (x !== late) return x
         tr?.('details', performance.now() - t0, 'late')
+        // A diff side's `detailsWait: 0` skips them by design; a cut viewer-facing budget is upgraded.
+        if (budget > 0) cov.detailsLate = true
         detailsOff = true
         details.catch(() => {})
         return [] as Row[]
@@ -1806,6 +1815,7 @@ async function rollupRead(env: Env, o: ViewOpts, rollup: Rollup, x: {
   region: (T: number) => Promise<IndexHandle>
   smallRows: number
   ivPlanRows: number
+  cov: Coverage
 }): Promise<Read | null> {
   const { date, path, w, h, minArea, atten, query, maxDepth } = o
   const { dP, trace: tr } = x
@@ -1919,11 +1929,12 @@ async function rollupRead(env: Env, o: ViewOpts, rollup: Rollup, x: {
       tr?.('details', 0, 'too wide')
       return [] as Row[]
     })
-    const budget = Number(env.FILTER_DETAILS_MS) || Infinity
+    const budget = o.detailsWait ?? (Number(env.FILTER_DETAILS_MS) || Infinity)
     const late = Symbol('late')
     const rows = budget === Infinity ? await look : await Promise.race([look, new Promise<typeof late>(r => setTimeout(() => r(late), budget))]).then(v => {
       if (v !== late) return v
       tr?.('details', performance.now() - t0, 'late')
+      if (budget > 0) x.cov.detailsLate = true
       look.catch(() => {})
       return [] as Row[]
     })
