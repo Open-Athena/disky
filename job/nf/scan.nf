@@ -27,7 +27,9 @@ params.scan = null
 params.gen = null
 params.job_start = null
 params.run_id = ''
-params.sources = []        // [[uri:, machine:, disk: [request:, type:], secrets: [ENV=SECRET, …] (only a source's own)]]
+params.sources = []        // [[uri:, machine:, disk: [request:, type:], secrets: [ENV=SECRET, …] (only a source's own),
+                           //   machines: [primary, fallback…], queue_timeout: '<N>m' (with `fallback`)]]
+params.list_retries = 0    // the most fallback types any source has (`list_source`'s `maxRetries`)
 params.list_default = [:]  // the profile's `machines.list`: [machine:, disk:]
 params.steps = []          // every enabled step (core minus `skip`, plus the profile's `steps`)
 params.pre = []            // enabled extra steps beside `list`, before `index` (soft: index runs without them)
@@ -114,11 +116,21 @@ process side {
     script: stepScript(task, params.side)
 }
 
+// A source with `fallback` types (spec §7) runs submit attempt k on `src.machines[k-1]`, each but the last with a queue
+// timeout; only Nextflow's submit timeout is retried (as `scan_head.fallback_block`'s labels), any real failure finishes.
 process list_source {
     tag "${src.uri}"
     label 'list'
-    machineType { src.machine ?: params.list_default.machine }
+    machineType { src.machines ? src.machines[task.submitAttempt - 1] : (src.machine ?: params.list_default.machine) }
     disk { diskOf(src.disk ?: params.list_default.disk) }
+    maxSubmitAwait { src.machines && task.submitAttempt < src.machines.size() ? src.queue_timeout : null }
+    maxRetries params.list_retries
+    errorStrategy {
+        if( !(task.previousException?.cause instanceof nextflow.exception.ProcessSubmitTimeoutException) ) return 'finish'
+        log.warn "scan head: ${task.process} queued ${src.queue_timeout} on ${task.machineType}; retrying on " +
+                 "${src.machines[task.submitAttempt]}${task.submitAttempt + 1 < src.machines.size() ? '' : ' (the last: no queue timeout)'}"
+        return 'retry'
+    }
     input: val src
     output: path 'done'
     script:
