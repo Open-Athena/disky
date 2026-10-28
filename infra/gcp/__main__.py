@@ -38,7 +38,8 @@ job = JobAccount(
     description="Lists the four approved OA R2 buckets and publishes only OA R2's derived index",
     # batch.jobsEditor + acting as itself: a Nextflow head (`dt-cloud scan head`, specs/pipelines-everywhere.md) submits,
     # polls and cancels its steps' Batch jobs, each running as this account
-    roles=["roles/batch.agentReporter", "roles/batch.jobsEditor", "roles/logging.logWriter"],
+    # `gcp-cost` (`dt-cloud cost`): the buckets' `total_bytes` from Cloud Monitoring
+    roles=["roles/batch.agentReporter", "roles/batch.jobsEditor", "roles/logging.logWriter", "roles/monitoring.viewer"],
     acts_as_self=True,
     adopt=Adopt(False),
 )
@@ -67,7 +68,14 @@ for component, name, days in (
         role="roles/storage.objectAdmin",
         member=job.member,
     )
-    resources.extend([bucket, grant])
+    # `gcp-cost` (`dt-cloud cost`) reads the bucket's lifecycle and soft-delete settings (`storage.buckets.get`)
+    viewer = gcp.storage.BucketIAMMember(
+        f"r2-{component}-job-viewer",
+        bucket=bucket.name,
+        role="roles/storage.bucketViewer",
+        member=job.member,
+    )
+    resources.extend([bucket, grant, viewer])
     build_grant = gcp.storage.BucketIAMMember(
         f"r2-{component}-builder",
         bucket=bucket.name,

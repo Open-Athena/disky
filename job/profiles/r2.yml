@@ -34,8 +34,9 @@ machines:
 # point from it, specs/lean-scans.md §1.3)
 skip: [bucket-check, index-gc, over-time]
 # `access-r2`: marin-na's read recency from the access collector (infra/cf/r2-access) for the read lens; `retire`
-# (specs/lean-scans.md §2): each run deletes the `path` sort of every scan but the newest once both stores hold it
-steps: [access-r2, retire]
+# (specs/lean-scans.md §2): each run deletes the `path` sort of every scan but the newest once both stores hold it;
+# `gcp-cost`: the day's GCP cost snapshot (`/admin/cost/gcp`), never fatal
+steps: [access-r2, retire, gcp-cost]
 secrets:
   R2_ACCESS_KEY_ID: oa-r2-index-access-key-id
   R2_SECRET_ACCESS_KEY: oa-r2-index-secret-access-key
@@ -82,6 +83,8 @@ options:
   # first (`interval-store verify`, its marker written); one that fails keeps its files. Executing since 2026-10-18,
   # after the reviewed backlog deletes (backup: gs://oa-r2-usage-data/retire-backup/2026-10-18)
   retire: {keep: 1, execute: true, copies: [r2]}
+  # the job's buckets (storage: Monitoring `total_bytes` + their policies); compute: the jobs `$DISKY_LABELS` names
+  gcp-cost: {buckets: [oa-r2-usage-data, oa-r2-usage-scratch]}
   digest:
     template: cw
     # the thread state (`digest/r2/…`) and every earlier scan's snapshots are on R2, as the one-VM job reads them
