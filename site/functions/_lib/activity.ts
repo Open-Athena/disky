@@ -1,16 +1,18 @@
 /**
  * The activity feed's D1 side and sinks (specs/done/activity-feed.md): the per-kind config (`activity_kinds`), bursts
- * (`activity_bursts`), server events (`activity_events`), and each burst's Slack thread / Discord message
+ * (`activity_bursts`), server events (`activity_events`; a burst's client errors are read from its session-log batches,
+ * `session_log_batches.burst_id`), and each burst's Slack thread / Discord message
  * (`activity_posts`, which also claims a post so two isolates never open two threads for one burst). Everything here is
  * best-effort: callers run it in `waitUntil`, and a failure is logged, never raised into the request that caused it.
  */
 import type { D1Database } from '@cloudflare/workers-types'
 import { BATCH_GAP_S } from './batchGroups.js'
 import { slackApi, type SlackEnv } from './slack.js'
-import type { SlogEvent } from './sessionLogShape.js'
+import type { SlogBatch, SlogEvent } from './sessionLogShape.js'
 import {
-  addPages, type Burst, DISCORD, highlights, joins, KIND_DEFS, type KindConf, type KindRow, type KindsConf, mergeKinds,
-  renderDiscord, renderLines, renderSummary, reported, type ServerEvent, SLACK, tallyClient,
+  addPages, addTrail, type Burst, DISCORD, emptyTrail, type Fmt, fmtGap, highlights, joins, KIND_DEFS, type KindConf,
+  type KindRow, type KindsConf, mergeKinds, renderDiscord, renderLines, renderSummary, reported, type ServerEvent, sessionUrl,
+  SLACK, tallyClient,
 } from './activityShape.js'
 
 export interface ActivityEnv extends SlackEnv {
@@ -65,13 +67,13 @@ export async function writeKind(db: D1Database, kind: string, conf: KindConf, wh
 
 interface BurstRow {
   id: number; actor: string; via: string; origin: string; first_ts: number; last_ts: number
-  counts: string; pages: string; sids: string; rendered_ms: number | null; dirty: number
+  counts: string; pages: string; trail: string; sids: string; rendered_ms: number | null; dirty: number
 }
 export type StoredBurst = Burst & { rendered_ms: number | null; dirty: boolean }
 
 const parse = (r: BurstRow): StoredBurst => ({
   id: r.id, actor: r.actor, via: r.via, origin: r.origin, first_ts: r.first_ts, last_ts: r.last_ts,
-  counts: JSON.parse(r.counts), pages: JSON.parse(r.pages), sids: JSON.parse(r.sids),
+  counts: JSON.parse(r.counts), pages: JSON.parse(r.pages), trail: JSON.parse(r.trail), sids: JSON.parse(r.sids),
   rendered_ms: r.rendered_ms, dirty: !!r.dirty,
 })
 
@@ -80,44 +82,83 @@ export async function loadBurst(db: D1Database, id: number): Promise<StoredBurst
   return r ? parse(r) : null
 }
 
-/** The actor's burst for an event at `ts`: their latest, if within `BATCH_GAP_S`, else a new one. */
-export async function burstFor(db: D1Database, actor: string, via: string, origin: string, ts: number, gapS: number = BATCH_GAP_S): Promise<number> {
+/** How far back a tab's session resumes its own earlier burst (`burstFor`'s `sid`). */
+export const RESUME_S = 7 * 86400
+
+/** The actor's burst for an event at `ts`: their latest, if within `BATCH_GAP_S`; else, given the event's session `sid`,
+ *  the newest burst (within `RESUME_S`) that session was already in, so one tab keeps one thread (`resumed` is the gap,
+ *  in seconds); else a new one. */
+export async function burstFor(
+  db: D1Database, actor: string, via: string, origin: string, ts: number, gapS: number = BATCH_GAP_S, sid?: string,
+): Promise<{ id: number; resumed?: number }> {
   const latest = await db.prepare('SELECT id, last_ts FROM activity_bursts WHERE actor = ? ORDER BY last_ts DESC LIMIT 1')
     .bind(actor).first<{ id: number; last_ts: number }>()
+  const extend = (id: number) => db.prepare('UPDATE activity_bursts SET first_ts = MIN(first_ts, ?1), last_ts = MAX(last_ts, ?1), via = ?2 WHERE id = ?3')
+    .bind(ts, via, id).run()
   if (latest && joins(latest, ts, gapS)) {
-    await db.prepare('UPDATE activity_bursts SET first_ts = MIN(first_ts, ?1), last_ts = MAX(last_ts, ?1), via = ?2 WHERE id = ?3')
-      .bind(ts, via, latest.id).run()
-    return latest.id
+    await extend(latest.id)
+    return { id: latest.id }
+  }
+  if (sid) {
+    const prior = await db.prepare(
+      `SELECT id, last_ts FROM activity_bursts WHERE actor = ? AND last_ts >= ? AND last_ts <= ?
+       AND EXISTS (SELECT 1 FROM json_each(sids) WHERE value = ?) ORDER BY last_ts DESC LIMIT 1`,
+    ).bind(actor, ts - RESUME_S, ts, sid).first<{ id: number; last_ts: number }>()
+    if (prior) {
+      await extend(prior.id)
+      return { id: prior.id, resumed: ts - prior.last_ts }
+    }
   }
   const r = await db.prepare(
-    `INSERT INTO activity_bursts (actor, via, origin, first_ts, last_ts, counts, pages, sids, dirty)
-     VALUES (?, ?, ?, ?, ?, '{}', '{}', '[]', 0) RETURNING id`,
-  ).bind(actor, via, origin, ts, ts).first<{ id: number }>()
-  return r!.id
+    `INSERT INTO activity_bursts (actor, via, origin, first_ts, last_ts, counts, pages, trail, sids, dirty)
+     VALUES (?, ?, ?, ?, ?, '{}', '{}', ?, '[]', 0) RETURNING id`,
+  ).bind(actor, via, origin, ts, ts, JSON.stringify(emptyTrail())).first<{ id: number }>()
+  return { id: r!.id }
 }
 
-/** Add to a burst's counts (atomically, per kind), its pages and its sessions. */
-export async function bump(db: D1Database, id: number, counts: Record<string, number>, pages: Record<string, number> = {}, sid?: string): Promise<void> {
+/** Add to a burst's counts (atomically, per kind), its pages (by count, and `trail`: in order) and its sessions. */
+export async function bump(
+  db: D1Database, id: number, counts: Record<string, number>, pages: Record<string, number> = {}, sid?: string, trail: readonly string[] = [],
+): Promise<void> {
   const kinds = Object.entries(counts).filter(([, n]) => n > 0)
   if (kinds.length) {
     const set = kinds.map((_, i) => `'$.${kinds[i][0]}', CAST(COALESCE(json_extract(counts, '$.${kinds[i][0]}'), 0) + ?${i + 2} AS INTEGER)`).join(', ')
     await db.prepare(`UPDATE activity_bursts SET counts = json_set(counts, ${set}) WHERE id = ?1`).bind(id, ...kinds.map(([, n]) => n)).run()
   }
-  if (Object.keys(pages).length || sid) {
-    const r = await db.prepare('SELECT pages, sids FROM activity_bursts WHERE id = ?').bind(id).first<{ pages: string; sids: string }>()
+  if (Object.keys(pages).length || trail.length || sid) {
+    const r = await db.prepare('SELECT pages, trail, sids FROM activity_bursts WHERE id = ?').bind(id).first<{ pages: string; trail: string; sids: string }>()
     if (!r) return
     const sids: string[] = JSON.parse(r.sids)
     if (sid && !sids.includes(sid)) sids.push(sid)
-    await db.prepare('UPDATE activity_bursts SET pages = ?, sids = ? WHERE id = ?')
-      .bind(JSON.stringify(addPages(JSON.parse(r.pages), pages)), JSON.stringify(sids.slice(-50)), id).run()
+    await db.prepare('UPDATE activity_bursts SET pages = ?, trail = ?, sids = ? WHERE id = ?')
+      .bind(JSON.stringify(addPages(JSON.parse(r.pages), pages)), JSON.stringify(addTrail(JSON.parse(r.trail), trail)), JSON.stringify(sids.slice(-50)), id).run()
   }
 }
 
 /** A burst's server events, oldest first. */
-export async function burstEvents(db: D1Database, id: number): Promise<ServerEvent[]> {
+/** A burst's events: its server events (`activity_events`) and its client errors (`batchErrors`), in time order. */
+export async function burstEvents(db: D1Database, b: Pick<StoredBurst, 'id' | 'actor' | 'via'>, conf: KindsConf): Promise<ServerEvent[]> {
   const r = await db.prepare('SELECT ts, kind, actor, via, method, route, line, detail FROM activity_events WHERE burst_id = ? ORDER BY ts, id')
-    .bind(id).all<Omit<ServerEvent, 'detail'> & { detail: string | null }>()
-  return r.results.map(e => ({ ...e, detail: e.detail ? JSON.parse(e.detail) : undefined }))
+    .bind(b.id).all<Omit<ServerEvent, 'detail'> & { detail: string | null }>()
+  const events = r.results.map(e => ({ ...e, detail: e.detail ? JSON.parse(e.detail) : undefined }))
+  const errors = await batchErrors(db, b, conf)
+  return errors.length ? [...events, ...errors].sort((x, y) => x.ts - y.ts) : events
+}
+
+/** Client errors a burst shows as lines (its thread's); past this they are only counted. */
+export const MAX_ERROR_EVENTS = 100
+
+/** A burst's client errors, read from the session-log batches fed into it (`burst_id`): each on the page it happened
+ *  on, `detail.sid` its session; the first `MAX_ERROR_EVENTS`. */
+export async function batchErrors(db: D1Database, b: Pick<StoredBurst, 'id' | 'actor' | 'via'>, conf: KindsConf): Promise<ServerEvent[]> {
+  const r = await db.prepare('SELECT sid, events FROM session_log_batches WHERE burst_id = ? ORDER BY first_ms, sid, pid, seq')
+    .bind(b.id).all<{ sid: string; events: string }>()
+  return r.results
+    .flatMap(({ sid, events }) => tallyClient(JSON.parse(events) as SlogEvent[], conf).errors.map((e): ServerEvent => ({
+      ts: e.ts, kind: 'error', actor: b.actor, via: b.via, method: '', route: e.page ?? '', line: e.line, detail: { sid },
+    })))
+    .sort((x, y) => x.ts - y.ts)
+    .slice(0, MAX_ERROR_EVENTS)
 }
 
 export interface Actor { actor: string; via: string; origin: string }
@@ -130,7 +171,7 @@ export async function recordServer(env: ActivityEnv, who: Actor, events: ServerE
     const conf = await readKinds(db, now)
     const kept = events.filter(e => conf[e.kind]?.log)
     if (!kept.length) return null
-    const id = await burstFor(db, who.actor, who.via, who.origin, kept[0].ts)
+    const { id } = await burstFor(db, who.actor, who.via, who.origin, kept[0].ts)
     await db.batch(kept.map(e => db.prepare(
       'INSERT INTO activity_events (burst_id, ts, kind, actor, via, method, route, line, detail) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
     ).bind(id, e.ts, e.kind, e.actor, e.via, e.method, e.route, e.line, e.detail ? JSON.stringify(e.detail) : null)))
@@ -145,18 +186,30 @@ export async function recordServer(env: ActivityEnv, who: Actor, events: ServerE
   }
 }
 
-/** Count a session-log batch's events into its actor's burst, then report it (throttled). */
-export async function feedClient(env: ActivityEnv, who: Actor, sid: string, events: readonly SlogEvent[], wait: Wait, now: number = Date.now()): Promise<number | null> {
+/** Count a stored session-log batch's events into its actor's burst and link the batch to it (`burst_id`: its errors
+ *  are the burst's error lines), then report it: at once when an error is a `line` kind, else throttled. */
+export async function feedClient(
+  env: ActivityEnv, who: Actor, batch: Pick<SlogBatch, 'sid' | 'pid' | 'seq' | 'events'>, wait: Wait, now: number = Date.now(),
+): Promise<number | null> {
   const db = env.DB
+  const { sid, events } = batch
   if (!db || !events.length) return null
   try {
     const conf = await readKinds(db, now)
-    const { counts, pages } = tallyClient(events, conf)
+    const { counts, pages, trail, errors } = tallyClient(events, conf)
     if (!Object.keys(counts).length) return null
     const ts = Math.floor(Math.max(...events.map(e => e.t)) / 1000)
-    const id = await burstFor(db, who.actor, who.via, who.origin, Math.min(ts, Math.floor(now / 1000)))
-    await bump(db, id, counts, pages, sid)
-    await report(env, id, false, wait, now)
+    const at = Math.min(ts, Math.floor(now / 1000))
+    const { id, resumed } = await burstFor(db, who.actor, who.via, who.origin, at, BATCH_GAP_S, sid)
+    if (resumed !== undefined) {
+      // The resumption is the thread's line (where the tab came back to, after how long); counted in the summary.
+      await db.prepare("INSERT INTO activity_events (burst_id, ts, kind, actor, via, method, route, line, detail) VALUES (?, ?, 'resume', ?, ?, '', ?, ?, ?)")
+        .bind(id, at, who.actor, who.via, trail.at(-1) ?? '', `after ${fmtGap(resumed)}`, JSON.stringify({ sid })).run()
+      counts.resume = 1
+    }
+    await db.prepare('UPDATE session_log_batches SET burst_id = ? WHERE sid = ? AND pid = ? AND seq = ?').bind(id, sid, batch.pid, batch.seq).run()
+    await bump(db, id, counts, pages, sid, trail)
+    await report(env, id, (errors.length > 0 && conf.error?.notify === 'line') || (resumed !== undefined && conf.resume?.notify === 'line'), wait, now)
     return id
   } catch (e) {
     if (!missingTable(e)) console.log(`activity: client feed failed: ${(e as Error).message}`)
@@ -225,12 +278,33 @@ export async function ensurePost(
   return msg
 }
 
+/** Re-render bursts in their sinks now, from their events (a format change reaching existing threads, or errors
+ *  linked late); returns the ids rendered. */
+export async function rerender(env: ActivityEnv, ids: readonly number[], now: number = Date.now()): Promise<number[]> {
+  const conf = await readKinds(env.DB!, now)
+  const done: number[] = []
+  for (const id of ids) {
+    const b = await loadBurst(env.DB!, id)
+    if (!b || !reported(b.counts, conf)) continue
+    await render(env, b, conf, now)
+    done.push(id)
+  }
+  return done
+}
+
 async function render(env: ActivityEnv, b: StoredBurst, conf: KindsConf, now: number): Promise<void> {
   const db = env.DB!
   await db.prepare('UPDATE activity_bursts SET rendered_ms = ?, dirty = 0 WHERE id = ?').bind(now, b.id).run()
-  const events = await burstEvents(db, b.id)
+  const events = await burstEvents(db, b, conf)
   const h = highlights(events)
   const lineKinds = KIND_DEFS.filter(d => conf[d.kind]?.notify === 'line').map(d => [d.kind, events.filter(e => e.kind === d.kind)] as const).filter(([, es]) => es.length)
+  /** A client line (an error, a resumption) is its own text (escaped for the sink), on its page, its time linked to its
+   *  session (an error to the session's errors). */
+  const lineEvents = (es: readonly ServerEvent[], fmt: Fmt) => es.map(e => {
+    const sid = (e.kind === 'error' || e.kind === 'resume') && typeof e.detail?.sid === 'string' ? e.detail.sid : null
+    if (!sid) return e
+    return { ...e, line: `${fmt.esc(e.line)}${e.route ? ` on ${fmt.code(e.route)}` : ''}`, href: sessionUrl(b.origin, sid, e.kind === 'error' ? 'errors' : undefined) }
+  })
   const s = sinks(env)
   if (s.slack) {
     const channel = env.SLACK_ADMIN_CHANNEL!
@@ -240,7 +314,7 @@ async function render(env: ActivityEnv, b: StoredBurst, conf: KindsConf, now: nu
       ts => slackApi(env, 'chat.update', { channel, ts, text }))
     if (parent) {
       for (const [kind, es] of lineKinds) {
-        const reply = renderLines(kind, es, SLACK)
+        const reply = renderLines(kind, lineEvents(es, SLACK), SLACK)
         await ensurePost(db, b.id, 'slack', kind, now,
           async () => (await slackApi(env, 'chat.postMessage', { channel, thread_ts: parent, text: reply, unfurl_links: false, unfurl_media: false })).ts ?? null,
           ts => slackApi(env, 'chat.update', { channel, ts, text: reply }))
@@ -251,7 +325,7 @@ async function render(env: ActivityEnv, b: StoredBurst, conf: KindsConf, now: nu
     const url = env.DISCORD_ADMIN_WEBHOOK!
     const content = renderDiscord(
       renderSummary(b, { fmt: DISCORD, conf, highlights: h }),
-      lineKinds.map(([kind, es]) => renderLines(kind, es, DISCORD)),
+      lineKinds.map(([kind, es]) => renderLines(kind, lineEvents(es, DISCORD), DISCORD)),
       `${b.origin}/admin/activity?burst=${b.id}`,
     )
     const body = JSON.stringify({ content, allowed_mentions: { parse: [] } })

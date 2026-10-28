@@ -29,6 +29,7 @@ import os
 import re
 import shlex
 import subprocess
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -172,7 +173,7 @@ class DeploymentImages(ComponentResource):
     member) pull, `writers` (a build account's) push. `repository_id` defaults to `<deployment>-usage`; a live repo is
     adopted under its own id (`existing`; a repo can't be renamed: a new name is a new repo, the old one deleted once
     nothing points at it). `logical`: the repo's resource name, so a stack moving it into this component keeps it
-    (pass the name it had, with an alias from its old parent)."""
+    (pass the name it had, and `aliases` its old parent, e.g. `[Alias(parent=ROOT_STACK_RESOURCE)]`)."""
 
     def __init__(
         self,
@@ -187,6 +188,7 @@ class DeploymentImages(ComponentResource):
         description: str | None = None,
         adopt: Adopt,
         existing: bool = False,
+        aliases: Sequence[pulumi.Alias] = (),
         opts: ResourceOptions | None = None,
     ):
         name = logical or f"{deployment}-usage-images"
@@ -210,7 +212,7 @@ class DeploymentImages(ComponentResource):
                 A.RepositoryCleanupPolicyArgs(id="delete-old", action="DELETE",
                                               condition=A.RepositoryCleanupPolicyConditionArgs(tag_state="ANY", older_than=f"{IMAGE_DELETE_AFTER_S}s")),
             ],
-            opts=adopt.opts(existing, f"projects/{project}/locations/{region}/repositories/{repo_id}", parent=self, protect=True),
+            opts=adopt.opts(existing, f"projects/{project}/locations/{region}/repositories/{repo_id}", parent=self, protect=True, aliases=list(aliases)),
         )
         for role, members in (("reader", readers), ("writer", writers)):
             for i, member in enumerate(members):

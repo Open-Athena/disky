@@ -47,7 +47,7 @@ from click import Choice, argument, group, option
 from .hex_runs import HexRule, end_dropped_sql, rule_from_json, rule_json, segment_occurs
 from .static_catalog import PARENT
 from .static_names import (
-    CODEC, NAME, OPEN, PREFIX, SX_RG, _batches, _sx_cast, _task, connect, q, read_json,
+    CODEC, NAME, OPEN, PREFIX, SX_RG, _batches, _sx_cast, _task, base_params, connect, q, read_json,
 )
 from .static_profile import data_bucket, scratch_bucket
 from .resource_monitor import monitor_resources, resource_stage
@@ -108,7 +108,9 @@ def par_hit_sql(mode: str, key: str = "s", par: str = "par", rule: HexRule | Non
     """`first_hit_sql`'s test of the row's ancestors, a function of `(key, par)` only: no ancestor segment matches."""
     if mode == "end" and rule is not None:
         anc = f"list_bool_or(list_transform(string_split({par}, '/'), lambda seg: ends_with(seg, {key}) AND NOT {end_dropped_sql('seg', key, rule)}))"
-        return f"NOT (contains({par} || '/', {key} || '/') AND {anc})"
+        # a CASE, not `NOT (contains AND anc)`: DuckDB evaluates both sides of an AND, so the lambda ran on every pair,
+        # though `contains` settles nearly all of them (cw's s31: 2,776 cpu-s over 27.3M pairs, 489K passing it)
+        return f"CASE WHEN contains({par} || '/', {key} || '/') THEN NOT {anc} ELSE true END"
     if mode == "end":
         return f"NOT contains({par} || '/', {key} || '/')"
     if mode == "exact":
@@ -522,10 +524,22 @@ def anchors_meta(R: int, K: int, sets: dict, scans: list[str] | None = None, **e
 #: DuckDB threads per shard process when `build_tier_local` builds a tier's rollups shard by shard (`jobs` > 1).
 ANCHOR_THREADS = 4
 
-#: A shard input of this many rows or more (its footer's) is built alone on every thread of an `anchor-shard` helper
-#: task, before the rest. Rows, not bytes: a shard's work tracks its rows (gcs: ~300 MB shards of ~108M rows took 470–600s
-#: at 4 threads, ~500 MB ones of ~49M under 60s); gcs's three ~260M-row `end` shards are the ones over it.
-ANCHOR_HEAVY_ROWS = int(os.environ.get("DT_ANCHOR_HEAVY_ROWS", 200_000_000))
+#: A shard input of `ANCHOR_HEAVY_X` × the median shard's rows or more (footers'; at least `ANCHOR_HEAVY_MIN_ROWS`) is
+#: heavy: dealt to a helper, which builds it alone on all its threads before the rest. Rows, not bytes: a shard's work
+#: tracks its rows (gcs: ~300 MB shards of ~108M rows took 470–600s at 4 threads, ~500 MB ones of ~49M under 60s);
+#: relative to the median, not a constant tuned to one deployment (gcs: 4 × 49M picks its three ~260M-row `end` shards,
+#: its next biggest 121M).
+ANCHOR_HEAVY_X = float(os.environ.get("DT_ANCHOR_HEAVY_X", 4))
+ANCHOR_HEAVY_MIN_ROWS = 1 << 24
+
+
+def heavy_rows(rows: list[int]) -> int:
+    """The heavy bar over shard tasks of `rows` (each input's footer rows): `ANCHOR_HEAVY_X` × their median, at least
+    `ANCHOR_HEAVY_MIN_ROWS` (a corpus of tiny shards builds none alone)."""
+    if not rows:
+        return ANCHOR_HEAVY_MIN_ROWS
+    mid = sorted(rows)[len(rows) // 2]
+    return max(ANCHOR_HEAVY_MIN_ROWS, round(ANCHOR_HEAVY_X * mid))
 
 
 def _sorted_cells(con, table: str, out: str) -> None:
@@ -1838,7 +1852,7 @@ def brute_sql(src: str, version: int, cases: str, rule: HexRule | None = None) -
     end = "ends_with(x.l, c.k) AND NOT contains(x.par || '/', c.k || '/')"
     if rule is not None:
         anc = f"list_bool_or(list_transform(string_split(x.par, '/'), lambda seg: ends_with(seg, c.k) AND NOT {end_dropped_sql('seg', 'c.k', rule)}))"
-        end = f"ends_with(x.l, c.k) AND NOT {end_dropped_sql('x.l', 'c.k', rule)} AND NOT (contains(x.par || '/', c.k || '/') AND {anc})"
+        end = f"ends_with(x.l, c.k) AND NOT {end_dropped_sql('x.l', 'c.k', rule)} AND CASE WHEN contains(x.par || '/', c.k || '/') THEN NOT {anc} ELSE true END"
     match = f"""CASE c.m WHEN 'start' THEN starts_with(x.l, c.k) AND NOT contains('/' || x.par, '/' || c.k)
         WHEN 'end' THEN {end}
         ELSE x.l = c.k AND NOT contains('/' || x.par || '/', '/' || c.k || '/') END"""
@@ -2136,13 +2150,13 @@ def start_cmd(bucket, run, gen, K, mount, mem, threads, R, tmp) -> None:
 @option("-b", "--bucket", default=data_bucket, help="Bucket")
 @option("-d", "--run", required=True, help="The run's scan id (a level-0 run in the newest manifest)")
 @option("-g", "--gen", required=True, help="Generation")
-@option("-K", "--keep", "K", default=K_DEFAULT, type=int, help="Kept children per heavy directory")
+@option("-K", "--keep", "K", type=int, help="Kept children per heavy directory (default and only allowed value: the base's)")
 @option("-m", "--mount", required=True, help="Local mount of the bucket")
 @option("-M", "--mem", default="100GB", help="DuckDB memory limit")
 @option("-o", "--out", help="Build into this new local dir and upload nothing (a canary or probe re-run; with -P)")
 @option("-p", "--threads", default=16, type=int, help="DuckDB threads")
 @option("-P", "--manifest", help="The tiers before the run from this manifest (`manifests/<id>.json`, the one that published it), not the newest")
-@option("-R", "--read-rows", "R", default=R_DEFAULT, type=int, help="R")
+@option("-R", "--read-rows", "R", type=int, help="R (default and only allowed value: the base's)")
 @option("-T", "--tmp", default="/stage/tmp", help="Local scratch")
 @monitor_resources(prefix="ANCHOR_RESOURCE")
 def run_cmd(bucket, run, gen, K, mount, mem, out, threads, manifest, R, tmp) -> None:
@@ -2163,6 +2177,8 @@ def run_cmd(bucket, run, gen, K, mount, mem, out, threads, manifest, R, tmp) -> 
         raise SystemExit(f"{out}: already exists")
     b = None if out is not None else _gcs(bucket)
     prefix = f"{PREFIX}/{gen}/deltas/{run}"
+    bm = _tier_root(mount, gen, None) / ANCHORS / "meta.json"
+    R, K = base_params(json.loads(bm.read_text()), str(bm.parent), R=R, K=K)
     if b is not None and b.blob(f"{prefix}/{ANCHORS}/meta.json").exists():
         # Built before the starts-with catalog existed: only its `anchors/start/` (when the base carries one).
         if b.blob(f"{PREFIX}/{gen}/{START_DIR}/meta.json").exists():

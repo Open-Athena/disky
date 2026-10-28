@@ -152,6 +152,8 @@ class Runner(ar.Runner):
                                                            *(["-D", str(self.cfg.measure_tasks)] if self.cfg.measure_tasks > 1 else []),
                                                            *(["-A", str(self.cfg.anchor_tasks)] if self.cfg.anchor_tasks > 1 else []),
                                                            *(["-L", str(self.cfg.fold_tasks)] if self.cfg.fold_tasks > 1 else []),
+                                                           *(["-k", str(self.cfg.keep)] if self.cfg.keep else []),
+                                                           *(["-N"] if self.candidate else []),
                                                            *duckdb_args(self.cfg.machine_for("compact"))], r2=r2)]
         if self.cfg.measure_tasks > 1 or self.cfg.anchor_tasks > 1 or self.cfg.fold_tasks > 1:
             # its helper jobs are built from the profile, as this runner's are
@@ -159,7 +161,8 @@ class Runner(ar.Runner):
 
             out[0][1]["taskGroups"][0]["taskSpec"]["environment"]["variables"]["STATIC_NAMES_PROFILE"] = json.dumps(to_mapping(self.cfg))
         if not r2:
-            out.append(self.job("compact-r2", scan, 1, "static_merge", ["compact-r2", "-g", self.cfg.gen], r2=True, mount=False))
+            out.append(self.job("compact-r2", scan, 1, "static_merge", ["compact-r2", "-g", self.cfg.gen, *(["-N"] if self.candidate else [])], r2=True,
+                                mount=False))
         return out
 
     def with_gen(self, gen: str) -> Profile:
@@ -429,6 +432,7 @@ def gcs_runner(cfg: Profile, *, dry_run: bool = False, verify_terms: str | None 
     from google.cloud import storage
 
     from . import static_append as sa
+    from .blobstore import Store
     from .static_names import list_scans, read_json
 
     client = storage.Client(project=cfg.project)
@@ -471,7 +475,8 @@ def gcs_runner(cfg: Profile, *, dry_run: bool = False, verify_terms: str | None 
         merge=merge,
         merge_wait=merge_wait,
         list_keys=lambda prefix: [x.name for x in client.list_blobs(cfg.bucket, prefix=prefix)],
-        coordination=None if dry_run else lambda: ar.gcs_coordinator_lease(cfg.scratch, PREFIX, client),
+        coordination=None if dry_run else lambda: ar.gcs_coordinator_lease(cfg.scratch, ar.coordinator_prefix(Store(f"gs://{cfg.bucket}"), PREFIX, runner.cfg.gen),
+                                                                           client),
         compacting=None if dry_run or not cfg.scratch else lambda: ar.gcs_compaction_lease_file(cfg.scratch, PREFIX, client),
     )
     return runner
@@ -483,10 +488,11 @@ def gcs_runner(cfg: Profile, *, dry_run: bool = False, verify_terms: str | None 
 @option("-K", "--compact-now", is_flag=True, help="After the merge stage, compact into a new generation whatever the policy says (when the generation has runs)")
 @option("-M", "--no-merge", is_flag=True, help="Skip the merge stage (the due carries wait for a later run, or `runs merge`)")
 @option("-n", "--dry-run", is_flag=True, help="Report each stage's state and what would run; submit and write nothing")
+@option("-N", "--candidate", is_flag=True, help="The compaction (due, or -K) writes a candidate: published, nothing pointed at it, appends not held off (`static_merge promote` points prod at it)")
 @option("-t", "--verify-terms", help="Also run `runs verify` with this terms file (a gs:// URL)")
 @option("-w", "--merge-wait", default=0, type=float, help="Seconds to wait on the merge job (default 0: submit it and go; it publishes on GCS when done)")
 @argument("scan_id")
-def add_cmd(catch_up: bool, gen: str | None, compact_now: bool, no_merge: bool, dry_run: bool, verify_terms: str | None, merge_wait: float,
+def add_cmd(catch_up: bool, gen: str | None, compact_now: bool, no_merge: bool, dry_run: bool, candidate: bool, verify_terms: str | None, merge_wait: float,
             scan_id: str) -> None:
     """Append SCAN_ID to the static name index: prepare → append → shards ∥ catalog → [drill] ∥ [anchors] → publish → R2 → prune, each stage
     skipped when its output exists; then the merge stage (the due carries, non-fatal). Exit 3 when SCAN_ID is not published
@@ -496,6 +502,7 @@ def add_cmd(catch_up: bool, gen: str | None, compact_now: bool, no_merge: bool, 
     cfg = ready(profile(), gen)
     runner = gcs_runner(cfg, dry_run=dry_run, verify_terms=verify_terms, merge=not no_merge, merge_wait=merge_wait)
     runner.compact_now = compact_now
+    runner.candidate = candidate
     done = exit_on(f"static-names runs add {scan_id}", lambda: runner.run(scan_id, catch_up=catch_up), lambda m: err(m))
     print(json.dumps({"gen": runner.cfg.gen, "scan": scan_id, "appended": done, "dry_run": dry_run, "compaction": runner.compaction}))
 

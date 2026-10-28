@@ -1034,6 +1034,15 @@ def upload_tree(local: Path, bucket: str, prefix: str, *, workers: int = 8, last
     return out + [one(p) for p in tail]
 
 
+def base_params(meta: dict, where: str, **given: int | None) -> list[int | None]:
+    """A run's build parameters (`R`, `K`, `floor`, …) from its generation's base (``meta``: its `meta.json`, at
+    ``where``): each given value (a CLI flag) must equal the base's; None takes the base's (None where it has none). A
+    run kept at another `K` than its base would carry, and compact, the wrong rollups."""
+    if bad := [f"{k} {v} (the base's: {meta[k]})" for k, v in given.items() if v is not None and k in meta and v != meta[k]]:
+        raise SystemExit(f"{where}: {', '.join(bad)}: a run is built as its generation's base")
+    return [meta.get(k) if v is None else v for k, v in given.items()]
+
+
 def read_json(uri: str) -> dict:
     if uri.startswith("gs://"):
         from google.cloud import storage

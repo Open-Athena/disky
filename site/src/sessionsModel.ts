@@ -3,24 +3,38 @@
  * event, the URL in effect at each moment ("open this view"), and the strip
  * chart's ticks. Pure, so the rendering is pinned by `sessionsModel.test.ts`.
  */
-import { isErrorEvent, type SessionPage, type SessionRow, type StoredEvent } from '../functions/_lib/sessionLogShape'
+import { isErrorEvent, type SessionPage, type SessionRow, type StoredEvent, summarize } from '../functions/_lib/sessionLogShape'
+
+export { summarize }
 import { type Registry, whoToHandle } from './identityRegistry'
 
-/** `1h 02m`, `3m 07s`, `12s`, `450ms`. */
+/** `4d 12h 43m`, `1h 02m`, `3m 07s`, `12s`, `450ms`. */
 export function fmtDuration(ms: number): string {
   if (ms < 1000) return `${Math.round(ms)}ms`
   const s = Math.floor(ms / 1000)
   if (s < 60) return `${s}s`
   const m = Math.floor(s / 60)
   if (m < 60) return `${m}m ${String(s % 60).padStart(2, '0')}s`
-  return `${Math.floor(m / 60)}h ${String(m % 60).padStart(2, '0')}m`
+  const h = Math.floor(m / 60)
+  if (h < 24) return `${h}h ${String(m % 60).padStart(2, '0')}m`
+  return `${Math.floor(h / 24)}d ${String(h % 24).padStart(2, '0')}h`
 }
 
-/** `+1:02.345` (offset into the session). */
+/** An offset or gap: `+2.345s` under a minute (to the ms), else two units: `+3m 07s`, `+1h 02m`, `+4d 12h`. */
 export function fmtOffset(ms: number): string {
   const t = Math.max(0, Math.round(ms))
-  const m = Math.floor(t / 60_000), s = Math.floor((t % 60_000) / 1000), r = t % 1000
-  return `+${m}:${String(s).padStart(2, '0')}.${String(r).padStart(3, '0')}`
+  return `+${t < 60_000 ? `${(t / 1000).toFixed(3)}s` : fmtDuration(t)}`
+}
+
+/** What the timeline's first column shows: the offset into the session with the gap since the row above
+ *  (`+2d 03h (+5m 10s)`), or how long ago (from `now`). */
+export const AT_MODES = ['start', 'ago'] as const
+export type AtMode = typeof AT_MODES[number]
+export const AT_LABEL: Record<AtMode, string> = { start: 'at (Δ)', ago: 'ago' }
+
+export function fmtAt(mode: AtMode, l: Pick<Line, 't' | 'off'>, prev: Pick<Line, 'off'> | null, now: number): string {
+  if (mode === 'start') return prev ? `${fmtOffset(l.off)} (${fmtOffset(l.off - prev.off)})` : fmtOffset(l.off)
+  return `${fmtDuration(Math.max(0, now - l.t))} ago`
 }
 
 /** A local wall-clock time to the ms (`19:43:09.433`), led by the date (`Oct 13 19:43:09.433`) when its day isn't
@@ -32,30 +46,6 @@ export function fmtClock(ms: number, startMs: number, timeZone?: string): string
   const clock = `${p.hour}:${p.minute}:${p.second}.${String(((Math.round(ms) % 1000) + 1000) % 1000).padStart(3, '0')}`
   if (day(ms) === day(startMs)) return clock
   return `${new Date(ms).toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone })} ${clock}`
-}
-
-const str = (v: unknown): string => (v === undefined || v === null ? '' : String(v))
-
-/** One event as a line of text. */
-export function summarize(e: StoredEvent): string {
-  switch (e.k) {
-    case 'start': return `page load ${str(e.u)}${e.ref ? ` (from ${str(e.ref)})` : ''}`
-    case 'nav': return str(e.u)
-    case 'click': return [e.n && `[${str(e.n)}]`, str(e.l), e.x !== undefined && (e.x ? '☑' : '☐')].filter(Boolean).join(' ')
-    case 'filter': return `${str(e.n)} = “${str(e.q)}”`
-    case 'pick': return `${str(e.n)} → ${str(e.v)}`
-    case 'prefetch': return `${str(e.w)} ${str(e.p) || '(root)'}${e.d ? ` @ ${str(e.d)}` : ''}`
-    case 'api': {
-      const b = e.b && typeof e.b === 'object' ? ` {${Object.entries(e.b).map(([k, v]) => `${k}: ${v}`).join(', ')}}` : ''
-      return `${str(e.m) || 'GET'} ${str(e.u)}${b} → ${e.s === 0 ? 'failed' : str(e.s)} · ${str(e.ms)}ms${e.c ? ` · ${str(e.c)}` : ''}${e.qe ? ` · ${str(e.qe)}` : ''}${e.err ? ` · ${str(e.err)}` : ''}`
-    }
-    case 'error': return `${str(e.msg)}${e.src ? ` @ ${str(e.src)}` : ''}`
-    case 'reject': return `unhandled rejection: ${str(e.msg)}`
-    case 'console': return `console.error: ${str(e.msg)}`
-    case 'viewport': return `${str(e.w)}×${str(e.h)} @${str(e.dpr)}x`
-    case 'vis': return `tab ${str(e.s)}`
-    case 'dropped': return `${str(e.n)} events dropped (cap)`
-  }
 }
 
 /** The strip chart's lanes, top to bottom. */

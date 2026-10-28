@@ -55,7 +55,7 @@ CREATE TABLE activity_bursts (
   sids        TEXT NOT NULL,
   rendered_ms INTEGER,
   dirty       INTEGER NOT NULL DEFAULT 0
-);
+, trail TEXT NOT NULL DEFAULT '{"n":0,"last":[]}');
 
 CREATE TABLE activity_events (
   id       INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -388,7 +388,7 @@ CREATE TABLE session_log_batches (
   first_ms    INTEGER NOT NULL,
   last_ms     INTEGER NOT NULL,
   n           INTEGER NOT NULL,
-  events      TEXT NOT NULL,
+  events      TEXT NOT NULL, burst_id INTEGER,
   PRIMARY KEY (sid, pid, seq)
 );
 
@@ -489,6 +489,8 @@ CREATE INDEX idx_scan_runs_started ON scan_runs (store, started_ts);
 CREATE INDEX idx_session_log_email ON session_log (email, last_ms);
 
 CREATE INDEX idx_session_log_received ON session_log (received_ts);
+
+CREATE INDEX idx_session_log_batches_burst ON session_log_batches (burst_id);
 
 CREATE INDEX idx_session_log_batches_received ON session_log_batches (received_ts);
 

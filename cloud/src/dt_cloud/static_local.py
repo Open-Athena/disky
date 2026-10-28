@@ -322,16 +322,24 @@ def build_base_anchors(con, gen_dir: Path, *, R: int, K: int, scans: list[str], 
     (`names/`, from the coalesced versions, as `static-names anchors names`), then `anchors/` — the `q$` rollups over the
     suffix shards, the `^q$` ones over the name index and the starts-with catalog `anchors/start/` (`build_tier_local`,
     each `meta.json` written last), at the drill's R and K. `fanout()`: the rollups' `static_fanout.AnchorFanout` (a
-    compaction's helper tasks; made once `names/` is written, its shards being their inputs)."""
+    compaction's helper tasks), its job submitted before `names/` is written (`presubmit`: the helpers boot meanwhile)
+    and dealt once it is, its shards being their inputs."""
     cint = sorted(str(f) for f in (gen_dir / "cintervals").glob("*.parquet"))
-    t = monotonic()
-    hb.set_stage("anchors/names")
-    names = an.write_names(con, an.files_sql(cint, an.VERSION_COLS), gen_dir / an.NAMES, jobs=sn.pool_jobs(con, 1 << 30, an.ANCHOR_THREADS))
-    sn.err(f"anchors/names: {names['rows']:,} rows in {names['shards']} shards in {monotonic() - t:.0f}s")
-    tier = an.Tier(gen_dir)
-    t = monotonic()
-    doc = an.build_tier_local(con, tier.files("end"), tier.files("exact"), gen_dir / an.ANCHORS, R, K, scans, rule,
-                              fanout=fanout() if fanout is not None else None)
+    fan = fanout() if fanout is not None else None
+    if fan is not None:
+        fan.presubmit()
+    try:
+        t = monotonic()
+        hb.set_stage("anchors/names")
+        names = an.write_names(con, an.files_sql(cint, an.VERSION_COLS), gen_dir / an.NAMES, jobs=sn.pool_jobs(con, 1 << 30, an.ANCHOR_THREADS))
+        sn.err(f"anchors/names: {names['rows']:,} rows in {names['shards']} shards in {monotonic() - t:.0f}s")
+        tier = an.Tier(gen_dir)
+        t = monotonic()
+        doc = an.build_tier_local(con, tier.files("end"), tier.files("exact"), gen_dir / an.ANCHORS, R, K, scans, rule, fanout=fan)
+    except BaseException:
+        if fan is not None:
+            fan.abandon()
+        raise
     sn.err(f"anchors/rollups: {', '.join(f'{k} {v['rows']:,} rows' for k, v in doc['sets'].items())} in {monotonic() - t:.0f}s")
     return {"names": {k: names[k] for k in ("rows", "shards")}, **{k: v["rows"] for k, v in doc["sets"].items()}}
 
@@ -397,13 +405,25 @@ MEASURE_THREADS = 4
 #: Overrides `MEASURE_THREADS`: fewer, wider measurement processes, each with a bigger share of `memory_limit` (a range
 #: whose working set passes its share spills to its temp dir and re-reads it per statement).
 MEASURE_THREADS_ENV = "DT_MEASURE_THREADS"
-#: A `q` range whose spilled roots pass this many bytes is heavy (gcs c001's: single-`q` ranges of 100M–440M roots,
-#: 0.8–5.2 GB zstd, against a median of 64 MB / 4M roots): `measure_ranges` measures the heavy ones first, `HEAVY_THREADS`
-#: DuckDB threads each (fewer processes, each a bigger share of `memory_limit`); at a light range's 1/13 they spilled
-#: 20–37 GiB apiece and set the stage's wall clock. `$DT_MEASURE_HEAVY_BYTES` overrides it.
-HEAVY_BYTES = 1 << 30
-HEAVY_BYTES_ENV = "DT_MEASURE_HEAVY_BYTES"
+#: A `q` range is heavy when its spilled roots hold `MEASURE_HEAVY_X` × the median range's rows (footers), at least
+#: `MEASURE_HEAVY_MIN_ROWS` (`measure_heavy_rows`): `measure_ranges` measures the heavy ones first, `HEAVY_THREADS` DuckDB
+#: threads each (fewer processes, each a bigger share of `memory_limit`). Rows, not bytes: gcs c001's long ranges' seconds
+#: track roots rows (r 0.78; short 0.98), not spilled bytes (0.33 / 0.65). Its single-`q` ranges of ~108M roots in
+#: 730–800 MiB stayed under the old 1 GiB bar and took 800–1190s at 4 threads, the stage's tail; alone, one took 463s at 4
+#: threads and 120s at 16. `$DT_MEASURE_HEAVY_ROWS` sets the bar outright.
+MEASURE_HEAVY_X = float(os.environ.get("DT_MEASURE_HEAVY_X", 4))
+MEASURE_HEAVY_MIN_ROWS = 1 << 25
+HEAVY_ROWS_ENV = "DT_MEASURE_HEAVY_ROWS"
 HEAVY_THREADS = 16
+
+
+def measure_heavy_rows(rows: list[int]) -> int:
+    """The heavy bar over `q` ranges of `rows` (each one's spilled roots): `MEASURE_HEAVY_X` × their median, at least
+    `MEASURE_HEAVY_MIN_ROWS` (a corpus of small ranges measures none alone)."""
+    if not rows:
+        return MEASURE_HEAVY_MIN_ROWS
+    mid = sorted(rows)[len(rows) // 2]
+    return max(MEASURE_HEAVY_MIN_ROWS, round(MEASURE_HEAVY_X * mid))
 
 
 def measure_jobs(con, ranges: int) -> int:
@@ -497,7 +517,7 @@ def measure_ranges(con, work: Path, kind: str, n: int, dirs_into: str, rup_into:
     are `q`-disjoint and in `q` order, so the files are what `static_drill.write_kind` streams (`chunks`) instead of
     sorting every root again. The sorted files, in `q` order.
 
-    The heavy ranges (spilled bytes ≥ `HEAVY_BYTES`) first, heaviest first, `HEAVY_THREADS` threads each; then the rest,
+    The heavy ranges (spilled roots ≥ `measure_heavy_rows`) first, heaviest first, `HEAVY_THREADS` threads each; then the rest,
     heaviest first, `jobs` at a time (default `measure_jobs`). Each range in a process of its own (spawned; `con`'s threads
     and memory limit split between them, `con`'s own limit lowered to a share meanwhile); 1: in turn on `con`. Each
     range's measurement and rollups go to parquet first and into the tables in `q`-range order, so neither the order nor
@@ -525,11 +545,11 @@ def measure_ranges(con, work: Path, kind: str, n: int, dirs_into: str, rup_into:
             tasks.append((g, [str(f) for f in files], str(out / f"g{g:06d}.parquet"), str(meas / f"dirs-g{g:06d}.parquet"),
                           str(meas / f"rup-g{g:06d}.parquet")))
     local = [t for t in tasks if t[0] not in away]
-    size = {t[0]: sum(Path(f).stat().st_size for f in t[1]) for t in local}
+    size = {t[0]: sum(pq.ParquetFile(f).metadata.num_rows for f in t[1]) for t in local}
     by_size = sorted(local, key=lambda t: (-size[t[0]], t[0]))
-    heavy_bytes = int(os.environ.get(HEAVY_BYTES_ENV) or HEAVY_BYTES)
-    heavy = [t for t in by_size if size[t[0]] >= heavy_bytes]
-    light = [t for t in by_size if size[t[0]] < heavy_bytes]
+    heavy_rows = int(os.environ.get(HEAVY_ROWS_ENV) or measure_heavy_rows(list(size.values())))
+    heavy = [t for t in by_size if size[t[0]] >= heavy_rows]
+    light = [t for t in by_size if size[t[0]] < heavy_rows]
     fixed = jobs
     prog = hb.Progress(f"drill/measure/{kind}", n, unit="ranges")
     prog.tick(n - len(tasks), nbytes=0)  # the ranges without roots
@@ -556,9 +576,11 @@ def measure_ranges(con, work: Path, kind: str, n: int, dirs_into: str, rup_into:
                 if on_range:
                     on_range(g, task[g], done[g])
 
+    if local:
+        sn.err(f"drill/measure/{kind}: {len(heavy)} of {len(local)} ranges heavy (≥ {heavy_rows:,} roots; up to {max(size.values()):,})")
     if heavy:
         hj = max(1, min(fixed, len(heavy))) if fixed is not None else sn.pool_jobs(con, len(heavy), HEAVY_THREADS)
-        sn.err(f"drill/measure/{kind}: {len(heavy)} heavy ranges (≥ {heavy_bytes:,} B spilled, up to {max(size.values()):,}) first, {hj} at a time")
+        sn.err(f"drill/measure/{kind}: the {len(heavy)} heavy ranges first, {hj} at a time")
         run_group(heavy, hj, f"drill/measure/{kind} (heavy)")
     jobs = measure_jobs(con, len(light)) if fixed is None else max(1, min(fixed, len(light) or 1))
     run_group(light, jobs, f"drill/measure/{kind}")

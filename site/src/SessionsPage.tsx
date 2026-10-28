@@ -8,7 +8,8 @@ import { useRegistry } from './identities'
 import { NO_AUTOFILL } from './noAutofill'
 import { useUserEmails } from './owners'
 import { relAgo } from './prefixes'
-import { fmtClock, fmtDuration, fmtOffset, LANES, type Line, pagerLabel, sessionsQuery, ticks, timeline, uaLabel, viewerOf } from './sessionsModel'
+import { AT_LABEL, AT_MODES, type AtMode, fmtAt, fmtClock, fmtDuration, fmtOffset, LANES, type Line, pagerLabel, sessionsQuery, ticks, timeline, uaLabel, viewerOf } from './sessionsModel'
+import { useSessionAt } from './prefs'
 import { SiteNav } from './SiteNav'
 import { Tooltip } from './Tooltip'
 import { UserChip } from './UserChip'
@@ -156,6 +157,7 @@ const KIND_FILTERS = [
   { id: 'api', label: 'requests' },
 ] as const
 type KindFilter = typeof KIND_FILTERS[number]['id']
+const isFilter = (s: string | null): s is KindFilter => KIND_FILTERS.some(f => f.id === s)
 const shown = (l: Line, f: KindFilter): boolean =>
   f === 'all' || (f === 'errors' ? l.error : f === 'actions' ? l.lane === 'input' || l.lane === 'nav' : l.k === 'api')
 
@@ -165,7 +167,17 @@ function SessionView({ sid }: { sid: string }) {
     queryFn: () => getJson<{ session: SessionRow; events: StoredEvent[] }>(`/api/session-log/sessions/${encodeURIComponent(sid)}`),
   })
   const lines = useMemo(() => timeline(q.data?.events ?? []), [q.data])
-  const [filter, setFilter] = useState<KindFilter>('all')
+  // `?show=errors` etc.: the filter is in the URL, so a link (the activity feed's error lines) can open on it.
+  const [sp, setSp] = useSearchParams()
+  const show = sp.get('show')
+  const filter: KindFilter = isFilter(show) ? show : 'all'
+  const setFilter = useCallback((f: KindFilter) => setSp(p => {
+    const n = new URLSearchParams(p)
+    if (f === 'all') n.delete('show'); else n.set('show', f)
+    return n
+  }, { replace: true }), [setSp])
+  const [at, setAt] = useSessionAt()
+  const now = useMemo(() => Date.now(), [q.data])
   const [focus, setFocus] = useState<number | null>(null)
   /** The event under the pointer, in the strip or the table: both highlight it. */
   const [hot, setHot] = useState<number | null>(null)
@@ -205,10 +217,10 @@ function SessionView({ sid }: { sid: string }) {
       </div>
       <div className="table-scroll" ref={box}>
         <table className="sessions timeline">
-          <thead><tr><th className="num">at</th><th className="num">time</th><th>kind</th><th>event</th><th></th></tr></thead>
+          <thead><tr><th className="num"><AtHeader at={at} onAt={setAt} /></th><th className="num">time</th><th>kind</th><th>event</th><th></th></tr></thead>
           <tbody onMouseLeave={() => setHot(null)}>
-            {lines.filter(l => shown(l, filter)).map(l => (
-              <EventRow key={l.i} l={l} t0={lines[0].t} hot={hot === l.i} focused={focus === l.i} rowRef={rowRef} onHover={setHot} />
+            {lines.filter(l => shown(l, filter)).map((l, j, rows) => (
+              <EventRow key={l.i} l={l} at={fmtAt(at, l, j ? rows[j - 1] : null, now)} t0={lines[0].t} hot={hot === l.i} focused={focus === l.i} rowRef={rowRef} onHover={setHot} />
             ))}
           </tbody>
         </table>
@@ -217,9 +229,26 @@ function SessionView({ sid }: { sid: string }) {
   )
 }
 
+const AT_TIP: Record<AtMode, string> = {
+  start: 'Time since the session’s first event, and (in parentheses) since the row above, as filtered.',
+  ago: 'How long ago, from when this page loaded.',
+}
+
+/** The first column's header: click to cycle what it shows (`AT_MODES`); remembered per browser. */
+function AtHeader({ at, onAt }: { at: AtMode; onAt: (m: AtMode) => void }) {
+  const next = AT_MODES[(AT_MODES.indexOf(at) + 1) % AT_MODES.length]
+  return (
+    <Tooltip content={<>{AT_TIP[at]} Click for “{AT_LABEL[next]}”: {AT_TIP[next].toLowerCase()}</>}>
+      <button type="button" className="th-toggle" onClick={() => onAt(next)}>{AT_LABEL[at]} ⇄</button>
+    </Tooltip>
+  )
+}
+
 /** One timeline row; memoized, so a hover re-renders two rows, not the whole (up to 20K-row) table. */
-const EventRow = memo(function EventRow({ l, t0, hot, focused, rowRef, onHover }: {
+const EventRow = memo(function EventRow({ l, at, t0, hot, focused, rowRef, onHover }: {
   l: Line
+  /** The first column's text (`fmtAt`). */
+  at: string
   t0: number
   hot: boolean
   focused: boolean
@@ -229,7 +258,7 @@ const EventRow = memo(function EventRow({ l, t0, hot, focused, rowRef, onHover }
   return (
     <tr ref={el => rowRef(l.i, el)} onMouseEnter={() => onHover(l.i)}
       className={`${l.error ? 'has-err' : ''}${focused ? ' focused' : ''}${hot ? ' hot' : ''}${l.k === 'start' ? ' load' : ''}`}>
-      <td className="num"><code>{fmtOffset(l.off)}</code></td>
+      <td className="num"><code>{at}</code></td>
       <td className="num"><code className="dim">{fmtClock(l.t, t0)}</code></td>
       <td><span className={`lane-dot lane-${l.lane}`} aria-hidden /> {l.k}</td>
       <td className="ev">{l.text}</td>

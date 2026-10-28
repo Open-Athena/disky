@@ -43,6 +43,12 @@ export const LIMITS = {
 /** Client-side truncation, per field family. */
 export const TRUNC = { label: 60, filter: 200, url: 300, msg: 300, stack: 1500 } as const
 
+/** Browser reports that aren't faults: `ResizeObserver loop …` is Chrome saying a resize callback deferred a frame. */
+const BENIGN_ERRORS = [/^ResizeObserver loop /]
+
+/** Whether an error message is one of `BENIGN_ERRORS` (neither logged by the client nor counted by the feed). */
+export const benignError = (msg: unknown): boolean => typeof msg === 'string' && BENIGN_ERRORS.some(r => r.test(msg))
+
 /** Kinds (and api statuses) that count as errors in the session summary. */
 export const isErrorEvent = (e: Pick<SlogEvent, 'k'> & { s?: unknown }): boolean =>
   e.k === 'error' || e.k === 'reject' || e.k === 'console' || (e.k === 'api' && typeof e.s === 'number' && (e.s === 0 || e.s >= 500))
@@ -195,4 +201,28 @@ export function bodySummary(body: unknown): Record<string, string | number> | nu
     out[cut(k, 30)] = Array.isArray(v) ? v.length : KIND_KEYS.has(k) && typeof v === 'string' ? cut(v, 30) : v === null ? 'null' : typeof v
   }
   return out
+}
+
+const str = (v: unknown): string => (v === undefined || v === null ? '' : String(v))
+
+/** One event as a line of text. */
+export function summarize(e: SlogEvent): string {
+  switch (e.k) {
+    case 'start': return `page load ${str(e.u)}${e.ref ? ` (from ${str(e.ref)})` : ''}`
+    case 'nav': return str(e.u)
+    case 'click': return [e.n && `[${str(e.n)}]`, str(e.l), e.x !== undefined && (e.x ? '☑' : '☐')].filter(Boolean).join(' ')
+    case 'filter': return `${str(e.n)} = “${str(e.q)}”`
+    case 'pick': return `${str(e.n)} → ${str(e.v)}`
+    case 'prefetch': return `${str(e.w)} ${str(e.p) || '(root)'}${e.d ? ` @ ${str(e.d)}` : ''}`
+    case 'api': {
+      const b = e.b && typeof e.b === 'object' ? ` {${Object.entries(e.b).map(([k, v]) => `${k}: ${v}`).join(', ')}}` : ''
+      return `${str(e.m) || 'GET'} ${str(e.u)}${b} → ${e.s === 0 ? 'failed' : str(e.s)} · ${str(e.ms)}ms${e.c ? ` · ${str(e.c)}` : ''}${e.qe ? ` · ${str(e.qe)}` : ''}${e.err ? ` · ${str(e.err)}` : ''}`
+    }
+    case 'error': return `${str(e.msg)}${e.src ? ` @ ${str(e.src)}` : ''}`
+    case 'reject': return `unhandled rejection: ${str(e.msg)}`
+    case 'console': return `console.error: ${str(e.msg)}`
+    case 'viewport': return `${str(e.w)}×${str(e.h)} @${str(e.dpr)}x`
+    case 'vis': return `tab ${str(e.s)}`
+    case 'dropped': return `${str(e.n)} events dropped (cap)`
+  }
 }

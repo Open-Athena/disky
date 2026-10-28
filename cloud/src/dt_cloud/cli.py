@@ -3111,9 +3111,10 @@ def _digest_options(template_default: str):
         option("-n", "--dry-run", is_flag=True, help="Render the plot + print OP/replies; post & host nothing"),
         option("-P", "--platform", type=Choice(["slack", "discord"]), default="slack", help="Which thread to converge (default slack)"),
         option("-r", "--root", help="Snapshots root: a dir or URL (`r2://<bucket>/snapshots`, `gs://…`; the month's state lives beside it); default the config's `root` (presets: gs://$DATA_BUCKET/snapshots)"),
-        option("-R", "--redo-replies", is_flag=True, help="Re-post the month's replies under the current day rule, then delete the old ones (Slack; dry-run unless --for-real)"),
+        option("-R", "--redo-replies", is_flag=True, help="Re-post the month's replies under the current day rule, then delete the old ones (Slack, or Discord with -P discord; dry-run unless --for-real)"),
+        option("-s", "--since", help="With --redo-replies: redo only the days from this one (YYYY-MM-DD) on; earlier days keep their replies, re-keyed to the current rule (a day's extra replies stay in the thread)"),
         option("-t", "--token", help="Slack bot token (default $SLACK_BOT_TOKEN)"),
-        option("-T", "--template", type=Choice(["gcs", "cw"]), default=template_default, help=f"Post style + preset config (default {template_default}): gcs = a reply per scan, $/mo by storage class, class mosaic; cw = a reply per day, % of quota per bucket, quota sparkline + diff treemap"),
+        option("-T", "--template", type=Choice(["gcs", "cw"]), default=template_default, help=f"Post style + preset config (default {template_default}): gcs = a reply per day, $/mo by storage class, class mosaic; cw = a reply per day, % of quota per bucket, quota sparkline + diff treemap"),
         option("-u", "--url", "site_url", default=None, help="Site base for links (default the config's `site_url`, else $SITE_URL)"),
         option("-V", "--variant", type=Choice(["sender", "body"]), default=None, help="Reply style (cw template): headline as the sender name, posted once from the day's morning scan (sender, default) or bold in the body, edited as the day's scans land (body)"),
         option("-w", "--webhook", help="Discord webhook URL in the digest channel (default $<config discord_webhook_env>: gcs $DISCORD_GCS_USAGE_WEBHOOK, cw none; with -P discord)"),
@@ -3140,6 +3141,7 @@ def _digest(
     platform: str,
     root: str | None,
     redo_replies: bool,
+    since: str | None,
     token: str | None,
     template: str,
     site_url: str | None,
@@ -3163,19 +3165,23 @@ def _digest(
     )
     root = root or cfg.resolve_root()
 
+    since_d = dt.date.fromisoformat(since) if since else None
+    if since_d and not redo_replies:
+        raise UsageError("-s/--since applies to -R/--redo-replies")
     if dry_run:
         print(dg.dry_run(tpl, root, m, variant))
         return
 
     if platform == "discord":
-        if redo_replies:
-            raise SystemExit("digest: -R/--redo-replies is Slack-only")
         webhook = secret(webhook, cfg.discord_webhook_env) if cfg.discord_webhook_env else webhook
         bot_token = secret(bot_token, "DISCORD_BOT_TOKEN")
         if not (webhook and bot_token):
             raise SystemExit(f"digest: -P discord needs {cfg.discord_webhook_env or 'a webhook (-w)'} + DISCORD_BOT_TOKEN (or -w/-b)")
-        dg.post_digest_discord(tpl, root, m, webhook, bot_token, edit_replies=edit_replies)
-        err(f"digest: converged {m:%Y-%m} (discord)")
+        plan = dg.post_digest_discord(tpl, root, m, webhook, bot_token, edit_replies=edit_replies, redo=redo_replies, since=since_d, for_real=for_real)
+        if redo_replies and not for_real:
+            _print_redo_plan(plan, f"{m:%Y-%m} on Discord", since_d)
+            return
+        err(f"digest: {'re-threaded' if redo_replies else 'converged'} {m:%Y-%m} (discord)" + (f", {len(plan['stale'])} old left undeleted" if plan.get("stale") else ""))
         return
     channel = channel or os.environ.get("SLACK_CHANNEL")
     token = secret(token, "SLACK_BOT_TOKEN")
@@ -3194,19 +3200,11 @@ def _digest(
 
     if redo_replies:
         # rule change: re-post every reply under the current day rule, then retire the old ones
-        plan = dg.redo_replies(tpl, root, m, client, channel, variant, icons_dir=icons, deploy_plot=deploy, reply_delay=reply_delay, for_real=for_real)
+        plan = dg.redo_replies(tpl, root, m, client, channel, variant, since=since_d, icons_dir=icons, deploy_plot=deploy, reply_delay=reply_delay, for_real=for_real)
         if for_real:
             err(f"digest: re-threaded {m:%Y-%m} ({variant}): {len(plan.get('posted', {}))} replies" + (f", {len(plan['stale'])} old left undeleted" if plan.get("stale") else ""))
             return
-        old = {day: e for day, e in plan["old"]}
-        print(f"digest --redo-replies {m:%Y-%m} in {channel} ({variant}; dry-run — -F/--for-real applies):")
-        print(f"  old replies to delete: {len(plan['old'])}")
-        for day, e in plan["old"]:
-            print(f"    {day}  {e['scan'] if isinstance(e, dict) else day}  ts={e['ts'] if isinstance(e, dict) else e}")
-        print(f"  new replies to post: {len(plan['new'])}")
-        for day, scan, head in plan["new"]:
-            same = "  (same scan as the old reply)" if isinstance(old.get(day), dict) and old[day]["scan"] == scan else ""
-            print(f"    {day}  {scan}  {head!r}{same}")
+        _print_redo_plan(plan, f"{m:%Y-%m} in {channel} ({variant})", since_d)
         return
     # the scheduled run (no -m) also closes the previous month's thread if its last day's provisional reply is still up
     converge = dg.converge_slack if month else dg.converge_slack_now
@@ -3214,12 +3212,30 @@ def _digest(
     err(f"digest: converged {m:%Y-%m} ({cfg.template}, {variant})")
 
 
+def _print_redo_plan(plan: dict, where: str, since: dt.date | None) -> None:
+    old = {day: e for day, e in plan["old"]}
+    print(f"digest --redo-replies {where}; dry-run — -F/--for-real applies:")
+    print(f"  old replies to delete: {len(plan['old'])}")
+    for day, e in plan["old"]:
+        print(f"    {day}  {e['scan'] if isinstance(e, dict) else day}  ts={e['ts'] if isinstance(e, dict) else e}")
+    print(f"  new replies to post: {len(plan['new'])}")
+    for day, scan, head in plan["new"]:
+        same = "  (same scan as the old reply)" if isinstance(old.get(day), dict) and old[day]["scan"] == scan else ""
+        print(f"    {day}  {scan}  {head!r}{same}")
+    if since:
+        print(f"  kept before {since} (re-keyed): {len(plan['rekey'])}")
+        for key, was in plan["rekey"]:
+            print(f"    {key}" + (f"  <- {was}" if was != key else ""))
+        print(f"  left in the thread, kept as `extra`: {len(plan['left'])}")
+        for key in plan["left"]:
+            print(f"    {key}")
+
+
 @main.command()
 @_digest_options("gcs")
 def digest(**kw) -> None:
     """Converge the monthly digest thread: an OP (month-to-date headline,
-    per-week bullets, plot) edited in place + one reply per scan (gcs template)
-    or per UTC day (cw), in Slack (default) or its Discord twin (`-P discord`:
+    per-week bullets, plot) edited in place + one reply per UTC day, in Slack (default) or its Discord twin (`-P discord`:
     webhook OP with the plot attached, bot-opened thread, webhook replies).
     State beside the snapshots, per the config's `state`/`discord_state`
     (gcs: digest/<YYYY-MM>.json; cw: digest/cw/<channel>/<variant>/<YYYY-MM>.json).
