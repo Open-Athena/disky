@@ -15,9 +15,11 @@ layout:
   layer2: cw-l2/{scan}/
   snapshots: cw
 # The primary first. The 02a listing is CPU-bound (22.8 min on 16 vCPUs, 33–42 on 8) and stages its shards + import on
-# a local SSD; the small buckets fit an e2 (which takes no local SSD) and its boot disk.
+# a local SSD; the small buckets fit an e2 (which takes no local SSD) and its boot disk. Still queued 10 min after submit (a
+# GCE stockout: 02a waited 26 min for an n2-standard-16, 2026-10-27), a task moves to the next type, an N2D (its own pool).
 sources:
-  - {uri: s3://marin-us-east-02a, endpoint: https://cwobject.com, machine: n2-standard-16, disk: {request: 375, type: local-ssd}}
+  - {uri: s3://marin-us-east-02a, endpoint: https://cwobject.com, machine: n2-standard-16, disk: {request: 375, type: local-ssd},
+     fallback: [n2d-standard-16], queue_timeout: 10}
   - {uri: s3://hero-checkpoints, endpoint: https://cwobject.com}
   - {uri: s3://marin-us-east-06a, endpoint: https://cwobject.com}
   - {uri: s3://rhoarnet-us-east-08a, endpoint: https://cwobject.com}
@@ -30,14 +32,14 @@ machines:
   medium: e2-standard-4
   # index-write (DuckDB, 16 GB) and the interval store's append (16 GiB RSS, ~25 GiB disk at a compaction), staged on a
   # local SSD (an untyped disk only grows the pd boot disk: the 02a import took 8.1 min there vs 5.5–6.8 on NVMe)
-  big: {type: n2-standard-8, disk: {request: 375, type: local-ssd}}
+  big: {type: n2-standard-8, disk: {request: 375, type: local-ssd}, fallback: [n2d-standard-8], queue_timeout: 10}
   list: {type: e2-standard-4, disk: 100}
   # over-time caps DuckDB at 16 GB, all of an e2-standard-4
   post: e2-highmem-4
   # over-time's own task: seconds on most scans, but every 16th seals a group of 16 (87 min on 8 vCPUs, 2026-10-13);
   # beside `post`, so the digest and warm-up never wait on it. Its DuckDB spill outgrew the boot disk (36 GiB full,
   # group 13, 2026-10-27), so it stages on a local SSD like `big`
-  over_time: {type: n2-standard-8, disk: {request: 375, type: local-ssd}}
+  over_time: {type: n2-standard-8, disk: {request: 375, type: local-ssd}, fallback: [n2d-standard-8], queue_timeout: 10}
 secrets:
   AWS_ACCESS_KEY_ID: cw-s3-access-key-id
   AWS_SECRET_ACCESS_KEY: cw-s3-secret-access-key
