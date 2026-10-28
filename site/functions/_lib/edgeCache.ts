@@ -118,7 +118,7 @@ export type Keep = boolean | { partialTtl: number }
 /** What a filter view or diff keeps: one cut by a time budget — phase 2's (`interiors.late`), the search's
  *  (`searchLate`) or a filtered diff's lookups (`lookups_late`: unanswered names folded into `(other)`) — briefly,
  *  else all. A read budget's cut is deterministic, so kept like a whole answer. */
-export const keepFor = (a: { interiors?: { late?: number }; searchLate?: true; lookups_late?: true }): Keep => a.interiors?.late || a.searchLate || a.lookups_late ? { partialTtl: PARTIAL_TTL } : true
+export const keepFor = (a: { interiors?: { late?: number }; searchLate?: true; detailsLate?: true; lookups_late?: true }): Keep => a.interiors?.late || a.searchLate || a.detailsLate || a.lookups_late ? { partialTtl: PARTIAL_TTL } : true
 
 /** Store `body` (already-serialized JSON) per `keep` and return the client response. With ``waitUntil``
  * (the Pages `EventContext`'s) the writes run after the response is sent — a KV put is hundreds of ms the
@@ -162,6 +162,8 @@ export async function cacheStore(env: CacheEnv, key: Request, body: string, head
 export const UPGRADE_PHASE2_MS = 10_000
 /** …and its search's time budget (`SearchLimits.wallMs`), in place of the viewer-facing one. */
 export const UPGRADE_SEARCH_LIMITS: SearchLimits = { ...SEARCH_LIMITS, wallMs: 10_000 }
+/** …and its match roots' detail lookups (`ViewOpts.detailsWait`), in place of `FILTER_DETAILS_MS`. */
+export const UPGRADE_DETAILS_MS = 10_000
 /** …and a filtered diff's lookup walk (`DiffOpts.walkMs`), in place of `FILTER_WALK_MS`. */
 export const UPGRADE_WALK_MS = 5_000
 
