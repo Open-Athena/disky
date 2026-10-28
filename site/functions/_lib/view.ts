@@ -1132,15 +1132,8 @@ async function readView(env: Env, o: ViewOpts, cov: Coverage = {}): Promise<Read
     const details = staticRoots && !firstPaintStatic && !(maxDepth != null && maxDepth <= 0) ? (async () => {
       const want = heaviest(roots.filter(r => drawn(r) && shown(r)), ROOT_DETAILS)
       if (!want.length) return []
-      const asks = new Set(want.map(r => `${depthF.get(r)}\0${r}`))
-      try {
-        const h = pathIdx ?? fine ?? withTrace(await openFine(env, date, 'path'), tr)
-        return (await readAsks(h, want.map(r => ({ depth: depthF.get(r)!, path: r })), r => asks.has(`${r.depth}\0${r.path}`), { maxGroups: DETAIL_GROUPS, stop: () => detailsOff, rememberWide: true })).rows
-      } catch (e) {
-        if (!/too wide/.test(String((e as Error).message ?? e))) throw e
-        tr?.('details', 0, 'too wide')
-        return []
-      }
+      const h = pathIdx ?? fine ?? withTrace(await openFine(env, date, 'path'), tr)
+      return readDetails(h, want.map(r => ({ depth: depthF.get(r)!, path: r })), { maxGroups: DETAIL_GROUPS, stop: () => detailsOff, tr })
     })() : Promise.resolve([] as Row[])
     let rows2: Row[] = []
     let variant: string | undefined
@@ -1923,12 +1916,7 @@ async function rollupRead(env: Env, o: ViewOpts, rollup: Rollup, x: {
   // lookups, heaviest first, within `FILTER_DETAILS_MS`; never on the first paint.
   const want = matched.filter(m => kept.has(m.path)).slice(0, ROOT_DETAILS)
   if (want.length && !o.firstPaint && !(maxDepth != null && maxDepth <= 0)) {
-    const asks = new Set(want.map(m => `${depthOf.get(m.path)}\0${m.path}`))
-    const look = readAsks(x.details, want.map(m => ({ depth: depthOf.get(m.path)!, path: m.path })), r => asks.has(`${r.depth}\0${r.path}`), { maxGroups: 60 }).then(r => r.rows).catch(e => {
-      if (!/too wide/.test(String((e as Error).message ?? e))) throw e
-      tr?.('details', 0, 'too wide')
-      return [] as Row[]
-    })
+    const look = readDetails(x.details, want.map(m => ({ depth: depthOf.get(m.path)!, path: m.path })), { maxGroups: 60, tr })
     const budget = o.detailsWait ?? (Number(env.FILTER_DETAILS_MS) || Infinity)
     const late = Symbol('late')
     const rows = budget === Infinity ? await look : await Promise.race([look, new Promise<typeof late>(r => setTimeout(() => r(late), budget))]).then(v => {
@@ -2111,6 +2099,24 @@ const ROOT_DETAILS = 48
  *  share the request's six connections with phase 2, and roots spread over many depths (`00241`) took
  *  ~20 groups to answer after phase 2 had already given up on them. */
 const DETAIL_GROUPS = 16
+
+/** The match roots' own rows (`readAsks`), `want` heaviest first: a lookup over `maxGroups` row groups is
+ *  retried on the heavier half, then quarter, …, so the heaviest roots keep their kind, ages and classes where all
+ *  of them at once span too many groups (gcs 10-27T1442, `q=safetensors`: 48 roots, none decorated). A plan over
+ *  budget fails before reading any group, so each retry costs span queries only. */
+async function readDetails(h: IndexHandle, want: { depth: number; path: string }[], o: { maxGroups: number; stop?: () => boolean; tr?: Trace }): Promise<Row[]> {
+  for (let n = want.length; n > 0; n >>= 1) {
+    const asks = want.slice(0, n)
+    const keys = new Set(asks.map(a => `${a.depth}\0${a.path}`))
+    try {
+      return (await readAsks(h, asks, r => keys.has(`${r.depth}\0${r.path}`), { maxGroups: o.maxGroups, stop: o.stop, rememberWide: true })).rows
+    } catch (e) {
+      if (!/too wide/.test(String((e as Error).message ?? e))) throw e
+      o.tr?.('details', 0, `too wide at ${n}`)
+    }
+  }
+  return []
+}
 
 /** `xs` in code-unit order: itself when it already is (a static literal's ~80K roots are), else a sorted copy. */
 function sortedOnce(xs: string[]): string[] {
