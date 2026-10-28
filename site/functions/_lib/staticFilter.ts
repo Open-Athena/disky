@@ -424,8 +424,9 @@ export function liveTotal(hits: Hit[], date: string, keep: (usr: string | null) 
  *  run's stored rows, close records too — over the compaction's count (gcs 10-24, `.parquet`: 103.3M vs 94.5M)); 29: match
  *  roots whose detail lookups missed `FILTER_DETAILS_MS` are `detailsLate` (kept briefly, upgraded), where the body was kept
  *  whole with them undecorated — files drawn as folders, no ages or classes (gcs 10-28: a faster drill left the lookups
- *  less time beside phase 2). */
-const RESPONSE_V = 29
+ *  less time beside phase 2); 30: match roots whose detail lookups span too many row groups keep the heaviest half's, quarter's,
+ *  … details, where none of them had any). */
+const RESPONSE_V = 30
 
 /** The query's substring matchers (positive and negative): the literals the hex-run rule applies to. */
 const subMatchers = (ast: QueryAst | undefined): Extract<Matcher, { kind: 'sub' }>[] =>
