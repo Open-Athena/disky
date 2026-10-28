@@ -6,13 +6,14 @@ import { sqliteD1 } from './testD1'
 import { gateFor } from './auth'
 import {
   type ActivityEnv, burstEvents, bump, burstFor, feedClient, listBursts, loadBurst, purgeActivity, readKinds, recordServer,
-  THROTTLE_MS, writeKind,
+  rerender, THROTTLE_MS, type Wait, writeKind,
 } from './activity'
 import {
   addTrail, authLine, type Burst, clientKind, DISCORD, emptyTrail, highlights, joins, keptEvents, mergeKinds, pageLines,
   renderDiscord, renderLines, renderSummary, type ServerEvent, serverKind, sessionLinks, SLACK, tallyClient,
 } from './activityShape'
 import { captureWrite, noteActivity } from './activityHook'
+import { ingest } from './sessionLog'
 import type { SlogEvent } from './sessionLogShape'
 
 const NOW = Date.UTC(2026, 9, 21, 15, 0, 0)  // 2026-10-21T15:00Z
@@ -105,11 +106,13 @@ describe('bursts (pure)', () => {
     expect(keptEvents(events, conf).map(e => e.k)).toEqual(['start', 'nav', 'nav', 'click', 'dropped'])
   })
 
-  it('tallies errors with the page they happened on', () => {
+  it('tallies errors with the page they happened on; a benign ResizeObserver report is not one', () => {
     const events = [
       { t: 1000, k: 'start', u: '/scans' }, { t: 2500, k: 'api', u: '/api/scan-runs', s: 0, ms: 3214, err: 'TypeError: Failed to fetch' },
       { t: 3000, k: 'nav', u: '/users?o=bob' }, { t: 4000, k: 'reject', msg: 'boom' }, { t: 5000, k: 'api', u: '/api/x', s: 404, ms: 9 },
+      { t: 6000, k: 'error', msg: 'ResizeObserver loop completed with undelivered notifications.', src: '/users:0:0' },
     ] as SlogEvent[]
+    expect(tallyClient(events, mergeKinds([])).counts.error).toBe(2)
     expect(tallyClient(events, mergeKinds([])).errors).toEqual([
       { ts: 2, line: 'GET /api/scan-runs → failed · 3214ms · TypeError: Failed to fetch', page: '/scans' },
       { ts: 4, line: 'unhandled rejection: boom', page: '/users' },
@@ -218,6 +221,14 @@ describe('D1 and sinks', () => {
   const who = { actor: 'ann@example.test', via: 'session', origin: ORIGIN }
   const assign = (ts: number, pattern: string): ServerEvent =>
     ({ ts, kind: 'assign', actor: who.actor, via: 'session', method: 'POST', route: '/api/actions', line: `\`${pattern}\` → bob`, detail: { pattern, owner: 'bob' } })
+  /** A tab's batch as the session-log route takes it: stored, then fed (each session's batches numbered from 0). */
+  const seqs: Record<string, number> = {}
+  async function feed(env: ActivityEnv, wait: Wait, sid: string, events: SlogEvent[], now: number): Promise<number | null> {
+    const batch = { sid, pid: 'p1', seq: seqs[sid] = (seqs[sid] ?? -1) + 1, build: '', events }
+    await ingest(env.DB!, { email: who.actor, via: 'session' }, null, batch, Math.floor(now / 1000))
+    return feedClient(env, who, batch, wait, now)
+  }
+  const eventsOf = async (db: NonNullable<ActivityEnv['DB']>, id: number) => burstEvents(db, (await loadBurst(db, id))!, await readKinds(db, NOW))
 
   it('records events into one burst per actor and gap', async () => {
     const { db, env, wait } = await setup()
@@ -229,7 +240,7 @@ describe('D1 and sinks', () => {
       id: 1, actor: who.actor, via: 'session', origin: ORIGIN, first_ts: S, last_ts: S + 600,
       counts: { assign: 3 }, pages: {}, trail: { n: 0, last: [] }, sids: [], rendered_ms: null, dirty: false,
     })
-    expect((await burstEvents(db, 1)).map(e => e.line)).toEqual(['`gs://b/x/` → bob', '`gs://b/y/` → bob', '`gs://b/z/` → bob'])
+    expect((await eventsOf(db, 1)).map(e => e.line)).toEqual(['`gs://b/x/` → bob', '`gs://b/y/` → bob', '`gs://b/z/` → bob'])
   })
 
   it('feeds client batches into the same burst; unrecorded kinds are not counted', async () => {
@@ -237,7 +248,7 @@ describe('D1 and sinks', () => {
     await writeKind(db, 'click', { log: false, notify: 'off' }, 'ops@example.test', S)
     await recordServer(env, who, [assign(S, 'gs://b/x/')], wait, NOW)
     const events = [{ t: NOW + 1000, k: 'start', u: '/' }, { t: NOW + 2000, k: 'click', n: 'x' }, { t: NOW + 3000, k: 'nav', u: '/users?o=bob' }] as SlogEvent[]
-    expect(await feedClient(env, who, 'sid-aaaaaa', events, wait, NOW + 5000)).toBe(1)
+    expect(await feed(env, wait, 'sid-aaaaaa', events, NOW + 5000)).toBe(1)
     const b = await loadBurst(db, 1)
     expect([b!.counts, b!.pages, b!.trail, b!.sids]).toEqual([
       { assign: 1, view: 1, nav: 1 }, { '/': 1, '/users': 1 }, { n: 2, last: [['/', 1], ['/users', 1]] }, ['sid-aaaaaa'],
@@ -249,16 +260,16 @@ describe('D1 and sinks', () => {
     const { db, env, wait } = await setup({ SLACK_BOT_TOKEN: 'xoxb', SLACK_ADMIN_CHANNEL: 'C1' })
     const page = (t: number, u: string) => [{ t, k: 'start', u }] as SlogEvent[]
     const later = NOW + 4 * 3600_000 + 17 * 60_000
-    await feedClient(env, who, 'sid-aaaaaa', page(NOW, '/'), wait, NOW)
+    await feed(env, wait, 'sid-aaaaaa', page(NOW, '/'), NOW)
     vi.setSystemTime(later)
-    expect(await feedClient(env, who, 'sid-aaaaaa', page(later, '/users'), wait, later)).toBe(1)
-    expect(await feedClient(env, who, 'sid-bbbbbb', page(later + 1000, '/'), wait, later + 1000)).toBe(1)
+    expect(await feed(env, wait, 'sid-aaaaaa', page(later, '/users'), later)).toBe(1)
+    expect(await feed(env, wait, 'sid-bbbbbb', page(later + 1000, '/'), later + 1000)).toBe(1)
     vi.setSystemTime(later + 3600_000)
-    expect(await feedClient(env, who, 'sid-bbbbbb', page(later + 3600_000, '/'), wait, later + 3600_000)).toBe(1)
-    expect(await feedClient(env, who, 'sid-cccccc', page(later + 7200_000, '/'), wait, later + 7200_000)).toBe(2)
+    expect(await feed(env, wait, 'sid-bbbbbb', page(later + 3600_000, '/'), later + 3600_000)).toBe(1)
+    expect(await feed(env, wait, 'sid-cccccc', page(later + 7200_000, '/'), later + 7200_000)).toBe(2)
     const b = await loadBurst(db, 1)
     expect([b!.first_ts, b!.last_ts, b!.counts, b!.sids]).toEqual([S, S + 3600 * 5 + 17 * 60, { view: 4, resume: 2 }, ['sid-aaaaaa', 'sid-bbbbbb']])
-    expect((await burstEvents(db, 1)).map(e => [e.kind, e.route, e.line, e.detail])).toEqual([
+    expect((await eventsOf(db, 1)).map(e => [e.kind, e.route, e.line, e.detail])).toEqual([
       ['resume', '/users', 'after 4h 17m', { sid: 'sid-aaaaaa' }],
       ['resume', '/', 'after 59m 59s', { sid: 'sid-bbbbbb' }],
     ])
@@ -280,8 +291,8 @@ describe('D1 and sinks', () => {
     const { db, env, wait } = await setup({ SLACK_BOT_TOKEN: 'xoxb', SLACK_ADMIN_CHANNEL: 'C1' })
     const fail = (t: number, u: string) => ({ t, k: 'api', u, s: 0, ms: 3300, err: 'TypeError: Failed to fetch' })
     const events = [{ t: NOW, k: 'start', u: '/admin' }, fail(NOW + 1, '/api/auth/whoami'), fail(NOW + 2, '/api/auth/whoami'), { t: NOW + 3, k: 'console', msg: 'a<b' }] as SlogEvent[]
-    await feedClient(env, who, 'sid-aaaaaa', events, wait, NOW + 5000)
-    expect((await burstEvents(db, 1)).map(e => [e.kind, e.route, e.line, e.detail])).toEqual([
+    await feed(env, wait, 'sid-aaaaaa', events, NOW + 5000)
+    expect((await eventsOf(db, 1)).map(e => [e.kind, e.route, e.line, e.detail])).toEqual([
       ['error', '/admin', 'GET /api/auth/whoami → failed · 3300ms · TypeError: Failed to fetch', { sid: 'sid-aaaaaa' }],
       ['error', '/admin', 'GET /api/auth/whoami → failed · 3300ms · TypeError: Failed to fetch', { sid: 'sid-aaaaaa' }],
       ['error', '/admin', 'console.error: a<b', { sid: 'sid-aaaaaa' }],
@@ -290,6 +301,25 @@ describe('D1 and sinks', () => {
     expect(calls.map(c => [c.body.thread_ts ?? null, String(c.body.text).split('\n')])).toEqual([
       [null, ['*ann* (browser) · 2026-10-21 15:00Z', '1 page load · 3 errors', 'Pages: `/admin`', `<${ORIGIN}/admin/activity?burst=1|activity> · <${ORIGIN}/admin/sessions/sid-aaaaaa|session sid-aaaa>`]],
       ['1.000001', ['*3 errors*', `• ${link} GET /api/auth/whoami → failed · 3300ms · TypeError: Failed to fetch on \`/admin\` ×2`, `• ${link} console.error: a&lt;b on \`/admin\``]],
+    ])
+  })
+
+  it('a burst\'s error lines are read from its batches: one linked later reaches its thread on a re-render', async () => {
+    const calls = stubFetch()
+    const { db, raw, env, wait } = await setup({ SLACK_BOT_TOKEN: 'xoxb', SLACK_ADMIN_CHANNEL: 'C1' })
+    await feed(env, wait, 'sid-aaaaaa', [{ t: NOW, k: 'start', u: '/scans' }] as SlogEvent[], NOW)
+    const late = { sid: 'sid-aaaaaa', pid: 'p2', seq: 0, build: '', events: [{ t: NOW + 60_000, k: 'reject', msg: 'boom' }] as SlogEvent[] }
+    await ingest(db, { email: who.actor, via: 'session' }, null, late, S + 60)
+    expect(await eventsOf(db, 1)).toEqual([])
+    raw.prepare('UPDATE session_log_batches SET burst_id = 1 WHERE pid = ?').run('p2')
+    expect((await eventsOf(db, 1)).map(e => [e.ts, e.kind, e.route, e.line, e.detail])).toEqual([
+      [S + 60, 'error', '', 'unhandled rejection: boom', { sid: 'sid-aaaaaa' }],
+    ])
+    expect(await rerender(env, [1, 7])).toEqual([1])
+    expect(calls.map(c => [c.url.replace('https://slack.com/api/', ''), c.body.thread_ts ?? c.body.ts ?? null, String(c.body.text).split('\n')[0]])).toEqual([
+      ['chat.postMessage', null, '*ann* (browser) · 2026-10-21 15:00Z'],
+      ['chat.update', '1.000001', '*ann* (browser) · 2026-10-21 15:00Z'],
+      ['chat.postMessage', '1.000001', '*1 error*'],
     ])
   })
 
@@ -322,9 +352,9 @@ describe('D1 and sinks', () => {
     const calls = stubFetch()
     const { db, env, wait, pending } = await setup({ SLACK_BOT_TOKEN: 'xoxb', SLACK_ADMIN_CHANNEL: 'C1' })
     const page = (t: number) => [{ t, k: 'start', u: '/' }] as SlogEvent[]
-    await feedClient(env, who, 'sid-aaaaaa', page(NOW), wait, NOW)
+    await feed(env, wait, 'sid-aaaaaa', page(NOW), NOW)
     vi.setSystemTime(NOW + 5000)
-    await feedClient(env, who, 'sid-aaaaaa', page(NOW + 5000), wait, NOW + 5000)
+    await feed(env, wait, 'sid-aaaaaa', page(NOW + 5000), NOW + 5000)
     expect(calls.length).toBe(1)
     expect((await loadBurst(db, 1))!.dirty).toBe(true)
     await vi.advanceTimersByTimeAsync(THROTTLE_MS)
@@ -380,7 +410,7 @@ describe('D1 and sinks', () => {
     await captureWrite({ request: req('/api/annotations', { at: '2026-10-20', text: 'x' }), env: full, data } as never, 'note', null, wait, NOW)
     const plain = req('/api/auth/grants', { email: 'bob@x.edu', scopes: ['gcs'], days: 7 })
     await captureWrite({ request: plain, env: full } as never, 'access', plain.clone().text(), wait, NOW + 1000)
-    expect((await burstEvents(db, 1)).map(e => [e.kind, e.actor, e.via, e.line, e.detail])).toEqual([
+    expect((await eventsOf(db, 1)).map(e => [e.kind, e.actor, e.via, e.line, e.detail])).toEqual([
       ['note', 'ann@example.test', 'grant', 'added a note on 2026-10-20: "x"', { note: 4 }],
       ['access', 'ann@example.test', 'grant', 'minted a grant', { body: { email: 'string', scopes: 1, days: 'number' } }],
     ])

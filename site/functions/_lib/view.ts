@@ -2326,7 +2326,8 @@ export async function buildDiff(env0: Env, o: DiffOpts): Promise<Diff> {
   // floor: the match roots alone (phase 1, `maxDepth: 0` — the static index's are held per isolate) say
   // each side's floor, so both forests are read once, at the shared one. (Reading both first and then
   // re-reading the lighter side at the shared floor paid that side's phase 2 twice.)
-  let floor: number | undefined
+  // A union root's member diff draws at the union's threshold (`o.threshold`), filtered or not.
+  let floor: number | undefined = query ? o.threshold : undefined
   // A diff draws its roots' kinds only (no ages, no classes): the lookups that land by phase 2's end are
   // taken, none waited for (with a deployment's finite `FILTER_DETAILS_MS`; unset waits, as views do).
   // Its phase 2 runs both sides at once, then the walk's lookups (`FILTER_WALK_MS`): a smaller share each
