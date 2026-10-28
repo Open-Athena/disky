@@ -20,7 +20,7 @@ async function setup() {
   raw.prepare('INSERT INTO session_log_switch VALUES (1, ?, ?, ?)').run(MONITOR_END_MS, 'test', NOW)
   const env = { DB: db, SESSION_SECRET: 's'.repeat(32), BASE_SCOPE: 'gcs', PROD_HOST: 'gcs.oa.dev', SESSION_MONITOR: '1', SLACK_BOT_TOKEN: 'test-token', SLACK_ADMIN_CHANNEL: 'test-channel' }
   const put = (events: Record<string, unknown>[], received = NOW - 1, seq = 0, sid = 'sid-test') =>
-    raw.prepare('INSERT INTO session_log_batches VALUES (?, ?, ?, ?, ?, ?, ?, ?)').run(sid, 'pid-test', seq, received, 0, 0, events.length, JSON.stringify(events))
+    raw.prepare('INSERT INTO session_log_batches (sid, pid, seq, received_ts, first_ms, last_ms, n, events) VALUES (?, ?, ?, ?, ?, ?, ?, ?)').run(sid, 'pid-test', seq, received, 0, 0, events.length, JSON.stringify(events))
   const state = () => ({ ...raw.prepare('SELECT version, lease_until, checked_s, signal_s, alert_s, day, attempts, thread_ts, delivery FROM session_monitor WHERE id = 1').all()[0] })
   return { db, raw, env, put, state }
 }
