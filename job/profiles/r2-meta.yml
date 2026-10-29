@@ -51,5 +51,7 @@ pass: [DT_RECORD, DT_ALERTS, DISKY_LABELS]
 labels: {deployment: oa-r2}
 options:
   index: {mode: path-index, args: [-U], mem: 12GB, age_pyramids: true, verify: true}
-  static-names: {gen: 2026-10-15metab, mem: 12GB, build_args: [-x, "16,8"]}
+  # `current_key`: each append / compaction points this lineage's pointer at its generation; the site follows it
+  # (`STATIC_CURRENT_KEY`), so a compaction's successor is served without a re-pin
+  static-names: {gen: 2026-10-15metab, current_key: static-names/meta-CURRENT.json, mem: 12GB, build_args: [-x, "16,8"]}
   index-gc: {dry: true}

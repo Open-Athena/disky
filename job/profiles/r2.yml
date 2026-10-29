@@ -73,7 +73,9 @@ options:
   # and age pyramids (`publish-r2 -S`); D1 gets the age pyramids' pointers only, and the site lists the scan from the
   # interval store (S1)
   index: {mode: path-index, args: [-U, -O], mem: 12GB, age_pyramids: true, verify: true, access: access/r2/agg.parquet}
-  static-names: {gen: 2026-10-15r2b, mem: 12GB, build_args: [-x, "16,8"]}
+  # `current_key`: each append / compaction points this lineage's pointer at its generation; the site follows it
+  # (`STATIC_CURRENT_KEY`), so a compaction's successor is served without a re-pin
+  static-names: {gen: 2026-10-15r2b, current_key: static-names/primary-CURRENT.json, mem: 12GB, build_args: [-x, "16,8"]}
   publish-r2: {args: [-S]}
   interval-store: {mem: 12GB, source: data}
   index-sync:
