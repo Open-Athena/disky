@@ -425,8 +425,10 @@ export function liveTotal(hits: Hit[], date: string, keep: (usr: string | null) 
  *  roots whose detail lookups missed `FILTER_DETAILS_MS` are `detailsLate` (kept briefly, upgraded), where the body was kept
  *  whole with them undecorated — files drawn as folders, no ages or classes (gcs 10-28: a faster drill left the lookups
  *  less time beside phase 2); 30: match roots whose detail lookups span too many row groups keep the heaviest half's, quarter's,
- *  … details, where none of them had any). */
-const RESPONSE_V = 30
+ *  … details, where none of them had any; 31: an interval store's `path` sort bounds a depth-straddling group by its
+ *  neighbours (`pathNeighbours`), so a root's lookup reads a group per segment, not ~3, and roots narrowed to fit the
+ *  group budget are `detailsLate`, upgraded at `UPGRADE_DETAIL_GROUPS` (gcs 10-20, `q=safetensors`: none decorated)). */
+const RESPONSE_V = 31
 
 /** The query's substring matchers (positive and negative): the literals the hex-run rule applies to. */
 const subMatchers = (ast: QueryAst | undefined): Extract<Matcher, { kind: 'sub' }>[] =>
