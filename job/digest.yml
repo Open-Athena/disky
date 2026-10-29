@@ -30,6 +30,9 @@ reply_hour: 12
 # (`10/3 · so far`, numbers in the body, edited in place), deleted when the
 # final reply posts
 provisional: true
+# a quota at/over this percent: `:warning:` in the daily replies + one alert reply also sent to the channel, deleted
+# once every quota is back under. null until thrds' `post(broadcast=True)` (thrds specs/slack-reply-broadcast.md); then 90
+alert_pct: null
 primary: marin-us-east-02a
 # quotas from CoreWeave's `cwobject_quota_info` metric, which is per ZONE: 02a =
 # exactly 910 TiB ("1 PB"); US-EAST-08A = 500 TiB (100 until 2026-10-16) shared by
