@@ -1164,7 +1164,7 @@ async function readView(env: Env, o: ViewOpts, cov: Coverage = {}): Promise<Read
     const budget = o.detailsWait ?? (Number(env.FILTER_DETAILS_MS) || Infinity)
     const late = Symbol('late')
     const { rows: detailRows, cut: detailsCut } = budget === Infinity ? await details
-      : await Promise.race([details, new Promise<typeof late>(r => setTimeout(() => r(late), budget))]).then(x => {
+      : await within(details, budget, late).then(x => {
         if (x !== late) return x
         tr?.('details', performance.now() - t0, 'late')
         // A diff side's `detailsWait: 0` skips them by design; a cut viewer-facing budget is upgraded.
@@ -1928,7 +1928,7 @@ async function rollupRead(env: Env, o: ViewOpts, rollup: Rollup, x: {
     const look = readDetails(x.details, want.map(m => ({ depth: depthOf.get(m.path)!, path: m.path })), { maxGroups: 60, tr }).then(d => d.rows)
     const budget = o.detailsWait ?? (Number(env.FILTER_DETAILS_MS) || Infinity)
     const late = Symbol('late')
-    const rows = budget === Infinity ? await look : await Promise.race([look, new Promise<typeof late>(r => setTimeout(() => r(late), budget))]).then(v => {
+    const rows = budget === Infinity ? await look : await within(look, budget, late).then(v => {
       if (v !== late) return v
       tr?.('details', performance.now() - t0, 'late')
       if (budget > 0) x.cov.detailsLate = true
@@ -2125,6 +2125,15 @@ async function readDetails(h: IndexHandle, want: { depth: number; path: string }
     }
   }
   return { rows: [], cut: true }
+}
+
+/** `p`, or `late` once `ms` pass, the timer cleared as soon as either settles. A timer set in a view's own scope held
+ *  that scope (V8 shares one context across a function's closures) for its whole budget after the view was built:
+ *  gcs's fleet-root `q=tokenizer` view kept its 171K-root forest (`exact`, `kidsOf`, `depthOf`; ~160 MB in Node) for
+ *  the details' 10 s in each upgrade, beside the next render's — past the isolate's memory (1102). */
+function within<T, L>(p: Promise<T>, ms: number, late: L): Promise<T | L> {
+  let timer: ReturnType<typeof setTimeout> | null = null
+  return Promise.race([p, new Promise<L>(r => { timer = setTimeout(() => r(late), ms) })]).finally(() => { if (timer != null) clearTimeout(timer) })
 }
 
 /** `xs` in code-unit order: itself when it already is (a static literal's ~80K roots are), else a sorted copy. */
