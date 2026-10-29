@@ -12,6 +12,8 @@
 #   DRY=1 ./job/cw-batch-submit.sh        # print the spec (for a scheduler body)
 #   NF=1 ./job/cw-batch-submit.sh         # cw's own Nextflow head (job/nf/cw-head.sh) instead of the generic one
 #   NF=0 ./job/cw-batch-submit.sh         # the one-VM driver (job/cw-run.sh)
+#   IMAGE=…@sha256:D DT_SCAN_IMAGE=…@sha256:D ./job/cw-batch-submit.sh  # a candidate image, head AND tasks (a scan
+#                                         # before it is promoted: `IMAGE` alone moves only the head)
 #
 # Prereq (one-time): the CAIOS S3 keypair in Secret Manager, readable by the SA.
 #   printf %s "$KEY_ID" | gcloud secrets create cw-s3-access-key-id --data-file=-
@@ -88,7 +90,7 @@ v = {
 }
 if not pin:  # one-off overrides forwarded only for manual submits, never the cron spec
     for k in ["SCAN_BUCKETS", "SNAP_ID", "LISTING_PROCS", "LISTING_WORKERS", "IMPORT_JOBS",
-              "GEN", "NF_IMAGE", "NF_SECRETS", "DT_RECORD", "DT_ALERTS"]:
+              "GEN", "NF_IMAGE", "NF_SECRETS", "DT_RECORD", "DT_ALERTS", "DT_SCAN_IMAGE"]:
         if k in os.environ:
             v[k] = os.environ[k]
 print(json.dumps(v))
