@@ -2153,7 +2153,9 @@ async function selectSpans1(h: IndexHandle, rects: Rect[], cap = 4000, bMin = 0,
     const exactPaths = h.mode === 'pq' && h.asOf != null
     const pass = (g: Parameters<typeof groupMatches>[0]) => groupMatches(g, rects, bMin, lens, lensSorted(h.variant)) &&
       (!exactPaths || rects.some(r => g.dMax >= r.dLo && g.dMin <= r.dHi && g.pMax >= r.pLo && g.pMin <= r.pHi))
-    const out = h.mode === 'blob' ? h.groups.filter(pass) : await pqGroups(h, pass)
+    // An interval store's `path` sort: its groups' neighbours bound the depths a group spans.
+    const near = exactPaths && h.variant === 'path' ? (g: BlobGroup, prev?: BlobGroup, next?: BlobGroup) => pathNeighbours(g, prev, next, rects) : undefined
+    const out = h.mode === 'blob' ? h.groups.filter(pass) : await pqGroups(h, pass, near)
     if (out.length > cap) throw new TooWide(`query too wide: >${cap} row groups (drill deeper or raise minArea)`)
     return out
   }
@@ -2478,6 +2480,30 @@ export function sizeNeighbours(g: SizeGroup, prev: SizeGroup | undefined, next: 
     const lo = b === T && whole(prev, T) && prev!.pMax > g.pMin ? prev!.pMax : g.pMin
     const hi = b === B && whole(next, B) && next!.pMin < g.pMax ? next!.pMin : g.pMax
     if (ranges.some(r => hi >= r.pLo && lo < r.pHi)) return true
+  }
+  return false
+}
+
+/** Whether a group of an interval store's `path` sort can hold a row of `rects`, from its bounds and its
+ *  neighbours' in the same segment — tighter than its min/max for a group spanning depths, whose min/max path is
+ *  any depth's (a group straddling a depth boundary has nearly the whole keyspace as its path range, so a point
+ *  lookup selected it in every segment: ~3 groups per segment where 1 holds the path, 20 for one path as of gcs
+ *  10-20 over 8 segments and 3 runs). Rows are sorted by depth, then path; so in a group whose depths run from `T`
+ *  (its `d_min`) to `B` (its `d_max`):
+ *  - its rows of depth `T` follow the previous group's rows, and when that group is all of depth `T` their paths
+ *    are at least its `p_max` (its last row's path);
+ *  - its rows of depth `B` precede the next group's, at most its `p_min` when that group is all of depth `B`.
+ *  Groups without `seg` (an older footer) are kept. */
+type PathGroup = Pick<BlobGroup, 'dMin' | 'dMax' | 'pMin' | 'pMax' | 'seg'>
+export function pathNeighbours(g: PathGroup, prev: PathGroup | undefined, next: PathGroup | undefined, rects: Rect[]): boolean {
+  if (g.seg == null || g.dMin === g.dMax) return true
+  const whole = (n: PathGroup | undefined, d: number) => n != null && n.seg === g.seg && n.dMin === d && n.dMax === d
+  for (const r of rects) {
+    for (let d = Math.max(r.dLo, g.dMin); d <= Math.min(r.dHi, g.dMax); d++) {
+      const lo = d === g.dMin && whole(prev, d) && prev!.pMax > g.pMin ? prev!.pMax : g.pMin
+      const hi = d === g.dMax && whole(next, d) && next!.pMin < g.pMax ? next!.pMin : g.pMax
+      if (hi >= r.pLo && lo <= r.pHi) return true
+    }
   }
   return false
 }
