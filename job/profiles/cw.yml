@@ -103,4 +103,4 @@ options:
   gcp-cost: {buckets: [oa-cw-s3-usage-data, oa-cw-s3-usage-scratch]}
   # the data bucket, then the R2 copy: every scan but the newest 2, each verified against the interval store in this task
   # first (about one per run once caught up; a failed or unverifiable scan keeps its files)
-  retire: {keep: 2, execute: true, verify_jobs: 3, static_gen: 2026-10-15cw, layer2: true, copies: [r2]}
+  retire: {keep: 2, execute: true, verify_jobs: 3, static_gen: 2026-10-15cw.c001, layer2: true, copies: [r2]}
