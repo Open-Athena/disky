@@ -1,7 +1,7 @@
 import { beforeAll, describe, expect, it, vi } from 'vitest'
 import type { Env } from './auth'
 import { parquetMetadata, parquetReadObjects } from 'hyparquet'
-import { asOfScans, type Ask, groupDoc, groupMatchesSize, groupRows, intervalsOn, IV_BROKEN_TTL, IV_CURRENT, IV_STATE_TTL, ivGen, ivRefusal, ivRetry, IvGroup, type IvUnavailable, openIndex, pathGens, planRects, planSizeRects, pathScans, readAsks, readRows, readSizeRects, type Rect, type Row, sizeBucket, sizeNeighbours, type Span, usMap, withPathStore } from './index'
+import { asOfScans, type Ask, groupDoc, groupMatchesSize, groupRows, intervalsOn, IV_BROKEN_TTL, IV_CURRENT, IV_STATE_TTL, ivGen, ivRefusal, ivRetry, IvGroup, type IvUnavailable, openIndex, pathGens, pathNeighbours, planRects, planSizeRects, pathScans, readAsks, readRows, readSizeRects, type Rect, type Row, sizeBucket, sizeNeighbours, type Span, usMap, withPathStore } from './index'
 import { indexedScan } from './scanArg'
 import { sqliteD1 } from './testD1'
 import { compressors } from './zstd'
@@ -783,6 +783,34 @@ describe('interval store: base + runs', () => {
       at('a/d/', 'a/d0', 0, { ...prev, bMin: B(34) }, { ...next, bMax: B(35) }), // neighbours spanning buckets themselves
       sizeNeighbours({ ...g, bMin: undefined }, prev, next, [{ pLo: 'a/d/', pHi: 'a/d0' }], 0), // an older footer: kept
     ]).toEqual([true, false, true, false, true, true, true, true, true])
+  })
+
+  it('bounds a depth-straddling group of the path sort by its whole-depth neighbours', () => {
+    // A group of depths 2 → 3 between a group all of depth 2 and one all of depth 3: its 2s follow `b/m`, its 3s
+    // precede `a/c/x`. Its own min/max (`a/a` … `c/z`) is either depth's, nearly the whole keyspace.
+    const prev = { dMin: 2, dMax: 2, pMin: 'a/a', pMax: 'b/m', seg: 0 }
+    const g = { dMin: 2, dMax: 3, pMin: 'a/a', pMax: 'c/z', seg: 0 }
+    const next = { dMin: 3, dMax: 3, pMin: 'a/c/x', pMax: 'c/c/c', seg: 0 }
+    const at = (d: number, P: string, p: typeof prev | null = prev, n: typeof next | null = next, h: typeof g = g) =>
+      pathNeighbours(h, p ?? undefined, n ?? undefined, [{ dLo: d, dHi: d, pLo: P, pHi: P }])
+    expect([
+      at(2, 'b/x'), // a 2 (after `b/m`)
+      at(2, 'b/m'), // `b/m`'s later versions may open the group
+      at(2, 'a/q'), // a 2 before `b/m`: the previous group's
+      at(3, 'a/b/q'), // a 3 (before `a/c/x`)
+      at(3, 'a/c/x'), // `a/c/x`'s earlier versions may close the group
+      at(3, 'b/a/a'), // a 3 after `a/c/x`: the next group's
+      at(4, 'a/b/q/r'), // a depth the group lacks
+      at(2, 'a/q', null), // no previous group: 2s from `a/a`
+      at(3, 'b/a/a', prev, null), // no next group: 3s to `c/z`
+      at(2, 'a/q', { ...prev, seg: 1 }), // neighbours in another segment
+      at(3, 'b/a/a', prev, { ...next, dMax: 4 }), // a neighbour spanning depths itself
+      at(3, 'b/a/a', prev, next, { ...g, dMin: 1 }), // a group of 1 → 3: its 3s still precede `a/c/x`
+      at(2, 'a/q', prev, next, { ...g, dMin: 1 }), // …and it holds every 2
+      pathNeighbours({ ...g, seg: undefined }, prev, next, [{ dLo: 2, dHi: 2, pLo: 'a/q', pHi: 'a/q' }]), // an older footer: kept
+      pathNeighbours(g, prev, next, [{ dLo: 2, dHi: 3, pLo: 'a/q', pHi: 'a/q0' }]), // a rect over both depths: neither side's
+      pathNeighbours(g, prev, next, [{ dLo: 2, dHi: 3, pLo: 'b/n', pHi: 'b/o' }]), // …the 2s'
+    ]).toEqual([true, true, false, true, true, false, false, true, true, true, true, false, true, true, false, true])
   })
 
   it('shapes only the rows a read\'s cheap test passes, as `all` would', () => {
