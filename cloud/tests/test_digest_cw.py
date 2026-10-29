@@ -565,11 +565,11 @@ class _FakeSlack:
         self.fail_post_at = fail_post_at  # the n-th post raises
         self.fail_delete = fail_delete
 
-    def post(self, content, thread_id=None, *, username=None, icon_url=None, icon_emoji=None):
+    def post(self, content, thread_id=None, *, username=None, icon_url=None, icon_emoji=None, broadcast=False):
         self.n += 1
         if self.n == self.fail_post_at:
             raise RuntimeError("slack down")
-        self.calls.append(("post", content, thread_id, username, icon_url, icon_emoji))
+        self.calls.append(("post", content, thread_id, username, icon_url, icon_emoji, *(["broadcast"] if broadcast else [])))
         return _Msg(f"m{self.n}")
 
     def edit(self, ts, content):
@@ -660,6 +660,78 @@ def test_post_digest_edit_replies(tmp_path: Path):
     fake.calls.clear()
     post_digest(str(root), SEP, "xoxb", "C1", "sender", client=fake)
     assert [_post(c) for c in fake.calls] == [("edit", "m1")]
+
+
+def test_quota_alert_is_broadcast_while_over_and_deleted_once_under(tmp_path: Path):
+    """`alert_pct`: a quota at or over it marks the day's clause `:warning:`, and the thread gets one alert reply also
+    sent to the channel (`broadcast`); it is deleted once every quota is back under (Slack can't un-broadcast), and a
+    later crossing posts a new one. RNO2A, 2026-10-29: 98 of 100 Ti for two days, no quota shown, writes suspended."""
+    tpl = E.template(replace(CFG, alert_pct=78.3))  # main: 78.0% → 78.35% → 78.24% → 78.6% of 1P
+    root = tmp_path / "snapshots" / "cw"
+    u = lambda d: f"{SITE}/main-data?d={d}#over-time"  # noqa: E731
+    sender = ("S3 usage: quota alert", None, ":warning:", "broadcast")
+
+    def alert(slug: str, clause: str, at: str) -> str:
+        return (f":warning: **Quota alert**: [main]({u(slug)}): {clause} · _as of {at}Z_ "
+                "(≥ 78.3% of a quota; removed once every quota is back under)")
+
+    fake = _FakeSlack()
+
+    def step(scans):
+        _publish(root, scans)
+        fake.calls.clear()
+        return E.converge_slack(tpl, str(root), SEP, fake, "C1", "sender"), fake.calls
+
+    state, calls = step(LEAD + SEPT[:1])
+    assert ([c[0] for c in calls], "alert" in state) == (["post"], False)
+
+    state, calls = step(SEPT[1:2])
+    over = alert("26090112", "78.4% of 1P (197.0 Ti free)", "9/1 12:00")
+    assert calls[1:] == [("post", f":warning: [main]({u('26090112-1d')}): 78.4% of 1P (197.0 Ti free)", "m1", "9/1 — 713 TiB (+8.0, 1.1%)",
+                          f"{AV}50.png?v=4", None),
+                         ("post", over, "m1", *sender)]
+    assert state["alert"] == {"ts": "m3", "body": over}
+
+    state, calls = step(SEPT[2:3])
+    assert (calls[1:], "alert" in state) == ([("delete", "m3")], False)
+
+    state, calls = step(SEPT[3:4])
+    over = alert("26090212", "78.6% of 1P (195.0 Ti free)", "9/2 12:00")
+    assert calls[1:] == [("post", f":warning: [main]({u('26090212-1d')}): 78.6% of 1P (195.0 Ti free)", "m1", "9/2 — 715 TiB (+2.0, 0.3%)",
+                          f"{AV}30.png?v=4", None),
+                         ("post", over, "m1", *sender)]
+    # a closed month's thread carries no alert: the next month's does
+    month = D.load_month(str(root), SEP, P)
+    assert (D.alert_body(month, tpl.cfg), D.alert_body(replace(month, closed=True), tpl.cfg)) == (over, None)
+
+
+def test_a_month_ending_over_quota_moves_its_alert_to_the_next_months_thread(tmp_path: Path):
+    """A quota still over when the month ends: the scheduled converge (`converge_slack_now`) closes the old month,
+    whose alert counts as resolved there (deleted), and the new month's thread posts the one alert: never both."""
+    tpl = E.template(replace(CFG, alert_pct=78.3))
+    root = tmp_path / "snapshots" / "cw"
+    _publish(root, LEAD + SEPT)
+    fake = _FakeSlack()
+    sept = E.converge_slack(tpl, str(root), SEP, fake, "C1", "sender")
+    assert sept["alert"]["ts"] == "m4"  # OP m1, replies m2 + m3, alert m4
+
+    _publish(root, [("2026-10-01T1200", _meta(716))])  # 78.7% of 1P: still over
+    fake.calls.clear()
+    oct_ = E.converge_slack_now(tpl, str(root), date(2026, 10, 1), fake, "C1", "sender")
+    body = (f":warning: **Quota alert**: [main]({SITE}/main-data?d=261001#over-time): 78.7% of 1P (194.0 Ti free) · _as of 10/1 12:00Z_ "
+            "(≥ 78.3% of a quota; removed once every quota is back under)")
+    # the alert calls alone: September's deleted, October's posted under October's OP (m5; its reply is m6)
+    assert [c for c in fake.calls if c[0] == "delete" or c[-1] == "broadcast"] == [
+        ("delete", "m4"), ("post", body, "m5", "S3 usage: quota alert", None, ":warning:", "broadcast")]
+    assert ("alert" in E.load_state(E.state_path(str(root), SEP, CFG.state.format(channel="C1", variant="sender"))), oct_["alert"]) == (
+        False, {"ts": "m7", "body": body})
+
+
+@pytest.mark.parametrize("pct", [0, 101, -5])
+def test_alert_pct_must_be_a_percent(pct):
+    with pytest.raises(ValueError) as e:
+        E.config_from_dict({"template": "cw", "alert_pct": pct})
+    assert str(e.value) == f"digest config alert_pct: {pct} is not a percent (0–100]"
 
 
 def test_post_digest_body_variant(tmp_path: Path):
