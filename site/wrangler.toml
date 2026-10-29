@@ -46,8 +46,8 @@ SNAPSHOTS_SUBDIR = "hf"          # snapshots/hf/<scan>/ (the scan's `index` step
 STORE_BUCKET = "oa-hf-usage-index"
 STORE_REGION = "auto"
 SERVED_R2 = "1"                  # snapshot JSONs + extras through INDEX_R2 (the same bucket), not the S3 seam
-# The static name index (the map's `?f=` and /names), in INDEX_R2 under `static-names/<STATIC_GEN>/`: the job's first
-# run builds this generation (`static-names build -x 16,8`), each later one appends its scan (`add`).
+# The static name index (the map's `?f=` and /names), in INDEX_R2 under `static-names/<gen>/`: the generation
+# STATIC_CURRENT_KEY names (no STATIC_GEN pin). Each scan appends to it (`add`); compaction moves the pointer.
 FILTER_INDEXED_ONLY = "1"        # search is the static name index only: a form it can't answer is refused, never walked
 FILTER_STATIC = "1"
 NAME_SUMMARY_STATIC = "1"
