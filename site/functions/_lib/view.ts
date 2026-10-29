@@ -41,6 +41,7 @@ import { joinOf, shared } from './shared.js'
 import { storeKey } from './stores.js'
 import { extrasFor } from './extras.js'
 import { loadRegistry } from './identity.js'
+import { UPGRADE_DETAIL_GROUPS } from './edgeCache.js'
 import { covers, declined, dirsOnlyOf, dirsOnlySplit, type Found, type Hit, type HitOpts, type Rollup, rollupAt, staticCompound, staticFilterStore, staticKey, staticLiteral } from './staticFilter.js'
 import { type BoolAnswer, boolPlan, compound } from './staticBool.js'
 import { scanAt } from './staticNames.js'
@@ -137,6 +138,8 @@ export interface ViewOpts {
   floorOnly?: boolean
   /** With `query`: ms the static roots' detail lookups may run past phase 2 (default `FILTER_DETAILS_MS`). */
   detailsWait?: number
+  /** With `query`: the most row groups the static roots' detail lookups read (default `DETAIL_GROUPS`). */
+  detailGroups?: number
   /** With `query`: phase 2's time budget, ms (default `FILTER_PHASE2_MS`, env or constant). */
   phase2Ms?: number
   /** With `query`: the request's phase-2 gate (`Phase2Gate`), shared by every read of one request. */
@@ -226,8 +229,9 @@ export interface Coverage {
   /** A search stopped at its time budget (`SearchFound.timedOut`): unlike a read budget's cut, a run with more
    *  time may answer more — so the answer is kept briefly and recomputed (`keepFor`). */
   searchLate?: true
-  /** The match roots' detail lookups (`FILTER_DETAILS_MS`) were cut: the roots drawn without kind, ages or classes
-   *  (a file reads as a folder) — a run with more time decorates them, so kept briefly and recomputed. */
+  /** The match roots' detail lookups (`FILTER_DETAILS_MS`) were cut, or narrowed to fit `DETAIL_GROUPS`: roots drawn
+   *  without kind, ages or classes (a file reads as a folder) — a run with more time and groups
+   *  (`UPGRADE_DETAIL_GROUPS`) decorates them, so kept briefly and recomputed. */
   detailsLate?: true
 }
 export const APPROX_NO_INDEX = 'this scan has no search index; small matches may be missing'
@@ -1129,12 +1133,13 @@ async function readView(env: Env, o: ViewOpts, cov: Coverage = {}): Promise<Read
     // The first paint skips both: the roots alone, exact, from the static read.
     const firstPaintStatic = staticRoots && !!o.firstPaint
     let detailsOff = false
+    const detailGroups = o.detailGroups ?? DETAIL_GROUPS
     const details = staticRoots && !firstPaintStatic && !(maxDepth != null && maxDepth <= 0) ? (async () => {
       const want = heaviest(roots.filter(r => drawn(r) && shown(r)), ROOT_DETAILS)
-      if (!want.length) return []
+      if (!want.length) return { rows: [], cut: false }
       const h = pathIdx ?? fine ?? withTrace(await openFine(env, date, 'path'), tr)
-      return readDetails(h, want.map(r => ({ depth: depthF.get(r)!, path: r })), { maxGroups: DETAIL_GROUPS, stop: () => detailsOff, tr })
-    })() : Promise.resolve([] as Row[])
+      return readDetails(h, want.map(r => ({ depth: depthF.get(r)!, path: r })), { maxGroups: detailGroups, stop: () => detailsOff, tr })
+    })() : Promise.resolve({ rows: [] as Row[], cut: false })
     let rows2: Row[] = []
     let variant: string | undefined
     let interiors: Read['interiors']
@@ -1156,9 +1161,9 @@ async function readView(env: Env, o: ViewOpts, cov: Coverage = {}): Promise<Read
     // The lookups ride beside phase 2 and may wait `FILTER_DETAILS_MS` past it, no longer: they are
     // display fields (kind, ages, classes) and their span plans cost seconds where roots spread over
     // many depths (`00241`: ~8.5 s for 48 roots, against 6 s for phase 2).
-    const budget = o.detailsWait ?? (Number(env.FILTER_DETAILS_MS) || Infinity)
+    const budget = o.detailsWait ?? filterDetailsMs(env)
     const late = Symbol('late')
-    const detailRows = budget === Infinity ? await details
+    const { rows: detailRows, cut: detailsCut } = budget === Infinity ? await details
       : await Promise.race([details, new Promise<typeof late>(r => setTimeout(() => r(late), budget))]).then(x => {
         if (x !== late) return x
         tr?.('details', performance.now() - t0, 'late')
@@ -1166,8 +1171,12 @@ async function readView(env: Env, o: ViewOpts, cov: Coverage = {}): Promise<Read
         if (budget > 0) cov.detailsLate = true
         detailsOff = true
         details.catch(() => {})
-        return [] as Row[]
+        return { rows: [] as Row[], cut: false }
       })
+    // Narrowed to fit the group budget: as of an older scan each root's row costs a group per segment and run
+    // its version may lie in (~12 as of gcs 10-20, ~5 as of the newest), so 16 groups hold one root or a few.
+    // The upgrade's wider budget decorates more; its own narrowing is final.
+    if (detailsCut && budget > 0 && detailGroups < UPGRADE_DETAIL_GROUPS) cov.detailsLate = true
     if (detailRows.length) {
       const d = aggregate(detailRows)
       for (const [r, m] of d.mine) {
@@ -1916,8 +1925,8 @@ async function rollupRead(env: Env, o: ViewOpts, rollup: Rollup, x: {
   // lookups, heaviest first, within `FILTER_DETAILS_MS`; never on the first paint.
   const want = matched.filter(m => kept.has(m.path)).slice(0, ROOT_DETAILS)
   if (want.length && !o.firstPaint && !(maxDepth != null && maxDepth <= 0)) {
-    const look = readDetails(x.details, want.map(m => ({ depth: depthOf.get(m.path)!, path: m.path })), { maxGroups: 60, tr })
-    const budget = o.detailsWait ?? (Number(env.FILTER_DETAILS_MS) || Infinity)
+    const look = readDetails(x.details, want.map(m => ({ depth: depthOf.get(m.path)!, path: m.path })), { maxGroups: 60, tr }).then(d => d.rows)
+    const budget = o.detailsWait ?? filterDetailsMs(env)
     const late = Symbol('late')
     const rows = budget === Infinity ? await look : await Promise.race([look, new Promise<typeof late>(r => setTimeout(() => r(late), budget))]).then(v => {
       if (v !== late) return v
@@ -1996,8 +2005,14 @@ export const FILTER_PHASE2_ROWS = 1 << 19
 /** …a depth's roots over that budget together are planned one by one, its heaviest this many. */
 export const FILTER_SPLIT_ROOTS = 4
 /** …within this many ms (`FILTER_PHASE2_MS` overrides): a read still running then is dropped. With the
- *  root details' wait past it (`FILTER_DETAILS_MS`, dev 300) and the build, a full view lands in ~2 s. */
+ *  root details' wait past it (`FILTER_DETAILS_MS`) and the build, a full view lands in ~2 s. */
 export const FILTER_PHASE2_MS = 1500
+/** ms a static filter view's match-root detail lookups may run past phase 2 (`FILTER_DETAILS_MS` overrides;
+ *  `Infinity` waits until they land), then it answers without them (`detailsLate`: kept briefly, upgraded). A default,
+ *  not per-deployment config: unbounded, gcs prod's fleet-root `q=tokenizer` view ran out of memory (1102) on 8 of 10
+ *  scans (2026-10-29) while its dev, which set 300, rendered all 10; cw, hf and r2 had it unset too. */
+export const FILTER_DETAILS_MS = 300
+export const filterDetailsMs = (env: { FILTER_DETAILS_MS?: string }): number => Number(env.FILTER_DETAILS_MS) || FILTER_DETAILS_MS
 /** A heavy literal's rollup view nests at most this many static answers (`rollupRead`), `NEST_PAR` at a
  *  time: each is a few ranged GETs per drill tier (an index span, a data span), held per isolate after. */
 export const FILTER_NEST_READS = 48
@@ -2104,18 +2119,18 @@ const DETAIL_GROUPS = 16
  *  retried on the heavier half, then quarter, …, so the heaviest roots keep their kind, ages and classes where all
  *  of them at once span too many groups (gcs 10-27T1442, `q=safetensors`: 48 roots, none decorated). A plan over
  *  budget fails before reading any group, so each retry costs span queries only. */
-async function readDetails(h: IndexHandle, want: { depth: number; path: string }[], o: { maxGroups: number; stop?: () => boolean; tr?: Trace }): Promise<Row[]> {
+async function readDetails(h: IndexHandle, want: { depth: number; path: string }[], o: { maxGroups: number; stop?: () => boolean; tr?: Trace }): Promise<{ rows: Row[]; cut: boolean }> {
   for (let n = want.length; n > 0; n >>= 1) {
     const asks = want.slice(0, n)
     const keys = new Set(asks.map(a => `${a.depth}\0${a.path}`))
     try {
-      return (await readAsks(h, asks, r => keys.has(`${r.depth}\0${r.path}`), { maxGroups: o.maxGroups, stop: o.stop, rememberWide: true })).rows
+      return { rows: (await readAsks(h, asks, r => keys.has(`${r.depth}\0${r.path}`), { maxGroups: o.maxGroups, stop: o.stop, rememberWide: true })).rows, cut: n < want.length }
     } catch (e) {
       if (!/too wide/.test(String((e as Error).message ?? e))) throw e
       o.tr?.('details', 0, `too wide at ${n}`)
     }
   }
-  return []
+  return { rows: [], cut: true }
 }
 
 /** `xs` in code-unit order: itself when it already is (a static literal's ~80K roots are), else a sorted copy. */
@@ -2347,10 +2362,10 @@ export async function buildDiff(env0: Env, o: DiffOpts): Promise<Diff> {
   // A union root's member diff draws at the union's threshold (`o.threshold`), filtered or not.
   let floor: number | undefined = query ? o.threshold : undefined
   // A diff draws its roots' kinds only (no ages, no classes): the lookups that land by phase 2's end are
-  // taken, none waited for (with a deployment's finite `FILTER_DETAILS_MS`; unset waits, as views do).
+  // taken, none waited for (unless `FILTER_DETAILS_MS` is `Infinity`: then it waits, as views do).
   // Its phase 2 runs both sides at once, then the walk's lookups (`FILTER_WALK_MS`): a smaller share each
   // (`o.phase2Ms`, a background full run's, overrides).
-  const wait = { ...(Number(env.FILTER_DETAILS_MS) ? { detailsWait: 0 } : {}), phase2Ms: o.phase2Ms ?? Math.min(Number(env.FILTER_PHASE2_MS) || FILTER_PHASE2_MS, FILTER_DIFF_PHASE2_MS) }
+  const wait = { ...(filterDetailsMs(env) !== Infinity ? { detailsWait: 0 } : {}), phase2Ms: o.phase2Ms ?? Math.min(Number(env.FILTER_PHASE2_MS) || FILTER_PHASE2_MS, FILTER_DIFF_PHASE2_MS) }
   // Every read of this diff shares one phase-2 gate: a side whose round read nothing in time stops the
   // re-read at the shared floor from paying its budget again.
   const gate: Phase2Gate = o.phase2Gate ?? { dead: false }

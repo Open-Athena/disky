@@ -512,6 +512,12 @@ def add_cmd(catch_up: bool, gen: str | None, compact_now: bool, no_merge: bool, 
 LAG_SCANS, LAG_S = 1, 12 * 3600
 #: The lag episode's marker in the scratch bucket (`runs lag`): one alert per episode, not one per run.
 LAG_MARKER = "lag-alert.json"
+#: More runs than this above the base is more than the binary counter leaves (one per level below the compaction's,
+#: 5 by default, plus a scan's not yet carried): its carries aren't running. cw 10-24 → 10-29: `merge: false` deferred
+#: them to a `runs merge` nothing ran, the manifest grew to 37 runs, and past ~7 level-0 tiers the reader's light-read
+#: budget (`TieredNames.defaultMaxRows`, 2× `MAX_ROWS` over every tier's boundary groups) declined nearly every
+#: literal: search refused every scan. `runs lag` reports the count, and exits `ar.UNMERGED` over it.
+UNMERGED_RUNS_ALERT = 8
 
 
 def lag_state(newest: str | None, published: list[str], scan: str) -> dict:
@@ -539,7 +545,9 @@ def lag_episode(lagging: bool, marked: bool) -> str | None:
 def lag_cmd(gen: str | None, scan_id: str) -> None:
     """Whether the static index lags SCAN_ID (`lag_state`), as JSON, with `episode`: `start` the first time it does (the
     marker `<gen>/lag-alert.json` in the scratch bucket is then written: the caller alerts once), `end` once it no longer
-    does (the marker removed), else null. Read-only but for the marker."""
+    does (the marker removed), else null; and the newest manifest's runs above the base (`runs`, `levels`). Exit
+    `UNMERGED` (5) when they are more than `UNMERGED_RUNS_ALERT`: the carries aren't running. Read-only but for the
+    marker."""
     from google.cloud import storage
 
     cfg = ready(profile(), gen)
@@ -553,7 +561,12 @@ def lag_cmd(gen: str | None, scan_id: str) -> None:
         blob.upload_from_string(json.dumps({"scan": scan_id, **doc}) + "\n")
     elif blob is not None and episode == "end":
         blob.delete()
-    print(json.dumps({"gen": runner.cfg.gen, "scan": scan_id, **doc, "episode": episode}))
+    keys = runner.manifests()
+    levels = [r["level"] for r in runner.read_json(keys[-1])["runs"]] if keys else []
+    print(json.dumps({"gen": runner.cfg.gen, "scan": scan_id, **doc, "episode": episode, "runs": len(levels), "levels": levels}))
+    if len(levels) > UNMERGED_RUNS_ALERT:
+        err(f"static-names runs lag: {len(levels)} unmerged runs (> {UNMERGED_RUNS_ALERT}): the carries aren't running (`runs merge`)")
+        raise SystemExit(ar.UNMERGED)
 
 
 def check_priors(read_json: Callable[[str], dict], exists: Callable[[str], bool], root: str, scan: str) -> dict:
