@@ -252,6 +252,48 @@ def test_the_probe_checks_the_lag_when_the_deployment_skips_static_names(tmp_pat
                                "catch-up appends them")]
 
 
+UNMERGED_ALERT = ("warn", f"static name index: 37 unmerged runs above its base (levels 4 4{' 0' * 35}), more than the binary counter "
+                          "leaves: its carries aren't running, and search declines most literals over that many tiers; run "
+                          "`dt-cloud static-names runs merge`")
+
+
+@pytest.mark.parametrize("code, probe, skip, alerts", [
+    (5, False, [], [UNMERGED_ALERT]),
+    (5, True, [], []),
+    (5, True, ["static-names"], [UNMERGED_ALERT]),
+    (0, False, [], []),
+])
+def test_unmerged_runs_alert_on_every_scan(tmp_path, env, code, probe, skip, alerts):
+    """`runs lag` exits `UNMERGED` (cw 10-24 → 10-29: `merge: false`, 37 runs, search refusing every scan): a warn alert
+    each scan, from the static-names step, or from the probe's call only when the deployment skips that step; the
+    record still comes back."""
+    lag = {"gen": "g", "scan": "2026-10-16T1200", "newest": "2026-10-16T1200", "behind": [], "s": 0, "lagging": False, "episode": None,
+           "runs": 37, "levels": [4, 4, *[0] * 35]}
+    c = ctx(tmp_path, env, runner=Runner(tmp_path, stdout={"dt-cloud static-names runs": json.dumps(lag)}, codes={"dt-cloud static-names runs": code}),
+            skip=skip, options={"list": {"import": True, "bulk_args": ["-a"], "threads": 8}, "index": {"webdata": ["python", "web.py", "{web}", "{sources}", "-a", "{date}"], "mem": "16GB", "threads": 2},
+                                "static-names": {"profile": "sn.json"}, "digest": {"template": "t", "config": "c.yml"}})
+    posted = []
+    c.run.alert = lambda level, msg: posted.append((level, msg))
+    assert (S.static_lag(c, probe=probe), posted, c.failure) == (lag, alerts, None)
+    assert c.sh_impl.calls == ["dt-cloud static-names runs lag 2026-10-16T1200"]
+
+
+def test_a_probe_refused_on_an_indexed_scan_fails(tmp_path, env):
+    """Failed requests that are `scan-not-indexed` on scans the index lists (`refused_indexed`, not `lag`): the phase
+    fails with the verdict, never `search behind`."""
+    env.update(SITE_TOKEN="st", SITE_URL="https://site.example.org")
+    line = ("6 passed, 0 skipped, 3 failed (3 scan-not-indexed refused on an indexed scan (over the tiers' row budget? check the "
+            "static index's unmerged runs))")
+    rec = json.dumps({"results": [], "summary": {"passed": 6, "skipped": 0, "failed": 3, "lag": 0, "refused_indexed": 3, "line": line}})
+    c = ctx(tmp_path, env, runner=Runner(tmp_path, stdout={"dt-cloud probe -c": rec}, codes={"dt-cloud probe -c": 1}))
+    calls = []
+    c.run.phases = lambda: [{"phase": "static-names", "seq": 0, "status": "done", "note": "overlapped"}]
+    c.run.begin = lambda name: calls.append(("begin", name))
+    c.run.end = lambda name, rc=0, **kw: calls.append(("end", name, rc, kw))
+    S.probe(c, None)
+    assert calls == [("begin", "probe"), ("end", "probe", 1, {"warn": True, "msg": f"serving probe failed for 2026-10-16T1200: {line}", "note": line})]
+
+
 @pytest.mark.parametrize("merge, argv", [(None, "-c 2026-10-16T1200"), (True, "-c 2026-10-16T1200"), (False, "-c -M 2026-10-16T1200")])
 def test_static_names_merge_off_leaves_the_due_carries_to_their_own_schedule(tmp_path, env, merge, argv):
     """`options.static-names.merge: false`: the scan's `runs add` skips the merge stage (`-M`), so a due carry or
@@ -262,6 +304,24 @@ def test_static_names_merge_off_leaves_the_due_carries_to_their_own_schedule(tmp
                                      "static-names": opts, "digest": {"template": "t", "config": "c.yml"}})
     S.static_names(c, None)
     assert c.sh_impl.calls == [f"dt-cloud static-names runs add {argv}", "dt-cloud static-names runs lag 2026-10-16T1200"]
+
+
+@pytest.mark.parametrize("deferred, after", [("level 5", ["bash job/cw-static-submit.sh"]), (None, [])])
+def test_static_names_compact_cmd_runs_a_deferred_compaction_apart(tmp_path, env, deferred, after):
+    """`options.static-names.compact_cmd`: the scan's `runs add` submits the due carries but defers a due compaction (`-D`),
+    whose hours-long fold would otherwise run inside the scan's task (cw 10-24: `merge: false` instead left the carries to
+    nothing, and search refused every scan by 10-27); the step runs the command only when `runs add` reports one deferred."""
+    # one stdout for both `runs add` and `runs lag` (the fake keys on the first three words): each reads its own fields
+    out = {"gen": "g", "scan": "2026-10-16T1200", "appended": ["2026-10-16T1200"], "dry_run": False, "compaction": deferred,
+           "deferred": deferred, "newest": "2026-10-16T1200", "behind": [], "s": 0, "lagging": False, "episode": None}
+    opts = {"profile": "sn.json", "compact_cmd": ["bash", "job/cw-static-submit.sh"]}
+    c = ctx(tmp_path, env, runner=Runner(tmp_path, stdout={"dt-cloud static-names runs": json.dumps(out)}),
+            options={"list": {"import": True, "bulk_args": ["-a"], "threads": 8},
+                     "index": {"webdata": ["python", "web.py", "{web}", "{sources}", "-a", "{date}"], "mem": "16GB", "threads": 2},
+                     "static-names": opts, "digest": {"template": "t", "config": "c.yml"}})
+    S.static_names(c, None)
+    assert c.sh_impl.calls == ["dt-cloud static-names runs add -c -D 2026-10-16T1200", *after, "dt-cloud static-names runs lag 2026-10-16T1200"]
+    assert c.failure is None
 
 
 BUSY_REASON = ("another coordinator or a compaction holds the static-names store's lease; search for this scan comes "

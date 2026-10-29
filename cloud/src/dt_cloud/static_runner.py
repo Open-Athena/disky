@@ -484,6 +484,7 @@ def gcs_runner(cfg: Profile, *, dry_run: bool = False, verify_terms: str | None 
 
 @command("add")
 @option("-c", "--catch-up", is_flag=True, help="Append every earlier published scan still pending first, in scan-id order")
+@option("-D", "--defer-compaction", is_flag=True, help="A due compaction is reported (`deferred` in the JSON), not run: the caller runs `runs merge` on its own")
 @option("-g", "--gen", help="Base generation (default: the profile's, $STATIC_NAMES_GEN)")
 @option("-K", "--compact-now", is_flag=True, help="After the merge stage, compact into a new generation whatever the policy says (when the generation has runs)")
 @option("-M", "--no-merge", is_flag=True, help="Skip the merge stage (the due carries wait for a later run, or `runs merge`)")
@@ -492,8 +493,8 @@ def gcs_runner(cfg: Profile, *, dry_run: bool = False, verify_terms: str | None 
 @option("-t", "--verify-terms", help="Also run `runs verify` with this terms file (a gs:// URL)")
 @option("-w", "--merge-wait", default=0, type=float, help="Seconds to wait on the merge job (default 0: submit it and go; it publishes on GCS when done)")
 @argument("scan_id")
-def add_cmd(catch_up: bool, gen: str | None, compact_now: bool, no_merge: bool, dry_run: bool, candidate: bool, verify_terms: str | None, merge_wait: float,
-            scan_id: str) -> None:
+def add_cmd(catch_up: bool, defer_compaction: bool, gen: str | None, compact_now: bool, no_merge: bool, dry_run: bool, candidate: bool,
+            verify_terms: str | None, merge_wait: float, scan_id: str) -> None:
     """Append SCAN_ID to the static name index: prepare → append → shards ∥ catalog → [drill] ∥ [anchors] → publish → R2 → prune, each stage
     skipped when its output exists; then the merge stage (the due carries, non-fatal). Exit 3 when SCAN_ID is not published
     yet, or an earlier published scan is pending (without -c); exit 4 when another `runs add` holds the coordinator lease.
@@ -502,9 +503,11 @@ def add_cmd(catch_up: bool, gen: str | None, compact_now: bool, no_merge: bool, 
     cfg = ready(profile(), gen)
     runner = gcs_runner(cfg, dry_run=dry_run, verify_terms=verify_terms, merge=not no_merge, merge_wait=merge_wait)
     runner.compact_now = compact_now
+    runner.defer_compaction = defer_compaction
     runner.candidate = candidate
     done = exit_on(f"static-names runs add {scan_id}", lambda: runner.run(scan_id, catch_up=catch_up), lambda m: err(m))
-    print(json.dumps({"gen": runner.cfg.gen, "scan": scan_id, "appended": done, "dry_run": dry_run, "compaction": runner.compaction}))
+    print(json.dumps({"gen": runner.cfg.gen, "scan": scan_id, "appended": done, "dry_run": dry_run, "compaction": runner.compaction,
+                      "deferred": runner.deferred}))
 
 
 #: The static index lags when more than `LAG_SCANS` published scans are past its newest, or any one has been for longer
@@ -512,6 +515,12 @@ def add_cmd(catch_up: bool, gen: str | None, compact_now: bool, no_merge: bool, 
 LAG_SCANS, LAG_S = 1, 12 * 3600
 #: The lag episode's marker in the scratch bucket (`runs lag`): one alert per episode, not one per run.
 LAG_MARKER = "lag-alert.json"
+#: More runs than this above the base is more than the binary counter leaves (one per level below the compaction's,
+#: 5 by default, plus a scan's not yet carried): its carries aren't running. cw 10-24 → 10-29: `merge: false` deferred
+#: them to a `runs merge` nothing ran, the manifest grew to 37 runs, and past ~7 level-0 tiers the reader's light-read
+#: budget (`TieredNames.defaultMaxRows`, 2× `MAX_ROWS` over every tier's boundary groups) declined nearly every
+#: literal: search refused every scan. `runs lag` reports the count, and exits `ar.UNMERGED` over it.
+UNMERGED_RUNS_ALERT = 8
 
 
 def lag_state(newest: str | None, published: list[str], scan: str) -> dict:
@@ -539,7 +548,9 @@ def lag_episode(lagging: bool, marked: bool) -> str | None:
 def lag_cmd(gen: str | None, scan_id: str) -> None:
     """Whether the static index lags SCAN_ID (`lag_state`), as JSON, with `episode`: `start` the first time it does (the
     marker `<gen>/lag-alert.json` in the scratch bucket is then written: the caller alerts once), `end` once it no longer
-    does (the marker removed), else null. Read-only but for the marker."""
+    does (the marker removed), else null; and the newest manifest's runs above the base (`runs`, `levels`). Exit
+    `UNMERGED` (5) when they are more than `UNMERGED_RUNS_ALERT`: the carries aren't running. Read-only but for the
+    marker."""
     from google.cloud import storage
 
     cfg = ready(profile(), gen)
@@ -553,7 +564,12 @@ def lag_cmd(gen: str | None, scan_id: str) -> None:
         blob.upload_from_string(json.dumps({"scan": scan_id, **doc}) + "\n")
     elif blob is not None and episode == "end":
         blob.delete()
-    print(json.dumps({"gen": runner.cfg.gen, "scan": scan_id, **doc, "episode": episode}))
+    keys = runner.manifests()
+    levels = [r["level"] for r in runner.read_json(keys[-1])["runs"]] if keys else []
+    print(json.dumps({"gen": runner.cfg.gen, "scan": scan_id, **doc, "episode": episode, "runs": len(levels), "levels": levels}))
+    if len(levels) > UNMERGED_RUNS_ALERT:
+        err(f"static-names runs lag: {len(levels)} unmerged runs (> {UNMERGED_RUNS_ALERT}): the carries aren't running (`runs merge`)")
+        raise SystemExit(ar.UNMERGED)
 
 
 def check_priors(read_json: Callable[[str], dict], exists: Callable[[str], bool], root: str, scan: str) -> dict:

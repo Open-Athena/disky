@@ -988,8 +988,10 @@ def path_index_part(ctx: Ctx, pid: str) -> None:
 def _static_check(p: ScanProfile) -> list[str]:
     o = p.opts("static-names")
     if o.get("gen"):
-        return [f"options.static-names.{k}: not with gen (the one-machine path)" for k in ("profile", "merge") if k in o]
+        return [f"options.static-names.{k}: not with gen (the one-machine path)" for k in ("profile", "merge", "compact_cmd") if k in o]
     problems = [f"options.static-names.{k}: only with gen (the one-machine path)" for k in ("store", "mem", "build_args", "current_key") if k in o]
+    if o.get("compact_cmd") and o.get("merge") is False:
+        problems.append("options.static-names.compact_cmd: only with the merge stage on (`merge: false` defers the compaction to nothing)")
     if not o.get("profile") and not p.env.get("STATIC_NAMES_PROFILE"):
         problems.append("options.static-names.profile: required (the deployment's static-names profile; or env STATIC_NAMES_PROFILE, "
                         "or gen: the one-machine path, or skip: [static-names])")
@@ -997,7 +999,7 @@ def _static_check(p: ScanProfile) -> list[str]:
 
 
 @step("static-names", stage="serve", soft=True, options={"profile": str, "gen": str, "store": str, "mem": str, "build_args": list, "current_key": str,
-                                                          "merge": bool},
+                                                          "merge": bool, "compact_cmd": list},
       requires=_static_check)
 def static_names(ctx: Ctx, arg: str | None) -> None:
     """Append this scan (and any earlier one still pending, in scan-id order) to the static name index as a run
@@ -1007,7 +1009,10 @@ def static_names(ctx: Ctx, arg: str | None) -> None:
 
     `options.static-names.gen`: the one-machine path instead, for a small deployment (`static-names add` in this task:
     every scan in the data store after the generation's newest, read at the layer-2 layout's `path` sorts, appended to
-    the generation in `store`, default `$R2_ARCHIVE`); `build` (+ `build_args`) when the store has no such generation."""
+    the generation in `store`, default `$R2_ARCHIVE`); `build` (+ `build_args`) when the store has no such generation.
+
+    `options.static-names.compact_cmd` (argv): a due compaction is deferred (`runs add -D`) to this command, run here only
+    when one was (a coordinator job of its own: the fold takes hours); `merge: false` instead skips the merge stage."""
     if ctx.reproc:
         err("static-names off under REPROC")
         return
@@ -1035,27 +1040,44 @@ def static_names(ctx: Ctx, arg: str | None) -> None:
     # appends this scan too, else the next run does. Until then search refuses the scan: an explicit skip (the probe
     # reads it from the record and skips those refusals; /scans shows the run `partial`, with this reason)
     with ctx.phase("static-names", note="overlapped"):
-        # `merge: false`: the due carries (and a compaction) wait for `runs merge` on its own schedule, never a scan's task
+        # `merge: false`: the due carries (and a compaction) wait for `runs merge` on its own schedule, never a scan's task.
+        # `compact_cmd`: the carries are submitted here (not waited on), and a due compaction, an hours-long fold, is
+        # deferred (`-D`) to this command, which runs `runs merge` apart (cw: its own coordinator job)
         merge = ctx.opt("static-names", "merge", True)
-        ctx.sh(["dt-cloud", "static-names", "runs", "add", "-c", *([] if merge else ["-M"]), ctx.scan], env={"STATIC_NAMES_PROFILE": str(prof)},
-               fatal=False, warn=f"static-names runs add failed for {ctx.scan}", allowed_codes=(BUSY,))
+        compact_cmd = ctx.opt("static-names", "compact_cmd") if merge else None
+        out = ctx.sh(["dt-cloud", "static-names", "runs", "add", "-c", *([] if merge else ["-M"]), *(["-D"] if compact_cmd else []), ctx.scan],
+                     env={"STATIC_NAMES_PROFILE": str(prof)}, fatal=False, warn=f"static-names runs add failed for {ctx.scan}",
+                     allowed_codes=(BUSY,), capture=bool(compact_cmd))
         if ctx.last is not None and ctx.last.returncode == BUSY:
             ctx.skip("busy", STATIC_NAMES_BUSY)
+        elif out and (deferred := json.loads(out.strip().splitlines()[-1]).get("deferred")):
+            err(f"static-names: compaction due ({deferred}): run apart")
+            ctx.sh(compact_cmd, fatal=False, warn=f"static-names compaction submit failed for {ctx.scan}")
     static_lag(ctx)
 
 
-def static_lag(ctx: Ctx) -> dict | None:
+def static_lag(ctx: Ctx, probe: bool = False) -> dict | None:
     """One alert per lag episode of the static name index (`static-names runs lag`): more than a scan (or one for 12 h)
     behind the newest published scan, search refusing those. Run after `runs add` and again by `probe`, which a
     deployment skipping its static-names step (cw since 10-22: the outage this is for) or a step dying first still runs;
     the episode's marker keeps it to one alert. Not on the one-machine path (`options.static-names.gen`) nor without a
-    static-names profile. Returns `runs lag`'s record (None without one)."""
+    static-names profile. Returns `runs lag`'s record (None without one).
+
+    Its exit `UNMERGED` (more unmerged runs than the binary counter leaves: the carries aren't running, cw's search
+    outage 10-24 → 10-29) is a warn alert on every scan until merged, from the static-names step, or from the probe's
+    call (`probe`) only when the deployment skips that step."""
+    from .append_runner import UNMERGED
+
     prof = ctx.opt("static-names", "profile") or ctx.env.get("STATIC_NAMES_PROFILE")
     if ctx.reproc or ctx.opt("static-names", "gen") or not prof:
         return None
     out = ctx.sh(["dt-cloud", "static-names", "runs", "lag", ctx.scan], env={"STATIC_NAMES_PROFILE": str(prof)}, fatal=False,
-                 warn=f"static-names runs lag failed for {ctx.scan}", capture=True)
+                 warn=f"static-names runs lag failed for {ctx.scan}", capture=True, allowed_codes=(UNMERGED,))
     lag = json.loads(out) if out else None
+    if lag and ctx.last is not None and ctx.last.returncode == UNMERGED and (not probe or "static-names" in ctx.profile.skip):
+        ctx.run.alert("warn", f"static name index: {lag['runs']} unmerged runs above its base (levels {' '.join(map(str, lag['levels']))}), "
+                              "more than the binary counter leaves: its carries aren't running, and search declines most literals over "
+                              "that many tiers; run `dt-cloud static-names runs merge`")
     if lag and lag["episode"] == "start":
         why = " (this deployment skips its static-names step)" if "static-names" in ctx.profile.skip else (
             f" (static-names skipped: {r})" if (r := ctx.recorded_skip("static-names")) else "")
@@ -1500,13 +1522,13 @@ def probe(ctx: Ctx, arg: str | None) -> None:
             verdict = ctx.note = summary["line"] if summary else None
             if ctx.failure and summary and summary.get("failed") and summary.get("lag") == summary["failed"]:
                 lagged = True
-                ctx.failure, ctx.note = None, behind_note(static_lag(ctx), summary)
+                ctx.failure, ctx.note = None, behind_note(static_lag(ctx, probe=True), summary)
             elif ctx.failure and verdict:
                 ctx.failure = (ctx.failure[0], f"serving probe failed for {ctx.scan}: {verdict}")
     finally:
         # whatever the probe did, or without a site to probe
         if not lagged:
-            static_lag(ctx)
+            static_lag(ctx, probe=True)
 
 
 def _probe_summary(stdout: str | None) -> dict | None:
