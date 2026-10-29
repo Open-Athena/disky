@@ -1667,6 +1667,12 @@ export class Totals extends Map<string, Agg> {
     yield* super.keys()
     yield* this.lite.keys()
   }
+  // Iterating the values would see only the `Agg`s built so far, never the numbers-only nodes: a caller walks the keys
+  // and asks `get` (each built then) or `bo` (none built).
+  override entries(): MapIterator<[string, Agg]> { throw new Error('Totals: iterate keys() and get/bo each') }
+  override values(): MapIterator<Agg> { throw new Error('Totals: iterate keys() and get/bo each') }
+  override forEach(_f: (a: Agg, p: string, m: Map<string, Agg>) => void): void { throw new Error('Totals: iterate keys() and get/bo each') }
+  override [Symbol.iterator](): MapIterator<[string, Agg]> { throw new Error('Totals: iterate keys() and get/bo each') }
 }
 
 export interface Nest {
