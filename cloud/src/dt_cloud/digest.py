@@ -741,7 +741,7 @@ def converge_slack(tpl: Template, root: str, month: dt.date, client, channel: st
         else:
             del state["alert"]
             save_state(path, state)
-            _err("digest: deleted the quota alert (every quota is back under)")
+            _err("digest: deleted the quota alert (every quota back under, or its month closed)")
     elif text is not None and have is None:
         rm = client.post(text, thread_id=op_ts, broadcast=True, username=f"{cfg.title}: quota alert", icon_emoji=ALERT_ICON)
         state["alert"] = {"ts": rm.id, "body": text}
