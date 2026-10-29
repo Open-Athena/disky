@@ -105,7 +105,9 @@ def test_queued_task_falls_back_and_a_real_failure_does_not(tmp_path):
     ]
     # interval-store's genuine failure on m-fb2 was not retried (submitted once there), and stopped the run before post
     assert sorted(marks.read_text().splitlines()) == ["index", "index-rows", "list s3://a"]
-    assert sorted(re.sub(r"^.*?(scan head: )", r"\1", line) for line in r.stdout.splitlines() if "scan head: " in line) == [
+    # each fallback's warning, from the run's log (Nextflow's console doesn't carry `log.warn` to stdout)
+    log = (launch / ".nextflow.log").read_text()
+    assert sorted(re.sub(r"^.*?(scan head: )", r"\1", line) for line in log.splitlines() if "scan head: " in line) == [
         "scan head: index queued 1 min on m-fb1; retrying on m-fb2 (the last: no queue timeout)",
         "scan head: index queued 1 min on m-primary; retrying on m-fb1",
         "scan head: interval_store queued 1 min on m-fb1; retrying on m-fb2 (the last: no queue timeout)",
