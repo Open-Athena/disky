@@ -145,15 +145,57 @@ def _tail(day: DayRow, cfg: DigestConfig) -> str:
         link = _diff_url(day.scan, day.since, cfg.site_url, cfg.primary if b is None or b.path is None else b.path, day.slug)
         body = ", ".join(_quota_clause(_scoped(day.tb, day.classes, q), q, cfg.unit) for q in qs) if qs else f"{day.tb:,.0f} {cfg.unit.short}"
         return f"{body} [{LINK_ARROW}]({link})"
+    return " · ".join(f"{ALERT_MARK} {c}" if over else c for c, over in _clauses(day, cfg))
+
+
+#: Marks a quota clause at or over `alert_pct` (the daily replies' tail and the alert reply).
+ALERT_MARK = ":warning:"
+
+
+def _groups(day: DayRow, cfg: DigestConfig) -> list[list[tuple[str, float]]]:
+    """The day's buckets (the primary first, then the extras in meta order) grouped by quota: buckets sharing a
+    ``zone`` are one group, at the first one's position; every other bucket is its own."""
     groups: dict[str, list[tuple[str, float]]] = {}
     for b, tb in [(cfg.primary, day.tb), *day.extra.items()]:
         z = cfg.buckets[b].zone if b in cfg.buckets else None
         groups.setdefault(f"zone:{z}" if z else f"bucket:{b}", []).append((b, tb))
-    return " · ".join(
-        _bucket_clause(*g[0], day.scan, day.since, cfg, day.slug, day.classes if g[0][0] == cfg.primary else None)
-        if len(g) == 1 else _zone_clause(g, day.scan, day.since, cfg, day.slug)
-        for g in groups.values()
-    )
+    return list(groups.values())
+
+
+def _fill(g: list[tuple[str, float]], day: DayRow, cfg: DigestConfig) -> float | None:
+    """A group's fullest quota, in percent (each quota over its own classes; a zone's over its buckets' sum); None
+    without a quota."""
+    if len(g) > 1:
+        q = cfg.buckets[g[0][0]].quota
+        return sum(tb for _, tb in g) / (q.bytes / cfg.unit.bytes) * 100 if q else None
+    name, tb = g[0]
+    b = cfg.buckets.get(name)
+    classes = day.classes if name == cfg.primary else None
+    return max((_scoped(tb, classes, q) / (q.bytes / cfg.unit.bytes) * 100 for q in b.quotas), default=None) if b else None
+
+
+def _clauses(day: DayRow, cfg: DigestConfig) -> list[tuple[str, bool]]:
+    """Each group's clause (`_bucket_clause` / `_zone_clause`), and whether its fill is at or over ``cfg.alert_pct``."""
+    out = []
+    for g in _groups(day, cfg):
+        clause = (_bucket_clause(*g[0], day.scan, day.since, cfg, day.slug, day.classes if g[0][0] == cfg.primary else None)
+                  if len(g) == 1 else _zone_clause(g, day.scan, day.since, cfg, day.slug))
+        fill = _fill(g, day, cfg)
+        out.append((clause, cfg.alert_pct is not None and fill is not None and fill >= cfg.alert_pct))
+    return out
+
+
+def alert_body(month: Month, cfg: DigestConfig) -> str | None:
+    """The quota alert reply's body: every group at or over ``cfg.alert_pct`` as of the month's latest scan, else
+    None (no threshold, none over, or a closed month: the next month's thread carries it)."""
+    if cfg.alert_pct is None or month.closed:
+        return None
+    last = month.rows[-1]
+    over = [c for c, o in _clauses(_row(last.date, last, None), cfg) if o]
+    if not over:
+        return None
+    return (f"{ALERT_MARK} **Quota alert**: {' · '.join(over)} · _as of {_md(last.date)} {scan_ts(last.scan):%H:%M}Z_ "
+            f"(≥ {cfg.alert_pct:g}% of a quota; removed once every quota is back under)")
 
 
 @dataclass(frozen=True)
@@ -500,6 +542,9 @@ class Cw:
 
     def units(self, month: Month, variant: str, platform: str = "slack") -> list[Unit]:
         return [Unit(day.date, day.scan, reply(day, variant, self.cfg)) for day in day_rows(month, variant, self.cfg.reply_hour)]
+
+    def alert(self, month: Month) -> str | None:
+        return alert_body(month, self.cfg)
 
     def provisional(self, month: Month, variant: str) -> Unit | None:
         """The still-open day's provisional reply (``sender`` only), else None."""

@@ -130,7 +130,11 @@ class DigestConfig:
     ``units`` (cw template): `TiB` (default) or `TB`, every size the digest
     renders (text and plot). ``provisional`` (cw ``sender``): post a day's early scans as one
     provisional reply, edited in place, replaced by the final reply when the
-    day's reply scan lands (see `digest_cw`)."""
+    day's reply scan lands (see `digest_cw`). ``alert_pct`` (cw): a quota at
+    or over this percent gets a `:warning:` in the daily replies, and the
+    month's thread one alert reply also sent to the channel (Slack
+    `reply_broadcast`), edited as its numbers move and deleted once every quota
+    is back under; None: neither."""
 
     template: str
     title: str
@@ -152,6 +156,7 @@ class DigestConfig:
     buckets: dict[str, Bucket] = field(default_factory=dict)
     prices: dict[str, float] = field(default_factory=dict)
     units: str = "TiB"
+    alert_pct: float | None = None
 
     @property
     def unit(self) -> Units:
@@ -241,7 +246,7 @@ _SCALAR_TYPES: dict[str, tuple[type, ...]] = {
     "discord_state": (str,), "discord_webhook_env": (str, type(None)), "icons_base": (str,),
     "icons_dir": (str,), "op_icon": (str,), "plot_project": (str,), "plot_branch": (str,), "plot_base": (str,),
     "variant": (str,), "reply_hour": (int,), "provisional": (bool,), "primary": (str, type(None)),
-    "units": (str,),
+    "units": (str,), "alert_pct": (int, float, type(None)),
 }
 
 
@@ -314,6 +319,8 @@ def config_from_dict(d: dict, base: DigestConfig | None = None) -> DigestConfig:
         raise ValueError(f"digest config template: {d['template']!r} is not one of {TEMPLATES}")
     if "units" in d and d["units"] not in UNITS:
         raise ValueError(f"digest config units: {d['units']!r} is not one of {tuple(UNITS)}")
+    if d.get("alert_pct") is not None and not 0 < d["alert_pct"] <= 100:
+        raise ValueError(f"digest config alert_pct: {d['alert_pct']} is not a percent (0–100]")
     if not 0 <= d.get("reply_hour", 0) <= 23:
         raise ValueError(f"digest config reply_hour: {d['reply_hour']} is not a UTC hour (0–23)")
     base = base or PRESETS[d["template"]]
@@ -404,6 +411,10 @@ def _span(a: dt.datetime, b: dt.datetime) -> str:
     return (f"{days}d" if days else "") + (f"{hours}h" if hours else "") or "0h"
 
 
+#: The quota alert reply's sender icon (`converge_slack`).
+ALERT_ICON = ":warning:"
+
+
 @dataclass(frozen=True)
 class Reply:
     """A reply's post parameters: ``username``/``icon_url``/``icon_emoji`` are
@@ -475,6 +486,7 @@ class Template(Protocol):
     def op_body(self, data: Any, month: dt.date, plot_url: str | None) -> str: ...
     def units(self, data: Any, variant: str, platform: str = "slack") -> list[Unit]: ...
     def provisional(self, data: Any, variant: str) -> Unit | None: ...
+    def alert(self, data: Any) -> str | None: ...
     def render_plot(self, data: Any, month: dt.date, out: Path, root: str | None = None) -> None: ...
 
 
@@ -718,6 +730,29 @@ def converge_slack(tpl: Template, root: str, month: dt.date, client, channel: st
     if not provs:
         state.pop("provisional")
 
+    # The quota alert: one reply, also in the channel, while any quota is at or over `alert_pct`; Slack can't take a
+    # reply back out of the channel, so a resolved alert is deleted (its days' replies keep their `:warning:`s)
+    text, have = tpl.alert(data), state.get("alert")
+    if text is None and have is not None:
+        try:
+            client.delete(have["ts"], orphans_ok=True)
+        except Exception as e:  # noqa: BLE001 — the next run retries; a lingering alert names its scan
+            _err(f"digest: WARN could not delete the quota alert: {e}")
+        else:
+            del state["alert"]
+            save_state(path, state)
+            _err("digest: deleted the quota alert (every quota is back under)")
+    elif text is not None and have is None:
+        rm = client.post(text, thread_id=op_ts, broadcast=True, username=f"{cfg.title}: quota alert", icon_emoji=ALERT_ICON)
+        state["alert"] = {"ts": rm.id, "body": text}
+        save_state(path, state)
+        _err(f"digest: posted the quota alert -> {rm.id}")
+    elif text is not None and have["body"] != text:
+        client.edit(have["ts"], text)
+        have["body"] = text
+        save_state(path, state)
+        _err("digest: edited the quota alert")
+
     save_state(path, state)
     return state
 
@@ -731,8 +766,9 @@ def converge_slack_now(tpl: Template, root: str, month: dt.date, client, channel
     provisional go. Idempotent like `converge_slack`; ``kw`` passes through."""
     variant = variant or tpl.variants[0]
     prev = (month - dt.timedelta(days=1)).replace(day=1)
-    if load_state(state_path(root, prev, tpl.cfg.state.format(channel=channel, variant=variant))).get("provisional"):
-        _err(f"digest: {prev:%Y-%m} still has a provisional reply — closing it first")
+    prev_state = load_state(state_path(root, prev, tpl.cfg.state.format(channel=channel, variant=variant)))
+    if prev_state.get("provisional") or prev_state.get("alert"):
+        _err(f"digest: {prev:%Y-%m} still has a {'provisional reply' if prev_state.get('provisional') else 'quota alert'} — closing it first")
         converge_slack(tpl, root, prev, client, channel, variant, **kw)
     return converge_slack(tpl, root, month, client, channel, variant, **kw)
 
@@ -955,4 +991,6 @@ def dry_run(tpl: Template, root: str, month: dt.date, variant: str | None = None
     for u in tpl.units(data, variant) + ([open_] if open_ else []):
         r = u.reply
         lines.append(f"{r.username} | {r.body} | {(r.icon_url or r.icon_emoji or '').split('/')[-1]}")
+    if (alert := tpl.alert(data)) is not None:
+        lines.append(f"{tpl.cfg.title}: quota alert | {alert} | {ALERT_ICON} (also sent to the channel)")
     return "\n".join(lines)

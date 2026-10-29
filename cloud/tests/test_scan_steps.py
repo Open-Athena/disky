@@ -306,6 +306,24 @@ def test_static_names_merge_off_leaves_the_due_carries_to_their_own_schedule(tmp
     assert c.sh_impl.calls == [f"dt-cloud static-names runs add {argv}", "dt-cloud static-names runs lag 2026-10-16T1200"]
 
 
+@pytest.mark.parametrize("deferred, after", [("level 5", ["bash job/cw-static-submit.sh"]), (None, [])])
+def test_static_names_compact_cmd_runs_a_deferred_compaction_apart(tmp_path, env, deferred, after):
+    """`options.static-names.compact_cmd`: the scan's `runs add` submits the due carries but defers a due compaction (`-D`),
+    whose hours-long fold would otherwise run inside the scan's task (cw 10-24: `merge: false` instead left the carries to
+    nothing, and search refused every scan by 10-27); the step runs the command only when `runs add` reports one deferred."""
+    # one stdout for both `runs add` and `runs lag` (the fake keys on the first three words): each reads its own fields
+    out = {"gen": "g", "scan": "2026-10-16T1200", "appended": ["2026-10-16T1200"], "dry_run": False, "compaction": deferred,
+           "deferred": deferred, "newest": "2026-10-16T1200", "behind": [], "s": 0, "lagging": False, "episode": None}
+    opts = {"profile": "sn.json", "compact_cmd": ["bash", "job/cw-static-submit.sh"]}
+    c = ctx(tmp_path, env, runner=Runner(tmp_path, stdout={"dt-cloud static-names runs": json.dumps(out)}),
+            options={"list": {"import": True, "bulk_args": ["-a"], "threads": 8},
+                     "index": {"webdata": ["python", "web.py", "{web}", "{sources}", "-a", "{date}"], "mem": "16GB", "threads": 2},
+                     "static-names": opts, "digest": {"template": "t", "config": "c.yml"}})
+    S.static_names(c, None)
+    assert c.sh_impl.calls == ["dt-cloud static-names runs add -c -D 2026-10-16T1200", *after, "dt-cloud static-names runs lag 2026-10-16T1200"]
+    assert c.failure is None
+
+
 BUSY_REASON = ("another coordinator or a compaction holds the static-names store's lease; search for this scan comes "
                "with its append or the next run")
 

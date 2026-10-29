@@ -385,6 +385,19 @@ def test_compact_now_skips_the_due_carries():
         ["merge: compaction forced (-K): it folds every run, so the due carries are skipped (1 merge)"])
 
 
+def test_defer_compaction_reports_it_and_submits_nothing():
+    """`-D` (a scan's step with `compact_cmd`): a due compaction is reported (`deferred`, its reason) and not submitted, so
+    the scan's task never waits out the fold; the caller runs `runs merge` apart."""
+    f = IvFake(["2026-08-03"], compact_level=1)
+    _two_l0(f)
+    r = f.runner(merge_wait=None)
+    r.defer_compaction = True
+    r.carries()
+    why = "level 1: two runs at level 0 (deltas/2026-08-04, deltas/2026-08-05)"
+    assert (f.calls(), r.compaction, r.deferred, [m for m in f.log if m.startswith("compact")]) == (
+        [], why, why, [f"compact: {why}: deferred (`-D`), for the caller to run on its own"])
+
+
 def test_the_fan_outs_helper_job_is_a_real_stage_job_named_by_the_compactions_scan():
     """`helper_job` through the static runner's own `job()` (not a fake submitter: c001's race failed there, its plan's
     key passed as the scan id): stage `measure`, named and labelled by the compaction's newest scan, `n` tasks of
