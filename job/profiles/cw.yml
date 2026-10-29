@@ -91,9 +91,10 @@ options:
     webdata: [python, /app/job/cw-webdata.py, "{web}", "{sources}", -l, Marin CoreWeave, -a, "{date}"]
     lifecycle: true
     mem: 16GB
-  # `merge: false`: a scan appends only (`runs add -M`); carries and compactions run on their own (`static-names runs merge`),
-  # never inside a scan's 6 h task
-  static-names: {profile: /app/job/static-names.json, merge: false}
+  # The scan submits its due carries (not waited on); a due compaction (hours: 10-29's level 5 ran past 2 h) is deferred to
+  # `compact_cmd`, its own coordinator job, never inside a scan's 6 h task. (`merge: false`, 10-24 → 10-29, left the carries
+  # to nothing: 35 level-0 runs, and search refused every scan.)
+  static-names: {profile: /app/job/static-names.json, compact_cmd: [env, MERGE=1, bash, /app/job/cw-static-submit.sh]}
   publish-r2: {barrier: true}
   interval-store: {timeout: 90m, mem: 12GB}
   over-time: {mem: 16GB}
