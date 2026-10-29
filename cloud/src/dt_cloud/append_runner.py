@@ -1673,6 +1673,10 @@ class Runner:
     compaction: str | None = None
     #: Compact after the carries whatever the policy says (`-K`), when the generation has runs.
     compact_now: bool = False
+    #: A due compaction is not run here (`-D`): `deferred` says why it was due, for the caller to run it on its own (a
+    #: scan's step submits a coordinator of its own rather than wait out an hours-long fold inside the scan).
+    defer_compaction: bool = False
+    deferred: str | None = None
     #: The compaction stage writes a candidate (`compact -N`): no compaction lease taken, nothing pointed at it.
     candidate: bool = False
     #: The submitter's env: what its merge and compaction jobs record their runs with (`record_env`).
@@ -2009,7 +2013,11 @@ class Runner:
             if forced:
                 self.compaction = "forced (-K)"
             if self.compaction is not None and m["runs"]:
-                self.compact_stage(m["date"])
+                if self.defer_compaction and not forced:
+                    self.deferred = self.compaction
+                    self.log(f"compact: {self.compaction}: deferred (`-D`), for the caller to run on its own")
+                else:
+                    self.compact_stage(m["date"])
         except Exception as e:
             if fatal:
                 raise RuntimeError(str(e)) from e
