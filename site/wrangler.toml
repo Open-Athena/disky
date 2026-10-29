@@ -121,13 +121,12 @@ STORES_EXTRA = "meta"
 STORES_JSON = '{"meta":{"scope":"admin","path":"/meta","vars":{"ROOT_LABEL":"Marin CW disky metadata","SNAPSHOTS_SUBDIR":"meta","STORE_SCHEME":"gs://","STORE_BUCKETS":"oa-cw-s3-usage-data,oa-cw-s3-usage-index","STORE_PREFIXES":"meta-l2/,snapshots/meta/","STORE_BUCKET":"oa-cw-s3-usage-index","STORE_REGION":"auto","ROOT_TITLE":"Data behind this site: scans, indexes and listings in oa-cw-s3-usage-data (GCS) and oa-cw-s3-usage-index (R2)","STATIC_GEN":"2026-10-18meta","FILTER_STATIC_HEAVY":"1"},"secrets":{"STORE_ENDPOINT":"STORE_ENDPOINT","STORE_ACCESS_KEY_ID":"STORE_ACCESS_KEY_ID","STORE_SECRET_ACCESS_KEY":"STORE_SECRET_ACCESS_KEY"}}}'
 
 # Static name search (specs/architecture/static-name-search.md, specs/static-append.md): the map's `?f=` filter
-# and /names read cw's static name index from its R2 bucket (INDEX_R2, below; generation `STATIC_GEN` under
-# `static-names/<gen>/`, built by `job/static-names.sh` with `STATIC_NAMES_PROFILE=cw`, appended per scan by
+# and /names read cw's static name index from its R2 bucket (INDEX_R2, below; the generation `static-names/CURRENT.json`
+# names, which a compaction moves; no `STATIC_GEN` pin), under `static-names/<gen>/`, built by `job/static-names.sh` with `STATIC_NAMES_PROFILE=cw`, appended per scan by
 # the scan job's stage 4f). The hex-run generation (specs/static-hex-runs.md), light index and drill both on R2;
 # heavy terms read the drill. Same values as `[env.preview.vars]`.
 FILTER_STATIC = "1"
 NAME_SUMMARY_STATIC = "1"
-STATIC_GEN = "2026-10-15cw.c001"
 FILTER_STATIC_HEAVY = "1"
 FILTER_INDEXED_ONLY = "1"   # as gcs: the filter is the static name index only (no per-scan search sidecars)
 SERVED_R2 = "1"   # snapshot JSONs + extras read through INDEX_R2 (the same bucket as `STORE_BUCKET`), not the S3 seam
@@ -239,13 +238,12 @@ STORES_EXTRA = "meta"
 STORES_JSON = '{"meta":{"scope":"admin","path":"/meta","vars":{"ROOT_LABEL":"Marin CW disky metadata","SNAPSHOTS_SUBDIR":"meta","STORE_SCHEME":"gs://","STORE_BUCKETS":"oa-cw-s3-usage-data,oa-cw-s3-usage-index","STORE_PREFIXES":"meta-l2/,snapshots/meta/","STORE_BUCKET":"oa-cw-s3-usage-index","STORE_REGION":"auto","ROOT_TITLE":"Data behind this site: scans, indexes and listings in oa-cw-s3-usage-data (GCS) and oa-cw-s3-usage-index (R2)","STATIC_GEN":"2026-10-18meta","FILTER_STATIC_HEAVY":"1"},"secrets":{"STORE_ENDPOINT":"STORE_ENDPOINT","STORE_ACCESS_KEY_ID":"STORE_ACCESS_KEY_ID","STORE_SECRET_ACCESS_KEY":"STORE_SECRET_ACCESS_KEY"}}}'
 
 # Static name search (specs/architecture/static-name-search.md, specs/static-append.md): the map's `?f=` filter
-# and /names read cw's static name index from its R2 bucket (INDEX_R2, below; generation `STATIC_GEN` under
-# `static-names/<gen>/`, built by `job/static-names.sh` with `STATIC_NAMES_PROFILE=cw`, appended per scan by
+# and /names read cw's static name index from its R2 bucket (INDEX_R2, below; the generation `static-names/CURRENT.json`
+# names, which a compaction moves; no `STATIC_GEN` pin), under `static-names/<gen>/`, built by `job/static-names.sh` with `STATIC_NAMES_PROFILE=cw`, appended per scan by
 # `dt-cloud static-names runs add`).
 FILTER_STATIC = "1"
 NAME_SUMMARY_STATIC = "1"
 # The hex-run generation (specs/static-hex-runs.md), light index and drill both on R2; heavy terms read the drill.
-STATIC_GEN = "2026-10-15cw.c001"
 FILTER_STATIC_HEAVY = "1"
 FILTER_INDEXED_ONLY = "1"   # as gcs: the filter is the static name index only (no per-scan search sidecars)
 SERVED_R2 = "1"   # snapshot JSONs + extras read through INDEX_R2 (the same bucket as `STORE_BUCKET`), not the S3 seam
