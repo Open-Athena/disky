@@ -71,7 +71,7 @@ def test_scan_crons_run_the_head_on_cw_profiles(script: str, profile: str, tmp_p
 def test_static_profile_uses_isolated_data_scratch_image_and_publisher() -> None:
     profile = json.loads((ROOT / "job/static-names.json").read_text())
     assert {name: profile[name] for name in ("bucket", "scratch", "image", "r2_secrets", "gen")} == {
-        "bucket": DATA, "scratch": "oa-cw-s3-usage-scratch", "image": IMAGE, "gen": "2026-10-15cw",
+        "bucket": DATA, "scratch": "oa-cw-s3-usage-scratch", "image": IMAGE, "gen": "2026-10-15cw.c001",
         "r2_secrets": {"endpoint": "cw-s3-r2-endpoint", "key_id": "cw-s3-isolated-r2-access-key-id", "secret": "cw-s3-isolated-r2-secret-access-key"},
     }
 
