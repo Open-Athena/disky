@@ -484,6 +484,7 @@ def gcs_runner(cfg: Profile, *, dry_run: bool = False, verify_terms: str | None 
 
 @command("add")
 @option("-c", "--catch-up", is_flag=True, help="Append every earlier published scan still pending first, in scan-id order")
+@option("-D", "--defer-compaction", is_flag=True, help="A due compaction is reported (`deferred` in the JSON), not run: the caller runs `runs merge` on its own")
 @option("-g", "--gen", help="Base generation (default: the profile's, $STATIC_NAMES_GEN)")
 @option("-K", "--compact-now", is_flag=True, help="After the merge stage, compact into a new generation whatever the policy says (when the generation has runs)")
 @option("-M", "--no-merge", is_flag=True, help="Skip the merge stage (the due carries wait for a later run, or `runs merge`)")
@@ -492,8 +493,8 @@ def gcs_runner(cfg: Profile, *, dry_run: bool = False, verify_terms: str | None 
 @option("-t", "--verify-terms", help="Also run `runs verify` with this terms file (a gs:// URL)")
 @option("-w", "--merge-wait", default=0, type=float, help="Seconds to wait on the merge job (default 0: submit it and go; it publishes on GCS when done)")
 @argument("scan_id")
-def add_cmd(catch_up: bool, gen: str | None, compact_now: bool, no_merge: bool, dry_run: bool, candidate: bool, verify_terms: str | None, merge_wait: float,
-            scan_id: str) -> None:
+def add_cmd(catch_up: bool, defer_compaction: bool, gen: str | None, compact_now: bool, no_merge: bool, dry_run: bool, candidate: bool,
+            verify_terms: str | None, merge_wait: float, scan_id: str) -> None:
     """Append SCAN_ID to the static name index: prepare → append → shards ∥ catalog → [drill] ∥ [anchors] → publish → R2 → prune, each stage
     skipped when its output exists; then the merge stage (the due carries, non-fatal). Exit 3 when SCAN_ID is not published
     yet, or an earlier published scan is pending (without -c); exit 4 when another `runs add` holds the coordinator lease.
@@ -502,9 +503,11 @@ def add_cmd(catch_up: bool, gen: str | None, compact_now: bool, no_merge: bool, 
     cfg = ready(profile(), gen)
     runner = gcs_runner(cfg, dry_run=dry_run, verify_terms=verify_terms, merge=not no_merge, merge_wait=merge_wait)
     runner.compact_now = compact_now
+    runner.defer_compaction = defer_compaction
     runner.candidate = candidate
     done = exit_on(f"static-names runs add {scan_id}", lambda: runner.run(scan_id, catch_up=catch_up), lambda m: err(m))
-    print(json.dumps({"gen": runner.cfg.gen, "scan": scan_id, "appended": done, "dry_run": dry_run, "compaction": runner.compaction}))
+    print(json.dumps({"gen": runner.cfg.gen, "scan": scan_id, "appended": done, "dry_run": dry_run, "compaction": runner.compaction,
+                      "deferred": runner.deferred}))
 
 
 #: The static index lags when more than `LAG_SCANS` published scans are past its newest, or any one has been for longer

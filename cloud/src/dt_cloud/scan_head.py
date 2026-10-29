@@ -111,9 +111,13 @@ def params(profile: ScanProfile, profile_json: str, scan: str, gen: str, job_sta
         # a source's `secrets`: its list call's whole binding list (else the list step's), when it has its own
         # REPROC runs from `index`, but an adopted listing (`sources[].listing`) is still fetched: its shards have no
         # other copy on a local data dir
+        # a source's `fallback` (spec §7): its list task's machine by submit attempt (`machines`) and queue timeout (a duration)
         "sources": [{"uri": s.uri, "machine": s.machine, "disk": _disk(s.disk),
+                     **({"machines": list(s.types), "queue_timeout": f"{s.queue_timeout}m"} if s.fallback else {}),
                      **({"secrets": _bindings(profile.secrets_for("list", s.uri))} if s.secrets else {})}
                     for s in profile.sources if not reproc or s.listing],
+        # bounds the list tasks' submit retries: only a fallback source's queue timeouts are retried (`list_source`)
+        "list_retries": max((len(s.fallback) for s in profile.sources), default=0),
         "list_default": {"machine": lst.type if lst else None, "disk": _disk(lst.disk) if lst else None},
         "steps": list(enabled),
         "pre": [n for n in enabled if STEPS[n].stage == "pre" and n != "bucket-check"],

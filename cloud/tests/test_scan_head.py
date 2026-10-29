@@ -278,6 +278,27 @@ def test_fallback_executor_config():
     ]
 
 
+def test_params_source_fallback():
+    """A source with fallbacks: its list task's machines by submit attempt and its queue timeout (a Nextflow duration), and the most
+    fallbacks any source has as the list tasks' retry bound."""
+    from dt_cloud.scan_profile import parse
+
+    p = parse({"deployment": "fix", "executor": {"kind": "google-batch", "project": "p", "region": "r", "image": "img"},
+               "work": "gs://w/nf", "data": "gs://w", "layout": {"layer2": "l2/{scan}/", "snapshots": ""},
+               "sources": [{"uri": "s3://a", "machine": "n2-standard-16", "fallback": ["n2d-standard-16", "c2d-standard-16"],
+                            "queue_timeout": 10}, "s3://b"],
+               "skip": ["digest", "static-names"], "options": {"list": {"import": True}}})
+    got = H.params(p, "{}", "2026-10-16", "G", "1", "", "S", {"DISKY_LABELS": "app=disky,deployment=fix"})
+    assert {k: got[k] for k in ("sources", "list_retries")} == {
+        "sources": [
+            {"uri": "s3://a", "machine": "n2-standard-16", "disk": None,
+             "machines": ["n2-standard-16", "n2d-standard-16", "c2d-standard-16"], "queue_timeout": "10m"},
+            {"uri": "s3://b", "machine": None, "disk": None},
+        ],
+        "list_retries": 2,
+    }
+
+
 def test_dry_run_writes_the_launch_files(tmp_path, monkeypatch):
     for k in ("SNAP_ID", "GEN", "DT_JOB_START", "DT_RUN_ID", "BATCH_JOB_UID", "SCAN_RUNS_PROFILE"):
         monkeypatch.delenv(k, raising=False)

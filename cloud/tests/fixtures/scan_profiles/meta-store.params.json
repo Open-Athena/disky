@@ -23,6 +23,7 @@
    ]
   }
  ],
+ "list_retries": 0,
  "list_default": {
   "machine": "e2-standard-4",
   "disk": null

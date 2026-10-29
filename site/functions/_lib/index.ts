@@ -1805,14 +1805,19 @@ export type Pre = (depth: number, path: string, size: number) => boolean
  *  `Pre` passes, without the rest. A group whose values JSON can't hold (`groupDoc` null) is held shaped. */
 export class IvGroup {
   private rows?: Row[]
-  constructor(private readonly h: { version: number }, private readonly doc: GroupDoc | null, rows?: Row[]) {
+  constructor(private readonly h: { version: number }, private doc: GroupDoc | null, rows?: Row[]) {
     this.rows = rows
   }
   get length(): number {
     return this.rows?.length ?? this.doc?.v[0]?.length ?? 0
   }
+  /** Every row shaped, once: the doc is dropped then (the rows hold its values), so the held group is never both. */
   all(): Row[] {
-    return (this.rows ??= groupRows(this.doc!).map(toRow(this.h)))
+    if (!this.rows) {
+      this.rows = groupRows(this.doc!).map(toRow(this.h))
+      this.doc = null
+    }
+    return this.rows
   }
   pick(pre: Pre): Row[] {
     if (this.rows) return this.rows.filter(r => pre(r.depth, r.path, r.size))
@@ -1901,7 +1906,10 @@ function combineVersions(rows: Row[]): Row[] {
  * stable key. Rows are never mutated by readers (`classRow` copies). The cap
  * keeps well inside the isolate's 128 MB with concurrent requests. */
 const GROUP_CACHE_CAP = 24 << 20
-const ROW_BYTES = 160 // a shaped Row with a ~60-char path, roughly
+/** A held row's bytes, as V8 holds it (Node, `bench/view-mem.ts` heap snapshots of gcs's interval store, 2026-10-29):
+ *  a shaped `Row` ~400 B, its group's columnar doc ~270 B before any is shaped. At the former 160 the 24 MB LRU held
+ *  ~77 MB (19 groups of 8K rows, each doc and rows both once `all` had run) — most of an isolate's 128 MB. */
+const ROW_BYTES = 400
 /** A cold footer's decoded groups (`…|fg:<n>` → `BlobGroup[]`) and their metadata (`…|fj:<n>`), in an
  *  LRU of their own: an interval store's reads touch tens of footer groups (~0.5 MB each with their
  *  `rg_json`), which in the rows' LRU evicted the very row groups a warm read wanted. */
