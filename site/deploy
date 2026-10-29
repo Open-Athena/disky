@@ -82,10 +82,11 @@ done
 # `<short>-dev`) pointer to exactly what we shipped (HEAD). Kept in sync by deploy itself, so
 # it can't drift the way a hand-updated branch would; `cf-status` stays the
 # authority (it reads CF's own deployment metadata) and this is the git-native
-# convenience for `git log <short>-prod..HEAD` / offline diffing.
+# convenience for `git log <short>-prod..HEAD` / offline diffing. Local only: it is never
+# pushed, so the shared repo's branch list carries just the deployment branches.
 # One pointer per Pages project: `<short>-prod` / `<short>-dev`, where `<short>`
 # is `PTR_SHORT` (default the project name). Branches are
-# shared across worktrees and pushed to the same GitHub repo, so a single `prod`
+# shared across worktrees, so a single `prod`
 # name would have each deployment's deploy clobber the other's (it did,
 # 2026-09-28). No exceptions: a deployment that used the bare `prod` renames
 # its pointer once (`git branch -m prod <short>-prod`).
@@ -103,6 +104,5 @@ if $push; then
   fi
   [ -n "$remote" ] || { echo "deploy: no push remote: set PUSH_REMOTE in site/deploy.env (or branch.$branch.pushRemote)" >&2; exit 1; }
   git push "$remote" "$branch" || echo "WARN: push of $branch to $remote failed (deploy itself succeeded)" >&2
-  git push -f "$remote" "$ptr"
-  echo "pushed $branch + $ptr → $remote"
+  echo "pushed $branch → $remote"
 fi

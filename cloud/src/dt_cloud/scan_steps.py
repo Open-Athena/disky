@@ -1044,18 +1044,28 @@ def static_names(ctx: Ctx, arg: str | None) -> None:
     static_lag(ctx)
 
 
-def static_lag(ctx: Ctx) -> dict | None:
+def static_lag(ctx: Ctx, probe: bool = False) -> dict | None:
     """One alert per lag episode of the static name index (`static-names runs lag`): more than a scan (or one for 12 h)
     behind the newest published scan, search refusing those. Run after `runs add` and again by `probe`, which a
     deployment skipping its static-names step (cw since 10-22: the outage this is for) or a step dying first still runs;
     the episode's marker keeps it to one alert. Not on the one-machine path (`options.static-names.gen`) nor without a
-    static-names profile. Returns `runs lag`'s record (None without one)."""
+    static-names profile. Returns `runs lag`'s record (None without one).
+
+    Its exit `UNMERGED` (more unmerged runs than the binary counter leaves: the carries aren't running, cw's search
+    outage 10-24 → 10-29) is a warn alert on every scan until merged, from the static-names step, or from the probe's
+    call (`probe`) only when the deployment skips that step."""
+    from .append_runner import UNMERGED
+
     prof = ctx.opt("static-names", "profile") or ctx.env.get("STATIC_NAMES_PROFILE")
     if ctx.reproc or ctx.opt("static-names", "gen") or not prof:
         return None
     out = ctx.sh(["dt-cloud", "static-names", "runs", "lag", ctx.scan], env={"STATIC_NAMES_PROFILE": str(prof)}, fatal=False,
-                 warn=f"static-names runs lag failed for {ctx.scan}", capture=True)
+                 warn=f"static-names runs lag failed for {ctx.scan}", capture=True, allowed_codes=(UNMERGED,))
     lag = json.loads(out) if out else None
+    if lag and ctx.last is not None and ctx.last.returncode == UNMERGED and (not probe or "static-names" in ctx.profile.skip):
+        ctx.run.alert("warn", f"static name index: {lag['runs']} unmerged runs above its base (levels {' '.join(map(str, lag['levels']))}), "
+                              "more than the binary counter leaves: its carries aren't running, and search declines most literals over "
+                              "that many tiers; run `dt-cloud static-names runs merge`")
     if lag and lag["episode"] == "start":
         why = " (this deployment skips its static-names step)" if "static-names" in ctx.profile.skip else (
             f" (static-names skipped: {r})" if (r := ctx.recorded_skip("static-names")) else "")
@@ -1500,13 +1510,13 @@ def probe(ctx: Ctx, arg: str | None) -> None:
             verdict = ctx.note = summary["line"] if summary else None
             if ctx.failure and summary and summary.get("failed") and summary.get("lag") == summary["failed"]:
                 lagged = True
-                ctx.failure, ctx.note = None, behind_note(static_lag(ctx), summary)
+                ctx.failure, ctx.note = None, behind_note(static_lag(ctx, probe=True), summary)
             elif ctx.failure and verdict:
                 ctx.failure = (ctx.failure[0], f"serving probe failed for {ctx.scan}: {verdict}")
     finally:
         # whatever the probe did, or without a site to probe
         if not lagged:
-            static_lag(ctx)
+            static_lag(ctx, probe=True)
 
 
 def _probe_summary(stdout: str | None) -> dict | None:

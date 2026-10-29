@@ -193,6 +193,56 @@ def test_not_indexed_without_a_recorded_skip_is_failed():
     assert summary_line(results) == "1 passed, 0 skipped, 1 failed (1 scan-not-indexed: the static name index lags this scan)"
 
 
+Q = "/api/subtree?date=2026-10-01&path=&q=ckpt"
+D = "/api/diff?from=2026-09-30&to=2026-10-01&path=&q=ckpt"
+
+
+def filter_scans(scans: object) -> Resp:
+    return ok({"scans": scans}, ms=5)
+
+
+@pytest.mark.parametrize("unindexed", [None, SKIP])
+def test_not_indexed_on_an_indexed_scan_is_failed_and_named_apart(unindexed):
+    """The refusal on scans `/api/filter-scans` lists: not a lag but the reader declining over its tiers (cw 10-24 →
+    10-29, 37 unmerged runs), failed even beside a recorded static-names skip; the index's list is fetched once."""
+    seen = []
+    resp = {Q: refused(), D: refused(), "/api/filter-scans": filter_scans(["2026-09-30", "2026-10-01"])}
+
+    def fetch(path):
+        seen.append(path)
+        return resp[path]
+    results = run(fetch, {"filter-hit": [Q, D]}, parallel=False, unindexed=unindexed)
+    # the list is fetched beside the page load's requests, so in no fixed order among them
+    assert sorted(seen) == sorted([Q, D, "/api/filter-scans"])
+    assert results == [
+        Result("filter-hit", Q, 400, 300, len(NOT_INDEXED), None, None, error=NOT_INDEXED.decode(), indexed=True),
+        Result("filter-hit", D, 400, 300, len(NOT_INDEXED), None, None, error=NOT_INDEXED.decode(), indexed=True),
+    ]
+    assert summarize(results) == (False, [
+        "  ✗ filter-hit     0.30s  2 reqs, 0 cached, 2 failed",
+        f"      400 0.30s {Q} (scan-not-indexed on an indexed scan)",
+        f"      400 0.30s {D} (scan-not-indexed on an indexed scan)",
+    ])
+    assert summary_line(results) == ("0 passed, 0 skipped, 2 failed (2 scan-not-indexed refused on an indexed scan (over the tiers' "
+                                     "row budget? check the static index's unmerged runs))")
+    assert record("https://x.test", T, results, dt.datetime(2026, 10, 2, tzinfo=dt.timezone.utc))["summary"] == {
+        "passed": 0, "skipped": 0, "failed": 2, "lag": 0, "refused_indexed": 2, "line": summary_line(results)}
+
+
+@pytest.mark.parametrize("scans, indexed", [(["2026-09-30"], False), (None, None)])
+def test_not_indexed_on_a_scan_the_index_lacks_is_its_lag(scans, indexed):
+    """The index doesn't list the scan (or has no list: the static filter off): the refusal is the index's lag, as
+    before; with a recorded static-names skip, skipped. The diff names a scan it does list, and one it doesn't."""
+    resp = {Q: refused(), D: refused(), "/api/filter-scans": filter_scans(scans)}
+    results = run(resp.__getitem__, {"filter-hit": [Q, D]}, parallel=False)
+    assert results == [
+        Result("filter-hit", Q, 400, 300, len(NOT_INDEXED), None, None, error=NOT_INDEXED.decode(), indexed=indexed),
+        Result("filter-hit", D, 400, 300, len(NOT_INDEXED), None, None, error=NOT_INDEXED.decode(), indexed=indexed),
+    ]
+    assert summary_line(results) == "0 passed, 0 skipped, 2 failed (2 scan-not-indexed: the static name index lags this scan)"
+    assert [r.skip for r in run(resp.__getitem__, {"filter-hit": [Q, D]}, parallel=False, unindexed=SKIP)] == [SKIP, SKIP]
+
+
 @pytest.mark.parametrize("resp", [
     refused(b"error code: 1102", 503),
     refused(status=500),
@@ -213,8 +263,8 @@ def test_record():
     assert record("https://x.test", T, r, now) == {
         "ts": "2026-10-02T01:02:03Z", "base": "https://x.test",
         "date": "2026-10-01", "prev": "2026-09-30", "bucket": "bk-a", "hit": "ckpt",
-        "results": [{"scenario": "one", "path": "/a", "status": 200, "ms": 5, "bytes": 2, "cache": None, "server_ms": None, "server_timing": None, "error": None, "skip": None}],
-        "summary": {"passed": 1, "skipped": 0, "failed": 0, "lag": 0, "line": "1 passed, 0 skipped, 0 failed"},
+        "results": [{"scenario": "one", "path": "/a", "status": 200, "ms": 5, "bytes": 2, "cache": None, "server_ms": None, "server_timing": None, "error": None, "skip": None, "indexed": None}],
+        "summary": {"passed": 1, "skipped": 0, "failed": 0, "lag": 0, "refused_indexed": 0, "line": "1 passed, 0 skipped, 0 failed"},
     }
 
 
@@ -278,8 +328,8 @@ def test_exact_request_cli_skips_discovery_and_records_details(monkeypatch):
     assert dt.datetime.strptime(rec.pop("ts"), "%Y-%m-%dT%H:%M:%SZ").tzinfo is None
     assert rec == {
         "base": "https://gcs.test", "date": "2026-10-13T1300", "prev": None, "bucket": "", "hit": "", "cold": True,
-        "results": [{"scenario": "requests", "path": path, "status": 200, "ms": 12, "bytes": 2, "cache": "miss", "server_ms": 10, "server_timing": timing, "error": None, "skip": None} for path in calls],
-        "summary": {"passed": 2, "skipped": 0, "failed": 0, "lag": 0, "line": "2 passed, 0 skipped, 0 failed"},
+        "results": [{"scenario": "requests", "path": path, "status": 200, "ms": 12, "bytes": 2, "cache": "miss", "server_ms": 10, "server_timing": timing, "error": None, "skip": None, "indexed": None} for path in calls],
+        "summary": {"passed": 2, "skipped": 0, "failed": 0, "lag": 0, "refused_indexed": 0, "line": "2 passed, 0 skipped, 0 failed"},
     }
     assert logs == ["probe https://gcs.test: 2 exact requests; cold subtree/diff keys", "  ✓ requests       0.01s  2 reqs, 0 cached", "PASS: 2 passed, 0 skipped, 0 failed"]
     assert result.stderr == ""
