@@ -109,6 +109,8 @@ def err(*a, **kw) -> None:
 NOT_NEXT = 3
 #: Exit status: another coordinator holds the store's coordinator lease (`Busy`); it appends this scan too.
 BUSY = 4
+#: Exit status: the newest manifest lists more unmerged runs than the binary counter leaves (`runs lag`).
+UNMERGED = 5
 #: Revision suffix width: `<id>.m001.json` … `<id>.m999.json` sort in revision order.
 REV_DIGITS = 3
 MANIFEST = re.compile(rf"(?P<scan>[^/]+?)(?:\.m(?P<rev>\d{{{REV_DIGITS}}}))?\.json")

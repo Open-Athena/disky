@@ -164,6 +164,9 @@ export const UPGRADE_PHASE2_MS = 10_000
 export const UPGRADE_SEARCH_LIMITS: SearchLimits = { ...SEARCH_LIMITS, wallMs: 10_000 }
 /** …and its match roots' detail lookups (`ViewOpts.detailsWait`), in place of `FILTER_DETAILS_MS`. */
 export const UPGRADE_DETAILS_MS = 10_000
+/** …and the most row groups those lookups read (`ViewOpts.detailGroups`), in place of the viewer-facing 16, which
+ *  shares the request's connections with phase 2: the rollup path's budget. */
+export const UPGRADE_DETAIL_GROUPS = 60
 /** …and a filtered diff's lookup walk (`DiffOpts.walkMs`), in place of `FILTER_WALK_MS`. */
 export const UPGRADE_WALK_MS = 5_000
 

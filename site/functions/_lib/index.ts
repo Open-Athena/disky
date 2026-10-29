@@ -1512,7 +1512,7 @@ async function readFooterJson(h: PqHandle, fg: FooterGroup): Promise<Map<number,
  * bounds contain every row's — and `groupMatches` / `groupMatchesSize`
  * applied to the bounds is exactly that relaxation (a depth-spanning range
  * skips the path test, a mixed-user one the keyed rect). */
-async function pqGroups(h: PqHandle, pass0: (g: NonNullable<FooterGroup['bounds']>) => boolean, near?: (g: BlobGroup, prev?: BlobGroup, next?: BlobGroup) => boolean): Promise<BlobGroup[]> {
+async function pqGroups(h: PqHandle, pass0: (g: NonNullable<FooterGroup['bounds']>) => boolean, near?: (g: BlobGroup, prev?: BlobGroup, next?: BlobGroup) => boolean, cap = Infinity): Promise<BlobGroup[]> {
   // As of a scan (an interval store): a group can answer only if one of its versions is live then.
   // A run's group can matter once a version in it opened by then, live or not (its close records end versions).
   const D = h.asOf
@@ -1522,6 +1522,11 @@ async function pqGroups(h: PqHandle, pass0: (g: NonNullable<FooterGroup['bounds'
     (g.vfMin == null || g.vfMin <= (range?.[1] ?? D)) && (run || g.vtMax == null || (range?.[0] ?? D) < g.vtMax) && pass0(g)
   const sel = h.footer.groups.filter(fg => !fg.bounds || pass(fg.bounds))
   h.trace?.('fgroups', sel.length)
+  // More footer groups than the caller takes row groups: refused before decoding any (an interval store's footer
+  // group is ~500 row groups' bounds and metadata, ~1 MB decoded). `readAsks` over 48 match roots across a fleet's
+  // buckets spans nearly every footer group of every segment (~300 a sort on gcs): it decoded them all, then threw
+  // `TooWide` at its group cap and halved — the root `q=tokenizer` view ran out of memory (1102).
+  if (sel.length > cap) throw new TooWide(`query too wide: >${cap} footer groups (drill deeper or raise minArea)`)
   const all = (await mapLimit(sel, GROUP_READS, fg => readFooterGroup(h, fg))).flat()
   if (!near) return all.filter(pass)
   // `all` is in `rg` order, a footer group's tier groups after the previous one's: a group's neighbours in the file
@@ -2150,7 +2155,9 @@ async function selectSpans1(h: IndexHandle, rects: Rect[], cap = 4000, bMin = 0,
     const exactPaths = h.mode === 'pq' && h.asOf != null
     const pass = (g: Parameters<typeof groupMatches>[0]) => groupMatches(g, rects, bMin, lens, lensSorted(h.variant)) &&
       (!exactPaths || rects.some(r => g.dMax >= r.dLo && g.dMin <= r.dHi && g.pMax >= r.pLo && g.pMin <= r.pHi))
-    const out = h.mode === 'blob' ? h.groups.filter(pass) : await pqGroups(h, pass)
+    // An interval store's `path` sort: its groups' neighbours bound the depths a group spans.
+    const near = exactPaths && h.variant === 'path' ? (g: BlobGroup, prev?: BlobGroup, next?: BlobGroup) => pathNeighbours(g, prev, next, rects) : undefined
+    const out = h.mode === 'blob' ? h.groups.filter(pass) : await pqGroups(h, pass, near, cap)
     if (out.length > cap) throw new TooWide(`query too wide: >${cap} row groups (drill deeper or raise minArea)`)
     return out
   }
@@ -2475,6 +2482,30 @@ export function sizeNeighbours(g: SizeGroup, prev: SizeGroup | undefined, next: 
     const lo = b === T && whole(prev, T) && prev!.pMax > g.pMin ? prev!.pMax : g.pMin
     const hi = b === B && whole(next, B) && next!.pMin < g.pMax ? next!.pMin : g.pMax
     if (ranges.some(r => hi >= r.pLo && lo < r.pHi)) return true
+  }
+  return false
+}
+
+/** Whether a group of an interval store's `path` sort can hold a row of `rects`, from its bounds and its
+ *  neighbours' in the same segment — tighter than its min/max for a group spanning depths, whose min/max path is
+ *  any depth's (a group straddling a depth boundary has nearly the whole keyspace as its path range, so a point
+ *  lookup selected it in every segment: ~3 groups per segment where 1 holds the path, 20 for one path as of gcs
+ *  10-20 over 8 segments and 3 runs). Rows are sorted by depth, then path; so in a group whose depths run from `T`
+ *  (its `d_min`) to `B` (its `d_max`):
+ *  - its rows of depth `T` follow the previous group's rows, and when that group is all of depth `T` their paths
+ *    are at least its `p_max` (its last row's path);
+ *  - its rows of depth `B` precede the next group's, at most its `p_min` when that group is all of depth `B`.
+ *  Groups without `seg` (an older footer) are kept. */
+type PathGroup = Pick<BlobGroup, 'dMin' | 'dMax' | 'pMin' | 'pMax' | 'seg'>
+export function pathNeighbours(g: PathGroup, prev: PathGroup | undefined, next: PathGroup | undefined, rects: Rect[]): boolean {
+  if (g.seg == null || g.dMin === g.dMax) return true
+  const whole = (n: PathGroup | undefined, d: number) => n != null && n.seg === g.seg && n.dMin === d && n.dMax === d
+  for (const r of rects) {
+    for (let d = Math.max(r.dLo, g.dMin); d <= Math.min(r.dHi, g.dMax); d++) {
+      const lo = d === g.dMin && whole(prev, d) && prev!.pMax > g.pMin ? prev!.pMax : g.pMin
+      const hi = d === g.dMax && whole(next, d) && next!.pMin < g.pMax ? next!.pMin : g.pMax
+      if (hi >= r.pLo && lo <= r.pHi) return true
+    }
   }
   return false
 }
