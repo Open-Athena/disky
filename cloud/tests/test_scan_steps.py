@@ -271,8 +271,7 @@ def test_unmerged_runs_alert_on_every_scan(tmp_path, env, code, probe, skip, ale
            "runs": 37, "levels": [4, 4, *[0] * 35]}
     c = ctx(tmp_path, env, runner=Runner(tmp_path, stdout={"dt-cloud static-names runs": json.dumps(lag)}, codes={"dt-cloud static-names runs": code}),
             skip=skip, options={"list": {"import": True, "bulk_args": ["-a"], "threads": 8}, "index": {"webdata": ["python", "web.py", "{web}", "{sources}", "-a", "{date}"], "mem": "16GB", "threads": 2},
-                                "digest": {"template": "t", "config": "c.yml"}})
-    c.env["STATIC_NAMES_PROFILE"] = "sn.json"
+                                "static-names": {"profile": "sn.json"}, "digest": {"template": "t", "config": "c.yml"}})
     posted = []
     c.run.alert = lambda level, msg: posted.append((level, msg))
     assert (S.static_lag(c, probe=probe), posted, c.failure) == (lag, alerts, None)
