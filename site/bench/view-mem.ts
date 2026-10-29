@@ -213,13 +213,15 @@ async function main(): Promise<void> {
     const pending: Promise<unknown>[] = []
     peak = zero()
     const t0 = performance.now()
-    let status = 0, bytes = 0, timing = ''
+    let status = 0, bytes = 0, timing = '', md5 = ''
     let error: string | undefined
     try {
       const res = await warmSubtree(env as never, url, p => { pending.push(p) })
       status = res.status
       timing = res.headers.get('server-timing') ?? ''
-      bytes = (await res.arrayBuffer()).byteLength
+      const body = new Uint8Array(await res.arrayBuffer())
+      bytes = body.byteLength
+      md5 = createHash('md5').update(body).digest('hex')
     } catch (e) {
       error = String((e as Error).stack ?? e).slice(0, 400)
     }
@@ -233,7 +235,7 @@ async function main(): Promise<void> {
     const after = { ms: Math.round(performance.now() - t1), tasks: pending.length, peak: pending.length ? peak : null }
     const retained = settledHeap() - base
     const row = {
-      url, status, bytes, ms, error, timing,
+      url, status, bytes, md5, ms, error, timing,
       response: Object.fromEntries(Object.entries(response).map(([k, v]) => [k, mb(v)])),
       waitUntil: { ...after, peak: after.peak && Object.fromEntries(Object.entries(after.peak).map(([k, v]) => [k, mb(v)])) },
       retainedHeap: mb(retained),
