@@ -207,6 +207,9 @@ class Report:
 
 #: The R2 client's connection pool (`r2_client`).
 R2_POOL = 128
+#: Parts of one object a multipart upload to R2 sends at a time (`copy_one`; s3transfer's default is 10): R2 throttles
+#: concurrent writes to one object, and `R2_WORKERS` objects in flight already fill the pool.
+R2_PART_CONCURRENCY = 4
 
 
 def r2_client() -> "S3Client":
@@ -292,15 +295,18 @@ def copy_one(src_bucket: str, s3: "S3Client", bucket: str, obj: Obj) -> None:
     extra: dict[str, Any] = {"Metadata": {MD5_META: obj.md5} if obj.md5 else {}}
     if obj.content_type:
         extra["ContentType"] = obj.content_type
+    from boto3.s3.transfer import TransferConfig
+
+    cfg = TransferConfig(max_concurrency=R2_PART_CONCURRENCY)
     root = local_root(src_bucket)
     if root is not None:
-        s3.upload_file(str(root / obj.key), bucket, obj.key, ExtraArgs=extra)
+        s3.upload_file(str(root / obj.key), bucket, obj.key, ExtraArgs=extra, Config=cfg)
         return
     from google.cloud import storage
 
     blob = storage.Client().bucket(src_bucket).blob(obj.key)
     with blob.open("rb") as f:
-        s3.upload_fileobj(f, bucket, obj.key, ExtraArgs=extra)
+        s3.upload_fileobj(f, bucket, obj.key, ExtraArgs=extra, Config=cfg)
 
 
 def publish(

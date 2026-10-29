@@ -73,6 +73,48 @@ def test_r2_publish_never_copies_the_manifest_when_a_run_is_missing_there(monkey
     assert [k for k in r2.r2 if "/manifests/" in k] == []
 
 
+THROTTLED = "Failed to upload a/b to r2b/a/b: An error occurred (ServiceUnavailable) when calling the UploadPart operation: Reduce your concurrent request rate for the same object."
+
+
+def test_r2_copy_copies_a_throttled_object_again_after_a_backoff(monkeypatch):
+    """R2 throttling one object past botocore's retries (cw's level-5 compaction, 10-29) costs that object a backoff and
+    a whole new copy, not the generation's copy."""
+    r2 = R2(["a/b", "a/c"])
+    r2.patch(monkeypatch, {"runs": []})
+    fails = {"a/b": 2}
+
+    def copy(bucket, s3, dst, o):
+        if fails.get(o.key):
+            fails[o.key] -= 1
+            raise RuntimeError(THROTTLED)
+        r2.r2.append(o.key)
+
+    monkeypatch.setattr(pub, "copy_one", copy)
+    sleeps: list[float] = []
+    monkeypatch.setattr(ar.time, "sleep", sleeps.append)
+    logs: list[str] = []
+    doc = ar.r2_copy("data", list(r2.gcs.values()), workers=1, log=logs.append)
+    assert (r2.r2, sleeps, doc["copied"]) == (["a/b", "a/c"], [ar.R2_RETRY_S, 2 * ar.R2_RETRY_S], 2)
+    assert [m for m in logs if "↻" in m] == [f"  ↻ a/b: R2 throttled ({THROTTLED}); again in {s:.0f}s" for s in sleeps]
+
+
+@pytest.mark.parametrize("msg, attempts", [(THROTTLED, ar.R2_ATTEMPTS), ("An error occurred (AccessDenied) when calling the PutObject operation", 1)])
+def test_r2_copy_raises_past_its_attempts_or_on_any_other_error(monkeypatch, msg, attempts):
+    r2 = R2(["a/b"])
+    r2.patch(monkeypatch, {"runs": []})
+    tries: list[str] = []
+
+    def copy(bucket, s3, dst, o):
+        tries.append(o.key)
+        raise RuntimeError(msg)
+
+    monkeypatch.setattr(pub, "copy_one", copy)
+    monkeypatch.setattr(ar.time, "sleep", lambda s: None)
+    with pytest.raises(RuntimeError) as e:
+        ar.r2_copy("data", list(r2.gcs.values()), workers=1, log=lambda m: None)
+    assert (str(e.value), len(tries)) == (msg, attempts)
+
+
 def test_batch_runner_polls_at_most_every_30s(monkeypatch):
     from dt_cloud import batch, gcp
 
