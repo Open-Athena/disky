@@ -1161,7 +1161,7 @@ async function readView(env: Env, o: ViewOpts, cov: Coverage = {}): Promise<Read
     // The lookups ride beside phase 2 and may wait `FILTER_DETAILS_MS` past it, no longer: they are
     // display fields (kind, ages, classes) and their span plans cost seconds where roots spread over
     // many depths (`00241`: ~8.5 s for 48 roots, against 6 s for phase 2).
-    const budget = o.detailsWait ?? (Number(env.FILTER_DETAILS_MS) || Infinity)
+    const budget = o.detailsWait ?? filterDetailsMs(env)
     const late = Symbol('late')
     const { rows: detailRows, cut: detailsCut } = budget === Infinity ? await details
       : await Promise.race([details, new Promise<typeof late>(r => setTimeout(() => r(late), budget))]).then(x => {
@@ -1926,7 +1926,7 @@ async function rollupRead(env: Env, o: ViewOpts, rollup: Rollup, x: {
   const want = matched.filter(m => kept.has(m.path)).slice(0, ROOT_DETAILS)
   if (want.length && !o.firstPaint && !(maxDepth != null && maxDepth <= 0)) {
     const look = readDetails(x.details, want.map(m => ({ depth: depthOf.get(m.path)!, path: m.path })), { maxGroups: 60, tr }).then(d => d.rows)
-    const budget = o.detailsWait ?? (Number(env.FILTER_DETAILS_MS) || Infinity)
+    const budget = o.detailsWait ?? filterDetailsMs(env)
     const late = Symbol('late')
     const rows = budget === Infinity ? await look : await Promise.race([look, new Promise<typeof late>(r => setTimeout(() => r(late), budget))]).then(v => {
       if (v !== late) return v
@@ -2005,8 +2005,14 @@ export const FILTER_PHASE2_ROWS = 1 << 19
 /** …a depth's roots over that budget together are planned one by one, its heaviest this many. */
 export const FILTER_SPLIT_ROOTS = 4
 /** …within this many ms (`FILTER_PHASE2_MS` overrides): a read still running then is dropped. With the
- *  root details' wait past it (`FILTER_DETAILS_MS`, dev 300) and the build, a full view lands in ~2 s. */
+ *  root details' wait past it (`FILTER_DETAILS_MS`) and the build, a full view lands in ~2 s. */
 export const FILTER_PHASE2_MS = 1500
+/** ms a static filter view's match-root detail lookups may run past phase 2 (`FILTER_DETAILS_MS` overrides;
+ *  `Infinity` waits until they land), then it answers without them (`detailsLate`: kept briefly, upgraded). A default,
+ *  not per-deployment config: unbounded, gcs prod's fleet-root `q=tokenizer` view ran out of memory (1102) on 8 of 10
+ *  scans (2026-10-29) while its dev, which set 300, rendered all 10; cw, hf and r2 had it unset too. */
+export const FILTER_DETAILS_MS = 300
+export const filterDetailsMs = (env: { FILTER_DETAILS_MS?: string }): number => Number(env.FILTER_DETAILS_MS) || FILTER_DETAILS_MS
 /** A heavy literal's rollup view nests at most this many static answers (`rollupRead`), `NEST_PAR` at a
  *  time: each is a few ranged GETs per drill tier (an index span, a data span), held per isolate after. */
 export const FILTER_NEST_READS = 48
@@ -2356,10 +2362,10 @@ export async function buildDiff(env0: Env, o: DiffOpts): Promise<Diff> {
   // A union root's member diff draws at the union's threshold (`o.threshold`), filtered or not.
   let floor: number | undefined = query ? o.threshold : undefined
   // A diff draws its roots' kinds only (no ages, no classes): the lookups that land by phase 2's end are
-  // taken, none waited for (with a deployment's finite `FILTER_DETAILS_MS`; unset waits, as views do).
+  // taken, none waited for (unless `FILTER_DETAILS_MS` is `Infinity`: then it waits, as views do).
   // Its phase 2 runs both sides at once, then the walk's lookups (`FILTER_WALK_MS`): a smaller share each
   // (`o.phase2Ms`, a background full run's, overrides).
-  const wait = { ...(Number(env.FILTER_DETAILS_MS) ? { detailsWait: 0 } : {}), phase2Ms: o.phase2Ms ?? Math.min(Number(env.FILTER_PHASE2_MS) || FILTER_PHASE2_MS, FILTER_DIFF_PHASE2_MS) }
+  const wait = { ...(filterDetailsMs(env) !== Infinity ? { detailsWait: 0 } : {}), phase2Ms: o.phase2Ms ?? Math.min(Number(env.FILTER_PHASE2_MS) || FILTER_PHASE2_MS, FILTER_DIFF_PHASE2_MS) }
   // Every read of this diff shares one phase-2 gate: a side whose round read nothing in time stops the
   // re-read at the shared floor from paying its budget again.
   const gate: Phase2Gate = o.phase2Gate ?? { dead: false }
