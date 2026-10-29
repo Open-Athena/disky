@@ -113,6 +113,7 @@ NAME_SUMMARY_STATIC = "1"
 # 400 `scan-not-indexed` for later scans, never a 500 (static-robust).
 FILTER_STATIC_HEAVY = "1"
 FILTER_INDEXED_ONLY = "1"
+FILTER_DETAILS_MS = "300"   # as dev: a static filter view waits this long past phase 2 for its roots' own rows (kind, ages, classes), then answers without them (kept briefly, upgraded); unset, the lookups ran to the end, and the fleet-root `q=tokenizer` view ran out of memory (1102) on 8 of 10 scans
 META_TREE_URL = "https://gcs.oa.dev/meta"   # /scans outputs link into this site's own /meta tree
 # Secondary store `meta` (specs/multi-store.md phase 3): the data behind this site (`oa-gcs-usage-dvx` + the R2 serving
 # bucket), scanned by `job/profiles/gcs-meta.yml` (`job/meta-submit.sh`) into `snapshots/meta/` + `meta-l2/` and the
