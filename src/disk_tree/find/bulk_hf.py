@@ -37,8 +37,9 @@ A bucket's rows sum to its ``size`` (the tree is flat and versionless); a
 mismatch warns.
 
 **Columns.** ``created`` is a repo file's last-commit date
-(``expand=true``; ``commit_dates=False`` uses the repo's ``lastModified``
-instead, at 1000 entries per tree page rather than 50), an old version's
+(``expand=true`` with explicit 100-entry pages, rather than the 50-entry
+default; ``commit_dates=False`` uses the repo's ``lastModified`` instead,
+at 1000 entries per tree page), an old version's
 ``pushedAt``, the residual's repo ``lastModified`` (an upper bound on its
 bytes' age), and a bucket file's ``uploadedAt`` (falling back to its
 ``mtime``). ``storage_class_id`` is the billing class, per
@@ -88,6 +89,8 @@ HISTORY_DIR = "@history"
 UNLISTED = "@unlisted"
 # Hub OpenAPI: bucket tree pages default to 1000, with a maximum of 5000. Repos have separate limits.
 BUCKET_PAGE_SIZE = 5000
+# Expanded repo trees accept 100 entries: live checks preserve all file dates; 101 is refused.
+EXPANDED_REPO_PAGE_SIZE = 100
 
 
 # --- URIs --------------------------------------------------------------------
@@ -317,7 +320,9 @@ def list_repo(
     oids: "set[str]" = set()
     lfs_bytes = git_bytes = 0
     if info.get("sha"):  # an empty repo has no commit to list
-        params = [("recursive", "true")] + ([("expand", "true")] if commit_dates else [])
+        params = [("recursive", "true")] + (
+            [("expand", "true"), ("limit", str(EXPANDED_REPO_PAGE_SIZE))] if commit_dates else []
+        )
         for e in client.paginate(f"{base}/tree/{info['sha']}", params):
             if e["type"] != "file":
                 continue

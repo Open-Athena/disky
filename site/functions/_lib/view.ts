@@ -209,6 +209,9 @@ export interface View {
   dirsOnly?: true
   /** With `q=`: the search stopped at its time budget (`Coverage.searchLate`): kept briefly, recomputed. */
   searchLate?: true
+  /** With `q=`: the match roots' own rows (kind, ages, classes) missed their time budget (`Coverage.detailsLate`):
+   *  kept briefly, recomputed. */
+  detailsLate?: true
 }
 
 /** Whether a filtered read may be missing matches, and why (the response's
@@ -223,6 +226,9 @@ export interface Coverage {
   /** A search stopped at its time budget (`SearchFound.timedOut`): unlike a read budget's cut, a run with more
    *  time may answer more — so the answer is kept briefly and recomputed (`keepFor`). */
   searchLate?: true
+  /** The match roots' detail lookups (`FILTER_DETAILS_MS`) were cut: the roots drawn without kind, ages or classes
+   *  (a file reads as a folder) — a run with more time decorates them, so kept briefly and recomputed. */
+  detailsLate?: true
 }
 export const APPROX_NO_INDEX = 'this scan has no search index; small matches may be missing'
 export const APPROX_V1_TOO_BIG = 'this scan has no search index and this view is too big to scan; small matches may be missing'
@@ -238,11 +244,12 @@ export function noteCoverage(cov: Coverage, flag: 'partial' | 'approximate' | 'd
   if (!have.includes(why)) have.push(why)
 }
 /** A coverage as response fields. */
-export const coverageFields = (c: Coverage): Pick<View, 'partial' | 'partialReason' | 'approximate' | 'approximateReason' | 'dirsOnly' | 'searchLate'> => ({
+export const coverageFields = (c: Coverage): Pick<View, 'partial' | 'partialReason' | 'approximate' | 'approximateReason' | 'dirsOnly' | 'searchLate' | 'detailsLate'> => ({
   ...(c.partial ? { partial: true as const, partialReason: c.partial.join(' · ') } : {}),
   ...(c.approximate ? { approximate: true as const, approximateReason: c.approximate.join(' · ') } : {}),
   ...(c.dirsOnly ? { dirsOnly: true as const } : {}),
   ...(c.searchLate ? { searchLate: true as const } : {}),
+  ...(c.detailsLate ? { detailsLate: true as const } : {}),
 })
 
 export class NotFound extends Error {}
@@ -957,7 +964,7 @@ async function readView(env: Env, o: ViewOpts, cov: Coverage = {}): Promise<Read
       tr?.('static', performance.now() - t0, shits ? `${skey} ${shits.rollup ? `rollup ${shits.rollup.cells.length}` : shits.hits.length}` : skey ? `declined${off ? ` (${off})` : ''}` : undefined)
       if (shits?.rollup) {
         const h = pathIdx ?? fine ?? withTrace(await openFine(env, date, 'path'), tr)
-        return rollupRead(env, o, shits.rollup, { dP, rootAll, idx, details: h, trace: tr, fetch: (p, ho) => sfs!.source.hits(skey!, p, ho), region: async T => (await regionFor(T, false)).idx, smallRows, ivPlanRows })
+        return rollupRead(env, o, shits.rollup, { dP, rootAll, idx, details: h, trace: tr, fetch: (p, ho) => sfs!.source.hits(skey!, p, ho), region: async T => (await regionFor(T, false)).idx, smallRows, ivPlanRows, cov })
       }
       if (sb) {
         p1 = aggregateHits(sb.roots)
@@ -1125,15 +1132,8 @@ async function readView(env: Env, o: ViewOpts, cov: Coverage = {}): Promise<Read
     const details = staticRoots && !firstPaintStatic && !(maxDepth != null && maxDepth <= 0) ? (async () => {
       const want = heaviest(roots.filter(r => drawn(r) && shown(r)), ROOT_DETAILS)
       if (!want.length) return []
-      const asks = new Set(want.map(r => `${depthF.get(r)}\0${r}`))
-      try {
-        const h = pathIdx ?? fine ?? withTrace(await openFine(env, date, 'path'), tr)
-        return (await readAsks(h, want.map(r => ({ depth: depthF.get(r)!, path: r })), r => asks.has(`${r.depth}\0${r.path}`), { maxGroups: DETAIL_GROUPS, stop: () => detailsOff, rememberWide: true })).rows
-      } catch (e) {
-        if (!/too wide/.test(String((e as Error).message ?? e))) throw e
-        tr?.('details', 0, 'too wide')
-        return []
-      }
+      const h = pathIdx ?? fine ?? withTrace(await openFine(env, date, 'path'), tr)
+      return readDetails(h, want.map(r => ({ depth: depthF.get(r)!, path: r })), { maxGroups: DETAIL_GROUPS, stop: () => detailsOff, tr })
     })() : Promise.resolve([] as Row[])
     let rows2: Row[] = []
     let variant: string | undefined
@@ -1162,6 +1162,8 @@ async function readView(env: Env, o: ViewOpts, cov: Coverage = {}): Promise<Read
       : await Promise.race([details, new Promise<typeof late>(r => setTimeout(() => r(late), budget))]).then(x => {
         if (x !== late) return x
         tr?.('details', performance.now() - t0, 'late')
+        // A diff side's `detailsWait: 0` skips them by design; a cut viewer-facing budget is upgraded.
+        if (budget > 0) cov.detailsLate = true
         detailsOff = true
         details.catch(() => {})
         return [] as Row[]
@@ -1806,6 +1808,7 @@ async function rollupRead(env: Env, o: ViewOpts, rollup: Rollup, x: {
   region: (T: number) => Promise<IndexHandle>
   smallRows: number
   ivPlanRows: number
+  cov: Coverage
 }): Promise<Read | null> {
   const { date, path, w, h, minArea, atten, query, maxDepth } = o
   const { dP, trace: tr } = x
@@ -1913,17 +1916,13 @@ async function rollupRead(env: Env, o: ViewOpts, rollup: Rollup, x: {
   // lookups, heaviest first, within `FILTER_DETAILS_MS`; never on the first paint.
   const want = matched.filter(m => kept.has(m.path)).slice(0, ROOT_DETAILS)
   if (want.length && !o.firstPaint && !(maxDepth != null && maxDepth <= 0)) {
-    const asks = new Set(want.map(m => `${depthOf.get(m.path)}\0${m.path}`))
-    const look = readAsks(x.details, want.map(m => ({ depth: depthOf.get(m.path)!, path: m.path })), r => asks.has(`${r.depth}\0${r.path}`), { maxGroups: 60 }).then(r => r.rows).catch(e => {
-      if (!/too wide/.test(String((e as Error).message ?? e))) throw e
-      tr?.('details', 0, 'too wide')
-      return [] as Row[]
-    })
-    const budget = Number(env.FILTER_DETAILS_MS) || Infinity
+    const look = readDetails(x.details, want.map(m => ({ depth: depthOf.get(m.path)!, path: m.path })), { maxGroups: 60, tr })
+    const budget = o.detailsWait ?? (Number(env.FILTER_DETAILS_MS) || Infinity)
     const late = Symbol('late')
     const rows = budget === Infinity ? await look : await Promise.race([look, new Promise<typeof late>(r => setTimeout(() => r(late), budget))]).then(v => {
       if (v !== late) return v
       tr?.('details', performance.now() - t0, 'late')
+      if (budget > 0) x.cov.detailsLate = true
       look.catch(() => {})
       return [] as Row[]
     })
@@ -2100,6 +2099,24 @@ const ROOT_DETAILS = 48
  *  share the request's six connections with phase 2, and roots spread over many depths (`00241`) took
  *  ~20 groups to answer after phase 2 had already given up on them. */
 const DETAIL_GROUPS = 16
+
+/** The match roots' own rows (`readAsks`), `want` heaviest first: a lookup over `maxGroups` row groups is
+ *  retried on the heavier half, then quarter, …, so the heaviest roots keep their kind, ages and classes where all
+ *  of them at once span too many groups (gcs 10-27T1442, `q=safetensors`: 48 roots, none decorated). A plan over
+ *  budget fails before reading any group, so each retry costs span queries only. */
+async function readDetails(h: IndexHandle, want: { depth: number; path: string }[], o: { maxGroups: number; stop?: () => boolean; tr?: Trace }): Promise<Row[]> {
+  for (let n = want.length; n > 0; n >>= 1) {
+    const asks = want.slice(0, n)
+    const keys = new Set(asks.map(a => `${a.depth}\0${a.path}`))
+    try {
+      return (await readAsks(h, asks, r => keys.has(`${r.depth}\0${r.path}`), { maxGroups: o.maxGroups, stop: o.stop, rememberWide: true })).rows
+    } catch (e) {
+      if (!/too wide/.test(String((e as Error).message ?? e))) throw e
+      o.tr?.('details', 0, `too wide at ${n}`)
+    }
+  }
+  return []
+}
 
 /** `xs` in code-unit order: itself when it already is (a static literal's ~80K roots are), else a sorted copy. */
 function sortedOnce(xs: string[]): string[] {
@@ -2327,7 +2344,8 @@ export async function buildDiff(env0: Env, o: DiffOpts): Promise<Diff> {
   // floor: the match roots alone (phase 1, `maxDepth: 0` — the static index's are held per isolate) say
   // each side's floor, so both forests are read once, at the shared one. (Reading both first and then
   // re-reading the lighter side at the shared floor paid that side's phase 2 twice.)
-  let floor: number | undefined
+  // A union root's member diff draws at the union's threshold (`o.threshold`), filtered or not.
+  let floor: number | undefined = query ? o.threshold : undefined
   // A diff draws its roots' kinds only (no ages, no classes): the lookups that land by phase 2's end are
   // taken, none waited for (with a deployment's finite `FILTER_DETAILS_MS`; unset waits, as views do).
   // Its phase 2 runs both sides at once, then the walk's lookups (`FILTER_WALK_MS`): a smaller share each
