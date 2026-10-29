@@ -247,6 +247,10 @@ class Gcs:
         """A day's reply is posted once its sender is known: never provisional."""
         return None
 
+    def alert(self, rows: list[Scan]) -> None:
+        """No quotas: never a quota alert."""
+        return None
+
     def render_plot(self, rows: list[Scan], month: dt.date, out: Path, root: str | None = None) -> None:
         """The OP's image, drawn by the site (`POST /api/digest-image`, `kind: tiers`): the month's total line over
         its stacked storage classes. Authenticated as the job (`$SITE_TOKEN`); ``root`` is unused."""
