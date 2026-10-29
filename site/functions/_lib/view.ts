@@ -1620,9 +1620,58 @@ async function readInteriors(env: Env, x: {
 
 /** A heavy literal's rollup at P nested on `date` (`rollupRead`, which draws it): every node known exactly, the
  *  paths answered, and what the budgets left unread. Null: nothing under P on `date`. */
+/** A nest's node totals: every node known on `date`, its matched bytes and objects (exact), a full `Agg` built only
+ *  for the nodes asked for (`get`: the drawn ones, a diff's lookups). A match-roots answer's forest is its every root
+ *  and every ancestor between it and the answered path (gcs's fleet-root `q=tokenizer`: ~250K nodes), and an `Agg`
+ *  each (two maps and nine fields) was ~460 B in Node (`bench/view-mem.ts`): 112 MB for nodes no view drew. Here a
+ *  node not asked for is its two numbers and its kind; `bo` reads them without building one. */
+export class Totals extends Map<string, Agg> {
+  private lite = new Map<string, number>()
+  private vals: number[] = []
+  /** `p` known at `b` bytes and `o` objects, a directory or not (`kind` 'dir', else unknown): held as numbers. */
+  addLite(p: string, b: number, o: number, dir: boolean): void {
+    this.lite.set(p, this.vals.length)
+    this.vals.push(b, o, dir ? 1 : 0)
+  }
+  /** `p`'s bytes and objects grown by `b` and `o`, wherever it is held. */
+  grow(p: string, b: number, o: number): void {
+    const i = this.lite.get(p)
+    if (i != null) { this.vals[i] += b; this.vals[i + 1] += o; return }
+    const a = super.get(p)!
+    a.b += b; a.o += o
+  }
+  /** `p`'s bytes and objects (zeros if unknown), without building its `Agg`. */
+  bo(p: string): { b: number; o: number } {
+    const i = this.lite.get(p)
+    if (i != null) return { b: this.vals[i], o: this.vals[i + 1] }
+    const a = super.get(p)
+    return { b: a?.b ?? 0, o: a?.o ?? 0 }
+  }
+  override get(p: string): Agg | undefined {
+    const i = this.lite.get(p)
+    if (i == null) return super.get(p)
+    const a = newAgg()
+    a.b = this.vals[i]; a.o = this.vals[i + 1]
+    if (this.vals[i + 2]) a.kind = 'dir'
+    this.lite.delete(p)
+    super.set(p, a)
+    return a
+  }
+  override has(p: string): boolean { return super.has(p) || this.lite.has(p) }
+  override set(p: string, a: Agg): this {
+    this.lite.delete(p)
+    return super.set(p, a)
+  }
+  override get size(): number { return super.size + this.lite.size }
+  override *keys(): MapIterator<string> {
+    yield* super.keys()
+    yield* this.lite.keys()
+  }
+}
+
 export interface Nest {
   /** Every node known on `date`: its matched bytes and objects (exact), and its depth. */
-  exact: Map<string, Agg>
+  exact: Totals
   depthOf: Map<string, number>
   /** Per answered path, its children with matches on `date` (a rollup's by name; a forest's every one). */
   kidsOf: Map<string, string[]>
@@ -1668,7 +1717,7 @@ export async function nestRollup(o: NestOpts): Promise<Nest | null> {
   const { date, path, dP, w, h, minArea, atten, maxDepth, isRoot, rollup, trace: tr } = o
   const t0 = performance.now()
   /** Every node known on `date`, its matched bytes and objects (exact), and its depth. */
-  const exact = new Map<string, Agg>()
+  const exact = new Totals()
   const depthOf = new Map<string, number>()
   /** Per answered path, its children with matches on `date` (a rollup's by name; a forest's every one); a
    *  rollup's children holding roots on any scan (its fold count); the paths answered by match roots. */
@@ -1692,28 +1741,37 @@ export async function nestRollup(o: NestOpts): Promise<Nest | null> {
     rollupKids.set(dir, r.children)
     return tot
   }
-  /** `dir`'s match roots live on `date`, and every ancestor between `dir` and them (their sums). */
+  /** `dir`'s match roots live on `date`, and every ancestor between `dir` and them (their sums, held as numbers,
+   *  `Totals`). Children are listed (`kidsOf`) only under the nodes a view can draw — `dir`, and below it each node
+   *  over its level's threshold within `maxDepth` under a drawable parent, `draw`'s own test, so every drawn node's
+   *  list (and fold count) is whole; the rest of the forest is never walked. */
   const addRoots = (dir: string, hits: Hit[]) => {
     rootsDirs.add(dir)
     const D = scanAt(date)
     const fresh: string[] = []
-    const node = (p: string, d: number, dir_: boolean): Agg => {
-      let a = exact.get(p)
-      if (!a) { exact.set(p, (a = newAgg())); depthOf.set(p, d); fresh.push(p); if (dir_) a.kind = 'dir' }
-      return a
+    const node = (p: string, d: number, dir_: boolean, size: number, n: number): void => {
+      if (exact.has(p)) { exact.grow(p, size, n); return }
+      exact.addLite(p, size, n, dir_); depthOf.set(p, d); fresh.push(p)
     }
     for (const hh of hits) {
       if (!(hh.vf <= D && D < hh.vt)) continue
       const size = Number(hh.size), n = Number(hh.n)
-      const a = node(hh.path, hh.depth, false)
-      a.b += size; a.o += n
-      for (let q = parentOf(hh.path), d = hh.depth - 1; q !== dir && q !== ''; q = parentOf(q), d--) {
-        const qa = node(q, d, true)
-        qa.b += size; qa.o += n
+      node(hh.path, hh.depth, false, size, n)
+      for (let q = parentOf(hh.path), d = hh.depth - 1; q !== dir && q !== ''; q = parentOf(q), d--) node(q, d, true, size, n)
+    }
+    const drawable = new Map<string, boolean>([[dir, true]])
+    const canDraw = (p: string): boolean => {
+      let v = drawable.get(p)
+      if (v == null) {
+        const d = depthOf.get(p)!
+        v = canDraw(parentOf(p)) && !(maxDepth != null && d > dP + maxDepth) && exact.bo(p).b >= thrAt(d)
+        drawable.set(p, v)
       }
+      return v
     }
     for (const p of fresh) {
       const par = parentOf(p)
+      if (!canDraw(par)) continue
       const ks = kidsOf.get(par)
       if (ks) ks.push(p); else kidsOf.set(par, [p])
     }
@@ -1928,7 +1986,7 @@ async function rollupRead(env: Env, o: ViewOpts, rollup: Rollup, x: {
     if (f > 0) foldedOf.set(dir, f)
   }
   if (!foldedOf.has(path)) foldedOf.set(path, 0)
-  const matched = [...rootSet].map(p => [p, exact.get(p)!] as const).map(([p, a]) => ({ path: p, b: a.b, o: a.o })).sort((x, y) => y.b - x.b || (x.path < y.path ? -1 : x.path > y.path ? 1 : 0))
+  const matched = [...rootSet].map(p => ({ path: p, ...exact.bo(p) })).sort((x, y) => y.b - x.b || (x.path < y.path ? -1 : x.path > y.path ? 1 : 0))
   // The drawn match roots: their own rows (kind, ages, classes, owners — the whole root is matched) by point
   // lookups, heaviest first, within `FILTER_DETAILS_MS`; never on the first paint.
   const want = matched.filter(m => kept.has(m.path)).slice(0, ROOT_DETAILS)
