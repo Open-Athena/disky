@@ -179,6 +179,31 @@ def test_machine_fallback_refused():
     ]
 
 
+def test_source_fallback():
+    """A source's `fallback` types + `queue_timeout`: its list task's types by submit attempt, `machine` first."""
+    src = {"uri": "s3://a", "machine": "n2-standard-16", "disk": {"request": 375, "type": "local-ssd"},
+           "fallback": ["n2d-standard-16"], "queue_timeout": 10}
+    s = parse({**gb(), "sources": [src, "s3://b"]}).sources
+    assert s[0] == Source("s3://a", "n2-standard-16", Disk(375, "local-ssd"), fallback=("n2d-standard-16",), queue_timeout=10)
+    assert s[0].types == ("n2-standard-16", "n2d-standard-16")
+    assert s[1].types == ()
+
+
+def test_source_fallback_refused():
+    assert problems({**gb(), "sources": [
+        {"uri": "s3://a", "machine": "t", "fallback": ["u"]},
+        {"uri": "s3://b", "fallback": ["u"], "queue_timeout": 5},
+        {"uri": "s3://c", "machine": "t", "fallback": ["t"], "queue_timeout": 5},
+    ]}) == [
+        "sources[0].fallback: needs `queue_timeout` (a queued task never fails, so nothing else moves it on)",
+        "sources[1].fallback: needs the primary `machine`",
+        "sources[2].fallback: each machine type once (with `machine`)",
+    ]
+    assert problems(minimal(sources=[{"uri": "s3://a", "machine": "t", "fallback": ["u"], "queue_timeout": 5}])) == [
+        "sources[0].fallback: google-batch only (the only executor whose tasks take a machine type)",
+    ]
+
+
 META = Path(__file__).parent / "fixtures" / "scan_profiles" / "meta-store.yml"
 
 

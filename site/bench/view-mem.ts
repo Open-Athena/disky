@@ -5,7 +5,8 @@
 //   esbuild bench/view-mem.ts --bundle --platform=node --format=esm --outfile=OUT.mjs
 //   node --expose-gc OUT.mjs --vars vars.json [--var K=V]… [--snap MB] [--out FILE] URL…
 //
-// URL: a full `https://<host>/api/subtree?…` (the host only keys caches). `--vars`: the deployment's `[vars]` as
+// URL: a full `https://<host>/api/subtree?…` (the host only keys caches), or `/api/diff?…`: the diff route, gated — on
+// `http://localhost/…` the dev identity passes it (`auth.ts` `identify`); elsewhere `$SITE_TOKEN`, if set, as a Bearer. `--vars`: the deployment's `[vars]` as
 // JSON; `--var K=V` overrides one (`K=` drops it). Bindings from the environment, read-only:
 //   INDEX_R2  ← R2_ENDPOINT, R2_BUCKET, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY (the S3 API, SigV4)
 //   DB        ← CLOUDFLARE_ACCOUNT_ID, CLOUDFLARE_API_TOKEN, D1_DB_ID (the D1 HTTP API; a write is logged, not sent)
@@ -13,15 +14,17 @@
 //   of the colo and KV, and nothing in-process stands in for them.
 // Any other environment variable named by `--secret NAME` is passed through (a store's HMAC pair, say).
 // `--snap MB`: a heap snapshot (`<out>.heapsnapshot`) the first time the heap passes MB; `--snap-end`: one after the
-// last URL and its `waitUntil` work, collected (`<out>.end.heapsnapshot`): what the isolate keeps.
+// last URL and its `waitUntil` work, collected (`<out>.end.heapsnapshot`): what the isolate keeps. `--bodies`: each
+// response body as `<out>.<n>.body`.
 import { createHash, createHmac } from 'node:crypto'
 import { readFileSync, writeFileSync } from 'node:fs'
 import { writeHeapSnapshot } from 'node:v8'
 import { warmSubtree } from '../functions/api/subtree.js'
+import { onRequestGet as diffGet } from '../functions/api/diff.js'
 
 const err = (...a: unknown[]) => console.error(...a)
 
-interface Opts { vars: string; set: [string, string][]; secrets: string[]; snapMb?: number; snapEnd?: boolean; out?: string; urls: string[] }
+interface Opts { vars: string; set: [string, string][]; secrets: string[]; snapMb?: number; snapEnd?: boolean; bodies?: boolean; out?: string; urls: string[] }
 
 function parseArgs(argv: string[]): Opts {
   const o: Opts = { vars: '', set: [], secrets: [], urls: [] }
@@ -33,6 +36,7 @@ function parseArgs(argv: string[]): Opts {
     else if (a === '--secret') o.secrets.push(val())
     else if (a === '--snap') o.snapMb = Number(val())
     else if (a === '--snap-end') o.snapEnd = true
+    else if (a === '--bodies') o.bodies = true
     else if (a === '--out') o.out = val()
     else if (a.startsWith('--')) throw new Error(`unknown option ${a}`)
     else o.urls.push(a)
@@ -213,13 +217,19 @@ async function main(): Promise<void> {
     const pending: Promise<unknown>[] = []
     peak = zero()
     const t0 = performance.now()
-    let status = 0, bytes = 0, timing = ''
+    let status = 0, bytes = 0, timing = '', md5 = ''
     let error: string | undefined
     try {
-      const res = await warmSubtree(env as never, url, p => { pending.push(p) })
+      const waitUntil = (p: Promise<unknown>) => { pending.push(p) }
+      const res = new URL(url).pathname === '/api/diff'
+        ? await diffGet({ request: new Request(url, { headers: { 'user-agent': 'dt-cloud-probe/1', ...(process.env.SITE_TOKEN ? { authorization: `Bearer ${process.env.SITE_TOKEN}` } : {}) } }), env, waitUntil } as never)
+        : await warmSubtree(env as never, url, waitUntil)
       status = res.status
       timing = res.headers.get('server-timing') ?? ''
-      bytes = (await res.arrayBuffer()).byteLength
+      const body = new Uint8Array(await res.arrayBuffer())
+      bytes = body.byteLength
+      md5 = createHash('md5').update(body).digest('hex')
+      if (o.bodies) writeFileSync(`${o.out ?? 'view-mem'}.${results.length}.body`, body)
     } catch (e) {
       error = String((e as Error).stack ?? e).slice(0, 400)
     }
@@ -233,7 +243,7 @@ async function main(): Promise<void> {
     const after = { ms: Math.round(performance.now() - t1), tasks: pending.length, peak: pending.length ? peak : null }
     const retained = settledHeap() - base
     const row = {
-      url, status, bytes, ms, error, timing,
+      url, status, bytes, md5, ms, error, timing,
       response: Object.fromEntries(Object.entries(response).map(([k, v]) => [k, mb(v)])),
       waitUntil: { ...after, peak: after.peak && Object.fromEntries(Object.entries(after.peak).map(([k, v]) => [k, mb(v)])) },
       retainedHeap: mb(retained),

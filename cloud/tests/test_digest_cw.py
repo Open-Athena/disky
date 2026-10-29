@@ -705,6 +705,28 @@ def test_quota_alert_is_broadcast_while_over_and_deleted_once_under(tmp_path: Pa
     assert (D.alert_body(month, tpl.cfg), D.alert_body(replace(month, closed=True), tpl.cfg)) == (over, None)
 
 
+def test_a_month_ending_over_quota_moves_its_alert_to_the_next_months_thread(tmp_path: Path):
+    """A quota still over when the month ends: the scheduled converge (`converge_slack_now`) closes the old month,
+    whose alert counts as resolved there (deleted), and the new month's thread posts the one alert: never both."""
+    tpl = E.template(replace(CFG, alert_pct=78.3))
+    root = tmp_path / "snapshots" / "cw"
+    _publish(root, LEAD + SEPT)
+    fake = _FakeSlack()
+    sept = E.converge_slack(tpl, str(root), SEP, fake, "C1", "sender")
+    assert sept["alert"]["ts"] == "m4"  # OP m1, replies m2 + m3, alert m4
+
+    _publish(root, [("2026-10-01T1200", _meta(716))])  # 78.7% of 1P: still over
+    fake.calls.clear()
+    oct_ = E.converge_slack_now(tpl, str(root), date(2026, 10, 1), fake, "C1", "sender")
+    body = (f":warning: **Quota alert**: [main]({SITE}/main-data?d=261001#over-time): 78.7% of 1P (194.0 Ti free) · _as of 10/1 12:00Z_ "
+            "(≥ 78.3% of a quota; removed once every quota is back under)")
+    # the alert calls alone: September's deleted, October's posted under October's OP (m5; its reply is m6)
+    assert [c for c in fake.calls if c[0] == "delete" or c[-1] == "broadcast"] == [
+        ("delete", "m4"), ("post", body, "m5", "S3 usage: quota alert", None, ":warning:", "broadcast")]
+    assert ("alert" in E.load_state(E.state_path(str(root), SEP, CFG.state.format(channel="C1", variant="sender"))), oct_["alert"]) == (
+        False, {"ts": "m7", "body": body})
+
+
 @pytest.mark.parametrize("pct", [0, 101, -5])
 def test_alert_pct_must_be_a_percent(pct):
     with pytest.raises(ValueError) as e:
