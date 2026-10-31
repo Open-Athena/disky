@@ -332,6 +332,52 @@ export class GroupFile {
 
 // --- one tier -----------------------------------------------------------------------------------
 
+/** A tier's alias map: every long member → its canonical (itself, or the member whose root set it shares) and, where
+ *  the tier records it, its root rows. Held as the members sorted (code units) with each canonical's index and each
+ *  `n`, looked up by binary search: as a `Map` of `{ c, n }` objects one tier's ~96K members took ~11–14 MB in Node
+ *  (`bench/view-mem.ts`, gcs `2026-10-08c.c002`), every tier of a heavy search held per isolate for its life. */
+export class Aliases {
+  private readonly qs: string[]
+  private readonly cs: Int32Array
+  private readonly ns: Float64Array
+  /** From `q[i]` → `canonical[i]` ('' = itself) and `n[i]` (−1 = unknown). */
+  constructor(q: string[], canonical: string[], n: number[]) {
+    const order = q.map((_, i) => i).sort((a, b) => cmp(q[a], q[b]))
+    this.qs = order.map(i => q[i])
+    const at = new Map<string, number>()
+    this.qs.forEach((x, i) => at.set(x, i))
+    this.cs = Int32Array.from(order, i => (canonical[i] && canonical[i] !== q[i] ? at.get(canonical[i]) ?? -2 : -1))
+    this.ns = Float64Array.from(order, i => n[i])
+    if (this.cs.includes(-2)) throw new Error('static drill: an alias names a canonical that is no member')
+  }
+  private find(t: string): number {
+    let lo = 0, hi = this.qs.length - 1
+    while (lo <= hi) {
+      const mid = (lo + hi) >> 1, c = cmp(this.qs[mid], t)
+      if (c === 0) return mid
+      if (c < 0) lo = mid + 1
+      else hi = mid - 1
+    }
+    return -1
+  }
+  private entry(i: number): { c: string; n: number | null } {
+    return { c: this.cs[i] < 0 ? this.qs[i] : this.qs[this.cs[i]], n: this.ns[i] < 0 ? null : this.ns[i] }
+  }
+  has(t: string): boolean { return this.find(t) >= 0 }
+  get(t: string): { c: string; n: number | null } | undefined {
+    const i = this.find(t)
+    return i < 0 ? undefined : this.entry(i)
+  }
+  get size(): number { return this.qs.length }
+  /** The colo copy's columns (`TierCache.aliases`). */
+  columns(): [string[], string[], number[]] {
+    return [this.qs, Array.from(this.cs, c => (c < 0 ? '' : this.qs[c])), Array.from(this.ns)]
+  }
+  *[Symbol.iterator](): IterableIterator<[string, { c: string; n: number | null }]> {
+    for (let i = 0; i < this.qs.length; i++) yield [this.qs[i], this.entry(i)]
+  }
+}
+
 /** A tier's colo caches: its index tops and its alias map (`[q, canonical ('' = itself), n (−1 = unknown)]`). */
 export interface TierCache { top?: IndexCache<Top>; aliases?: IndexCache<[string[], string[], number[]]> }
 
@@ -339,7 +385,7 @@ export interface TierCache { top?: IndexCache<Top>; aliases?: IndexCache<[string
 export class DrillTier {
   /** `meta.json`, the alias map and the fresh counts, held once read; one pending in another request is joined (`shared.ts`). */
   private meta = new Memo<DrillMeta>('static-drill-meta')
-  private aliasMap = new Memo<Map<string, { c: string; n: number | null }>>('static-drill-aliases')
+  private aliasMap = new Memo<Aliases>('static-drill-aliases')
   private freshMap = new Memo<Map<string, number>>('static-drill-fresh')
   readonly files: Record<Kind, Record<Set_, GroupFile>>
   constructor(readonly blobs: Blobs, readonly dir: string | null, readonly cache?: TierCache) {
@@ -358,14 +404,14 @@ export class DrillTier {
 
   /** Every long member of the tier → its canonical (itself, or the member whose root set it shares there) and,
    *  where the tier records it (the base), its root rows. */
-  aliases(req?: Req): Promise<Map<string, { c: string; n: number | null }>> {
+  aliases(req?: Req): Promise<Aliases> {
     return this.aliasMap.get('', async () => {
       const cached = await this.cache?.aliases?.get('aliases.parquet')
-      if (cached) return new Map(cached[0].map((q, i) => [q, { c: cached[1][i] || q, n: cached[2][i] < 0 ? null : cached[2][i] }]))
+      if (cached) return new Aliases(cached[0], cached[1], cached[2])
       const rows = await parquetReadObjects({ file: await this.blobs.range('aliases.parquet', 0), compressors }) as { q: string; canonical: string; n?: bigint }[]
-      const m = new Map(rows.map(r => [r.q, { c: r.canonical, n: r.n == null ? null : num(r.n) }]))
-      await this.cache?.aliases?.put('aliases.parquet', [[...m.keys()], [...m].map(([q, a]) => a.c === q ? '' : a.c), [...m.values()].map(a => a.n ?? -1)])
-      return m
+      const a = new Aliases(rows.map(r => r.q), rows.map(r => r.canonical), rows.map(r => (r.n == null ? -1 : num(r.n))))
+      await this.cache?.aliases?.put('aliases.parquet', a.columns())
+      return a
     }, req)
   }
 
@@ -390,7 +436,7 @@ const KIND_FULL = 0, KIND_DELTA = -1
  *  so the tests can break each rule and see the views go wrong; `DRILL_RULES` is the reader's. */
 export interface DrillRules {
   /** A literal's canonical in tier `i` (`maps[i]` its alias map): `aliases_i[t] ?? t`, each tier its own. */
-  canon(maps: Map<string, { c: string }>[], i: number, t: string): string
+  canon(maps: Pick<Aliases, 'get'>[], i: number, t: string): string
   /** The dispatch bound over the tiers' metas (base first): `R + 2·Σ rg`, since each tier's bound is at most its
    *  rows plus two of its row groups. */
   bound(metas: DrillMeta[]): number
@@ -609,7 +655,7 @@ export class Drill {
   /** The base tier's `meta.json`. */
   info(req?: Req): Promise<DrillMeta> { return this.tier(null).info(req) }
   /** The base tier's alias map. */
-  aliases(req?: Req): Promise<Map<string, { c: string; n: number | null }>> { return this.tier(null).aliases(req) }
+  aliases(req?: Req): Promise<Aliases> { return this.tier(null).aliases(req) }
 
   /** The generation's hex-run rule (`hexRuns.ts`): the catalog's `meta.json` `hex_runs` (null without a catalog
    *  `info`, or on a generation without the rule). */
