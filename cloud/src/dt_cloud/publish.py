@@ -50,6 +50,9 @@ err = partial(print, file=sys.stderr)
 # re-run compares against (R2's multipart ETag is not an md5).
 MD5_META = "gcs-md5"
 SNAPSHOTS_SUBDIR = os.environ.get("SNAPSHOTS_SUBDIR", "")
+# Python's built-in map only: `mimetypes.guess_type` also reads the host's
+# `/etc/mime.types`, so a local file's content type would depend on the machine.
+MIME_TYPES = mimetypes.MimeTypes()
 
 
 def snapshots_prefix(scan: str, subdir: str = SNAPSHOTS_SUBDIR) -> str:
@@ -265,7 +268,7 @@ def list_source(src_bucket: str, prefixes: list[str]) -> list[Obj]:
             for f in base.rglob("*"):
                 key = f.relative_to(root).as_posix()
                 if f.is_file() and key.startswith(prefix) and not f.name.startswith("."):
-                    found[key] = Obj(key=key, size=f.stat().st_size, md5=file_md5(f), content_type=mimetypes.guess_type(f.name)[0])
+                    found[key] = Obj(key=key, size=f.stat().st_size, md5=file_md5(f), content_type=MIME_TYPES.guess_type(f.name)[0])
         return sorted(found.values(), key=lambda o: o.key)
     from google.cloud import storage
 
