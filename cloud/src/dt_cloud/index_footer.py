@@ -230,9 +230,15 @@ def groups_blob(schema: dict, rows: list[dict]) -> str:
 
 
 def _write(out: str, data: bytes) -> None:
-    """Bytes to a local/mounted path or a URL (`blobfs`: `gs://`, `r2://`, `s3://`)."""
+    """Bytes to a local/mounted path or a URL (`blobfs`: `gs://`, `r2://`, `s3://`), unless it already holds exactly them:
+    `index-rows` re-derives the footers the `index` step wrote, while `publish-r2` copies them by the generation it
+    listed, and a rewrite of the same bytes still replaces that generation (a 404 mid-copy, 2026-10-29)."""
     from disk_tree import blobfs
 
+    if blobfs.exists(out):
+        with blobfs.open_read(out) if blobfs.is_url(out) else open(out, "rb") as f:
+            if f.read() == data:
+                return
     blobfs.write_bytes(out, data)
 
 

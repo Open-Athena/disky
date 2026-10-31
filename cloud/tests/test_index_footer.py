@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+from pathlib import Path
 import urllib.error
 import urllib.request
 
@@ -395,6 +396,42 @@ def test_groups_parquet_is_the_synced_rows_typed_in_small_stat_groups(tmp_path):
         "row_start": None, "row_end": None, "rg_json": None,
     }
     assert {c for c, v in stats(0).items() if v is not None} == set(FOOTER_STAT_COLS)
+
+
+def test_engine_and_index_sync_write_the_same_cold_footers(tmp_path):
+    """The engine's footers (`tiers -g`, the `index` step) and `index-sync -r`'s rewrite of them are byte-identical,
+    so a copy racing the rewrite (`publish-r2`, 2026-10-29: a 404 on the replaced generation) reads what it listed, and
+    R2 never keeps a footer saying `version` 1 (the dir-only index) for a store sort."""
+    from disk_tree.find.groups import write_groups
+
+    from dt_cloud.index_footer import groups_blob_path, groups_parquet_path, write_groups_blob, write_groups_parquet
+
+    t = pa.table({"path": pa.array([f"b/d{i:02d}" for i in range(6)]), "depth": pa.array([2] * 6, pa.int64()),
+                  "size": pa.array(range(100, 106), pa.int64())})
+    got = {}
+    for who in ("engine", "cloud"):
+        (tmp_path / who).mkdir()
+        tier = str(tmp_path / who / "path-index-bysize.parquet")
+        pq.write_table(t.replace_schema_metadata({b"tier": b"bysize"}), tier, row_group_size=2, compression="zstd")
+        if who == "engine":
+            write_groups(tier, footer_parquet=True)
+        else:
+            schema, rows = index_footer.extract(tier)
+            write_groups_parquet(tier, schema, rows)
+            write_groups_blob(tier, schema, rows)
+        got[who] = (Path(groups_parquet_path(tier)).read_bytes(), Path(groups_blob_path(tier)).read_bytes())
+    assert got["engine"] == got["cloud"]
+    assert pq.read_metadata(groups_parquet_path(tier)).metadata[b"version"] == b"2"
+
+    # The rewrite of the same bytes doesn't touch the file (a new GCS generation would 404 a copy pinned to the old);
+    # different bytes still replace it.
+    footer = Path(groups_parquet_path(str(tmp_path / "engine" / "path-index-bysize.parquet")))
+    before = footer.stat().st_mtime_ns, footer.stat().st_ino
+    schema, rows = index_footer.extract(str(tmp_path / "engine" / "path-index-bysize.parquet"))
+    write_groups_parquet(str(tmp_path / "engine" / "path-index-bysize.parquet"), schema, rows)
+    assert (footer.stat().st_mtime_ns, footer.stat().st_ino) == before
+    write_groups_parquet(str(tmp_path / "engine" / "path-index-bysize.parquet"), schema, rows[:1])
+    assert (footer.read_bytes() == got["engine"][0], len(pq.read_table(footer))) == (False, 1)
 
 
 def test_index_blob_backfills_the_cold_footer_from_json(tmp_path, monkeypatch):

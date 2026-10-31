@@ -70,7 +70,8 @@ def test_dag_order_and_resume(tmp_path):
     assert at["bucket-check"] < at["list s3://a"]
     assert max(lists) < at["index"]
     assert at["index"] < min(at["static-names"], at["publish-r2"], at["index-rows"])
-    assert at["publish-r2"] < at["interval-store"]
+    # publish-r2 copies what index-rows wrote (its footers, cw 10-30), then the interval store reads it
+    assert at["index-rows"] < at["publish-r2"] < at["interval-store"]
     assert max(at["static-names"], at["interval-store"], at["index-rows"]) < at["index-sync"]
     # post runs its steps in order; over-time is its own task beside it, once the stores are written
     assert [x for x in ran[at["index-sync"]:] if x != "over-time"] == ["index-sync", "index-gc", "warm-cache"]
