@@ -1,6 +1,7 @@
 """Specs for the R2 publish step (`dt_cloud.publish`): exact served-subset
 prefixes and the idempotency decision — the pure core the CLI drives."""
 import hashlib
+import mimetypes
 from pathlib import Path
 
 from dt_cloud import publish as P
@@ -211,7 +212,7 @@ def test_a_local_dir_source_lists_its_files_with_md5s_and_uploads_them(tmp_path,
     (root / "listing/laptop/S2/index/G2/path-index.parquet").write_bytes(b"other scan")
     objs = P.list_source(str(root), ["snapshots/laptop/S1/", "listing/laptop/S1/"])
     assert objs == [
-        P.Obj(key="listing/laptop/S1/index/G1/path-index.parquet", size=2, md5=hashlib.md5(b"pi").hexdigest(), content_type=None),
+        P.Obj(key="listing/laptop/S1/index/G1/path-index.parquet", size=2, md5=hashlib.md5(b"pi").hexdigest(), content_type=mimetypes.guess_type("path-index.parquet")[0]),
         P.Obj(key="snapshots/laptop/S1/meta.json", size=2, md5=hashlib.md5(b"{}").hexdigest(), content_type="application/json"),
     ]
 
