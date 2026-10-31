@@ -217,11 +217,14 @@ workflow {
     def indexed = index(params.index_parts ? gathered(index_part(Channel.fromList(params.index_parts), listed)) : listed)
     def none = Channel.value('skipped')
     def sided = params.side ? side() : none
-    def pub = on('publish-r2') ? publish_r2(params.side ? gathered(indexed.mix(sided)) : indexed) : indexed
+    def rows = index_rows(indexed)
+    // publish-r2 copies the generation as it stands, so after index-rows: the footers it writes (`.groups.json`, the age
+    // pyramids' `.groups.*`) never reached R2 when the two ran side by side, and a `.groups.parquet` it rewrote mid-copy
+    // left R2 the older bytes (cw, 2026-10-30)
+    def pub = on('publish-r2') ? publish_r2(params.side ? gathered(rows.mix(sided)) : rows) : indexed
     // On a local data dir the static index reads earlier scans from the serving store, so it waits for this one's publish
     def st = on('static-names') ? static_names(params.static_after_publish ? pub : indexed) : none
     def iv = on('interval-store') ? interval_store(pub) : pub
-    def rows = index_rows(indexed)
     def serving = gathered(rows.mix(st, iv, sided))
     def synced = folded('index-sync') ? serving : gathered(index_sync(serving))
     if (params.post || folded('index-sync')) post(synced)
