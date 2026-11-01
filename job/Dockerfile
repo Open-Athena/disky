@@ -30,6 +30,8 @@ COPY job/icons-r2 ./job/icons-r2
 # The generic scan pipeline and r2's profiles (`dt-cloud scan head /app/job/profiles/<profile>.yml`, `DT_NF_DIR`)
 COPY job/nf ./job/nf
 COPY job/profiles ./job/profiles
+# The Pages config the `cf-usage` step filters Cloudflare's analytics by (`options.cf-usage.config`)
+COPY site/wrangler.toml ./site/wrangler.toml
 ENV DT_NF_DIR=/app/job/nf
 # `scan-run supervise` (the shared job wrapper): the scan runs in its own session; a TERM (preemption) reaches its whole
 # group, and a run killed before its own exit (TERM, the OOM killer) is recorded failed and alerts once.
