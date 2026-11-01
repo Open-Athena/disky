@@ -77,7 +77,7 @@ async function asOf(env: Env, date: string, paths: { path: string; depth: number
 async function candidates(env: Env, o: ChangesOpts, floor: number): Promise<{ cands: Map<string, Cand>; lookups: number; capped: boolean; groups: number }> {
   const dP = o.path === '' ? 0 : o.path.split('/').length
   const thrAt = (depth: number) => floor * o.atten ** Math.max(0, depth - dP - 1)
-  const got = await readChanges(env, o.from, o.to, o.path, floor, { trace: o.trace })
+  const got = await readChanges(env, o.from, o.to, o.path, floor, { trace: o.trace, atten: o.atten })
   const [firstScan, lastScan] = [got.scans[0], got.scans[got.scans.length - 1]]
   const byPath = new Map<string, Transition[]>()
   for (const t of got.rows) {
@@ -190,7 +190,7 @@ export async function buildDiffChanges(env0: Env, o: ChangesOpts): Promise<Diff>
     }
     level = next
   }
-  const cut = capDiffRows(rows, o.top)
+  const cut = capDiffRows(rows, o.top, { a: Math.round(ra?.b ?? 0), b: Math.round(rb?.b ?? 0), oa: Math.round(ra?.o ?? 0), ob: Math.round(rb?.o ?? 0) })
   return {
     rows: cut.rows,
     total_a: Math.round(ra?.b ?? 0),
