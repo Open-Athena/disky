@@ -32,7 +32,8 @@
   "optional_secrets": {
     "SLACK_BOT_TOKEN": "oa-r2-slack-bot-token",
     "SITE_TOKEN": "oa-r2-site-grant",
-    "CF_PAGES_TOKEN": "oa-r2-cf-pages-token"
+    "CF_PAGES_TOKEN": "oa-r2-cf-pages-token",
+    "CF_ANALYTICS_TOKEN": "oa-r2-cf-analytics-token"
   },
-  "optional_secrets_live": ["SLACK_BOT_TOKEN", "SITE_TOKEN", "CF_PAGES_TOKEN"]
+  "optional_secrets_live": ["SLACK_BOT_TOKEN", "SITE_TOKEN", "CF_PAGES_TOKEN", "CF_ANALYTICS_TOKEN"]
 }

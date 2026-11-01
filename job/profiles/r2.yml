@@ -35,14 +35,17 @@ machines:
 skip: [bucket-check, index-gc, over-time]
 # `access-r2`: marin-na's read recency from the access collector (infra/cf/r2-access) for the read lens; `retire`
 # (specs/lean-scans.md §2): each run deletes the `path` sort of every scan but the newest once both stores hold it;
-# `gcp-cost`: the day's GCP cost snapshot (`/admin/cost/gcp`), never fatal
-steps: [access-r2, retire, gcp-cost]
+# `cf-usage`: the Cloudflare usage snapshot (`snapshots/usage/<date>.json`, `/admin/usage`); `gcp-cost`: the day's GCP
+# cost snapshot (`/admin/cost/gcp`); both never fatal
+steps: [access-r2, retire, cf-usage, gcp-cost]
 secrets:
   R2_ACCESS_KEY_ID: oa-r2-index-access-key-id
   R2_SECRET_ACCESS_KEY: oa-r2-index-secret-access-key
   CLOUDFLARE_API_TOKEN: oa-r2-d1-token
   SITE_TOKEN: oa-r2-site-grant
   SLACK_BOT_TOKEN: oa-r2-slack-bot-token
+  # Account Analytics: Read, for the `cf-usage` step
+  CF_ANALYTICS_TOKEN: oa-r2-cf-analytics-token
 env:
   SCAN_RUNS_PROFILE: /app/job/r2-nf-scan-runs.json
   SITE_URL: https://r2.oa.dev
@@ -86,6 +89,8 @@ options:
   # after the reviewed backlog deletes (backup: gs://oa-r2-usage-data/retire-backup/2026-10-18)
   retire: {keep: 1, execute: true, copies: [r2]}
   # the job's buckets (storage: Monitoring `total_bytes` + their policies); compute: the jobs `$DISKY_LABELS` names
+  # the Nextflow task's cwd isn't the image's `/app`
+  cf-usage: {config: /app/site/wrangler.toml}
   gcp-cost: {buckets: [oa-r2-usage-data, oa-r2-usage-scratch]}
   digest:
     template: cw
