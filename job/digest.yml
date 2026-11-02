@@ -9,6 +9,9 @@ root: r2://oa-hf-usage-index/snapshots/hf
 # beside `snapshots/`: r2://oa-hf-usage-index/digest/hf/<channel>/<variant>/<YYYY-MM>.json, keyed by channel (a
 # staging converge never masquerades as prod) and variant
 state: digest/hf/{channel}/{variant}
+# each converge's preview bundle (the OP as posted + its rows), which `/admin/slack` shows: the site reads it from this
+# bucket (its `INDEX_R2`), under `digest/preview/`
+preview: r2://oa-hf-usage-index/digest/preview/{channel}/{variant}
 discord_state: digest/discord/{webhook}
 discord_webhook_env: null
 # the reply avatars (`arrows/av_deg<N>.png`) are the icons project's production deployment of `job/icons-hf/`
