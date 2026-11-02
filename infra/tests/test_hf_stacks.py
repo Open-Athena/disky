@@ -235,7 +235,7 @@ def test_scan_profile_matches_the_site_and_the_stack():
     assert p.opts("age-store")["store"] == f"r2://{w['vars']['STORE_BUCKET']}/{w['vars']['AGE_STORE_PREFIX']}"
     block = re.search(r"^HF_SECRETS = \[\n(.*?)^\]", (INFRA / "gcp" / "__main__.py").read_text(), re.M | re.S).group(1)
     stack_secrets = re.findall(r'^    "([a-z0-9-]+)",', block, re.M)
-    assert len(stack_secrets) == 9
+    assert len(stack_secrets) == 10
     assert set(p.secrets.values()) <= set(stack_secrets)
     redacted = json.loads((REPO / "job" / "hf-scan-runs.json").read_text())["secrets"]
     assert set(p.secrets) <= set(redacted)

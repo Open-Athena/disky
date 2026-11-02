@@ -36,7 +36,8 @@ machines:
 skip: [bucket-check, over-time]
 # constant size (specs/lean-scans.md §2): each scan retires the per-scan files of the scans before the newest 2, and
 # collects the interval-store generations the current one superseded
-steps: [age-store, retire, store-gc]
+# `cf-usage`: the Cloudflare usage snapshots (`snapshots/usage/<date>.json`, `/admin/usage`), never fatal
+steps: [age-store, retire, store-gc, cf-usage]
 secrets:
   HF_TOKEN: hf-usage-hf-token
   CLOUDFLARE_API_TOKEN: hf-usage-cf-token
@@ -47,6 +48,8 @@ secrets:
   R2_SECRET_ACCESS_KEY: hf-usage-r2-secret-access-key
   SLACK_BOT_TOKEN: hf-usage-slack-bot-token
   SITE_TOKEN: hf-usage-job-grant
+  # Account Analytics: Read, for the `cf-usage` step (`snapshots/usage/<date>.json`)
+  CF_ANALYTICS_TOKEN: hf-usage-cf-analytics-token
 env:
   SCAN_RUNS_PROFILE: /app/job/hf-scan-runs.json
   D1_DB_ID: 2f83fdf9-509f-491c-9664-04bef9944988   # oa-hf-usage-db (site/wrangler.toml)
@@ -91,3 +94,4 @@ options:
   # The digest's live thread state and the earlier scans' snapshots are on R2 (publish-r2 lands this scan's before
   # `post`): the data store's root would find no state and post a second OP.
   digest: {template: cw, config: /app/job/digest.yml, root: "r2://oa-hf-usage-index/{snapshots}"}
+  cf-usage: {config: /app/site/wrangler.toml}
