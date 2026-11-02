@@ -20,6 +20,11 @@ remote = true   # dev-only: local dev reads the real D1; deploys ignore it
 [observability]
 enabled = true
 
+# Usage attribution (`_lib/usage.ts`, specs/usage-metrics.md): one point per Functions request.
+[[analytics_engine_datasets]]
+binding = "USAGE"
+dataset = "disky_usage_hf"
+
 [vars]
 MARK = "hf"                      # build-time: the 🤗 favicon / touch icons (`public/icons/hf*`, vite.config.ts)
 ROOT_LABEL = "Open Athena Hugging Face"   # the store root's crumb label
@@ -28,6 +33,7 @@ ROOT_TITLE = "The open-athena org's Storage Buckets and model, dataset and space
 STORE = "hf"
 AUTH_MODE = "app"
 PROD_HOST = "hf.oa.dev"
+CF_PAGES_SCRIPT = "pages-worker--21391274"   # the project's Functions scripts in the analytics datasets: `<this>-production` / `-preview` (`dt-cloud cf-usage`; the Pages API's `production_script_name`)
 DEV_HOST = "dev.hf.oa.dev"
 REPO_URL = "https://github.com/Open-Athena/disky"
 OG_CARDS = "1"
@@ -135,3 +141,8 @@ bucket_name = "oa-hf-usage-index"
 [[env.preview.kv_namespaces]]
 binding = "CACHE_KV"
 id = "db204aed0ef5440f8d450184cc7c177a"
+
+# The same dataset as production (a point's host isn't recorded; dev's load is small next to prod's).
+[[env.preview.analytics_engine_datasets]]
+binding = "USAGE"
+dataset = "disky_usage_hf"
