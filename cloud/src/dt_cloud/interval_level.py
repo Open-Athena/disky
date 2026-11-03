@@ -166,15 +166,15 @@ def backfill(store, gen: str, work: Path, *, rg_rows: int | None = None, threads
     out = work / "out"
     out.mkdir(parents=True, exist_ok=True)
     tree = tm.Budget.measure(sn.mem_bytes(mem))
-    con = sn.connect(threads, mem, work / "duckdb")
+    con = sn.connect(threads, tm.stage_mem(tree, f"backfill-level {gen}"), work / "duckdb")
     rg = rg_rows or ist.SERVED_RG
     docs: dict[str, dict] = {}
     if not runs_only:
         sorts, _ = ist.cut_gen(con, src, {**scans, LEVEL_FLAG: True}, rg_rows=rg, tree=tree, sorts=[LEVEL], served=out / "served")
         docs[""] = sorts[LEVEL]
-    con = sn.connect(threads, mem, work / "duckdb")
+    con = sn.connect(threads, tm.stage_mem(tree, f"backfill-level {gen}"), work / "duckdb")
     for r in todo_runs:
-        d = ia.cut_level(con, str(src / r), out / r / "served", rg_rows=rg)
+        d = ia.cut_level(con, str(src / r), out / r / "served", rg_rows=rg, tree=tree)
         docs[r] = {k: d[k] for k in ("rows", "groups", "bytes")}
     # Each dir's data, then its record (`level.json`: what marks the dir as having the sort).
     for d in [*(f"{r}/" for r in todo_runs), *(() if runs_only else ("",))]:
@@ -188,7 +188,7 @@ def backfill(store, gen: str, work: Path, *, rg_rows: int | None = None, threads
 
 @command("backfill-level")
 @option("-g", "--gen", required=True, help="The generation to add the level sort to (`<store>/interval-store/GEN/`): only `served/level.*` (and each listed run's) are written")
-@option("-M", "--mem", default="4GB", help="Memory budget of the whole process tree (`tree_mem`): DuckDB gets what this process, the cut's workers and the Arrow buffers leave")
+@option("-M", "--mem", default="4GB", help="Memory budget of the whole process tree (`tree_mem`): DuckDB gets what this process, the cut's workers and the Arrow buffers leave; the peak is logged (exit 1 past it with $DT_TREE_MEM_ASSERT)")
 @option("-o", "--out", "store_root", required=True, help="The store: a dir or URL (`r2://bucket[/prefix]`, `s3://…`, `gs://…`), the readers' INDEX_R2 root")
 @option("-p", "--threads", default=4, type=IntRange(min=1), help="DuckDB threads")
 @option("-r", "--rg-rows", type=IntRange(min=1), help="Rows per served row group (default the store's)")
@@ -200,7 +200,8 @@ def backfill_cmd(gen, mem, store_root, threads, rg_rows, runs_only, work) -> Non
     `CURRENT.json` and never rewrites a file; later appends and compactions carry the sort. Prints a JSON summary."""
     from .blobstore import Store
     from .static_local import _check_gen, workdir
+    from . import tree_mem as tm
 
     _check_gen(gen)
-    with workdir(work) as w:
+    with tm.watch(mem, f"backfill-level {gen}"), workdir(work) as w:
         print(json.dumps(backfill(Store(store_root), gen, w, rg_rows=rg_rows, threads=threads, mem=mem, runs_only=runs_only), indent=1))
