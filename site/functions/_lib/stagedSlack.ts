@@ -504,7 +504,7 @@ export async function deletedItems(db: D1Database, planId: number): Promise<Set<
     SELECT DISTINCT i.prefix FROM plan_items i JOIN deletion_bands b ON b.prefix = i.prefix
     JOIN deletion_runs r ON r.run_id = b.run_id
     WHERE i.plan_id = ? AND r.plan_id = i.plan_id AND r.mode = 'real' AND r.finished_ts IS NOT NULL
-      AND r.started_ts >= i.added_ts AND COALESCE(b.undone_objects, 0) = 0
+      AND r.started_ts >= i.added_ts AND COALESCE(b.undone_objects, 0) = 0 AND b.skipped_objects = 0
   `).bind(planId).all<{ prefix: string }>()
   return new Set(results.map(r => r.prefix))
 }

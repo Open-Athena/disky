@@ -657,6 +657,25 @@ def test_a_prefix_with_only_nulls_records_no_band_so_it_stays_staged(source, tmp
     assert [tuple(band) for band in d1.execute("SELECT prefix, bytes, objects FROM deletion_bands")] == [("gs://b1/a/", 8, 4)]
 
 
+def test_a_partly_null_prefix_records_its_deletes_and_its_skips(monkeypatch):
+    # Its deletes stay in the band (undo, totals); `skipped_objects` keeps it staged. A run with no skips keeps the old columns.
+    from dt_cloud import index_footer, sweep_exec
+
+    sent: list[str] = []
+    monkeypatch.setattr(index_footer, "_creds", lambda: ("tok", "acct"))
+    monkeypatch.setattr(index_footer, "_d1_query", lambda sql, acct, tok: sent.append(sql))
+    partly = {"bytes": 8, "objects": 4, "no_generation": 2, "no_generation_bytes": 3}
+    whole = {"bytes": 0, "objects": 0, "no_generation": 5, "no_generation_bytes": 9}
+    assert sweep_exec.record_bands("r", {"buckets": {"b": {"bands": {"gs://b/p/": partly, "gs://b/q/": whole, "gs://b/c/": {"bytes": 1, "objects": 1}}}}}) == 2
+    assert sweep_exec.record_bands("r2", {"buckets": {"b": {"bands": {"gs://b/c/": {"bytes": 1, "objects": 1}}}}}) == 1
+    assert sent == [
+        "INSERT INTO deletion_bands (run_id, prefix, bytes, objects, gone, overwritten, drift_new_objects, undone_objects, skipped_objects) VALUES "
+        "('r', 'gs://b/p/', 8, 4, 0, 0, 0, 0, 2), ('r', 'gs://b/c/', 1, 1, 0, 0, 0, 0, 0) ON CONFLICT (run_id, prefix) DO NOTHING",
+        "INSERT INTO deletion_bands (run_id, prefix, bytes, objects, gone, overwritten, drift_new_objects, undone_objects) VALUES "
+        "('r2', 'gs://b/c/', 1, 1, 0, 0, 0, 0) ON CONFLICT (run_id, prefix) DO NOTHING",
+    ]
+
+
 def test_manifest_then_execute_closes_the_run_with_its_totals(tmp_path, monkeypatch, d1):
     """The dispatched script's two commands, end to end: `sweep manifest` into the run's `source/`, `execute-manifest` into
     the run, as_of holds honored, and the D1 row `sweepReflect` closes keyed by the run dir."""

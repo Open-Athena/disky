@@ -558,6 +558,7 @@ export async function audit(
  * The caller supplies provider-confirmed successful run ids. One `admin_edits` row per run
  * (`deleted_by`), so `/staged` shows those batches as deleted, not unstaged.
  * An undo deliberately does not re-stage: restoring means "keep these".
+ * A band with skipped objects (no generation) doesn't count: part of the item is still there, so it stays staged.
  * Idempotent; returns the prefixes removed. */
 /** Run ids per `unstageDeleted` query: D1's 100 bound parameters, less the plan id. */
 const RUN_CHUNK = 99
@@ -573,7 +574,7 @@ export async function unstageDeleted(db: D1Database, planId: number, succeededRu
       JOIN deletion_bands b ON b.prefix = i.prefix
       JOIN deletion_runs r ON r.run_id = b.run_id
       WHERE i.plan_id = ? AND r.plan_id = i.plan_id AND r.mode = 'real' AND r.finished_ts IS NOT NULL
-        AND r.started_ts >= i.added_ts AND b.undone_objects = 0 AND r.plan_digest IS NOT ''
+        AND r.started_ts >= i.added_ts AND b.undone_objects = 0 AND b.skipped_objects = 0 AND r.plan_digest IS NOT ''
         AND r.run_id IN (${runs.map(() => '?').join(',')})
       GROUP BY i.prefix
     `).bind(planId, ...runs).all<{ prefix: string; run_id: string }>()

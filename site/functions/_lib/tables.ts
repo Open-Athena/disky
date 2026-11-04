@@ -147,6 +147,7 @@ export const TABLES: TableSpec[] = [
       { name: 'overwritten', type: 'int' },
       { name: 'drift_new_objects', type: 'int' },
       { name: 'undone_objects', type: 'int' },
+      { name: 'skipped_objects', type: 'int' },
     ],
     readScope: 'gcs',
     writeScope: null,

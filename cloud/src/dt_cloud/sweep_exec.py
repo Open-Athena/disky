@@ -1245,23 +1245,31 @@ def record_bands(run_id: str, summary: dict) -> int:
     """Write the summary's per-prefix bands for `run_id` to D1, in statements
     of `BAND_ROWS_PER_STATEMENT` rows. Idempotent: a band already recorded is
     left as it is (keeping its `undone_objects`). A band of only null-generation
-    skips is left out: the item would read as swept (`unstageDeleted` unstages any
-    item with a band on a succeeded run), and it stays staged. Returns the bands sent."""
+    skips is left out: nothing of it was deleted. A partly skipped one records its deletes and `skipped_objects`,
+    which keeps the item staged (`unstageDeleted`). The column is named only when a band has skips, so a run without
+    any records on a database that doesn't have it yet. Returns the bands sent."""
     from .index_footer import _creds, _d1_query, _q
 
-    rows = [
-        f"({_q(run_id)}, {_q(prefix)}, {c.get('bytes', 0)}, {c.get('objects', 0)}, "
-        f"{c.get('gone', 0)}, {c.get('overwritten', 0)}, {c.get('drift_new_objects', 0)}, 0)"
+    bands = [
+        (prefix, c)
         for b in summary["buckets"].values()
         for prefix, c in (b.get("bands") or {}).items()
         if c.get("objects") or not c.get("no_generation")
+    ]
+    skips = any(c.get("no_generation") for _, c in bands)
+    columns = "run_id, prefix, bytes, objects, gone, overwritten, drift_new_objects, undone_objects" + (", skipped_objects" if skips else "")
+    rows = [
+        f"({_q(run_id)}, {_q(prefix)}, {c.get('bytes', 0)}, {c.get('objects', 0)}, "
+        f"{c.get('gone', 0)}, {c.get('overwritten', 0)}, {c.get('drift_new_objects', 0)}, 0"
+        + (f", {c.get('no_generation', 0)}" if skips else "") + ")"
+        for prefix, c in bands
     ]
     if not rows:
         return 0
     tok, acct = _creds()
     for i in range(0, len(rows), BAND_ROWS_PER_STATEMENT):
         _d1_query(
-            "INSERT INTO deletion_bands (run_id, prefix, bytes, objects, gone, overwritten, drift_new_objects, undone_objects) VALUES "
+            f"INSERT INTO deletion_bands ({columns}) VALUES "
             + ", ".join(rows[i:i + BAND_ROWS_PER_STATEMENT])
             + " ON CONFLICT (run_id, prefix) DO NOTHING",
             acct, tok,
