@@ -295,7 +295,7 @@ CREATE TABLE deletion_bands (
   gone INTEGER NOT NULL DEFAULT 0,
   overwritten INTEGER NOT NULL DEFAULT 0,
   drift_new_objects INTEGER NOT NULL DEFAULT 0,
-  undone_objects INTEGER NOT NULL DEFAULT 0, skipped_objects INTEGER NOT NULL DEFAULT 0,
+  undone_objects INTEGER NOT NULL DEFAULT 0,
   PRIMARY KEY (run_id, prefix)
 );
 

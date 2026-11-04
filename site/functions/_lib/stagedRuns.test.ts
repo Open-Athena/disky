@@ -290,22 +290,6 @@ describe('D1', () => {
   })
 
   describe('unstageDeleted — a finished real run takes what it deleted out of the queue', () => {
-    it('a prefix with any skipped objects stays staged, its deletes still recorded; a later run without skips takes it out', async () => {
-      const { db, raw } = await gcsDb()
-      const partly = `gs://${B1}/partly/`, whole = `gs://${B1}/whole/`
-      raw.exec(`INSERT INTO deletion_bands (run_id, prefix, bytes, objects, skipped_objects) VALUES ('${RUN}', '${partly}', 8, 4, 2), ('${RUN}', '${whole}', 5, 1, 0)`)
-      for (const p of [partly, whole]) raw.exec(`INSERT INTO plan_items (plan_id, prefix, batch_id, added_by, added_ts) VALUES (1, '${p}', NULL, 'ann', 50)`)
-      const removed = await unstageDeleted(db, 1, [RUN])
-      const items = () => raw.prepare(`SELECT prefix FROM plan_items WHERE plan_id = 1 AND prefix IN ('${partly}', '${whole}')`).all().map(r => (r as { prefix: string }).prefix)
-      const bands = raw.prepare(`SELECT prefix, bytes, objects, skipped_objects FROM deletion_bands WHERE run_id = '${RUN}' AND prefix IN ('${partly}', '${whole}') ORDER BY prefix`).all()
-      expect([removed.filter(p => p === partly || p === whole), items(), bands]).toEqual([
-        [whole],
-        [partly],
-        [{ prefix: partly, bytes: 8, objects: 4, skipped_objects: 2 }, { prefix: whole, bytes: 5, objects: 1, skipped_objects: 0 }],
-      ])
-      raw.exec(`UPDATE deletion_bands SET skipped_objects = 0 WHERE prefix = '${partly}'`)
-      expect([await unstageDeleted(db, 1, [RUN]), items()]).toEqual([[partly], []])
-    })
     it('consumes successful reviewed staging despite new/changed objects; keeps unrun and later-staged items; audits idempotently', async () => {
       const { db, raw } = await gcsDb()
       const done = `gs://${B1}/ckpt/b/`, drift = `gs://${B2}/tmp/a/`, ovw = `gs://${B1}/ow/`, unrun = `gs://${B1}/other/`, late = `gs://${B1}/late/`
