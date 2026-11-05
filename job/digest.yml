@@ -13,8 +13,7 @@ state: digest/hf/{channel}/{variant}
 # bucket (its `INDEX_R2`), under `digest/preview/`
 preview: r2://oa-hf-usage-index/digest/preview/{channel}/{variant}
 # the OP's text and plot request are rendered by the site (`POST /api/digest-op`, the renderer `/admin/slack` previews
-# with; specs/slack-preview-page.md phase 2), under the default params (`""`: what the local renderer posted, byte for byte)
-renderer: site
+# with; specs/slack-preview-page.md phase 2), under the default params (`""`)
 params: ""
 discord_state: digest/discord/{webhook}
 discord_webhook_env: null

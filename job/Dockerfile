@@ -40,6 +40,12 @@ COPY job/nf ./job/nf
 COPY job/profiles ./job/profiles
 # The digest's icons dir: the plot is rendered into it and the dir deployed to the icons project's `plot` branch.
 COPY job/icons-hf ./job/icons-hf
+# The source revision (`job/build.sh` → `cloudbuild.yaml` build args): OCI labels for the registry, env for the code
+# (`dt-cloud image-sha [--expect SHA]`, the steps' start-up log).
+ARG DISKY_GIT_SHA=""
+ARG DISKY_GIT_DIRTY=""
+LABEL org.opencontainers.image.revision=$DISKY_GIT_SHA disky.dirty=$DISKY_GIT_DIRTY
+ENV DISKY_GIT_SHA=$DISKY_GIT_SHA DISKY_GIT_DIRTY=$DISKY_GIT_DIRTY
 # The head's spec sets the same entrypoint (`dt-cloud scan head …`); Nextflow's tasks override it (a task's
 # `containerOptions`: `--entrypoint=/usr/bin/env`).
 ENTRYPOINT ["dt-cloud"]
