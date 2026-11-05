@@ -3,7 +3,7 @@ import type { Env } from './auth'
 import { sqliteD1 } from './testD1'
 import { fixtureR2 as r2 } from './testR2'
 import { readJson } from './testStore'
-import { buildDiff, type Diff, type DiffRow } from './view'
+import { buildDiff, capDiffRows, type Diff, type DiffRow } from './view'
 
 vi.mock('@rdub/file-tree/stores/s3', async () => ({ S3Store: (await import('./testStore')).S3Store }))
 
@@ -116,17 +116,30 @@ describe('the churn walk', () => {
     }
   })
 
-  it('stays on the walk\'s readers: no page-index read, no `readChanged`, and no more lookups than a plain walk', async () => {
+  it('stays on the walk\'s readers: no page-index read, no `readChanged`, its asks only for paths a side lacks', async () => {
+    // The paged `iv-churn` store: `readChanged` would read it by page (`pgets`, …); this reads whole groups.
+    const { db } = await sqliteD1()
+    const paged = { DB: db, ROOT_LABEL: 'all buckets', PATH_STORE: 'intervals', INTERVAL_STORE_GEN: 'g', INTERVAL_STORE_PREFIX: 'interval-store-p2', INDEX_R2: r2('iv-churn', []) } as Env
+    const seen = new Set<string>()
+    let asked = 0
     for (const c of cases.filter(x => x.a > 0 && x.b > 0)) {
-      for (const threshold of [11, 41]) {
-        const names = new Set<string>()
-        const d = await walk(c, threshold, true, n => names.add(n))
-        expect([...names].filter(n => /^(p|lv-|level)/.test(n))).toEqual([])
-        const plain = await walk(c, threshold, false)
-        // Lookups beyond the plain walk's are only under a directory it wouldn't expand (identical bytes, churn moved).
-        if (d.expansions === plain.expansions) expect(d.lookups).toBe(plain.lookups)
-      }
+      const t: Record<string, number> = {}
+      const d = await buildDiff(paged, { from: c.from, to: c.to, path: c.path, w: 1024, h: 1024, minArea: 12, atten: 1, top: 5000, threshold: 0, churn: true, trace: (n, v) => { seen.add(n); t[n] = (t[n] ?? 0) + v } })
+      expect(d.churn).toBe(c.churn)
+      asked += t['churn-asks'] ?? 0
+      // Adjacent scans: the version the walk holds starts or ends at the missing side's neighbour, so no read.
+      const ids = ['2026-07-30', '2026-07-31', '2026-08-02', '2026-08-03', '2026-08-04', '2026-08-05', '2026-08-06']
+      if (ids.indexOf(c.to) === ids.indexOf(c.from) + 1) expect(t['churn-asks'] ?? 0).toBe(0)
     }
+    expect([...seen].filter(n => /^(pgets|prounds|pgroups|pages|pskip|prows|pindex|pdata|pjson|lv-|level)/.test(n))).toEqual([])
+    expect(asked > 0).toBe(true)
+  })
+
+  it('folds a one-sided path whose versions don\'t fit, saying so, and still sums', () => {
+    const rows: DiffRow[] = [{ p: 'x', d: 1, k: 'dir', s: 'changed', a: 5, b: 5, oa: 1, ob: 1, c: 7, x: true }, { p: 'x/y', d: 2, k: 'file', s: 'added', a: 0, b: 5, oa: 0, ob: 1, c: 5 }]
+    const { rows: out } = capDiffRows(rows, 10, { a: 5, b: 5, oa: 1, ob: 1, c: 9 })
+    const got = Object.fromEntries(out.map(r => [r.p, r.c]))
+    expect(got).toEqual({ x: 7, 'x/y': 5, '(other)': 2, 'x/(other)': 2 })
   })
 
   it('leaves a plain walk\'s rows as they are: no churn columns, no `c`', async () => {
