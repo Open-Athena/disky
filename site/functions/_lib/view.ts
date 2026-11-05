@@ -29,7 +29,7 @@
  * `f = n_children(P) − kept` — objects and dirs alike.
  */
 import type { Env } from './auth.js'
-import { asOfScans, folded, type IndexHandle, isStore, ivHeldDates, ivLastRead, type Lens, openIndex, pathStoreKey, perScan, planGroups, planRects, slices, planSizeRects, readAsks, readFits, readRects, readRows, readRootHistoryRows, readSizeRects, type Rect, type Row, sizeVariant, type Span, TooWide, type Trace, withTrace } from './index.js'
+import { asOfScans, coarsenRects, coarsenSizeRects, folded, type IndexHandle, isStore, ivHeldDates, ivLastRead, type Lens, openIndex, pathStoreKey, perScan, planGroups, planRects, slices, planSizeRects, readAsks, readFits, readRects, readRows, readRootHistoryRows, readSizeRects, type Rect, type Row, sizeVariant, type Span, TooWide, type Trace, withTrace } from './index.js'
 import { planCharge, type PlanGroup } from './readCap.js'
 import { reqOf } from './shared.js'
 import { type FoldedLens, ownerLens, poolLens } from './owners.js'
@@ -148,6 +148,8 @@ export interface ViewOpts {
   phase2Gate?: Phase2Gate
   /** One side of a diff: its plan's groups, admitted with the other side's (`planMeeting`). */
   admitPlan?: (groups: PlanGroup[]) => Promise<unknown>
+  /** One side of an unfiltered diff: its planned floor → the floor both sides read at (`floorMeeting`). */
+  meetFloor?: (floor: number) => Promise<number>
   /** A heavy literal's rollup view (`rollupRead`): paths to nest whatever their bytes and the read budget — the
    *  ones a diff's other side answered (`Read.nested`), so both sides know the same paths whole. */
   nestForce?: Set<string>
@@ -435,8 +437,10 @@ async function readSubtree(
 }
 
 /** `readSubtree`'s plan, before any group is fetched: the sort it would read, how many row groups and
- *  rows that read decodes, and the read itself — so a caller can hold reads to a group budget. */
-interface SubtreePlan { variant: string; groups: number; rows: number; spans: Span[]; read: (stop?: () => boolean) => Promise<Row[]> }
+/** `readSubtree`'s plan, before any group is fetched: the sort it would read, how many row groups and
+ *  rows that read decodes, and the read itself — so a caller can hold reads to a group budget. `raise`: the factor
+ *  on `thrAt` the read applies, past 1 only when `planSubtree`'s `coarser` cut a plan down to the read budget. */
+interface SubtreePlan { variant: string; groups: number; rows: number; spans: Span[]; raise: number; read: (stop?: () => boolean) => Promise<Row[]> }
 
 async function planSubtree(
   env: Env,
@@ -450,10 +454,21 @@ async function planSubtree(
   tr?: Trace,
   pathOnly = false,
   ivPlanRows = IV_PATH_PLAN_ROWS,
+  coarser = false,
 ): Promise<SubtreePlan> {
   const held = (plan: Span[]) => plan.reduce((n, x) => n + (x.rowEnd - x.rowStart), 0)
-  const of = (variant: string, plan: Span[], read: SubtreePlan['read']): SubtreePlan => ({ variant, groups: plan.length, rows: held(plan), spans: plan, read })
+  const of = (variant: string, plan: Span[], read: SubtreePlan['read'], raise = 1): SubtreePlan => ({ variant, groups: plan.length, rows: held(plan), spans: plan, raise, read })
   const fromPath = (plan: Span[]) => of(pathIdx.variant, plan, stop => readRects(pathIdx, rects, thrAt, lens, plan, stop))
+  // `coarser` (a view's own read, whose floor its caller takes back from `raise`): no sort's plan fits the read
+  // budget, so read the one that fits at the lower floor, at that floor. A cut of plans already in hand: no I/O.
+  const coarsened = async (pp: Span[] | null, size?: { sized: IndexHandle; sh: IndexHandle; sp: Span[] }): Promise<SubtreePlan | null> => {
+    if (!coarser) return null
+    const cs = size ? await coarsenSizeRects(size.sh, size.sp, rects, thrAt) : null
+    const cp = pp ? coarsenRects(pp, rects, thrAt) : null
+    const at = (f: number) => (d: number) => f * thrAt(d)
+    if (size && cs && (!cp || cs.raise <= cp.raise)) return of(size.sized.variant, cs.spans, stop => readSizeRects(size.sh, rects, at(cs.raise), lens, cs.spans, stop), cs.raise)
+    return cp ? of(pathIdx.variant, cp.spans, stop => readRects(pathIdx, rects, at(cp.raise), lens, cp.spans, stop), cp.raise) : null
+  }
   // A store generation: plan the read on both sorts (span queries only, no
   // decode) and decode whichever holds fewer rows. The cost of a `path` read
   // is ~one group per depth of the subtree, of a `bysize` read ~one group per
@@ -480,6 +495,10 @@ async function planSubtree(
       // A tiny subtree can have an unknown row count and a low byte floor: the size sort's
       // boundary groups then exceed the decode budget though its path range fits easily.
       if (!readFits(sp) && !pp) pp = await planRects(pathIdx, rects, thrAt, lens)
+      if (!readFits(sp) && !readFits(pp!)) {
+        const cut = await coarsened(pp, { sized, sh, sp })
+        if (cut) return cut
+      }
       if (pp && (held(pp) < held(sp) || !readFits(sp) && readFits(pp))) return fromPath(pp)
       return of(sized.variant, sp, stop => readSizeRects(sh, rects, thrAt, lens, sp, stop))
     }
@@ -491,11 +510,19 @@ async function planSubtree(
     if (sized) {
       const sh = withTrace(sized, tr)
       const [pp, sp] = await Promise.all([planRects(pathIdx, rects, thrAt, lens), planSizeRects(sh, rects, thrAt, lens)])
+      if (!readFits(sp) && !readFits(pp)) {
+        const cut = await coarsened(pp, { sized, sh, sp })
+        if (cut) return cut
+      }
       if (held(sp) < held(pp)) return of(sized.variant, sp, stop => readSizeRects(sh, rects, thrAt, lens, sp, stop))
       return of(pathIdx.variant, pp, stop => readRects(pathIdx, rects, thrAt, lens, pp, stop))
     }
   }
   const pp = await planRects(pathIdx, rects, thrAt, lens)
+  if (!readFits(pp)) {
+    const cut = await coarsened(pp)
+    if (cut) return cut
+  }
   return of(pathIdx.variant, pp, stop => readRects(pathIdx, rects, thrAt, lens, pp, stop))
 }
 
@@ -801,8 +828,10 @@ async function readView(env: Env, o: ViewOpts, cov: Coverage = {}): Promise<Read
   // Nothing in scope under P: an empty view, not a zero threshold that would
   // keep every row the tier holds.
   if (rootAgg.b <= 0) return null
-  const threshold = o.threshold ?? (rootAgg.b * minArea) / (w * h)
-  const thrAt = (depth: number) => threshold * atten ** Math.max(0, depth - dP - 1)
+  const asked = o.threshold ?? (rootAgg.b * minArea) / (w * h)
+  // Past `asked` only when the read budget raises it (`setFloor`).
+  let threshold = asked
+  let thrAt = (depth: number) => asked * atten ** Math.max(0, depth - dP - 1)
 
   // The coarsest tier whose floor the UNSCOPED query can't see below. A
   // narrow scope lowers the node threshold (its root is smaller), but the
@@ -1337,9 +1366,6 @@ async function readView(env: Env, o: ViewOpts, cov: Coverage = {}): Promise<Read
   // query (a lens's assignments fold filters these rows): matches are found at
   // every depth.
   t0 = performance.now()
-  const sub = await planSubtree(env, date, idx, [{ dLo: dP + 1, dHi: maxDepth != null && !query ? dP + maxDepth : 1e9, pLo, pHi }], thrAt, lens, nDesc, smallRows, tr, false, ivPlanRows)
-  // A store generation names the sort that answered; a v1 one its tier.
-  const tierName = isStore(idx) ? sub.variant : pick.name
   // The lens's assigned regions from the by-path tier (their own rows and
   // everything under them): every path there whose U-share can clear the
   // threshold is present, since all ≥ U's share. P itself as a region means
@@ -1351,7 +1377,32 @@ async function readView(env: Env, o: ViewOpts, cov: Coverage = {}): Promise<Read
   // exact total, every path over the threshold and no other. (A path-first read over the slices' dyadic
   // segments selects a run per depth per segment: a big user's root regions went past `decodeSpans`' cap.)
   const allSized = regionRects.length && pick.all!.asOf != null ? withTrace(await openIndex(folded(env), date, 'bysize'), tr) : null
-  const regionSpans = !regionRects.length ? [] : allSized ? await planSizeRects(allSized, regionRects, thrAt) : await planRects(pick.all!, regionRects, thrAt)
+  const setFloor = (floor: number) => {
+    threshold = floor
+    thrAt = depth => floor * atten ** Math.max(0, depth - dP - 1)
+  }
+  // A plan past the read budget is read at the lowest floor that fits it (`coarsen`), and that is this view's floor:
+  // a big canvas gets what a smaller one does, `(other)` holding the rest, its totals exact. Not with a query: a
+  // coarser read hides matches, so that refusal stands. The regions' plan can raise it further: the subtree's read,
+  // planned at the lower floor, is then a superset the kept test below cuts.
+  const planReads = async (coarser: boolean) => {
+    const sub = await planSubtree(env, date, idx, [{ dLo: dP + 1, dHi: maxDepth != null && !query ? dP + maxDepth : 1e9, pLo, pHi }], thrAt, lens, nDesc, smallRows, tr, false, ivPlanRows, coarser)
+    if (sub.raise !== 1) setFloor(threshold * sub.raise)
+    if (!regionRects.length) return { sub, regionSpans: [] as Span[] }
+    const plan = allSized ? await planSizeRects(allSized, regionRects, thrAt) : await planRects(pick.all!, regionRects, thrAt)
+    const cut = !coarser || readFits(plan) ? null : allSized ? await coarsenSizeRects(allSized, plan, regionRects, thrAt) : coarsenRects(plan, regionRects, thrAt)
+    if (cut) setFloor(threshold * cut.raise)
+    return { sub, regionSpans: cut?.spans ?? plan }
+  }
+  let { sub, regionSpans } = await planReads(!query)
+  // A diff's sides settle on one floor before either decodes a group (`floorMeeting`); the larger floor's plans are
+  // within this side's, so they fit.
+  const agreed = o.meetFloor ? await o.meetFloor(threshold) : threshold
+  if (agreed > threshold) {
+    setFloor(agreed)
+    ;({ sub, regionSpans } = await planReads(false))
+  }
+  if (threshold !== asked) tr?.('raise', threshold / asked)
   // The whole plan's charge before any of it is fetched (a diff's, of both sides: `planMeeting`), so this read never
   // holds part of the isolate while it waits for more; a plan the decoder refuses waits for nothing.
   if (!readFits(sub.spans) || !readFits(regionSpans)) throw new Error('query too wide: drill deeper or raise minArea')
@@ -1359,6 +1410,8 @@ async function readView(env: Env, o: ViewOpts, cov: Coverage = {}): Promise<Read
   await (o.admitPlan ? o.admitPlan(groups) : reqOf(env)?.reads?.admit(planCharge(groups), tr))
   const rows = await sub.read()
   tr?.('rows', performance.now() - t0, sub.variant)
+  // A store generation names the sort that answered; a v1 one its tier.
+  const tierName = isStore(idx) ? sub.variant : pick.name
   const allRows = !regionRects.length ? []
     : allSized ? await readSizeRects(allSized, regionRects, thrAt, undefined, regionSpans)
     : await readRects(pick.all!, regionRects, thrAt, undefined, regionSpans)
@@ -2518,6 +2571,27 @@ function planMeeting(env: Env, sides: number, tr?: Trace): () => (groups: PlanGr
   }
 }
 
+/** `sides` reads settling on one floor, before any of them decodes: each side's meeting, called with its floor (again:
+ *  a no-op), resolves once all have met, to the largest. A side with none to bring (nothing in scope, a failure) meets
+ *  at 0. */
+function floorMeeting(sides: number): () => (floor: number) => Promise<number> {
+  let left = sides
+  let top = 0
+  let done!: (floor: number) => void
+  const agreed = new Promise<number>(resolve => { done = resolve })
+  return () => {
+    let met = false
+    return floor => {
+      if (!met) {
+        met = true
+        top = Math.max(top, floor)
+        if (--left === 0) done(top)
+      }
+      return agreed
+    }
+  }
+}
+
 /** What changed under P between two scans (specs/done/view-serving.md §2):
  * both sides are read from their index tiers at ONE absolute byte floor —
  * the larger side's pixel-budget threshold — so a directory is named on both
@@ -2587,12 +2661,16 @@ export async function buildDiff(env0: Env, o: DiffOpts): Promise<Diff> {
     if (ta && tb) floor = Math.max(ta.threshold, tb.threshold)
     tr?.('floors', performance.now() - t0)
   }
+  const sideOpts = (date: string): ViewOpts => ({ ...o, date, ...wait, phase2Gate: gate, ...(query ? floor != null ? { threshold: floor } : {} : { threshold }), ...cap })
+  // Unfiltered, the sides share `threshold`, unless the read budget raises one's (`coarsen`): then both read at the
+  // larger, or a name read on one side and folded on the other reads as churn. Then their plans go in as one charge.
+  const floors = query ? null : floorMeeting(Number(!!ra) + Number(!!rb))
   const meet = planMeeting(env, Number(!!ra) + Number(!!rb), tr)
   const side = (date: string) => {
+    const meetFloor = floors?.()
     const admitPlan = meet()
-    return readView(env, { ...sideOpts(date), admitPlan }, cov).finally(() => admitPlan([]))
+    return readView(env, { ...sideOpts(date), admitPlan, ...(meetFloor ? { meetFloor } : {}) }, cov).finally(() => { meetFloor?.(0); return admitPlan([]) })
   }
-  const sideOpts = (date: string): ViewOpts => ({ ...o, date, ...wait, phase2Gate: gate, ...(query ? floor != null ? { threshold: floor } : {} : { threshold }), ...cap })
   let [va, vb] = await Promise.all([ra ? side(from) : null, rb ? side(to) : null])
   // Without the pre-pass (a summary, or one side without matches then), a side whose floor differs is
   // re-read at the larger.
@@ -2638,7 +2716,7 @@ export async function buildDiff(env0: Env, o: DiffOpts): Promise<Diff> {
     total_b: Math.round(vb?.rootAgg.b ?? 0),
     objects_a: Math.round(va?.rootAgg.o ?? 0),
     objects_b: Math.round(vb?.rootAgg.o ?? 0),
-    threshold: query ? ((vb ?? va)!.threshold) : threshold,
+    threshold: (vb ?? va)!.threshold,
     tier: (vb ?? va)!.tier,
     ...(matchedUnion ? (() => {
       const keptBoth = new Map([...(va?.kept ?? []), ...(vb?.kept ?? [])])
