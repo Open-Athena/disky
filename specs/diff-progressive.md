@@ -196,6 +196,26 @@ One `bysize` cut per format, same VM and plan, harness `scripts/ipc_bench.py` (o
 
 **For the real change.** IPC's footer has no row counts and batches aren't uniform, so counts must be kept (a sidecar, or passed in `pieces`). mmap is out: it inflates the PSS `TreeWatch` measures, and was slower. The piece threads shared one reader, which held over this run's rows but which pyarrow's docs don't promise; opening per span costs ~42% on read-only replay. `Budget.cut` needs its footer term either way, batches × bytes a batch.
 
+### 3c. Churn on the as-of walk (prototype, dev alias only)
+
+`dm=churn` on `buildDiff` (`DIFF_CHURN`, branch `w/diff-churn-walk`): area = range churn, colour = net, with no new index. The level index is paused while the walk's own latency is the priority.
+
+**As built.** The as-of reads project `churn_cum` / `churn_end` (`churnRows`; 3.1% more bytes on `bysize`, 3.3% on `path`, kept in their own group-cache entries, so a plain read fetches nothing more). A row's churn is `churn_cum`(D2) − `churn_cum`(D1). Leaves rank by churn; a directory whose bytes held and whose churn moved expands (a rename); every bucket is drawn (the root's churn is their sum); `(other)` = parent − Σ drawn, exact.
+
+**A path one scan lacks is the one extra read.** An as-of handle's plan holds only groups live at its scan, so the lookup that finds a path absent never sees its closed versions (the churn oracle caught this: every reappearing path was wrong). `churnValues` takes its first version in the range (`churn_cum − size`) or last (`churn_end`) from one whole-group read after the walk, `planChanged` + `decodeSpans`; no read when the version it holds starts or ends next to the missing side (adjacent scans never read). Too wide: the smallest half folds into `(other)`, `churn_folded`.
+
+**Refused, a plain walk with `churn_off`:** a D1 before the churn base, a generation without churn, a path on one scan only.
+
+**Reads.** No `readChanged`, no page index, no level file: as-of `readRects` / `readSizeRects` / `readAsks`, plus `readPathVersions`' whole groups (a test runs it on the paged fixture and asserts no page counters).
+
+**Coverage limit (measured: `interval-store churn-coverage`, `.c`, 18 diff-check cases).** Shares of the case's churn at the walk's floor, on the replay; the live walk also folds at `LOOKUP_CAP`. A root diff leaves 48–58% in `(other)`s (live 38–68%); `marin-us-east5` 39–46%. A week leaves 29–32% of the root's and `marin-us-central2`'s churn in paths live at **neither** scan (created and gone inside the range), which no floor can draw, the largest single path 9–17% of its map. Lowering the floor doesn't converge: at ×0.1 and ×0.01 (or a flat floor) a leaf that held its churn expands around its big unchanged children, so `other` often rises; and live, ×0.1 returned 413 or 1102 on 30 of 54 full requests.
+
+**Latency (measured: 18 cases × 3 cold canvas buckets, alias pinned to `.c`, `Server-Timing` total).** Full map cold p50 / p90 / max: walk 1.32 / 5.22 / 9.11 s, churn 1.61 / 6.58 / 15.55 s; median per-case ratio 1.42, 1.10 past the first round. First paint (`depth=1`) p50 0.26 vs 0.29 s. Response-cold only: colo group caches warm after a first read, and the walk's plain groups may have been warm when the churn groups weren't.
+
+**Verdict.** Correct, and in the walk's latency range, but not a churn-weighted map: a byte floor chooses the cells, so it can't be one. Useful as a toggle on drilled, short ranges. Churn determining weight takes a reader that chooses cells by churn and sees paths live at neither scan.
+
+**A churn index, a model only (`interval-store churn-index-model`, nothing built).** Over the base's 121 scans and 8 levels: E = 365.7M changes, 2.80B rows (2.1× `path`'s), estimated bytes 2.1× `path`'s from every 64th key range's rows (optimistic for a global key). Rows barely shrink by level (365.7M at L0, 339.6M at L7) since most paths change once or twice: a full segment tree stores most changes 8 times. A week is m = 5 blocks. One full map at a 48² cell on the root: per-parent key 517 runs (174 rounds); global `(L, b, depth, ⌊log2 churn⌋ desc, path)` 3,068 rows wanted from 58 groups, 58 runs (20 rounds, two waves); then 250 `path` groups for exact values at D1 and D2, about what the walk reads (175–214). Undercounted: those exact reads price live rows only, and a one-sided or live-at-neither candidate needs the version read above. Overcounted: the drill cases' global rows, which ignore a path prune inside each bucket.
+
 ### 4. What goes away
 
 The lazy descent's planner, ms and row budgets, `HandOff`, `DESCENT_V`, and `DIFF_DESCENT`. The as-of walk stays for `dm=max`, lens, owner pool, class scope and filtered (`q=`) diffs: those need unchanged children's sizes or matches, and their costs and readers are unchanged.
