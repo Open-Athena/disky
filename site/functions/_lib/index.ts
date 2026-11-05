@@ -470,7 +470,7 @@ const handleAt = new IsoMap<string, number>('handleAt')
 export async function openIndex(env: Env, date: string, variant = 'path'): Promise<IndexHandle> {
   if (intervalsOn(env)) {
     const h = await openInterval(env, date, variant)
-    if (h) return h
+    if (h) return (env as Env & { [IV_CHURN]?: boolean })[IV_CHURN] ? withChurn(h) ?? h : h
     // A date the store holds never reads per-scan (its per-scan sorts are retired once the store holds it:
     // `dt-cloud scan retire`): a broken run's scan is a 503 (`IvUnavailable`), a variant the store doesn't serve
     // (a v1 `user` / `coarse*` tier, a sliced read of a generation without slice sorts) is "not synced". What
@@ -637,6 +637,10 @@ export const asOfScans = (env: Env, dates: string[]): Env => (intervalsOn(env) ?
 export const IV_ASOF = Symbol('interval-store request scans')
 /** The marker `slices` sets on an env (a symbol: not a binding or var; object spreads carry it). */
 export const IV_SLICED = Symbol('interval-store slices')
+/** The marker `churnRows` sets on an env: its handles project the churn columns (`withChurn`). */
+const IV_CHURN = Symbol('interval-store churn rows')
+/** `env` whose interval-store handles project the churn columns, on the as-of reads too: a churn walk's (`buildDiff`). */
+export const churnRows = (env: Env): Env => ({ ...env, [IV_CHURN]: true }) as Env
 const isSliced = (env: Env): boolean => !!(env as Env & { [IV_SLICED]?: boolean })[IV_SLICED]
 export const IV_PREFIX = 'interval-store'
 export const ivPrefix = (env: Env): string => env.INTERVAL_STORE_PREFIX?.replace(/\/$/, '') || IV_PREFIX

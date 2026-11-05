@@ -18,6 +18,8 @@ export interface DiffRow {
   ob: number
   x?: boolean
   l?: 1 | 2
+  /** Range churn, on a churn walk's rows (`dm=churn`). */
+  c?: number
 }
 
 export interface DiffData {
@@ -34,6 +36,10 @@ export interface DiffData {
   lookups: number
   lookups_capped: boolean
   rows: DiffRow[]
+  /** `dm=churn` answered: the range churn under the path. */
+  churn?: number
+  /** `dm=churn` not answered, and why: a plain walk, drawn by Δ. */
+  churn_off?: string
   /** With `q=`: either scan's search was budget-cut / read without the index
    * (`FilterNote.tsx`). */
   partialReason?: string
@@ -46,7 +52,7 @@ export interface DiffData {
   budgetCut?: true
 }
 
-export type AreaMode = 'max' | 'delta'
+export type AreaMode = 'max' | 'delta' | 'churn'
 
 export interface DiffNode {
   key: string
@@ -56,6 +62,8 @@ export interface DiffNode {
   k: 'file' | 'dir'
   weight: number
   delta: number
+  /** Range churn (`dm=churn`): bytes added + removed under the node, scan by scan; its area in that mode. */
+  churn?: number
   /** Bytes that arrived / left under this node (Σ over the frontier below
    * it): start − removed + added = end. A frontier row is all one or the other. */
   added: number
@@ -122,6 +130,7 @@ export function buildTree(data: DiffData, areaMode: AreaMode, atRoot: boolean): 
       k: r.k,
       weight: 0,
       delta: r.b - r.a,
+      ...(r.c != null ? { churn: r.c } : {}),
       added: r.x ? 0 : max(0, r.b - r.a),
       removed: r.x ? 0 : max(0, r.a - r.b),
       status: r.s,
@@ -138,7 +147,7 @@ export function buildTree(data: DiffData, areaMode: AreaMode, atRoot: boolean): 
   }
 
   const finalize = (node: DiffNode): number => {
-    const own = areaMode === 'max' ? max(node.size_old, node.size_new) : abs(node.delta)
+    const own = areaMode === 'max' ? max(node.size_old, node.size_new) : areaMode === 'churn' ? node.churn ?? 0 : abs(node.delta)
     if (!node.children?.length) {
       node.weight = own
       return node.weight

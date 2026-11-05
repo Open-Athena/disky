@@ -53,7 +53,7 @@ export function useDiffModel(data: DiffData | null, atRoot: boolean, label: stri
   // (area = |delta|) is the default — the movement is what a diff view is for —
   // and stays out of the URL.
   const [dmP, setDmP] = useUrlState('dm', stringParam())
-  const setAreaMode = (m: AreaMode) => setDmP(m === 'max' ? 'max' : undefined)
+  const setAreaMode = (m: AreaMode) => setDmP(m === 'delta' ? undefined : m)
   const derived = useMemo(() => {
     if (!data) return null
     const fmtDelta = (d: number) => (d >= 0 ? '+' : '−') + fmtBytes(abs(d))
@@ -68,7 +68,7 @@ export function useDiffModel(data: DiffData | null, atRoot: boolean, label: stri
     // Area mode falls back to `max` when Δ has nothing to show: if the user
     // hasn't pinned a mode and the movement tree is empty (nothing moved between
     // the two scans), draw the sizes in `max` instead of a bare "no changes".
-    const built = diffRoot(data, dmP === 'max' ? 'max' : 'delta', dmP === 'max', atRoot, label)
+    const built = diffRoot(data, dmP === 'max' ? 'max' : dmP === 'churn' ? 'churn' : 'delta', dmP === 'max', atRoot, label)
     if (!built) return null
     const { root, mode } = built
     const { added, removed, n_added, n_removed } = root
@@ -161,19 +161,23 @@ function DiffStats({ model }: { model: DiffModel }) {
 }
 
 /** Area-mode toggle (max vs Δ), parked top-right by the fullscreen button. */
+/** `dm=churn` is a prototype: its button only on the dev host (`DIFF_CHURN`, specs/diff-progressive.md §3c). */
+const CHURN_TOGGLE = import.meta.env.DEV || location.hostname === import.meta.env.VITE_DEV_HOST
+
 function DiffModes({ model }: { model: DiffModel }) {
   const { areaMode, setAreaMode } = model
   return (
     <div className="dh-modes">
-      {(['max', 'delta'] as const).map(m => (
+      {([...(CHURN_TOGGLE || model.data.churn != null ? ['churn'] as const : []), 'max', 'delta'] as const).map(m => (
         <Explain key={m} text={m === 'max'
           ? 'Cell area = max(old, new) bytes, with a band for |Δ| — what is there, and how much of it moved'
+          : m === 'churn' ? 'Cell area = bytes added + removed, scan by scan, colour = net — what moved, a rename included. Folders under the byte floor stay in (other)'
           : 'Cell area = |Δ| bytes, colour = Δ as a share of the directory — only the movement'}>
           <button
             onClick={e => { e.stopPropagation(); setAreaMode(m) }}
             className={'diff-mode' + (areaMode === m ? ' on' : '')}
           >
-            {m === 'max' ? 'max' : 'Δ'}
+            {m === 'max' ? 'max' : m === 'churn' ? 'churn' : 'Δ'}
           </button>
         </Explain>
       ))}
@@ -220,7 +224,7 @@ export function DiffTreemap({ model, onDrill, onOpen }: {
         formatSize={n => fmtBytes(n)}
         // Delta mode: a cell's area is its movement (a dir's: its children's, grew + shrank), its label the
         // movement as the table writes it, `+37.2 T −20.4 T = +16.8 T`, where it fits, else the signed net alone.
-        formatCell={areaMode === 'max' ? undefined : n => diffCellText(n, fmtBytes, fmtDelta)}
+        formatCell={areaMode === 'max' ? undefined : areaMode === 'churn' ? n => [`${fmtBytes(n.churn ?? 0)} moved · ${fmtDelta(n.delta)}`, fmtBytes(n.churn ?? 0)] : n => diffCellText(n, fmtBytes, fmtDelta)}
         tipMode="dock"
         // Crumb and movement totals both live in the header band above the map
         // now, so the map's own crumb suffix is empty.

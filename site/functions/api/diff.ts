@@ -15,6 +15,8 @@
 import { filterJson, hiddenNotFound, isHidden, restrictDiff, restrictionFor } from '../_lib/restrict.js'
 import { type Env, type Identity, json, presentsCredentials, requireViewer } from '../_lib/auth.js'
 import { DESCENT_V } from '../_lib/diffDescent.js'
+/** A churn walk's answer version, in its edge-cache key (`&dm=c<v>`): only `dm=churn`'s bodies carry `c`, so no other key moves. */
+const CHURN_WALK_V = 1
 import { DiffUnavailable, intervalsOn, ivRefusal, ivRetry, pathGens, withPathStore, storeReady, type Lens } from '../_lib/index.js'
 import { hasLedger, ledgerHead } from '../_lib/ledger.js'
 import { classKey, parseClasses, parseOwner, queryParam, QueryError } from '../_lib/scope.js'
@@ -130,12 +132,14 @@ async function diffGated(
   const url = new URL(ctx.request.url)
   const scans = early.later(() => Promise.all(['from', 'to'].map(key => scanArg(ctx.env, url.searchParams, key))))
   const gens = early.later(() => pathGens(ctx.env, [from, to]))
+  // `dm=churn` (dev: `DIFF_CHURN`): the walk with range churn on its rows. Plain diffs only; `v` is its answer's version.
+  const churn = url.searchParams.get('dm') === 'churn' && ctx.env.DIFF_CHURN === '1' && intervalsOn(ctx.env) && !o.lens && !owner && !query && !classes && !member
   const descentOf = (lensOn: boolean) => url.searchParams.get('dm') === 'delta' && intervalsOn(ctx.env) && !lensOn && !owner && !query && !classes && !summary && atten >= 1
   const keyOf = (head: number, g: string, lensTag: string, descent: boolean) => cacheKeyFor('diff', cacheEnvTag(ctx.env, ctx.request),
     `${from}/${to}/${encodeURIComponent(path)}?w=${w}&h=${h}&a=${minArea}&t=${atten}&n=${top}&l=${lensTag}` +
       `&o=${rawOwner ?? ''}&cl=${classKey(classes)}&qs=${query ? qp.syntax : ''}&q=${encodeURIComponent(query ? qRaw : '')}&head=${head}&s=${summary ? 1 : 0}&D=${depth ?? ''}&g=${g}&st=${staticTag(ctx.env, query)}${query ? `&fv=${FILTER_VIEW_V}` : ''}` +
       // A union root's member diff: the union's threshold (absent otherwise, so no other key moves).
-      (member?.threshold !== undefined ? `&T=${member.threshold}` : '') + (descent && ctx.env.DIFF_DESCENT === '1' ? `&dm=d${DESCENT_V}` : ''),
+      (member?.threshold !== undefined ? `&T=${member.threshold}` : '') + (descent && ctx.env.DIFF_DESCENT === '1' ? `&dm=d${DESCENT_V}` : '') + (churn ? `&dm=c${CHURN_WALK_V}` : ''),
     storeKey(ctx.env),
   )
   // Unscoped and unfiltered (the map's diffs): the key is the gate's to none of (no lens, ledger head or name rule), so
@@ -186,7 +190,7 @@ async function diffGated(
     // The worker's answer: the diff's JSON and what to keep of it — `phase2Ms` (a background full run's) over
     // the viewer-facing default.
     const render = async (o: { phase2Ms?: number; searchLimits?: SearchLimits; walkMs?: number; trace?: typeof st.trace } = {}) => {
-      const diff = await ivRetry(() => buildDiff(ctx.env, { from, to, path, w, h, minArea, atten, top, lens, owner, query, classes, summary, depth, trace: o.trace, ...(o.phase2Ms ? { phase2Ms: o.phase2Ms } : {}), ...(o.searchLimits ? { searchLimits: o.searchLimits } : {}), ...(o.walkMs ? { walkMs: o.walkMs } : {}), ...(member?.threshold !== undefined ? { threshold: member.threshold } : {}), ...(descent ? { descent } : {}) }))
+      const diff = await ivRetry(() => buildDiff(ctx.env, { from, to, path, w, h, minArea, atten, top, lens, owner, query, classes, summary, depth, trace: o.trace, ...(o.phase2Ms ? { phase2Ms: o.phase2Ms } : {}), ...(o.searchLimits ? { searchLimits: o.searchLimits } : {}), ...(o.walkMs ? { walkMs: o.walkMs } : {}), ...(member?.threshold !== undefined ? { threshold: member.threshold } : {}), ...(descent ? { descent } : {}), ...(churn ? { churn } : {}) }))
       // Cut by a time budget (phase 2's or the search's): kept briefly, upgraded at the edge, re-asked (`budgetCut`).
       const keep = keepFor(diff)
       const body = JSON.stringify({

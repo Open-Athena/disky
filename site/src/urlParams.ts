@@ -128,8 +128,8 @@ export const URL_PARAMS: Record<string, UrlParamDoc> = {
   },
   dm: {
     label: 'Diff area mode',
-    description: '`max` sizes the diff treemap\'s cells by the larger of the old and new sizes. When absent, cells are sized by the size change (|Δ|), falling back to `max` when nothing moved.',
-    examples: ['max'],
+    description: '`max` sizes the diff treemap\'s cells by the larger of the old and new sizes; `churn` (where a deployment enables it) by the bytes added + removed. When absent, cells are sized by the size change (|Δ|), falling back to `max` when nothing moved.',
+    examples: ['max', 'churn'],
   },
   err: {
     label: 'Errors only',

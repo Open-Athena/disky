@@ -114,6 +114,9 @@ export interface Env {
   /** `1`: Δ-mode diffs (`dm=delta`, unscoped) by lazy descent over the interval store (`_lib/diffDescent.ts`; its
    *  planner hands busy, broad paths to the as-of walk). Needs no index beyond the store's. */
   DIFF_DESCENT?: string
+  /** `1`: `dm=churn` on the as-of walk (`buildDiff` `churn`): cell area = range churn, colour = net. A prototype, dev only
+   *  (specs/diff-progressive.md §3c); unset, `dm=churn` is a plain walk. */
+  DIFF_CHURN?: string
   /** `1`: the fleet-root owner series reads one bounded interval-store version range (`readRootHistory`),
    *  the canonical reader as fallback. A prototype, off (specs/root-owner-history.md). */
   OWNER_HISTORY_BATCH?: string
