@@ -46,3 +46,7 @@ node --expose-gc [--max-old-space-size=MB] view-mem.mjs --vars vars.json [--var 
 `tsc -p bench/tsconfig.view-mem.json` typechecks it. It is an esbuild entry, not run by type stripping like `bench.ts`.
 
 Each URL prints one JSON line: status, the body's md5, ms, the peak RSS, heap, external and ArrayBuffer memory during the response and during its `waitUntil` work, and the heap kept after a collection. The colo cache, KV and analytics are empty stand-ins, so every render is cold apart from the isolate's own caches, which carry from URL to URL as on the edge. Heap peaks include uncollected garbage. To tell whether a view fits, find the smallest `--max-old-space-size` it completes under. Node's heap runs larger than workerd's, which compresses pointers.
+
+## Decode bench (`decode-bench.ts`)
+
+The site's own decoder over local parquet bytes under Node: whole groups, page reads and page-index parses, per writer setting (`dt-cloud interval-store settings-sample` writes the files), interleaved and repeated, with each pass's median as the spread; and a sort's `.groups.parquet` footer and footer groups. Node isn't a Worker: read it as a ratio between settings, not an absolute. Its header has the flags. Run it pinned on a batch machine (`taskset`), not a laptop, from an `esbuild --bundle --platform=node --format=esm` bundle.

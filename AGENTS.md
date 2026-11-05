@@ -177,6 +177,12 @@ dt-cloud interval-store level-sim GEN REQUESTS  # `readLevel`'s two waves priced
                           # only sidecars and the kept groups' page indexes (cached under `-c`); gets and bytes match live `lv-*` spans exactly
                           # `-s 256,512,1024` (+ `-F` sidecar row-group sizes): a table per mode, today / held page indexes (cold,
                           # colo warm, warm) / the sort cut in small groups with no page index, from the real file's page indexes
+dt-cloud interval-store settings-sample SRC -o OUT -s A=none,D=256,E=1024  # A served sort's real groups (`-n`, evenly spaced) rewritten under writer settings (`none`: the
+                          # pre-page writer; else page rows): same rows, same groups, per-column chunk and page-index bytes in `sizes.json`. `site/bench/decode-bench.ts` times the
+                          # site's own decoder over them under Node (whole groups, page reads, page-index parses; a ratio between settings, not a Worker's absolute)
+dt-cloud interval-store settings-sim -a PLAIN -d PAGED -S SIZES -o OUT REQUESTS  # `readChanged`'s reads of `{a, b, dirs}` mirrored over real sidecars and a real page index:
+                          # whole groups (`-a`) vs pages (`-d`) vs wider pages derived from them (`-p`; bounds exact, bytes the sample's ratios), base tier, bytes / GETs / rounds /
+                          # predicted ms (`-T`, `-R`); plus Map whole-group reads, sidecar facts and (`-f`) each sort's thrift footer's read cost
 dt-cloud image-sha [-e SHA [-a]] [-j]  # The running image's source revision (`image_sha.py`): `$DISKY_GIT_SHA` /
                           # `$DISKY_GIT_DIRTY`, which a deployment's image build stamps (gcs: `job/build.sh` → Dockerfile
                           # `ARG`/`ENV` + OCI labels `org.opencontainers.image.revision`, `disky.dirty`). Prints `<sha>`,

@@ -14,5 +14,5 @@
     "types": ["node"]
   },
   "include": ["*.ts", "../src/perf.ts"],
-  "exclude": ["view-mem.ts"]
+  "exclude": ["view-mem.ts", "decode-bench.ts"]
 }

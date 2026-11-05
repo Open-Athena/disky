@@ -1468,7 +1468,7 @@ async function openIvFooter(env: Env, key: string, src: ByteStore): Promise<Foot
 }
 
 /** The columns of an interval store's footer group (bounds, time bounds, metadata, then the size floor and segment). */
-const IV_FOOTER_COLS = [...FOOTER_BOUNDS, 'vf_min', 'vf_max', 'vt_min', 'vt_max', 'rg_json', 'b_min', 'seg']
+export const IV_FOOTER_COLS = [...FOOTER_BOUNDS, 'vf_min', 'vf_max', 'vt_min', 'vt_max', 'rg_json', 'b_min', 'seg']
 /** The colo copy's layout (`IV_FOOTER_COLS`): bumped when its columns change, so an older copy is never read. */
 const IV_FOOTER_DOC = 2
 /** A footer group as the colo holds it: one array per column of `IV_FOOTER_COLS`, in its rows' (`rg`) order. */
@@ -2477,7 +2477,7 @@ type PageLocation = ReturnType<typeof readOffsetIndex>['page_locations'][number]
 
 /** Several fetched byte runs as one `FileSlice` (absolute offsets): a slice is copied from the runs covering it, which
  *  must cover it contiguously (a read outside them is a planning bug, never a silent short read). */
-function runsSlice(runs: { start: number; buf: ArrayBuffer }[]): FileSlice {
+export function runsSlice(runs: { start: number; buf: ArrayBuffer }[]): FileSlice {
   const sorted = [...runs].sort((a, b) => a.start - b.start)
   return {
     byteLength: sorted.reduce((n, r) => Math.max(n, r.start + r.buf.byteLength), 0),
@@ -2530,7 +2530,7 @@ export class GetRounds {
 }
 
 /** A revived column chunk, with the page-index ranges a 2b.1 cut carries. */
-type IndexedChunk = { offset_index_offset?: bigint; offset_index_length?: number; column_index_offset?: bigint; column_index_length?: number; meta_data: { data_page_offset: bigint; dictionary_page_offset?: bigint } }
+export type IndexedChunk = { offset_index_offset?: bigint; offset_index_length?: number; column_index_offset?: bigint; column_index_length?: number; meta_data: { data_page_offset: bigint; dictionary_page_offset?: bigint } }
 
 /** The pages of `locs` overlapping rows `[a, b)` of a group of `n` rows: `[first, last]`, inclusive (`[-1, -1]`: none). */
 function pagesOf(locs: PageLocation[], a: number, b: number, n: number): [number, number] {
@@ -2562,13 +2562,13 @@ const PAGE_IX_HELD = 8
 
 /** A group's page index as a paged read plans by it: every indexed column's page locations (OffsetIndex), and the
  *  planning columns' per-page bounds (ColumnIndex). */
-type PageIx = { locs: Record<string, PageLocation[]>; stats: Record<string, ColumnIndex> }
+export type PageIx = { locs: Record<string, PageLocation[]>; stats: Record<string, ColumnIndex> }
 
 const pageIxKey = (t: IndexHandle, rg: number): string => `${storeKey(t.env)}|${t.dataKey}|pi:${rg}`
 const pageIxColoKey = (t: IndexHandle, rg: number): Request => coloKey(t.env, t.dataKey!, `pi=${rg}&d=${PAGE_IX_DOC}`)
 /** A group's page-index byte spans (`plan`'s ColumnIndexes, every column's OffsetIndex), and the runs they merge into
  *  (`planRuns`; the colo copy holds those runs' bytes). */
-function pageIxSpans(chunks: IndexedChunk[], leaves: SchemaElement[], plan: readonly string[] = PAGE_PLAN): { spans: { start: number; end: number }[]; runs: { start: number; end: number }[] } {
+export function pageIxSpans(chunks: IndexedChunk[], leaves: SchemaElement[], plan: readonly string[] = PAGE_PLAN): { spans: { start: number; end: number }[]; runs: { start: number; end: number }[] } {
   const spans: { start: number; end: number }[] = []
   for (const [i, k] of chunks.entries()) {
     if (plan.includes(leaves[i].name) && k.column_index_length) spans.push({ start: Number(k.column_index_offset), end: Number(k.column_index_offset) + k.column_index_length })
@@ -2578,7 +2578,7 @@ function pageIxSpans(chunks: IndexedChunk[], leaves: SchemaElement[], plan: read
 }
 
 /** A group's page index parsed from its index runs' bytes (`buf`: `runs`' bytes concatenated). */
-function parsePageIx(chunks: IndexedChunk[], leaves: SchemaElement[], runs: { start: number; end: number }[], buf: ArrayBuffer, plan: readonly string[] = PAGE_PLAN): PageIx {
+export function parsePageIx(chunks: IndexedChunk[], leaves: SchemaElement[], runs: { start: number; end: number }[], buf: ArrayBuffer, plan: readonly string[] = PAGE_PLAN): PageIx {
   const at = (off: bigint | undefined, len: number) => {
     let base = 0
     for (const r of runs) {

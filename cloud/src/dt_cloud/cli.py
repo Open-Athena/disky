@@ -3577,6 +3577,7 @@ from .interval_backfill import verify_generation_cmd as _interval_verify_generat
 from .interval_attribution import backfill_attribution_cmd as _interval_backfill_attribution, convert_cmd as _interval_attribution_convert  # noqa: E402
 from .layout_sim import layout_sim_cmd as _interval_layout_sim  # noqa: E402
 from .level_sim import level_sim_cmd as _interval_level_sim  # noqa: E402
+from .settings_sim import settings_sample_cmd as _interval_settings_sample, settings_sim_cmd as _interval_settings_sim  # noqa: E402
 
 _interval_store.add_command(_interval_local_build)
 _interval_store.add_command(_interval_local_add)
@@ -3594,6 +3595,8 @@ _interval_store.add_command(_interval_merge)
 _interval_store.add_command(_interval_runs)
 _interval_store.add_command(_interval_layout_sim)
 _interval_store.add_command(_interval_level_sim)
+_interval_store.add_command(_interval_settings_sample)
+_interval_store.add_command(_interval_settings_sim)
 main.add_command(_interval_store)
 
 from .age_store import age_store_cmd as _age_store  # noqa: E402
