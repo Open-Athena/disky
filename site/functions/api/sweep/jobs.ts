@@ -4,15 +4,17 @@
 // which can be an hour of listing), and the `gcs-undo-*` jobs undoing runs
 // (`op: 'undo'`, `target` = the run id). Read via the same dispatch SA as
 // `dispatch.ts` (`batch.jobsEditor` covers list). Any signed-in viewer of the
-// console may read this; the payload holds no bucket data.
+// console may read this; the payload holds no bucket data beyond a failed step's
+// own reason (`failure`), which can name a bucket or a key, as the run's files do.
 //
 // Reading also reflects finished runs (`_lib/sweepReflect.ts`: the run's item
-// digest, or closing a run whose job died) and posts each newly finished run's
+// digest, closing a run whose job died, or giving a closed row to a job that
+// ended before recording one) and posts each newly finished run's
 // result to its plan's Slack thread (specs/done/staged-slack.md). The Batch job's
 // exit trap calls this with the job's read grant, so that happens as the run
 // ends.
 import { type Env as AuthEnv, json, requireViewer } from '../../_lib/auth.js'
-import type { ExecEnv } from '../../_lib/dispatch.js'
+import { type ExecEnv, type Expected, expectedOfVars } from '../../_lib/dispatch.js'
 import { type BatchConfig, batchConfig, notConfigured } from '../../_lib/batchConfig.js'
 import { batchLogsUrl, gcpToken } from '../../_lib/gcp.js'
 import { runDir } from '../../_lib/sweepDispatch.js'
@@ -22,6 +24,9 @@ import { isSweepJob, isUndoJob, jobIdOf, listSweepJobs, reflectSweepRuns, type S
 import { S3Store } from '@rdub/file-tree/stores/s3'
 import { storeCreds, storeReady, storeTarget, withPathStore } from '../../_lib/index.js'
 import { intentionalStop } from '../../_lib/sweepStop.js'
+import { failureReader } from '../../_lib/sweepFailure.js'
+import { totalsReader } from '../../_lib/sweepTotals.js'
+import { outcomeReader } from '../../_lib/sweepOutcome.js'
 
 type Env = AuthEnv & ExecEnv
 
@@ -50,7 +55,11 @@ export interface SweepJob {
   plan: string
   last_event: string | null
   logs: string
+  /** A failed job's reason from its `failure.json` (null: none recorded). */
+  failure?: string | null
   stop_requested?: boolean
+  /** What was selected at dispatch (`EXPECTED_*`), display only; absent: not known. */
+  expected?: Expected
 }
 
 /** One listed Batch job as the console reads it (pure). */
@@ -63,6 +72,7 @@ export function sweepJobView(cfg: Pick<BatchConfig, 'project' | 'dataBucket' | '
   const last = ev.length ? ev[ev.length - 1] : null
   const dur = j.status?.runDuration
   const undo = isUndoJob(j)
+  const expected = expectedOfVars(vars)
   return {
     job_id,
     op: undo ? 'undo' : 'sweep',
@@ -81,6 +91,7 @@ export function sweepJobView(cfg: Pick<BatchConfig, 'project' | 'dataBucket' | '
     plan: runDir(cfg, job_id),
     last_event: last?.description ?? null,
     logs: batchLogsUrl(cfg.project, j.uid, j.createTime),
+    ...(expected ? { expected } : {}),
   }
 }
 
@@ -96,9 +107,10 @@ export const onRequestGet = async (ctx: { request: Request; env: Env; waitUntil?
   const jobs = await listSweepJobs(cfg, token).catch(e => e as Error)
   if (jobs instanceof Error) { console.error('batch list failed', jobs.message); return json({ error: jobs.message }, 500) }
 
+  const reason = failureReader(ctx.env)
   const db = ctx.env.DB
   if (db) {
-    const finished = await reflectSweepRuns(cfg, db, jobs)
+    const finished = await reflectSweepRuns(cfg, db, jobs, undefined, reason, undefined, outcomeReader(ctx.env), totalsReader(ctx.env))
     await settleOpenPlan(db, jobs.filter(j => j.status?.state === 'SUCCEEDED').map(jobIdOf))
     if (finished.length) {
       // Sized from the interval store for the dates it holds (`withPathStore`), as the plans routes size them.
@@ -113,6 +125,7 @@ export const onRequestGet = async (ctx: { request: Request; env: Env; waitUntil?
     const store = S3Store({ ...storeTarget(ctx.env), ...storeCreds(ctx.env), prefixes: ['sweep/runs/'] })
     await Promise.all(out.map(async j => {
       if (j.op === 'sweep' && await intentionalStop(j, store.get)) j.stop_requested = true
+      if (j.op === 'sweep' && j.state === 'FAILED' && !j.stop_requested && reason) j.failure = await reason(j.job_id)
     }))
   }
   return json({ jobs: out, configured: true }, 200, { 'cache-control': 'private, max-age=10' })

@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest'
+import { planDigest, realRun, type RunRow } from '../functions/_lib/plans'
 import {
-  commonBucketPrefix, type DeletionRun, EXEC_CAPS, elapsed, elapsedDetails, type ExecJob, fmtDur, joinRuns, loggedOf, plannedOf, runControls,
+  attemptOnly, itemsDigest, reusableDryRun, totalsLowerBound,
+  commonBucketPrefix, type DeletionRun, EXEC_CAPS, elapsed, elapsedDetails, type ExecJob, fmtDur, expectedOf, joinRuns, loggedOf, plannedOf, runControls,
   progressEstimate, type ProgressFile, runDirHref, runFileHref, runFilesRel, runJobId, runLabel, sumProgress, verifyRun, viewBuckets, viewState,
 } from './runs'
 
@@ -21,6 +23,19 @@ describe('runJobId — the Batch job behind a run', () => {
       runJobId({ run_id: GCS_RUN, log_dir: 'gs://data/sweep/2026-09-27-p3/' }),
       runJobId({ run_id: GCS_RUN }),
     ]).toEqual([GCS_JOB, 'cw-sweep-dry-20260928-120000z', GCS_RUN, GCS_RUN])
+  })
+})
+
+describe('expectedOf — the selection total a live run shows until its manifest says', () => {
+  const expected = { bytes: 137_000, objects: 754 }
+  it('a live job has it; a finished one, or one dispatched without a total, has none', () => {
+    expect([
+      expectedOf({ key: 'a', job: job({ job_id: 'a', state: 'RUNNING', expected }), ops: [] }),
+      expectedOf({ key: 'b', job: job({ job_id: 'b', state: 'QUEUED', expected }), ops: [] }),
+      expectedOf({ key: 'c', job: job({ job_id: 'c', state: 'FAILED', expected }), ops: [] }),
+      expectedOf({ key: 'd', job: job({ job_id: 'd', state: 'RUNNING' }), ops: [] }),
+      expectedOf({ key: 'e', run: run(), ops: [] }),
+    ]).toEqual([expected, expected, null, null, null])
   })
 })
 
@@ -169,10 +184,32 @@ describe('verifyRun — log against D1, planned against decided', () => {
   })
 })
 
+describe('totalsLowerBound — a real run closed with no final summary in its run dir', () => {
+  const killed = run({ mode: 'real', finished_ts: 2000, plan_digest: '' })
+  it('only once the file is known to be absent, on a finished real run that reviewed nothing', () => {
+    expect([
+      totalsLowerBound(killed, null),
+      totalsLowerBound(killed, undefined),
+      totalsLowerBound(killed, { for_real: true, buckets: {} }),
+      totalsLowerBound({ ...killed, mode: 'dry' }, null),
+      totalsLowerBound({ ...killed, finished_ts: null }, null),
+      totalsLowerBound({ ...killed, plan_digest: 'D' }, null),
+    ]).toEqual([true, false, false, false, false, false])
+  })
+})
+
 describe('runControls — per executor capabilities', () => {
   const view = (r: DeletionRun, j?: Partial<ExecJob>, ops: ExecJob[] = []) => ({ key: r.run_id, run: r, ...(j ? { job: job({ job_id: GCS_JOB, ...j }) } : {}), ops })
   const gcs = EXEC_CAPS.sweep
   const cw = EXEC_CAPS['plan-sweep']
+  it('a run with soft delete off offers no undo, on gcs or to an admin', () => {
+    const off = run({ mode: 'real', finished_ts: 2000, undo_deadline: null, undo_state: 'none', soft_delete_days: 0 })
+    expect(runControls(view(off), gcs, true, 2500)).toEqual({ stop: false, undo: false, purge: false, undoing: false })
+  })
+  it('a run closed from what it wrote offers undo: its window is set', () => {
+    const killed = run({ mode: 'real', finished_ts: 2000, plan_digest: '', undo_deadline: 3000, undo_state: 'none' })
+    expect(runControls(view(killed, { state: 'FAILED' }), gcs, true, 2500)).toEqual({ stop: false, undo: true, purge: false, undoing: false })
+  })
   it('a live run: stop (admins only)', () => {
     expect([
       runControls(view(run({ finished_ts: null }), { state: 'RUNNING' }), gcs, true, 2000),
@@ -200,5 +237,48 @@ describe('runControls — per executor capabilities', () => {
       runControls(view(run({ purge_state: 'pending' })), cw, true, 8999).purge,
       runControls(view(run({ purge_state: 'pending' })), gcs, true, 9000).purge,
     ]).toEqual([true, false, true, false, false])
+  })
+})
+
+describe('attemptOnly — runs whose deleted count means attempted', () => {
+  it('both generation executors on XML; a JSON one and a listing run keep their counts', () => {
+    expect([
+      attemptOnly({ contract: 'manifest-delete-generations', backend: 'xml' }),
+      attemptOnly({ contract: 'reviewed-delete-generations' }),
+      attemptOnly({ contract: 'reviewed-delete-generations', backend: 'json' }),
+      attemptOnly({}),
+      attemptOnly(null),
+    ]).toEqual([true, true, false, false, false])
+  })
+})
+
+describe('reusableDryRun — which path the confirm names', () => {
+  const dryDir = (stamp: string) => `gs://data/sweep/runs/gcs-sweep-dry-${stamp}z`
+  const dry = (o: Partial<DeletionRun>): DeletionRun => run({ mode: 'dry', plan_digest: 'D', log_dir: dryDir('20260928-120000'), ...o })
+  const a = dry({ run_id: 'a', started_ts: 100 })
+  const b = dry({ run_id: 'b', started_ts: 200, log_dir: dryDir('20260928-130000') })
+  it('the newest dry run of exactly these items at this scan, on this plan', () => {
+    const scan = '2026-09-27'
+    expect(reusableDryRun([a, b], 3, 'D', scan)?.run_id).toBe('b')
+    expect([
+      reusableDryRun([a], 3, 'other digest', scan),
+      reusableDryRun([a], 3, 'D', 'another scan'),
+      reusableDryRun([a], 4, 'D', scan),
+      reusableDryRun([{ ...a, mode: 'real' }], 3, 'D', scan),
+      reusableDryRun([{ ...a, plan_digest: '' }], 3, 'D', scan),
+      reusableDryRun([], 3, 'D', scan),
+    ]).toEqual([null, null, null, null, null, null])
+  })
+  it('a newest dry run whose dir dispatch wouldn\'t reuse means a fresh manifest, not an older one', () => {
+    expect(reusableDryRun([a, { ...b, log_dir: 'gs://data/elsewhere' }], 3, 'D', '2026-09-27')).toBe(null)
+  })
+  it('picks what dispatch\'s `realRun` picks', () => {
+    const runs = [a, b, dry({ run_id: 'c', started_ts: 300, scan: 'another scan' }), dry({ run_id: 'd', started_ts: 400, plan_digest: 'E' })]
+    const server = realRun(runs as unknown as RunRow[], 'D', 1, '2026-09-27')
+    expect([server.ok && server.reviewed?.run_id, reusableDryRun(runs, 3, 'D', '2026-09-27')?.run_id]).toEqual(['b', 'b'])
+  })
+  it('digests the items as `planDigest` does', async () => {
+    const lines = ['gs://b/z/', '=gs://b/a.bin', 'gs://b/a/']
+    expect(await itemsDigest(lines)).toBe(await planDigest(lines))
   })
 })

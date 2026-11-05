@@ -1576,6 +1576,15 @@ input::placeholder, textarea::placeholder { color: var(--ink-3); opacity: 1; }
 
   h1 { margin-bottom: 8px; }
 
+  .sweep-soft-delete {
+    margin-top: 24px;
+    .status { font-weight: 600; }
+    form { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; }
+    input[type='number'] { width: 5em; }
+    .warn { color: var(--danger); font-weight: 600; }
+    .sweep-soft-delete-buckets { margin-top: 4px; td, th { padding: 2px 16px 2px 0; text-align: left; } }
+  }
+
   .session-log-switch {
     margin-top: 24px;
     .status { font-weight: 600; }
@@ -2075,6 +2084,13 @@ input::placeholder, textarea::placeholder { color: var(--ink-3); opacity: 1; }
   // (or clears) this slot instead of pushing the rest of the page up and down.
   min-height: 30px;
   .sel-bar { margin-left: 0; box-shadow: 0 6px 18px rgb(0 0 0 / 0.25); pointer-events: auto; }
+}
+// The app's pager strip (`Pager.tsx`), wherever a list has one; a table's own header pagers restyle it.
+.pg {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 4px; margin: 6px 0; font-size: 13px; font-variant-numeric: tabular-nums;
+  > span { padding: 0 6px; color: var(--ink-2); }
+  button { font: inherit; line-height: 1.4; background: var(--panel); color: var(--ink); border: 1px solid var(--line); border-radius: 5px; padding: 0 8px; cursor: pointer; &:disabled { opacity: 0.4; cursor: default; } }
+  select.psize { margin-left: 8px; font: inherit; font-size: 12px; background: var(--panel); color: var(--ink-2); border: 1px solid var(--line); border-radius: 4px; padding: 1px 4px; }
 }
 .children-tbl .pager {
   display: flex; align-items: center; flex-wrap: wrap; gap: 4px 10px; margin: 6px 0; font-size: 12px; color: var(--ink-2);
@@ -2893,6 +2909,7 @@ kbd { font: inherit; font-size: 11px; padding: 0 4px; border: 1px solid var(--li
     h3 { margin: 0 0 4px; }
   }
   .dispatch-note { margin: 0; font-size: 12.5px; }
+  .dispatch-path { margin: 0; font-size: 13px; color: var(--danger); }
   .dispatch-btns { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
   .dispatch button, .staged-actions button, table.runs button {
     font: inherit; font-size: 13px; padding: 3px 12px; cursor: pointer;
@@ -2925,11 +2942,15 @@ kbd { font: inherit; font-size: 11px; padding: 0 4px; border: 1px solid var(--li
   .stage-batch.emptied .batch-head { opacity: 0.8; }
   .batch-prefix-history { margin: 8px 0 12px 28px; padding-left: 16px; li { margin: 5px 0; overflow-wrap: anywhere; } }
   .runs-pg { flex-wrap: wrap; }
+  .dispatch-confirm-head { display: flex; align-items: center; gap: 10px; margin-top: 8px; }
+  .dispatch-confirm-list { margin: 6px 0; padding-left: 18px; li { margin: 3px 0; overflow-wrap: anywhere; } }
+  .run-expected .tag { margin-left: 0; }
   table.runs {
     th.num, td.num { text-align: right; font-variant-numeric: tabular-nums; }
     td.nb, td.num { white-space: nowrap; }
     .tag.real { margin-left: 0; color: #d6b65a; border-color: #d6b65a; font-weight: 650; }
     .tag.dry { margin-left: 0; color: var(--ink-3); border-color: var(--line); }
+    .tag.not-swept { color: var(--danger); border-color: var(--danger); font-weight: 650; }
     tr.cancelled > td { background: color-mix(in srgb, var(--ink-3) 6%, transparent); }
     .run-sort { color: inherit; font: inherit; font-weight: inherit; padding: 0; border: 0; background: none; cursor: pointer; }
     .run-outcome .prediction-label { display: block; color: var(--ink-2); font-size: .9em; font-weight: 600; }

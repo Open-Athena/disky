@@ -10,6 +10,8 @@ export interface PrefixBandRecord extends RunBand {
 }
 export type PrefixExecution = null | {
   kind: 'recorded'; runId: string; objects: number; bytes: number; preserved: number; undone: number; deadline: number | null; expired: boolean
+  /** A finished run that recorded no window: nothing to promise (soft delete off, the usual reason). */
+  noUndo?: boolean
 } | {
   kind: 'live-prefix'; runId: string; objects: number; bytes: number
 } | { kind: 'live-bucket'; runId: string; done: boolean }
@@ -26,7 +28,20 @@ export function prefixExecution(prefix: string, records: readonly PrefixBandReco
   const r = records.filter(r => r.prefix === prefix && (r.objects > 0 || r.drift_new_objects > 0 || r.overwritten > 0)).sort((a, b) => b.started_ts - a.started_ts)[0]
   if (r) {
     const deadline = conservativeDeadline(r)
-    return { kind: 'recorded', runId: r.run_id, objects: r.objects, bytes: r.bytes, preserved: r.drift_new_objects + r.overwritten, undone: r.undone_objects, deadline, expired: deadline != null && now >= deadline }
+    return { kind: 'recorded', runId: r.run_id, objects: r.objects, bytes: r.bytes, preserved: r.drift_new_objects + r.overwritten, undone: r.undone_objects, deadline, expired: deadline != null && now >= deadline, ...(r.finished_ts != null && r.undo_deadline == null ? { noUndo: true } : {}) }
   }
   return live ? { kind: 'live-bucket', runId: live.runId, done: live.progress.done } : null
+}
+
+/** A run's pinned item set: its `plan.json`, as the dispatch snapshotted it. */
+export interface RunItems { sweep?: string[]; objects?: string[] }
+
+/** Is `prefix` in this run: an item, or under a prefix item? An unread plan says no: a row claims a run only on the run's own word. */
+export const inRunItems = (prefix: string, items: RunItems | null | undefined): boolean =>
+  !!items && (!!items.objects?.includes(prefix) || !!items.sweep?.some(item => prefix.startsWith(item)))
+
+/** Which live run `prefix` (staged at `addedTs`) is part of: the index into `targets`, -1 for none. Sharing a bucket with a run isn't being in it. */
+export function liveTargetOf(prefix: string, addedTs: number, targets: readonly { bucket: string; run: { started_ts: number }; items?: RunItems | null }[]): number {
+  const bucket = prefix.replace(/^[a-z0-9]+:\/\//, '').split('/')[0]
+  return targets.findIndex(t => t.bucket === bucket && t.run.started_ts >= addedTs && inRunItems(prefix, t.items))
 }

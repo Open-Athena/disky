@@ -114,7 +114,7 @@ ROOT_LABEL = "my buckets"                   # the store root's crumb label
 # BUCKET_REGIONS = '{"my-bucket": "us-east1"}'  # a one-region bucket cut runs its job there, beside the data; unset = BATCH_REGION
 # DATA_BUCKET = "my-data"                      # the bucket a run's plan.json, manifest and logs land in (dispatch requires it)
 # SWEEP_IMAGE = "<region>-docker.pkg.dev/<project>/<repo>/<image>:<tag>"  # the executor's image (dispatch requires it)
-# SWEEP_REVIEW_STORE = "r2://<index-bucket>"  # historical review inputs after per-scan retirement
+# SWEEP_REVIEW_STORE = "r2://<index-bucket>"  # historical review inputs after per-scan retirement (`sweep`: the `as_of` hold store; unset = gs://$DATA_BUCKET)
 # SWEEP_REVIEW_SECRETS = '{"R2_ENDPOINT":"<endpoint-secret>","R2_ACCESS_KEY_ID":"<key-secret>","R2_SECRET_ACCESS_KEY":"<secret-secret>"}'
 # SWEEP_PACING = "guided"                    # per-bucket feedback; adaptive is a faster probe, enable after a controlled benchmark
 # CF_ACCOUNT_ID = "<cf-account-id>"            # `sweep`: the Cloudflare account its runs are recorded to (D1)
@@ -123,6 +123,7 @@ ROOT_LABEL = "my buckets"                   # the store root's crumb label
 # SWEEP_S3_ENDPOINT = "https://s3.example.com"  # `plan-sweep`: the S3 endpoint its runs delete through
 # DISKY_LABELS = "app=disky,deployment=<name>"  # cost-attribution labels on the executor jobs' VMs + disks (each adds `component`); unset = none
 # SLACK_ADMIN_CHANNEL = "C0123456789"          # channel id staged-plan threads post to (with SLACK_BOT_TOKEN); unset = no Slack
+# STAGED_CARD_GRANT = "<grant id>"             # the job grant whose post-scan `staged-card` step re-renders the staged card; prod's env only, never a dev stack sharing its channel; unset = no such route
 
 # --- Link previews (specs/done/dogi.md) ---
 # --- Name search: the static name index on INDEX_R2; private viewer gate ---
