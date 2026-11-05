@@ -18,13 +18,12 @@ import type { Trace } from './shared.js'
 import { reqOf } from './shared.js'
 
 /** Bytes a plan's row adds to a read's peak: the slope of the peak over the plan's distinct rows, on a real Worker
- *  (`bench/README.md`: each peak is the kill line less the most ballast the read survives beside it), ~50-60 B colo-cold
- *  and warm alike. Far below a row's own size: a plan reads whole groups and keeps ~1% of them, so the rest is a group's
- *  doc on its way through the LRU. */
+ *  (`bench/README.md`: each peak is the kill line less the most ballast the read survives beside it), ~60 B colo-warm.
+ *  Far below a row's own size: a plan reads whole groups and keeps ~1% of them, so the rest is a group's doc on its way
+ *  through the LRU. Per request: a group two requests read is counted for both, though it's decoded and held once. */
 export const READ_ROW_HEAP = 56
-/** What a read costs at any plan: the same fit's intercept colo-cold (~60 MiB), less what it fills the isolate's caches
- *  with, which is the intercept colo-warm (~29 MiB) and is counted once, in `READ_CAP.bytes`. Its fetched runs and the
- *  groups being decoded. */
+/** What a read costs at any plan (its fetched runs, the groups being decoded): set so that a charge plus the caches a
+ *  cleared isolate's read fills, which `READ_CAP.bytes` leaves room for, covers the measured colo-cold peaks. */
 export const READ_REQUEST_HEAP = 32 * 2 ** 20
 
 /** A read of at most this many rows goes in without asking: a request's point reads (a root's row, a level's lookups
@@ -34,7 +33,8 @@ export const READ_REQUEST_HEAP = 32 * 2 ** 20
 export const READ_SMALL_ROWS = 64_000
 
 /** The cap and the wait's bounds (a knob object: tests shrink them). `bytes`: where a Worker dies, measured over the
- *  isolate's code (231 MiB of ballast lives, 246 doesn't: past the 128 MiB Cloudflare documents; `bench/README.md`), less
+ *  isolate's code (231 MiB of ballast lives, 246 doesn't, and 220 sometimes doesn't on an isolate that just held as much:
+ *  past the 128 MiB Cloudflare documents; `bench/README.md`), less
  *  what the isolate can hold apart from reads, each at its bound: the group (24), footer (12) and level-index (8) LRUs and
  *  the static answers (32). */
 export const READ_CAP = {

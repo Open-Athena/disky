@@ -49,18 +49,20 @@ Each URL prints one JSON line: status, the body's md5, ms, the peak RSS, heap, e
 
 ## Where a Worker dies, and what a read costs
 
-Node's heap isn't a Worker's: it doesn't compress pointers, and its peaks count garbage a Worker's limit doesn't. So the constants of `functions/_lib/readCap.ts` come from a real Worker, by bisecting what kills it (1102) on a test deployment:
+Node's heap isn't a Worker's: it doesn't compress pointers, and its peaks count garbage a Worker's limit doesn't. So the constants of `functions/_lib/readCap.ts` come from a real Worker, by bisecting what kills it (1102) on a test deployment (2026-11-05, EWR):
 
-- **The line.** A test route holding N MiB of filled `ArrayBuffer`s for a second: 231 lives, 246 dies (flat one-byte strings: 268, 273), past the documented 128 MiB. Not counted: 7.5 GB of short-lived garbage, ~780 MiB of `Response` bodies, 194 gzip pipes of ~2 MB each in flight (each passed; none was bisected to a death).
-- **A read's peak.** The same ballast held across a real read, its isolate's memos cleared and (colo-cold) its colo keys namespaced per trial: the peak is the line less the most ballast it survives. The bisect resolves about 10 MiB.
+- **The line.** A test route holding N MiB of filled `ArrayBuffer`s for a second: 231 lives, 246 dies (flat one-byte strings: 268, 273), past the documented 128 MiB. It isn't sharp: ten requests in a row holding 220 MiB each, some died, on isolates that had just served one (buffers not yet collected). Not counted, each passing where tried: 7.5 GB of short-lived garbage objects, ~780 MiB of `Response` bodies, 194 gzip pipes of ~2 MB each in flight.
+- **A read's peak.** The same ballast held across a real read, its isolate's memos cleared and (colo-cold) its colo keys namespaced per trial: the peak is the line less the most ballast it survives, an isolate's caches as that read fills them included. Each bisect resolves 10 to 20 MiB; the ranges are those of two or more.
 
-| Plan's distinct rows | Peak, colo-warm | Peak, colo-cold |
-|---|---|---|
-| 377K | ~49 MiB | ~80 MiB |
-| 455K (diff) | ~60 MiB | ~96 MiB |
-| 696K | ~60 MiB | ~96 MiB |
-| 696K (diff) | ~72 MiB | ~96 MiB |
+| Read | Plan's distinct rows | Charge | Peak, colo-warm | Peak, colo-cold |
+|---|---|---|---|---|
+| subtree | 374K | 52 MiB | 26–48 MiB | 66–104 MiB |
+| diff | 599K | 64 MiB | 44–61 MiB | 81–104 MiB |
+| subtree, a full plan | 693K | 69 MiB | 44–61 MiB | 81–104 MiB |
+| diff, two full plans | 918K | 81 MiB | 59–79 MiB | 81–111 MiB |
 
-`READ_ROW_HEAP` is the slope, `READ_REQUEST_HEAP` the colo-cold intercept less the colo-warm one (the caches a cleared isolate fills, charged once, in `READ_CAP.bytes`).
+`READ_ROW_HEAP` is the colo-warm slope (~60 B a row by the ranges' middles; colo-cold is flatter, within the bisects' resolution). `READ_REQUEST_HEAP` is what makes a charge plus the caches a cleared isolate's read fills (groups 24 MiB, footers 12) cover the colo-cold peaks: 88 to 117 MiB against 66 to 111 measured. A fit to a bisect's resolution, not a heap snapshot.
 
-Before colo copies were taken as they arrived the colo-warm peaks were ~78 to ~180 MiB: every copy of a read waited in memory for its slowest.
+- **Reads at once in one isolate** (a test route running K past-budget reads of one bucket together, no cap in effect). Colo-warm, by the ballast they survive: 2 and 4 reads peak at 51 to 91 MiB, 8 and 12 at 91 to 131, against charges summing to 150, 289, 567 and 856. Their groups are mostly the same ones (a size sort's top buckets), read once and joined, and a charge doesn't know another request holds the group: across requests the cap over-counts shared groups severalfold. Colo-cold, 2 reads peak at 161 to 191 MiB (charges 150, plus the caches); 3 or more can't be run in one request (its CPU limit ends it first).
+
+Before colo copies were taken as they arrived, the colo-warm peaks of these four were 66–74, 89–96, 164–171 and 171–179 MiB: every copy of a read waited in memory for its slowest.
