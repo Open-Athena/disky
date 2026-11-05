@@ -127,7 +127,14 @@ class ScanReporter:
             self.run.clear()
 
 
-def build_command(context: Path, tag: str, config: dict) -> list[str]:
+def source_revision(root: Path) -> tuple[str, int]:
+    """``root``'s exact commit and whether its tracked files differ from it (what the image is stamped with)."""
+    sha = run(["git", "-C", str(root), "rev-parse", "HEAD"], check=True, capture_output=True, text=True).stdout.strip()
+    status = run(["git", "-C", str(root), "status", "--porcelain", "--untracked-files=no"], check=True, capture_output=True, text=True).stdout
+    return sha, int(bool(status.strip()))
+
+
+def build_command(context: Path, tag: str, config: dict, sha: str, dirty: int) -> list[str]:
     if not fullmatch(r"[a-z0-9][a-z0-9._-]{0,127}", tag):
         raise ValueError("Choose a lowercase image tag of at most 128 characters")
     image = f"{config['region']}-docker.pkg.dev/{config['project']}/{config['image_repository']}/scan:{tag}"
@@ -138,7 +145,7 @@ def build_command(context: Path, tag: str, config: dict) -> list[str]:
         "--service-account", f"projects/{config['project']}/serviceAccounts/{config['builder_account']}@{config['project']}.iam.gserviceaccount.com",
         "--gcs-source-staging-dir", f"gs://{config['scratch_bucket']}/builds/source",
         "--polling-interval", "15",
-        "--substitutions", f"_IMAGE={image}",
+        "--substitutions", f"_IMAGE={image},_GIT_SHA={sha},_GIT_DIRTY={dirty}",
     ]
 
 
@@ -310,12 +317,18 @@ def main() -> None:
 
 
 @main.command()
+@option("-D", "--allow-dirty", is_flag=True, help="Build a tree with uncommitted changes to tracked files (stamped dirty)")
 @option("-n", "--dry-run", is_flag=True, help="Stage the minimal source context and print the build command without uploading")
 @argument("tag")
-def build(dry_run: bool, tag: str) -> None:
+def build(allow_dirty: bool, dry_run: bool, tag: str) -> None:
+    """Build this checkout's image (not the caller's cwd's), stamped with its commit and dirty state."""
     root = HERE.parent
+    sha, dirty = source_revision(root)
+    print(f"building {root} at {sha}{' (dirty)' if dirty else ''}", file=stderr)
+    if dirty and not allow_dirty:
+        raise ClickException("Refusing to build a dirty tree: commit, or pass --allow-dirty to stamp it dirty")
     context = root / "tmp" / f"oa-r2-build-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S%fZ')}"
-    command = build_command(context, tag, profile())
+    command = build_command(context, tag, profile(), sha, dirty)
     context.mkdir(parents=True, exist_ok=False)
     for directory in ("src", "cloud/src", "job/icons-r2", "job/nf", "job/profiles"):
         copytree(root / directory, context / directory, ignore=ignore_patterns("__pycache__", "*.pyc"))

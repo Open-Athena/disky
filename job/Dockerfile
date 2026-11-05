@@ -33,6 +33,12 @@ COPY job/profiles ./job/profiles
 # The Pages config the `cf-usage` step filters Cloudflare's analytics by (`options.cf-usage.config`)
 COPY site/wrangler.toml ./site/wrangler.toml
 ENV DT_NF_DIR=/app/job/nf
+# The source revision (`job/r2-scan build` → `cloudbuild.yaml` build args), late so a new sha rebuilds no layer above:
+# OCI labels for the registry, env for the code (`dt-cloud image-sha [--expect SHA]`, the stages' start-up log).
+ARG DISKY_GIT_SHA=""
+ARG DISKY_GIT_DIRTY=""
+LABEL org.opencontainers.image.revision=$DISKY_GIT_SHA disky.dirty=$DISKY_GIT_DIRTY
+ENV DISKY_GIT_SHA=$DISKY_GIT_SHA DISKY_GIT_DIRTY=$DISKY_GIT_DIRTY
 # `scan-run supervise` (the shared job wrapper): the scan runs in its own session; a TERM (preemption) reaches its whole
 # group, and a run killed before its own exit (TERM, the OOM killer) is recorded failed and alerts once.
 ENTRYPOINT ["dt-cloud", "scan-run", "supervise", "--", "python", "job/r2-scan", "run"]
