@@ -111,6 +111,10 @@ class Node:
 class Coverage:
     """One case replayed at one floor. Shares are of the case's churn C, unless named otherwise.
 
+    `absent_both_*`: the outermost undrawn paths live at neither scan (created and gone inside the range): no floor draws
+    these, since an as-of read at D1 or D2 has no row for them. `drawn` counts the cells with churn (a churnless leaf is
+    filler), `expanded` includes the path itself.
+
     `missed`: paths over τ under an `(other)`, each its own cell on a map chosen by churn (`missed_share`: the outermost
     such paths' churn). `hidden_in_leaves`: paths over τ inside a cell the walk draws as a leaf (its children sub-floor).
     The replay is given the changed paths over τ/64 and those the walk keeps, so a `largest_undrawn` under τ/64 reads 0.
@@ -121,6 +125,7 @@ class Coverage:
     to: str
     path: str
     area_factor: float
+    atten: float
     floor: float
     churn: int
     drawn: int
@@ -138,6 +143,8 @@ class Coverage:
     missed: int
     missed_share: float
     hidden_in_leaves: int
+    absent_both_share: float
+    absent_both_largest: int
 
 
 def replay(
@@ -198,7 +205,7 @@ def replay(
             others[p] = c - s
         level = nxt
     # `top`: the leaves by churn; the rest fold into their parents' `(other)`.
-    ranked = sorted(drawn.items(), key=lambda kv: -kv[1])
+    ranked = sorted(((q, c) for q, c in drawn.items() if c > 0), key=lambda kv: -kv[1])
     cut = sum(c for _, c in ranked[top:])
     for q, c in ranked[top:]:
         others[parent_of(q)] = others.get(parent_of(q), 0) + c
@@ -211,14 +218,18 @@ def replay(
     # What a map chosen by churn would draw and this doesn't: any undrawn path over τ under an `(other)`.
     tau = total * min_area / (w * h)
     leaves = set(dict(ranked[:top]))
-    over = [n for n in changed if n.churn >= tau and n.path not in drawn_paths]
+    over = [n for n in changed if n.churn > 0 and n.churn >= tau and n.path not in drawn_paths]
     missed = [n for n in over if not _under_drawn(n.path, path, leaves)]
     # Maximal missed paths' churn: a child's churn is inside its parent's, so count each `(other)`'s once.
     missed_set = {n.path for n in missed}
     missed_top = [n for n in missed if parent_of(n.path) not in missed_set]
+    # Live at neither scan: under `(other)` at any floor.
+    absent = [n for n in changed if n.churn > 0 and not n.a and not n.b and n.path not in drawn_paths and not _under_drawn(n.path, path, leaves)]
+    absent_set = {n.path for n in absent}
+    absent_top = [n for n in absent if parent_of(n.path) not in absent_set]
     worst = max((o / expanded[p] for p, o in others.items() if expanded.get(p)), default=0.0)
     return Coverage(
-        frm=frm, to=to, path=path, area_factor=area_factor, floor=floor, churn=total, drawn=len(drawn_paths - {path}), expanded=len(expanded), kept_rows=kept_rows,
+        frm=frm, to=to, path=path, area_factor=area_factor, atten=atten, floor=floor, churn=total, drawn=len(drawn_paths - {path}), expanded=len(expanded), kept_rows=kept_rows,
         other_share=in_other / total if total else 0.0,
         root_other_share=others.get(path, 0) / total if total else 0.0,
         worst_other_share=worst,
@@ -231,6 +242,8 @@ def replay(
         missed=len(missed),
         missed_share=sum(n.churn for n in missed_top) / total if total else 0.0,
         hidden_in_leaves=len(over) - len(missed),
+        absent_both_share=sum(n.churn for n in absent_top) / total if total else 0.0,
+        absent_both_largest=max((n.churn for n in absent_top), default=0),
     )
 
 
@@ -273,6 +286,7 @@ def root_size(con: duckdb.DuckDBPyConnection, gen: Path, path: str, d: int) -> i
 
 
 @command("churn-coverage")
+@option("-a", "--attens", default="2", help="Attenuations to replay, comma-separated: 2 is the walk's default (a floor doubling per level below P's children), 1 a flat floor")
 @option("-f", "--factors", default="1", help="minArea factors to replay, comma-separated: 1 is the walk's floor; 0.1 reads ten times lower")
 @option("-H", "--height", default=1024, type=IntRange(1), help="Canvas height (`view.QUANT`-rounded, as the route)")
 @option("-M", "--memory", default="24GB", help="DuckDB memory limit")
@@ -282,7 +296,7 @@ def root_size(con: duckdb.DuckDBPyConnection, gen: Path, path: str, d: int) -> i
 @option("-w", "--width", default=1664, type=IntRange(1), help="Canvas width")
 @argument("gen", type=Path)
 @argument("cases", type=Path)
-def churn_coverage_cmd(factors, height, memory, out, threads, tmp, width, gen, cases) -> None:
+def churn_coverage_cmd(attens, factors, height, memory, out, threads, tmp, width, gen, cases) -> None:
     """Replay the walk per case against the paths' exact churn: what lands in `(other)`, the largest churner not drawn."""
     work = Path(tmp)
     work.mkdir(parents=True, exist_ok=True)
@@ -317,16 +331,17 @@ def churn_coverage_cmd(factors, height, memory, out, threads, tmp, width, gen, c
             con.execute("INSERT INTO names SELECT path FROM read_parquet(?)", [str(lv)])
             changed = [Node(p, d, a, b, x) for d, p, a, b, x in _nodes(con, ch, c["path"], "depth, path, a, b, churn", f"(churn >= {tau / 64} OR depth = {d_p + 1} OR path IN (SELECT path FROM names))")]
             for f in fs:
-                rows.append(replay(pair[0], pair[1], c["path"], roots[(pair[0], pair[1], c["path"])], int(total), changed, live, width, height, f))
-                err(coverage_line(rows[-1]))
+                for at in (float(x) for x in attens.split(",")):
+                    rows.append(replay(pair[0], pair[1], c["path"], roots[(pair[0], pair[1], c["path"])], int(total), changed, live, width, height, f, at))
+                    err(coverage_line(rows[-1]))
     if out:
         out.write_text("".join(json.dumps(asdict(r)) + "\n" for r in rows))
 
 
 def coverage_line(r: Coverage) -> str:
-    return (f"{r.frm}→{r.to} {r.path or '/':42} ×{r.area_factor:<5} floor {size_of(r.floor):>7} C {size_of(r.churn):>7} cells {r.drawn:>5}"
+    return (f"{r.frm}→{r.to} {r.path or '/':42} ×{r.area_factor:<5} a{r.atten:<3} floor {size_of(r.floor):>7} C {size_of(r.churn):>7} cells {r.drawn:>5}"
             f" other {share(r.other_share):>6} (root {share(r.root_other_share):>6}, worst {share(r.worst_other_share):>6})"
-            f" largest undrawn {size_of(r.largest_undrawn):>7} ({share(r.largest_undrawn_share):>6}) missed≥τ {r.missed:>5} ({share(r.missed_share):>6}) in leaves {r.hidden_in_leaves}")
+            f" largest undrawn {size_of(r.largest_undrawn):>7} ({share(r.largest_undrawn_share):>6}) missed≥τ {r.missed:>5} ({share(r.missed_share):>6}) in leaves {r.hidden_in_leaves} absent both {share(r.absent_both_share):>6} top cut {share(r.top_cut_share):>6} kept {r.kept_rows}")
 
 
 # --- the dedicated churn index: a model ------------------------------------------------------------------------------

@@ -37,18 +37,26 @@ def world():
 def test_a_small_heavy_directory_lands_in_its_parents_other():
     changed, live = world()
     r = replay("a", "b", "", (101, 101), 50, changed, live, 100, 100, min_area=100)
-    assert (r.floor, r.churn, r.expanded, r.drawn) == (1.01, 50, 2, 4)
+    # Cells with churn: b1, b1/warm, b2; b1/big is filler.
+    assert (r.floor, r.churn, r.expanded, r.drawn) == (1.01, 50, 2, 3)
     assert (r.other_share, r.root_other_share) == (40 / 50, 0.0)
     assert r.worst_other_share == 40 / 44
     assert (r.largest_undrawn, r.largest_undrawn_share, r.largest_undrawn_size, r.largest_undrawn_path) == (40, 40 / 50, 1, "b1/hot")
     assert (r.tau, r.missed, r.missed_share, r.hidden_in_leaves) == (0.5, 1, 40 / 50, 0)
 
 
+def test_a_path_live_at_neither_scan_stays_in_other_at_any_floor():
+    changed = [Node("b1", 1, 50, 50, 30), Node("b1/gone", 2, 0, 0, 30)]
+    live = [Node("b1", 1, 50, 50, 0), Node("b1/here", 2, 50, 50, 0)]
+    r = replay("a", "b", "", (50, 50), 30, changed, live, 100, 100, area_factor=0.001, min_area=100)
+    assert (r.other_share, r.absent_both_share, r.absent_both_largest, r.largest_undrawn_path) == (1.0, 1.0, 30, "b1/gone")
+
+
 def test_a_lower_floor_draws_it():
     changed, live = world()
     live = [*live, Node("b1/hot", 2, 1, 1, 0)]
     r = replay("a", "b", "", (101, 101), 50, changed, live, 100, 100, area_factor=0.1, min_area=100)
-    assert (r.floor, r.other_share, r.largest_undrawn, r.missed, r.drawn) == (0.101, 0.0, 0, 0, 5)
+    assert (r.floor, r.other_share, r.largest_undrawn, r.missed, r.drawn) == (0.101, 0.0, 0, 0, 4)
 
 
 def test_a_rename_under_identical_bytes_expands():

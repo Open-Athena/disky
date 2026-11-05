@@ -2431,6 +2431,15 @@ async function decodeSpans(h: IndexHandle, kept: Span[], keep: (r: Row) => boole
 /** A version that opens or closes in `(d1, d2]`. */
 const changesIn = (vf: number, vt: number, d1: number, d2: number): boolean => (vf > d1 && vf <= d2) || (vt > d1 && vt <= d2)
 
+/** The versions of `paths` (`(depth, path)` points) that open or close in `(d1, d2]`, whole groups (never by page, unlike
+ *  `readChanged`): what a churn walk reads for a path one scan lacks. `plan`'s groups, from `planChanged`. */
+export async function readPathVersions(h: IndexHandle, paths: { depth: number; path: string }[], d1: number, d2: number, plan: ChangedPlan): Promise<Row[]> {
+  const want = new Set(paths.map(q => `${q.depth}\0${q.path}`))
+  const at = (depth: number, path: string) => want.has(`${depth}\0${path}`)
+  const rows = await decodeSpans(h, plan.spans, r => at(r.depth, r.path), undefined, at, true)
+  return (h.runs?.length ? combineVersions(rows) : rows).filter(r => changesIn(r.vf!, r.vt!, d1, d2))
+}
+
 /** What a range read decodes (`readChanged`), before any is: its row groups, and their rows. */
 export interface ChangedPlan { spans: Span[]; rows: number }
 
@@ -3820,6 +3829,9 @@ export async function readRootHistoryRows(env: Env, dates: string[], lens?: Lens
 
 /** The scans the interval store holds (none when it is off). */
 export const ivHeldDates = async (env: Env): Promise<string[]> => (intervalsOn(env) ? [...(await ivScans(env)).keys()] : [])
+
+/** The stamps (`vf`/`vt` units) of the scans the interval store holds, in order. */
+export const ivStamps = async (env: Env): Promise<number[]> => [...(await ivScans(env)).values()].sort((x, y) => x - y)
 
 /** The interval store's newest scan ordinal (`vf`/`vt` units); null when it is off or empty. */
 export async function ivHorizon(env: Env): Promise<number | null> {
