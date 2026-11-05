@@ -4,12 +4,14 @@ and a compaction under a small one stays within it, measured over the tree."""
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 import tracemalloc
 import warnings
 from pathlib import Path
 from threading import Event, Thread
+from time import monotonic, sleep
 
 import numpy as np
 import pyarrow as pa
@@ -277,6 +279,45 @@ def _measured_part(spool: str, n: int, rg: int, page: int, out: str) -> tuple[in
     if not tm.has_procfs():
         peak[0] = max(peak[0], tm.peak_bytes())
     return base, max(peak[0], _held())
+
+
+def _hold_arrow(n: int, done: str) -> int:
+    """In a spawned worker: `n` bytes of Arrow's pool, touched, until the file `done` appears."""
+    held = pa.allocate_buffer(n)
+    np.frombuffer(held, dtype="u1")[:] = 1
+    deadline = monotonic() + 60
+    while not Path(done).exists() and monotonic() < deadline:
+        sleep(0.01)
+    return held.size
+
+
+@pytest.mark.skipif(not Path("/proc/self/smaps_rollup").exists(), reason="the tree's parts are read from procfs (Linux)")
+def test_a_worker_tells_the_watch_what_only_it_can_read(tmp_path):
+    """A worker's Arrow pool isn't readable from outside it: `worker_init`'d under a sort's name in a running watch, it says
+    it, and `tree_parts` adds it up per sort, next to what its pages are. The watch's report dir goes with it."""
+    from concurrent.futures import ProcessPoolExecutor
+    from multiprocessing import get_context
+
+    n = 64 * tm.MIB
+    done = tmp_path / "done"
+    with tm.TreeWatch(1 << 40, "x", every=3600, check=False):
+        d = os.environ[tm.REPORT_ENV]
+        with ProcessPoolExecutor(1, mp_context=get_context("spawn"), initializer=tm.worker_init, initargs=("path",)) as ex:
+            held = ex.submit(_hold_arrow, n, str(done))
+            deadline = monotonic() + 60
+            parts = tm.tree_parts()
+            while parts["workers Arrow"] != n and monotonic() < deadline:
+                sleep(0.05)
+                parts = tm.tree_parts()
+            done.touch()
+            assert held.result() == n
+        assert sorted(parts) == sorted(["own", "own anon", "own file", "own heap", "own heap free", "workers", "workers anon", "workers file",
+                                        "workers Arrow", "workers heap", "workers heap free", "path workers", "path heap"])
+        assert parts["workers Arrow"] == n
+        assert parts["workers anon"] >= n
+        assert n <= parts["path workers"] <= parts["workers"]
+        assert parts["path heap"] == parts["workers heap"] > 0
+    assert (os.environ.get(tm.REPORT_ENV), Path(d).exists()) == (None, False)
 
 
 @pytest.mark.parametrize("rg, page", [(256, 8), (1024, 1024)])

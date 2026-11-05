@@ -1222,6 +1222,7 @@ def write_served(con, src: str | list[str], sort: str, out: Path, schema: pa.Sch
     try:
         t0 = monotonic()
         hb.set_stage(f"cut {sort}: sort")
+        tm.doing(sort, "runs")
         budget = run_budget(con, k) if budget is None else budget
         # A level run's rows are up to `ROWS_PER_VERSION` its source's (any one key range; `rows_bound` is the whole's): its
         # sort holds them within the same budget.
@@ -1267,6 +1268,7 @@ def write_served(con, src: str | list[str], sort: str, out: Path, schema: pa.Sch
                  for lo, hi, spans in piece_plan([(a, z, got[i][1].get(s, [])) for i, a, z in at_run[s]], share)]
         if tasks:
             hb.set_stage(f"cut {sort}: pieces")
+            tm.doing(sort, "pieces")
             tf = monotonic()
             spools = sn.each(con, lambda _, f: RunSpool(f), run_files, min(len(run_files), k))
             footers_s = monotonic() - tf
@@ -1320,12 +1322,13 @@ def write_served(con, src: str | list[str], sort: str, out: Path, schema: pa.Sch
         parts = cut_plan(segs, rg_rows, min(k, max(1, total // part_rows)) if part_rows else k)
         t2 = monotonic()
 
-        with ProcessPoolExecutor(len(parts), mp_context=get_context("spawn"), initializer=tm.worker_init) if len(parts) > 1 else nullcontext() as ex:
+        with ProcessPoolExecutor(len(parts), mp_context=get_context("spawn"), initializer=tm.worker_init, initargs=(sort,)) if len(parts) > 1 else nullcontext() as ex:
             def args(i: int, groups: list) -> tuple:
                 lo, hi = (groups[0][1], groups[-1][1] + groups[-1][2]) if groups else (0, 0)
                 return _trim(pieces, lo, hi), groups, str(work / f"part-{i:04d}.parquet"), schema, size_col, kv, page, rg_rows
 
             hb.set_stage(f"cut {sort}: write")
+            tm.doing(sort, "write")
             prog = hb.Progress(f"cut {sort}", total=len(parts), total_rows=total, unit="parts")
             files = [work / f"part-{i:04d}.parquet" for i in range(len(parts))]
             if len(parts) == 1:
@@ -1342,7 +1345,9 @@ def write_served(con, src: str | list[str], sort: str, out: Path, schema: pa.Sch
             for p in [*work.glob("run-*.parquet"), *work.glob("piece-*.parquet")]:
                 p.unlink()
             t3 = monotonic()
+            tm.doing(sort, "join")
             concat(files, out, drop=True, **({"map_": ex.map} if ex else {}))
+        tm.doing(sort, "groups")
         hb.after(f"cut {sort}")
         seg_rows = dict(segs)
         err(f"  {sort}: {total:,} rows in {len(segs)} segments (open {seg_rows.get(0, 0):,}): {len(runs)} runs sorted in "
@@ -1351,6 +1356,7 @@ def write_served(con, src: str | list[str], sort: str, out: Path, schema: pa.Sch
         return write_groups(out, read_bounds([work / f"part-{i:04d}.parquet.bounds" for i in range(len(parts))]), sort,
                             lambda rows: _seg_summary(rows, bool(stamps) and not level))
     finally:
+        tm.doing(sort, None)
         shutil.rmtree(work, ignore_errors=True)
 
 
@@ -1413,8 +1419,8 @@ def plan_cut(con, tree: tm.Budget | None, files: list[str], *, at_once: int = 1,
     sort's; default `files`') a group over `sort_rows` rows — the most one sort has, default all of `files`' and `extra_rows`:
     what a sort holds past its files', the level sort's, `interval_level.extra_rows`), DuckDB's limit set to the rest for the block, then the previous limit back; None: the
     machine's cores over `at_once`, DuckDB's limit as set. Each run and piece is a share of DuckDB's limit (`run_budget`
-    over `at_once × procs`). The block is `TreeWatch`'s phase `what`."""
-    with tm.phase(what):
+    over `at_once × procs`). The block is `TreeWatch`'s phase `what`, under the cut's gauges (`cut_gauges`)."""
+    with tm.gauges(**tm.cut_gauges(con)), tm.phase(what):
         cores = os.cpu_count() or 1
         if tree is None:
             procs = max(1, cores // at_once)
@@ -1486,7 +1492,8 @@ def cut_gen(con, gen_dir: Path, scans: dict, *, rg_rows: int = SERVED_RG, jobs: 
     cut = {sort: {"rows": got[sort]["rows"], "groups": got[sort]["groups"], "bytes": got[sort]["bytes"]} for sort in todo}
     if sorts:
         return cut, None
-    stats = {**churn_stats(con, str(gen_dir), scans, paths), "slices": scans["slices"]}
+    with tm.gauges(**tm.cut_gauges(con)):
+        stats = {**churn_stats(con, str(gen_dir), scans, paths), "slices": scans["slices"]}
     (served / "stats.json").write_text(json.dumps(stats, indent=1) + "\n")
     return cut, stats
 

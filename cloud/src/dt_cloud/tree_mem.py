@@ -31,20 +31,27 @@ each such entry runs under `TreeWatch`, which samples the tree's proportional re
 `WATCH_S` and logs `<entry>: peak tree PSS X MiB of budget M MiB` at its end; with `$DT_TREE_MEM_ASSERT` set, a peak past
 `-M` exits non-zero. Named blocks (`phase`: each sort, the cut's plan, the churn's counts, `add`'s stages, an append's steps) get their own peak,
 logged before the overall line: what a stage's real tree held, next to the plan that sized it. `at` names what the tree is
-working on (an append's key range) and `gauges` what else to read with each sample (DuckDB's and Arrow's own totals), so a
-peak's line says where it happened and how much of it each side accounts for."""
+working on (an append's key range), `doing` what a concurrent block is at (a cut's sort and its pass) and `gauges` what else
+to read with each sample, so a peak's line says where it happened and how much of it each holder accounts for: DuckDB's and
+Arrow's own totals, and over a cut (`tree_parts`, `duck_parts`) the tree split by process, what each process's PSS is backed
+by, and what its heap and Arrow pool hold; a spawned worker says its own (`worker_init`), which nothing outside it can read.
+Under gauges a watch also logs every `SERIES_S` where the tree stands, and each phase what each gauge reached by itself."""
 from __future__ import annotations
 
+import ctypes
 import os
 import resource
+import shutil
+import struct
 import sys
 from collections import Counter
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from functools import cache
+from tempfile import mkdtemp
 from threading import Event, Lock, Thread
-from time import monotonic
+from time import monotonic, sleep
 
 import pyarrow as pa
 
@@ -143,11 +150,52 @@ def arrow_returns_freed() -> None:
         pass
 
 
-def worker_init() -> None:
+class _MallInfo2(ctypes.Structure):
+    _fields_ = [(n, ctypes.c_size_t) for n in ("arena", "ordblks", "smblks", "hblks", "hblkhd", "usmblks", "fsmblks", "uordblks", "fordblks", "keepcost")]
+
+
+@cache
+def _mallinfo2():
+    fn = ctypes.CDLL(None).mallinfo2
+    fn.restype = _MallInfo2
+    return fn
+
+
+def heap_bytes() -> tuple[int, int]:
+    """glibc's heap in this process: `(in use, free but kept)`, where the C++ side's own allocations live (a parquet
+    writer's metadata, a parsed footer), which Arrow's pool doesn't count. Glibc ≥ 2.33; others raise (a gauge's read fails)."""
+    m = _mallinfo2()()
+    return m.uordblks + m.hblkhd, m.fordblks
+
+
+#: The dir a running `TreeWatch` made for its tree's workers to say what only they can read (`_report_to_watch`).
+REPORT_ENV = "DT_TREE_REPORT_DIR"
+#: A worker's report: its Arrow pool's bytes, its heap's in use and free (`heap_bytes`).
+_REPORT = struct.Struct("<qqq")
+
+
+def _report_to_watch(label: str) -> None:
+    """Under a `TreeWatch` (`REPORT_ENV`, inherited), this process's Arrow pool and heap go to `<dir>/<label>.<pid>` every
+    `WATCH_S`, overwritten in place, from a daemon thread, for `tree_parts`. Nothing else in the tree can read them."""
+    d = os.environ.get(REPORT_ENV)
+    if not d:
+        return
+    fd = os.open(f"{d}/{label}.{os.getpid()}", os.O_WRONLY | os.O_CREAT, 0o600)
+
+    def run() -> None:
+        while True:
+            os.pwrite(fd, _REPORT.pack(pa.total_allocated_bytes(), *heap_bytes()), 0)
+            sleep(WATCH_S)
+
+    Thread(target=run, name="tree-report", daemon=True).start()
+
+
+def worker_init(label: str = "-") -> None:
     """A spawned cut worker's initializer: one Arrow thread (the cores are split between the workers), freed memory
-    returned (`arrow_returns_freed`)."""
+    returned (`arrow_returns_freed`), and its own bytes told to a running watch under `label` (its sort)."""
     pa.set_cpu_count(1)
     arrow_returns_freed()
+    _report_to_watch(label)
 
 
 def _spawned_private() -> int:
@@ -296,37 +344,82 @@ def has_procfs() -> bool:
     return os.path.exists("/proc/self/smaps_rollup")
 
 
-def tree_pss(root: int | None = None) -> int:
-    """The proportional resident bytes (`smaps_rollup`'s `Pss`) of `root` (default this process) and every descendant:
-    the tree's share of physical memory, a page shared by several of them (their libraries) counted once across them.
+def tree_rollups(root: int | None = None) -> Iterator[tuple[int, dict[str, int]]]:
+    """`(pid, its `smaps_rollup`'s byte fields: `Pss`, `Pss_Anon`, …)` of `root` (default this process) and every descendant.
     Linux only (`has_procfs`)."""
-    todo, total = [os.getpid() if root is None else root], 0
+    todo = [os.getpid() if root is None else root]
     while todo:
         pid = todo.pop()
         try:
             with open(f"/proc/{pid}/smaps_rollup") as f:
-                total += next(int(line.split()[1]) << 10 for line in f if line.startswith("Pss:"))
+                fields = {p[0][:-1]: int(p[1]) << 10 for p in (line.split() for line in f) if len(p) == 3 and p[2] == "kB"}
             for task in os.listdir(f"/proc/{pid}/task"):
                 with open(f"/proc/{pid}/task/{task}/children") as f:
                     todo += [int(c) for c in f.read().split()]
-        except (FileNotFoundError, ProcessLookupError, StopIteration):  # legitimate: the process exited between reads
+        except (FileNotFoundError, ProcessLookupError):  # legitimate: the process exited between reads
             continue
-    return total
+        if fields:  # legitimate: empty, a process exiting as it was read
+            yield pid, fields
+
+
+def tree_pss(root: int | None = None) -> int:
+    """The proportional resident bytes (`smaps_rollup`'s `Pss`) of `root` (default this process) and every descendant:
+    the tree's share of physical memory, a page shared by several of them (their libraries) counted once across them.
+    Linux only (`has_procfs`)."""
+    return sum(fields["Pss"] for _, fields in tree_rollups(root))
+
+
+def _worker_reports(pids: set[int]) -> Iterator[tuple[str, int, tuple[int, int, int]]]:
+    """`(label, pid, report)` of each live worker in `pids` that has reported to the running watch (`_report_to_watch`)."""
+    d = os.environ.get(REPORT_ENV)
+    for name in os.listdir(d) if d else []:
+        label, _, pid = name.rpartition(".")
+        if int(pid) in pids:
+            with open(f"{d}/{name}", "rb") as f:
+                got = f.read(_REPORT.size)
+            if len(got) == _REPORT.size:  # legitimate: short, a worker that hasn't written its first report yet
+                yield label, int(pid), _REPORT.unpack(got)
+
+
+def tree_parts() -> dict[str, int]:
+    """A gauge of what the tree's PSS (`tree_pss`) is made of, read from one walk of it. `own`: this process, and of it
+    `own anon`, `own file` (file-backed pages, which the kernel can drop), `own heap`, `own heap free` (`heap_bytes`).
+    `workers`: every descendant, the same, and `workers Arrow` (each one's own pool; this process's is the `Arrow` gauge).
+    `<label> workers`, `<label> heap`: those of the workers `worker_init`'d under a label (a cut's sort)."""
+    rollups = dict(tree_rollups())
+    own = rollups.pop(os.getpid())
+    heap, free = heap_bytes()
+    parts = {"own": own["Pss"], "own anon": own["Pss_Anon"], "own file": own["Pss_File"], "own heap": heap, "own heap free": free,
+             "workers": sum(r["Pss"] for r in rollups.values()), "workers anon": sum(r["Pss_Anon"] for r in rollups.values()),
+             "workers file": sum(r["Pss_File"] for r in rollups.values()), "workers Arrow": 0, "workers heap": 0, "workers heap free": 0}
+    labels: Counter[str] = Counter()
+    for label, pid, (arrow, used, kept) in sorted(_worker_reports(set(rollups))):
+        parts["workers Arrow"] += arrow
+        parts["workers heap"] += used
+        parts["workers heap free"] += kept
+        labels[f"{label} workers"] += rollups[pid]["Pss"]
+        labels[f"{label} heap"] += used
+    return {**parts, **labels}
 
 
 @dataclass
 class PhasePeak:
-    """A `phase`'s peak tree PSS, over the `samples` taken while it ran; `at` and `gauges`: what `at` named and what `gauges`
-    read at that peak's sample."""
+    """A `phase`'s peak tree PSS, over the `samples` taken while it ran; `at`, `doing` and `gauges`: what `at` and `doing`
+    named and what `gauges` read at that peak's sample; `highs`: the most each gauge read in any of them."""
 
     peak: int = 0
     samples: int = 0
     at: str | None = None
     gauges: dict[str, int | None] = field(default_factory=dict)
+    doing: dict[str, str] = field(default_factory=dict)
+    highs: dict[str, int] = field(default_factory=dict)
 
-    def add(self, pss: int, at: str | None = None, gauges: dict[str, int | None] | None = None) -> None:
+    def add(self, pss: int, at: str | None = None, gauges: dict[str, int | None] | None = None, doing: dict[str, str] | None = None) -> None:
         if pss > self.peak:
-            self.peak, self.at, self.gauges = pss, at, gauges or {}
+            self.peak, self.at, self.gauges, self.doing = pss, at, gauges or {}, doing or {}
+        for k, v in (gauges or {}).items():
+            if v is not None:
+                self.highs[k] = max(self.highs.get(k, 0), v)
         self.samples += 1
 
 
@@ -365,10 +458,24 @@ def at(label: str) -> Iterator[None]:
         w.at_label = prev
 
 
+def doing(what: str, step: str | None) -> None:
+    """From now the innermost running `TreeWatch`'s samples say `what` is at `step`, until the next call for it (`None`: it's
+    done; none running: nothing). For blocks that overlap, which one `at` label can't name: a peak's line lists them."""
+    w = _WATCHES[-1] if _WATCHES else None
+    if w is None:
+        return
+    with w._lock:
+        if step is None:
+            w.doings.pop(what, None)
+        else:
+            w.doings[what] = step
+
+
 @contextmanager
-def gauges(**fns: Callable[[], int]) -> Iterator[None]:
-    """The innermost running `TreeWatch` also reads these (name → bytes) with each sample in the block (none running:
-    nothing): each phase's line gives their values at its peak, or says a read failed (`TreeWatch._read_gauges`)."""
+def gauges(**fns: Callable[[], int | dict[str, int]]) -> Iterator[None]:
+    """The innermost running `TreeWatch` also reads these (name → bytes, or a read of several: name → bytes) with each
+    sample in the block (none running: nothing): each phase's line gives their values at its peak, or says a read failed
+    (`TreeWatch._read_gauges`), and another the most each reached."""
     w = _WATCHES[-1] if _WATCHES else None
     if w is None:
         yield
@@ -387,8 +494,30 @@ def duck_bytes(con) -> Callable[[], int]:
     return lambda: int(cur.execute("SELECT coalesce(sum(memory_usage_bytes), 0) FROM duckdb_memory()").fetchone()[0])
 
 
+def duck_parts(con) -> Callable[[], dict[str, int]]:
+    """A gauge of `duck_bytes`' total (`DuckDB`), its tags past `DUCK_TAG_MIN` (`DuckDB <tag>`) and what DuckDB has spilled
+    (`DuckDB spill`), read as `duck_bytes` reads."""
+    cur = con.cursor()
+
+    def read() -> dict[str, int]:
+        rows = cur.execute("SELECT tag, memory_usage_bytes, temporary_storage_bytes FROM duckdb_memory()").fetchall()
+        return {"DuckDB": sum(int(r[1]) for r in rows), **{f"DuckDB {r[0]}": int(r[1]) for r in sorted(rows) if r[1] >= DUCK_TAG_MIN},
+                "DuckDB spill": sum(int(r[2]) for r in rows)}
+
+    return read
+
+
+def cut_gauges(con) -> dict[str, Callable[[], int | dict[str, int]]]:
+    """What a cut's watch reads with each sample (`gauges`): DuckDB's parts, this process's Arrow pool, the tree's parts."""
+    return {"DuckDB": duck_parts(con), "Arrow": pa.total_allocated_bytes, "tree": tree_parts}
+
+
 #: Labels `TreeWatch` logs at its end, largest peak first.
 AT_TOP = 5
+#: A DuckDB memory tag holding less isn't worth its place on a line (`duck_parts`).
+DUCK_TAG_MIN = 64 * MIB
+#: Seconds between a watch's `now` lines, while it has gauges.
+SERIES_S = 60.0
 
 
 class TreeWatch:
@@ -406,7 +535,9 @@ class TreeWatch:
         self.phases: dict[str, PhasePeak] = {}
         self.untagged = PhasePeak()
         self.at_label: str | None = None
-        self.gauge_fns: dict[str, Callable[[], int]] = {}
+        self.gauge_fns: dict[str, Callable[[], int | dict[str, int]]] = {}
+        self.doings: dict[str, str] = {}
+        self._said = 0.0
         self.at_peaks: dict[str, int] = {}
         self.gauge_fails: Counter[str] = Counter()
         self._gauge_lock = Lock()
@@ -415,15 +546,17 @@ class TreeWatch:
         self._stop = Event()
         self._thread: Thread | None = None
 
-    def _read_gauges(self, fns: dict[str, Callable[[], int]]) -> dict[str, int | None]:
-        """Each gauge's bytes, None where its read failed (counted, and said on the phase's line). A gauge is a diagnostic,
+    def _read_gauges(self, fns: dict[str, Callable[[], int | dict[str, int]]]) -> dict[str, int | None]:
+        """Each gauge's bytes (a read of several: each of its names'), None where its read failed (counted, and said on the
+        phase's line). A gauge is a diagnostic,
         so its failure doesn't raise: on a phase's thread that would fail the work being measured, and on the watch's it
         would end the sampling, leaving a peak that understates the tree and still logs as normal."""
         read: dict[str, int | None] = {}
         with self._gauge_lock:  # a sample is on the watch's thread or a phase's: one cursor between them
             for name, fn in fns.items():
                 try:
-                    read[name] = fn()
+                    got = fn()
+                    read.update(got if isinstance(got, dict) else {name: got})
                 except Exception:
                     read[name] = None
                     self.gauge_fails[name] += 1
@@ -439,10 +572,14 @@ class TreeWatch:
             if at_ is not None:
                 self.at_peaks[at_] = max(self.at_peaks.get(at_, 0), pss)
             running = [name for name, n in self._running.items() if n]
+            doings = dict(self.doings)
             for name in running:
-                self.phases[name].add(pss, at_, read)
+                self.phases[name].add(pss, at_, read, doings)
             if not running:
-                self.untagged.add(pss, at_, read)
+                self.untagged.add(pss, at_, read, doings)
+        if read and monotonic() - self._said >= SERIES_S:
+            self._said = monotonic()
+            print(f"{self.what}: now tree PSS {pss / MIB:,.0f} MiB ({100 * pss / self.total:.0f}%{self._detail(at_, doings, read)})", file=sys.stderr, flush=True)
 
     def _begin(self, name: str) -> None:
         with self._lock:
@@ -458,9 +595,12 @@ class TreeWatch:
     def _gauge(self, name: str, value: int | None) -> str:
         return f"{name} unread ({self.gauge_fails[name]} failed)" if value is None else f"{name} {value / MIB:,.0f} MiB"
 
+    def _detail(self, at_: str | None, doings: dict[str, str], read: dict[str, int | None]) -> str:
+        steps = ", ".join(f"{k} {v}" for k, v in sorted(doings.items()))
+        return f"{f'; at {at_}' if at_ else ''}{f'; doing {steps}' if steps else ''}{''.join(f'; {self._gauge(k, v)}' for k, v in read.items())}"
+
     def _line(self, p: PhasePeak) -> str:
-        return (f"peak tree PSS {p.peak / MIB:,.0f} MiB ({100 * p.peak / self.total:.0f}%; {p.samples} samples"
-                f"{f'; at {p.at}' if p.at else ''}{''.join(f'; {self._gauge(k, v)}' for k, v in p.gauges.items())})"
+        return (f"peak tree PSS {p.peak / MIB:,.0f} MiB ({100 * p.peak / self.total:.0f}%; {p.samples} samples{self._detail(p.at, p.doing, p.gauges)})"
                 f"{' — OVER BUDGET' if p.peak > self.total else ''}")
 
     def _run(self) -> None:
@@ -473,6 +613,9 @@ class TreeWatch:
                 raise SystemExit(f"{self.what}: ${ASSERT_ENV} set, but the tree's memory is read from procfs (Linux), which this machine lacks")
             return self
         self._t0 = monotonic()
+        self._said = self._t0
+        self._reports, self._outer_reports = mkdtemp(prefix="tree-watch-"), os.environ.get(REPORT_ENV)
+        os.environ[REPORT_ENV] = self._reports
         self._sample()
         _WATCHES.append(self)
         self._thread = Thread(target=self._run, name="tree-watch", daemon=True)
@@ -487,10 +630,17 @@ class TreeWatch:
         self._thread.join()
         _WATCHES.remove(self)
         self._sample()
+        if self._outer_reports is None:
+            del os.environ[REPORT_ENV]
+        else:
+            os.environ[REPORT_ENV] = self._outer_reports
+        shutil.rmtree(self._reports)
         over = self.peak > self.total
         if self.phases:
             for name, p in [*self.phases.items(), ("(untagged)", self.untagged)]:
                 print(f"{self.what}: phase {name}: {self._line(p)}", file=sys.stderr, flush=True)
+                if p.highs:
+                    print(f"{self.what}: phase {name}: each at its highest: " + "; ".join(f"{k} {v / MIB:,.0f} MiB" for k, v in p.highs.items()), file=sys.stderr, flush=True)
         if self.at_peaks:
             top = sorted(self.at_peaks.items(), key=lambda kv: (-kv[1], kv[0]))[:AT_TOP]
             print(f"{self.what}: largest of {len(self.at_peaks)}: " + ", ".join(f"{k} {v / MIB:,.0f} MiB" for k, v in top), file=sys.stderr, flush=True)
