@@ -88,8 +88,9 @@ CHUNK_META = 2304
 PAGE_META = 48
 #: The buffer a joining worker copies through (`parquet_pages._copy_range`, without `copy_file_range`).
 CONCAT_BUF = 1 << 24
-#: The share of `-M` past `base` the cut's workers (their `proc_base` and buffers) and its sorts' batches may take;
-#: DuckDB's sorts get the rest. Workers only add speed: fewer of them still cut the same bytes.
+#: The share of `-M` past `base` and the writers' metadata (which the workers don't change: `Budget.cut`) the cut's workers
+#: (their `proc_base` and buffers) and its sorts' batches may take; DuckDB's sorts get the rest. Workers only add speed:
+#: fewer of them still cut the same bytes.
 WORKER_SHARE = 1 / 2
 
 
@@ -249,21 +250,25 @@ class Budget:
             meta: int = 0, sort_rows: int | None = None) -> CutPlan:
         """The cut's plan: the most workers (≤ `cores // at_once` a sort) whose bytes — `at_once × (procs × (proc_base +
         worker_bytes) + sort_bytes)`, each row count charged at most `rows` (the sorts' rows: no batch or group holds
-        more) — fit `WORKER_SHARE` of `total − base`; none fitting: one. A worker's part is its sort's served groups
-        (of `sort_rows`, default `rows`, the most any one sort has) over the workers, each kept by its writer (`meta`
-        bytes, `group_meta`) until the part closes: all of a sort's groups' metadata at once, however many workers.
-        DuckDB gets the rest, which its runs and pieces (`interval_store.run_budget`) are sized to."""
+        more) — fit `WORKER_SHARE` of `total − base`, past the metadata their writers keep, and leave DuckDB `DUCK_MIN`; none
+        fitting: one. A worker's part is its sort's served groups (of `sort_rows`, default `rows`, the most any one sort
+        has) over the workers, each kept by its writer (`meta` bytes, `group_meta`) until the part closes: all of a sort's
+        groups' metadata at once, however many workers. So that metadata doesn't choose them: it comes off before the
+        share, and only what a rounded-up part adds to it counts as theirs. It's still charged: DuckDB gets the rest, which
+        its runs and pieces (`interval_store.run_budget`) are sized to."""
         cap = (lambda r: min(r, rows)) if rows else (lambda r: r)  # noqa: E731
-        room = (self.total - self.base) * WORKER_SHARE
         top = max(1, cores // max(1, at_once))
         groups = -(-(sort_rows or rows or 0) // rg_rows)
+        fixed = at_once * groups * meta
+        left = self.total - self.base - fixed
+        room = min(left * WORKER_SHARE, left - DUCK_MIN)
 
         def cost(procs: int) -> tuple[int, int]:
             sort = SORT_COPIES * cap(procs * spool_rows) * rb  # `sort_bytes`, capped
             arrow = at_once * (procs * worker_bytes(cap(spool_rows), cap(rg_rows), rb, -(-groups // procs), meta) + sort)
             return arrow, arrow + at_once * procs * self.proc_base
 
-        procs = next((p for p in range(top, 0, -1) if cost(p)[1] <= room), 1)
+        procs = next((p for p in range(top, 0, -1) if cost(p)[1] - fixed <= room), 1)
         arrow, _ = cost(procs)
         return CutPlan(at_once, procs, spool_rows, arrow, self.duck(arrow, at_once * procs, f"the cut ({at_once} sorts × {procs} workers)"))
 

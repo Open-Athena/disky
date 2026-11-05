@@ -63,8 +63,7 @@ def test_cut_plan_most_workers():
 def test_cut_plan_charges_the_writers_metadata():
     """Each writer keeps its part's groups' metadata until it closes (`group_meta`: 20 columns of 2,304 B, 32 pages of
     20 × 48 B + a 100-byte path's min and max): 1 MiB of it a group, a sort of 1,000 groups holds 1,000 MiB of it
-    whatever its workers, and DuckDB is left that much less; past `WORKER_SHARE`, fewer workers don't help (each holds
-    more groups), so it's still all charged."""
+    whatever its workers, and DuckDB is left that much less."""
     meta = tm.group_meta(20, 32, 100)
     assert meta == 20 * 2304 + 32 * (20 * 48 + 200) == 83_200
     b = tm.Budget(total=8192 * MIB, base=200 * MIB, proc_base=80 * MIB)
@@ -75,9 +74,45 @@ def test_cut_plan_charges_the_writers_metadata():
     two = b.cut(2, 8, 8192, 128, 65536, 2 * rows, meta=MIB, sort_rows=rows)
     assert two == tm.CutPlan(at_once=2, procs=4, spool_rows=65536, arrow=(2 * (4 * 35 + 64) + 2 * 1000) * MIB,
                              duck=(8192 - 200 - 8 * 80 - 408 - 2000) * MIB)
-    # More metadata than half the budget: one worker, and DuckDB what's left.
-    big = b.cut(1, 8, 8192, 128, 65536, 5 * rows, meta=MIB)
-    assert (big.procs, big.arrow) == (1, (35 + 16 + 5000) * MIB)
+
+
+def test_cut_plan_takes_the_metadata_off_before_the_workers_share():
+    """The workers don't change the writers' metadata, so it doesn't choose them: 5,000 MiB of it is past half of what this
+    process leaves (3,996), but half of the 2,992 MiB past it still holds all 8 workers (1,048 MiB with their buffers and
+    batches). DuckDB gets the rest; the metadata is still charged, to the byte."""
+    b = tm.Budget(total=8192 * MIB, base=200 * MIB, proc_base=80 * MIB)
+    assert b.cut(1, 8, 8192, 128, 65536, 5000 * 8192, meta=MIB) == tm.CutPlan(
+        at_once=1, procs=8, spool_rows=65536, arrow=(408 + 5000) * MIB, duck=(8192 - 200 - 8 * 80 - 408 - 5000) * MIB)
+    # Tighter: 6,999 MiB leave 993, half of it 496: 3 workers (393 MiB with their batches), not 4 (525, a group's rounding in it).
+    assert b.cut(1, 8, 8192, 128, 65536, 6999 * 8192, meta=MIB) == tm.CutPlan(
+        at_once=1, procs=3, spool_rows=65536, arrow=(3 * 35 + 48 + 6999) * MIB, duck=(8192 - 200 - 3 * 80 - 153 - 6999) * MIB)
+
+
+def test_cut_plan_several_sorts_all_their_workers():
+    """Four sorts at once on 16 cores, each of 10,000 groups of 1 MiB of metadata: 40,000 MiB, past half of what this process
+    leaves (32,668), but half of the 25,336 past it holds all 4 workers a sort."""
+    b = tm.Budget(total=64 * 1024 * MIB, base=200 * MIB, proc_base=75 * MIB)
+    rows = 10_000 * 8192
+    kept = 40_000 * MIB
+    workers = 4 * (4 * tm.part_bytes(65536, 8192, 478) + tm.sort_bytes(4, 65536, 478))
+    assert b.cut(4, 16, 8192, 478, 65536, 4 * rows, meta=MIB, sort_rows=rows) == tm.CutPlan(
+        at_once=4, procs=4, spool_rows=65536, arrow=kept + workers, duck=b.total - b.base - 16 * b.proc_base - kept - workers)
+
+
+def test_cut_plan_leaves_duckdb_its_least_past_the_metadata():
+    """The share of a little left past the metadata mustn't take what DuckDB needs: 230 MiB left, half of it (115) would hold
+    3 workers (37 MiB each with their batches) and leave DuckDB 119 MiB, under `DUCK_MIN`. Two (74) leave it 156."""
+    b = tm.Budget(total=4096 * MIB, base=200 * MIB, proc_base=20 * MIB)
+    assert b.cut(1, 8, 8192, 8, 65536, 3666 * 8192, meta=MIB) == tm.CutPlan(
+        at_once=1, procs=2, spool_rows=65536, arrow=(2 * 16 + 2 + 3666) * MIB, duck=156 * MIB)
+
+
+def test_cut_plan_refuses_what_cant_fit():
+    """Metadata leaving too little for even one worker and DuckDB's least: one worker, refused, naming the least budget."""
+    b = tm.Budget(total=4096 * MIB, base=200 * MIB, proc_base=80 * MIB)
+    with pytest.raises(tm.TooSmall, match=r"^memory budget 4,096 MiB too small for the cut \(1 sorts × 1 workers\): this process 200 MiB, 1 workers × 80 MiB, "
+                                          r"Arrow buffers 3,797 MiB leave DuckDB 19 MiB \(< 128\); needs ≥ 4,205 MiB$"):
+        b.cut(1, 8, 8192, 128, 65536, 3746 * 8192, meta=MIB)
 
 
 def test_append_split():
