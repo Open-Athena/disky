@@ -20,6 +20,7 @@
  *  `openIvLevel`), a round reads it instead (`levelRound`): each asked directory's transitions in `(D1, D2]`, one key
  *  range per file, every directory and file planned together and read in two waves (`readLevel`). Same answers. */
 import type { Env } from './auth.js'
+import { chargedElsewhere } from './readCap.js'
 import { asOfScans, type ChangedPlan, DiffUnavailable, FooterBudget, type IndexHandle, intervalsOn, ivChurnFrom, ivRefuseHeld, chargeLevel, LEVEL_BUDGET, LEVEL_PATH_ROW_HEAP, LevelBusy, type LevelHandle, type LevelRec, type LevelSpend, releaseLevel, openInterval, openIvLevel, planChanged, readChanged, readFits, readLevel, type Rect, type Row, syncClock, type Trace, withChurn, withTrace } from './index.js'
 import { readRootAgg } from './view.js'
 
@@ -378,6 +379,8 @@ async function round(env: Env, h: IndexHandle, dirs: string[], d1: number, d2: n
     }
   }
   o.onRead?.()
+  // Charged above; it must not also wait on the isolate's reads while it holds that charge.
+  if (o.spend) chargedElsewhere(env)
   const rows = await readChanged(h, rects, d1, d2, { plan })
   const byPath = new Map<string, Row[]>()
   for (const r of rows) {

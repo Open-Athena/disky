@@ -15,7 +15,9 @@
 // Any other environment variable named by `--secret NAME` is passed through (a store's HMAC pair, say).
 // `--snap MB`: a heap snapshot (`<out>.heapsnapshot`) the first time the heap passes MB; `--snap-end`: one after the
 // last URL and its `waitUntil` work, collected (`<out>.end.heapsnapshot`): what the isolate keeps. `--bodies`: each
-// response body as `<out>.<n>.body`.
+// response body as `<out>.<n>.body`. `--live MS`: every MS a full collection and what survives it (`liveMb`): the live
+// peak, no garbage. `--no-compress`: a colo put's gzip stream discards at once, since Node's holds each group's ~2 MB of
+// JSON in JS until it drains and workerd's pipe is native (measured: a Worker's limit doesn't count it).
 import { createHash, createHmac } from 'node:crypto'
 import { readFileSync, writeFileSync } from 'node:fs'
 import { writeHeapSnapshot } from 'node:v8'
@@ -25,7 +27,7 @@ import { onRequestGet as seriesGet } from '../functions/api/series.js'
 
 const err = (...a: unknown[]) => console.error(...a)
 
-interface Opts { vars: string; set: [string, string][]; secrets: string[]; snapMb?: number; snapEnd?: boolean; bodies?: boolean; out?: string; urls: string[] }
+interface Opts { vars: string; set: [string, string][]; secrets: string[]; snapMb?: number; snapEnd?: boolean; bodies?: boolean; out?: string; liveMs?: number; urls: string[] }
 
 function parseArgs(argv: string[]): Opts {
   const o: Opts = { vars: '', set: [], secrets: [], urls: [] }
@@ -39,6 +41,8 @@ function parseArgs(argv: string[]): Opts {
     else if (a === '--snap-end') o.snapEnd = true
     else if (a === '--bodies') o.bodies = true
     else if (a === '--out') o.out = val()
+    else if (a === '--live') o.liveMs = Number(val())
+    else if (a === '--no-compress') continue
     else if (a.startsWith('--')) throw new Error(`unknown option ${a}`)
     else o.urls.push(a)
   }
@@ -171,6 +175,9 @@ function d1(account: string, token: string, db: string) {
 
 // --- the empty colo, KV and analytics -------------------------------------------------------------------------
 
+if (process.argv.includes('--no-compress')) {
+  (globalThis as unknown as { CompressionStream: unknown }).CompressionStream = class extends TransformStream { constructor() { super({ transform() {} }) } }
+}
 const emptyCache = { match: async () => undefined, put: async () => {}, delete: async () => false }
 ;(globalThis as unknown as { caches: unknown }).caches = { default: emptyCache, open: async () => emptyCache }
 const emptyKv = { get: async () => null, getWithMetadata: async () => ({ value: null, metadata: null }), put: async () => {}, delete: async () => {}, list: async () => ({ keys: [], list_complete: true }) }
@@ -214,7 +221,14 @@ async function main(): Promise<void> {
   const base = settledHeap()
   const timer = setInterval(() => sample(o), 5)
   const results = []
+  let live = { heap: 0, arrayBuffers: 0, total: 0 }
+  const liveTimer = o.liveMs && gc ? setInterval(() => {
+    gc()
+    const m = process.memoryUsage()
+    live = { heap: Math.max(live.heap, m.heapUsed), arrayBuffers: Math.max(live.arrayBuffers, m.arrayBuffers), total: Math.max(live.total, m.heapUsed + m.arrayBuffers) }
+  }, o.liveMs) : null
   for (const url of o.urls) {
+    live = { heap: 0, arrayBuffers: 0, total: 0 }
     const pending: Promise<unknown>[] = []
     peak = zero()
     const t0 = performance.now()
@@ -249,11 +263,13 @@ async function main(): Promise<void> {
       response: Object.fromEntries(Object.entries(response).map(([k, v]) => [k, mb(v)])),
       waitUntil: { ...after, peak: after.peak && Object.fromEntries(Object.entries(after.peak).map(([k, v]) => [k, mb(v)])) },
       retainedHeap: mb(retained),
+      ...(liveTimer ? { liveMb: { heap: mb(live.heap), arrayBuffers: mb(live.arrayBuffers), total: mb(live.total) } } : {}),
     }
     results.push(row)
     console.log(JSON.stringify(row))
   }
   clearInterval(timer)
+  if (liveTimer) clearInterval(liveTimer)
   if (o.snapEnd) { settledHeap(); err(`view-mem: end snapshot ${writeHeapSnapshot(`${o.out ?? 'view-mem'}.end.heapsnapshot`)}`) }
   if (writes.length) err(`view-mem: ${writes.length} D1 writes dropped, e.g. ${writes[0]}`)
   if (o.out) writeFileSync(`${o.out}.json`, JSON.stringify(results, null, 1))

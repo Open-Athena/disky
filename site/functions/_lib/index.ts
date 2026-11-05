@@ -36,6 +36,7 @@ import { S3Store } from '@rdub/file-tree/stores/s3'
 import { type ColumnIndex, type FileMetaData, parquetMetadata, parquetMetadataAsync, parquetRead, parquetReadObjects, readColumnIndex, readOffsetIndex, type RowGroup } from 'hyparquet'
 import type { Env } from './auth.js'
 import { FILL_MAX_ROWS, type FooterRow, noteAccess, probe, queueFill, trusted, wantsFill } from './footerCache.js'
+import { chargedRead, type PlanGroup, readGate, ReadsBusy } from './readCap.js'
 import { newestManifest } from './manifests.js'
 import { colo, inFlight, IsoMap, IsoSet, join, JOIN, type Join, Memo, registerIsolate, reqOf, scopeOf, shared, STALLED, track } from './shared.js'
 import { d1Variant, isPrimary, PRIMARY_STORE, storeKey } from './stores.js'
@@ -745,9 +746,10 @@ export class IvUnavailable extends Error {
   }
 }
 
-/** The 503 + `Retry-After` a broken run's read answers (`IvUnavailable`, or an uncaught `IvTierBroken`); null for
- *  any other error. Never cached (`no-store`). */
+/** The 503 + `Retry-After` a broken run's read answers (`IvUnavailable`, or an uncaught `IvTierBroken`), or a read the
+ *  isolate had no room for (`ReadsBusy`); null for any other error. Never cached (`no-store`). */
 export function ivRefusal(e: unknown): Response | null {
+  if (e instanceof ReadsBusy) return new Response(`${e.message}\n`, { status: 503, headers: { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store', 'retry-after': String(e.retryAfter) } })
   if (!(e instanceof IvUnavailable || e instanceof IvTierBroken)) return null
   return new Response(`${e.message}\n`, { status: 503, headers: { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store', 'retry-after': String(e.retryAfter) } })
 }
@@ -2402,6 +2404,14 @@ export function readFits(spans: Span[]): boolean {
 /** `versions`: an interval store's rows are returned every version (tiers combined), not only those live at its scan. */
 async function decodeSpans(h: IndexHandle, kept: Span[], keep: (r: Row) => boolean, stop?: () => boolean, pre?: Pre, versions = false): Promise<Row[]> {
   if (!readFits(kept)) throw new Error('query too wide: drill deeper or raise minArea')
+  return chargedRead(h.env, planGroups(h, kept), () => decodeAdmitted(h, kept, keep, stop, pre, versions))
+}
+
+/** `spans` of `h` as the groups a charge counts: one per sort, tier and group, however many reads of a request hit it. */
+export const planGroups = (h: { variant: string }, spans: readonly Span[]): PlanGroup[] =>
+  spans.map(s => ({ key: `${h.variant}|${s.tier ?? 0}|${s.rg}`, rows: s.rowEnd - s.rowStart }))
+
+async function decodeAdmitted(h: IndexHandle, kept: Span[], keep: (r: Row) => boolean, stop?: () => boolean, pre?: Pre, versions = false): Promise<Row[]> {
   let t0 = now()
   if (h.runs?.length) {
     // Every tier's groups, every version of them, combined and then tested live.
@@ -3018,6 +3028,7 @@ export function levelHeldBytes(): number {
   }
   return held
 }
+readGate.held = levelHeldBytes
 /** This request would fit, but other requests in the isolate hold the room: ask again shortly. */
 export class LevelBusy extends Error {}
 /** Charge `bytes` to `spend` and the isolate, or refuse: "query too wide" past the request's own budget, `LevelBusy` past
@@ -3025,7 +3036,7 @@ export class LevelBusy extends Error {}
 export function chargeLevel(spend: LevelSpend, bytes: number): void {
   const mib = (n: number) => Math.round(n / 2 ** 20)
   if (bytes > spend.left) throw new Error(`query too wide: its level rows would cost ${mib(bytes)} MiB, ${mib(spend.left)} left`)
-  if (bytes > LEVEL_BUDGET.bytes - levelHeldBytes()) throw new LevelBusy(`level reads busy: ${mib(bytes)} MiB wanted`)
+  if (bytes > LEVEL_BUDGET.bytes - levelHeldBytes() - readGate.bytes()) throw new LevelBusy(`level reads busy: ${mib(bytes)} MiB wanted`)
   spend.left -= bytes
   const held = levelHeld.get(spend)
   levelHeld.set(spend, { bytes: (held?.bytes ?? 0) + bytes, at: Date.now() })
@@ -3771,7 +3782,12 @@ export async function readAsks(
     }
     throw new Error(`lookup too wide: ${n} (cap ${maxGroups})`)
   }
-  t0 = now()
+  return chargedRead(h.env, planGroups(h, spans), () => readAsksAdmitted(h, spans, keep, { columns, stop, versions, pre }))
+}
+
+/** `readAsks`' planned groups, read. */
+async function readAsksAdmitted(h: IndexHandle, spans: Span[], keep: (r: Row) => boolean, { columns, stop, versions, pre }: { columns?: string[]; stop?: () => boolean; versions: boolean; pre?: Pre }): Promise<{ rows: Row[]; groups: number }> {
+  let t0 = now()
   if (h.runs?.length) {
     h.trace?.('ngroups', spans.length)
     const got = await Promise.all(tiersOf(h).map((_, i) => onTier(h, i, async t => {

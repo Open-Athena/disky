@@ -20,6 +20,8 @@
  * removal and settle compares identity first). Holders of a real stake (a lock, a slot) must never be shared this
  * way at all — there is no release to wait for. */
 
+import type { Grant } from './readCap.js'
+
 /** A `Server-Timing` sink (`serverTiming().trace`). */
 export type Trace = (name: string, ms: number, desc?: string) => void
 
@@ -309,6 +311,8 @@ export const resetJoinStats = (): void => typical.clear()
 export class Req {
   dead = false
   trace?: Trace
+  /** Its reads' one charge against the isolate's cap (`readCap.ts`, `withReads`). */
+  reads?: Grant
   private joining = 0
   private since = 0
   private spent = 0
@@ -324,7 +328,7 @@ export class Req {
     if (!--this.joining) this.spent += Date.now() - this.since
   }
   readonly entries = new Set<Entry>()
-  constructor(signal?: AbortSignal | null) {
+  constructor(readonly signal?: AbortSignal | null) {
     if (!signal) return
     if (signal.aborted) this.dead = true
     else signal.addEventListener('abort', () => this.kill(), { once: true })
