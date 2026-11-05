@@ -34,7 +34,7 @@ vi.mock('./identity.js', async orig => ({
   loadRegistry: async () => ({ 'ann-bee': { name: 'Ann Bee' }, kai: { u: 'kai', name: 'Kai', github: 'kai-gh' } }),
 }))
 
-const { notifyPlan, refreshThread } = await import('./stagedSlack.js')
+const { cardScan, notifyPlan, refreshStagedCard, refreshThread } = await import('./stagedSlack.js')
 const { onRequestPost: slackActions } = await import('../slack/actions.js')
 
 const SITE = 'https://site.example.org'
@@ -47,7 +47,7 @@ interface Call { method: string; body: Record<string, unknown> }
 
 /** A fake Slack: posts get increasing ts (`200.000001`, …), the parent's
  *  reactions come from `reactions`, every call is recorded. */
-function fakeSlack({ reactions = {} as Record<string, string[]>, delayMs = 0, onCall = async (_c: Call): Promise<void> => {} } = {}): Call[] {
+function fakeSlack({ reactions = {} as Record<string, string[]>, shown = {} as Record<string, unknown[]>, delayMs = 0, onCall = async (_c: Call): Promise<void> => {} } = {}): Call[] {
   const calls: Call[] = []
   let n = 0
   const json = (o: unknown) => new Response(JSON.stringify(o))
@@ -60,7 +60,7 @@ function fakeSlack({ reactions = {} as Record<string, string[]>, delayMs = 0, on
     if (delayMs) await new Promise(r => setTimeout(r, delayMs))
     switch (method) {
       case 'chat.postMessage': return json({ ok: true, channel: body.channel, ts: `200.${String(++n).padStart(6, '0')}` })
-      case 'conversations.replies': return json({ ok: true, messages: [{ ts: body.ts, reactions: (reactions[body.ts] ?? []).map(name => ({ name, count: 1, users: ['U9'] })) }] })
+      case 'conversations.replies': return json({ ok: true, messages: [{ ts: body.ts, blocks: shown[body.ts], reactions: (reactions[body.ts] ?? []).map(name => ({ name, count: 1, users: ['U9'] })) }] })
       case 'chat.getPermalink': return json({ ok: true, permalink: `https://ws.slack.com/archives/${body.channel}/p${body.message_ts.replace('.', '')}` })
       case 'users.lookupByEmail': return json(body.email === ANN ? { ok: true, user: { id: 'UANN', profile: { real_name: 'Ann Bee', image_192: 'https://img/ann.png' } } } : { ok: false, error: 'users_not_found' })
       case 'users.info': return json({ ok: true, user: { profile: { email: ANN } } })
@@ -119,6 +119,50 @@ describe('D1', () => {
         [1000, 1000, 501],
         [['chat.update', PARENT, PARENT_TEXT(2500, '2.4 PiB', '25,000', '+1 staged prefix empty at scan, not counted\n')]],
       ])
+    })
+  })
+
+  describe('the card follows a new scan: nothing else re-renders it when one lands', () => {
+    const at = (scan: string) => [{ type: 'section', text: { type: 'mrkdwn', text: `*Staged for deletion* · plan #1: *1 prefix · 1.0 TiB · 10 objects* at scan ${scan}\nstaged by Ann Bee` } }]
+    // Each case its own stretch of clock: a check is due only `CARD_CHECK_S` after the last.
+    let clock = 1_000_000
+    const tick = () => (clock += 1_000_000)
+
+    it('`cardScan` reads the scan the card states; an unsized card states none', () => {
+      expect([cardScan({ blocks: at('2026-11-04T0703') }), cardScan({ blocks: [{ type: 'section', text: { type: 'mrkdwn', text: '*Staged for deletion* · plan #1: *1 prefix*' } }] }), cardScan({})])
+        .toEqual(['2026-11-04T0703', null, null])
+    })
+    it('a card at an older scan is edited in place, with no new post', async () => {
+      const calls = fakeSlack({ shown: { [PARENT]: at('2026-11-04T0703') } })
+      const { db } = await planDb()
+      await stage(db, 1, ['gs://b/x/', 'gs://b/empty/x/'])
+      await refreshStagedCard(env, db, SITE, tick())
+      expect(calls.map(show)).toEqual([
+        `reactions? ${PARENT}`,
+        `update ${PARENT}: ${PARENT_TEXT(2, '2.0 TiB', '20', '+1 staged prefix empty at scan, not counted\n')}`,
+      ])
+    })
+    it('a card already at the newest scan is left alone', async () => {
+      const calls = fakeSlack({ shown: { [PARENT]: at(SCAN) } })
+      const { db } = await planDb()
+      await refreshStagedCard(env, db, SITE, tick())
+      expect(calls.map(show)).toEqual([`reactions? ${PARENT}`])
+    })
+    it('a plan with no thread is not given one', async () => {
+      const calls = fakeSlack()
+      const { db, raw } = await planDb()
+      raw.exec('UPDATE plans SET slack_ts = NULL')
+      await refreshStagedCard(env, db, SITE, tick())
+      expect(calls).toEqual([])
+    })
+    it('checks at most once per `CARD_CHECK_S`, however often /staged polls', async () => {
+      const calls = fakeSlack({ shown: { [PARENT]: at(SCAN) } })
+      const { db } = await planDb()
+      const t = tick()
+      await refreshStagedCard(env, db, SITE, t)
+      await refreshStagedCard(env, db, SITE, t + 299)
+      await refreshStagedCard(env, db, SITE, t + 300)
+      expect(calls.map(show)).toEqual([`reactions? ${PARENT}`, `reactions? ${PARENT}`])
     })
   })
 

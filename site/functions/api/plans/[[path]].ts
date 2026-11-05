@@ -23,7 +23,7 @@ import { type Ctx, type Env as AuthEnv, json, requireAdmin, requireStager, requi
 import { audit, canonicalPrefix, mergeBatches, NO_SHAPE, openPlanId, planDetail, type PlanRow, type PrefixShape, prefixShape, runDetail, stageItems } from "../../_lib/plans.js"
 import { pathScans, storeReady, withPathStore } from "../../_lib/index.js"
 import { MAX_PREFIXES, prefixesAt } from "../../_lib/prefixes.js"
-import { notifyPlan, refreshThread, type NotifyEnv } from "../../_lib/stagedSlack.js"
+import { notifyPlan, refreshStagedCard, refreshThread, type NotifyEnv } from "../../_lib/stagedSlack.js"
 import { batchConfig, type BatchEnv } from "../../_lib/batchConfig.js"
 import { gcpToken } from "../../_lib/gcp.js"
 import { readRunJson } from "../../_lib/runReflect.js"
@@ -147,7 +147,10 @@ export const onRequest = async (ctx0: Ctx & { env: Env; waitUntil?: Bg }): Promi
   // /api/plans/staged — the shared open plan, for the /staged console.
   if (segs.length === 1 && segs[0] === "staged" && method === "GET") {
     const gated = await requireViewer(ctx)
-    return gated instanceof Response ? gated : getStaged(db, staging)
+    if (gated instanceof Response) return gated
+    // The card stays at the scan its last event saw: a look here brings it up to the newest, as this page reads it.
+    background(ctx, refreshStagedCard(ctx.env as NotifyEnv, db, new URL(ctx.request.url).origin))
+    return getStaged(db, staging)
   }
 
   // /api/plans/stage — the opt-in trash proposal, on deployments that stage.
