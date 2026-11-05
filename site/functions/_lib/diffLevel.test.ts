@@ -155,6 +155,46 @@ describe('level diffs', () => {
     expect(decoded.filter(([rows, groups]) => rows >= 4 * groups && groups > 0)).toEqual([])
   })
 
+  describe('a generation holding both kinds of `path` file: a base and its runs cut across a change of page settings', () => {
+    // `interval-store/` (no page index) and `-p2/` (2-row pages, a page index) are the same store, so a tier's `path`
+    // files can come from either; everything else is `interval-store/`'s.
+    const mixed = (name: string, baseFrom: string, runsFrom: string, reads: string[]): R2Bucket => {
+      const under = r2('iv-churn', reads)
+      const real = (key: string): string => {
+        const rest = key.slice(name.length + 1)
+        return /^g\/served\/path\./.test(rest) ? `${baseFrom}/${rest}` : /^g\/deltas\/[^/]+\/served\/path\./.test(rest) ? `${runsFrom}/${rest}` : `interval-store/${rest}`
+      }
+      return {
+        get: (key: string, o?: R2GetOptions) => under.get(real(key), o),
+        head: (key: string) => under.head(real(key)),
+        list: async ({ prefix }: { prefix: string }) => {
+          const { objects, truncated } = await under.list({ prefix: real(prefix) })
+          return { truncated, objects: objects.map(x => ({ ...x, key: x.key.replace(/^interval-store\//, `${name}/`) })) }
+        },
+      } as unknown as R2Bucket
+    }
+
+    it.each([
+      ['a paged base under runs without an index', 'interval-store-mix-a', 'interval-store-p2', 'interval-store', ['interval-store-p2 base', 'interval-store runs']],
+      ['a base without an index under paged runs', 'interval-store-mix-b', 'interval-store', 'interval-store-p2', ['interval-store base', 'interval-store-p2 runs']],
+    ])('%s answers as either store does, each tier read as it was cut', async (_, name, baseFrom, runsFrom, tiers) => {
+      const { db } = await sqliteD1()
+      const reads: string[] = []
+      const env = { DB: db, ROOT_LABEL: 'all buckets', PATH_STORE: 'intervals', INTERVAL_STORE_GEN: 'g', INTERVAL_STORE_PREFIX: name, INDEX_R2: mixed(name, baseFrom, runsFrom, reads) } as Env
+      const got = []
+      const counts = { pgroups: 0, pages: 0 }
+      for (const c of cases) {
+        const trace = (k: string, v: number) => { if (k in counts) counts[k as keyof typeof counts] += v }
+        got.push(shape((await buildLevels(env, { from: c.from, to: c.to, dirs: [c.path], k: 512, m: 'churn', chain: false, trace })).get(c.path)!))
+      }
+      expect(got).toEqual(cases.map(wanted))
+      // Some groups by page (only the paged tier has any), and both tiers' data files read from their own store.
+      expect([counts.pgroups > 0, counts.pages > 0]).toEqual([true, true])
+      const data = reads.filter(k => k.endsWith('/served/path.parquet')).map(k => `${k.split('/')[0]} ${k.includes('/deltas/') ? 'runs' : 'base'}`)
+      expect([...new Set(data)].sort()).toEqual([...tiers].sort())
+    })
+  })
+
   it('counts GET rounds: a slot-bound GET is in the round after the one freeing its slot; colo lookups add none', async () => {
     const lim = new GetRounds(2)
     const get = (dep: number, free = false) => lim.run(dep, async () => null, free).then(r => r.round)

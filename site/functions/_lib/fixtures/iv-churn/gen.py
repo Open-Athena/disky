@@ -8,14 +8,15 @@ computed from the scans' files alone: each child that changed (its range churn, 
 the path's own.
 
 With `PAGES` (an int), the same store cut in `PAGES`-row data pages with a page index, under `interval-store-p<PAGES>/`
-(2b.1's page reads; `diffLevel.test.ts` checks both answer `expected.json`). `interval-store/` was cut before served
-sorts carried a page index, and stays so: the reader's whole-group path for older generations.
+(2b.1's page reads; `diffLevel.test.ts` checks both answer `expected.json`): its `path` sort only, the one a generation
+without the level sort reads by page (`interval_store.served_page_rows`). `interval-store/` was cut before served sorts
+carried a page index, and stays so: the reader's whole-group path for older generations.
 
 With `ROOT` (a top-level name, `b1` or `b2`), a store of only the files under it, under `interval-store-<ROOT>/`, and no
 `expected.json`: two of them, one per root, are a union view's members (`unionLevel.test.ts`), whose union answers as
 the whole store does.
 
-With `level`, the same store built with the level sort (`build -l`; its runs carry it), in 2-row pages, under
+With `level`, the same store built with the level sort (`build -l`; its runs carry it), that sort in 2-row pages, under
 `interval-store-level/` (`/api/diff/level`'s level index, specs/diff-progressive.md §3b); `expected.json` is checked, not
 rewritten.
 
