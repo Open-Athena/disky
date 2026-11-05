@@ -14,6 +14,7 @@
 import { filterJson, hiddenNotFound, isHidden, restrictionFor, restrictSubtree } from '../_lib/restrict.js'
 import { type Env, type Identity, presentsCredentials, requireViewer } from '../_lib/auth.js'
 import { ivRefusal, ivRetry, pathGens, withPathStore, storeReady, type Lens } from '../_lib/index.js'
+import { withReads } from '../_lib/readCap.js'
 import { hasLedger, ledgerHead } from '../_lib/ledger.js'
 import { parseOwner, queryParam, QueryError, classKey, parseClasses } from '../_lib/scope.js'
 import { hasExtras } from '../_lib/extras.js'
@@ -211,7 +212,7 @@ async function subtreeGated(
     }
     // The worker's answer: the view's JSON and what to keep of it — `phase2Ms` (a background full run's) over
     // the viewer-facing default.
-    const render = async (o: { phase2Ms?: number; detailsWait?: number; detailGroups?: number; searchLimits?: SearchLimits; trace?: typeof st.trace } = {}) => {
+    const render = (o: { phase2Ms?: number; detailsWait?: number; detailGroups?: number; searchLimits?: SearchLimits; trace?: typeof st.trace } = {}) => withReads(ctx.env, async () => {
       // A broken interval-store run is cut out and the view read again: a scan before it answers, its own scans are a
       // 503 + `Retry-After` (`ivRefusal`), never read per-scan.
       const view = await ivRetry(() => buildView(ctx.env, { date, path, w, h, minArea, atten, lens, owner, by, maxDepth: depth, query, classes, firstPaint: !!query && !full, trace: o.trace, ...(o.phase2Ms ? { phase2Ms: o.phase2Ms } : {}), ...(o.detailsWait ? { detailsWait: o.detailsWait } : {}), ...(o.detailGroups ? { detailGroups: o.detailGroups } : {}), ...(o.searchLimits ? { searchLimits: o.searchLimits } : {}), ...(member?.threshold !== undefined ? { threshold: member.threshold } : {}) }))
@@ -236,7 +237,7 @@ async function subtreeGated(
         tree: view.tree,
       })
       return { body, keep }
-    }
+    }, { background: !!o.phase2Ms })
     // A partial answer (phase 2 cut by its time budget) schedules the full one in the background, which
     // replaces it in the colo cache (`upgradePartial`): on the miss that produced it, and on a partial hit.
     const upgrade = (res: Response): Response => {

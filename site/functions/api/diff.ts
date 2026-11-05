@@ -16,6 +16,7 @@ import { filterJson, hiddenNotFound, isHidden, restrictDiff, restrictionFor } fr
 import { type Env, type Identity, json, presentsCredentials, requireViewer } from '../_lib/auth.js'
 import { DESCENT_V } from '../_lib/diffDescent.js'
 import { DiffUnavailable, intervalsOn, ivRefusal, ivRetry, pathGens, withPathStore, storeReady, type Lens } from '../_lib/index.js'
+import { withReads } from '../_lib/readCap.js'
 import { hasLedger, ledgerHead } from '../_lib/ledger.js'
 import { classKey, parseClasses, parseOwner, queryParam, QueryError } from '../_lib/scope.js'
 import { ATTEN_DEFAULT, buildDiff, type DiffRow, FILTER_VIEW_V, LensUnavailable, MIN_AREA_DEFAULT, NotFound, QUANT, readRootAgg } from '../_lib/view.js'
@@ -185,7 +186,7 @@ async function diffGated(
     }
     // The worker's answer: the diff's JSON and what to keep of it — `phase2Ms` (a background full run's) over
     // the viewer-facing default.
-    const render = async (o: { phase2Ms?: number; searchLimits?: SearchLimits; walkMs?: number; trace?: typeof st.trace } = {}) => {
+    const render = (o: { phase2Ms?: number; searchLimits?: SearchLimits; walkMs?: number; trace?: typeof st.trace } = {}) => withReads(ctx.env, async () => {
       const diff = await ivRetry(() => buildDiff(ctx.env, { from, to, path, w, h, minArea, atten, top, lens, owner, query, classes, summary, depth, trace: o.trace, ...(o.phase2Ms ? { phase2Ms: o.phase2Ms } : {}), ...(o.searchLimits ? { searchLimits: o.searchLimits } : {}), ...(o.walkMs ? { walkMs: o.walkMs } : {}), ...(member?.threshold !== undefined ? { threshold: member.threshold } : {}), ...(descent ? { descent } : {}) }))
       // Cut by a time budget (phase 2's or the search's): kept briefly, upgraded at the edge, re-asked (`budgetCut`).
       const keep = keepFor(diff)
@@ -201,7 +202,7 @@ async function diffGated(
         ...(keep !== true ? { budgetCut: true } : {}),
       })
       return { body, keep }
-    }
+    }, { background: !!o.phase2Ms })
     // A partial answer schedules the full one in the background (`upgradePartial`, as subtree.ts).
     const upgrade = (res: Response): Response => {
       res.headers.set('x-cache-upgrade', upgradePartial(ctx.env, cacheKey, () => render({ phase2Ms: UPGRADE_PHASE2_MS, searchLimits: UPGRADE_SEARCH_LIMITS, walkMs: UPGRADE_WALK_MS }), ctx.waitUntil?.bind(ctx)))
