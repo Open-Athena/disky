@@ -374,6 +374,7 @@ def test_tree_watch_says_where_each_peak_was_and_what_held_it(pss, capsys):
     assert _normal(capsys.readouterr().err) == [
         "x: phase outside: peak tree PSS 1 MiB (0%; 2 samples)",
         "x: phase step: peak tree PSS 700 MiB (70%; 14 samples; at r1; DuckDB 500 MiB; Arrow 90 MiB)",
+        "x: phase step: each at its highest: DuckDB 500 MiB; Arrow 90 MiB",
         "x: phase (untagged): peak tree PSS 50 MiB (5%; 2 samples)",
         "x: largest of 7: r1 700 MiB, r2 400 MiB, r0 300 MiB, r6 106 MiB, r5 105 MiB",
         "x: peak tree PSS 700 MiB of budget 1,000 MiB (70%; 18 samples over <s>)",
@@ -382,6 +383,50 @@ def test_tree_watch_says_where_each_peak_was_and_what_held_it(pss, capsys):
     with tm.at("r"), tm.gauges(a=lambda: 1 / 0):
         pass
     assert (tm._WATCHES, capsys.readouterr().err) == ([], "")
+
+
+def test_gauges_read_together_and_doing_names_what_overlaps(pss, capsys):
+    """A gauge may read several names at once, each on the lines by its own name. A peak's line says what `doing` said then
+    and what the gauges read then; the next line, the most each gauge read, which needn't be at that peak."""
+    held = {"DuckDB": 0, "own": 0}
+    w = tm.TreeWatch(1000 * MIB, "x", every=3600, check=False)
+    with w:
+        with tm.gauges(parts=lambda: dict(held)), tm.phase("a"):
+            tm.doing("s1", "runs")
+            tm.doing("s2", "write")
+            pss["mib"], held["DuckDB"], held["own"] = 300, 500 * MIB, 10 * MIB
+            w._sample()
+            tm.doing("s1", None)
+            pss["mib"], held["DuckDB"], held["own"] = 700, 200 * MIB, 90 * MIB
+            w._sample()
+            pss["mib"], held["DuckDB"], held["own"] = 100, MIB, MIB
+        tm.doing("s2", None)
+    assert _normal(capsys.readouterr().err) == [
+        "x: phase a: peak tree PSS 700 MiB (70%; 4 samples; doing s2 write; DuckDB 200 MiB; own 90 MiB)",
+        "x: phase a: each at its highest: DuckDB 500 MiB; own 90 MiB",
+        "x: phase (untagged): peak tree PSS 100 MiB (10%; 2 samples)",
+        "x: peak tree PSS 700 MiB of budget 1,000 MiB (70%; 6 samples over <s>)",
+    ]
+    # No watch running: nothing.
+    tm.doing("s", "runs")
+    assert (tm._WATCHES, capsys.readouterr().err) == ([], "")
+
+
+def test_a_watch_under_gauges_logs_where_it_stands(pss, capsys, monkeypatch):
+    """Every `SERIES_S`, while it has gauges: the peak alone can't say how the tree got there."""
+    monkeypatch.setattr(tm, "SERIES_S", 0.0)
+    pss["mib"] = 300
+    w = tm.TreeWatch(1000 * MIB, "x", every=3600, check=False)
+    with w:
+        w._sample()
+        with tm.gauges(DuckDB=lambda: 5 * MIB):
+            tm.doing("s1", "runs")
+            w._sample()
+            tm.doing("s1", None)
+    assert _normal(capsys.readouterr().err) == [
+        "x: now tree PSS 300 MiB (30%; doing s1 runs; DuckDB 5 MiB)",
+        "x: peak tree PSS 300 MiB of budget 1,000 MiB (30%; 4 samples over <s>)",
+    ]
 
 
 def _boom() -> int:
@@ -396,6 +441,7 @@ def test_a_failing_gauge_is_said_and_leaves_a_phases_block_alone(pss, capsys):
             pass
     assert _normal(capsys.readouterr().err) == [
         "x: phase a: peak tree PSS 100 MiB (10%; 2 samples; DuckDB unread (2 failed); Arrow 5 MiB)",
+        "x: phase a: each at its highest: Arrow 5 MiB",
         "x: phase (untagged): peak tree PSS 100 MiB (10%; 2 samples)",
         "x: peak tree PSS 100 MiB of budget 1,000 MiB (10%; 4 samples over <s>)",
     ]
@@ -446,6 +492,20 @@ def test_cut_all_names_its_phases(built, pss, tmp_path):
     sorts = [s for s in ist.served_sorts(*(json.loads((gen / "scans.json").read_text()).get(k, False) for k in ("slices", ist.ATTRIBUTION)))]
     got = _phases(res.stderr, "cut g")
     assert (got[0], got[-2:], sorted(got[1:-2])) == ("cut", ["churn_stats", "(untagged)"], sorted(f"sort {s}" for s in sorts))
+
+
+@pytest.mark.skipif(not Path("/proc/self/smaps_rollup").exists(), reason="the tree's parts are read from procfs (Linux)")
+def test_cut_all_reads_its_gauges(built, tmp_path, monkeypatch):
+    """Each sort's peak, and the churn's, split by what holds it: DuckDB's, this process's Arrow pool, and the tree's parts. This
+    small a cut writes one part (no workers), so none under a sort's name; none of DuckDB's tags is past a limit this high."""
+    monkeypatch.setattr(tm, "DUCK_TAG_MIN", 1 << 60)
+    res = CliRunner().invoke(ist.cli, ["cut", "-b", str(built), "-g", "g", "-m", str(built), "-T", str(tmp_path / "t"), "-p", "2", "-M", MEM, "-U", "-r", str(RG),
+                                       "-o", str(tmp_path / "all"), "-a"], catch_exceptions=False)
+    assert res.exit_code == 0, res.output
+    names = ["DuckDB", "DuckDB spill", "Arrow", "own", "own anon", "own file", "own heap", "own heap free",
+             "workers", "workers anon", "workers file", "workers Arrow", "workers heap", "workers heap free"]
+    got = {m[0]: re.findall(r"; ([^;)]+?) [\d,]+ MiB", m[1]) for m in re.findall(r"^cut g: phase (.+?): peak tree PSS (.+)$", res.stderr, re.M)}
+    assert {k: v for k, v in got.items() if k != "(untagged)"} == {k: names for k in got if k != "(untagged)"}
 
 
 def test_add_names_its_stages(world, built, pss, tmp_path):  # noqa: F811
