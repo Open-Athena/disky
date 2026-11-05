@@ -93,9 +93,9 @@ describe('a view whose plan is past the read budget', () => {
     expect(view.threshold).toBe(past(15))
     expect(view.tier).toBe('bysize')
     expect(view.tree).toEqual({
-      n: 'e', k: 'dir', b: 20, o: 3, a: 6, t: 7, d: 0, cb: { '4': 2 }, us: [['alice', 10]],
+      n: 'e', k: 'dir', b: 20, o: 3, a: 6, t: 7, d: 0, cb: { '5': 4, '6': 2 }, us: [['alice', 10]],
       c: [
-        { n: 'd.json', k: 'file', b: 20, o: 1, a: 6, t: 7, d: 0, cb: { '4': 2 } },
+        { n: 'd.json', k: 'file', b: 20, o: 1, a: 6, t: 7, d: 0, cb: { '5': 4, '6': 2 } },
       ],
     })
     // The same answer as asking for that floor outright, on a plan that fits.
