@@ -49,6 +49,8 @@ import { useLocation, useNavigationType } from 'react-router-dom'
 import { useSectionSpy, type SectionMode } from 'use-prms/sections'
 import { machineFor } from '../functions/_lib/sweepMachines'
 import { Loading, Skeleton } from './Busy'
+import { copyText } from './CopyName'
+import { Paginated, Pager, usePaged } from './Pager'
 
 const iso = (ts: number): string => new Date(ts * 1000).toISOString()
 const store = DEFAULT_STORE
@@ -130,6 +132,26 @@ function EmptiedLine({ e, batches }: { e: EmptiedBatch; batches: Map<number, { c
   if (!parts.length) parts.push(<span key="none">nothing new (already staged)</span>)
   return <span className="emptied-fate">{parts.map((p, i) => <Fragment key={i}>{i > 0 && ' · '}{p}</Fragment>)}</span>
 }
+
+/** The paths a real delete takes, every one reviewable: page through, or copy the whole list out. */
+const CONFIRM_SIZES = [50, 200, 500]
+function ConfirmList({ rows, fmtBytes }: { rows: Row[]; fmtBytes: (b: number) => string }) {
+  const [copied, setCopied] = useState(false)
+  const copy = () => void copyText(rows.map(r => r.prefix).join('\n')).then(() => { setCopied(true); setTimeout(() => setCopied(false), 1200) })
+  return (
+    <Paginated rows={rows} sizes={CONFIRM_SIZES} label="Paths to be deleted">{page => <>
+      <div className="dispatch-confirm-head">
+        <span className="dim">To be deleted: {fmtN(rows.length)} {rows.length === 1 ? 'path' : 'paths'}</span>
+        <Tooltip content="Copy every path, one per line, to review elsewhere"><button type="button" onClick={copy}>{copied ? 'copied ✓' : 'copy all'}</button></Tooltip>
+      </div>
+      <ul className="dispatch-confirm-list" aria-label="To be deleted">
+        {page.map(r => <li key={r.prefix}><code>{r.prefix}</code>{r.stat && <span className="dim"> · {fmtBytes(r.stat.b)}</span>}</li>)}
+      </ul>
+    </>}</Paginated>
+  )
+}
+
+const SETTLED_SIZES = [20]
 
 export function StagedPage() {
   const { fmtBytes, units, suffixB } = useUnits()
@@ -289,7 +311,13 @@ export function StagedPage() {
   const settled = flat ? [] : groups.filter(g => g.emptied || !g.rows.some(r => activePrefixes.has(r.prefix)))
   const liveGroups = groups.filter(g => !settled.includes(g))
   const [settledOpen, setSettledOpen] = useState(false)
-  useEffect(() => { if (settled.some(linked)) setSettledOpen(true) }, [hash, settled.length]) // eslint-disable-line react-hooks/exhaustive-deps
+  const settledPaged = usePaged(settled, SETTLED_SIZES)
+  useEffect(() => {
+    const i = settled.findIndex(linked)
+    if (i < 0) return
+    setSettledOpen(true)
+    settledPaged.reveal(i)
+  }, [hash, settled.length]) // eslint-disable-line react-hooks/exhaustive-deps
   const foldable = groups
   const pageSize = flat ? FLAT_PAGE : PAGE
   const pageOf = (g: Group) => Math.min(pages[gkey(g)] ?? 0, Math.max(0, Math.ceil(g.rows.length / pageSize) - 1))
@@ -333,6 +361,8 @@ export function StagedPage() {
   const runRows = activeRows.filter(r => sel.selected.has(r.prefix) && onBuckets.includes(prefixToPath(r.prefix).split('/')[0]))
   const runItems = runRows.map(r => (r.kind === 'object' ? `=${r.prefix}` : r.prefix))
   const runTotal = runRows.reduce((t, r) => t + (r.stat?.b ?? 0), 0)
+  // What the run's row says until its manifest does: display only, nothing a run deletes reads it.
+  const expected = stats ? { bytes: runTotal, objects: runRows.reduce((t, r) => t + (r.stat?.o ?? 0), 0) } : undefined
   // the newest scan: each item is held to the one it was staged at (`as_of`), so the run lists from the newest and
   // deletes only what that staging scan saw
   const runScan = scans[0] ?? ''
@@ -397,9 +427,9 @@ export function StagedPage() {
           <SessionLink g={g} />
           {g.emptied.note && <i className="memo">{g.emptied.note}</i>}
         </div>
-        {open && (g.emptied.prefixes.length ? <ul className="batch-prefix-history" aria-label="Originally staged prefixes">
-          {g.emptied.prefixes.map(prefix => <li key={prefix}><a href={`/${prefixToPath(prefix)}`}><code>{prefix}</code></a></li>)}
-        </ul> : <p className="dim">Original prefix list unavailable in this batch’s audit history.</p>)}
+        {open && (g.emptied.prefixes.length ? <Paginated rows={g.emptied.prefixes} label="Originally staged prefixes">{page => <ul className="batch-prefix-history" aria-label="Originally staged prefixes">
+          {page.map(prefix => <li key={prefix}><a href={`/${prefixToPath(prefix)}`}><code>{prefix}</code></a></li>)}
+        </ul>}</Paginated> : <p className="dim">Original prefix list unavailable in this batch’s audit history.</p>)}
       </section>
     )
     return (
@@ -544,7 +574,8 @@ export function StagedPage() {
             {settled.length > 0 && (
               <details className="staged-settled" open={settledOpen} onToggle={e => setSettledOpen((e.target as HTMLDetailsElement).open)}>
                 <summary className="dim">{settled.length} completed or no longer staged {settled.length === 1 ? 'batch' : 'batches'}</summary>
-                {settled.map(renderGroup)}
+                {settledPaged.rows.map(renderGroup)}
+                <Pager paged={settledPaged} label="Completed batches" />
               </details>
             )}
           </div>
@@ -568,13 +599,13 @@ export function StagedPage() {
                 </details>
               )}
               <div className="dispatch-btns">
-                <button type="button" className="dry" disabled={busy || !runScan || !runItems.length} onClick={() => dispatch.mutate({ mode: 'dry', date: runScan, items: runItems, buckets: cut, machine })}>
+                <button type="button" className="dry" disabled={busy || !runScan || !runItems.length} onClick={() => dispatch.mutate({ mode: 'dry', date: runScan, items: runItems, buckets: cut, machine, expected })}>
                   dry-run {runItems.length ? <>{runItems.length} selected</> : <>(check rows)</>}
                 </button>
                 {!armed
                   ? <button type="button" className="danger" disabled={busy || !runScan || !runItems.length} onClick={() => setArmed(true)}>real delete{runItems.length ? <> {runItems.length} selected…</> : <> (check rows)</>}</button>
                   : <>
-                      <button type="button" className="danger armed" disabled={busy} onClick={() => dispatch.mutate({ mode: 'real', date: runScan, items: runItems, buckets: cut, machine }, { onSuccess: () => setArmed(false) })}>
+                      <button type="button" className="danger armed" disabled={busy} onClick={() => dispatch.mutate({ mode: 'real', date: runScan, items: runItems, buckets: cut, machine, expected }, { onSuccess: () => setArmed(false) })}>
                         confirm REAL delete of {runItems.length} {runItems.length === 1 ? 'prefix' : 'prefixes'}{stats && <> · {fmtBytes(runTotal)}</>}
                       </button>
                       <button type="button" onClick={() => setArmed(false)}>cancel</button>
@@ -589,15 +620,11 @@ export function StagedPage() {
                       : <>No dry run of exactly this selection at scan <code>{runScan}</code>: deletes from a fresh manifest, with no dry run. A directory that gained new writes since the scan still has its older staged files deleted, and the new files survive; a dry run would report that directory as drift instead.</>}
                 </p>
               )}
-              {armed && (
-                <ul className="dispatch-confirm-list" aria-label="To be deleted">
-                  {runRows.map(r => <li key={r.prefix}><code>{r.prefix}</code>{r.stat && <span className="dim"> · {fmtBytes(r.stat.b)}</span>}</li>)}
-                </ul>
-              )}
+              {armed && <ConfirmList rows={runRows} fmtBytes={fmtBytes} />}
               {dispatch.error && <p className="staged-err" role="alert">{dispatch.error.message}</p>}
               {pendingJob && (
                 <p className="dispatch-pending">
-                  Dispatched <code>{pendingJob}</code> · {(pendingState ?? 'submitted').toLowerCase()}. Its run appears below {CAPS.startHint}.
+                  Dispatched <code>{pendingJob}</code> · {(pendingState ?? 'submitted').toLowerCase()}{dispatch.variables?.expected && <> · expected {fmtBytes(dispatch.variables.expected.bytes)} · {fmtN(dispatch.variables.expected.objects)} objects</>}. Its run appears below {CAPS.startHint}.
                 </p>
               )}
               <p className="dispatch-note dim">A run acts on the checked rows only. Each is read at the scan it was staged at: objects written since are left alone (re-stage to include them), and anything rewritten since is skipped. A real run doesn't need a dry run first.{machine && <> Runs on <code>{machine}</code>.</>}</p>

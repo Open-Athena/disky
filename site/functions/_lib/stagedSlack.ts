@@ -343,10 +343,10 @@ function skipsLine(o?: RunOutcome): string {
 
 /** A run's thread reply: the actor by name, the run id linking to its row on
  *  `/staged`. */
-export function runEvent(r: RunRow, phase: 'dispatched' | 'finished' | 'failed', o: { via?: string | null; names?: Names; siteUrl?: string; reason?: string; outcome?: RunOutcome } = {}): string {
+export function runEvent(r: RunRow, phase: 'dispatched' | 'finished' | 'failed', o: { via?: string | null; names?: Names; siteUrl?: string; reason?: string; outcome?: RunOutcome; expected?: { bytes: number; objects: number } } = {}): string {
   const kind = r.mode === 'dry' ? 'Dry-run' : '*Real deletion*'
   const id = o.siteUrl ? `<${runUrl(o.siteUrl, r.run_id)}|${r.run_id}>` : `\`${r.run_id}\``
-  if (phase === 'dispatched') return `${r.mode === 'dry' ? ':test_tube:' : ':rotating_light:'} ${kind} dispatched by ${who(r.actor, o.names)}${o.via ? ` via ${o.via}` : ''} on scan ${r.scan} (${id})`
+  if (phase === 'dispatched') return `${r.mode === 'dry' ? ':test_tube:' : ':rotating_light:'} ${kind} dispatched by ${who(r.actor, o.names)}${o.via ? ` via ${o.via}` : ''} on scan ${r.scan} (${id})${o.expected ? `: expected ${fmtBytes(o.expected.bytes)} / ${fmtN(o.expected.objects)} objects` : ''}`
   if (phase === 'failed' && o.outcome?.totals) {
     const verb = o.outcome.attempted ? 'attempted' : 'deleted'
     const size = `*${fmtBytes(r.deleted_bytes)}* / ${fmtN(r.deleted_objects)} objects`
@@ -423,7 +423,7 @@ export async function stagedImageVersion(env: Env, digest: string): Promise<stri
 export interface StageArgs { stage: { planId: number; batchId: number; by: string; prefixes: string[]; covered: number; note: string | null; siteUrl: string } }
 /** A run's reply, rendered here so it can carry its actor's name (and, for a
  *  dispatch, post as them). */
-export interface RunArgs { run: RunRow; phase: 'dispatched' | 'finished' | 'failed'; via?: string | null; reason?: string; outcome?: RunOutcome }
+export interface RunArgs { run: RunRow; phase: 'dispatched' | 'finished' | 'failed'; via?: string | null; reason?: string; outcome?: RunOutcome; expected?: { bytes: number; objects: number } }
 
 /** How automatic posts name `emails`: their Slack names where the workspace
  *  knows them (callers fall back to the local part). */
@@ -538,20 +538,57 @@ export async function deletedItems(db: D1Database, planId: number): Promise<Set<
   return new Set(results.map(r => r.prefix))
 }
 
-/** Does the parent message carry a ✅? Read via `conversations.replies` (the
- *  bot has `channels:history` / `groups:history`, not `reactions:read`): its
- *  first message is the parent, with its `reactions`. Unreadable = no. */
-export async function parentDone(env: SlackEnv, channel: string, ts: string): Promise<boolean> {
-  if (!env.SLACK_BOT_TOKEN) return false
+/** A parent message as Slack holds it. */
+interface ParentRead { ts?: string; reactions?: { name: string }[]; blocks?: unknown[] }
+
+/** The parent, read via `conversations.replies` (the bot has `channels:history` /
+ *  `groups:history`, not `reactions:read`): its first message. Unreadable = null. */
+async function readParent(env: SlackEnv, channel: string, ts: string): Promise<ParentRead | null> {
+  if (!env.SLACK_BOT_TOKEN) return null
   try {
     const r = await fetch(`https://slack.com/api/conversations.replies?channel=${encodeURIComponent(channel)}&ts=${encodeURIComponent(ts)}&limit=1`, { headers: { authorization: `Bearer ${env.SLACK_BOT_TOKEN}` } })
-    const j = (await r.json().catch(() => null)) as { ok?: boolean; error?: string; messages?: { ts?: string; reactions?: { name: string }[] }[] } | null
-    if (!j?.ok) { console.log(`slack conversations.replies failed: ${j?.error ?? `http ${r.status}`}`); return false }
-    const parent = j.messages?.find(m => m.ts === ts)
-    return !!parent?.reactions?.some(x => x.name === DONE_REACTION)
+    const j = (await r.json().catch(() => null)) as { ok?: boolean; error?: string; messages?: ParentRead[] } | null
+    if (!j?.ok) { console.log(`slack conversations.replies failed: ${j?.error ?? `http ${r.status}`}`); return null }
+    return j.messages?.find(m => m.ts === ts) ?? null
   } catch (e) {
     console.log(`slack conversations.replies threw: ${(e as Error).message}`)
-    return false
+    return null
+  }
+}
+
+/** Does the parent message carry a ✅? Unreadable = no. */
+export async function parentDone(env: SlackEnv, channel: string, ts: string): Promise<boolean> {
+  return !!(await readParent(env, channel, ts))?.reactions?.some(x => x.name === DONE_REACTION)
+}
+
+/** The scan a parent message states (`totalLine`); null: it states none (unsized). */
+export function cardScan(m: Pick<ParentRead, 'blocks'>): string | null {
+  const head = (m.blocks?.[0] as { text?: { text?: string } } | undefined)?.text?.text ?? ''
+  return / at scan (\S+)$/m.exec(head)?.[1] ?? null
+}
+
+/** How often one isolate looks for a stale card, however often /staged polls. */
+export const CARD_CHECK_S = 300
+let cardCheckedAt = -Infinity
+
+/** Only an event re-renders the parent, so a scan landing leaves the card stating the scan before it, its total
+ *  counting what that scan alone still held (a run's deletions, whatever a re-stage picked from an older scan), while
+ *  `/staged` reads the newest. So a look at the page checks what the card states and, if that's an older scan,
+ *  re-renders it in place: `chat.update`, no one notified, no new thread. Best-effort; never throws. */
+export async function refreshStagedCard(env: NotifyEnv, db: D1Database, siteUrl: string, now = Math.floor(Date.now() / 1000)): Promise<void> {
+  const full = env as NotifyEnv & Env
+  if (!slackReady(env) || !storeReady(full) || now - cardCheckedAt < CARD_CHECK_S) return
+  cardCheckedAt = now
+  try {
+    const plan = await db.prepare("SELECT id, slack_ts, slack_channel FROM plans WHERE state = 'open' AND slack_ts IS NOT NULL ORDER BY created_ts DESC LIMIT 1")
+      .first<{ id: number; slack_ts: string; slack_channel: string | null }>()
+    if (!plan || plan.slack_channel !== env.SLACK_ADMIN_CHANNEL) return
+    const newest = (await pathScans(full, true)).results.at(-1)?.date
+    const parent = newest ? await readParent(env, plan.slack_channel, plan.slack_ts) : null
+    if (!parent || cardScan(parent) === newest) return
+    await notifyPlan(env, db, plan.id, siteUrl, undefined, { now })
+  } catch (e) {
+    console.log(`staged card refresh failed: ${(e as Error).message}`)
   }
 }
 
@@ -707,7 +744,7 @@ export async function notifyPlan(env: NotifyEnv, db: D1Database, planId: number,
     }
     const { at, people, names, parent } = await render(v)
     const event: Event | undefined = runEv
-      ? { text: runEvent(runEv.run, runEv.phase, { via: runEv.via, names, siteUrl, reason: runEv.reason, outcome: runEv.outcome }), ...(by ? { sender: personSender(by, people[by.toLowerCase()], 'dispatched') } : {}) }
+      ? { text: runEvent(runEv.run, runEv.phase, { via: runEv.via, names, siteUrl, reason: runEv.reason, outcome: runEv.outcome, expected: runEv.expected }), ...(by ? { sender: personSender(by, people[by.toLowerCase()], 'dispatched') } : {}) }
       : said ? { ...said, text: typeof said.text === 'function' ? said.text(who(said.by?.email ?? '', names)) : said.text, ...(said.by ? { sender: personSender(said.by.email, people[said.by.email.toLowerCase()], said.by.verb) } : {}) }
       : undefined
     const channel = env.SLACK_ADMIN_CHANNEL!

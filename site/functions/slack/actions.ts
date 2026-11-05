@@ -107,7 +107,9 @@ async function handle(env: Env, p: BlockActions, siteUrl: string): Promise<void>
     // only refuses a button drawn for an older item set.
     if (clickedDigest !== g.digest) return tell(p.response_url, 'Not deleting: the plan changed after that button was drawn. Check the updated message.')
   }
-  const r = await dispatchPlan(env, { planId: id, mode, date, actor: email, siteUrl }, kind)
+  // A real run's selection is what its dry run reviewed, the size the button's confirm named.
+  const expected = mode === 'real' && g.gate.ok ? { bytes: g.gate.dry.deleted_bytes, objects: g.gate.dry.deleted_objects } : undefined
+  const r = await dispatchPlan(env, { planId: id, mode, date, actor: email, siteUrl, expected }, kind)
   if (!r.ok) return tell(p.response_url, `Dispatch refused: ${r.error}`)
   await notifyDispatched(env, r, 'Slack', siteUrl)
 }
