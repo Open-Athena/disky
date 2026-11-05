@@ -412,7 +412,7 @@ class Derive:
         a, b = by[have], by[want]
         ia = sum(a["ci"].values()) + sum(a["oi"].values())
         ib = sum(b["ci"].values()) + sum(b["oi"].values())
-        return cls({c: b["chunks"][c] / a["chunks"][c] if a["chunks"][c] else 1.0 for c in a["chunks"]}, ib / ia, b["size"] / a["size"])
+        return cls({c: b["chunks"][c] / a["chunks"][c] if a["chunks"][c] else 1.0 for c in a["chunks"]}, ib / ia, sum(b["chunks"].values()) / sum(a["chunks"].values()))
 
 
 def scale_locs(ix: PageIx, d: Derive) -> PageIx:
