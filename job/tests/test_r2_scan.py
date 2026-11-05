@@ -240,6 +240,7 @@ def test_job_uses_only_r2_resources_and_secret_containers() -> None:
             "SLACK_BOT_TOKEN": "projects/oa-internal-450019/secrets/oa-r2-slack-bot-token/versions/latest",
             "SITE_TOKEN": "projects/oa-internal-450019/secrets/oa-r2-site-grant/versions/latest",
             "CF_PAGES_TOKEN": "projects/oa-internal-450019/secrets/oa-r2-cf-pages-token/versions/latest",
+            "CF_ANALYTICS_TOKEN": "projects/oa-internal-450019/secrets/oa-r2-cf-analytics-token/versions/latest",
         },
     }
     assert spec["allocationPolicy"]["serviceAccount"] == {"email": "oa-r2-usage-job@oa-internal-450019.iam.gserviceaccount.com"}
