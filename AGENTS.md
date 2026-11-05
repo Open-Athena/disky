@@ -145,6 +145,11 @@ dt-cloud interval-store backfill-churn -O NEW -o STORE [-g GEN]  # GEN (base + r
                           # file's |Δsize| rolled up to its ancestors, counted after the last v1 → v2 scan) and `churn_end` (at
                           # `vt`, closed pieces), `"churn": true` in `scans.json`; a fresh `build`'s bytes. New builds (`churn`
                           # after `fold`), appends and compactions carry it; source and `CURRENT.json` untouched
+dt-cloud interval-store backfill-level -g GEN -o STORE  # The level index (specs/diff-progressive.md §3b, what
+                          # `/api/diff/level` reads): one row per child version transition keyed `(parent depth, parent
+                          # path, ts, name)`, cut into GEN's `served/level.*` and each listed run's, nothing else written
+                          # (not `scans.json`, not `CURRENT.json`); needs churn. Appends, carries and compactions then carry
+                          # it. New builds opt in with `build -l` (`"level": true`); without either, no served byte changes
 dt-cloud interval-store backfill-generation -O NEW -o STORE -s ROOT -l TEMPLATE  # A generation folded into NEW (a dir or
                           # URL store; never over one) whose object versions carry their GCS `generation`, read once from
                           # the raw listings (`{id}` templates under ROOT): each version the first listed within it, earlier
@@ -154,7 +159,31 @@ dt-cloud interval-store backfill-generation -O NEW -o STORE -s ROOT -l TEMPLATE 
                           # from the scans whose listings have them all: gcs's depth-2/3 objects had none before 2026-10-22)
                           # `-j N` (also `add`'s compaction; `build`'s cut): N key ranges, then N served sorts, at a time on
                           # cursors of one DuckDB database (`-p`/`-M` shared; each ends in a serial pyarrow writer), same bytes
-dt-cloud diff-bench -a BEFORE -b AFTER [-v DATE:PATH]… CASES  # The table a store-layout change ships with (no CURRENT move
+dt-cloud interval-store layout-sim GEN REQUESTS  # `/api/diff/level` reads of a generation's served sort (`-s`, default
+                          # `path`; GEN a dir or `gs://`/`s3://`/`r2://` URL through `blobstore.Store`) simulated offline
+                          # (specs/diff-progressive.md §3b): per `{path, from, to}` request, rows decoded and GET runs for
+                          # today's kept groups, `-p` page sizes within them, `-b` band counts (`(band, depth, path, vf)`),
+                          # and `-l` a dedicated level sort: one row per child version transition, keyed `(parent depth,
+                          # parent path, b, child)`, one file per base / newest-manifest run (`-f N`: N even files), one
+                          # run a file touched; `-C` its size over the whole generation (transitions, estimated bytes).
+                          # Runs merge as the site's `planRuns` (`RUN_GAP`/`RUN_BYTES`/`RUN_READS`
+                          # mirror `site/functions/_lib/index.ts`) at the sort's bytes/row; row groups cached under `-c`
+                          # (`depth, path, vf, vt`), `-t` fetches over one footer, `-j` processes. JSONL out, p50/p90/p99/max
+                          # summary (rows, runs, GET rounds at 2 and 3 waves) to stderr
+dt-cloud interval-store level-sim GEN REQUESTS  # `readLevel`'s two waves priced over GEN's real `level` sort: per `{from, to, dirs}`
+                          # read (one line per chain round) the groups, pages and page-index spans as the reader plans them, each wave's
+                          # gets, rounds, bytes and predicted time (`-T` first byte, `-R` throughput, 6 slots) under `-g` gaps × `-C` caps,
+                          # `-b` `fit:B` (closes gaps while a round is saved within B fetched bytes), and `whole` (no index wave). Fetches
+                          # only sidecars and the kept groups' page indexes (cached under `-c`); gets and bytes match live `lv-*` spans exactly
+                          # `-s 256,512,1024` (+ `-F` sidecar row-group sizes): a table per mode, today / held page indexes (cold,
+                          # colo warm, warm) / the sort cut in small groups with no page index, from the real file's page indexes
+dt-cloud image-sha [-e SHA [-a]] [-j]  # The running image's source revision (`image_sha.py`): `$DISKY_GIT_SHA` /
+                          # `$DISKY_GIT_DIRTY`, which a deployment's image build stamps (gcs: `job/build.sh` → Dockerfile
+                          # `ARG`/`ENV` + OCI labels `org.opencontainers.image.revision`, `disky.dirty`). Prints `<sha>`,
+                          # `<sha> dirty` or `unstamped`; `-e` exits 1 unless the image is that sha (or a ≥7-char prefix),
+                          # clean (`-a` accepts dirty) and stamped. Job entrypoints (`scan head`/`step`, the
+                          # `interval-store` stage tasks) log it
+dt-cloud diff-bench -a BEFORE -b AFTER [-S STORE] [-v DATE:PATH]… CASES  # The table a store-layout change ships with (no CURRENT move
                           # without it): the browser's diff + map requests (diff-check's CASES, `-v` views) on two hosts, each
                           # cold (`-n` random w×h cache buckets no page asks for) then warm; per request kind, median cold
                           # `Server-Timing` total, the paired Δ (B − A), B-slower count + sign-test p; answers must agree
@@ -202,6 +231,7 @@ One gate (`_lib/auth.ts`, `@open-athena/auth` over D1): `identify` → `Identity
 - `/auth/google` (+ `/callback`, `/onetap`) — Google OIDC → email session; `/auth/email/*` — emailed code / magic link → email session
 - `/api/auth/*` — the package's routes: `whoami`, `exchange` (`?key=` share link → grant session), `logout`, request-access, admin grant/request/log console
 - `/api/token` — a session's personal agent token (a non-expiring Bearer grant, the base scope only; grants can't mint one)
+- `/a/<sha256>.<ext>` — **public, no gate**: an activity post's sender face (`_lib/publicAvatar.ts`), only bytes a Slack / Discord post stored in `public_avatars`, named by their own SHA-256 (a profile's or grant's face, else an identicon seeded by an HMAC of the actor under `SESSION_SECRET`); anything else 404s
 
 ## Development
 
@@ -272,7 +302,7 @@ Every deployment (gcs, cw-s3, r2, hf, the r2 demo, …) ships the current full f
 - **Hosts:** prod and a dev stack: `dev.<host>` (a `branchAliases` CNAME onto the Pages branch `dev`), wrangler's `[env.preview]` with prod's bindings, preview-env secrets, every origin + callback (prod, dev, the `pages.dev` alias, localhost) on the Google OAuth client.
 - **Auth:** app sign-in (Google OIDC + emailed codes), staff domain, admin console, personal agent tokens.
 - **Serving:** the interval store as the Map's path store (`PATH_STORE = "intervals"`, following `interval-store/CURRENT.json`, once `interval-store verify` / a `ps=iv` parity check passes on the first scans); search from the prebuilt static name index only (`FILTER_STATIC`, `NAME_SUMMARY_STATIC`, `FILTER_STATIC_HEAVY`, `FILTER_INDEXED_ONLY = "1"`), no per-scan search sidecars. Per-scan `path`/`bysize` sorts are on their way out (`specs/lean-scans.md`).
-- **Job:** `scan-run supervise` (phases, alerts, `/scans` records, cost labels), `DT_TRIGGER` (`schedule` in the cron body, `manual` from hand submits; with migration `scan-run-trigger`): the run's and the scan's trigger (`/scans`, the digest's reply scan), `index-gc`, cache warm-up (`warm-cache`) and the serving probe (`probe -c`) after each scan, the Slack digest thread.
+- **Job:** `scan-run supervise` (phases, alerts, `/scans` records, cost labels), `DT_TRIGGER` (`schedule` in the cron body, `manual` from hand submits; with migration `scan-run-trigger`): the run's and the scan's trigger (`/scans`, the digest's reply scan), `index-gc`, cache warm-up (`warm-cache`) and the serving probe (`probe -c`) after each scan, the Slack digest thread, and on a staging deployment the `staged-card` step (`dt-cloud staged-card`; the site's prod env names the job's grant in `STAGED_CARD_GRANT`, its dev stack does not).
 - **Meta:** the "data behind this site" store (`STORES_JSON` `meta`) with its own static index.
 
 A deployment's spec lists the baseline items it doesn't have yet as gaps, and those gaps are open work, not follow-ups to propose.

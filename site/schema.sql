@@ -128,6 +128,27 @@ CREATE TABLE chart_annotations (
   updated INTEGER NOT NULL
 , path TEXT, url TEXT, kind TEXT);
 
+CREATE TABLE digest_reapply (
+  job_id      TEXT PRIMARY KEY,
+  month       TEXT NOT NULL,
+  channel     TEXT NOT NULL,
+  target      TEXT NOT NULL,
+  dry_run     INTEGER NOT NULL,
+  params      TEXT,
+  quota_marks TEXT,
+  actor       TEXT NOT NULL,
+  ts          INTEGER NOT NULL,
+  out         TEXT NOT NULL
+);
+
+CREATE TABLE digest_settings (
+  template    TEXT PRIMARY KEY,
+  params      TEXT NOT NULL,
+  quota_marks TEXT NOT NULL,
+  updated_by  TEXT NOT NULL,
+  updated_at  INTEGER NOT NULL
+);
+
 CREATE TABLE footer_cache (
   date            TEXT NOT NULL,
   variant         TEXT NOT NULL,
@@ -264,7 +285,7 @@ CREATE TABLE deletion_runs (
   undo_state TEXT NOT NULL DEFAULT 'none' CHECK (undo_state IN ('none', 'partial', 'full', 'expired')),
   purge_state TEXT NOT NULL DEFAULT 'none' CHECK (purge_state IN ('none', 'pending', 'done')),
   log_dir TEXT NOT NULL
-, plan_digest TEXT);
+, plan_digest TEXT, min_soft_delete_days INTEGER, soft_delete_days INTEGER);
 
 CREATE TABLE deletion_bands (
   run_id TEXT NOT NULL REFERENCES deletion_runs(run_id),
@@ -299,6 +320,13 @@ CREATE TABLE profiles (
   avatar_src  TEXT,
   updated_at  INTEGER NOT NULL
 , name TEXT);
+
+CREATE TABLE public_avatars (
+  sha256      TEXT PRIMARY KEY,
+  type        TEXT NOT NULL,
+  data        TEXT NOT NULL,
+  created_at  INTEGER NOT NULL
+);
 
 CREATE TABLE "pyramid_multiscans" (
   dataset TEXT NOT NULL,
@@ -428,6 +456,13 @@ CREATE TABLE plan_items (
   PRIMARY KEY (plan_id, prefix)
 );
 
+CREATE TABLE sweep_settings (
+  id                   INTEGER PRIMARY KEY CHECK (id = 1),
+  min_soft_delete_days INTEGER NOT NULL CHECK (min_soft_delete_days BETWEEN 0 AND 90),
+  updated_by           TEXT NOT NULL,
+  updated_at           INTEGER NOT NULL
+);
+
 CREATE UNIQUE INDEX access_log_dedupe ON access_log (event, session_sub, path, bucket) WHERE bucket IS NOT NULL;
 
 CREATE INDEX access_log_grant ON access_log (grant_id, ts DESC);
@@ -459,6 +494,8 @@ CREATE INDEX admin_edits_tbl ON admin_edits (tbl, ts);
 CREATE INDEX chart_annotations_store ON chart_annotations (store, at);
 
 CREATE INDEX idx_deletion_bands_prefix ON deletion_bands (prefix);
+
+CREATE INDEX digest_reapply_ts ON digest_reapply (ts);
 
 CREATE INDEX idx_footer_cache_lru ON footer_cache (state, last_access_day, date);
 

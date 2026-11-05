@@ -14,13 +14,15 @@ import os
 import re
 import sys
 from collections import Counter
+from collections.abc import Callable
 from dataclasses import asdict
-from functools import partial
+from functools import partial, wraps
 from pathlib import Path
+from typing import Any
 
 import duckdb
 import pandas as pd
-from click import Choice, Context, File, UsageError, argument, group, option, pass_context
+from click import Choice, Context, File, IntRange, UsageError, argument, group, option, pass_context
 
 from .identity import IDENTITIES_ENV, load_identities
 from .deploy import data_bucket, layer2_prefix as resolve_layer2, site_token, site_url as resolve_site_url
@@ -539,6 +541,23 @@ def rules(identities_path: str, out: Path | None) -> None:
 
 
 # --- index tiers + their D1 footers (specs/done/view-serving.md, ported from gcs) ---
+
+
+@main.command("staged-card")
+@option("-t", "--token", default=None, help="Bearer token: the grant the site names as `STAGED_CARD_GRANT` (default: $SITE_TOKEN)")
+@option("-u", "--url", default=None, help="Site base URL (default: $SITE_URL)")
+def staged_card(token: str | None, url: str | None) -> None:
+    """Re-render the staged plan's Slack card at the newest scan, in place. Posts nothing new."""
+    from .site import SiteError, creds, post_json
+
+    base, tok = creds(token, url)
+    if not tok:
+        raise SystemExit("staged-card: no token (-t or $SITE_TOKEN)")
+    try:
+        result = json.loads(post_json(base, tok, "/api/plans/staged/card", {}))
+    except SiteError as e:
+        raise SystemExit(f"staged-card: {e}") from e
+    err(f"staged-card: {'edited' if result['refreshed'] else 'nothing to edit'}")
 
 
 @main.command()
@@ -1816,6 +1835,53 @@ def sweep_sync_progress(interval: int, sql_output: str | None, job_name: str) ->
     sync_progress(job_name, interval, sql_output)
 
 
+def _failure_recorded(step: str, out_param: str = "out") -> Callable:
+    """A failed step's reason in `<out>/failure.json`, then the failure as it was. A run refused before `record_run_start` has
+    no `deletion_runs` row, and Batch's own event only says "exit code 1": `/api/sweep/jobs` reads this for the row's "why" and
+    the Slack thread (`sweepFailure.ts`). A step killed from outside (out of memory, a pre-emption) leaves none."""
+    def decorate(fn: Callable) -> Callable:
+        @wraps(fn)
+        def run(**kwargs: Any) -> None:
+            try:
+                fn(**kwargs)
+            except Exception as error:
+                _write_failure(kwargs[out_param], step, error)
+                raise
+            except SystemExit as error:
+                if error.code not in (None, 0):
+                    _write_failure(kwargs[out_param], step, error.code)
+                raise
+        return run
+    return decorate
+
+
+def _write_failure(out: str | None, step: str, reason: object) -> None:
+    """Best effort: never masks the failure being reported."""
+    import fsspec
+
+    if out is None:
+        return
+    try:
+        fs, path = fsspec.core.url_to_fs(out)
+        fs.makedirs(path, exist_ok=True)
+        with fs.open(f"{path}/failure.json", "w") as fh:
+            json.dump({"step": step, "reason": str(reason)[:2000], "ts": int(dt.datetime.now(dt.timezone.utc).timestamp())}, fh)
+    except Exception as error:
+        err(f"WARN: couldn't write {out}/failure.json: {error}")
+
+
+def _start_recorded(record: Callable[[], str], for_real: bool) -> str | None:
+    """The run's `deletion_runs` row, before its first delete. A real run refuses without one: `sweepReflect` closes a failed
+    job with no row as a run that deleted nothing, which must never be said of one that did. A dry run has nothing to misreport."""
+    try:
+        return record()
+    except Exception as error:
+        if for_real:
+            raise RuntimeError(f"real run refused before any delete: couldn't record its start in D1: {error}") from error
+        err(f"WARN: deletion-run start record failed: {error}")
+        return None
+
+
 @sweep.command("manifest")
 @option("-b", "--bucket", "only_buckets", multiple=True, help="Only these buckets (default: every bucket the plan names)")
 @option("-d", "--date", required=True, help="Scan date whose listing to plan from (pinned)")
@@ -1826,6 +1892,7 @@ def sweep_sync_progress(interval: int, sql_output: str | None, job_name: str) ->
 @option("-o", "--out", default=None, help="Output dir (default gs://$DATA_BUCKET/sweep/<date>-p<plan_id>)")
 @option("-p", "--plan", "plan_path", required=True, help="The dispatched plan.json (path or gs:// URL): its items are the delete set, and the buckets are the plan's (∩ -b)")
 @option("-r", "--root", default=None, help="Listing root (gs:// or local mount; default gs://$DATA_BUCKET)")
+@_failure_recorded("manifest")
 def sweep_manifest(only_buckets: tuple[str, ...], date: str, iv_gen: str | None, holds: str, interval_store: str | None, workers: int, out: str | None,
                    plan_path: str, root: str | None) -> None:
     """Object-level manifest of a staged plan (specs/done/staged-delete.md): scan
@@ -1923,17 +1990,19 @@ def sweep_reuse_manifest(
 @option("-b", "--bucket", "only_buckets", multiple=True, help="Only these buckets")
 @option("-D", "--drift", type=Choice(["skip", "proceed"]), default="skip", help="Dirs that gained new keys since the scan: skip (default) or proceed (manifest keys only — new keys always survive)")
 @option("-m", "--max-root-objects", default=250_000, type=int, help="Split listing roots above this many manifest objects when safe")
+@option("-s", "--min-soft-delete-days", default=7, type=IntRange(0, 90), help="Refuse --for-real on a bucket retaining soft deletes for less; 0 allows soft delete off, whose deletes are permanent")
 @option("-w", "--workers", default=0, type=int, help="Concurrent directory re-lists (default 2 × CPUs, ≤ 16)")
 @option("-W", "--delete-workers", default=32, type=int, help="Concurrent delete batches (100 objects each), shared by every re-list")
 @option("--for-real", is_flag=True, help="Actually delete (default: dry-run writes would-delete/)")
 @option("--no-record", is_flag=True, help="Skip the D1 deletion_runs/bands record (recorded by default)")
 @argument("plan_dir")
-def sweep_execute(only_buckets: tuple[str, ...], drift: str, max_root_objects: int, delete_workers: int, workers: int, for_real: bool, no_record: bool, plan_dir: str) -> None:
+@_failure_recorded("execute", "plan_dir")
+def sweep_execute(only_buckets: tuple[str, ...], drift: str, max_root_objects: int, min_soft_delete_days: int, delete_workers: int, workers: int, for_real: bool, no_record: bool, plan_dir: str) -> None:
     """Execute (default: DRY-RUN) a `sweep manifest` plan: fresh re-list per
     eligible dir, generation-matched deletes of manifest∩live keys whose
     timeCreated is unchanged. The plan is the whole intent: nothing is
-    re-classified. `--for-real` additionally requires ≥7d soft delete on every
-    bucket."""
+    re-classified. `--for-real` additionally requires `-s` days (default 7) of
+    soft delete on every bucket; the run records the minimum it ran under."""
     import fsspec
 
     from .sweep_exec import DELETE_ATTEMPTS, execute_plan
@@ -1950,12 +2019,9 @@ def sweep_execute(only_buckets: tuple[str, ...], drift: str, max_root_objects: i
         # The run's D1 row goes in now (finished NULL) so /staged lists it while
         # the re-list runs — hours, on the big bands; completed at the end.
         from .sweep_exec import record_run_start
-        try:
-            run_id = record_run_start(plan_summary, plan_dir, actor=actor, started_ts=started, for_real=for_real, buckets=only_buckets)
-            progress_run_id = run_id
-            err(f"recorded deletion run {run_id} (in progress)")
-        except Exception as e:  # recording must never block the run
-            err(f"WARN: deletion-run start record failed: {e}")
+        progress_run_id = _start_recorded(lambda: record_run_start(plan_summary, plan_dir, actor=actor, started_ts=started, for_real=for_real, buckets=only_buckets, min_soft_delete_days=min_soft_delete_days), for_real)
+        if progress_run_id is not None:
+            err(f"recorded deletion run {progress_run_id} (in progress)")
     # A clean stop: `sweep stop PLAN` drops PLAN/STOP (polled every 10 s), or
     # SIGTERM — roots not yet started are left for a re-run, everything done
     # is logged and recorded, and the job ends red (exit 130).
@@ -1980,6 +2046,7 @@ def sweep_execute(only_buckets: tuple[str, ...], drift: str, max_root_objects: i
         workers=workers,
         delete_workers=delete_workers,
         max_root_objects=max_root_objects,
+        min_soft_delete_days=min_soft_delete_days,
         stop=stop,
         on_progress=progress if not no_record else None,
     )
@@ -1988,12 +2055,12 @@ def sweep_execute(only_buckets: tuple[str, ...], drift: str, max_root_objects: i
     err(f"\n{'deleted' if for_real else 'would delete'}: {total / 1e12:.2f} TB total")
     failed = {b: v["failed_dirs"] for b, v in summary["buckets"].items() if v.get("failed_dirs")}
     if not no_record:
-        from .sweep_exec import record_run
+        from .sweep_exec import narrowest_retention, record_run
         # The undo deadline follows the narrowest window actually measured on
-        # the run's buckets (the guard already refused anything under 7 d).
-        windows = [int(v["soft_delete_days"]) for v in summary["buckets"].values() if "soft_delete_days" in v]
+        # the buckets the run deleted from (the guard already refused anything under `-s`); none at 0.
+        narrowest = narrowest_retention(summary["buckets"].values())
         try:
-            run_id = record_run(summary, summary["_plan"], actor=actor, started_ts=started, finished_ts=finished, soft_delete_days=min(windows) if windows else 7)
+            run_id = record_run(summary, summary["_plan"], actor=actor, started_ts=started, finished_ts=finished, soft_delete_days=min_soft_delete_days if narrowest is None else narrowest, min_soft_delete_days=min_soft_delete_days)
             err(f"recorded deletion run {run_id}")
         except Exception as e:  # recording must never mask a completed run
             err(f"WARN: deletion-run record failed: {e}")
@@ -2133,21 +2200,8 @@ def sweep_benchmark_delete(workers: int, methods: tuple[str, ...], objects: int,
     _hard_exit()
 
 
-@sweep.command("execute-reviewed")
-@option("-B", "--bucket-workers", default=6, type=int, help="Concurrent buckets (1..6), sharing the delete-worker pool")
-@option("-b", "--bucket", "only_buckets", multiple=True, help="Subset of reviewed DR buckets")
-@option("-c", "--pacing", type=Choice(["guided", "adaptive"]), default="guided", help="Per-bucket feedback pacing; guided retains the GCS 2x/20m envelope, adaptive probes 25%/healthy minute")
-@option("-e", "--backend", type=Choice(["xml", "json"]), default="xml", help="Generation-addressed delete backend")
-@option("-j", "--workers", default=16, type=int, help="Concurrent full batches (1..64)")
-@option("-o", "--out", required=True, help="New output run directory for progress and undo records")
-@option("-p", "--plan", "plan_path", required=True, help="Current staged plan.json; must exactly match DR intent")
-@option("-r", "--max-rate", default=8000, type=int, help="Per-bucket attempted-object/s ceiling, including retries; starts at ≤1000")
-@option("-w", "--work-dir", required=True, help="Empty local directory for pinned decision-log cache")
-@option("-x", "--exclude-run", "exclude_runs", multiple=True, help="Subtract this drained run's reconciled settled identities; include its full resume chain")
-@option("--for-real", is_flag=True, help="Delete reviewed generations; default validates and writes a dry log")
-@option("--no-record", is_flag=True, help="Skip D1 run/band records (scratch only)")
-@argument("source")
-def sweep_execute_reviewed(
+def _execute_generations(
+    execute: Callable[..., dict],
     bucket_workers: int,
     only_buckets: tuple[str, ...],
     pacing: str,
@@ -2156,21 +2210,17 @@ def sweep_execute_reviewed(
     out: str,
     plan_path: str,
     max_rate: int,
+    min_soft_delete_days: int,
     work_dir: str,
     exclude_runs: tuple[str, ...],
     for_real: bool,
     no_record: bool,
     source: str,
 ) -> None:
-    """Stream a completed DR's exact generations; no fresh relist/drift audit.
-
-    Full pinned-log preflight, recoverable deletes, bounded batches, progress,
-    and per-object undo records. This is the normal real web-dispatch path.
-    """
+    """`execute-reviewed` / `execute-manifest`: run `execute` over SOURCE, recording the run in D1."""
     import signal
     import threading
-    from .sweep_exec import record_run, record_run_start, stop_file_watch
-    from .sweep_reviewed import execute_reviewed
+    from .sweep_exec import narrowest_retention, record_run, record_run_start, stop_file_watch
 
     stop = threading.Event()
     signal.signal(signal.SIGTERM, lambda *_: stop.set())
@@ -2180,13 +2230,10 @@ def sweep_execute_reviewed(
 
     progress_run_id = None
 
-    def prepared(plan: dict) -> None:
+    def prepared(plan: dict, soft_delete_days: int | None) -> None:
         nonlocal progress_run_id
         if for_real and not no_record:
-            try:
-                progress_run_id = record_run_start(plan, out, actor, started, for_real, only_buckets)
-            except Exception as error:
-                err(f"WARN: deletion-run start record failed: {error}")
+            progress_run_id = _start_recorded(lambda: record_run_start(plan, out, actor, started, for_real, only_buckets, min_soft_delete_days, soft_delete_days), for_real)
 
     def progress(snapshot: dict) -> None:
         from .sweep_progress import sample, write_samples
@@ -2194,11 +2241,11 @@ def sweep_execute_reviewed(
         if progress_run_id is not None:
             write_samples(progress_run_id, [sample(snapshot)])
 
-    summary = execute_reviewed(source, plan_path, out, work_dir, for_real, only_buckets, backend, workers, max_rate, stop, on_prepared=prepared, bucket_workers=bucket_workers, exclude_runs=exclude_runs, on_progress=progress if not no_record else None, pacing=pacing)
+    summary = execute(source, plan_path, out, work_dir, for_real, only_buckets, backend, workers, max_rate, stop, on_prepared=prepared, bucket_workers=bucket_workers, exclude_runs=exclude_runs, on_progress=progress if not no_record else None, pacing=pacing, min_soft_delete_days=min_soft_delete_days)
     if for_real and not no_record:
-        windows = [int(entry["soft_delete_days"]) for entry in summary["buckets"].values()]
+        narrowest = narrowest_retention(summary["buckets"].values())
         try:
-            record_run(summary, summary["_plan"], actor, started, int(dt.datetime.now(dt.timezone.utc).timestamp()), min(windows) if windows else 7)
+            record_run(summary, summary["_plan"], actor, started, int(dt.datetime.now(dt.timezone.utc).timestamp()), min_soft_delete_days if narrowest is None else narrowest, min_soft_delete_days)
         except Exception as error:
             err(f"WARN: deletion-run final record failed: {error}")
     failed = any(entry.get("failed_dirs") or entry.get("error") for entry in summary["buckets"].values())
@@ -2208,6 +2255,67 @@ def sweep_execute_reviewed(
         sys.stderr.flush()
         os._exit(130 if stop.is_set() else 2)
     _hard_exit()
+
+
+def _generation_options(source: str) -> Callable:
+    """The options `execute-reviewed` and `execute-manifest` share: how to delete, whichever SOURCE says what."""
+    def decorate(fn: Callable) -> Callable:
+        for decorator in reversed((
+            option("-B", "--bucket-workers", default=6, type=int, help="Concurrent buckets (1..6), sharing the delete-worker pool"),
+            option("-b", "--bucket", "only_buckets", multiple=True, help=f"Subset of the {source}'s buckets"),
+            option("-c", "--pacing", type=Choice(["guided", "adaptive"]), default="guided", help="Per-bucket feedback pacing; guided retains the GCS 2x/20m envelope, adaptive probes 25%/healthy minute"),
+            option("-e", "--backend", type=Choice(["xml", "json"]), default="xml", help="Generation-addressed delete backend"),
+            option("-j", "--workers", default=16, type=int, help="Concurrent full batches (1..64)"),
+            option("-o", "--out", required=True, help="New output run directory for progress and undo records"),
+            option("-p", "--plan", "plan_path", required=True, help=f"Current staged plan.json; must exactly match the {source}'s items"),
+            option("-r", "--max-rate", default=8000, type=int, help="Per-bucket attempted-object/s ceiling, including retries; starts at ≤1000"),
+            option("-s", "--min-soft-delete-days", default=7, type=IntRange(0, 90), help="Refuse --for-real on a bucket retaining soft deletes for less; 0 allows soft delete off, whose deletes are permanent"),
+            option("-w", "--work-dir", required=True, help=f"Empty local directory for the pinned {source} cache"),
+            option("-x", "--exclude-run", "exclude_runs", multiple=True, help="Subtract this drained run's reconciled settled identities; include its full resume chain"),
+            option("--for-real", is_flag=True, help=f"Delete the {source}'s generations; default validates and writes a dry log"),
+            option("--no-record", is_flag=True, help="Skip D1 run/band records (scratch only)"),
+            argument("source"),
+        )):
+            fn = decorator(fn)
+        return fn
+    return decorate
+
+
+@sweep.command("execute-reviewed")
+@_generation_options("reviewed DR")
+@_failure_recorded("execute-reviewed")
+def sweep_execute_reviewed(**kwargs: Any) -> None:
+    """Stream a completed DR's exact generations; no fresh relist/drift audit.
+
+    Full pinned-log preflight, deletes recoverable for each bucket's retention
+    (`-s`), bounded batches, progress, and per-object undo records. This is the web dispatch of a real run with a
+    dry run of exactly its items.
+    """
+    from .sweep_reviewed import execute_reviewed
+
+    _execute_generations(execute_reviewed, **kwargs)
+
+
+@sweep.command("execute-manifest")
+@_generation_options("manifest")
+@_failure_recorded("execute-manifest")
+def sweep_execute_manifest(**kwargs: Any) -> None:
+    """Stream SOURCE's (a `sweep manifest` output dir) exact generations; no dry run, relist or drift audit.
+
+    `execute-reviewed`'s executor, over the generations the manifest read from
+    its scan's listing: every row is checked first (pinned artifact, a positive
+    generation, under a staged item, totals, no identity twice), then the
+    buckets' permissions and soft-delete retention. A zero or negative
+    generation refuses the whole run. A null one is logged per object as
+    `skipped_no_generation`, not deleted, and counted in the summary (a manifest
+    of only those refuses). Only named generations are deleted, so a key written
+    beside a manifest key survives, and its directory is still swept (no
+    whole-dir drift skip). This is the web dispatch of a real run with no dry
+    run of exactly its items.
+    """
+    from .sweep_reviewed import execute_manifest
+
+    _execute_generations(execute_manifest, **kwargs)
 
 
 @sweep.command("batch-submit")
@@ -2300,10 +2408,14 @@ def sweep_recovery_check(limit: int, prefixes: tuple[str, ...]) -> None:
 def sweep_undo(only_buckets: tuple[str, ...], bulk: bool, dry_run: bool, bulk_ops: int, prefixes: tuple[str, ...], workers: int, no_record: bool, run: str) -> None:
     """Restore what a real run deleted, from its `deleted/` logs — the
     soft-delete restore of exactly the logged generations, valid until the
-    run's recorded `undo_deadline`. Actual retention starts per object at
+    run's recorded `undo_deadline`; none for a run that recorded soft delete off
+    on a bucket (`soft_delete_days` 0) or required none and recorded no retention (a killed `sweep execute -s 0`), but `-b`
+    names the buckets that kept theirs. Actual retention starts per object at
     deletion, so that record is not an object-level guarantee. RUN is the D1
     run id (`<scan>-p<plan_id>/<utc stamp>`, as /staged lists it) or the run's
-    gs:// log dir. Re-runnable: names already live again are left alone.
+    gs:// log dir. Re-runnable: names already live again are left alone. A run
+    with no `deleted-summary.json` (killed) restores what its uploaded parts
+    name, and says its log may be partial; `undo_state` then stays `partial`.
 
     `-B` restores per directory with GCS bulk restore, filtered to the run's
     deletion window (the D1 row's started/finished times, else the log dir's
@@ -2317,7 +2429,7 @@ def sweep_undo(only_buckets: tuple[str, ...], bulk: bool, dry_run: bool, bulk_op
     try:
         tok, acct = _creds()
         rows = _d1_query(
-            "SELECT run_id, mode, started_ts, finished_ts, undo_deadline, undo_state, log_dir, deleted_objects FROM deletion_runs "
+            "SELECT * FROM deletion_runs "
             f"WHERE run_id = {_q(run)} OR log_dir = {_q(run)}", acct, tok,
         )
         row = rows[0] if rows else None
@@ -2329,6 +2441,17 @@ def sweep_undo(only_buckets: tuple[str, ...], bulk: bool, dry_run: bool, bulk_op
         raise SystemExit(f"no deletion run {run!r} in D1 (see /staged for run ids)")
     if row is not None and row["mode"] != "real":
         raise SystemExit(f"{row['run_id']} was a dry run — nothing to undo")
+    if row is not None and row.get("soft_delete_days") == 0 and not only_buckets:
+        raise SystemExit(
+            f"{row['run_id']}: no undo: a bucket in this run had soft delete off, so its deletes are permanent. "
+            "Name the buckets that retained theirs with -b (their retention: the run's `deleted-summary.json`)"
+        )
+    # A killed `sweep execute -s 0`: it never wrote what it measured (`sweepReflect` closes it with no deadline), and undo would run unchecked.
+    if row is not None and row.get("soft_delete_days") is None and row.get("min_soft_delete_days") == 0 and not only_buckets:
+        raise SystemExit(
+            f"{row['run_id']}: no undo promised: it required no soft delete and recorded no retention, so treat its deletes as permanent. "
+            "Name the buckets to try with -b"
+        )
     log_dir = row["log_dir"] if row is not None else run
     deadline = row.get("undo_deadline") if row is not None else None
     if row is not None:
@@ -2792,6 +2915,7 @@ def job_submit_listing(
 @option("-o", "--out", required=True, help="New run output directory")
 @option("-p", "--plan", required=True, help="Snapshot of current staged plan")
 @option("-r", "--max-rate", default=8000, type=int, help="Per-bucket object/s ceiling")
+@option("-s", "--min-soft-delete-days", default=None, type=IntRange(0, 90), help="`sweep execute-reviewed -s` (unset: its default, 7, and no flag, for an image from before it)")
 @option("-t", "--template", required=True, type=Path, help="Described prior Batch job JSON; reuse deployment settings")
 @option("-x", "--exclude-run", "exclude_runs", multiple=True, help="Exclude reconciled settled identities from a drained run")
 @option("--for-real", is_flag=True, help="Actually delete reviewed generations (default validates only)")
@@ -2808,6 +2932,7 @@ def job_submit_reviewed(
     out: str,
     plan: str,
     max_rate: int,
+    min_soft_delete_days: int | None,
     template: Path,
     exclude_runs: tuple[str, ...],
     for_real: bool,
@@ -2818,7 +2943,7 @@ def job_submit_reviewed(
     from .batch import submit_job
     from .sweep_job import reviewed_job_spec
 
-    spec = reviewed_job_spec(json.loads(template.read_text()), source, plan, out, image, workers, max_rate, for_real, buckets, after_run, bucket_workers=bucket_workers, exclude_runs=exclude_runs, pacing=pacing)
+    spec = reviewed_job_spec(json.loads(template.read_text()), source, plan, out, image, workers, max_rate, for_real, buckets, after_run, bucket_workers=bucket_workers, exclude_runs=exclude_runs, pacing=pacing, min_soft_delete_days=min_soft_delete_days)
     if not re.fullmatch(r"gcs-sweep-(real|dry)-\d{8}-\d{6}z", name):
         raise UsageError("job name must use the site's gcs-sweep-(real|dry)-YYYYMMDD-HHMMSSz format")
     expected = f"gs://{spec['taskGroups'][0]['taskSpec']['environment']['variables']['DATA_BUCKET']}/sweep/runs/{name}"
@@ -3108,10 +3233,13 @@ def _digest_options(template_default: str):
         option("-F", "--for-real", is_flag=True, help="With --redo-replies: actually post the new replies and delete the old ones (default: print the plan)"),
         option("-H", "--reply-hour", type=int, default=None, help="cw template: UTC hour the sender variant's daily reply is taken from — the day's first scan at/after it (default 12 → the 12:01Z morning scan, 8:01 am ET; the day's other scans still feed the OP + plot, and with the config's `provisional: true` its earlier ones post a provisional reply)"),
         option("-i", "--icons-dir", type=Path, default=None, help="Where the plot PNG is written + deployed from (default the config's `icons_dir`: job/icons, job/icons-cw)"),
+        option("-L", "--file-settings", is_flag=True, help="Use the config file's `params` / `quota_marks`, not the site's live settings (`/api/digest-settings`, edited on /admin/slack; the default when the site has a row)"),
         option("-m", "--month", help="Month YYYY-MM (default: current UTC month)"),
         option("-n", "--dry-run", is_flag=True, help="Render the plot + print OP/replies; post & host nothing"),
         option("-o", "--op", "op_only", is_flag=True, help="Re-apply only the OP (its plot re-rendered and hosted) to its current rendering, touching no reply (Slack; with -d/-y, those replies too; `-n` prints the edits)"),
+        option("-p", "--params", "params_override", default=None, help="The OP's site-renderer params (the site's codec string, e.g. `qh,pp`) for this run, over the live settings and the file"),
         option("-P", "--platform", type=Choice(["slack", "discord"]), default="slack", help="Which thread to converge (default slack)"),
+        option("-q", "--quota-marks", "marks_override", type=Choice(["warning", "circles", "runway", "runway-hue"]), default=None, help="The replies' quota marks for this run, over the live settings and the file"),
         option("-r", "--root", help="Snapshots root: a dir or URL (`r2://<bucket>/snapshots`, `gs://…`; the month's state lives beside it); default the config's `root` (presets: gs://$DATA_BUCKET/snapshots)"),
         option("-R", "--redo-replies", is_flag=True, help="Re-post the month's replies under the current day rule, then delete the old ones (Slack, or Discord with -P discord; dry-run unless --for-real)"),
         option("-s", "--since", help="With --redo-replies: redo only the days from this one (YYYY-MM-DD) on; earlier days keep their replies, re-keyed to the current rule (a day's extra replies stay in the thread)"),
@@ -3140,10 +3268,13 @@ def _digest(
     for_real: bool,
     reply_hour: int | None,
     icons_dir: Path | None,
+    file_settings: bool,
     month: str | None,
     dry_run: bool,
     op_only: bool,
+    params_override: str | None,
     platform: str,
+    marks_override: str | None,
     root: str | None,
     redo_replies: bool,
     since: str | None,
@@ -3160,6 +3291,11 @@ def _digest(
 
     cfg = dg.load_config(template, config_path)
     cfg = replace(cfg, site_url=site_url or cfg.site_url, reply_hour=cfg.reply_hour if reply_hour is None else reply_hour)
+    if not file_settings:
+        cfg = dg.with_settings(cfg, dg.live_settings(cfg))
+    cfg = dg.with_settings(cfg, {"params": cfg.params if params_override is None else params_override,
+                                 "quota_marks": marks_override or cfg.quota_marks})
+    err(f"digest: quota_marks {cfg.quota_marks}, params {cfg.params!r}")
     tpl = dg.template(cfg)
     variant = variant or cfg.variant
     if variant not in tpl.variants:
@@ -3471,9 +3607,12 @@ from .interval_local import add_cmd as _interval_local_add, build_cmd as _interv
 from .interval_export import export_cmd as _interval_export  # noqa: E402
 from .interval_backfill import backfill_cmd as _interval_backfill  # noqa: E402
 from .interval_churn import backfill_cmd as _interval_backfill_churn  # noqa: E402
+from .interval_level import backfill_cmd as _interval_backfill_level  # noqa: E402
 from .interval_identity import migrate_cmd as _interval_identity  # noqa: E402
 from .interval_backfill import verify_generation_cmd as _interval_verify_generation  # noqa: E402
 from .interval_attribution import backfill_attribution_cmd as _interval_backfill_attribution, convert_cmd as _interval_attribution_convert  # noqa: E402
+from .layout_sim import layout_sim_cmd as _interval_layout_sim  # noqa: E402
+from .level_sim import level_sim_cmd as _interval_level_sim  # noqa: E402
 
 _interval_store.add_command(_interval_local_build)
 _interval_store.add_command(_interval_local_add)
@@ -3481,6 +3620,7 @@ _interval_store.add_command(_interval_local_current)
 _interval_store.add_command(_interval_export)
 _interval_store.add_command(_interval_backfill)
 _interval_store.add_command(_interval_backfill_churn)
+_interval_store.add_command(_interval_backfill_level)
 _interval_store.add_command(_interval_identity)
 _interval_store.add_command(_interval_verify_generation)
 _interval_store.add_command(_interval_backfill_attribution)
@@ -3488,6 +3628,8 @@ _interval_store.add_command(_interval_attribution_convert)
 _interval_store.add_command(_interval_append)
 _interval_store.add_command(_interval_merge)
 _interval_store.add_command(_interval_runs)
+_interval_store.add_command(_interval_layout_sim)
+_interval_store.add_command(_interval_level_sim)
 main.add_command(_interval_store)
 
 from .age_store import age_store_cmd as _age_store  # noqa: E402
@@ -3587,8 +3729,10 @@ def _scan_step(profile_path: str | None, name: str, arg: str | None) -> None:
     """Run scan step NAME (ARG: `list`'s source URI) for the scan `$SNAP_ID` / `$GEN` / `$DT_JOB_START` the head
     stamped, recording its phases into the run `$DT_RUN_ID`. Idempotent: done work is skipped. Steps:
     `dt_cloud.scan_steps.STEPS`."""
+    from .image_sha import log_job_stamp
     from .scan_steps import run_step
 
+    log_job_stamp(f"scan step {name}")
     sys.exit(run_step(name, arg, profile_path=profile_path))
 
 
@@ -3602,8 +3746,10 @@ def _scan_step(profile_path: str | None, name: str, arg: str | None) -> None:
 def _scan_head(fresh: bool, dry_run: bool, nf_dir: Path | None, reproc: bool, launch_dir: Path | None, profile_path: Path) -> None:
     """Run one scan of the deployment PROFILE_PATH describes (`job/profiles/<deployment>.yml`) through
     `job/nf/scan.nf`: `$SNAP_ID` / `$GEN` / `$DT_JOB_START` when set (resuming that scan's session), else stamped now."""
+    from .image_sha import log_job_stamp
     from .scan_head import head
 
+    log_job_stamp("scan head")
     nf = nf_dir or Path(os.environ.get("DT_NF_DIR") or "job/nf")
     sys.exit(head(profile_path, nf.absolute(), launch_dir, reproc=reproc, fresh=fresh, dry_run=dry_run))
 
@@ -3620,6 +3766,10 @@ main.add_command(_cf_usage)
 from .deploy_cost import cost_cmd as _deploy_cost  # noqa: E402
 
 main.add_command(_deploy_cost)
+
+from .image_sha import image_sha_cmd as _image_sha  # noqa: E402
+
+main.add_command(_image_sha)
 
 if __name__ == "__main__":
     main()
