@@ -7,7 +7,7 @@ import { buildDiff, capDiffRows, type Diff, type DiffRow } from './view'
 
 vi.mock('@rdub/file-tree/stores/s3', async () => ({ S3Store: (await import('./testStore')).S3Store }))
 
-// The as-of walk with range churn on its rows (`buildDiff` `churn`, specs/diff-progressive.md §3c), over
+// The as-of walk with range churn on its rows (`buildDiff` `churn`, specs/diff-progressive.md §3d), over
 // `fixtures/iv-churn/`: a base over four scans and three appended runs, 4 rows per group. `expected.json` is the churn
 // oracle: per `(from, to, path)` from the churn base on, each changed child's values and range churn, computed from the
 // scans' files alone. Files drop out of scans and come back (`_files`), and two trade sizes (a same-size swap).

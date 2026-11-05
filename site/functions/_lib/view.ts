@@ -2353,7 +2353,7 @@ export interface DiffOpts extends Omit<ViewOpts, 'date'> {
   descentBudgetMs?: number
   descentBudgetRows?: number
   /** Range churn on the walk's rows (`DiffRow.c`, `Diff.churn`), ranking its leaves and expanding a directory whose bytes
-   *  held but whose churn didn't. No other reader, no index: the as-of rows carry `churn_cum` (§3c). Plain diffs only. */
+   *  held but whose churn didn't. No other reader, no index: the as-of rows carry `churn_cum` (§3d). Plain diffs only. */
   churn?: boolean
 }
 

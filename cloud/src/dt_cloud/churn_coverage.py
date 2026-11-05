@@ -1,5 +1,5 @@
 """Offline, over a generation's folded path versions (`pvl/`): what `dm=churn` on the as-of walk can show, and what a
-dedicated churn index would cost (specs/diff-progressive.md §3c).
+dedicated churn index would cost (specs/diff-progressive.md §3d).
 
 `interval-store churn-coverage GEN CASES`: the walk's cells are chosen by a byte floor, so a small directory with heavy
 churn rolls into its parent's `(other)`. Per case `{from, to, path}`, the walk is replayed from both scans' rows (the same

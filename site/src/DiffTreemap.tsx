@@ -161,7 +161,7 @@ function DiffStats({ model }: { model: DiffModel }) {
 }
 
 /** Area-mode toggle (max vs Δ), parked top-right by the fullscreen button. */
-/** `dm=churn` is a prototype: its button only on the dev host (`DIFF_CHURN`, specs/diff-progressive.md §3c). */
+/** `dm=churn` is a prototype: its button only on the dev host (`DIFF_CHURN`, specs/diff-progressive.md §3d). */
 const CHURN_TOGGLE = import.meta.env.DEV || location.hostname === import.meta.env.VITE_DEV_HOST
 
 function DiffModes({ model }: { model: DiffModel }) {

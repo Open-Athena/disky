@@ -196,7 +196,7 @@ One `bysize` cut per format, same VM and plan, harness `scripts/ipc_bench.py` (o
 
 **For the real change.** IPC's footer has no row counts and batches aren't uniform, so counts must be kept (a sidecar, or passed in `pieces`). mmap is out: it inflates the PSS `TreeWatch` measures, and was slower. The piece threads shared one reader, which held over this run's rows but which pyarrow's docs don't promise; opening per span costs ~42% on read-only replay. `Budget.cut` needs its footer term either way, batches × bytes a batch.
 
-### 3c. Churn on the as-of walk (prototype, dev alias only)
+### 3d. Churn on the as-of walk (prototype, dev alias only)
 
 `dm=churn` on `buildDiff` (`DIFF_CHURN`, branch `w/diff-churn-walk`): area = range churn, colour = net, with no new index. The level index is paused while the walk's own latency is the priority.
 
