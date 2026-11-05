@@ -379,7 +379,7 @@ function AppContent() {
   // The diff map's area mode (`DiffTreemap`'s `dm`; absent = Δ): the rows a Δ map needs are only what changed
   // (specs/diff-from-changes.md), so the server is told which one it draws for.
   const [dmP] = useUrlState('dm', stringParam())
-  const dmMode = dmP === 'max' ? 'max' : 'delta'
+  const dmMode = dmP === 'max' ? 'max' : dmP === 'churn' ? 'churn' : 'delta'
   const diffKey = `${startAt ?? diffPrev}→${endAt ?? asof}`
   // A store whose scans carry physical disk readings (`meta.disk_space`) compares them across the diff;
   // any other store never fetches the earlier scan's meta (`diskDiffScan`).

@@ -59,6 +59,8 @@ export function diffCellStyle(n: DiffNode, areaMode: AreaMode): DiffCellStyle {
  *  (falling back to `max` when Δ has nothing to show and `mode` wasn't
  *  pinned), or null when nothing moved. */
 export function diffRoot(data: DiffData, mode: AreaMode, pinned: boolean, atRoot: boolean, label: string): { root: DiffNode; mode: AreaMode } | null {
+  // A churn walk the server didn't answer (`churn_off`, or `DIFF_CHURN` unset) has no churn to size by: Δ.
+  if (mode === 'churn' && data.churn == null) mode = 'delta'
   let { cells } = buildTree(data, mode, atRoot)
   if (!pinned && mode === 'delta' && cells.length === 0) {
     const alt = buildTree(data, 'max', atRoot)
@@ -71,6 +73,7 @@ export function diffRoot(data: DiffData, mode: AreaMode, pinned: boolean, atRoot
     k: 'dir',
     weight: cells.reduce((s, c) => s + c.weight, 0),
     delta: data.total_b - data.total_a,
+    ...(data.churn != null ? { churn: data.churn } : {}),
     added: cells.reduce((s, c) => s + c.added, 0),
     removed: cells.reduce((s, c) => s + c.removed, 0),
     status: 'root',

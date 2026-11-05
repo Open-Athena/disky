@@ -29,7 +29,7 @@
  * `f = n_children(P) − kept` — objects and dirs alike.
  */
 import type { Env } from './auth.js'
-import { asOfScans, folded, type IndexHandle, isStore, ivHeldDates, ivLastRead, type Lens, openIndex, pathStoreKey, perScan, planRects, slices, planSizeRects, readAsks, readFits, readRects, readRows, readPathHistoryRows, readSizeRects, type Rect, type Row, sizeVariant, type Span, TooWide, type Trace, withTrace } from './index.js'
+import { asOfScans, churnRows, ivChurnFrom, folded, type IndexHandle, isStore, ivHeldDates, ivLastRead, type Lens, openIndex, pathStoreKey, perScan, planRects, slices, planSizeRects, readAsks, readFits, readRects, readRows, readPathHistoryRows, readSizeRects, type Rect, type Row, sizeVariant, type Span, TooWide, type Trace, withTrace } from './index.js'
 import { type FoldedLens, ownerLens, poolLens } from './owners.js'
 import { type ClassScope, classRow, nameFilter, type NamePred, ownerKey, ownerOk, type OwnerScope } from './scope.js'
 import { filterThreshold, looseThreshold, matchRoots, pickTier, rebasedThreshold, rootRects } from './filter.js'
@@ -283,6 +283,10 @@ interface Agg {
   /** Built from exactly one interval-store row: that version's `[vf, vt)` (null once a second row
    *  merges in; absent on per-scan rows and synthesized aggregates). A diff's lookups use it. */
   ver?: { vf: number; vt: number } | null
+  /** On a churn walk (`churnRows`): the path's cumulative churn at this scan (`churn_cum`; the fleet root: its depth-1
+   *  rows' sum), and at the close of the row's version (`churn_end`: where a path gone by the other scan may have ended). */
+  cum?: number
+  cumEnd?: number | null
 }
 
 const newAgg = (): Agg => ({ b: 0, o: 0, wts: 0, wb: 0, m: null, a: null, cb: {}, ub: {}, kind: null, nc: null, nd: null })
@@ -305,6 +309,7 @@ function merge(a: Agg, r: Row): void {
   if (r.n_children != null) a.nc = r.n_children
   if (r.n_desc != null) a.nd = r.n_desc
   if (r.vf != null && r.vt != null) a.ver = a.ver === undefined ? { vf: r.vf, vt: r.vt } : null
+  if (r.churn_cum != null) { a.cum = (a.cum ?? 0) + r.churn_cum; a.cumEnd = r.churn_end ?? null }
 }
 
 function subtract(parent: Agg, kids: Agg[]): Agg {
@@ -673,6 +678,8 @@ function lensAgg(ol: FoldedLens, user: string, path: string, all: Agg | null, mi
  * (above-threshold, ancestor-closed) scoped aggregates under it, the fold
  * counts, and which tier answered. `null` = nothing in scope under P. */
 interface Read {
+  /** The fleet root's depth-1 paths (an unscoped read): a churn walk draws them all, the root's churn their sum. */
+  rootKids?: Map<string, Agg>
   rootAll: Agg
   rootAgg: Agg
   kept: Map<string, Agg>
@@ -1488,7 +1495,8 @@ async function readView(env: Env, o: ViewOpts, cov: Coverage = {}): Promise<Read
     const key = kept.has(par) ? par : par === path || (path === '' && !p.includes('/')) ? path : null
     if (key !== null) foldedOf.set(key, (foldedOf.get(key) ?? 0) + 1)
   }
-  return { rootAll, rootAgg, kept, aggDepth, foldedOf, threshold, thrAt, tier: tierName, idx, truncated, ...(matches ? { matches } : {}), ownerLens: ol, scoped }
+  const rootKids = path === '' && plain ? new Map(rootRows.map(r => { const a = newAgg(); merge(a, r); return [r.path, a] as const })) : undefined
+  return { rootAll, rootAgg, kept, aggDepth, foldedOf, threshold, thrAt, tier: tierName, idx, truncated, ...(matches ? { matches } : {}), ...(rootKids ? { rootKids } : {}), ownerLens: ol, scoped }
 }
 
 /** Phase 2's counters (`readInteriors`, a rollup's nest): roots left out over the read budget, too wide, late. */
@@ -2345,6 +2353,9 @@ export interface DiffOpts extends Omit<ViewOpts, 'date'> {
   /** With `descent`: its running-cost budgets (`DESCENT_BUDGET_MS`, `DESCENT_BUDGET_ROWS` by default; tests). */
   descentBudgetMs?: number
   descentBudgetRows?: number
+  /** Range churn on the walk's rows (`DiffRow.c`, `Diff.churn`), ranking its leaves and expanding a directory whose bytes
+   *  held but whose churn didn't. No other reader, no index: the as-of rows carry `churn_cum` (§3c). Plain diffs only. */
+  churn?: boolean
 }
 
 export interface DiffRow {
@@ -2362,6 +2373,8 @@ export interface DiffRow {
   x?: true
   /** Read by a point lookup on the side where it sat under the floor. */
   l?: 1 | 2
+  /** On a churn walk: range churn, `churn_cum`(D2) − `churn_cum`(D1); an `(other)`'s is its parent's less its drawn children's. */
+  c?: number
 }
 
 /** A diff's rows cut to `top` (every reader's tail): every expanded row (the skeleton), then the changed leaf rows by
@@ -2373,15 +2386,19 @@ export interface DiffRow {
  *  A scan's rows are hierarchical, so this is the walk's own `(other)` plus the cut leaves wherever the walk read them
  *  all. `additive` false (a filtered diff: a parent's totals are its matched bytes, not its children's sum): the walk's
  *  own `(other)` plus the cut leaves instead. */
-export function capDiffRows(rows: DiffRow[], top: number, root: { a: number; b: number; oa: number; ob: number }, additive = true): { rows: DiffRow[]; cut: boolean } {
+export function capDiffRows(rows: DiffRow[], top: number, root: { a: number; b: number; oa: number; ob: number; c?: number }, additive = true): { rows: DiffRow[]; cut: boolean } {
   const isOther = (r: DiffRow) => r.p === '(other)' || r.p.endsWith('/(other)')
   const parentOf = (p: string) => { const i = p.lastIndexOf('/'); return i < 0 ? '' : p.slice(0, i) }
   const skeleton = rows.filter(r => r.x)
-  const leaves = rows.filter(r => !r.x && !isOther(r) && r.s !== 'unchanged').sort((r1, r2) => Math.abs(r2.b - r2.a) - Math.abs(r1.b - r1.a))
+  // A churn walk (`root.c`) ranks by churn, and keeps a leaf whose bytes held but whose churn didn't.
+  const churned = root.c != null
+  const measure = (r: DiffRow) => (churned ? r.c ?? 0 : Math.abs(r.b - r.a))
+  const isFiller = (r: DiffRow) => r.s === 'unchanged' && !r.c
+  const leaves = rows.filter(r => !r.x && !isOther(r) && !isFiller(r)).sort((r1, r2) => measure(r2) - measure(r1))
   const kept = leaves.slice(0, top)
-  type T = { a: number; b: number; oa: number; ob: number }
-  const zero = (): T => ({ a: 0, b: 0, oa: 0, ob: 0 })
-  const add = (t: T, r: T) => { t.a += r.a; t.b += r.b; t.oa += r.oa; t.ob += r.ob }
+  type T = { a: number; b: number; oa: number; ob: number; c: number }
+  const zero = (): T => ({ a: 0, b: 0, oa: 0, ob: 0, c: 0 })
+  const add = (t: T, r: Omit<T, 'c'> & { c?: number }) => { t.a += r.a; t.b += r.b; t.oa += r.oa; t.ob += r.ob; t.c += r.c ?? 0 }
   // The walk's own `(other)`s, plus the leaves cut.
   const fold = new Map<string, T>()
   for (const r of [...rows.filter(isOther), ...leaves.slice(top)]) {
@@ -2392,7 +2409,7 @@ export function capDiffRows(rows: DiffRow[], top: number, root: { a: number; b: 
   }
   // The invariant's: each expanded row less its drawn children (kept, or unchanged: filler).
   const drawn = new Map<string, T>()
-  for (const r of [...skeleton, ...kept, ...rows.filter(r => !r.x && !isOther(r) && r.s === 'unchanged')]) {
+  for (const r of [...skeleton, ...kept, ...rows.filter(r => !r.x && !isOther(r) && isFiller(r))]) {
     const q = parentOf(r.p)
     const t = drawn.get(q) ?? zero()
     add(t, r)
@@ -2401,7 +2418,7 @@ export function capDiffRows(rows: DiffRow[], top: number, root: { a: number; b: 
   const others: DiffRow[] = []
   // Every expanded row and the root, and any other parent the walk gave an `(other)` (a filtered diff's match root).
   // The root only when it was expanded (a drawn child, or the walk's own `(other)`), as every other parent.
-  const pars: { p: string; d: number; a: number; b: number; oa: number; ob: number; own?: true }[] = [...(drawn.has('') || fold.has('') ? [{ p: '', d: 0, ...root }] : []), ...skeleton]
+  const pars: { p: string; d: number; a: number; b: number; oa: number; ob: number; c?: number; own?: true }[] = [...(drawn.has('') || fold.has('') ? [{ p: '', d: 0, ...root }] : []), ...skeleton]
   const known = new Set(pars.map(x => x.p))
   for (const r of rows.filter(isOther)) {
     const q = parentOf(r.p)
@@ -2411,16 +2428,17 @@ export function capDiffRows(rows: DiffRow[], top: number, root: { a: number; b: 
     const f = fold.get(par.p) ?? zero()
     const t = drawn.get(par.p) ?? zero()
     const o = additive && !par.own
-      ? { a: Math.max(0, par.a - t.a), b: Math.max(0, par.b - t.b), oa: Math.max(0, par.oa - t.oa), ob: Math.max(0, par.ob - t.ob) }
+      ? { a: Math.max(0, par.a - t.a), b: Math.max(0, par.b - t.b), oa: Math.max(0, par.oa - t.oa), ob: Math.max(0, par.ob - t.ob), c: Math.max(0, (par.c ?? 0) - t.c) }
       : f
     // Zero-byte objects count too: an `(other)` of objects alone (no bytes either side) is kept when they differ.
     const s: DiffRow['s'] = !o.a && !o.b
       ? (o.oa === o.ob ? 'unchanged' : !o.oa ? 'added' : !o.ob ? 'removed' : 'changed')
       : !o.a ? 'added' : !o.b ? 'removed' : o.a !== o.b || o.oa !== o.ob ? 'changed' : 'unchanged'
-    if (s === 'unchanged') continue
-    others.push({ p: par.p === '' ? '(other)' : `${par.p}/(other)`, d: par.d + 1, k: 'dir', s, ...o })
+    if (s === 'unchanged' && !o.c) continue
+    const { c: oc, ...bytes } = o
+    others.push({ p: par.p === '' ? '(other)' : `${par.p}/(other)`, d: par.d + 1, k: 'dir', s, ...bytes, ...(churned ? { c: oc } : {}) })
   }
-  const tail = [...kept, ...others].sort((r1, r2) => Math.abs(r2.b - r2.a) - Math.abs(r1.b - r1.a))
+  const tail = [...kept, ...others].sort((r1, r2) => measure(r2) - measure(r1))
   return { rows: [...skeleton, ...tail], cut: leaves.length > top }
 }
 
@@ -2435,6 +2453,10 @@ export interface Diff {
   threshold: number
   tier: string
   lookups: number
+  /** With `churn`: the range churn under the path. */
+  churn?: number
+  /** `churn` was asked for and not answered, and why: a plain walk (no `c`), which the client draws by Δ. */
+  churn_off?: string
   /** Directories a budgeted reader (the descent, at `top`) left unexpanded, each drawn as a leaf: cut, not complete. */
   expansions_skipped?: number
   /** The lookup budget ran out: names one side drew that the other side's lookup didn't answer are folded into
@@ -2479,6 +2501,17 @@ function sumInteriors(a?: View['interiors'], b?: View['interiors']): NonNullable
  *  same test a view's `(other)` count makes (`f`). */
 const listsObjects = (v: Read): boolean => isStore(v.idx) && (v.idx.asOf == null || v.rootAll.nd != null)
 
+/** Why a churn walk can't answer `(from, to]` (§3): a generation without churn, a scan on no interval store, or a D1
+ *  before the churn base (nothing counted the bytes it held then); undefined: it can. */
+async function churnRefusal(env: Env, from: string, to: string): Promise<string | undefined> {
+  const base = await ivChurnFrom(env)
+  if (base == null) return 'the generation carries no churn'
+  const [ha, hb] = await Promise.all([openIndex(env, from, 'path'), openIndex(env, to, 'path')])
+  if (ha.asOf == null || hb.asOf == null) return 'a scan is not on the interval store'
+  if (ha.asOf < base) return `churn is counted from scan stamp ${base}; ${from} is before it`
+  return undefined
+}
+
 /** What changed under P between two scans (specs/done/view-serving.md §2):
  * both sides are read from their index tiers at ONE absolute byte floor —
  * the larger side's pixel-budget threshold — so a directory is named on both
@@ -2503,7 +2536,9 @@ export async function buildDiff(env0: Env, o: DiffOpts): Promise<Diff> {
       if (!(e instanceof HandOff)) throw e
     }
   }
-  const env = sliced(asOfScans(env0, [o.from, o.to]), o)
+  const churnOff = o.churn ? await churnRefusal(asOfScans(env0, [o.from, o.to]), o.from, o.to) : undefined
+  const churn = !!o.churn && churnOff == null
+  const env = sliced(asOfScans(churn ? churnRows(env0) : env0, [o.from, o.to]), o)
   const { from, to, path, lens, owner, query } = o
   const dP = path === '' ? 0 : path.split('/').length
   const tr = o.trace
@@ -2573,6 +2608,8 @@ export async function buildDiff(env0: Env, o: DiffOpts): Promise<Diff> {
     }
   }
   tr?.('views', performance.now() - t0)
+  // A path on one scan only has no as-of row to difference on the other, nor have its children: a plain walk.
+  if (churn && (!va || !vb)) return { ...await buildDiff(env0, { ...o, churn: false }), churn_off: 'the path is on one scan only' }
   // Nothing in scope on either side (a filter with no matches, an empty owner
   // pool): an empty diff, not a crash on the missing views.
   if (!va && !vb) {
@@ -2584,6 +2621,9 @@ export async function buildDiff(env0: Env, o: DiffOpts): Promise<Diff> {
   if (va && vb && listsObjects(va) !== listsObjects(vb)) {
     for (const v of [va, vb]) for (const [p, a] of v.kept) if (a.kind === 'file') v.kept.delete(p)
   }
+  // A churn walk draws every bucket, sub-floor ones too (few, all read with the root): the root's churn is their sum, a
+  // bucket one scan lacks counted through the lookups below.
+  if (churn && path === '') for (const v of [va, vb]) for (const [p, a] of v?.rootKids ?? []) if (!v!.kept.has(p)) v!.kept.set(p, a)
   const walkStart = performance.now()
   // A filtered diff's lookups stop after `FILTER_WALK_MS` as they do past `LOOKUP_CAP` (`lookups_capped`).
   let late = false
@@ -2609,7 +2649,7 @@ export async function buildDiff(env0: Env, o: DiffOpts): Promise<Diff> {
     ...(va?.interiors || vb?.interiors ? { interiors: sumInteriors(va?.interiors, vb?.interiors) } : {}),
     ...(query ? coverageFields(cov) : {}),
   }
-  if (o.summary) return { rows: [], ...totals, expansions: 0, truncated: false, lookups: 0, lookups_capped: false }
+  if (o.summary) return { rows: [], ...totals, expansions: 0, truncated: false, lookups: 0, lookups_capped: false, ...(churnOff ? { churn_off: churnOff } : {}) }
   const kidsA = va ? kidsIndex(va.kept, path) : new Map<string, string[]>()
   const kidsB = vb ? kidsIndex(vb.kept, path) : new Map<string, string[]>()
 
@@ -2680,6 +2720,9 @@ export async function buildDiff(env0: Env, o: DiffOpts): Promise<Diff> {
   // outside that window are never read. (Unbounded, 10-08 → 10-09 at the root reads 12 groups to find
   // 17 added names absent, none of them holding an answer.)
   const sameStore = !!(va && vb && va.idx.asOf != null && vb.idx.asOf != null && va.idx.gen === vb.idx.gen && !query && !lens && !owner && !o.classes && !o.by)
+  // A path a side lacks: its cumulative churn on that side, `${side}:${path}`, from the closed versions the same lookup
+  // decodes (none closed by then: absent here).
+  const past = new Map<string, number>()
   const lookupMany = async (date: string, v: Read, items: { cp: string; d: number; other?: Agg }[]): Promise<Map<string, Agg | null>> => {
     const out = new Map<string, Agg | null>()
     const todo: { cp: string; d: number; vtLe?: number; vfGe?: number }[] = []
@@ -2707,12 +2750,28 @@ export async function buildDiff(env0: Env, o: DiffOpts): Promise<Diff> {
     const want = new Map(take.map(q => [`${q.d}\0${q.cp}`, q]))
     let got: Row[]
     try {
-      got = (await readAsks(await fine(date), take.map(q => ({ depth: q.d, path: q.cp, ...(q.vtLe != null ? { vtLe: q.vtLe } : {}), ...(q.vfGe != null ? { vfGe: q.vfGe } : {}) })), r => want.has(`${r.depth}\0${r.path}`), { maxGroups: 120, stop: () => lookupsOff })).rows
+      got = (await readAsks(await fine(date), take.map(q => ({ depth: q.d, path: q.cp, ...(q.vtLe != null ? { vtLe: q.vtLe } : {}), ...(q.vfGe != null ? { vfGe: q.vfGe } : {}) })), r => want.has(`${r.depth}\0${r.path}`), { maxGroups: 120, stop: () => lookupsOff, ...(churn ? { versions: true } : {}) })).rows
     } catch (e) {
       if (!/too wide/.test(String((e as Error).message ?? e))) throw e
       tr?.('perask', take.length)
+      // A per-ask read wouldn't see a churn walk's closed versions: unanswered, so folded, as past the budget.
+      if (churn) { capped = true; return out }
       await perAsk(take)
       return out
+    }
+    if (churn) {
+      // Every version read: the one live at D answers as a plain lookup does; else the newest closed by D has the churn.
+      const at = v.idx.asOf!
+      const side = date === from ? 1 : 2
+      const newest = new Map<string, Row>()
+      for (const r of got) {
+        const n = newest.get(r.path)
+        if (r.vt! <= at && (!n || r.vt! > n.vt!)) newest.set(r.path, r)
+      }
+      for (const [p, r] of newest) past.set(`${side}:${p}`, r.churn_end!)
+      got = got.filter(r => r.vf! <= at && at < r.vt!)
+      // Live, though answered as absent: a path of no bytes (`a.b > 0` below).
+      for (const r of got) past.set(`${side}:${r.path}`, r.churn_cum!)
     }
     lookups += take.length
     const byPath = new Map<string, { all: Agg; mine: Agg }>()
@@ -2737,11 +2796,18 @@ export async function buildDiff(env0: Env, o: DiffOpts): Promise<Diff> {
   const rel = (p: string) => (path === '' ? p : p.slice(path.length + 1))
   const status = (a: Agg | null, b: Agg | null): DiffRow['s'] =>
     !a ? 'added' : !b ? 'removed' : Math.round(a.b) !== Math.round(b.b) || Math.round(a.o) !== Math.round(b.o) ? 'changed' : 'unchanged'
+  // A path's range churn, `churn_cum`(D2) − `churn_cum`(D1). On a side it isn't live: the newest version closed by then
+  // (`past`, from the lookup that found it absent); with none, at D2 the D1 version's own close, at D1 no history: 0.
+  const churnOf = (p: string, a: Agg | null, b: Agg | null): number =>
+    (b ? b.cum! : past.get(`2:${p}`) ?? a!.cumEnd!) - (a ? a.cum! : past.get(`1:${p}`) ?? 0)
+  let rootChurn = churn && path !== '' ? vb!.rootAgg.cum! - va!.rootAgg.cum! : 0
   const emit = (p: string, d: number, a: Agg | null, b: Agg | null, x: boolean, l?: 1 | 2) => {
+    const c = churn ? churnOf(p, a, b) : undefined
+    if (c != null && path === '' && d === 1) rootChurn += c
     rows.push({
       p, d, k: a?.kind ?? b?.kind ?? 'dir', s: status(a, b),
       a: Math.round(a?.b ?? 0), b: Math.round(b?.b ?? 0), oa: Math.round(a?.o ?? 0), ob: Math.round(b?.o ?? 0),
-      ...(x ? { x: true } : {}), ...(l ? { l } : {}),
+      ...(x ? { x: true } : {}), ...(l ? { l } : {}), ...(c != null ? { c } : {}),
     })
   }
   // Level by level, so a level's point lookups run in parallel (each is a
@@ -2760,7 +2826,8 @@ export async function buildDiff(env0: Env, o: DiffOpts): Promise<Diff> {
       // the totals differ: the children carry the Δ. One-sided subtrees ride
       // whole on their own row; a byte-identical subtree is one unchanged
       // row (the renderer infers it as filler), not a walk of its skeleton.
-      const same = !!(a && b && Math.round(a.b) === Math.round(b.b) && Math.round(a.o) === Math.round(b.o))
+      // (On a churn walk, its bytes holding isn't enough: a rename under it nets 0.)
+      const same = !!(a && b && Math.round(a.b) === Math.round(b.b) && Math.round(a.o) === Math.round(b.o) && (!churn || a.cum === b.cum))
       // A one-sided node (a bucket the older scan never covered, a directory
       // that appeared or vanished) expands too: its children all read as
       // added / removed, but they still say WHAT arrived — a leaf tile
@@ -2825,7 +2892,8 @@ export async function buildDiff(env0: Env, o: DiffOpts): Promise<Diff> {
       const has = (r: Agg) => r.b > 0 || r.o > 0
       if (has(restA) || has(restB)) {
         const key = p === path ? '(other)' : `${rel(p)}/(other)`
-        emit(key, d - dP + 1, has(restA) ? restA : null, has(restB) ? restB : null, false)
+        // Its bytes and objects only: a churn walk's `(other)` churn is the invariant's (`capDiffRows`).
+        rows.push({ p: key, d: d - dP + 1, k: 'dir', s: status(has(restA) ? restA : null, has(restB) ? restB : null), a: Math.round(restA.b), b: Math.round(restB.b), oa: Math.round(restA.o), ob: Math.round(restB.o) })
       }
     }
     level = next
@@ -2835,10 +2903,12 @@ export async function buildDiff(env0: Env, o: DiffOpts): Promise<Diff> {
   // the top-|Δ| changed frontier rows; unchanged frontier rows are inferred
   // as filler by the renderer.
   tr?.('walk', performance.now() - walkStart)
-  const capped0 = capDiffRows(rows, o.top, { a: totals.total_a, b: totals.total_b, oa: totals.objects_a, ob: totals.objects_b }, !query)
+  const capped0 = capDiffRows(rows, o.top, { a: totals.total_a, b: totals.total_b, oa: totals.objects_a, ob: totals.objects_b, ...(churn ? { c: rootChurn } : {}) }, !query)
   return {
     rows: capped0.rows,
     ...totals,
+    ...(churn ? { churn: rootChurn } : {}),
+    ...(churnOff ? { churn_off: churnOff } : {}),
     expansions,
     truncated: capped0.cut,
     lookups,
