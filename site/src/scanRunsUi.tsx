@@ -88,7 +88,8 @@ export const colorer = (order: string[]) => (phase: string) => `var(${PALETTE[Ma
 /** The tip on a quiet run's warning (and a lost run's status). */
 export const QUIET_TIP = "The run hasn't written its record (phases, its once-a-minute heartbeat) for this long: its job may have stalled or died. Check its Batch job."
 
-/** Where an issue stands: the run that did its work since (linked through `runHref`); for a failed check, the first
+/** Where an issue stands: the run that did its work since (linked through `runHref`; a later run's converging step
+ * only shows that step completed there, not that it did this scan's work, so it reads "held since"); for a failed check, the first
  * later run whose same check passed (`PhaseIssue.passing`: no re-check of this scan); else whether a later run will
  * (`issueNext`). */
 export function IssueStanding({ issue: i, runHref }: { issue: PhaseIssue; runHref?: (id: string) => string }) {
@@ -98,7 +99,8 @@ export function IssueStanding({ issue: i, runHref }: { issue: PhaseIssue; runHre
   const label = attempt ? 'a later attempt' : <>the <code>{r.scan}</code> run</>
   const link = runHref ? <Link to={runHref(r.run_id)}>{label}</Link> : label
   if (!i.recovery) return <>Passing since {link}: that run's check of the site, not a re-check of this scan.</>
-  return <>Done by {link}{attempt && r.finished_ts != null && <> at {fmtRunTime(r.finished_ts)}</>}.</>
+  if (!attempt) return <>Held since: a later run's <code>{i.phase}</code> step completed ({link}).</>
+  return <>Done by {link}{r.finished_ts != null && <> at {fmtRunTime(r.finished_ts)}</>}.</>
 }
 
 /** A succeeded run's issues, one block each: what happened (with the recorded verdict when it has one), what it
@@ -116,12 +118,12 @@ export function IssueList({ issues, runHref }: { issues: readonly PhaseIssue[]; 
 }
 
 /** A short run's status tip's first line, by outcome. */
-const OUTCOME_HEAD: Record<string, string> = {
+export const OUTCOME_HEAD: Record<string, string> = {
   incomplete: "Published, but the scan's data or serving is short.",
   [BEHIND]: "Data published. Search doesn't cover this scan yet.",
   [PASSING]: "A check failed on this run. The same check has passed in a later run: the site passes since, which doesn't show this scan did.",
   partial: "The scan's data and serving are complete; a side step failed.",
-  recovered: 'Complete: what this run left short was done since.',
+  recovered: 'Recovered: see below.',
 }
 const OUTCOME_CLASS: Record<string, string> = { incomplete: 'warn', [BEHIND]: 'behind', [PASSING]: 'passing', partial: 'partial', recovered: 'succeeded' }
 
