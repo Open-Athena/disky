@@ -41,7 +41,7 @@ describe('kinds', () => {
       ['PUT /api/sweep/settings', 'admin'],
       ['POST /api/digest-op', 'digest'],
       ['POST /api/digest-image', '-'],
-      ['POST /api/owner-prices', 'write'],
+      ['POST /api/owner-prices', '-'],
       ['GET /api/actions', '-'],
       ['POST /api/session-log', '-'],
       ['POST /api/prefixes', '-'],

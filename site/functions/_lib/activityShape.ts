@@ -65,7 +65,7 @@ export function mergeKinds(rows: readonly KindRow[]): KindsConf {
 /** Writes that are reads or plumbing, never events. */
 const NOT_EVENTS = [
   /^\/api\/session-log(\/sessions.*)?$/, /^\/api\/footer-cache$/, /^\/api\/digest-image$/, /^\/api\/static-bench$/,
-  /^\/api\/prefixes$/, /^\/auth\//, /^\/api\/auth\/(exchange|logout|track|request|email)(\/|$)/,
+  /^\/api\/prefixes$/, /^\/api\/owner-prices$/, /^\/auth\//, /^\/api\/auth\/(exchange|logout|track|request|email)(\/|$)/,
   /^\/slack\//,
 ]
 
