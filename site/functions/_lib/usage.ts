@@ -61,7 +61,7 @@ export class Meter {
  *  `other`. `usage.test.ts` pins that every Function file maps to one of these. */
 export const ROUTES: readonly string[] = [
   '/api/admin/r2-probe',
-  '/api/actions', '/api/admins', '/api/age-pyramid', '/api/annotations', '/api/assignments', '/api/diff', '/api/diff/level', '/api/digest-image', '/api/digest-op', '/api/digest-preview', '/api/digest-settings',
+  '/api/actions', '/api/admins', '/api/age-pyramid', '/api/annotations', '/api/assignments', '/api/diff', '/api/diff/level', '/api/digest-image', '/api/digest-op', '/api/digest-preview', '/api/digest-reapply', '/api/digest-settings',
   '/api/dups', '/api/estate', '/api/filter-caps', '/api/filter-cover', '/api/filter-scans', '/api/footer-cache',
   '/api/health', '/api/largest', '/api/me', '/api/name-matches', '/api/name-summary', '/api/name-summary-registry', '/api/owner-prices',
   '/api/owners', '/api/path-index', '/api/prefixes', '/api/series', '/api/session-monitor', '/api/static-bench',
@@ -69,7 +69,7 @@ export const ROUTES: readonly string[] = [
   '/api/plans/prefix-history', '/api/plans/progress', '/api/plans/*',
   '/api/plan-sweep/*', '/api/sweep/*',
   '/api/activity/*', '/api/auth/*', '/api/cost/*', '/api/db/*', '/api/og/*', '/api/scan-runs/*', '/api/session-log/*',
-  '/auth/google/*', '/auth/email/*',
+  '/auth/google/*', '/auth/oa/*', '/auth/email/*',
   '/data/*', '/og/*', '/v1/files/*', '/v1/objects/*', '/slack/actions',
   '/assignments', '/staged', '/users', '/user/*',
   '/assets/*',
