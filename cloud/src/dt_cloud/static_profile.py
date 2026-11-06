@@ -113,8 +113,17 @@ class Profile:
     #: (`maint_runs`): `{"CLOUDFLARE_API_TOKEN": <the D1 token's secret>}`, with the submitter's `$D1_DB_ID` and
     #: `$CLOUDFLARE_ACCOUNT_ID` passed through (`append_runner.Runner.record_env`). Empty: the jobs run unrecorded.
     record_secrets: Mapping[str, str] = field(default_factory=dict)
+    #: The interval store of a deployment whose site keeps owner pricing per generation (an ownership ledger): a
+    #: compaction moves `CURRENT.json` only once the site holds the new generation's pricing (`compact -O`,
+    #: `owner_prices.Gate`; specs/owner-pricing-off-the-read-path.md). Its job then asks the site: the submitter's
+    #: `$SITE_URL`, and the job grant's token (the one the site names in `OWNER_PRICES_GRANT`) from `site_secrets`.
+    owner_prices: bool = False
+    #: `{"SITE_TOKEN": <its Secret Manager secret's name>}`, for `owner_prices`.
+    site_secrets: Mapping[str, str] = field(default_factory=dict)
 
     def __post_init__(self):
+        if not isinstance(self.owner_prices, bool):
+            raise SystemExit(f"owner_prices must be true or false, not {self.owner_prices!r}")
         if self.read_from not in ("gcs", "r2"):
             raise SystemExit(f"read_from must be gcs or r2, not {self.read_from!r}")
         if self.compact_level is not None and (isinstance(self.compact_level, bool) or not isinstance(self.compact_level, int) or self.compact_level < 1):

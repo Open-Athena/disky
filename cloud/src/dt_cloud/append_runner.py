@@ -2289,9 +2289,20 @@ def store_newest_runs(store, prefix: str) -> tuple[str | None, list[dict]]:
     return newest, store.read_json(f"{prefix}/{newest}")["runs"] if newest else []
 
 
+class PricingGate(Protocol):
+    """What a compaction asks before the store's pointer moves to a new generation, on a deployment whose site keeps
+    owner pricing per generation (`owner_prices.Gate`, specs/owner-pricing-off-the-read-path.md). Each raises
+    `owner_prices.PricingRefused` when the pricing isn't in place; `after` never does."""
+
+    def ready(self, gen: str) -> dict: ...
+    def before(self, old: str, new: str) -> dict: ...
+    def after(self, old: str, new: str) -> dict | None: ...
+
+
 def compact_store(store, c: Compactor, gen: str, gen_dir: Path, work: Path, *, policy: Policy | int | None, why: str, threads: int = 4,
                   mem: str = "4GB", jobs: int = 1, r2: Callable[[str, str], dict] | None = None, reads: dict | None = None,
-                  promote: bool = True, rec: Recorder | None = None, log: Callable[[str], None] = err) -> dict:
+                  promote: bool = True, pricing: PricingGate | None = None, rec: Recorder | None = None,
+                  log: Callable[[str], None] = err) -> dict:
     """Generation `gen` of `store` (a `blobstore.Store`; its files readable in `gen_dir`: a mirror or a mount) folded
     into the next one (`next_gen`, by `c.fold`) and published: an earlier, unpublished attempt's keys removed; the new
     generation's files in `c.publish_order`, `compaction.json` last; `successor.json` in `gen`; `CURRENT.json` when it
@@ -2310,15 +2321,29 @@ def compact_store(store, c: Compactor, gen: str, gen_dir: Path, work: Path, *, p
     deleted). Appends landing on `gen` meanwhile don't supersede it; `promote_gen` wants them in the candidate. An
     existing candidate is replaced only by another candidate; a promoting compaction refuses it.
 
+    `pricing` (a deployment whose site keeps owner pricing per generation): the pointer doesn't move to a generation
+    without it. `pricing.ready(gen)` before the fold (a site that can't fill `gen`'s pricing couldn't carry it hours
+    later: refused here, nothing written); `pricing.before(gen, new)` in the `pointer` phase, before `successor.json`
+    (so before `CURRENT.json`, here or by a later `resolve`): refused, the pointers stay on `gen` and the new generation
+    stays unpublished (the next compaction replaces it, as an interrupted one's), `SystemExit`; `pricing.after` once the
+    pointers (and the R2 copy's) have moved. Not asked when `CURRENT.json` names another generation (nothing moves), nor
+    of a candidate (`promote_gen` asks).
+
     `rec`: the run's record (`maint_runs`): phases `fold` (the interval store's then `sorts`: the fold's `progress`
     hook moves it on), `upload`, `pointer`, `r2`, each with its note (rows, files, GiB, seconds, work-disk / RSS peaks)."""
     from .blobstore import upload_new
     from .maint_runs import NULL, PhaseHook, gib, phase
+    from .owner_prices import PricingRefused
     from .static_local import DiskPeak, rss_peak_gb
 
     rec = rec or NULL
 
     new = next_gen(gen)
+    if pricing is not None and promote:
+        try:
+            pricing.ready(gen)
+        except PricingRefused as e:
+            raise SystemExit(f"compact {gen}: its owner pricing can't be filled ({e}): not compacting (the pointer would move to a generation without it)") from e
     new_prefix = f"{c.prefix}/{new}"
     if stale := store.listing(new_prefix):
         # Not yet recorded as `gen`'s successor (`resolve_gen` would have followed it): an interrupted compaction's, or a
@@ -2380,22 +2405,33 @@ def compact_store(store, c: Compactor, gen: str, gen_dir: Path, work: Path, *, p
         store.delete(sorted(store.listing(new_prefix)))
         return {**summary, "runs": comp["runs"], "scans": comp["scans"], "superseded": key, "s": round(monotonic() - t0, 1)}
 
+    carried = None
     if promote:
         with phase(rec, "pointer") as ph:
             if key := landed():
                 ph.note = f"superseded: {key} landed on {gen} during the fold; {new} deleted, not published"
                 return superseded(key, successor=False)
+            was = current(store, c.prefix)
+            moves = was in (None, gen)
+            if pricing is not None and moves:
+                # before `successor.json`: once it is written, this or a later `resolve` moves the pointer
+                try:
+                    carried = pricing.before(gen, new)
+                except PricingRefused as e:
+                    ph.note = f"refused: owner pricing for {new} isn't in place ({e}); {CURRENT} stays at {was or 'nothing'}, {new} unpublished"
+                    raise SystemExit(f"compact {gen} → {new}: owner pricing for {new} isn't in place ({e}): no pointer moved; "
+                                     f"{new} stays unpublished (the next compaction replaces it)") from e
             store.write_text(f"{c.prefix}/{gen}/{SUCCESSOR}", json.dumps({"gen": new}) + "\n")
             if key := landed():
                 ph.note = f"superseded: {key} landed on {gen} during the fold; {new} and its successor record deleted, not published"
                 return superseded(key, successor=True)
             summary.update(runs=comp["runs"], scans=comp["scans"], why=why, files=len(files), upload_s=up_s,
                            bytes=sum(p.stat().st_size for p in out.rglob("*") if p.is_file()), reads=reads)
-            was = current(store, c.prefix)
-            summary["current"] = was in (None, gen)
-            if summary["current"]:
+            summary["current"] = moves
+            if moves:
                 set_current(store, c.prefix, new)
-            ph.note = f"{gen}/{SUCCESSOR} → {new}; " + (f"{CURRENT} → {new}" if summary["current"] else f"{CURRENT} names {was}: unchanged")
+            ph.note = (f"{gen}/{SUCCESSOR} → {new}; " + (f"{CURRENT} → {new}" if moves else f"{CURRENT} names {was}: unchanged")
+                       + (f"; owner pricing carried ({carried.get('carried', 0)} rows)" if carried is not None and carried.get("ledger") is not False else ""))
     else:
         summary.update(runs=comp["runs"], scans=comp["scans"], why=why, files=len(files), upload_s=up_s,
                        bytes=sum(p.stat().st_size for p in out.rglob("*") if p.is_file()), reads=reads, current=False, candidate=True)
@@ -2406,6 +2442,9 @@ def compact_store(store, c: Compactor, gen: str, gen_dir: Path, work: Path, *, p
             summary["r2"] = r2(new, gen)
             d = summary["r2"]
             ph.note = f"{d.get('copied')} of {d.get('objects')} objects copied ({gib(d.get('bytes'))}) in {d.get('s')}s; the pointer last"
+    if carried is not None:
+        # readers were on `gen` until its pointer (the R2 copy's, last) moved: a prefix assigned meanwhile was priced there
+        summary["pricing"] = {"carried": carried, "after": pricing.after(gen, new) if carried.get("ledger") is not False else None}
     summary["s"] = round(monotonic() - t0, 1)
     summary["peak"] = {"disk_gb": disk.close(), "rss_gb": rss_peak_gb()}
     log(f"compact {gen} → {new}: {summary['files']} files ({summary['bytes'] / 2**30:.2f} GiB, uploaded in {up_s}s) in {summary['s']}s "
@@ -2454,13 +2493,17 @@ def gen_scans(store, prefix: str) -> list[str]:
     return [s["id"] for s in store.read_json(f"{prefix}/scans.json")["scans"]] + run_scans(runs)
 
 
-def promote_gen(store, prefix: str, new: str, *, r2_bucket: str | None = None, log: Callable[[str], None] = err) -> dict:
+def promote_gen(store, prefix: str, new: str, *, r2_bucket: str | None = None, pricing: PricingGate | None = None,
+                log: Callable[[str], None] = err) -> dict:
     """Candidate `new` (`compact_store(promote=False)`) made the successor of the generation it was compacted from and,
     when `CURRENT.json` named that one (or nothing), the current generation; with `r2_bucket` (the data bucket the R2
     copy mirrors), then the R2 copy's pointers (`r2_promote`). Refused, nothing moved: `new` not a whole candidate
     (`candidate.json`, `compaction.json`), its source already compacted, `new` lacking a scan its source holds (append
-    those to `new` first), or R2 lacking a file of `new`. A scan appended to the source as its successor record is
-    written: the record removed again, refused. Returns `{from, gen, current}`."""
+    those to `new` first), R2 lacking a file of `new`, or (`pricing`, as `compact_store`'s: asked when the pointer would
+    move) owner pricing for `new` not in place. A scan appended to the source as its successor record is written: the
+    record removed again, refused. Returns `{from, gen, current[, pricing]}`."""
+    from .owner_prices import PricingRefused
+
     new_prefix = f"{prefix}/{new}"
     for marker, what in ((CANDIDATE, "not a candidate"), (COMPACTION, "not whole: its compaction didn't finish")):
         if not store.exists(f"{new_prefix}/{marker}"):
@@ -2479,19 +2522,28 @@ def promote_gen(store, prefix: str, new: str, *, r2_bucket: str | None = None, l
                          + f"): append {'them' if len(lack) > 1 else 'it'} to {new} first")
     if r2_bucket and (bad := r2_missing(r2_objects(r2_bucket, [f"{new_prefix}/"]))):
         raise SystemExit(f"r2 {new_prefix}: {len(bad)} files not on R2 (e.g. {bad[0]}): copy the candidate there first")
+    was = current(store, prefix)
+    moved = was in (None, old)
+    carried = None
+    if pricing is not None and moved:
+        try:
+            carried = pricing.before(old, new)
+        except PricingRefused as e:
+            raise SystemExit(f"promote {new}: owner pricing for it isn't in place ({e}): nothing moved, {CURRENT} stays at {was or 'nothing'}") from e
     store.write_text(f"{old_prefix}/{SUCCESSOR}", json.dumps({"gen": new}) + "\n")
     if lack := lacking():
         store.delete([f"{old_prefix}/{SUCCESSOR}"])
         raise SystemExit(f"{lack[-1]} landed on {old} as {new} was promoted: its successor record removed; append it to {new}, then promote again")
-    was = current(store, prefix)
-    moved = was in (None, old)
     if moved:
         set_current(store, prefix, new)
     log(f"promote {new}: {old}/{SUCCESSOR} → {new}; " + (f"{CURRENT} → {new}" if moved else f"{CURRENT} names {was}: unchanged"))
     if r2_bucket:
         r2_promote(r2_bucket, prefix, old, log=log)
         log(f"promote {new}: the R2 copy's pointers moved")
-    return {"from": old, "gen": new, "current": moved}
+    doc = {"from": old, "gen": new, "current": moved}
+    if carried is not None:
+        doc["pricing"] = {"carried": carried, "after": pricing.after(old, new) if carried.get("ledger") is not False else None}
+    return doc
 
 
 def run_compaction(store, c: Compactor, gen: str, mount: Path, work: Path, *, lease: LeaseFile | None = None, log: Callable[[str], None] = err,
@@ -2508,8 +2560,8 @@ def run_compaction(store, c: Compactor, gen: str, mount: Path, work: Path, *, le
 
 def compact_generation(store, c: Compactor, gen: str, mount: Path, work: Path, *, policy: Policy | int | None, force: bool = False,
                        r2_bucket: str | None = None, grace_s: float = GRACE_S, now: float | None = None, threads: int = 4, mem: str = "4GB",
-                       jobs: int = 1, read_from: str = "gcs", source=None, promote: bool = True, rec: Recorder | None = None,
-                       log: Callable[[str], None] = err) -> dict:
+                       jobs: int = 1, read_from: str = "gcs", source=None, promote: bool = True, pricing: PricingGate | None = None,
+                       rec: Recorder | None = None, log: Callable[[str], None] = err) -> dict:
     """The Batch `compact` stage (both stores): generation `gen` of `store` (the data bucket, a `blobstore.Store`)
     followed to its newest successor; when `policy` fires (or `force`, with runs), folded into the next one and published
     (`compact_store`) — GCS first, then, with `r2_bucket` (the data bucket the R2 copy mirrors), R2 (`r2_publish_gen`:
@@ -2517,8 +2569,8 @@ def compact_generation(store, c: Compactor, gen: str, mount: Path, work: Path, *
     `read_from` `gcs`: the generation is read in place from `mount` (`<mount>/<prefix>/<gen>/`, the bucket's mount);
     `r2`: what the fold reads (`c.keep`) is mirrored from the R2 copy (`source`, default `R2Source()`) first, refused
     when it lacks any of it (`read_tree`). Idempotent: a rerun after a compaction finds the successor, which isn't due.
-    `promote` off: a candidate (`compact_store`), nothing pruned; `promote_gen` points at it later. Returns `{gen, why,
-    compact, predecessors}`.
+    `promote` off: a candidate (`compact_store`), nothing pruned; `promote_gen` points at it later. `pricing`:
+    `compact_store`'s owner-pricing gate. Returns `{gen, why, compact, predecessors}`.
 
     `rec`: the run's record on `/scans` (`maint_runs`, kind `compact`): started once the generation is resolved (its
     `scan` the newest scan the generation holds: the newest the fold would fold), phases `read`, `due`, then
@@ -2556,7 +2608,7 @@ def compact_generation(store, c: Compactor, gen: str, mount: Path, work: Path, *
         if r2_bucket:
             r2 = lambda new, old: r2_publish_gen(r2_bucket, c.prefix, new, old, last=c.last, promote=promote, log=log)  # noqa: E731
         doc["compact"] = compact_store(store, c, gen, gen_dir, work, policy=policy, why=why, threads=threads, mem=mem, jobs=jobs, r2=r2, reads=reads,
-                                       promote=promote, rec=rec, log=log)
+                                       promote=promote, pricing=pricing, rec=rec, log=log)
         if c.prune and promote and not doc["compact"].get("superseded"):
             with phase(rec, "prune") as ph:
                 doc["predecessors"] = prune_predecessors(store, c.prefix, doc["compact"]["gen"], now=time.time() if now is None else now, grace_s=grace_s, log=log)

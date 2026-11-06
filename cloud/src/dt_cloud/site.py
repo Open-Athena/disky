@@ -26,12 +26,15 @@ class SiteError(Exception):
     """A caller-fixable problem (no token, the server refused or is unreachable).
 
     ``status`` is the HTTP status of a refusal (``None``: unreachable), so a
-    caller can tell a legitimate "not found" from an auth or server failure.
+    caller can tell a legitimate "not found" from an auth or server failure;
+    ``body`` is the refusal's JSON body when it is an object (its fields beside
+    ``error``), else ``{}``.
     """
 
-    def __init__(self, msg: str, status: int | None = None):
+    def __init__(self, msg: str, status: int | None = None, body: dict | None = None):
         super().__init__(msg)
         self.status = status
+        self.body = body or {}
 
 
 def creds(token: str | None, url: str | None) -> tuple[str, str | None]:
@@ -72,11 +75,13 @@ def _fetch(req: Request, endpoint: str, timeout: int) -> bytes:
             got, short = len(e.partial), e.expected
         except HTTPError as e:
             body = e.read().decode(errors="replace")
+            doc = None
             try:
-                msg = json.loads(body).get("error", body)
-            except ValueError:
+                doc = json.loads(body)
+                msg = doc.get("error", body)
+            except (ValueError, AttributeError):
                 msg = body
-            raise SiteError(f"{endpoint} → HTTP {e.code}: {msg}", status=e.code) from e
+            raise SiteError(f"{endpoint} → HTTP {e.code}: {msg}", status=e.code, body=doc if isinstance(doc, dict) else None) from e
         except URLError as e:
             raise SiteError(f"{endpoint} unreachable: {e.reason}") from e
     raise SiteError(f"{endpoint} → truncated body ({got} of {got + (short or 0)} bytes), {TRUNCATED_RETRIES + 1} tries")

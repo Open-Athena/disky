@@ -94,6 +94,9 @@ PREFIX = ist.PREFIX
 RUN_SORTS = ("path", "bysize", "slices", "slices-bytotal", "slices-bysize-user", ist.ATTRIBUTION, ilv.LEVEL)
 #: Cost-attribution `component` of every job the append submits (`cost_labels`).
 COMPONENT = "interval-store"
+#: `-O`, wherever a command can move `interval-store/CURRENT.json` (`compact`, `promote`, `interval_local`'s `add` and `current -s`).
+OWNER_PRICES_HELP = ("A deployment whose site keeps owner pricing per generation (an ownership ledger): move the pointer only once the site holds the new "
+                     "generation's pricing (`POST /api/owner-prices` as $SITE_TOKEN at $SITE_URL), else fail with the old generation current")
 #: What a folded run keeps on GCS (`append_runner.plan_prune`'s `retain`): its `ranges/` docs (the next scan's
 #: `prev_open_counts` balances its tasks by them) and its pinned `scans.json`, both small. R2 keeps none of it.
 FOLDED_RETAIN = ("ranges/", "scans.json")
@@ -884,12 +887,30 @@ class Runner(ar.Runner):
 
     def compact_jobs(self, scan: str) -> list[tuple[str, dict]]:
         r2 = self.merge_r2()
+        priced = self.p.owner_prices and not self.candidate
         out = [self.job("compact", scan, 1, "interval_append", ["compact", "-C", str(self.p.policy), *(["-K"] if self.compact_now else []), *self.read_args(),
                                                               *(["-r"] if r2 else []), "-j", str(self.p.compact_jobs), *(["-N"] if self.candidate else []),
-                                                              *duckdb_args(self.p.machine_for("compact"))], r2=r2)]
+                                                              *(["-O"] if priced else []), *duckdb_args(self.p.machine_for("compact"))], r2=r2)]
+        if priced:
+            out[0] = (out[0][0], self.pricing_env(*out[0]))
         if not r2:
             out.append(self.job("compact-r2", scan, 1, "interval_append", ["compact-r2", *(["-N"] if self.candidate else [])], r2=True, mount=False))
         return out
+
+    def pricing_env(self, name: str, spec: dict) -> dict:
+        """`spec` (the `compact` job, under `append.owner_prices`) with what its owner-pricing gate asks the site with: this
+        process's `$SITE_URL`, and `$SITE_TOKEN` from the secret the profile names (`site_secrets`). Without either the
+        job isn't submitted (`SystemExit`): it would fold for hours, then refuse to move the pointer."""
+        url = (self.environ.get("SITE_URL") or "").strip()
+        secret = (self.p.site_secrets or {}).get("SITE_TOKEN")
+        if not url or not secret:
+            missing = " and ".join(x for x in ("" if url else "$SITE_URL in the submitter's environment",
+                                               "" if secret else "`site_secrets.SITE_TOKEN` in the profile") if x)
+            raise SystemExit(f"{name}: the profile keeps owner pricing across a compaction (`owner_prices`), which asks the site: no {missing}")
+        env = spec["taskGroups"][0]["taskSpec"].setdefault("environment", {})
+        env.setdefault("variables", {})["SITE_URL"] = url
+        env.setdefault("secretVariables", {})["SITE_TOKEN"] = f"projects/{self.p.project}/secrets/{secret}/versions/latest"
+        return spec
 
     def with_gen(self, gen: str) -> Config:
         """A compacted generation holds its own range files and `ranges.json`."""
@@ -1372,24 +1393,29 @@ def _summary(doc: dict) -> dict:
 @cli.command("compact")
 @stage_options
 @ar.compact_options
+@option("-O", "--owner-prices", is_flag=True, help=OWNER_PRICES_HELP)
 @option("-w", "--rg-rows", "rg_rows", default=ist.SERVED_RG, type=IntRange(min=1), help="Rows per served row group (the compacted generation's)")
-def compact_cmd(bucket, gen, ranges_gen, scratch, policy, read_from, grace_s, jobs, force, mount, mem, promote, threads, to_r2, tmp, rg_rows) -> None:
+def compact_cmd(bucket, gen, ranges_gen, scratch, policy, read_from, grace_s, jobs, force, mount, mem, promote, threads, to_r2, tmp, owner_prices,
+                rg_rows) -> None:
     """The compaction stage (`append_runner.run_compaction` with `interval_compact`): when the policy fires (or `-K`),
     the generation's base and runs folded into `<gen>.c<NNN>` (a fresh build's bytes), published on GCS (`scans.json`,
     then `compaction.json`, `successor.json`, `interval-store/CURRENT.json`), then with `--r2` on R2 (its pointer last);
     predecessors past the grace leave GCS. Holds the compaction lease (the scratch bucket's `interval-store/compacting.lease.json`)
     throughout: appends to the generation wait; exit 4 (`BUSY`) while another compaction holds it. `-N`: a candidate (no
-    lease, no pointer; `promote` points at it). Prints a JSON summary."""
+    lease, no pointer; `promote` points at it). `-O`: the pointers move only once the site holds the new generation's
+    owner pricing (`owner_prices.Gate`), else the job fails with the old generation current. Prints a JSON summary."""
     from . import interval_compact as ic
+    from . import owner_prices as op
 
     if (b := gs_bucket(bucket)) is None:
         raise SystemExit(f"interval store: the staged compaction reads a mounted GCS bucket; {bucket!r} is not one")
+    pricing = op.gate(os.environ) if owner_prices and promote else None
     try:
         with tm.watch(mem, f"compact {gen}"):
             doc = ar.run_compaction(Store(f"gs://{b}"), ic.compactor(rg_rows), gen, Path(mount), Path(tmp),
                                     lease=ar.gcs_compaction_lease_file(gs_bucket(scratch), PREFIX) if promote else None, policy=policy, force=force,
                                     r2_bucket=b if to_r2 else None, grace_s=grace_s, threads=threads, mem=mem, jobs=jobs, read_from=read_from,
-                                    promote=promote, rec=from_env("compact"))
+                                    promote=promote, pricing=pricing, rec=from_env("compact"))
     except ar.Busy as e:
         err(f"compact: {e}")
         raise SystemExit(ar.BUSY)
@@ -1398,14 +1424,19 @@ def compact_cmd(bucket, gen, ranges_gen, scratch, policy, read_from, grace_s, jo
 
 @cli.command("promote")
 @option("-b", "--bucket", required=True, help="The store: a bucket name (gs://) or URL")
+@option("-O", "--owner-prices", is_flag=True, help=OWNER_PRICES_HELP)
 @option("-r", "--r2", "to_r2", is_flag=True, help="Then the R2 copy's pointers (the candidate must be on R2 already: `compact -N --r2`)")
 @argument("gen")
-def promote_cmd(bucket, to_r2, gen) -> None:
+def promote_cmd(bucket, owner_prices, to_r2, gen) -> None:
     """Point prod at candidate generation GEN (`compact -N`): its source's `successor.json`, then `interval-store/CURRENT.json`
-    (when it named the source), then with `-r` the R2 copy's. Refused unless GEN holds every scan its source does."""
+    (when it named the source), then with `-r` the R2 copy's. Refused unless GEN holds every scan its source does, and
+    with `-O` unless the site holds GEN's owner pricing."""
+    from . import owner_prices as op
+
     if (b := gs_bucket(bucket)) is None:
         raise SystemExit(f"interval store: promote moves a GCS bucket's pointers; {bucket!r} is not one")
-    print(json.dumps(ar.promote_gen(Store(f"gs://{b}"), PREFIX, gen, r2_bucket=b if to_r2 else None), indent=1))
+    pricing = op.gate(os.environ) if owner_prices else None
+    print(json.dumps(ar.promote_gen(Store(f"gs://{b}"), PREFIX, gen, r2_bucket=b if to_r2 else None, pricing=pricing), indent=1))
 
 
 @cli.command("compact-r2")

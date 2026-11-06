@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 from dataclasses import replace
 from pathlib import Path
@@ -799,6 +800,8 @@ class Ends:
     ("probe", "dt-cloud probe -c", "serving probe failed for 2026-10-16T1200 (an HTTP or transport error; data is fine)"),
     ("healthcheck", "dt-cloud healthcheck -d", "the live site's health check failed for 2026-10-16T1200 (data is fine; serving may be degraded)"),
     ("staged_card", "dt-cloud staged-card", "staged card refresh failed for 2026-10-16T1200 (it stays at the scan before)"),
+    ("owner_prices", "dt-cloud owner-prices -d",
+     'owner pricing not filled for 2026-10-16T1200 (its owner-scoped views answer "pricing pending" until a fill runs: `dt-cloud owner-prices`)'),
     ("index_gc", "dt-cloud index-gc -R", "index-gc -F failed (superseded generations stay until the next run)"),
     ("over_time", "dt-cloud over-time-groups -g", "over-time groups failed (the series uses its configured path store)"),
 ])
@@ -818,6 +821,52 @@ def test_staged_card_pings_the_site_only_with_its_token(tmp_path, env):
     c.env.update(SITE_TOKEN="t", SITE_URL="https://site.example.org")
     S.staged_card(c, None)
     assert c.sh_impl.calls == ["dt-cloud staged-card"]
+
+
+def test_owner_prices_fills_through_the_scan_only_with_the_sites_token(tmp_path, env):
+    """`owner-prices` (opt-in, after `interval-store`): `dt-cloud owner-prices -d <scan> -p` as the job's site grant;
+    `options.owner-prices` sets the chunk, the wait, and keeps the pruning off."""
+    c = ctx(tmp_path, env, steps=["owner-prices"])
+    S.owner_prices(c, None)
+    assert c.sh_impl.calls == []
+    c.env.update(SITE_TOKEN="t", SITE_URL="https://site.example.org")
+    S.owner_prices(c, None)
+    tuned = ctx(tmp_path, {**env, "SITE_TOKEN": "t", "SITE_URL": "https://site.example.org"}, steps=["owner-prices"],
+                options={**profile(tmp_path).options, "owner-prices": {"chunk": 32, "wait": 0, "prune": False}})
+    S.owner_prices(tuned, None)
+    assert (c.sh_impl.calls, tuned.sh_impl.calls) == (["dt-cloud owner-prices -d 2026-10-16T1200 -p"], ["dt-cloud owner-prices -d 2026-10-16T1200 -n 32 -w 0"])
+    reproc = ctx(tmp_path, {**env, "SITE_TOKEN": "t", "SITE_URL": "https://site.example.org", "REPROC": "1"}, steps=["owner-prices"])
+    S.owner_prices(reproc, None)
+    assert reproc.sh_impl.calls == []
+
+
+def test_owner_prices_is_opt_in_after_interval_store_and_needs_it(tmp_path):
+    """Not a core step (a deployment with an ownership ledger lists it); in the registry right after `interval-store`,
+    whose task runs it; refused for a store that skips the interval store, or isn't the primary."""
+    names = list(S.STEPS)
+    step = S.STEPS["owner-prices"]
+    assert (step.core, step.stage, step.soft, names[names.index("interval-store") + 1]) == (False, "serve", True, "owner-prices")
+    assert "owner-prices" not in profile(tmp_path).enabled()
+    on = profile(tmp_path, steps=["owner-prices"]).enabled()
+    assert on[on.index("interval-store"):on.index("index-rows") + 1] == ("interval-store", "owner-prices", "index-rows")
+    with pytest.raises(ValueError) as e:
+        profile(tmp_path, steps=["owner-prices"], skip=["interval-store"])
+    assert str(e.value) == "profile: owner-prices: needs the interval-store step (owner pricing is filled per store generation)"
+
+
+def test_interval_store_add_keeps_owner_pricing_when_the_deployment_fills_it(tmp_path, env, monkeypatch):
+    """A deployment running `owner-prices`: its one-machine `add` gates a due compaction on the new generation's
+    pricing (`-O`); another's doesn't."""
+    from dt_cloud import scan_runs
+
+    ran = []
+    monkeypatch.setattr(scan_runs, "run_grouped", lambda cmd, timeout, grace, env=None, **kw: (ran.append(" ".join(cmd)), scan_runs.Ran(0, False, None))[1])
+    env["R2_ARCHIVE"] = "r2://idx"
+    for steps in ([], ["owner-prices"]):
+        c = ctx(tmp_path, dict(env), Runner(tmp_path, stdout={"dt-cloud interval-store current": "g1\n"}), steps=steps)
+        S.interval_store(c, None)
+    add = "dt-cloud interval-store add -L l2/{id}/index/{gen}/path-index.parquet -s r2://idx -o r2://idx -w <tmp>/t/dt-scan/2026-10-16T1200/interval-store -p <n>"
+    assert [re.sub(r"-p \d+", "-p <n>", r.replace(str(tmp_path), "<tmp>")) for r in ran] == [add, f"{add} -O"]
 
 
 @pytest.mark.parametrize("name,prefix,warn", [

@@ -113,6 +113,22 @@ def test_preview_dag_is_the_runs(tmp_path):
     assert preview.to_json() == real.to_json()
 
 
+def test_owner_prices_runs_in_interval_stores_task_right_after_it(tmp_path):
+    """`steps: [owner-prices]` (a deployment with an ownership ledger): the fill runs in `interval_store`'s task, as its
+    next step, so before index-sync and every post step; no task of its own."""
+    marks = tmp_path / "marks"
+    r = head(tmp_path, marks, extra="steps: [owner-prices]\n")
+    assert r.returncode == 0, r.stderr
+    ran = marks.read_text().splitlines()
+    assert sorted(ran) == sorted([*ALL, "owner-prices"])
+    at = {s: ran.index(s) for s in ran}
+    script = next(p for p in (tmp_path / "nf/work").rglob(".command.sh") if _nf_node(p) == ("interval_store", ""))
+    steps = [line.split(" scan step ")[1] for line in script.read_text().splitlines() if " scan step " in line]
+    assert (steps, at["interval-store"] < at["owner-prices"] < at["index-sync"]) == (["interval-store", "owner-prices"], True)
+    assert sorted({_nf_node(p)[0] for p in (tmp_path / "nf/work").rglob(".command.sh")}) == [
+        "index", "index_rows", "interval_store", "list_source", "over_time", "post", "publish_r2", "static_names"]
+
+
 def test_reproc_unfolded(tmp_path):
     """`-R` runs from `index` (no list tasks, no bucket-check); `fold: []` gives index-sync its own task."""
     marks = tmp_path / "marks"

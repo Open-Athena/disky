@@ -16,6 +16,9 @@
 // `params.index_parts` (`options.index.parts`): the index sharded, one `index_part` task per part (`scan step index
 // <part>`: a bucket, or a key range of one), then `index` merges them into the one pass's outputs (`index_parts`).
 //
+// `owner-prices` (opt-in, a deployment with an ownership ledger): in interval-store's task, right after it, so a scan's
+// owner pricing is filled as soon as the store holds it (specs/owner-pricing-off-the-read-path.md).
+//
 // `post` runs the enabled post steps in registry order (`scan_steps.STEPS`), e.g. `retire` (opt-in via the profile's
 // `steps`): after both stores and the pointers, so a scan is retired only once the stores serve it.
 //
@@ -172,7 +175,7 @@ process interval_store {
     label params.interval_label  // `interval` when the profile sizes it (`machines.interval`), else `big` (index's machine)
     input: val published
     output: path 'done'
-    script: stepScript(task, ['interval-store'])
+    script: stepScript(task, ['interval-store'] + (on('owner-prices') ? ['owner-prices'] : []))
 }
 
 process index_rows {

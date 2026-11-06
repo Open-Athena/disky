@@ -1180,14 +1180,44 @@ def interval_store(ctx: Ctx, arg: str | None) -> None:
         return
     layout = ctx.profile.layout.layer2.replace("{scan}", "{id}") + "index/{gen}/path-index.parquet"
     source = ctx.data_uri if ctx.opt("interval-store", "source", "store") == "data" else store
+    # A deployment that fills owner pricing (the `owner-prices` step): a due compaction keeps it (`-O`), or doesn't move
+    # the pointer. The staged path's is its profile's `append.owner_prices`.
     cmd = ["dt-cloud", "interval-store", "add", "-L", layout, "-s", source, "-o", store, "-w", str(ctx.work / "interval-store"),
            *(["-M", ctx.opt("interval-store", "mem")] if ctx.opt("interval-store", "mem") else []), "-p", str(ctx.nproc),
-           *(["-C", str(ctx.opt("interval-store", "compact"))] if ctx.opt("interval-store", "compact") else [])]
+           *(["-C", str(ctx.opt("interval-store", "compact"))] if ctx.opt("interval-store", "compact") else []),
+           *(["-O"] if "owner-prices" in ctx.profile.enabled() else [])]
     err("+ " + " ".join(cmd))
     with ctx.beating("interval-store") as tail:
         ran = run_grouped(cmd, duration(timeout) if timeout else None, 30.0, env=ctx.env, tail=tail)
     ctx.run.end("interval-store", ran.rc, warn=True, msg="the scan reads per-scan until a later run appends it",
                 timed_out=timeout if ran.timed_out else None, terminated=ran.signal if ran.rc else None)
+
+
+def _prices_check(p: ScanProfile) -> list[str]:
+    bad = primary_only("owner-prices", "the ownership ledger is the primary store's")(p)
+    if "interval-store" not in p.enabled():
+        bad.append("owner-prices: needs the interval-store step (owner pricing is filled per store generation)")
+    return bad
+
+
+@step("owner-prices", core=False, stage="serve", soft=True, options={"chunk": int, "wait": int, "prune": bool}, requires=_prices_check)
+def owner_prices(ctx: Ctx, arg: str | None) -> None:
+    """Fill the site's owner pricing through this scan (`dt-cloud owner-prices -d <scan>`: the job grant named by the
+    site's `OWNER_PRICES_GRANT`), right after `interval-store` in its task: the site never prices inside a read
+    (specs/owner-pricing-off-the-read-path.md), so until this ends the scan's owner-scoped views answer "pricing
+    pending". For a deployment with an ownership ledger (opt-in: `steps: [owner-prices]`). `options.owner-prices`:
+    `chunk` (prefixes a call, default 64), `wait` (seconds for the site's store to hold the scan, default 600: a scan
+    another coordinator is still appending isn't waited out longer), `prune: false` to keep the pricing of generations
+    the store no longer holds. A failure warns: the next scan's fill, or `dt-cloud owner-prices` by hand, prices it."""
+    with ctx.phase("owner-prices"):
+        if ctx.reproc or not ctx.has("SITE_TOKEN", "SITE_URL"):
+            err("no SITE_TOKEN/SITE_URL, or REPROC: skipping the owner-pricing fill")
+            return
+        ctx.sh(["dt-cloud", "owner-prices", "-d", ctx.scan,
+                *(["-n", str(ctx.opt("owner-prices", "chunk"))] if ctx.opt("owner-prices", "chunk") else []),
+                *(["-w", str(ctx.opt("owner-prices", "wait"))] if ctx.opt("owner-prices", "wait") is not None else []),
+                *(["-p"] if ctx.opt("owner-prices", "prune", True) else [])], fatal=False,
+               warn=f"owner pricing not filled for {ctx.scan} (its owner-scoped views answer \"pricing pending\" until a fill runs: `dt-cloud owner-prices`)")
 
 
 def _sync_args(ctx: Ctx) -> list[str]:

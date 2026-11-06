@@ -561,6 +561,41 @@ def staged_card(token: str | None, url: str | None) -> None:
     err(f"staged-card: {'edited' if result['refreshed'] else 'nothing to edit'}")
 
 
+@main.command("owner-prices")
+@option("-d", "--date", "scan", default=None, help="The scan just appended: wait (`-w`) until the site's store holds it, then price through it (default: whatever the site's store holds now)")
+@option("-g", "--gen", default=None, help="Price this interval-store generation instead of the site's current one (a generation's first fill, before anything points at it)")
+@option("-n", "--chunk", default=64, type=IntRange(min=1), help="Prefixes a call prices (one history read on the site; halved when a call fails as a server error)")
+@option("-p", "--prune", is_flag=True, help="Then delete the pricing of generations the store no longer holds")
+@option("-t", "--token", default=None, help="Bearer token: the grant the site names as `OWNER_PRICES_GRANT` (default: $SITE_TOKEN)")
+@option("-u", "--url", default=None, help="Site base URL (default: $SITE_URL)")
+@option("-w", "--wait", "wait_s", default=600, type=IntRange(min=0), help="Seconds to wait for the site's store to hold `-d`'s scan")
+def owner_prices(scan: str | None, gen: str | None, chunk: int, prune: bool, token: str | None, url: str | None, wait_s: int) -> None:
+    """Fill the site's owner pricing (specs/owner-pricing-off-the-read-path.md): every ledger prefix priced through the
+    interval store's newest scan, a bounded chunk a call (`POST /api/owner-prices`), until none remains. The site
+    never prices inside a read, so this runs after each scan is appended (the `owner-prices` scan step), and by hand
+    after an assignment of more prefixes than its write priced. Resumable and idempotent. Prints the fill's summary
+    as JSON; exits 1 when the site refuses, doesn't answer, or stops making progress."""
+    from . import owner_prices as op
+    from .site import creds
+
+    base, tok = creds(token, url)
+    if not tok:
+        raise SystemExit("owner-prices: no token (-t or $SITE_TOKEN)")
+    try:
+        doc = op.fill(base, tok, scan=scan, gen=gen, n=chunk, wait_s=wait_s, log=lambda m: err(m))
+        if doc.get("ledger") is False:
+            err("owner-prices: no ownership ledger on this deployment: nothing to price")
+        else:
+            err(f"owner-prices: {doc['index']}: {doc['prefixes']} prefixes priced through {scan or 'the newest scan'} ({doc['priced']} in {doc['calls']} calls)")
+            if prune:
+                doc["prune"] = op.prune(base, tok)
+                dropped = doc["prune"]["dropped"]
+                err("owner-prices: pruned " + (", ".join(f"{d['index']} ({d['rows']} rows)" for d in dropped) if dropped else "nothing"))
+    except op.PricingRefused as e:
+        raise SystemExit(f"owner-prices: {e}") from e
+    print(json.dumps(doc))
+
+
 @main.command()
 @option("-d", "--date", default=None, help="Scan slug: YYMMDD[HH[MM]] or YYYY-MM-DD[THH[MM]] — the latest scan it names; one naming none fails (default: latest from scans.json)")
 @option("-f", "--max-age-days", default=2, type=int, help="Freshness: latest scan must be within this many days")

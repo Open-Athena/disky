@@ -132,7 +132,17 @@ dt-cloud interval-store add [-g GEN] -L LAYOUT -s SCANS -o STORE  # Append every
                           # store is the serving R2 bucket. Every 2^L scans (`-C L`, default 5; `none`: never) it compacts
                           # base + runs into a new generation (`interval_compact`: a fresh build's bytes), then moves
                           # `interval-store/CURRENT.json` to it (the site follows it when `INTERVAL_STORE_GEN` is unset);
-                          # `-g` defaults to that pointer. `interval-store current -o STORE [-s GEN]` prints / sets it
+                          # `-g` defaults to that pointer. `interval-store current -o STORE [-s GEN]` prints / sets it.
+                          # `-O` (`add`, `current -s`, the staged `compact` / `promote`; a profile's `append.owner_prices`):
+                          # the pointer moves only once the site holds the new generation's owner pricing, else it stays
+dt-cloud owner-prices [-d SCAN] [-g GEN] [-n N] [-p] [-w S]  # Fill the site's owner pricing (`owner_prices.py`,
+                          # specs/owner-pricing-off-the-read-path.md): the site never prices owner assignments inside a
+                          # read (a missing price is a "pricing pending" answer), so the job does, through `POST
+                          # /api/owner-prices` as the grant the site names in `OWNER_PRICES_GRANT`: N prefixes a call (one
+                          # history read; halved when a call fails as a server error) until none remains; resumable,
+                          # idempotent. `-d`: wait (`-w`) for the site's store to hold that scan, then price through it
+                          # (the `owner-prices` scan step, in `interval-store`'s task); `-g`: a generation that isn't
+                          # current; `-p`: then drop the pricing of generations the store no longer holds. JSON summary
 dt-cloud interval-store backfill-attribution -O NEW -o STORE [-s ROOT]  # The roster attribution table
                           # (specs/attr-interval-table.md): each scan's `attribution.parquet` (`path-index -a` writes it
                           # beside the sorts; key `(depth, path)`, change columns `user`, `source`, `evidence`) versioned
@@ -308,7 +318,7 @@ Every deployment (gcs, cw-s3, r2, hf, the r2 demo, …) ships the current full f
 - **Hosts:** prod and a dev stack: `dev.<host>` (a `branchAliases` CNAME onto the Pages branch `dev`), wrangler's `[env.preview]` with prod's bindings, preview-env secrets, every origin + callback (prod, dev, the `pages.dev` alias, localhost) on the Google OAuth client.
 - **Auth:** app sign-in (Google OIDC + emailed codes), staff domain, admin console, personal agent tokens.
 - **Serving:** the interval store as the Map's path store (`PATH_STORE = "intervals"`, following `interval-store/CURRENT.json`, once `interval-store verify` / a `ps=iv` parity check passes on the first scans); search from the prebuilt static name index only (`FILTER_STATIC`, `NAME_SUMMARY_STATIC`, `FILTER_STATIC_HEAVY`, `FILTER_INDEXED_ONLY = "1"`), no per-scan search sidecars. Per-scan `path`/`bysize` sorts are on their way out (`specs/lean-scans.md`).
-- **Job:** `scan-run supervise` (phases, alerts, `/scans` records, cost labels), `DT_TRIGGER` (`schedule` in the cron body, `manual` from hand submits; with migration `scan-run-trigger`): the run's and the scan's trigger (`/scans`, the digest's reply scan), `index-gc`, cache warm-up (`warm-cache`) and the serving probe (`probe -c`) after each scan, the Slack digest thread, and on a staging deployment the `staged-card` step (`dt-cloud staged-card`; the site's prod env names the job's grant in `STAGED_CARD_GRANT`, its dev stack does not).
+- **Job:** `scan-run supervise` (phases, alerts, `/scans` records, cost labels), `DT_TRIGGER` (`schedule` in the cron body, `manual` from hand submits; with migration `scan-run-trigger`): the run's and the scan's trigger (`/scans`, the digest's reply scan), `index-gc`, cache warm-up (`warm-cache`) and the serving probe (`probe -c`) after each scan, the Slack digest thread, and on a staging deployment the `staged-card` step (`dt-cloud staged-card`; the site's prod env names the job's grant in `STAGED_CARD_GRANT`, its dev stack does not). On a deployment with an ownership ledger: the `owner-prices` step (`dt-cloud owner-prices -d <scan>`, right after `interval-store`; the site's prod env names the job's grant in `OWNER_PRICES_GRANT`, its dev stack does not) and its compaction's pricing gate (`interval-store add -O`, or the staged profile's `append.owner_prices` + `site_secrets`): no read path prices, so without the step every owner-scoped view of a new scan answers "pricing pending".
 - **Meta:** the "data behind this site" store (`STORES_JSON` `meta`) with its own static index.
 
 A deployment's spec lists the baseline items it doesn't have yet as gaps, and those gaps are open work, not follow-ups to propose.

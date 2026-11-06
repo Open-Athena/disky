@@ -39,6 +39,7 @@ The served generation is what the site's interval reader opens (`site/functions/
 from __future__ import annotations
 
 import json
+import os
 import shutil
 from pathlib import Path
 from time import monotonic
@@ -347,20 +348,22 @@ def build_cmd(attribution, gen, jobs, k, level, layouts, mem, store_root, thread
 @option("-n", "--prune-dry-run", is_flag=True, help="Report the folded runs and compacted generations the prune would delete from the store; delete nothing")
 @option("-N", "--no-merge", is_flag=True, help="Skip the due carries and compaction (a later `add` makes them)")
 @option("-o", "--out", "store_root", required=True, help="The store: a dir or URL, the readers' INDEX_R2 root")
+@option("-O", "--owner-prices", is_flag=True, help=ia.OWNER_PRICES_HELP)
 @option("-p", "--threads", default=4, type=IntRange(min=1), help="DuckDB threads")
 @option("-r", "--rg-rows", default=ist.SERVED_RG, type=IntRange(min=1), help="Rows per served row group (the runs', and a compacted generation's)")
 @option("-s", "--scans", "scans_root", required=True, help="Where the scans are: a dir or URL, the root of -L's keys")
 @option("-t", "--through", help="Last scan id to append (inclusive; default: the newest)")
 @option("-w", "--work", help="Local work dir (default: a temporary one, removed after); a URL store's generation is mirrored into it")
-def add_cmd(attribution, compact, read_from, gen, grace_s, compact_now, jobs, layouts, mem, prune_dry_run, no_merge, store_root, threads, rg_rows, scans_root,
-            through, work) -> None:
+def add_cmd(attribution, compact, read_from, gen, grace_s, compact_now, jobs, layouts, mem, prune_dry_run, no_merge, store_root, owner_prices, threads, rg_rows,
+            scans_root, through, work) -> None:
     """Append every scan after the generation's newest (base + runs), oldest first, each as a run published by its
     manifest; then the binary counter's due carries. The generation's published files are never rewritten; new ones go
     to the store data first, `meta.json`s next, manifests last. Then the runs a carry folded are deleted from the store
     (`append_runner.prune_folded`, `-G` grace; a folded run keeps `interval_append.FOLDED_RETAIN`). When the compaction
     policy (`-C`) fires or `-K` forces it, the base and every run fold into a new generation (`interval_compact`), published, then pointed to
-    (`successor.json`, `interval-store/CURRENT.json`); a compacted generation leaves the store `-G` s later. Prints a JSON
-    summary."""
+    (`successor.json`, `interval-store/CURRENT.json`); a compacted generation leaves the store `-G` s later. With `-O` a
+    due compaction first asks the site for the new generation's owner pricing (`owner_prices.Gate`): refused, the scans
+    are appended and the pointer stays (exit 1). Prints a JSON summary."""
     store = Store(store_root)
     if gen is not None:
         _check_gen(gen)
@@ -418,9 +421,11 @@ def add_cmd(attribution, compact, read_from, gen, grace_s, compact_now, jobs, la
         compacted = None
         why = None if no_merge else ar.forced(gen_dir) if compact_now else ar.due_in(gen_dir, compact)
         if why is not None:
+            from . import owner_prices as op
+
             with tm.phase("compact"):
                 compacted = ar.compact_store(store, ic.compactor(rg_rows), gen, gen_dir, w, policy=compact, why=why, threads=threads, mem=mem, jobs=jobs,
-                                             reads=got)
+                                             reads=got, pricing=op.gate(os.environ) if owner_prices else None)
         preds = ic.prune_predecessors(store, gen, now=sl.now(), grace_s=grace_s, dry_run=prune_dry_run)
     print(json.dumps({"gen": gen, "after": have[-1], "added": added, "merge": merged, "files": len(uploaded),
                       "prune": {k_: v for k_, v in prune.items() if k_ != "keys"}, "compact": compacted, "predecessors": preds}, indent=1))
@@ -428,16 +433,25 @@ def add_cmd(attribution, compact, read_from, gen, grace_s, compact_now, jobs, la
 
 @command("current")
 @option("-o", "--out", "store_root", required=True, help="The store: a dir or URL, the readers' INDEX_R2 root")
+@option("-O", "--owner-prices", is_flag=True, help="With -s, on a deployment whose site keeps owner pricing per generation: first fill that generation's pricing on the site (`POST /api/owner-prices?gen=` as $SITE_TOKEN at $SITE_URL; the site must be able to read it), and move the pointer only once none is unpriced")
 @option("-s", "--set", "to", help="Point the store at this generation instead (it must exist)")
-def current_cmd(store_root, to) -> None:
+def current_cmd(store_root, owner_prices, to) -> None:
     """Print the store's current generation: `interval-store/CURRENT.json`'s, else its only generation; nothing when it
     has none; exit 1 when it has several and no pointer. With `-s`, set the pointer (what unpinned readers serve and `add`
-    appends to)."""
+    appends to); with `-O` too, only once the site has priced that generation's owner assignments (a hand move is to any
+    generation, so its pricing is filled from its own rows, not carried)."""
     store = Store(store_root)
     if to is not None:
         _check_gen(to)
         if not store.exists(f"{PREFIX}/{to}/scans.json"):
             raise SystemExit(f"{store.root}/{PREFIX}/{to}/scans.json: no such generation")
+        if owner_prices:
+            from . import owner_prices as op
+
+            try:
+                op.gate(os.environ).ready(to)
+            except op.PricingRefused as e:
+                raise SystemExit(f"{to}: its owner pricing isn't in place ({e}): {ic.CURRENT} not moved") from e
         ic.set_current(store, to)
     gen, how = ic.resolve(store)
     if gen is not None:
