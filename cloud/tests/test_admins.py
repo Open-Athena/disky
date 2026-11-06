@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+from inspect import cleandoc
 from pathlib import Path
 
 import pytest
@@ -149,7 +150,7 @@ def test_check_without_the_column_json(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_check_help_documents_its_exit_statuses() -> None:
-    assert check_cmd.help == (
+    assert cleandoc(check_cmd.help) == (
         "Compare the admin list's GitHub handles with ORG's owners. Reads only; changes nothing.\n\n"
         "Exit status: 0 in sync; 1 drift; 3 the comparison isn't available (the database has no `github` column or no "
         "`admin_emails` table: its recipe is unapplied), which says nothing about drift."
