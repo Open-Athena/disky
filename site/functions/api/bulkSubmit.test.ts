@@ -43,19 +43,19 @@ describe('bulk submission against a local D1', () => {
     ])
   })
 
-  it('assigns 1,100 folder prefixes in 3 POSTs (the API takes ≤ 500), one ledger row each', async () => {
+  it('assigns 1,100 folder prefixes in 18 POSTs (64 each: what one write prices), one ledger row each', async () => {
     const { db, raw } = await sqliteD1()
     withLedger(raw)
     const env = { ...base, DB: db }
     const prefixes = Array.from({ length: 1100 }, (_, i) => `gs://${B}/d${String(i).padStart(4, '0')}/`)
-    const statuses: number[] = []
+    const posts: [number, number][] = []
     const n = await assignInBatches(prefixes, pattern => ({ pattern, owner: 'ann', memo: "bulk filter:'tomat'", scan: '2026-10-09' }), async actions => {
       const r = await actionsRoute({ request: new Request('http://localhost/api/actions', { method: 'POST', body: JSON.stringify(actions) }), env } as never)
-      statuses.push(r.status)
+      posts.push([r.status, actions.length])
       if (!r.ok) throw new Error(await r.text())
     })
     const rows = (await db.prepare('SELECT prefix, owner FROM owner_prefixes ORDER BY prefix').all<{ prefix: string; owner: string }>()).results
-    expect([n, statuses, rows.length, rows.map(r => r.prefix), [...new Set(rows.map(r => r.owner))]]).toEqual([1100, [200, 200, 200], 1100, prefixes, ['ann']])
+    expect([n, posts, rows.length, rows.map(r => r.prefix), [...new Set(rows.map(r => r.owner))]]).toEqual([1100, [...Array(17).fill([200, 64]), [200, 12]], 1100, prefixes, ['ann']])
   })
 })
 
@@ -118,15 +118,15 @@ describe('a click on the matches → confirm → batches → accepted, against a
     ])
   })
 
-  it('assign 120 lone files: asks (over the confirm threshold), one POST, one exact-object ledger row each', async () => {
+  it('assign 120 lone files: asks (over the confirm threshold), two POSTs (64 a write), one exact-object ledger row each', async () => {
     const files = Array.from({ length: 120 }, (_, i) => ({ path: `${B}/show/clip${String(i).padStart(3, '0')}.mp3`, kind: 'file' as const, b: 1, o: 1, roots: 1 }))
     const h = await harness(files, true)
     await h.ctl.start({ kind: 'assign', owner: 'ann', who: 'ann', memo: "bulk filter:'clip'" })
     await h.ctl.confirm()
     const rows = (await h.db.prepare('SELECT p.prefix, p.kind, p.owner, a.memo FROM owner_prefixes p JOIN actions a ON a.id = p.action_id ORDER BY p.prefix').all<{ prefix: string; kind: string | null; owner: string; memo: string }>()).results
     expect([h.states, h.sent, rows]).toEqual([
-      ['resolving', 'confirm', 'sending 0/1', 'sending 1/1', 'done: assigned 120 files → ann'],
-      ['POST /api/actions 120'],
+      ['resolving', 'confirm', 'sending 0/2', 'sending 1/2', 'sending 2/2', 'done: assigned 120 files → ann'],
+      ['POST /api/actions 64', 'POST /api/actions 56'],
       files.map(f => ({ prefix: `gs://${f.path}`, kind: 'object', owner: 'ann', memo: "bulk filter:'clip'" })),
     ])
   })

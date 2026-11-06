@@ -11,7 +11,7 @@ import { shortName } from './UserChip'
 import { useStore, useStoreFetch } from './store'
 import { useUnits } from './units'
 import { fmtBytesStep } from './types'
-import { bandCallouts, pickAnnotations, relativeSeries, seriesGaps, stackSeries, unitTicks, youngestGenesis } from './series'
+import { bandCallouts, pickAnnotations, pricingNote, relativeSeries, seriesGaps, type SeriesPricing, stackSeries, unitTicks, youngestGenesis } from './series'
 import { DAY, fmtScan, scanInstant, type ScanLabel, type ScanTimes } from './scan'
 import type { Band } from './series'
 import { stringParam } from 'use-prms'
@@ -35,7 +35,9 @@ import { brushDomain, fitToWindow, fmtXr, inXDomain, parseXr, presetOf, resolveX
 // precomputed per prefix and nothing is floored.
 
 interface Pt { x: number; y: number; y0?: number }
-interface Series { path: string; points: { date: string; b: number; o: number; missing?: string[] }[]; unindexed?: string[]; roots?: { path: string; points: { date: string; b: number; o: number }[] }[] }
+interface Series { path: string; points: { date: string; b: number; o: number; missing?: string[] }[]; unindexed?: string[]; pricing?: SeriesPricing; roots?: { path: string; points: { date: string; b: number; o: number }[] }[] }
+/** How often a series with scans whose owner pricing is still being filled asks again (a fill takes a few minutes). */
+const PRICING_POLL = 60_000
 
 // Default prominence-suppression radius for the local-extrema callouts, in days
 // (≈6 scans at the 12-hourly cadence): peaks/dips within this of a more
@@ -280,6 +282,8 @@ export function SizeOverTime({ scans, times, fmt = fmtScan, prefix, user, pool, 
     // what the page asked for.
     enabled: scopeReady && scans.length > 1 && !(filterLabel && !paths?.length && !((queryOnly || overMax) && filterQs)) && !(overMax && !filterQs),
     staleTime: 5 * 60_000,
+    // Scans left out while their owner pricing is filled: ask again until they're in.
+    refetchInterval: q => (q.state.data?.pricing?.pending.length ? PRICING_POLL : false),
     queryFn: async () => {
       const pf = perf.start('series', `${prefix || '/'}${scope}|n${scans.length}`)
       const r = await pf.track(sfetch(`/api/series?path=${encodeURIComponent(prefix)}${scope}`, { credentials: 'include' }))
@@ -290,6 +294,9 @@ export function SizeOverTime({ scans, times, fmt = fmtScan, prefix, user, pool, 
     },
   })
   usePerfCommit('series')
+  // Scans a lens or pool series leaves out because their owner pricing isn't filled: said, never drawn as zeros
+  // nor as "no scans hold this path".
+  const unpriced = pricingNote(seriesQ.data?.pricing, fmt)
   // Too many match roots for `paths=`, and the server couldn't sum the query itself.
   const tooMany = overMax && (!filterQs || (seriesQ.error instanceof ApiError && seriesQ.error.status === 400))
 
@@ -539,7 +546,7 @@ export function SizeOverTime({ scans, times, fmt = fmtScan, prefix, user, pool, 
       {seriesQ.isError && !tooMany && (allZero || series.length > 0) && <LoadFailure err={seriesQ.error} what="series" className="sub" onRetry={() => void seriesQ.refetch()} />}
       {tooMany ? (
         <p className="loading">size over time charts up to {SERIES_MAX_PATHS} matches; this filter has {nPaths.toLocaleString()}. Narrow it to chart.</p>
-      ) : allZero ? (
+      ) : allZero && !unpriced ? (
         <p className="loading">
           {user ? <><b>{shortName(user)}</b> owns nothing{prefix ? <> under <code>{prefix}</code></> : ''} in any scan</>
             : pool === 'unowned' ? <>nothing{prefix ? <> under <code>{prefix}</code></> : ''} is unowned in any scan</>
@@ -582,10 +589,14 @@ export function SizeOverTime({ scans, times, fmt = fmtScan, prefix, user, pool, 
           </Explain>
         )}
         </div>
+      ) : unpriced && !refused && !seriesQ.isError && !seriesQ.isLoading ? (
+        // Too few priced scans to draw a line: the reason stands where the chart would be.
+        <p className="loading not-ready" role="status">{unpriced}</p>
       ) : (
         <SeriesEmpty err={refused ?? (seriesQ.isError ? seriesQ.error : undefined)} loading={seriesQ.isLoading} onRetry={() => void seriesQ.refetch()} />
       )}
       {gaps.note && !tooMany && <p className="gap-note">{gaps.note}</p>}
+      {unpriced && !tooMany && series.length > 0 && <p className="gap-note not-ready" role="status">{unpriced}</p>}
       {/* A union's points before some member's first scan: partial totals, named — never a zero for it. */}
       {!tooMany && <SeriesMissingNote points={seriesQ.data?.points} />}
       {(roots.length > 0 || manualLegend) && (

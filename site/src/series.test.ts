@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { bandCallouts, geneses, pickAnnotations, prominentExtrema, relativeSeries, seriesGaps, stackSeries, unitTicks, youngestGenesis } from './series'
+import { bandCallouts, geneses, pickAnnotations, pricingNote, prominentExtrema, relativeSeries, seriesGaps, stackSeries, unitTicks, youngestGenesis } from './series'
 
 const P = { key: 'p', points: [{ x: 1, y: 90 }, { x: 2, y: 100 }, { x: 3, y: 101 }] }
 const H = { key: 'h', points: [{ x: 3, y: 40 }] }
@@ -268,6 +268,34 @@ describe('seriesGaps: a series\' unindexed scans as gaps, never zeros', () => {
       { xs: [], note: null },
       { xs: [], note: null },
       { xs: at('2026-09-29'), note: '1 scan not indexed (gaps in the line)' },
+    ])
+  })
+})
+
+describe('pricingNote: a scoped series\' scans left out for owner pricing, said in words', () => {
+  const fmt = (d: string) => d.slice(5)
+  const none = { pending: [], unheld: [], count: 0, prefixes: [], roots: false }
+  it('nothing left out: no note', () => {
+    expect([pricingNote(undefined, fmt), pricingNote(none, fmt)]).toEqual([null, null])
+  })
+  it('pending scans: which, what is unpriced, and that the pricing job fills them', () => {
+    expect([
+      pricingNote({ ...none, pending: ['2026-11-05'], count: 1260, prefixes: ['b/x'], roots: true }, fmt),
+      pricingNote({ ...none, pending: ['2026-11-03', '2026-11-04', '2026-11-05'], count: 1, prefixes: ['b/x'] }, fmt),
+      pricingNote({ ...none, pending: ['2026-11-05'], roots: true }, fmt),
+    ]).toEqual([
+      'owner totals for 11-05 are still being prepared (1,260 assigned paths and the store roots not priced yet): its point is left out until the pricing job has run',
+      'owner totals for 3 scans (11-03 to 11-05) are still being prepared (1 assigned path not priced yet): their points are left out until the pricing job has run',
+      'owner totals for 11-05 are still being prepared (the store roots not priced yet): its point is left out until the pricing job has run',
+    ])
+  })
+  it('scans the store does not hold get none, and say so; both kinds at once', () => {
+    expect([
+      pricingNote({ ...none, unheld: ['2026-07-30', '2026-08-05'] }, fmt),
+      pricingNote({ ...none, pending: ['2026-11-05'], unheld: ['2026-07-30'], count: 2 }, fmt),
+    ]).toEqual([
+      'no owner totals for 2 scans (07-30 to 08-05): not in the current store, left out',
+      'owner totals for 11-05 are still being prepared (2 assigned paths not priced yet): its point is left out until the pricing job has run · no owner totals for 07-30: not in the current store, left out',
     ])
   })
 })

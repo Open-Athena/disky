@@ -5,6 +5,7 @@ import { useQuery } from '@tanstack/react-query'
 import type { QuerySyntax } from '../functions/_lib/queryAst'
 import { indexedHelp } from '../functions/_lib/indexedOnly'
 import { plain } from '../functions/_lib/querySyntax'
+import { PENDING_CODE } from '../functions/_lib/pricingPending'
 import { useStore, useStoreFetch } from './store'
 import { type DefaultScanMode, prefersIndexed } from './defaultScan'
 
@@ -47,28 +48,34 @@ const REFUSAL = /^(?:unsupported-[a-z-]+|scan-not-indexed|term-too-common|owner-
 /** A failed API response: `message` as `apiErrorMessage` words it; `refusal` the structured
  *  `{ error, code }` body's reason when its code is a filter refusal (`REFUSAL`); `status` the HTTP status. */
 export class ApiError extends Error {
-  constructor(message: string, readonly refusal?: { code: string; reason: string }, readonly status?: number) { super(message); this.name = 'ApiError' }
+  /** `notReady`: the server's own words for an answer that isn't ready yet (owner pricing a fill hasn't written:
+   *  `PENDING_CODE`), not a failure. */
+  constructor(message: string, readonly refusal?: { code: string; reason: string }, readonly status?: number, readonly notReady?: string) { super(message); this.name = 'ApiError' }
 }
 
 /** A failed API response as a throwable `ApiError`. */
 export function apiError(status: number, text: string): ApiError {
   let refusal: ApiError['refusal']
+  let notReady: string | undefined
   try {
     const j = JSON.parse(text) as { error?: unknown; code?: unknown }
     if (status === 400 && typeof j.error === 'string' && typeof j.code === 'string' && REFUSAL.test(j.code)) refusal = { code: j.code, reason: j.error }
+    if (j.code === PENDING_CODE && typeof j.error === 'string') notReady = j.error
   } catch { /* not JSON */ }
-  return new ApiError(apiErrorMessage(status, text), refusal, status)
+  return new ApiError(apiErrorMessage(status, text), refusal, status, notReady)
 }
 
 /** An error's filter refusal (a reason to state inline, with no retry or status), else null. */
 export const refusalOf = (e: unknown): { code: string; reason: string } | null => (e instanceof ApiError && e.refusal) || null
 
-/** How a failed load reads inline: a filter refusal's reason, or the failure's message — with a retry when it may
- *  pass next time (a 5xx, or no response at all), never for a 4xx (the same request fails the same way). */
-export type Failure = { refusal: string } | { message: string; retry: boolean }
+/** How a failed load reads inline: a filter refusal's reason; a not-ready answer in the server's words (with a retry
+ *  while one may pass: a 503); or the failure's message — with a retry when it may pass next time (a 5xx, or no
+ *  response at all), never for a 4xx (the same request fails the same way). */
+export type Failure = { refusal: string } | { notReady: string; retry: boolean } | { message: string; retry: boolean }
 export function failureOf(e: unknown): Failure {
   const r = refusalOf(e)
   if (r) return { refusal: r.reason }
+  if (e instanceof ApiError && e.notReady) return { notReady: e.notReady, retry: e.status === 503 }
   const status = e instanceof ApiError ? e.status : undefined
   return { message: e instanceof Error ? e.message : String(e), retry: status == null || status >= 500 }
 }

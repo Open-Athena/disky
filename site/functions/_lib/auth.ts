@@ -117,6 +117,9 @@ export interface Env {
   /** `1`: the fleet-root owner series reads one bounded interval-store version range (`readRootHistory`),
    *  the canonical reader as fallback. A prototype, off (specs/root-owner-history.md). */
   OWNER_HISTORY_BATCH?: string
+  /** The id of the grant that may fill owner pricing (`POST /api/owner-prices`: the scan job's): prod's vars only,
+   *  never a dev stack sharing prod's D1. Unset: no such route (specs/owner-pricing-off-the-read-path.md). */
+  OWNER_PRICES_GRANT?: string
   /** The interval store generation (`interval-store/<gen>/` on `INDEX_R2`), a pin; unset: the store's current one,
    *  `interval-store/CURRENT.json` (`index.ts` `ivGen`), which a compaction moves. */
   INTERVAL_STORE_GEN?: string

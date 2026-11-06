@@ -20,7 +20,13 @@
  *                                listing `missing`, nothing written, unless
  *                                `allow_missing: true`. The assign scope (every signed-in
  *                                viewer, and their agent token) or admin;
- *                                share links are read-only here.
+ *                                share links are read-only here. Answers
+ *                                `{ ok, count, ts, pricing }`: the write prices
+ *                                its new prefixes over the store's history
+ *                                (`pricing.priced`, at most 64 a POST;
+ *                                `pricing.pending` wait for the next fill, and
+ *                                owner-scoped reads answer "pricing pending"
+ *                                meanwhile).
  *
  * Anyone with the base scope can read; the ledger keeps the full
  * who-did-what trail.
@@ -35,6 +41,7 @@ import { isScanId } from '../../src/scanSlug.js'
 import { noteActivity } from '../_lib/activityHook.js'
 import { pathScans, storeReady, withPathStore } from '../_lib/index.js'
 import { MAX_PREFIXES, prefixesAt } from '../_lib/prefixes.js'
+import { priceAssigned } from '../_lib/ownerTotals.js'
 
 const reEscape = (s: string): string => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 /** `<scheme><bucket>/<path>/` over the scanned buckets (`STORE_SCHEME` /
@@ -178,7 +185,18 @@ export const onRequest = async (ctx: Ctx): Promise<Response> => {
       owner: p.owner,
       ...(p.kind === 'object' ? { object: true } : {}),
     })))
-    return json({ ok: true, count: parsed.length, ts })
+    // No read path prices (specs/owner-pricing-off-the-read-path.md), so the write does: its prefixes the store
+    // hasn't priced yet, over every scan it holds, in one read (`WRITE_PRICE_MAX` of them; the rest are `pending`
+    // until the next fill). The ledger rows are written either way: a failed pricing is reported, not rolled back.
+    // No `pricing` where no interval store serves the deployment: there is none to fill.
+    let pricing: { priced: number; pending: number } | { error: string } | null
+    try {
+      pricing = await priceAssigned((await withPathStore(ctx)).env, ok.map(p => p.pattern))
+    } catch (e) {
+      pricing = { error: (e as Error).message }
+      console.error(`actions: pricing ${ok.length} assigned ${ok.length === 1 ? 'prefix' : 'prefixes'} failed: ${(e as Error).message}`)
+    }
+    return json({ ok: true, count: parsed.length, ts, ...(pricing ? { pricing } : {}) })
   }
 
   return json({ error: 'method not allowed' }, 405)

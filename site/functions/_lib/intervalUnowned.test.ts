@@ -7,6 +7,9 @@ import { type D1Variant, fixture, getsOf, readJson, seedGeneration } from './tes
 import { buildDiff, buildView, readRootAgg, readRootHistory } from './view'
 
 vi.mock('@rdub/file-tree/stores/s3', async () => ({ S3Store: (await import('./testStore')).S3Store }))
+// The per-scan reader is this suite's oracle: its ledger folds price per scan (`testOwnerPerScan.ts`), as the read
+// path did before owner pricing moved to the pipeline. The interval store's are filled, never priced by a read.
+vi.mock('./ownerTotals', async () => (await import('./testOwnerPerScan')).perScanOracle(() => vi.importActual<typeof import('./ownerTotals')>('./ownerTotals')))
 
 // A generation without the owner axis (specs/interval-store.md §2.1): `fixtures/iv/interval-store/g7` (`fixtures/iv/gen.py
 // g7`) is three scans of the per-scan fixtures with no `usr` column (`v2`, `v2-search`, `v2`), built by the single-machine
@@ -73,7 +76,14 @@ async function seed(ledger = LEDGER): Promise<{ perScan: Env; iv: Env }> {
   withLedger(raw)
   if (ledger) raw.exec(ledger)
   const perScan = { DB: db, ROOT_LABEL: 'root', BASE_SCOPE: 'gcs', GCS_HMAC_KEY_ID: 'k', GCS_HMAC_SECRET: 's' } as Env
-  return { perScan, iv: { ...perScan, PATH_STORE: 'intervals', INTERVAL_STORE_GEN: 'g7', INDEX_R2: r2() } as Env }
+  const iv = { ...perScan, PATH_STORE: 'intervals', INTERVAL_STORE_GEN: 'g7', INDEX_R2: r2() } as Env
+  // The pipeline's fill (`POST /api/owner-prices`): no read prices.
+  if (ledger) {
+    const { fillOwnerHist } = await import('./ownerTotals')
+    const got = await fillOwnerHist(iv, 64)
+    if (!got || 'behind' in got || got.remaining) throw new Error(`fill: ${JSON.stringify(got)}`)
+  }
+  return { perScan, iv }
 }
 
 /** What a read did per-scan: the store's `listing/` keys it fetched. */
@@ -150,20 +160,20 @@ describe('interval store g7: no owner axis', () => {
     }
   })
 
-  it('folds owner totals on every scan from its history, as the per-scan reader folds them', async () => {
-    type Totals = Awaited<ReturnType<typeof import('./ownerTotals').ownerTotals>>
-    const fold = ({ computed: _, ...body }: Totals) => body
-    const folds = async (env: 'perScan' | 'iv'): Promise<Totals[]> => {
-      // A fresh module and D1 each: `ownerTotals` memoizes per (scan, head) in the isolate, and caches in D1.
-      vi.resetModules()
-      const { ownerTotals } = await import('./ownerTotals')
-      const e = (await seed())[env]
-      const out = []
-      for (const date of [S1, S2, S3]) out.push(await ownerTotals(e, date))
-      return out
+  it('folds owner totals on every scan from its filled history, as the per-scan pricing folds them', async () => {
+    // A fresh module and D1: `ownerTotals` memoizes per (scan, head) in the isolate.
+    vi.resetModules()
+    const { ownerTotals } = await import('./ownerTotals')
+    const { perScanTotals } = await import('./testOwnerPerScan')
+    const { perScan, iv } = await seed()
+    const got = []
+    const want = []
+    for (const date of [S1, S2, S3]) {
+      const { v: _v, computed, ...body } = await ownerTotals(iv, date)
+      got.push([date, computed.index, body])
+      want.push([date, 'pq:iv:g7', await perScanTotals(perScan, date)])
     }
-    const [iv, per] = [await folds('iv'), await folds('perScan')]
-    expect(iv.map(t => [t.scan, t.computed.hist, fold(t)])).toEqual(per.map(t => [t.scan, true, fold(t)]))
+    expect(got).toEqual(want)
   })
 
   it('reads the folded sorts, never a slice sort, for owner-scoped reads', () => {

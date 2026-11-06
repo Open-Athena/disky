@@ -2,6 +2,7 @@
 // bounded number of prefixes per request, so a gesture over many is several POSTs — and a staging gesture is
 // then folded back into one batch.
 import type { ItemKind, PlanItem } from '../functions/_lib/plans'
+import { WRITE_PRICE_MAX } from '../functions/_lib/pricingPending'
 
 /** What an action names: a folder prefix or one exact object (`functions/_lib/plans.ts`). */
 export type { ItemKind, PlanItem } from '../functions/_lib/plans'
@@ -38,8 +39,10 @@ export const ownerPost = (i: { key: string; kind: ItemKind }, owner: string | nu
 /** `xs` in runs of `n`. */
 export const chunks = <T>(xs: readonly T[], n: number): T[][] => Array.from({ length: Math.ceil(xs.length / n) }, (_, i) => xs.slice(i * n, (i + 1) * n))
 
-/** Owner actions per POST (`/api/actions` takes 1–500). */
-export const ASSIGN_CHUNK = 500
+/** Owner actions per POST: `/api/actions` takes 1–500, and prices at most `WRITE_PRICE_MAX` new prefixes in the
+ *  request that writes them (no read prices: the rest would read "pricing pending" until the next fill), so a
+ *  gesture's POSTs carry that many each. */
+export const ASSIGN_CHUNK = WRITE_PRICE_MAX
 /** Prefixes per stage POST; the batches are then merged into one (`/api/plans/:id/batches/merge`). */
 export const STAGE_CHUNK = 500
 

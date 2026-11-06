@@ -9,6 +9,9 @@ import { parseQuery } from './scope'
 import { buildDiff, buildView, type DiffRow, lensSort, readRootAgg, SMALL_SUBTREE_ROWS, type ViewNode } from './view'
 
 vi.mock('@rdub/file-tree/stores/s3', async () => ({ S3Store: (await import('./testStore')).S3Store }))
+// These scans are per-scan stores: their ledger folds price per scan (`testOwnerPerScan.ts`), as the read path did
+// before owner pricing moved to the pipeline (a deployment prices on its interval store only: `ownerTotals.ts`).
+vi.mock('./ownerTotals', async () => (await import('./testOwnerPerScan')).perScanOracle(() => vi.importActual<typeof import('./ownerTotals')>('./ownerTotals')))
 
 // The path store's reader (specs/done/path-store.md phase 2), over two real
 // generations served from one D1 through the local-file store twin:

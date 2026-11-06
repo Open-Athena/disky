@@ -1,6 +1,7 @@
 /** A failed load stated inline where its widget would be (the map, the diff, the size chart): a filter refusal's
- *  reason as is (`filterCaps.ts`), anything else as what failed and the server's message, with a retry when a
- *  retry may pass (a 5xx, or no response). Never a blank or endlessly "loading" slot. */
+ *  reason as is (`filterCaps.ts`), a not-ready answer in the server's words (owner pricing pending), anything else
+ *  as what failed and the server's message, with a retry when a retry may pass (a 5xx, or no response). Never a
+ *  blank or endlessly "loading" slot. */
 import { failureOf } from './filterCaps'
 
 export function LoadFailure({ err, what, onRetry, as: Tag = 'p', className = 'loading' }: {
@@ -14,6 +15,13 @@ export function LoadFailure({ err, what, onRetry, as: Tag = 'p', className = 'lo
 }) {
   const f = failureOf(err)
   if ('refusal' in f) return <Tag className={`${className} filter-refused`} role="status">{f.refusal}</Tag>
+  // Not ready yet (owner pricing a fill hasn't written): the server's words, as a state, not a failure.
+  if ('notReady' in f) return (
+    <Tag className={`${className} not-ready`} role="status">
+      {f.notReady}
+      {f.retry && onRetry && <>{' '}<button type="button" className="linkish" onClick={onRetry}>retry</button></>}
+    </Tag>
+  )
   return (
     <Tag className={`${className} load-failed`} role="alert">
       {what} failed: {f.message}

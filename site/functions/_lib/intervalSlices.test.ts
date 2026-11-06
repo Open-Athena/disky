@@ -5,9 +5,14 @@ import { type Req, reqOf, withReq } from './shared'
 import type { OwnerScope } from './scope'
 import { sqliteD1, withLedger } from './testD1'
 import { type D1Variant, fixture, getsOf, readJson, seedGeneration } from './testStore'
+import { perScanTotals } from './testOwnerPerScan'
 import { buildDiff, buildView, readRootAgg, readRootHistory } from './view'
 
 vi.mock('@rdub/file-tree/stores/s3', async () => ({ S3Store: (await import('./testStore')).S3Store }))
+// The per-scan reader is this suite's oracle: its ledger folds price per scan (`testOwnerPerScan.ts`), as the read
+// path did before owner pricing moved to the pipeline. The interval store's are the module's own: filled, never
+// priced by a read.
+vi.mock('./ownerTotals', async () => (await import('./testOwnerPerScan')).perScanOracle(() => vi.importActual<typeof import('./ownerTotals')>('./ownerTotals')))
 
 // Owner-scoped reads from the interval store's slice sorts (specs/interval-store.md §2.1): `fixtures/iv/
 // interval-store/g2` (`fixtures/iv/gen.py g2`) is one generation over three scans of the per-scan store
@@ -56,8 +61,8 @@ const files = (dir: string, sorts: Record<string, string>) =>
   Object.fromEntries(Object.entries(sorts).map(([v, stem]) => [v, { parquet: `${dir}/${stem}.parquet`, groups: `${dir}/${stem}.groups.json` }]))
 
 /** The per-scan stores and the interval store over the same scans, on one D1 with the gcs ledger's tables
- *  and `ledger` (SQL) in them. */
-async function seed(ledger = ''): Promise<{ perScan: Env; iv: Env }> {
+ *  and `ledger` (SQL) in them, its prefixes priced on the interval store's generations (`fill`). */
+async function seed(ledger = '', fill = true): Promise<{ perScan: Env; iv: Env }> {
   const { db, raw } = await sqliteD1()
   const slicesD1 = await readJson<Record<string, D1Variant>>('v2-slices/d1.json')
   const lensD1 = await readJson<Record<string, D1Variant>>('v2-lens/d1.json')
@@ -66,7 +71,20 @@ async function seed(ledger = ''): Promise<{ perScan: Env; iv: Env }> {
   if (ledger) raw.exec(ledger)
   seedGeneration(raw, { date: S2, gen: 'g', dir: `listing/${S2}/index/g`, variants: lensD1, files: files('v2-lens', { path: 'path-index', bysize: 'path-index-bysize', 'bysize-user': 'path-index-bysize-by-user' }) })
   const perScan = { DB: db, ROOT_LABEL: 'root', BASE_SCOPE: 'gcs', GCS_HMAC_KEY_ID: 'k', GCS_HMAC_SECRET: 's' } as Env
-  return { perScan, iv: { ...perScan, PATH_STORE: 'intervals', INTERVAL_STORE_GEN: 'g2', INDEX_R2: r2() } as Env }
+  const iv = { ...perScan, PATH_STORE: 'intervals', INTERVAL_STORE_GEN: 'g2', INDEX_R2: r2() } as Env
+  // The pipeline's fill (`POST /api/owner-prices`), for both generations the suites read: no read prices.
+  if (ledger && fill) for (const gen of ['g2', 'g5']) await priced({ ...iv, INTERVAL_STORE_GEN: gen } as Env)
+  return { perScan, iv }
+}
+
+/** `env`'s generation filled to its end, as the scan job's `owner-prices` step fills it. */
+async function priced(env: Env): Promise<void> {
+  const { fillOwnerHist } = await import('./ownerTotals')
+  for (;;) {
+    const got = await fillOwnerHist(env, 64)
+    if (!got || 'behind' in got) throw new Error(`fill: ${JSON.stringify(got)}`)
+    if (!got.remaining) return
+  }
 }
 
 beforeAll(async () => {
@@ -134,9 +152,9 @@ describe('an owner-scoped root read of a held scan with no sort to read', () => 
     const r = env.INDEX_R2! as unknown as { get: (k: string, o?: unknown) => Promise<unknown> }
     const hidden = { ...env, INDEX_R2: { ...r, get: (k: string, o?: unknown) => (k.includes('/served/slices') ? Promise.resolve(null) : r.get(k, o)) } } as unknown as Env
     const got = await Promise.allSettled([{ lens: { key: 'alice' } }, { owner: 'owned' as const }].map(scope => fresh(hidden, { date: S1, path: '', ...scope })))
-    // A lens fails earlier, folding its ledger on the scan's `path` sort.
+    // (No assignments in the ledger: a lens has none to fold, so it fails where the pool does, reading the scan.)
     expect(got.map(g => g.status === 'fulfilled' ? g.value : String(g.reason))).toEqual([
-      `Error: index variant 'path' not synced for ${S1} (the interval store holds the scan and doesn't serve the variant)`,
+      `Error: no owner-scoped sort of ${S1} to read`,
       `Error: no owner-scoped sort of ${S1} to read`,
     ])
   })
@@ -154,40 +172,38 @@ describe('owner totals after a new assignment', () => {
   `
   const fold = ({ computed: _, ...body }: Awaited<ReturnType<typeof import('./ownerTotals').ownerTotals>>) => body
 
-  it('prices only the new prefix, and folds what a cold recompute folds', async () => {
-    for (const env of ['perScan', 'iv'] as const) {
-      vi.resetModules()
-      const { ownerTotals } = await import('./ownerTotals')
-      const before = (await seed(LEDGER))[env]
-      const cold = await ownerTotals(before, S2)
-      expect([cold.head, cold.computed.prefixes]).toEqual([2, 2])
-      for (const sql of NEXT.split(';').map(q => q.trim()).filter(Boolean)) await before.DB!.prepare(sql).run()
-      const next = await ownerTotals(before, S2)
-      // A fresh module: `ownerTotals` memoizes per (scan, head) in the isolate.
-      vi.resetModules()
-      const { ownerTotals: coldTotals } = await import('./ownerTotals')
-      const full = await coldTotals((await seed(LEDGER + NEXT))[env], S2)
-      expect({ env, head: next.head, prefixes: next.computed.prefixes, fold: fold(next) }).toEqual({ env, head: 3, prefixes: 1, fold: fold(full) })
-      expect(full.computed.prefixes).toBe(3)
-    }
+  it('the write prices only the new prefix, and the fold is what a fill of the whole ledger folds', async () => {
+    vi.resetModules()
+    const { ownerTotals, priceAssigned } = await import('./ownerTotals')
+    const env = (await seed(LEDGER)).iv
+    expect([(await ownerTotals(env, S2)).head, (await ownerTotals(env, S2)).assignments.length]).toEqual([2, 2])
+    for (const sql of NEXT.split(';').map(q => q.trim()).filter(Boolean)) await env.DB!.prepare(sql).run()
+    // What `POST /api/actions` does after its write: the one new prefix, priced.
+    expect(await priceAssigned(env, ['gs://bk/nest/'])).toEqual({ priced: 1, pending: 0 })
+    const next = await ownerTotals(env, S2)
+    // A fresh module: `ownerTotals` memoizes per (scan, head) in the isolate.
+    vi.resetModules()
+    const { ownerTotals: coldTotals } = await import('./ownerTotals')
+    const full = await coldTotals((await seed(LEDGER + NEXT)).iv, S2)
+    expect({ head: next.head, fold: fold(next) }).toEqual({ head: 3, fold: fold(full) })
   })
 
-  it('prices a new prefix on every held scan in one interval-store read', async () => {
+  it('prices a new prefix on every held scan in one interval-store read: no fold reads the store after it', async () => {
     vi.resetModules()
-    const { ownerTotals } = await import('./ownerTotals')
+    const { ownerTotals, priceAssigned } = await import('./ownerTotals')
     const env = (await seed(LEDGER)).iv
     for (const date of [S1, S2, S3]) await ownerTotals(env, date)
     for (const sql of NEXT.split(';').map(q => q.trim()).filter(Boolean)) await env.DB!.prepare(sql).run()
-    const next = await ownerTotals(env, S2)
+    expect(await priceAssigned(env, ['gs://bk/nest/'])).toEqual({ priced: 1, pending: 0 })
     const n = r2Reads.length
-    const rest = [await ownerTotals(env, S1), await ownerTotals(env, S3)]
-    // The other scans' refolds read nothing: S2's refold priced the prefix on them too.
+    const folds = [await ownerTotals(env, S2), await ownerTotals(env, S1), await ownerTotals(env, S3)]
+    // The refolds read nothing: the write priced the prefix on every scan.
     expect(r2Reads.slice(n)).toEqual([])
-    expect([next, ...rest].map(b => [b.scan, b.head, b.computed.prefixes])).toEqual([[S2, 3, 1], [S1, 3, 0], [S3, 3, 0]])
+    expect(folds.map(b => [b.scan, b.head])).toEqual([[S2, 3], [S1, 3], [S3, 3]])
     vi.resetModules()
     const { ownerTotals: coldTotals } = await import('./ownerTotals')
     const cold = (await seed(LEDGER + NEXT)).iv
-    for (const b of [next, ...rest]) expect(fold(b)).toEqual(fold(await coldTotals(cold, b.scan)))
+    for (const b of folds) expect(fold(b)).toEqual(fold(await coldTotals(cold, b.scan)))
   })
 
   it('writes nothing per scan when an owner changes on prefixes already priced', async () => {
@@ -195,17 +211,18 @@ describe('owner totals after a new assignment', () => {
     const { ownerTotals } = await import('./ownerTotals')
     const env = (await seed(LEDGER)).iv
     for (const date of [S1, S2, S3]) await ownerTotals(env, date)
-    const cached = () => env.DB!.prepare('SELECT scan, updated_ts, length(body) AS n FROM owner_prefix_aggs ORDER BY scan').all()
+    const cached = () => env.DB!.prepare('SELECT idx, depth, path, hz, updated_ts, length(versions) AS n FROM owner_prefix_hist ORDER BY idx, depth, path').all()
     const before = (await cached()).results
     // `gs://bk/m/` changes hands: already priced on every scan.
     await env.DB!.prepare(`INSERT INTO actions (id, actor, ts, scan, pattern, set_owner, owner) VALUES (3, 'ops', 3, '${S2}', 'gs://bk/m/', 1, 'carol')`).run()
     await env.DB!.prepare(`INSERT INTO owner_prefixes (action_id, prefix, owner, ts) VALUES (3, 'gs://bk/m/', 'carol', 3)`).run()
     const n = r2Reads.length
     const after = [await ownerTotals(env, S1), await ownerTotals(env, S2), await ownerTotals(env, S3)]
-    expect(after.map(b => [b.scan, b.head, b.computed.prefixes])).toEqual([[S1, 3, 0], [S2, 3, 0], [S3, 3, 0]])
+    expect(after.map(b => [b.scan, b.head])).toEqual([[S1, 3], [S2, 3], [S3, 3]])
     expect(r2Reads.slice(n)).toEqual([])
     expect((await cached()).results).toEqual(before)
-    expect((await env.DB!.prepare('SELECT count(*) AS n FROM owner_totals').first<{ n: number }>())!.n).toBe(0)
+    const count = async (t: string) => (await env.DB!.prepare(`SELECT count(*) AS n FROM ${t}`).first<{ n: number }>())!.n
+    expect([await count('owner_totals'), await count('owner_prefix_aggs')]).toEqual([0, 0])
   })
 })
 
@@ -236,19 +253,31 @@ describe('owner prefix history', () => {
       const env = { ...iv, INTERVAL_STORE_GEN: gen } as Env
       for (const date of [S1, S2, S3]) {
         const h = await ownerTotals(env, date)
-        expect({ gen, date, hist: h.computed.hist, fold: fold(h) }).toEqual({ gen, date, hist: true, fold: fold(await ownerTotals(perScan, date)) })
+        expect({ gen, date, index: h.computed.index, fold: fold(h) }).toEqual({ gen, date, index: `pq:iv:${gen}:s`, fold: { v: h.v, ...(await perScanTotals(perScan, date)) } })
       }
     }
   })
 
-  it('concurrent folds after a new assignment share one pricing and all fold from history', async () => {
+  it('concurrent fills of a new assignment share one pricing, and every scan then folds from history', async () => {
+    /** A cold isolate over the ledger with the new assignment written and not priced; `run`'s reads of the slice sort's rows. */
+    const dataReads = async (run: (m: typeof import('./ownerTotals'), env: Env) => Promise<unknown>) => {
+      vi.resetModules()
+      const m = await import('./ownerTotals')
+      const env = (await seed(LEDGER)).iv
+      await env.DB!.prepare(`INSERT INTO actions (id, actor, ts, scan, pattern, set_owner, owner) VALUES (4, 'ops', 4, '${S2}', 'gs://bk/small/', 1, 'dan')`).run()
+      await env.DB!.prepare(`INSERT INTO owner_prefixes (action_id, prefix, owner, ts) VALUES (4, 'gs://bk/small/', 'dan', 4)`).run()
+      const n = r2Reads.length
+      await run(m, env)
+      return r2Reads.slice(n).filter(k => k.endsWith('/served/slices.parquet'))
+    }
+    const one = await dataReads((m, env) => m.priceAssigned(env, ['gs://bk/small/']))
     vi.resetModules()
-    const { ownerTotals } = await import('./ownerTotals')
+    const { ownerTotals, priceAssigned } = await import('./ownerTotals')
     const env = (await seed(LEDGER)).iv
     for (const date of [S1, S2, S3]) await ownerTotals(env, date)
     await env.DB!.prepare(`INSERT INTO actions (id, actor, ts, scan, pattern, set_owner, owner) VALUES (4, 'ops', 4, '${S2}', 'gs://bk/small/', 1, 'dan')`).run()
     await env.DB!.prepare(`INSERT INTO owner_prefixes (action_id, prefix, owner, ts) VALUES (4, 'gs://bk/small/', 'dan', 4)`).run()
-    // D1's latency: each statement's result arrives a few ms later, so concurrent folds interleave as on the edge.
+    // D1's latency: each statement's result arrives a few ms later, so concurrent fills interleave as on the edge.
     const late = <T extends object>(o: T): T => new Proxy(o, { get(t, k) {
       const v = Reflect.get(t, k)
       if (typeof v !== 'function') return v
@@ -256,27 +285,31 @@ describe('owner prefix history', () => {
       return async (...a: unknown[]) => { await new Promise(r => setTimeout(r, 5)); return v.apply(t, a) }
     } })
     const slow = { ...env, DB: late(env.DB!) } as Env
-    const got = await Promise.allSettled([S1, S2, S3].map(d => ownerTotals(slow, d)))
-    expect(got.map(g => g.status === 'fulfilled' ? [g.value.scan, g.value.computed.hist] : [g.status, String(g.reason)])).toEqual([[S1, true], [S2, true], [S3, true]])
+    const n = r2Reads.length
+    const fills = await Promise.all([1, 2, 3].map(() => priceAssigned(slow, ['gs://bk/small/'])))
+    expect(fills).toEqual(Array(3).fill({ priced: 1, pending: 0 }))
+    // One history read between the three: the slice sort's rows are read as one fill alone reads them.
+    expect([one.length > 0, r2Reads.slice(n).filter(k => k.endsWith('/served/slices.parquet'))]).toEqual([true, one])
+    const got = await Promise.all([S1, S2, S3].map(d => ownerTotals(slow, d)))
     vi.resetModules()
-    const { ownerTotals: coldTotals } = await import('./ownerTotals')
     const cold = (await seed(LEDGER + `
       INSERT INTO actions (id, actor, ts, scan, pattern, set_owner, owner) VALUES (4, 'ops', 4, '${S2}', 'gs://bk/small/', 1, 'dan');
       INSERT INTO owner_prefixes (action_id, prefix, owner, ts) VALUES (4, 'gs://bk/small/', 'dan', 4);`)).perScan
-    for (const g of got) if (g.status === 'fulfilled') expect(fold(g.value)).toEqual(fold(await coldTotals(cold, g.value.scan)))
+    for (const g of got) expect(fold(g)).toEqual({ v: g.v, ...(await perScanTotals(cold, g.scan)) })
   })
 
   it('a new assignment writes one history row, and no per-scan row', async () => {
     vi.resetModules()
-    const { ownerTotals } = await import('./ownerTotals')
+    const { ownerTotals, priceAssigned } = await import('./ownerTotals')
     const env = (await seed(LEDGER)).iv
     for (const date of [S1, S2, S3]) await ownerTotals(env, date)
     const count = async (t: string) => (await env.DB!.prepare(`SELECT count(*) AS n FROM ${t}`).first<{ n: number }>())!.n
     const before = [await count('owner_prefix_hist'), await count('owner_prefix_aggs')]
     await env.DB!.prepare(`INSERT INTO actions (id, actor, ts, scan, pattern, set_owner, owner) VALUES (4, 'ops', 4, '${S2}', 'gs://bk/small/', 1, 'dan')`).run()
     await env.DB!.prepare(`INSERT INTO owner_prefixes (action_id, prefix, owner, ts) VALUES (4, 'gs://bk/small/', 'dan', 4)`).run()
+    expect(await priceAssigned(env, ['gs://bk/small/'])).toEqual({ priced: 1, pending: 0 })
     const after = [await ownerTotals(env, S1), await ownerTotals(env, S2), await ownerTotals(env, S3)]
-    expect(after.map(b => [b.scan, b.computed.hist, b.computed.prefixes])).toEqual([[S1, true, 1], [S2, true, 0], [S3, true, 0]])
+    expect(after.map(b => [b.scan, b.assignments.length])).toEqual([[S1, 4], [S2, 4], [S3, 4]])
     expect([await count('owner_prefix_hist'), await count('owner_prefix_aggs')]).toEqual([before[0] + 1, before[1]])
   })
 })

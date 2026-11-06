@@ -196,3 +196,20 @@ export function seriesGaps(
   ].filter(Boolean)
   return { xs, note: notes.join(' · ') }
 }
+
+/** A series' scans left out for owner pricing (`/api/series`'s `pricing`: a user lens or an owner pool folds the
+ *  ledger over each scan's priced prefixes, and no read prices them) in words, or null when every scan is priced:
+ *  `pending` scans are being filled (by the scan job, or the assignment that added a path); `unheld` ones are not
+ *  in the store pricing is filled for, and get none. Their points are missing from the line — never zeros. */
+export interface SeriesPricing { pending: string[]; unheld: string[]; count: number; prefixes: string[]; roots: boolean }
+export function pricingNote(p: SeriesPricing | undefined, fmtScan: (scan: string) => string): string | null {
+  if (!p) return null
+  const scans = (ids: string[]) => (ids.length === 1 ? fmtScan(ids[0]) : `${ids.length.toLocaleString('en-US')} scans (${fmtScan(ids[0])} to ${fmtScan(ids[ids.length - 1])})`)
+  const notes: string[] = []
+  if (p.pending.length) {
+    const what = [p.count ? `${p.count.toLocaleString('en-US')} assigned ${p.count === 1 ? 'path' : 'paths'}` : '', p.roots ? 'the store roots' : ''].filter(Boolean).join(' and ')
+    notes.push(`owner totals for ${scans(p.pending)} are still being prepared (${what} not priced yet): ${p.pending.length === 1 ? 'its point is' : 'their points are'} left out until the pricing job has run`)
+  }
+  if (p.unheld.length) notes.push(`no owner totals for ${scans(p.unheld)}: not in the current store, left out`)
+  return notes.length ? notes.join(' · ') : null
+}

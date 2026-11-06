@@ -18,6 +18,7 @@ import { type Ctx, type Identity, json, requireScope, requireViewer } from '../_
 import { snapshotsPrefix, traceJoins } from '../_lib/shared.js'
 import { ivRefusal, ivRetry, type Lens, pathGens, withPathStore, pathScans, servedStore, storeReady } from '../_lib/index.js'
 import { hasLedger, ledgerHead } from '../_lib/ledger.js'
+import { OwnerPricingPending, type PricingPending } from '../_lib/pricingPending.js'
 import { classKey, ownerKey, ownerOk, type OwnerScope, parseClasses, parseOwner, QueryError, queryParam } from '../_lib/scope.js'
 import { hexNote, hexQuery, liveTotal, rollupTotal, staticCompound, staticFilterStore, staticLiteral, staticTag } from '../_lib/staticFilter.js'
 import { type BoolAnswer, boolPlan, compound } from '../_lib/staticBool.js'
@@ -295,6 +296,9 @@ export async function seriesRead(ctx: SeriesCtx, gate: (ctx: SeriesCtx) => Promi
   const points: { date: string; b: number; o: number }[] = []
   /** Scans whose point errored (not ones the path is absent from): named in the body, which isn't cached. */
   const failed: string[] = []
+  /** Scans whose owner pricing isn't filled (`OwnerPricingPending`: a lens or pool point folds the ledger over it,
+   *  and no read prices): named in the body with what is unpriced, their points left out; the body isn't cached. */
+  const unpriced = new Map<string, PricingPending>()
   // split=roots: each scan's depth-1 rows (the total is their sum), and for
   // tier-less scans whatever meta.json says about its roots.
   const rootsByDate = new Map<string, RootRow[]>()
@@ -342,6 +346,7 @@ export async function seriesRead(ctx: SeriesCtx, gate: (ctx: SeriesCtx) => Promi
       const a = await ivRetry(() => readRootAgg(env, { date, path, lens, owner, classes }))
       return a ? { date, ...a } : null
     } catch (e) {
+      if (e instanceof OwnerPricingPending) { unpriced.set(date, e.pending); return null }
       // A scan a broken interval-store run cut out: the whole series is refused (503 + `Retry-After`), not drawn
       // without the point.
       if (ivRefusal(e)) throw e
@@ -380,10 +385,21 @@ export async function seriesRead(ctx: SeriesCtx, gate: (ctx: SeriesCtx) => Promi
     for (const g of got) if (g) points.push(g)
   }
   points.sort((a, b) => a.date.localeCompare(b.date))
-  const body = JSON.stringify({ path, ...(qp.query ? hexNote(hx.hexRuns, qp.query.ast) : {}), ...(unindexed.length ? { unindexed: unindexed.sort() } : {}), ...(paths.length ? { paths } : {}), ...(lens ? { lens: lensTag } : {}), ...(owner ? { owner } : {}), points, ...(split ? { roots: rootPoints(rootsByDate) } : {}), ...(failed.length ? { failed: failed.sort() } : {}) })
-  // A series missing points to errors is served (gaps beat no chart) but never cached: the next request retries them.
-  if (failed.length) return new Response(body, { headers: { 'content-type': 'application/json', 'cache-control': 'no-store', 'server-timing': st.header() } })
+  const body = JSON.stringify({ path, ...(qp.query ? hexNote(hx.hexRuns, qp.query.ast) : {}), ...(unindexed.length ? { unindexed: unindexed.sort() } : {}), ...(paths.length ? { paths } : {}), ...(lens ? { lens: lensTag } : {}), ...(owner ? { owner } : {}), points, ...(split ? { roots: rootPoints(rootsByDate) } : {}), ...(failed.length ? { failed: failed.sort() } : {}), ...(unpriced.size ? { pricing: seriesPricing(unpriced) } : {}) })
+  // A series missing points to errors, or to pricing a fill hasn't written yet, is served (gaps beat no chart) but
+  // never cached: the next request retries them.
+  if (failed.length || unpriced.size) return new Response(body, { headers: { 'content-type': 'application/json', 'cache-control': 'no-store', 'server-timing': st.header() } })
   return cacheStore(env, cacheKey, body, { 'server-timing': st.header() }, ctx.waitUntil?.bind(ctx))
+}
+
+/** A series' scans left out for owner pricing (`pricing` in the body): `pending` (a fill will price them: the scan
+ *  job's, or the assignment's own) with the most any of them lacks (`count` prefixes, a sample, the roots), and
+ *  `unheld` (scans the interval store doesn't hold: none is coming). */
+export interface SeriesPricing { pending: string[]; unheld: string[]; count: number; prefixes: string[]; roots: boolean }
+export function seriesPricing(unpriced: Map<string, PricingPending>): SeriesPricing {
+  const of = (why: PricingPending['why']) => [...unpriced].filter(([, p]) => p.why === why).map(([d]) => d).sort()
+  const most = [...unpriced.values()].filter(p => p.why === 'pending').sort((a, b) => b.count - a.count)[0]
+  return { pending: of('pending'), unheld: of('unheld'), count: most?.count ?? 0, prefixes: most?.prefixes ?? [], roots: [...unpriced.values()].some(p => p.why === 'pending' && p.roots) }
 }
 
 /** An owner pool's bytes and objects over static hits on `date` — the filtered view's numbers (`view.ts` `poolAgg` per

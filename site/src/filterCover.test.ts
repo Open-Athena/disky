@@ -6,10 +6,14 @@ import { stageMany } from './plans'
 
 describe('large sets go in batches, never refused', () => {
   const prefixes = Array.from({ length: 1234 }, (_, i) => `gs://b/d/${i}/`)
-  it('assign: 500 actions per POST, in order, with progress', async () => {
+  it('assign: 64 actions per POST (what one write prices), in order, with progress', async () => {
     const posts: number[] = [], seen: string[] = [], prog: [number, number][] = []
     const n = await assignInBatches(prefixes, pattern => ({ pattern, owner: '@me' }), async a => { posts.push(a.length); seen.push(...a.map(x => x.pattern)) }, (d, t) => prog.push([d, t]))
-    expect([n, posts, seen, prog]).toEqual([1234, [500, 500, 234], prefixes, [[500, 1234], [1000, 1234], [1234, 1234]]])
+    // 19 full POSTs and the last 18.
+    expect([n, posts, seen, prog]).toEqual([
+      1234, [...Array(19).fill(64), 18], prefixes,
+      [...Array.from({ length: 19 }, (_, i): [number, number] => [64 * (i + 1), 1234]), [1234, 1234]],
+    ])
   })
   it('stage: 500 prefixes per POST, then the batches fold into the first', async () => {
     const calls: unknown[] = []

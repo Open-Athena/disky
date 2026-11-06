@@ -37,6 +37,7 @@ import { type ColumnIndex, type FileMetaData, parquetMetadata, parquetMetadataAs
 import type { Env } from './auth.js'
 import { FILL_MAX_ROWS, type FooterRow, noteAccess, probe, queueFill, trusted, wantsFill } from './footerCache.js'
 import { newestManifest } from './manifests.js'
+import { OwnerPricingPending, pricingRefusal } from './pricingPending.js'
 import { colo, inFlight, IsoMap, IsoSet, join, JOIN, type Join, Memo, registerIsolate, reqOf, scopeOf, shared, STALLED, track } from './shared.js'
 import { d1Variant, isPrimary, PRIMARY_STORE, storeKey } from './stores.js'
 import { compressors } from './zstd.js'
@@ -745,9 +746,11 @@ export class IvUnavailable extends Error {
   }
 }
 
-/** The 503 + `Retry-After` a broken run's read answers (`IvUnavailable`, or an uncaught `IvTierBroken`); null for
- *  any other error. Never cached (`no-store`). */
+/** The 503 + `Retry-After` a broken run's read answers (`IvUnavailable`, or an uncaught `IvTierBroken`), or the
+ *  not-ready answer of a read whose owner pricing isn't filled (`pricingRefusal`: reads never price); null for any
+ *  other error. Never cached (`no-store`). */
 export function ivRefusal(e: unknown): Response | null {
+  if (e instanceof OwnerPricingPending) return pricingRefusal(e)
   if (!(e instanceof IvUnavailable || e instanceof IvTierBroken)) return null
   return new Response(`${e.message}\n`, { status: 503, headers: { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store', 'retry-after': String(e.retryAfter) } })
 }
@@ -992,7 +995,7 @@ export async function openInterval(env: Env, date: string, variant: string, retr
       const schema = JSON.parse(kv.get('schema')!) as SchemaElement[]
       const version = Number(kv.get('version'))
       const file: FileSlice = { get byteLength() { return 0 }, slice: async (s0, e) => toBuffer((await src.get(key, { offset: s0, length: (e ?? s0) - s0 })).bytes) }
-      const h: PqHandle = { mode: 'pq', file, env, date, variant, gen: `iv:${gen}${ivRev(env)}${sliced ? ':s' : ''}`, dir, schema, version, columns: variant === 'reads' ? null : rowColumns(version, schema), floor: null, footer, asOf, src, dataKey: key }
+      const h: PqHandle = { mode: 'pq', file, env, date, variant, gen: ivHandleGen(env, gen, sliced), dir, schema, version, columns: variant === 'reads' ? null : rowColumns(version, schema), floor: null, footer, asOf, src, dataKey: key }
       if (!runs.length) return h
       return { ...h, runs: await Promise.all(runs.map(r => openIvRun(env, h, r.key, file0))) }
     }, 300_000, ivJoin(env, 'handle')))
@@ -3859,6 +3862,26 @@ export async function readRootHistoryRows(env: Env, dates: string[], lens?: Lens
 
 /** The scans the interval store holds (none when it is off). */
 export const ivHeldDates = async (env: Env): Promise<string[]> => (intervalsOn(env) ? [...(await ivScans(env)).keys()] : [])
+
+/** An interval-store handle's `gen` for generation `gen` (`openInterval`): what its caches, and the owner pricing
+ *  filled for it (`ownerTotals.ts`' index tag), key by. */
+export const ivHandleGen = (env: Env, gen: string, sliced: boolean): string => `iv:${gen}${ivRev(env)}${sliced ? ':s' : ''}`
+
+/** The generations the store holds (`<prefix>/<gen>/scans.json`), listed fresh; null without a bucket that lists. */
+export async function ivGenerations(env: Env): Promise<string[] | null> {
+  const r2 = env.INDEX_R2 as (R2Bucket & { list?: R2Bucket['list']; head?: R2Bucket['head'] }) | undefined
+  if (!r2 || typeof r2.list !== 'function' || typeof r2.head !== 'function') return null
+  const prefix = `${ivPrefix(env)}/`
+  const dirs: string[] = []
+  let cursor: string | undefined
+  do {
+    const page = await r2.list({ prefix, delimiter: '/', ...(cursor ? { cursor } : {}) })
+    for (const d of page.delimitedPrefixes) dirs.push(d.slice(prefix.length, -1))
+    cursor = page.truncated ? page.cursor : undefined
+  } while (cursor)
+  const held = await Promise.all(dirs.map(async g => ((await r2.head!(`${prefix}${g}/scans.json`)) ? g : null)))
+  return held.filter((g): g is string => g != null).sort()
+}
 
 /** The interval store's newest scan ordinal (`vf`/`vt` units); null when it is off or empty. */
 export async function ivHorizon(env: Env): Promise<number | null> {

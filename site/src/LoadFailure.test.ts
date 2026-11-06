@@ -42,6 +42,17 @@ describe('LoadFailure', () => {
     ])
   })
 
+  it('owner pricing a fill has not written yet is a state in the server\'s words, with a retry while one may pass (503), not a failure', () => {
+    const body = (error: string) => JSON.stringify({ error, code: 'owner-pricing-pending', pricing: { scan: '2026-11-05', index: 'pq:iv:g3:s', why: 'pending', count: 2, prefixes: ['b/x', 'b/y'], roots: false } })
+    const pending = 'owner pricing is pending for scan 2026-11-05: 2 assigned prefixes not priced through it yet (filled by the scan job\'s owner-prices step, or by the assignment that added a prefix)'
+    const unheld = 'owner totals aren\'t available for scan 2026-07-01: the interval store doesn\'t hold it, and owner pricing is filled per store generation'
+    const html = (s: string) => s.replace(/'/g, '&#x27;')
+    expect([render(apiError(503, body(pending))), render(apiError(409, body(unheld)), 'series', 'p', 'sub')]).toEqual([
+      `<p class="loading not-ready" role="status">${html(pending)} ${RETRY}</p>`,
+      `<p class="sub not-ready" role="status">${html(unheld)}</p>`,
+    ])
+  })
+
   it('the diff\'s and the series\' 500s, in their lines', () => {
     expect([render(apiError(500, 'diff failed: boom'), 'diff 10/8 → 10/9', 'span', 'tab-note'), render(apiError(500, 'series failed: boom'), 'series', 'p', 'sub')]).toEqual([
       `<span class="tab-note load-failed" role="alert">diff 10/8 → 10/9 failed: 500: diff failed: boom ${RETRY}</span>`,
