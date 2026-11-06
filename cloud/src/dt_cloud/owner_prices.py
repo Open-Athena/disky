@@ -30,13 +30,15 @@ from .site import SiteError
 ENDPOINT = "/api/owner-prices"
 #: Prefixes a call prices (one history read on the site): what its Worker handles well inside its CPU limit.
 CHUNK = 64
-#: The least a failing fill is cut down to (`fill` halves its chunk when a call fails as a server error).
-MIN_CHUNK = 8
+#: The least a failing fill is cut down to (`fill` halves its chunk when a call fails as a server error): one prefix,
+#: so a range only counts as refused at every size when a single prefix is.
+MIN_CHUNK = 1
 #: How long `fill` waits for the site's view of the store to hold the scan it was asked for (the site holds its
 #: state for a minute per isolate and per colo), and how often it asks.
 WAIT_S = 600
 POLL_S = 15
-#: A call that fails as a server error or doesn't answer is tried again this many times, this far apart.
+#: A failed call (a server error, or no answer) is asked again this far apart, at half its chunk; at `MIN_CHUNK`,
+#: this many more times.
 RETRIES = 3
 RETRY_S = 10
 #: A call's timeout: one history read, a few seconds; a cold isolate's first, tens.
@@ -68,12 +70,19 @@ def fill(base: str, token: str, *, scan: str | None = None, gen: str | None = No
 
     `scan`: the scan just appended; the site answers 409 `behind` until the store it sees holds it, waited out up to
     `wait_s`. `gen`: that generation, not the site's current one. A call failing as a server error (or not answering) is
-    retried (`RETRIES`) with half the chunk. Raises `PricingRefused` on a refusal, a wait or retries run out, or a call
-    that prices nothing while prefixes remain. Returns `{index, hz, prefixes, priced, calls}`, or `{ledger: False,
+    asked again with half the chunk, down to one prefix (`RETRIES` more there). A chunk that fails holds a range too wide
+    for a call, so it stays down until the fill has priced past what the largest failed call asked for, then doubles
+    back to `n`. Raises `PricingRefused` on a refusal, a wait run out, a call that prices nothing while prefixes remain,
+    or a prefix refused at every size. That last stops the fill, naming where, rather than going past it: the site prices
+    the head of what's stale, and one unpriced prefix leaves a scan's owner-scoped views pending and a compaction's gate
+    refusing, so pricing the rest would buy neither. Returns `{index, hz, prefixes, priced, calls}`, or `{ledger: False,
     calls}` on a deployment without an ownership ledger (nothing to price).
     """
     t0 = clock()
     priced = calls = failures = 0
+    chunk, floor = n, min(MIN_CHUNK, n)
+    past = 0
+    remaining: int | None = None
     while True:
         try:
             got = call(base, token, n=n, scan=scan, gen=gen)
@@ -84,18 +93,28 @@ def fill(base: str, token: str, *, scan: str | None = None, gen: str | None = No
                 log(f"owner-prices: the site's store doesn't hold {scan} yet; asking again in {POLL_S}s")
                 sleep(POLL_S)
                 continue
-            if (e.status is None or e.status >= 500) and failures < RETRIES:
+            if e.status is not None and e.status < 500:
+                raise PricingRefused(str(e)) from e
+            past = max(past, priced + n)
+            if n > floor:
+                n = max(floor, n // 2)
+                log(f"owner-prices: {e}; again in {RETRY_S}s with {n} prefixes a call")
+            elif failures < RETRIES:
                 failures += 1
-                n = max(MIN_CHUNK, n // 2)
                 log(f"owner-prices: {e}; again in {RETRY_S}s with {n} prefixes a call ({failures}/{RETRIES})")
-                sleep(RETRY_S)
-                continue
-            raise PricingRefused(str(e)) from e
+            else:
+                where = "the first prefix still unpriced" if remaining is None else f"the first of the {remaining} prefixes still unpriced"
+                raise PricingRefused(f"{e} (refused at every size from {chunk} to {n}: {where}, after {priced} priced by this run)") from e
+            sleep(RETRY_S)
+            continue
         calls += 1
         failures = 0
         if got.get("ledger") is False:
             return {"ledger": False, "calls": calls}
         priced += got["priced"]
+        remaining = got["remaining"]
+        if n < chunk and priced >= past:
+            n = min(chunk, n * 2)
         if not got["remaining"]:
             return {"index": got["index"], "hz": got["hz"], "prefixes": got["prefixes"], "priced": priced, "calls": calls}
         if not got["priced"]:

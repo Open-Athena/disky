@@ -106,6 +106,44 @@ def test_fill_halves_its_chunk_when_the_worker_fails_and_goes_on(prices) -> None
     assert prices.slept == [op.RETRY_S] * 3
 
 
+def test_fill_grows_back_once_it_is_past_the_failing_range(prices) -> None:
+    """A chunk that fails holds a bad range, not a bad fill: the chunk stays down until the fill has priced past what
+    the largest failing call asked for, then doubles back to what was asked. Stuck halved, one bad range costs every
+    later call its size: a real fill took 122 calls where 20 would do."""
+    over = refusal(500, "error code: 1101")
+    prices.answers = [answer(64, 136), over, over, *(answer(16, 136 - 16 * i) for i in range(1, 5)), answer(32, 40), answer(40, 0)]
+    assert op.fill(SITE, "t", **prices.kw) == {"index": TAG, "hz": 9, "prefixes": 150, "priced": 200, "calls": 7}
+    assert [c["n"] for c in prices.calls] == ["64", "64", "32", "16", "16", "16", "16", "32", "64"]
+    assert prices.slept == [op.RETRY_S] * 2
+
+
+def test_fill_grows_only_as_far_as_it_was_asked(prices) -> None:
+    over = refusal(503, "boom")
+    prices.answers = [over, answer(8, 30), answer(8, 22), answer(16, 6), answer(6, 0)]
+    op.fill(SITE, "t", n=16, **prices.kw)
+    assert [c["n"] for c in prices.calls] == ["16", "8", "8", "16", "16"]
+
+
+def test_a_chunk_asked_below_the_floor_is_never_raised_to_it(prices) -> None:
+    prices.answers = [refusal(503, "boom")]
+    with pytest.raises(op.PricingRefused):
+        op.fill(SITE, "t", n=1, **prices.kw)
+    assert [c["n"] for c in prices.calls] == ["1", "1", "1", "1"]
+
+
+def test_fill_names_a_range_refused_at_every_size_and_stops(prices) -> None:
+    """Every size down to one prefix, then the retries at one, then a refusal naming where: never a loop. It stops, not
+    skips: the site prices the head of what's stale (there is no asking past it), and one unpriced prefix leaves a
+    scan's owner-scoped views pending and a compaction's gate refusing, so the rest would buy neither."""
+    prices.answers = [answer(64, 86), refusal(500, "error code: 1101")]
+    with pytest.raises(op.PricingRefused) as e:
+        op.fill(SITE, "t", **prices.kw)
+    assert str(e.value) == (f"{SITE}{op.ENDPOINT} → HTTP 500: error code: 1101 "
+                            "(refused at every size from 64 to 1: the first of the 86 prefixes still unpriced, after 64 priced by this run)")
+    assert [c["n"] for c in prices.calls] == ["64", "64", "32", "16", "8", "4", "2", "1", "1", "1", "1"]
+    assert prices.slept == [op.RETRY_S] * 9
+
+
 @pytest.mark.parametrize("error,said", [
     (refusal(503, "boom"), f"{SITE}{op.ENDPOINT} → HTTP 503: boom"),
     (refusal(None, "timed out"), f"{SITE}{op.ENDPOINT} unreachable: timed out"),
@@ -114,8 +152,8 @@ def test_fill_refuses_once_its_retries_run_out(prices, error: site.SiteError, sa
     prices.answers = [error]
     with pytest.raises(op.PricingRefused) as e:
         op.fill(SITE, "t", **prices.kw)
-    assert str(e.value) == said
-    assert ([c["n"] for c in prices.calls], prices.slept) == (["64", "32", "16", "8"], [op.RETRY_S] * 3)
+    assert str(e.value) == f"{said} (refused at every size from 64 to 1: the first prefix still unpriced, after 0 priced by this run)"
+    assert ([c["n"] for c in prices.calls], prices.slept) == (["64", "32", "16", "8", "4", "2", "1", "1", "1", "1"], [op.RETRY_S] * 9)
 
 
 @pytest.mark.parametrize("error", [
