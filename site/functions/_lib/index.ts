@@ -3976,7 +3976,7 @@ export async function readAsksHistory(
   variant: string,
   asks: Ask[],
   keep: (r: Row) => boolean,
-  { fields, maxGroups = 60, pre, lens }: { fields?: (keyof Row)[]; maxGroups?: number; pre?: Pre; lens?: Lens } = {},
+  { maxGroups = 60, pre, lens }: { maxGroups?: number; pre?: Pre; lens?: Lens } = {},
 ): Promise<{ byDate: Map<string, Row[]>; rows: Row[]; hz: number; versions: number; groups: number; index: string } | null> {
   if (!intervalsOn(env) || !dates.length) return null
   const scoped = asOfScans(env, dates)
@@ -3988,7 +3988,7 @@ export async function readAsksHistory(
   if (!handle) return null
   const range: [number, number] = [Math.min(...held.map(d => state.scans.get(d)!)), state.scans.get(latest)!]
   const history = { ...handle, historyRange: range, runs: handle.runs?.map(r => ({ ...r, historyRange: range })) }
-  const { rows, groups } = await readAsks(history, asks, keep, { versions: true, maxGroups, pre, lens, ...(fields ? { columns: columnsFor(handle, fields) } : {}) })
+  const { rows, groups } = await readAsks(history, asks, keep, { versions: true, maxGroups, pre, lens })
   const byDate = new Map(held.map(date => [date, liveAt({ ...handle, asOf: state.scans.get(date)! }, rows)]))
   return { byDate, rows, hz: range[1], versions: rows.length, groups, index: `${handle.mode}:${'gen' in handle ? handle.gen : ''}` }
 }

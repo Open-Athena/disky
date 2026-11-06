@@ -97,9 +97,9 @@ async function price(env: Env, tag: string, rows: Map<string, Hist>, keys: Map<s
   return shared(pricing, id, async () => {
     const asks: Ask[] = [...keys].map(([path, depth]) => ({ depth, path }))
     if (roots) asks.push({ depth: 1, under: '' })
-    const fields: (keyof Row)[] = ['path', 'depth', 'usr', 'size', 'n_files', 'cls2', 'cls3', 'cls4']
-    const got = await readAsksHistory(env, await ivHeldDates(env), 'path', asks, r => keys.get(r.path) === r.depth || (roots && r.depth === 1),
-      { fields, maxGroups: Math.max(400, 2 * asks.length) })
+    // Through the decoded-group cache: a fill's reads repeat most of their groups. `pre` shapes only the rows kept, not each group's every row.
+    const wanted = (d: number, p: string) => keys.get(p) === d || (roots && d === 1)
+    const got = await readAsksHistory(env, await ivHeldDates(env), 'path', asks, r => wanted(r.depth, r.path), { pre: wanted, maxGroups: Math.max(400, 2 * asks.length) })
     if (!got || got.index !== tag) return null
     const vs = versionsOf(got.rows)
     const put = new Map<string, Hist>()
