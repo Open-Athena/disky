@@ -2,7 +2,7 @@ import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import type { Env } from './auth'
 import { IV_JOIN, openIndex, readRootHistoryRows, slices } from './index'
 import { type Req, reqOf, withReq } from './shared'
-import type { OwnerScope } from './scope'
+import type { ClassScope, OwnerScope } from './scope'
 import { sqliteD1, withLedger } from './testD1'
 import { type D1Variant, fixture, getsOf, readJson, seedGeneration } from './testStore'
 import { buildDiff, buildView, readRootAgg, readRootHistory } from './view'
@@ -284,6 +284,10 @@ describe('owner prefix history', () => {
 /** What a read did per-scan: the store's `listing/` keys it fetched. */
 const perScanGets = getsOf
 
+/** Of the 135 summaries `diff summaries` asks (3 pairs × 5 paths × 9 scopes), those answered; the rest are refused, as the full diff is (a lens with nothing on a side: a 404). Assignments give the lenses more to answer. */
+const SUMMARIES_ANSWERED = 86
+const SUMMARIES_ANSWERED_LEDGERED = 117
+
 const PATHS = ['', 'bk', 'bk/m', 'bk/m/deep', 'bk/nest', 'bk/flat']
 
 /** The store's kind for a path that is both an object and a prefix (`bk/m/twin`: alice's 50 KiB object
@@ -446,6 +450,61 @@ for (const GEN of ['g2', 'g5'] as const) {
         }
       }
     }, 60_000)  // every scan × scope against the per-scan reader: seconds alone, past the 5 s default under the parallel suite
+  })
+
+  // A diff's `summary=1`: the two sides' scoped roots, each read as a view reads its own root (`ViewOpts.rootOnly`)
+  // and nothing under it. Its totals are the full diff's in every scope, the ledger folded or not, and a path or
+  // scope the full diff refuses it refuses alike; unfiltered it reads no subtree (`rows`: the phase a view's
+  // subtree read reports).
+  describe(`interval store ${GEN}: diff summaries`, () => {
+    const SUMMARY_SCOPES: { lens?: { key: string }; owner?: OwnerScope; classes?: ClassScope }[] = [
+      {}, ...SCOPES, { classes: new Set(['1'] as const) }, { owner: 'owned', classes: new Set(['1', '2'] as const) },
+    ]
+    type Answer = Awaited<ReturnType<typeof buildDiff>> | string
+    const refusal = (e: unknown) => `${(e as Error).name}: ${(e as Error).message}`
+    const totals = (d: Answer) => typeof d === 'string' ? d : [d.total_a, d.total_b, d.objects_a, d.objects_b]
+    /** Every pair × path × scope on `env`: the summary against the full diff. The number of them answered. */
+    const check = async (env: Env): Promise<number> => {
+      let answered = 0
+      for (const [from, to] of [[S1, S2], [S2, S3], [S1, S3]]) {
+        for (const path of ['', 'bk', 'bk/m', 'bk/nest', 'bk/flat']) {
+          for (const scope of SUMMARY_SCOPES) {
+            const o = { ...base, from, to, path, top: 500, ...scope }
+            const full: Answer = await buildDiff(env, o).catch(refusal)
+            const phases = new Set<string>()
+            const sum: Answer = await buildDiff(env, { ...o, summary: true, trace: n => phases.add(n) }).catch(refusal)
+            expect({ o, totals: totals(sum), rows: typeof sum === 'string' ? [] : sum.rows, subtreeRead: phases.has('rows') })
+              .toEqual({ o, totals: totals(full), rows: [], subtreeRead: false })
+            answered += typeof sum === 'string' ? 0 : 1
+          }
+        }
+      }
+      return answered
+    }
+
+    it('totals what the full diff totals in every scope, reading no subtree', async () => {
+      expect(await check(ivg())).toBe(SUMMARIES_ANSWERED)
+    }, 60_000)
+
+    it('…with assignments folded into the lenses and pools', async () => {
+      // `bk/m` assigned to alice and all of `bk` to bob (the later, outer assignment covers it).
+      const { iv: ledgered } = await seed(`
+        INSERT INTO actions (id, actor, ts, scan, pattern, set_owner, owner) VALUES
+          (1, 'ops', 1, '${S2}', 'gs://bk/m/', 1, 'alice'), (2, 'ops', 2, '${S2}', 'gs://bk/', 1, 'bob');
+        INSERT INTO owner_prefixes (action_id, prefix, owner, ts) VALUES (1, 'gs://bk/m/', 'alice', 1), (2, 'gs://bk/', 'bob', 2);
+      `)
+      expect(await check({ ...ledgered, INTERVAL_STORE_GEN: GEN } as Env)).toBe(SUMMARIES_ANSWERED_LEDGERED)
+    }, 60_000)
+
+    it('answers with the asked floor and names what it read', async () => {
+      const o = { ...base, from: S1, to: S2, path: 'bk', top: 500 }
+      const full = await buildDiff(ivg(), o)
+      expect(await buildDiff(ivg(), { ...o, summary: true })).toEqual({
+        rows: [], total_a: full.total_a, total_b: full.total_b, objects_a: full.objects_a, objects_b: full.objects_b,
+        threshold: (Math.max(full.total_a, full.total_b) * base.minArea) / (base.w * base.h), tier: 'root',
+        expansions: 0, truncated: false, lookups: 0, lookups_capped: false,
+      })
+    })
   })
 }
 

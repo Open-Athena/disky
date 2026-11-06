@@ -593,6 +593,22 @@ describe('buildDiff', () => {
       approximate: true, approximateReason: 'this scan has no search index; small matches may be missing',
     })
   })
+
+  it('a summary is the full diff\'s totals from the two roots alone: a v1 side, a store side, a path one side lacks', async () => {
+    const phases: string[] = []
+    const root = await buildDiff(env, { ...base, from: V1, to: V2, path: '', threshold: 1, summary: true, trace: n => phases.push(n) })
+    expect(root).toEqual({
+      rows: [], total_a: 700, total_b: 37229948, objects_a: 3, objects_b: 8009, threshold: 1, tier: 'root',
+      expansions: 0, truncated: false, lookups: 0, lookups_capped: false,
+    })
+    // No subtree read (`rows`), no lookups walk: the root reads (`rootagg`, then each side's own) and nothing else.
+    expect(phases.filter(p => p === 'rows' || p === 'rootagg' || p === 'root' || p === 'views')).toEqual(['rootagg', 'root', 'root', 'views'])
+    const added = await buildDiff(env, { ...base, from: V1, to: V2, path: 'bk/nest', threshold: 1, summary: true })
+    expect(added).toEqual({
+      rows: [], total_a: 0, total_b: 4456448, objects_a: 0, objects_b: 5, threshold: 1, tier: 'root',
+      expansions: 0, truncated: false, lookups: 0, lookups_capped: false,
+    })
+  })
 })
 
 describe('serverTiming desc', () => {

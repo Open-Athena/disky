@@ -136,6 +136,10 @@ export interface ViewOpts {
   phase2Rows?: number
   /** With `query`: only the filter's floor (`Read.threshold`, from the match roots' total) — no forest. */
   floorOnly?: boolean
+  /** Without `query`: only P's scoped root (`Read.rootAgg`: its bytes and objects under the lens, owner and class
+   *  scope, the ledger folded as a view folds it) — nothing under P is planned or read (`Read.kept` empty,
+   *  `Read.tier` `root`). What an unfiltered diff summary totals. */
+  rootOnly?: boolean
   /** With `query`: ms the static roots' detail lookups may run past phase 2 (default `FILTER_DETAILS_MS`). */
   detailsWait?: number
   /** With `query`: the most row groups the static roots' detail lookups read (default `DETAIL_GROUPS`). */
@@ -786,13 +790,15 @@ async function readView(env: Env, o: ViewOpts, cov: Coverage = {}): Promise<Read
   tr?.('open', performance.now() - t0)
   let rootRows: Row[] = []
   let fine: IndexHandle | null = null
+  // The handle P's rows came from.
+  let rootIdx: IndexHandle | null = null
   t0 = performance.now()
   for (const t of tiers) {
     rootRows = await readRoot(t.idx)
-    if (rootRows.length) break
+    if (rootRows.length) { rootIdx = t.idx; break }
   }
   if (!rootRows.length) {
-    fine = withTrace(await openFine(env, date, sort, lens), tr)
+    rootIdx = fine = withTrace(await openFine(env, date, sort, lens), tr)
     rootRows = await readRoot(fine)
     // A lens user the scan attributes nothing to under P may still own it
     // all by assignment: an empty attribution root is a zero, not a miss.
@@ -827,6 +833,12 @@ async function readView(env: Env, o: ViewOpts, cov: Coverage = {}): Promise<Read
   // Past `asked` only when the read budget raises it (`setFloor`).
   let threshold = asked
   let thrAt = (depth: number) => asked * atten ** Math.max(0, depth - dP - 1)
+  // Only P's scoped root was asked for (`rootOnly`): the same root a view of P draws over, with no tier picked
+  // and nothing under P planned or read.
+  if (o.rootOnly) {
+    tr?.('root', performance.now() - t0)
+    return { rootAll, rootAgg, kept: new Map(), aggDepth: new Map(), foldedOf: new Map(), threshold: asked, thrAt, tier: 'root', idx: rootIdx!, truncated: false, ownerLens: ol, scoped }
+  }
 
   // The coarsest tier whose floor the UNSCOPED query can't see below. A
   // narrow scope lowers the node threshold (its root is smaller), but the
@@ -2381,7 +2393,10 @@ export interface DiffOpts extends Omit<ViewOpts, 'date'> {
   /** Frontier rows kept (largest |Δ| first); the expanded skeleton always ships. */
   top: number
   /** Totals only: both sides' scoped root reads, no walk (`rows` empty) —
-   * what the diff section's headline shows while the full diff aligns. */
+   * what the diff section's headline shows while the full diff aligns.
+   * Unfiltered, nothing under P is planned or read (`ViewOpts.rootOnly`): `threshold` is the floor a full diff
+   * asks before the read budget may raise it, `tier` is `root`. With `q=` the match roots are still found
+   * (phase 1; with exclusions, phase 2 too): their totals are the answer. */
   summary?: boolean
   /** Expand at most this many levels below P (rows at the cap come back
    * unexpanded, as leaves) — `depth=1` is the bucket-level diff the page
@@ -2597,7 +2612,9 @@ export async function buildDiff(env0: Env, o: DiffOpts): Promise<Diff> {
   // views read just those bands (`depth=1`: two groups instead of ~25 a side).
   // A filtered summary needs only the match roots' totals (phase 1), not the forest under them — unless
   // exclusions, which phase 2 also finds.
-  const cap = o.summary && query && !query.neg ? { maxDepth: 0 } : o.depth != null ? { maxDepth: o.depth } : {}
+  // An unfiltered summary needs only each side's scoped root (`rootOnly`): the totals below are a view's own root
+  // aggregate, read by the same lines, with nothing under P planned or read.
+  const cap = o.summary && !query ? { rootOnly: true } : o.summary && query && !query.neg ? { maxDepth: 0 } : o.depth != null ? { maxDepth: o.depth } : {}
   // Either side's coverage notes, merged (a re-read below adds the same ones).
   const cov: Coverage = {}
   // A filtered diff plans each side's forest by its own matched bytes and draws both at the larger side's
@@ -2625,7 +2642,8 @@ export async function buildDiff(env0: Env, o: DiffOpts): Promise<Diff> {
   const sideOpts = (date: string): ViewOpts => ({ ...o, date, ...wait, phase2Gate: gate, ...(query ? floor != null ? { threshold: floor } : {} : { threshold }), ...cap })
   // Unfiltered, the sides share `threshold`, unless the read budget raises one's (`coarsen`): then both read at the
   // larger, or a name read on one side and folded on the other reads as churn.
-  const floors = query ? null : floorMeeting(Number(!!ra) + Number(!!rb))
+  // (A summary's sides plan nothing: no floor to meet.)
+  const floors = query || o.summary ? null : floorMeeting(Number(!!ra) + Number(!!rb))
   const side = (date: string) => {
     const meetFloor = floors?.()
     return readView(env, { ...sideOpts(date), ...(meetFloor ? { meetFloor } : {}) }, cov).finally(() => meetFloor?.(0))
