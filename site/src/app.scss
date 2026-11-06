@@ -648,6 +648,14 @@ h2 { font-size: 17px; font-weight: 650; margin: 0 0 4px; }
   p + p { margin-top: 0.6em; }
 }
 .loading { color: var(--ink-3); }
+// An action inside a sentence (a failed load's "retry", `LoadFailure.tsx`): the sentence's own type, underlined as
+// the app's other in-text actions are (the path crumbs), in the page's ink so it reads against a muted or red line.
+button.linkish {
+  background: none; border: none; padding: 0; font: inherit; color: var(--ink); cursor: pointer;
+  text-decoration: underline; text-decoration-color: var(--ink-3); text-underline-offset: 3px;
+  &:hover { text-decoration-color: var(--ink); }
+  &:focus-visible { outline: 2px solid var(--s1); outline-offset: 2px; border-radius: 2px; }
+}
 
 // Cross-site link (prod hosts are one-store-each; see App's `crossSite`).
 .crosslink {
@@ -2607,6 +2615,12 @@ a.staged-chip {
 // to decide when a deep link has landed.
 :root { --anchor-gap: 16px; }
 #tree-map, #tbl, #over-time, #diff, #mtime, #dispatch, #runs { scroll-margin-top: calc(var(--topbar-h, 48px) + var(--anchor-gap)); }
+// A level of the drilled path that didn't load (`LevelFailure`): one line over the map drawn without it.
+.level-failed {
+  margin: 0 0 -10px; font-size: 13px; color: var(--ink-2);
+  code { color: var(--ink); }
+  &.load-failed { color: var(--danger); }
+}
 .leaf-note { margin: -8px 0 4px; color: var(--ink-2); code { color: var(--ink); } }
 // Nothing drawable under the drilled node: the canvas folds away (the owner
 // panel / rollup above it stay).
@@ -2925,6 +2939,8 @@ kbd { font: inherit; font-size: 11px; padding: 0 4px; border: 1px solid var(--li
     &.danger { border-color: var(--danger); color: var(--danger); font-weight: 650; }
     &.danger.armed { background: var(--danger); color: #fff; }
   }
+  // A run control shown but unavailable (`RunButton`: sized at an older scan): `aria-disabled`, so its tip still opens.
+  .dispatch button[aria-disabled="true"] { opacity: 0.45; cursor: help; &:not(.danger):hover { border-color: var(--line); } }
   .close-plan button, .run-detail button.more, .runs-pg button {
     font: inherit; font-size: 13px; padding: 3px 12px; cursor: pointer;
     background: var(--panel); color: var(--ink); border: 1px solid var(--line); border-radius: 6px;
@@ -2963,6 +2979,8 @@ kbd { font: inherit; font-size: 11px; padding: 0 4px; border: 1px solid var(--li
     .prog progress { width: 64px; height: 8px; vertical-align: middle; }
     .prog-estimate { display: block; font-size: .9em; }
     td.actions { white-space: nowrap; > * + * { margin-left: 6px; } }
+    // A control shown but unavailable (`UndoControl`): `aria-disabled`, so its tip still opens (hover, focus, a tap pins it).
+    button[aria-disabled="true"] { opacity: 0.45; cursor: help; &:hover { border-color: var(--line); } }
     tr.live td.rid { font-weight: 600; }
     tr.run-detail-row > td { background: var(--panel); padding: 8px 12px 12px; }
     tr.run.linked > td { background: color-mix(in srgb, var(--accent, #4a9eff) 14%, transparent); }
