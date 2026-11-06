@@ -1,8 +1,8 @@
 // POST /api/sweep/undo — undo a real run (remove its delete markers) on Batch.
 // Body: { run_id }. Admin only. Allowed only while the run's undo window is open
 // (mode real, undo_state != full, now < undo_deadline). Submits a Batch job
-// running `sweep undo` against the run dir; /api/sweep/jobs reflects completion
-// (undo_state -> full).
+// running `plan-sweep undo` against the run dir. The run's `undo_state` moves only
+// on what that job reports (`reflectRuns`), so a job that restores nothing changes nothing.
 import type { D1Database } from "@cloudflare/workers-types"
 import { type Ctx, type Env as AuthEnv, json, requireAdmin } from "../../_lib/auth.js"
 import { batchConfig, type BatchEnv, notConfigured } from "../../_lib/batchConfig.js"
@@ -27,7 +27,7 @@ export const onRequestPost = async (ctx: Ctx & { env: Env }): Promise<Response> 
   if (!ctx.env.DB) return json({ error: "not configured (no D1 binding)" }, 503)
   if (!ctx.env.GCP_SA_KEY) return json({ error: "not configured (no GCP_SA_KEY)" }, 503)
   if (!ctx.env.JOB_SA) return json({ error: "not configured (no JOB_SA)" }, 503)
-  const cfg = batchConfig(ctx.env, ["GCP_PROJECT", "DATA_BUCKET", "SWEEP_IMAGE", "SWEEP_S3_ENDPOINT"])
+  const cfg = batchConfig(ctx.env, ["GCP_PROJECT", "BATCH_REGION", "DATA_BUCKET", "SWEEP_IMAGE", "SWEEP_S3_ENDPOINT"])
   if ("missing" in cfg) return json({ error: notConfigured("undo", cfg.missing) }, 503)
   const shape = prefixShape(ctx.env)
   if (!shape) return json({ error: `undo ${NO_SHAPE}` }, 503)
@@ -51,7 +51,6 @@ export const onRequestPost = async (ctx: Ctx & { env: Env }): Promise<Response> 
     console.error("undo submit failed", status, text.slice(0, 2000))
     return json({ error: `batch submit failed (${status})`, status }, 500)
   }
-  await db.prepare("UPDATE deletion_runs SET undo_state = 'partial' WHERE run_id = ?").bind(runId).run()
   await auditRunControl(db, "undo", runId, gated.email ?? "admin", jobId)
   return json({ job_id: jobId, target: runId, by: gated.email })
 }

@@ -22,7 +22,7 @@ STAMPS = [1000 * (i + 1) for i in range(6)]
 RG, PAGE = 32, 8
 
 
-def serial_cut(con, src: str, sort: str, out: Path, schema: pa.Schema, *, rg_rows: int, stamps: list[int], page_rows: int) -> dict:
+def serial_cut(con, src: str, sort: str, out: Path, schema: pa.Schema, *, rg_rows: int, stamps: list[int], page_rows: int | None) -> dict:
     """The cut as one writer: the rows streamed in sort order into one `ParquetWriter`, a group closed every `rg_rows`
     rows and at each segment's end (`write_served` before it went parallel), the reference the parallel cut must equal."""
     _, order, size_col = ist.SORTS[sort]
@@ -50,8 +50,9 @@ def serial_cut(con, src: str, sort: str, out: Path, schema: pa.Schema, *, rg_row
 @pytest.fixture(scope="module")
 def src(tmp_path_factory) -> str:
     """Path versions over 6 scans: ~700 paths, each live over a random run of scans split into versions, so the rows
-    fall in the open segment and several dyadic ones."""
-    rnd = random.Random(7)
+    fall in the open segment and several dyadic ones. The versions' values draw from their own stream, so the segments
+    (what the cut's parts are planned from) don't move with a deployment's `CLASS_COLS`."""
+    rnd, values = random.Random(7), random.Random(8)
     schema = ist.PVL_SCHEMA
     rows = []
     for i in range(700):
@@ -73,13 +74,13 @@ def src(tmp_path_factory) -> str:
                 elif f.name == "vt":
                     row[f.name] = vt
                 elif f.name == "kind":
-                    row[f.name] = rnd.choice("fd")
+                    row[f.name] = values.choice("fd")
                 elif f.name == "us":
-                    row[f.name] = rnd.choice(["", "ann:5", "bob:7"])
+                    row[f.name] = values.choice(["", "ann:5", "bob:7"])
                 elif pa.types.is_floating(f.type):
-                    row[f.name] = rnd.random() * 1e6
+                    row[f.name] = values.random() * 1e6
                 else:
-                    row[f.name] = rnd.randrange(0, 1 << rnd.choice([3, 20, 40 if f.type.bit_width > 32 else 30]))
+                    row[f.name] = values.randrange(0, 1 << values.choice([3, 20, 40 if f.type.bit_width > 32 else 30]))
             rows.append(row)
     p = tmp_path_factory.mktemp("pvl") / "r0000.parquet"
     pq.write_table(pa.Table.from_pylist(rows, schema=schema), p)
@@ -148,20 +149,22 @@ def gen(tmp_path_factory) -> Path:
     return root
 
 
+@pytest.mark.parametrize("page", [PAGE, None], ids=["paged", "unpaged"])
 @pytest.mark.parametrize("sort", [s for s in ist.SORTS if s != ist.LEVEL])
-def test_bounded_cut_is_one_order_by(gen, sort, tmp_path):
+def test_bounded_cut_is_one_order_by(gen, sort, page, tmp_path):
     """Every served sort, cut from a generation's range files as runs (each range whole, or in key sub-ranges under a
     tiny budget), sorted alone and concatenated (a sort led by `(depth, path)`) or cut per segment in key-range pieces
     sorted alone (the others: one piece a segment, or many under a tiny piece share — splitters between rows equal on
     the key's leading columns, spans cut inside spool groups), then written in 1 or several processes: the file and
-    sidecar one `ORDER BY` of the whole generation streamed into one writer leaves, byte for byte."""
+    sidecar one `ORDER BY` of the whole generation streamed into one writer leaves, byte for byte, with pages and a page
+    index or without."""
     con = duckdb.connect()
     sub = ist.SORTS[sort][0]
     schema = ist.served_schema(sort)
     files = [str(p) for p in sorted((gen / sub).glob("r*.parquet"))]
     assert len(files) == N_RANGES
     ref = serial_cut(con, f"read_parquet('{gen / sub}/r*.parquet')", sort, tmp_path / "ref" / f"{sort}.parquet", schema,
-                     rg_rows=RG, stamps=STAMPS, page_rows=PAGE)
+                     rg_rows=RG, stamps=STAMPS, page_rows=page)
     assert len(ref["segments"]) >= 3 and ref["groups"] >= 20
     # A budget of 1 byte cuts a range file at every row-group start; a third of the largest file's estimate at a few.
     third = max(ic.sub_ranges([f], None)[0][2] for f in files) // 3
@@ -172,7 +175,7 @@ def test_bounded_cut_is_one_order_by(gen, sort, tmp_path):
     for procs, budget, piece, spool in ((1, None, None, None), (4, None, None, None), (1, 1, None, None), (4, third, None, None),
                                         (4, None, 7, 8), (1, third, 50, 8), (4, 1, 50, None)):
         out = tmp_path / f"p{procs}-b{budget}-r{piece}-s{spool}" / f"{sort}.parquet"
-        doc = ist.write_served(con, files, sort, out, schema, rg_rows=RG, stamps=STAMPS, page_rows=PAGE, procs=procs, part_rows=0,
+        doc = ist.write_served(con, files, sort, out, schema, rg_rows=RG, stamps=STAMPS, page_rows=page, procs=procs, part_rows=0,
                                budget=budget, piece_rows=piece, **({"spool_rows": spool} if spool else {}))
         assert doc == ref
         assert out.read_bytes() == (tmp_path / "ref" / f"{sort}.parquet").read_bytes()
@@ -274,13 +277,14 @@ def test_cut_plan_splits_on_group_boundaries():
     assert ist.cut_plan([], 4, 8) == [[]]
 
 
+@pytest.mark.parametrize("page", [PAGE, None], ids=["paged", "unpaged"])
 @pytest.mark.parametrize("sort", ["path", "bysize"])
-def test_parallel_cut_is_the_serial_cut(src, sort, tmp_path):
+def test_parallel_cut_is_the_serial_cut(src, sort, page, tmp_path):
     """Over a fixture of ~60 groups in several segments, the cut in 1 and 4 processes is the serial writer's file and
     sidecar, byte for byte: a part starts inside a segment, and a part ends on a segment's short last group."""
     con = duckdb.connect()
     schema = ist.served_schema(sort)
-    ref = serial_cut(con, src, sort, tmp_path / "ref" / f"{sort}.parquet", schema, rg_rows=RG, stamps=STAMPS, page_rows=PAGE)
+    ref = serial_cut(con, src, sort, tmp_path / "ref" / f"{sort}.parquet", schema, rg_rows=RG, stamps=STAMPS, page_rows=page)
     segs = con.execute(f"SELECT {ist.seg_sql(STAMPS)} AS s, count(*) FROM {src} GROUP BY s ORDER BY s").fetchall()
     plan = ist.cut_plan(segs, RG, 4)
     seg_starts, at = set(), 0
@@ -293,7 +297,7 @@ def test_parallel_cut_is_the_serial_cut(src, sort, tmp_path):
     assert plan[-1][-1][2] < RG
     for procs in (1, 4):
         out = tmp_path / f"p{procs}" / f"{sort}.parquet"
-        doc = ist.write_served(con, src, sort, out, schema, rg_rows=RG, stamps=STAMPS, page_rows=PAGE, procs=procs, part_rows=0)
+        doc = ist.write_served(con, src, sort, out, schema, rg_rows=RG, stamps=STAMPS, page_rows=page, procs=procs, part_rows=0)
         assert doc == ref
         assert out.read_bytes() == (tmp_path / "ref" / f"{sort}.parquet").read_bytes()
         assert out.with_name(f"{sort}.groups.parquet").read_bytes() == (tmp_path / "ref" / f"{sort}.groups.parquet").read_bytes()
@@ -301,16 +305,17 @@ def test_parallel_cut_is_the_serial_cut(src, sort, tmp_path):
     assert pq.read_table(out).equals(pq.read_table(tmp_path / "ref" / f"{sort}.parquet"))
 
 
-def test_concat_is_one_writer(tmp_path):
-    """Parts of any sizes, an empty one among them, joined: one writer's bytes; and an unedited footer re-encodes to
-    itself."""
+@pytest.mark.parametrize("page", [16, None], ids=["paged", "unpaged"])
+def test_concat_is_one_writer(page, tmp_path):
+    """Parts of any sizes, an empty one among them, joined: one writer's bytes, with a page index or without; and an
+    unedited footer re-encodes to itself."""
     n = 1000
     t = pa.table({"depth": pa.array([i % 7 for i in range(n)], pa.uint8()), "path": [f"a/b/{i:05d}" for i in range(n)],
                   "kind": ["f" if i % 3 else "d" for i in range(n)], "usr": pa.array([None] * n, pa.string()), "vf": list(range(n))})
     groups = [t.slice(o, min(100, n - o)) for o in range(0, n, 100)] + [t.slice(0, 37)]
 
     def write(p: Path, gs: list) -> Path:
-        with ist._served_writer(p, t.schema, 16) as w:
+        with ist._served_writer(p, t.schema, page) as w:
             for g in gs:
                 w.write_table(g, row_group_size=100)
             w.add_key_value_metadata({"k": "v"})
