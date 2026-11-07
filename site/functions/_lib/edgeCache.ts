@@ -20,7 +20,7 @@
 
 import { PRIMARY_STORE } from './stores.js'
 import { SEARCH_LIMITS, type SearchLimits } from './search.js'
-import { colo, isolatePut, IsoMap, IsoSet } from './shared.js'
+import { colo, isolatePut, IsoMap } from './shared.js'
 import { currentMeter } from './usage.js'
 
 const TTL = 86400
@@ -177,37 +177,74 @@ export const UPGRADE_DETAIL_GROUPS = 60
 /** …and a filtered diff's lookup walk (`DiffOpts.walkMs`), in place of `FILTER_WALK_MS`. */
 export const UPGRADE_WALK_MS = 5_000
 
-/** Per isolate: keys with a background full run in flight (one each: concurrent partial hits don't
- *  stampede), and keys whose run was cut short too — not retried until the partial they'd replace expires
+/** Per isolate: keys with a background full run in flight and when each began (one each: concurrent partial hits
+ *  don't stampede), and keys whose run was cut short too — not retried until the partial they'd replace expires
  *  (`PARTIAL_TTL`), so a heavy key doesn't re-run every hit. */
-const upgrading = new IsoSet<string>('edge-upgrading')
+const upgrading = new IsoMap<string, number>('edge-upgrading')
 const gaveUp = new IsoMap<string, number>('edge-gave-up')
 
-/** What `upgradePartial` did: `scheduled`, or why not. */
-export type Upgrade = 'scheduled' | 'no-waituntil' | 'in-flight' | 'gave-up'
+/** How long a run is expected to take, ms: the `Retry-After` of the partial answer that scheduled it. The median
+ *  upgrade (a scheduled request's tail `wallTime` less its response time; gcs's filtered pages, 2026-11-06,
+ *  n = 1,485): p50 6.7 s, p75 9.5 s, p90 12.4 s, p95 14.6 s, max 26 s. */
+export const UPGRADE_EXPECT_MS = 7_000
+/** The `Retry-After` for a run past `UPGRADE_EXPECT_MS` and not done, ms. */
+export const UPGRADE_LATE_MS = 3_000
+/** The colo lease's life, seconds (`upgradeLease`): the p95 upgrade. A run that outlives it may meet a second one on
+ *  another isolate (CPU spent twice, the same answer written twice); one killed with its isolate holds the others
+ *  off at most this long. */
+export const LEASE_TTL = 15
+
+/** The colo lease of `key`'s upgrade: the same cache key on a `lease.` host, its body the run's start (epoch ms). Put
+ *  when a run starts, deleted when it ends: an isolate anywhere in the colo that finds it starts no run of its own.
+ *  Not atomic: two isolates that look before either puts both run (CPU twice, never a wrong answer). It goes to the
+ *  Cache API directly, not through `colo()`'s request-scoped puts, so others see it while the run is on. */
+export function upgradeLease(key: Request): Request {
+  const u = new URL(key.url)
+  u.hostname = `lease.${u.hostname}`
+  return new Request(u.href)
+}
+const rawColo = (): Cache => (caches as unknown as { default: Cache }).default
+
+/** What `upgradePartial` did — `scheduled`; `in-flight` (this isolate's run) or `leased` (another isolate's) is
+ *  on; or why none is — and, while a run is on, how long until it is worth asking again (`retryAfterMs`). */
+export type Upgrade = 'scheduled' | 'no-waituntil' | 'in-flight' | 'leased' | 'gave-up'
+export interface UpgradeState { upgrade: Upgrade; retryAfterMs?: number }
+
+/** When to look again at a run that began at `start`. */
+const retryAfter = (start: number, now: number): number => Math.max(UPGRADE_LATE_MS, start + UPGRADE_EXPECT_MS - now)
 
 /** After serving a partial answer (budget-cut: the miss that produced it, or a partial hit), compute the full
- *  one in the background (`waitUntil`) with `compute` (the endpoint's build at `UPGRADE_PHASE2_MS`). A whole
- *  answer replaces the colo entry, at the normal TTL (and goes to KV, as any whole answer does); one cut
- *  short again leaves the partial as it is. `done` (tests) settles with the run. */
-export function upgradePartial(
+ *  one in the background (`waitUntil`) with `compute` (the endpoint's build at `UPGRADE_PHASE2_MS`), unless a run is
+ *  on: this isolate's, or one holding the colo lease (`upgradeLease`). A whole answer replaces the colo entry, at
+ *  the normal TTL (and goes to KV, as any whole answer does); one cut short again leaves the partial as it is. */
+export async function upgradePartial(
   env: CacheEnv,
   key: Request,
   compute: () => Promise<{ body: string; keep: Keep }>,
   waitUntil: ((p: Promise<unknown>) => void) | undefined,
   now = Date.now(),
-): Upgrade {
-  if (!waitUntil) return 'no-waituntil'
+): Promise<UpgradeState> {
+  if (!waitUntil) return { upgrade: 'no-waituntil' }
   const k = key.url
-  if (upgrading.has(k)) return 'in-flight'
+  const mine = upgrading.get(k)
+  if (mine != null) return { upgrade: 'in-flight', retryAfterMs: retryAfter(mine, now) }
   const until = gaveUp.get(k)
   if (until != null) {
-    if (now < until) return 'gave-up'
+    if (now < until) return { upgrade: 'gave-up' }
     gaveUp.delete(k)
   }
-  upgrading.add(k)
+  const lease = upgradeLease(key)
+  const held = await rawColo().match(lease).then(r => r?.text(), () => undefined)
+  const at = held == null ? NaN : Number(held)
+  if (Number.isFinite(at) && now - at < LEASE_TTL * 1000) return { upgrade: 'leased', retryAfterMs: retryAfter(at, now) }
+  // Another request of this isolate may have started one while the lease was looked up.
+  const raced = upgrading.get(k)
+  if (raced != null) return { upgrade: 'in-flight', retryAfterMs: retryAfter(raced, now) }
+  upgrading.set(k, now)
+  const put = rawColo().put(lease, new Response(String(now), { headers: { 'cache-control': `public, s-maxage=${LEASE_TTL}` } })).catch(() => undefined)
   waitUntil((async () => {
     try {
+      await put
       const { body, keep } = await compute()
       if (keep === true) await cacheStore(env, key, body)
       else gaveUp.set(k, now + PARTIAL_TTL * 1000)
@@ -215,9 +252,24 @@ export function upgradePartial(
       gaveUp.set(k, now + PARTIAL_TTL * 1000)
     } finally {
       upgrading.delete(k)
+      try { await rawColo().delete(lease) } catch { /* it expires (`LEASE_TTL`) */ }
     }
   })())
-  return 'scheduled'
+  return { upgrade: 'scheduled', retryAfterMs: UPGRADE_EXPECT_MS }
+}
+
+/** A partial answer's response with what its upgrade did: `x-cache-upgrade`, and while a run is on `Retry-After`
+ *  (whole seconds, rounded up), when the client asks again (`budgetCut.ts`). */
+export function withUpgrade(res: Response, u: UpgradeState): Response {
+  res.headers.set('x-cache-upgrade', u.upgrade)
+  if (u.retryAfterMs != null) res.headers.set('retry-after', String(Math.ceil(u.retryAfterMs / 1000)))
+  return res
+}
+
+/** A union answer's `Retry-After`: its members' latest, if any says one. */
+export function unionRetryAfter(reads: readonly Response[]): Record<string, string> {
+  const s = reads.map(r => Number(r.headers.get('retry-after'))).filter(n => n > 0)
+  return s.length ? { 'retry-after': String(Math.max(...s)) } : {}
 }
 
 /** Tests: forget the isolate's upgrade state. */

@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it } from 'vitest'
-import { CACHE_V, cacheEnvTag, cacheKeyFor, cacheMatch, cacheStore, keepFor, PARTIAL_TTL, resetUpgrades, upgradePartial } from './edgeCache'
+import { CACHE_V, cacheEnvTag, cacheKeyFor, cacheMatch, cacheStore, keepFor, LEASE_TTL, PARTIAL_TTL, resetUpgrades, unionRetryAfter, UPGRADE_EXPECT_MS, UPGRADE_LATE_MS, upgradeLease, upgradePartial, type UpgradeState, withUpgrade } from './edgeCache'
 
 // `cacheStore` keeps an answer in the colo cache and KV; a budget-cut answer (a filter view whose phase 2 its
 // time budget cut short) in the colo cache only, for `PARTIAL_TTL` seconds; `false`: served, not kept.
@@ -54,7 +54,8 @@ describe('cacheStore', () => {
   })
 })
 
-// `upgradePartial`: after a partial answer is served, the full one computed in the background replaces it.
+// `upgradePartial`: after a partial answer is served, the full one computed in the background replaces it; one run per
+// key across the colo's isolates (`upgradeLease`), and `Retry-After` from what is running.
 describe('upgradePartial', () => {
   const key = cacheKeyFor('subtree', '', 'd/p?q=heavy')
   const setup = () => {
@@ -62,6 +63,7 @@ describe('upgradePartial', () => {
     ;(globalThis as unknown as { caches: unknown }).caches = { default: {
       match: async (k: Request) => held.get(k.url)?.clone(),
       put: async (k: Request, r: Response) => { held.set(k.url, r) },
+      delete: async (k: Request) => held.delete(k.url),
     } }
     const kv: string[] = []
     const env = { CACHE_KV: { put: async (_k: string, v: string) => { kv.push(v) }, get: async () => null } as unknown as KVNamespace }
@@ -72,9 +74,16 @@ describe('upgradePartial', () => {
       const r = held.get(key.url)
       return r ? [r.headers.get('cache-control'), r.headers.get('x-cache-partial'), await r.clone().text()] : null
     }
-    return { env, kv, bg, waitUntil, entry }
+    /** The lease's colo entry: its cache-control and body (the run's start). */
+    const lease = async () => {
+      const r = held.get(upgradeLease(key).url)
+      return r ? [r.headers.get('cache-control'), await r.clone().text()] : null
+    }
+    return { env, kv, bg, waitUntil, entry, lease }
   }
   const PARTIAL = '{"budgetCut":true}', FULL = '{"tree":"all"}'
+  /** Another isolate: its own (empty) in-flight and gave-up state; the colo cache is the same. */
+  const otherIsolate = () => resetUpgrades()
   beforeEach(() => resetUpgrades())
 
   it('the full answer replaces the partial in the colo cache at the normal TTL (and goes to KV)', async () => {
@@ -82,63 +91,122 @@ describe('upgradePartial', () => {
     await cacheStore(env, key, PARTIAL, {}, undefined, keepFor({ interiors: { late: 2 } }))
     const before = await entry()
     const runs: number[] = []
-    const got = upgradePartial(env, key, async () => { runs.push(1); return { body: FULL, keep: true } }, waitUntil)
+    const got = await upgradePartial(env, key, async () => { runs.push(1); return { body: FULL, keep: true } }, waitUntil)
     await Promise.all(bg)
     const hit = (await cacheMatch(env, key))!
     expect([before, got, runs.length, await entry(), kv, hit.headers.get('x-cache-partial'), await hit.text()]).toEqual([
       ['public, s-maxage=120', 'ttl=120', PARTIAL],
-      'scheduled', 1,
+      { upgrade: 'scheduled', retryAfterMs: UPGRADE_EXPECT_MS }, 1,
       ['public, s-maxage=86400', null, FULL],
       [FULL],
       null, FULL,
     ])
   })
 
-  it('dedupe: concurrent partial hits while a run is in flight schedule nothing more; after it, a new one may', async () => {
+  it('dedupe: concurrent partial hits while a run is in flight schedule nothing more, and say when it should be done; after it, a new one may', async () => {
     const { env, bg, waitUntil } = setup()
     let release!: () => void
     const gate = new Promise<void>(r => { release = r })
     let runs = 0
     const compute = async () => { runs++; await gate; return { body: FULL, keep: true as const } }
-    const first = [upgradePartial(env, key, compute, waitUntil), upgradePartial(env, key, compute, waitUntil), upgradePartial(env, key, compute, waitUntil)]
-    const other = upgradePartial(env, cacheKeyFor('subtree', '', 'd/p?q=other'), async () => ({ body: FULL, keep: true }), waitUntil)
+    const t0 = 1_000_000
+    const first = [await upgradePartial(env, key, compute, waitUntil, t0), await upgradePartial(env, key, compute, waitUntil, t0 + 2000), await upgradePartial(env, key, compute, waitUntil, t0 + 6000)]
+    const other = await upgradePartial(env, cacheKeyFor('subtree', '', 'd/p?q=other'), async () => ({ body: FULL, keep: true }), waitUntil, t0)
     release()
     await Promise.all(bg)
-    const after = upgradePartial(env, key, compute, waitUntil)
+    const after = await upgradePartial(env, key, compute, waitUntil, t0 + 20_000)
     await Promise.all(bg)
-    expect([first, other, after, runs]).toEqual([['scheduled', 'in-flight', 'in-flight'], 'scheduled', 'scheduled', 2])
+    expect([first, other, after, runs]).toEqual([
+      [{ upgrade: 'scheduled', retryAfterMs: UPGRADE_EXPECT_MS }, { upgrade: 'in-flight', retryAfterMs: UPGRADE_EXPECT_MS - 2000 }, { upgrade: 'in-flight', retryAfterMs: UPGRADE_LATE_MS }],
+      { upgrade: 'scheduled', retryAfterMs: UPGRADE_EXPECT_MS },
+      { upgrade: 'scheduled', retryAfterMs: UPGRADE_EXPECT_MS },
+      2,
+    ])
   })
 
-  it('a background run cut short too: the partial stays, and no rerun until it would have expired', async () => {
-    const { env, bg, waitUntil, entry } = setup()
+  it('the colo lease: another isolate that finds a run on starts none and says when it should be done; once it ends, or past `LEASE_TTL`, one may', async () => {
+    const { env, bg, waitUntil, lease } = setup()
+    let release!: () => void
+    const gate = new Promise<void>(r => { release = r })
+    let runs = 0
+    const compute = async () => { runs++; await gate; return { body: FULL, keep: true as const } }
+    const t0 = 1_000_000
+    const first = await upgradePartial(env, key, compute, waitUntil, t0)
+    const during = await lease()
+    otherIsolate()
+    const followers = [await upgradePartial(env, key, compute, waitUntil, t0 + 1000), await upgradePartial(env, key, compute, waitUntil, t0 + 9000)]
+    const runsDuring = runs
+    release()
+    await Promise.all(bg)
+    const ended = await lease()
+    otherIsolate()
+    const next = await upgradePartial(env, key, async () => { runs++; return { body: FULL, keep: true } }, waitUntil, t0 + 20_000)
+    await Promise.all(bg)
+    // A lease its run never cleared (the isolate died with it) holds the others off only `LEASE_TTL`.
+    const t1 = 2_000_000
+    otherIsolate()
+    await upgradePartial(env, key, () => new Promise(() => {}), waitUntil, t1)
+    otherIsolate()
+    const stale = [await upgradePartial(env, key, compute, waitUntil, t1 + LEASE_TTL * 1000 - 1), await upgradePartial(env, key, async () => ({ body: FULL, keep: true }), waitUntil, t1 + LEASE_TTL * 1000)]
+    expect([first, during, followers, runsDuring, ended, next, runs, stale]).toEqual([
+      { upgrade: 'scheduled', retryAfterMs: UPGRADE_EXPECT_MS },
+      [`public, s-maxage=${LEASE_TTL}`, String(t0)],
+      [{ upgrade: 'leased', retryAfterMs: UPGRADE_EXPECT_MS - 1000 }, { upgrade: 'leased', retryAfterMs: UPGRADE_LATE_MS }],
+      1,
+      null,
+      { upgrade: 'scheduled', retryAfterMs: UPGRADE_EXPECT_MS },
+      2,
+      [{ upgrade: 'leased', retryAfterMs: UPGRADE_LATE_MS }, { upgrade: 'scheduled', retryAfterMs: UPGRADE_EXPECT_MS }],
+    ])
+  })
+
+  it('a background run cut short too: the partial stays, no rerun until it would have expired, and no `Retry-After` meanwhile', async () => {
+    const { env, bg, waitUntil, entry, lease } = setup()
     await cacheStore(env, key, PARTIAL, {}, undefined, keepFor({ interiors: { late: 2 } }))
     let runs = 0
     const cut = async () => { runs++; return { body: '{"budgetCut":true,"more":1}', keep: keepFor({ interiors: { late: 1 } }) } }
     const t0 = 1_000_000
-    const got = upgradePartial(env, key, cut, waitUntil, t0)
+    const got = await upgradePartial(env, key, cut, waitUntil, t0)
     await Promise.all(bg)
-    const again = [upgradePartial(env, key, cut, waitUntil, t0 + 1000), upgradePartial(env, key, cut, waitUntil, t0 + PARTIAL_TTL * 1000 - 1)]
-    const expired = upgradePartial(env, key, cut, waitUntil, t0 + PARTIAL_TTL * 1000)
+    const again = [await upgradePartial(env, key, cut, waitUntil, t0 + 1000), await upgradePartial(env, key, cut, waitUntil, t0 + PARTIAL_TTL * 1000 - 1)]
+    const expired = await upgradePartial(env, key, cut, waitUntil, t0 + PARTIAL_TTL * 1000)
     await Promise.all(bg)
-    expect([got, again, expired, runs, await entry()]).toEqual([
-      'scheduled', ['gave-up', 'gave-up'], 'scheduled', 2, ['public, s-maxage=120', 'ttl=120', PARTIAL],
+    expect([got, again, expired, runs, await entry(), await lease()]).toEqual([
+      { upgrade: 'scheduled', retryAfterMs: UPGRADE_EXPECT_MS },
+      [{ upgrade: 'gave-up' }, { upgrade: 'gave-up' }],
+      { upgrade: 'scheduled', retryAfterMs: UPGRADE_EXPECT_MS },
+      2,
+      ['public, s-maxage=120', 'ttl=120', PARTIAL],
+      null,
     ])
   })
 
   it('a background run that throws: the partial stays, no unhandled rejection, treated as cut short', async () => {
     const { env, bg, waitUntil, entry } = setup()
     await cacheStore(env, key, PARTIAL, {}, undefined, keepFor({ interiors: { late: 2 } }))
-    const got = upgradePartial(env, key, async () => { throw new Error('D1_ERROR') }, waitUntil, 0)
+    const got = await upgradePartial(env, key, async () => { throw new Error('D1_ERROR') }, waitUntil, 0)
     await Promise.all(bg)
-    expect([got, upgradePartial(env, key, async () => ({ body: FULL, keep: true }), waitUntil, 1), await entry()]).toEqual([
-      'scheduled', 'gave-up', ['public, s-maxage=120', 'ttl=120', PARTIAL],
+    expect([got, await upgradePartial(env, key, async () => ({ body: FULL, keep: true }), waitUntil, 1), await entry()]).toEqual([
+      { upgrade: 'scheduled', retryAfterMs: UPGRADE_EXPECT_MS }, { upgrade: 'gave-up' }, ['public, s-maxage=120', 'ttl=120', PARTIAL],
     ])
   })
 
-  it('without `waitUntil` nothing is scheduled', () => {
+  it('without `waitUntil` nothing is scheduled', async () => {
     const { env } = setup()
     let runs = 0
-    expect([upgradePartial(env, key, async () => { runs++; return { body: FULL, keep: true } }, undefined), runs]).toEqual(['no-waituntil', 0])
+    expect([await upgradePartial(env, key, async () => { runs++; return { body: FULL, keep: true } }, undefined), runs]).toEqual([{ upgrade: 'no-waituntil' }, 0])
+  })
+
+  it('`withUpgrade`: `x-cache-upgrade`, and `Retry-After` in whole seconds (up) only while a run is on', () => {
+    const h = (u: UpgradeState) => { const r = withUpgrade(new Response('{}'), u); return [r.headers.get('x-cache-upgrade'), r.headers.get('retry-after')] }
+    expect([h({ upgrade: 'scheduled', retryAfterMs: 7000 }), h({ upgrade: 'leased', retryAfterMs: 4001 }), h({ upgrade: 'gave-up' }), h({ upgrade: 'no-waituntil' })]).toEqual([
+      ['scheduled', '7'], ['leased', '5'], ['gave-up', null], ['no-waituntil', null],
+    ])
+  })
+
+  it('`unionRetryAfter`: the members\' latest; none when none says one', () => {
+    const r = (s?: string) => new Response('{}', { headers: s ? { 'retry-after': s } : {} })
+    expect([unionRetryAfter([r('3'), r(), r('7')]), unionRetryAfter([r(), r()])]).toEqual([{ 'retry-after': '7' }, {}])
   })
 })
 

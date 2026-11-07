@@ -20,7 +20,7 @@ import { hasExtras } from '../_lib/extras.js'
 import { ATTEN_DEFAULT, buildView, FILTER_VIEW_V, LensUnavailable, MIN_AREA_DEFAULT, NotFound, QUANT, readRootAgg, readRootRows, scopedTag, type ViewNode } from '../_lib/view.js'
 import { hexNote, hexQuery, indexedGate, staticTag } from '../_lib/staticFilter.js'
 import { FilterRejected, indexedOnly, pathTerms, rejectBody, rejectQuery, rejectScope } from '../_lib/indexedOnly.js'
-import { cacheEnvTag, cacheKeyFor, cacheMatch, cacheStore, isPartial, keepFor, serverTiming, UPGRADE_DETAIL_GROUPS, UPGRADE_DETAILS_MS, UPGRADE_PHASE2_MS, UPGRADE_SEARCH_LIMITS, upgradePartial } from '../_lib/edgeCache.js'
+import { cacheEnvTag, cacheKeyFor, cacheMatch, cacheStore, isPartial, keepFor, serverTiming, UPGRADE_DETAIL_GROUPS, UPGRADE_DETAILS_MS, UPGRADE_PHASE2_MS, UPGRADE_SEARCH_LIMITS, unionRetryAfter, upgradePartial, withUpgrade } from '../_lib/edgeCache.js'
 import type { SearchLimits } from '../_lib/search.js'
 import { LENS_PRIMARY_ONLY, storeKey, withStore } from '../_lib/stores.js'
 import { lensParam, ME_UNRESOLVED, resolveLens } from '../_lib/me.js'
@@ -245,21 +245,20 @@ async function subtreeGated(
       return { body, keep }
     }
     // A partial answer (phase 2 cut by its time budget) schedules the full one in the background, which
-    // replaces it in the colo cache (`upgradePartial`): on the miss that produced it, and on a partial hit.
-    const upgrade = (res: Response): Response => {
-      res.headers.set('x-cache-upgrade', upgradePartial(ctx.env, cacheKey, () => render({ phase2Ms: UPGRADE_PHASE2_MS, detailsWait: UPGRADE_DETAILS_MS, detailGroups: UPGRADE_DETAIL_GROUPS, searchLimits: UPGRADE_SEARCH_LIMITS }), ctx.waitUntil?.bind(ctx)))
-      return res
-    }
+    // replaces it in the colo cache (`upgradePartial`): on the miss that produced it, and on a partial hit. Its
+    // `Retry-After` says when that run should be done (`withUpgrade`).
+    const upgrade = async (res: Response): Promise<Response> =>
+      withUpgrade(res, await upgradePartial(ctx.env, cacheKey, () => render({ phase2Ms: UPGRADE_PHASE2_MS, detailsWait: UPGRADE_DETAILS_MS, detailGroups: UPGRADE_DETAIL_GROUPS, searchLimits: UPGRADE_SEARCH_LIMITS }), ctx.waitUntil?.bind(ctx)))
     const early1 = looked && await looked()
     const hit = early1 && early1.key.url === cacheKey.url ? early1.hit : await st.time('match', cacheMatch(ctx.env, cacheKey))
-    if (hit) return out(isPartial(hit) ? upgrade(hit) : hit)
+    if (hit) return out(isPartial(hit) ? await upgrade(hit) : hit)
 
     st.mark('fixed')
     const { body, keep } = await render({ trace: st.trace })
     // A phase 2 cut short by its time budget: kept briefly (`keepFor`), so a retry or a second viewer isn't
     // another full recompute; its totals and match counts are exact, only the drawn interiors partial.
     const res = await cacheStore(ctx.env, cacheKey, body, { 'server-timing': st.header() }, ctx.waitUntil?.bind(ctx), keep)
-    return out(keep === true ? res : upgrade(res))
+    return out(keep === true ? res : await upgrade(res))
   } catch (e) {
     const refused = ivRefusal(e)
     if (refused) return refused
@@ -281,11 +280,12 @@ async function subtreeGated(
 const UNION_ROOT_UNSCOPED = ['lens', 'o', 'by', 'cl'] as const
 
 /** A union answer's headers: as private as its members' answers; a member's uncacheable one (a budget-cut
- *  partial) makes it so. */
+ *  partial) makes it so, and its `Retry-After` the union's. */
 const unionHeaders = (reads: readonly Response[]): Record<string, string> => ({
   'content-type': 'application/json; charset=utf-8',
   'cache-control': reads.map(r => r.headers.get('cache-control')).find(c => c === 'no-store') ?? reads[0]?.headers.get('cache-control') ?? 'no-store',
   'x-cache': reads.map(r => r.headers.get('x-cache') ?? '-').join(','),
+  ...unionRetryAfter(reads),
 })
 
 type FilteredBody = FilteredRoot & { tier: string; index: string; nodes: number; truncated: boolean; budgetCut?: true }

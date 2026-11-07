@@ -49,7 +49,7 @@ import type { DayBand } from './dayBand'
 import { DEFAULT_SYNTAX, SYNTAXES, syntaxById } from './filterTree'
 import { fetchCover, matchedListOf, prefetchCover, rowCover, rowMatchesOf, useFilterCover } from './filterCover'
 import { HttpError } from './batches'
-import { budgetCutRefetch } from './budgetCut'
+import { budgetCutRefetch, noteRetryAfter } from './budgetCut'
 import type { RowSource } from './MatchActions'
 import { type MatchFields, seriesMatches } from './filterMatches'
 import { QueryHelpTip } from './QueryHelp'
@@ -473,14 +473,14 @@ function AppContent() {
     queryKey: ['subtree', store.key, cutKey, p, canW, scopeKey],
     staleTime: Infinity,
     // A budget-cut answer (`budgetCut`) is upgraded at the edge in the background: ask again until whole.
-    refetchInterval: (q: { state: { data?: { budgetCut?: boolean }; dataUpdateCount: number } }) => budgetCutRefetch(q.state.data, q.state.dataUpdateCount),
+    refetchInterval: (q: { queryHash: string; state: { data?: { budgetCut?: boolean }; dataUpdateCount: number } }) => budgetCutRefetch(q),
     // Retry transient failures, but not the deterministic ones (409: no
     // user index for this scan; 413: view too wide) — those surface as-is.
     retry: (n: number, e: Error) => !/^4\d\d/.test(e.message) && n < 3,
     retryDelay: (n: number) => 400 * 2 ** n,
     // With a filter the full read plans each match root's tier (`full=1`);
     // the companion below paints the coarsest-tier forest first.
-    queryFn: async ({ signal }: { signal?: AbortSignal }) => {
+    queryFn: async ({ signal, queryKey }: { signal?: AbortSignal; queryKey: readonly unknown[] }) => {
       const pf = perf.start('treemap', viewKey(p, asof, fq ? '|full' : ''), ['table'])
       const r = await pf.track(sfetch(
         `/api/subtree?cv=${API_CV}&${cutQs}&path=${encodeURIComponent(p)}&w=${canW}&h=${Math.round(canW * 0.6)}${scopeQs}${fq ? '&full=1' : ''}`,
@@ -489,6 +489,7 @@ function AppContent() {
       if (!r.ok) { pf.fail(); throw apiError(r.status, await r.text()) }
       const j = await r.json() as MatchFields & { tree: TreeNode; tier?: string; matches?: string[]; threshold?: number; partialReason?: string; approximateReason?: string; hexRuns?: { min: number; tail: number }; budgetCut?: true; union?: UnionVector }
       pf.decoded()
+      noteRetryAfter(queryKey, r.headers)
       return j
     },
   })
@@ -926,10 +927,10 @@ function AppContent() {
     // section holds its height and shows something before the detail.
     placeholderData: (prev: DiffData | undefined) => diffL1 ?? prev,
     staleTime: Infinity,
-    refetchInterval: q => budgetCutRefetch(q.state.data, q.state.dataUpdateCount),
+    refetchInterval: q => budgetCutRefetch(q),
     retry: (n: number, e: Error) => !/^4\d\d/.test(e.message) && n < 3,
     retryDelay: (n: number) => 400 * 2 ** n,
-    queryFn: async ({ signal }: { signal?: AbortSignal }) => {
+    queryFn: async ({ signal, queryKey }: { signal?: AbortSignal; queryKey: readonly unknown[] }) => {
       const pf = perf.start('dtm', viewKey(graftPath, `${diffPrev}→${asof}`), ['dtable'])
       const r = await pf.track(sfetch(
         `/api/diff?cv=${API_CV}&${diffQs}&path=${encodeURIComponent(diffPath)}&w=${canW}&h=${Math.round(canW * 0.6)}${scopeQs}&dm=${dmMode}`,
@@ -939,6 +940,7 @@ function AppContent() {
       const j = await r.json() as DiffData
       // No rows: the section says "no changes" and the map never mounts.
       if (j.rows.length) pf.decoded(); else pf.empty()
+      noteRetryAfter(queryKey, r.headers)
       return j
     },
   })

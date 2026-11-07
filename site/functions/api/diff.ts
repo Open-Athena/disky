@@ -21,7 +21,7 @@ import { classKey, parseClasses, parseOwner, queryParam, QueryError } from '../_
 import { ATTEN_DEFAULT, buildDiff, type DiffRow, FILTER_VIEW_V, LensUnavailable, MIN_AREA_DEFAULT, NotFound, QUANT, readRootAgg, scopedTag, WALK_V } from '../_lib/view.js'
 import { hexNote, hexQuery, indexedGate, staticTag } from '../_lib/staticFilter.js'
 import { FilterRejected, indexedOnly, pathTerms, rejectBody, rejectQuery, rejectScope } from '../_lib/indexedOnly.js'
-import { cacheEnvTag, cacheKeyFor, cacheMatch, cacheStore, isPartial, keepFor, serverTiming, UPGRADE_PHASE2_MS, UPGRADE_SEARCH_LIMITS, UPGRADE_WALK_MS, upgradePartial } from '../_lib/edgeCache.js'
+import { cacheEnvTag, cacheKeyFor, cacheMatch, cacheStore, isPartial, keepFor, serverTiming, UPGRADE_PHASE2_MS, UPGRADE_SEARCH_LIMITS, UPGRADE_WALK_MS, unionRetryAfter, upgradePartial, withUpgrade } from '../_lib/edgeCache.js'
 import type { SearchLimits } from '../_lib/search.js'
 import { LENS_PRIMARY_ONLY, storeKey, withStore } from '../_lib/stores.js'
 import { lensParam, ME_UNRESOLVED, resolveLens } from '../_lib/me.js'
@@ -210,20 +210,18 @@ async function diffGated(
       })
       return { body, keep }
     }
-    // A partial answer schedules the full one in the background (`upgradePartial`, as subtree.ts).
-    const upgrade = (res: Response): Response => {
-      res.headers.set('x-cache-upgrade', upgradePartial(ctx.env, cacheKey, () => render({ phase2Ms: UPGRADE_PHASE2_MS, searchLimits: UPGRADE_SEARCH_LIMITS, walkMs: UPGRADE_WALK_MS }), ctx.waitUntil?.bind(ctx)))
-      return res
-    }
+    // A partial answer schedules the full one in the background (`upgradePartial`, `withUpgrade`, as subtree.ts).
+    const upgrade = async (res: Response): Promise<Response> =>
+      withUpgrade(res, await upgradePartial(ctx.env, cacheKey, () => render({ phase2Ms: UPGRADE_PHASE2_MS, searchLimits: UPGRADE_SEARCH_LIMITS, walkMs: UPGRADE_WALK_MS }), ctx.waitUntil?.bind(ctx)))
     const looked = early1 && await early1()
     const hit = looked && looked.key.url === cacheKey.url ? looked.hit : await st.time('match', cacheMatch(ctx.env, cacheKey))
-    if (hit) return out(isPartial(hit) ? upgrade(hit) : hit)
+    if (hit) return out(isPartial(hit) ? await upgrade(hit) : hit)
 
     st.mark('fixed')
     const { body, keep } = await render({ trace: st.trace })
     // A phase 2 cut short by its time budget: kept briefly (`keepFor`, as subtree.ts).
     const res = await cacheStore(ctx.env, cacheKey, body, { 'server-timing': st.header() }, ctx.waitUntil?.bind(ctx), keep)
-    return out(keep === true ? res : upgrade(res))
+    return out(keep === true ? res : await upgrade(res))
   } catch (e) {
     const refused = ivRefusal(e)
     if (refused) return refused
@@ -355,6 +353,7 @@ async function unionDiff(ctx0: DiffCtx, view: UnionView): Promise<Response> {
       'content-type': 'application/json; charset=utf-8',
       'server-timing': `${unionTiming(pre, marks)}, members;dur=${Math.round(performance.now() - t0 - pre)}`,
       'cache-control': reads.map(r => r.headers.get('cache-control')).find(c => c === 'no-store') ?? reads[0]?.headers.get('cache-control') ?? 'no-store',
+      ...unionRetryAfter(reads),
     } })
   } catch (e) {
     const refused = ivRefusal(e)

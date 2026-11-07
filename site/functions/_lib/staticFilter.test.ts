@@ -546,6 +546,7 @@ describe('a budget-cut answer upgrades to the full one in the background (`upgra
     ;(globalThis as unknown as { caches: unknown }).caches = { default: {
       match: async (k: Request) => held.get(k.url)?.clone(),
       put: async (k: Request, r: Response) => { held.set(k.url, r) },
+      delete: async (k: Request) => held.delete(k.url),
     } }
     const bg: Promise<unknown>[] = []
     const env = envStatic()
@@ -557,10 +558,11 @@ describe('a budget-cut answer upgrades to the full one in the background (`upgra
     const restore = () => { spy.slowMs = 0; (globalThis as unknown as { caches: unknown }).caches = prev }
     return { env, bg, waitUntil: (p: Promise<unknown>) => { bg.push(p) }, restore }
   }
-  /** What a response says about its answer: cache tier, partial flag, upgrade, and the body's cut / interiors. */
+  /** What a response says about its answer: cache tier, partial flag, upgrade, when to ask again, and the body's cut /
+   *  interiors. */
   const said = async (r: Response) => {
     const b = await r.json() as { budgetCut?: true; interiors?: unknown }
-    return [r.headers.get('x-cache'), r.headers.get('x-cache-partial'), r.headers.get('x-cache-upgrade'), b.budgetCut ?? null, b.interiors ?? null]
+    return [r.headers.get('x-cache'), r.headers.get('x-cache-partial'), r.headers.get('x-cache-upgrade'), r.headers.get('retry-after'), b.budgetCut ?? null, b.interiors ?? null]
   }
 
   it('subtree: the miss serves the partial and schedules the run; a partial hit meanwhile is deduped; then the hit is whole', async () => {
@@ -575,10 +577,10 @@ describe('a budget-cut answer upgrades to the full one in the background (`upgra
       const body = await after.clone().json() as { tree: ViewNode }
       const full = await view(envStatic(), A, '', 'tomat')
       expect([miss, during, runs, await said(after), body.tree]).toEqual([
-        ['miss', 'ttl=120', 'scheduled', true, { read: 0, skipped: 3, reason: '3 past the time budget', late: 3 }],
-        ['hit', 'ttl=120', 'in-flight', true, { read: 0, skipped: 3, reason: '3 past the time budget', late: 3 }],
+        ['miss', 'ttl=120', 'scheduled', '7', true, { read: 0, skipped: 3, reason: '3 past the time budget', late: 3 }],
+        ['hit', 'ttl=120', 'in-flight', '7', true, { read: 0, skipped: 3, reason: '3 past the time budget', late: 3 }],
         2, // the miss's cache put, and the run
-        ['hit', null, null, null, null],
+        ['hit', null, null, null, null, null],
         JSON.parse(JSON.stringify(full.tree)),
       ])
     } finally { restore() }
@@ -593,10 +595,30 @@ describe('a budget-cut answer upgrades to the full one in the background (`upgra
       const missSaid = await said(miss)
       await Promise.all(bg)
       const after = await get()
-      expect([missSaid.slice(0, 4), await said(after)]).toEqual([
-        ['miss', 'ttl=120', 'scheduled', true],
-        ['hit', null, null, null, null],
+      expect([missSaid.slice(0, 5), await said(after)]).toEqual([
+        ['miss', 'ttl=120', 'scheduled', '7', true],
+        ['hit', null, null, null, null, null],
       ])
+    } finally { restore() }
+  })
+
+  it('another isolate meanwhile finds the colo lease: the same partial, when to ask, and no run of its own', async () => {
+    const { env, bg, waitUntil, restore } = harness()
+    const url = `http://localhost/api/subtree?date=${A}&path=&q=tomat&full=1&w=${W}&h=${H}&minArea=${MIN_AREA}&atten=${ATTEN}`
+    try {
+      const miss = await warmSubtree(env, url, waitUntil)
+      const missBody = await miss.clone().text()
+      const runs = bg.length
+      resetUpgrades() // the next request lands on another isolate
+      const other = await warmSubtree(env, url, waitUntil)
+      const otherBody = await other.clone().text()
+      expect([(await said(miss)).slice(2, 4), (await said(other)).slice(0, 4), bg.length - runs, otherBody === missBody]).toEqual([
+        ['scheduled', '7'],
+        ['hit', 'ttl=120', 'leased', '7'],
+        0,
+        true,
+      ])
+      await Promise.all(bg)
     } finally { restore() }
   })
 })
