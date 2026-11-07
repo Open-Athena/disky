@@ -46,6 +46,8 @@ VIEWER_DOMAINS = "openathena.ai"
 STAFF_DOMAIN = ""
 ADMIN_EMAILS = "1"
 DISKY_LABELS = "app=disky,deployment=oa-r2"
+# Activity posts (`_lib/activity.ts`): #r2-admin, with the production-only Pages secret `SLACK_BOT_TOKEN` (the dev stack has none, so it never posts)
+SLACK_ADMIN_CHANNEL = "C0C9U47KTM2"
 GCP_PROJECT = "oa-internal-450019"
 REPO_URL = "https://github.com/Open-Athena/disky"
 
