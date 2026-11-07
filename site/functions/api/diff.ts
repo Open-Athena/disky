@@ -21,13 +21,13 @@ import { classKey, parseClasses, parseOwner, queryParam, QueryError } from '../_
 import { ATTEN_DEFAULT, buildDiff, type DiffRow, FILTER_VIEW_V, LensUnavailable, MIN_AREA_DEFAULT, NotFound, QUANT, readRootAgg, scopedTag, WALK_V } from '../_lib/view.js'
 import { hexNote, hexQuery, indexedGate, staticTag } from '../_lib/staticFilter.js'
 import { FilterRejected, indexedOnly, pathTerms, rejectBody, rejectQuery, rejectScope } from '../_lib/indexedOnly.js'
-import { cacheEnvTag, cacheKeyFor, cacheMatch, cacheStore, isPartial, keepFor, serverTiming, UPGRADE_PHASE2_MS, UPGRADE_SEARCH_LIMITS, UPGRADE_WALK_MS, upgradePartial } from '../_lib/edgeCache.js'
+import { cacheEnvTag, cacheKeyFor, cacheMatch, cacheStore, cutReason, isPartial, keepFor, serverTiming, UPGRADE_PHASE2_MS, UPGRADE_SEARCH_LIMITS, UPGRADE_WALK_MS, upgradePartial } from '../_lib/edgeCache.js'
 import type { SearchLimits } from '../_lib/search.js'
 import { LENS_PRIMARY_ONLY, storeKey, withStore } from '../_lib/stores.js'
 import { lensParam, ME_UNRESOLVED, resolveLens } from '../_lib/me.js'
 import { isScanId } from '../../src/scanSlug.js'
 import { scanArg } from '../_lib/scanArg.js'
-import { ahead, loadScopes, traceJoins } from '../_lib/shared.js'
+import { ahead, HELD_BYTES, loadScopes, traceJoins } from '../_lib/shared.js'
 import { cutoffOf, type FilteredRoot, memberOf, memberRequest, membersAt, openUnion, type Refusal, refusalOf, refusalResponse, type Union, UnionOverlap, unionFilterFields, unionFor } from '../_lib/union.js'
 import { filterThreshold } from '../_lib/filter.js'
 import type { UnionView } from '../_lib/stores.js'
@@ -188,7 +188,7 @@ async function diffGated(
     const cacheKey = keyOf(head, g, lensTag, deltaOk)
     // …and both scans covered by the static index for this literal (else `scan-not-indexed`).
     if (query && indexedOnly(ctx.env)) {
-      const r = await st.time('indexed', indexedGate(ctx.env, query.ast, path, [from, to]))
+      const r = await st.time('indexed', indexedGate(ctx.env, query.ast, path, [from, to], { maxBytes: HELD_BYTES }))
       if (r) return new Response(rejectBody(r), { status: 400, headers: { 'content-type': 'application/json' } })
     }
     // The worker's answer: the diff's JSON and what to keep of it — `phase2Ms` (a background full run's) over
@@ -208,11 +208,11 @@ async function diffGated(
         threshold: Math.round(diff.threshold),
         ...(keep !== true ? { budgetCut: true } : {}),
       })
-      return { body, keep }
+      return { body, keep, cut: cutReason(diff) }
     }
     // A partial answer schedules the full one in the background (`upgradePartial`, as subtree.ts).
     const upgrade = (res: Response): Response => {
-      res.headers.set('x-cache-upgrade', upgradePartial(ctx.env, cacheKey, () => render({ phase2Ms: UPGRADE_PHASE2_MS, searchLimits: UPGRADE_SEARCH_LIMITS, walkMs: UPGRADE_WALK_MS }), ctx.waitUntil?.bind(ctx)))
+      res.headers.set('x-cache-upgrade', upgradePartial(ctx.env, cacheKey, trace => render({ phase2Ms: UPGRADE_PHASE2_MS, searchLimits: UPGRADE_SEARCH_LIMITS, walkMs: UPGRADE_WALK_MS, trace }), ctx.waitUntil?.bind(ctx)))
       return res
     }
     const looked = early1 && await early1()
