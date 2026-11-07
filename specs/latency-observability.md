@@ -389,3 +389,31 @@ Paired bursts, as the bound's: both codes on the same cold URLs and fresh group 
 
 Colo copies, for the deferred-copy decision: at that same concurrency, copies off takes wasm's read CPU from 5.0 to 2.9 s and wall from 6.9 to 4.9 s (JS: 16.9 to 14.6 s). A put costs about 20 ms, so copies go from about a seventh of a cold read's CPU to about two fifths.
 
+## A full read's peak memory (2026-11-07)
+
+What holds memory while one map read runs, for the reads a cold filtered page sends (a heavy literal: the fleet root's and a bucket's `full=1` views, the bucket's first paint and its background upgrade) and one plain root view. Two instruments over the same code:
+
+- **Node, on the real bytes:** `/api/subtree` run in Node (`bench/view-mem.ts`'s shape) against a recording of every R2 range and D1 read the reads made, fetched once through a probe alias's own bindings and replayed from disk. Live bytes after a full gc at phase hooks, heap snapshots summarized by dominator. Node has no pointer compression, so its heap reads up to about twice a Worker's: compare order, not size.
+- **Workers, by ballast:** each trial a cold isolate and colo namespace holding N MiB for its life; a phase hook can end the read there. The kill line was 245 MiB that day; a read's peak is that less the most ballast it survives (±4 MiB per bisect).
+
+| Read | Worker peak, whole read (MiB) | to phase 1 (static hits) | to phase 2 (interiors) | Node live max (MiB) | Node, colo copies off |
+|---|---|---|---|---|---|
+| bucket, `full=1` | 200–204 | 120–131 | 200–204 | 449 (phase 2) | 325 |
+| bucket, the upgrade's budgets | 204–208 | | | 543 (its run, after the response) | 295 |
+| fleet root, `full=1` | 151–154 (later runs: past 205) | 108–112 | | 300 (tree) | 149 |
+| fleet root, plain | 105–112 (three runs) | | | 158 (read) | 78 |
+
+What holds it, from the snapshots:
+
+1. **Colo copies in flight** (`putColoGroup`): half the Node live bytes at every peak. Each decoded group's copy held its whole JSON string, its encoded bytes, a gzip context and its output until the put landed, with no limit: 57–93 copies at once at the peaks, because decoding starves the copies' streams of turns. It scales with the groups a read decodes.
+2. **A heavy literal's phase 1, held per isolate:** its hits (99K roots for the bucket, two BigInts each), their aggregates per root, and the forest's sums per ancestor (`Phase1Memo`), with the static drill and tier indexes. These scale with the answer, sit outside every byte budget, and are what the Worker's phase-1 stop already holds (120–131 MiB with the baseline). Their colo copy is one `JSON.stringify` of every hit, so the miss that puts it briefly holds the string and its bytes as well.
+3. **Decoding:** `RUN_READS` runs of up to 2 MiB per read, each group's raw rows until shaped, per read and not per isolate, so overlapping reads multiply it. The scan's attribution sidecar (8 groups on the bucket view) decodes beside phase 2.
+4. The LRUs stayed under their estimates, and the response body (0.5–1.8 MB) is small.
+
+**Built, a candidate (`w/read-peak`):** colo copies run `COLO_PUT_SLOTS` (2) at once with `COLO_PUT_QUEUE` (8) queued (`Slots`), each serialized in slices (`jsonChunks` → `gzipChunks`, the same gzipped JSON); a read decoding faster than its copies land waits for a place instead of dropping one (the bound parked on 2026-11-06 skipped copies and paid for it on the second pass). Node: live max halved on every read above (449 → 305, 300 → 153, 158 → 83), all four answers byte-identical, CPU including the copies within −14 to +10%, response wall +13 to +60% (the copies now finish before it). Workers: the fleet root's filtered read fell 34 MiB in one paired run; the bucket's didn't move; the plain root rose 7–26 MiB across three pairs, and the same build's root read moved by 50 MiB within the hour. Not proven on Workers, so not proposed for a deployment yet.
+
+**Proposed bound, not built:** one isolate-wide budget for everything a read leaves behind (LRUs, held static answers, `Phase1Memo`, the drill and attribution maps), and per read a fixed set of slots: copies (above), decodes (an isolate-wide cap on groups decoding at once, so overlapping reads don't add up), and streamed copies of a heavy literal's hits. That bounds everything except phase 1 itself; making it constant needs hits held as columns of typed arrays, aggregated by subtree from the drill instead of whole, which is a bigger change. Re-measure with paired runs (each build in the same window, several bisects each), since one bisect moves more than the effect.
+
+## The re-ask lease waits (2026-11-07)
+
+The re-ask lease (`w/reask-retry-after`, `6c85269a`: one upgrade per key across a colo's isolates, `Retry-After` from it) is held. Background upgrades of a budget-cut answer die of memory about half the time after the response is sent (in a diagnostic, 33 started, 18 finished, 15 killed), and today's duplicate upgrades are how pages still reach a whole answer: a lease that removes the duplicates halved completeness (16 of 32 pages vs 32 of 32). Re-measure once a full read's peak is bounded (above).

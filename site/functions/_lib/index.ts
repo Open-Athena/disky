@@ -1980,17 +1980,117 @@ async function coloGroup(h: IndexHandle, rg: number): Promise<IvGroup | null> {
   return new IvGroup(h, d)
 }
 
-/** Put a group's decoded copy in the colo, best effort and not waited for (a read never waits on the cache). */
-function putColoGroup(h: IndexHandle, rg: number, d: GroupDoc): void {
-  const body = new Response(JSON.stringify(d)).body!.pipeThrough(new CompressionStream('gzip'))
-  // Buffered: the Cache API wants a known length.
-  const p: Promise<void> = new Response(body).arrayBuffer()
-    .then(buf => colo().put(groupColoKey(h, rg), new Response(buf, { headers: { 'content-type': 'application/octet-stream', 'cache-control': `max-age=${BLOB_CACHE_TTL}` } })))
-    .catch(() => {})
-    .finally(() => { coloPuts.delete(p) })
+/** Colo copies written at once, isolate-wide. Each holds a slice of its group's JSON, a gzip context and its
+ *  compressed bytes until the put lands; unbounded, a read's tens of decoded groups were as many copies in flight,
+ *  most of a full read's peak memory (`specs/latency-observability.md`, 2026-11-07). */
+export const COLO_PUT_SLOTS = 2
+/** Copies queued for a slot, each holding its decoded group (as a read holds the group it is decoding). Past this
+ *  many the read putting one waits for a place: a copy is never dropped. */
+export const COLO_PUT_QUEUE = 8
+/** Array elements serialized at once (`jsonChunks`): a few hundred KB of a group's path column. */
+const JSON_SLICE = 2048
+
+/** `JSON.stringify(x)` for an object whose values are arrays of JSON scalars, in pieces of at most `JSON_SLICE`
+ *  elements, never the whole string at once: the pieces concatenate to exactly `JSON.stringify(x)`. A nested array
+ *  (a `GroupDoc`'s `v`) is sliced the same way, per inner array. */
+export function* jsonChunks(x: Record<string, unknown[]>): Generator<string> {
+  let first = true
+  for (const [k, v] of Object.entries(x)) {
+    yield `${first ? '{' : ','}${JSON.stringify(k)}:`
+    first = false
+    yield* arrayChunks(v)
+  }
+  yield first ? '{}' : '}'
+}
+function* arrayChunks(v: unknown[]): Generator<string> {
+  if (!v.length) { yield '[]'; return }
+  const nested = Array.isArray(v[0])
+  for (let i = 0; i < v.length; i += nested ? 1 : JSON_SLICE) {
+    const pre = i === 0 ? '[' : ','
+    if (nested) {
+      yield pre
+      yield* arrayChunks(v[i] as unknown[])
+    } else yield `${pre}${JSON.stringify(v.slice(i, i + JSON_SLICE)).slice(1, -1)}`
+  }
+  yield ']'
+}
+
+/** `chunks` gzipped, written one piece at a time as the compressor takes them, buffered compressed (the Cache API
+ *  wants a known length). */
+export async function gzipChunks(chunks: Iterable<string>): Promise<ArrayBuffer> {
+  const cs = new CompressionStream('gzip')
+  const out = new Response(cs.readable).arrayBuffer()
+  const w = cs.writable.getWriter()
+  const enc = new TextEncoder()
+  try {
+    for (const c of chunks) {
+      await w.ready
+      void w.write(enc.encode(c)).catch(() => {})
+    }
+    await w.close()
+  } catch (e) {
+    await w.abort(e).catch(() => {})
+    out.catch(() => {})
+    throw e
+  }
+  return out
+}
+
+/** Jobs run `slots` at a time with at most `cap` more queued; past that, `add` waits for a place. What it holds
+ *  is bounded by construction: `slots` jobs' working sets, `cap` queued jobs' inputs, and each waiting caller's
+ *  own. `add` resolves once its job is running or queued, with the job's settlement (`done`); an isolate's clear
+ *  drops the queued jobs and those still waiting. */
+export class Slots {
+  private running = 0
+  private gen = 0
+  private readonly queue: (() => void)[] = []
+  private readonly waiting: (() => void)[] = []
+  /** Its registry entry (held here: the registry's reference is weak): an isolate's clear drops the queue and frees
+   *  every waiting caller. */
+  private readonly held: object
+  constructor(name: string, readonly slots: number, readonly cap: number) {
+    this.held = registerIsolate({ name, entries: () => this.queue.entries(), clear: () => this.clear() })
+  }
+  async add(job: () => Promise<void>, onWait?: () => void): Promise<{ done: Promise<void> }> {
+    const gen = this.gen
+    while (this.running >= this.slots && this.queue.length >= this.cap) {
+      onWait?.()
+      await new Promise<void>(r => this.waiting.push(r))
+      // Cleared while waiting: the job is dropped, as the queued ones were.
+      if (this.gen !== gen) return { done: Promise.resolve() }
+    }
+    let go!: () => void
+    const done = new Promise<void>(r => { go = r }).then(job).finally(() => {
+      this.running--
+      this.queue.shift()?.()
+      this.waiting.shift()?.()
+    })
+    const start = () => { this.running++; go() }
+    if (this.running < this.slots) start()
+    else this.queue.push(start)
+    return { done }
+  }
+  clear(): void {
+    this.gen++
+    this.queue.length = 0
+    for (const w of this.waiting.splice(0)) w()
+  }
+}
+
+const putSlots = new Slots('coloPutSlots', COLO_PUT_SLOTS, COLO_PUT_QUEUE)
+
+/** Put a group's decoded copy in the colo, best effort and never waited for once accepted: `COLO_PUT_SLOTS` at once,
+ *  each streamed (`jsonChunks` → `gzipChunks`), `COLO_PUT_QUEUE` more queued. A read decoding faster than its copies
+ *  land waits here for a place (traced `gput-wait`), so the copies it holds stay bounded and none is dropped. */
+async function putColoGroup(h: IndexHandle, rg: number, d: GroupDoc): Promise<void> {
+  const { done } = await putSlots.add(async () => {
+    const buf = await gzipChunks(jsonChunks(d as unknown as Record<string, unknown[]>))
+    await colo().put(groupColoKey(h, rg), new Response(buf, { headers: { 'content-type': 'application/octet-stream', 'cache-control': `max-age=${BLOB_CACHE_TTL}` } }))
+  }, () => h.trace?.('gput-wait', 1))
+  const p: Promise<void> = done.catch(() => {}).finally(() => { coloPuts.delete(p) })
   coloPuts.add(p)
 }
-/** Decoded row groups being put in the colo (`putColoGroup`). */
+/** Decoded row groups being put in the colo (`putColoGroup`), running or waiting for a slot. */
 const coloPuts = new IsoSet<Promise<void>>('coloPuts')
 /** Resolves once every colo put of a decoded row group started so far has landed (or failed). */
 export const coloPutsSettled = async (): Promise<void> => { await Promise.all([...coloPuts]) }
@@ -2224,7 +2324,7 @@ async function readGroupsCached<T>(h: IndexHandle, groups: { rg: number; json: s
         const all = new IvGroup(h, doc, doc ? undefined : raw.map(toRow(h)))
         take(g.i, g.rg, all, true)
         settle(ivGroupKey(h, g.rg), all)
-        if (h.dataKey && doc) putColoGroup(h, g.rg, doc)
+        if (h.dataKey && doc) await putColoGroup(h, g.rg, doc)
       }
     })
   } finally {
