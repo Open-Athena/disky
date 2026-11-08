@@ -133,7 +133,7 @@ def test_migration_preserves_level_support_present_only_on_newer_runs(tmp_path: 
     lv.backfill(store, 'old', tmp_path / 'level', threads=1, mem='2GB', rg_rows=4, runs_only=True)
     assert (root / 'interval-store/old/served/level.json').is_file() is False
     assert [p.relative_to(root).as_posix() for p in sorted(root.glob('interval-store/old/deltas/*/served/level.json'))] == [
-        'interval-store/old/deltas/2026-10-02_2026-10-02/served/level.json',
+        'interval-store/old/deltas/2026-10-02/served/level.json',
     ]
     pointer = store.read_bytes('interval-store/CURRENT.json')
     migrate(store, 'old', 'converted', tmp_path / 'migrate', threads=1, mem='2GB', rg_rows=4)
