@@ -23,3 +23,9 @@ Proposed resume window: seven days after a successfully published and verified r
 ## Gates
 
 The production age-reader release, complete primary checkpoint scan and version-aware history cutovers passed their independent verification gates; the newly pinned image is undergoing full primary/meta pipeline validation. Historical cleanup stays held until Ryan approves the concrete list. Enabling rolling cleanup is a distinct decision with the keep/proof/grace rules above; this file itself authorizes no apply, D1 mutation or deletion.
+
+## Prepared first age-retirement pass
+
+Both native histories caught up through the November 8 manual scans with full cell equality. The unchanged native retirement planners produced `tmp/cs3-age-retention-review.json` / `.md`: 2,910 exact histogram/sidecar keys totaling 1,961,120,020 bytes across the data and serving buckets (no execution). Their first copy clears only the corresponding covered primary/meta age footers in D1 before removing files. This list is separate from the 621-key historical review.
+
+If approved, the primary profile would use `retire: {keep: 2, execute: true, copies: [r2], layer1: true, cache: true}`; meta adds the same optional step beside `age-store`, explicitly keeping its `static_store` at `r2://oa-r2-usage-index` while its interval store stays under `/meta`. Both `age-store` entries keep their existing independent roots, memory limits and keep-two setting, changing only `execute` to true. Native string-version and published-history proofs stay mandatory, and inputs with missing proofs stay. This paragraph is a proposed configuration, not an applied one. Nextflow retention and access aggregate deletion remain separate, unimplemented policies.
