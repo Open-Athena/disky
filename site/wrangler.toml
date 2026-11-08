@@ -24,7 +24,7 @@ enabled = true
 [vars]
 STORE = "oa-r2"
 STORES_EXTRA = "meta"
-STORES_JSON = '{"meta":{"path":"/meta","vars":{"ROOT_LABEL":"OA R2 disky metadata","SNAPSHOTS_SUBDIR":"meta","STORE_SCHEME":"r2://","STORE_BUCKETS":"oa-r2-usage-data,oa-r2-usage-index","STORE_PREFIXES":"meta-l2/,snapshots/meta/","STORE_BUCKET":"oa-r2-usage-index","STORE_REGION":"auto","ROOT_TITLE":"This deployment’s scan archive and serving indexes","STATIC_CURRENT_KEY":"static-names/meta-CURRENT.json","FILTER_STATIC_HEAVY":"1","PATH_STORE":"intervals","INTERVAL_STORE_PREFIX":"meta/interval-store"},"secrets":{"STORE_ENDPOINT":"STORE_ENDPOINT","STORE_ACCESS_KEY_ID":"STORE_ACCESS_KEY_ID","STORE_SECRET_ACCESS_KEY":"STORE_SECRET_ACCESS_KEY"}},"all":{"union":["primary","meta"],"main":true,"sources":{"primary":{"label":"R2 buckets","icon":"/icons/r2.svg"},"meta":{"label":"Scan metadata","icon":"/icons/meta.svg"}}}}'
+STORES_JSON = '{"meta":{"path":"/meta","vars":{"ROOT_LABEL":"OA R2 disky metadata","SNAPSHOTS_SUBDIR":"meta","STORE_SCHEME":"r2://","STORE_BUCKETS":"oa-r2-usage-data,oa-r2-usage-index","STORE_PREFIXES":"meta-l2/,snapshots/meta/","STORE_BUCKET":"oa-r2-usage-index","STORE_REGION":"auto","ROOT_TITLE":"This deployment\u2019s scan archive and serving indexes","STATIC_CURRENT_KEY":"static-names/meta-CURRENT.json","FILTER_STATIC_HEAVY":"1","PATH_STORE":"intervals","INTERVAL_STORE_PREFIX":"meta/interval-store","AGE_STORE_PREFIX":"history/meta-age"},"secrets":{"STORE_ENDPOINT":"STORE_ENDPOINT","STORE_ACCESS_KEY_ID":"STORE_ACCESS_KEY_ID","STORE_SECRET_ACCESS_KEY":"STORE_SECRET_ACCESS_KEY"}},"all":{"union":["primary","meta"],"main":true,"sources":{"primary":{"label":"R2 buckets","icon":"/icons/r2.svg"},"meta":{"label":"Scan metadata","icon":"/icons/meta.svg"}}}}'
 META_TREE_URL = "https://r2.oa.dev/meta"
 AUTH_MODE = "app"
 ROOT_LABEL = "Open Athena R2"
@@ -59,6 +59,7 @@ FILTER_STATIC = "1"
 STATIC_CURRENT_KEY = "static-names/primary-CURRENT.json"
 FILTER_STATIC_HEAVY = "1"
 PATH_STORE = "intervals"
+AGE_STORE_PREFIX = "history/primary-age"
 CF_ACCOUNT_ID = "74981a43be0de7712369306c7b19133d"
 CF_PAGES_SCRIPT = "pages-worker--21097822"   # the project's Functions scripts in the analytics datasets: `<this>-production` / `-preview` (`dt-cloud cf-usage`; the Pages API's `production_script_name`)
 
@@ -71,7 +72,7 @@ bucket_name = "oa-r2-usage-index"
 # SESSION_SECRET, a sign-in transport, and STORE_ENDPOINT / STORE_ACCESS_KEY_ID /
 # STORE_SECRET_ACCESS_KEY from the index-reader token, not the publisher token.
 
-# Dev age-history pilot; production remains on per-scan histograms until parity and latency gates pass.
+# Dev shares the verified age histories; its progressive diff pilot remains independent.
 [env.preview.vars]
 STORE = "oa-r2"
 STORES_EXTRA = "meta"

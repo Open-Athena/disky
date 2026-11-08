@@ -4,14 +4,20 @@ Status: 2026-11-08. CS3 is the primary deployment priority; the deployment has n
 
 ## Current work
 
-- Shared `r/cloud` through `0a41e942` is merged as `5126d1de`; CI is running. This includes bounded static-compaction group caching and the common Pages/auth package. It is not deployed yet.
+- Shared `r/cloud` through `0a41e942` is merged as `5126d1de`; Full CI passed. This includes bounded static-compaction group caching and the common Pages/auth package. Dev is deployed; production rollout is pending the age-reader configuration gate.
 - Primary and meta path histories are live, each following its own current pointer; meta's November 3 cutover passed exact-answer comparisons and a cold/warm benchmark. Both static lineages have independent current pointers. Primary per-scan path-sort retirement is executing.
 - The November 7 manual primary scan (`2026-11-07T1944`, image `nf-e277fe1c`) succeeded, with the serving probe at 16/16. The four D1 recipes applied November 7 were verified against the live schema and removed in `7b753e48`; CI passed.
 - The access collector's November 8 00:13 UTC run collected through November 7 22:00 UTC, its configured settling lag: zero waiting windows, gaps or errors, 128/400 pages used. It holds 1,728 active and 3,844 frozen windows. The cap/window repairs below are deployed; do not repeat their old plans.
-- Access processing still reads all historical aggregates per scan. [The read-checkpoint implementation] makes that incremental; archive deletion and collector bookkeeping retirement remain held.
+- The incremental read checkpoint passed full-history parity and its bounded steady update; both daily scheduler images now include it, with a full primary pipeline validation running. [The read-checkpoint implementation] records the measurements; archive deletion and collector bookkeeping retirement remain held.
 - Remaining storage work: raw primary/meta listings, age histories and their covered source pyramids, meta per-scan indexes, superseded history generations, and Nextflow work/reports. Use exact inventories, coverage/parity checks and explicit deletion plans. The meta profile also still skips its own warm-up and serving probe.
 - Read-only GCS inventory at November 8 00:45 UTC: 16,462,884,250 bytes / 12,483 objects, including 13,316,717,852 bytes under `listing/`, 1,899,324,689 bytes in the fixed retirement backup, and 171,693,686 bytes / 7,790 objects under `nf/`. Across archive locations, per-scan age pyramid files account for 1,062,565,580 bytes. Inventory and summaries: `tmp/cs3-data-inventory.json`, `tmp/cs3-data-summary.json`. These are live-object sizes, not soft-deleted storage billing.
 - Raw-listing retirement also needs string object-version proof: footer audit confirms recent meta listings carry non-null `version` tokens. The old guard checked numeric `generation` only. The shared fix holds string-bearing shards unless their passing marker explicitly compared the `version` column; new append/manual verification markers name that column. Old numeric markers do not authorize string-token retirement. No raw listings were deleted during this audit.
+
+## November 8 candidates and review
+
+Native age history builds passed every cell comparison for all 59 primary scans and 31 meta scans. Dev reader deployment `cd7d2ce4` passed 14 exact API comparisons against fresh baseline deployment `2b8ea4b5`: median first request 535 → 363 ms, median repeated request 416 → 153 ms; mean first request 616 → 637 ms due to two cold starts. Artifacts: `tmp/cs3-age-before.json`, `tmp/cs3-age-after.json`. The production configuration is prepared; no source pyramids are deleted and pipeline age cleanup remains held.
+
+The exact cleanup proposal in `tmp/cs3-cleanup-review.md` contains 621 keys / 7,946,358,883 bytes, checked against native dry-run counts. Nothing has been deleted. It preserves current and rollback static roots, the two newest primary scans, age files, the fixed retirement backup and all raw shards with unproved string identities. Execution needs Ryan's exact-key review. The raw retirement guard now handles string versions, empty shards and churn-backfill lineage.
 
 ## Historical audit (October 22)
 
