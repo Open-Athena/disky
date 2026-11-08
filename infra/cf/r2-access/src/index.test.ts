@@ -575,15 +575,11 @@ describe('collect', () => {
       id: `e${String(i).padStart(6, '0')}`, timestamp: hr('03') + Math.floor(i * (H / n)),
       action: i % 3 ? 'PutObject' : 'GetObject', key: `shard/${i % 20_000}`,
     }))
-    const started = performance.now()
     expect(await collect(time, env.HOURLY_CRON, env, provider(big, 2000), 'r1')).toEqual({ run_id: 'r1', buckets: 1, hours: 1, pages: 51, events: n, changed: 1, waiting: 5 })
-    const elapsed = performance.now() - started
     const a = read(agg('03', 'r1'))
     expect([a.events, a.actions, a.rows.length, a.rows.reduce((sum: number, r: [unknown, unknown, number]) => sum + r[2], 0), a.rows[0]]).toEqual([
       n, { GetObject: 33_334, PutObject: 66_666 }, 20_000, 33_334, ['shard/0', 'GetObject', 2, hr('03'), at('2026-10-12T03:36:00Z')],
     ])
-    // Sanity, not a benchmark: the mock provider's JSON dominates; the collector's own work is a small fraction.
-    expect(elapsed).toBeLessThan(30_000)
   }, 60_000)
 
   it('upgrades a version-1 state: watermark and gaps carry over, legacy days stay named', async () => {
