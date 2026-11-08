@@ -15,7 +15,7 @@ Status: 2026-11-08. CS3 is the primary deployment priority; the deployment has n
 
 ## November 8 candidates and review
 
-Native age history builds passed every cell comparison for all 59 primary scans and 31 meta scans. Dev reader deployment `cd7d2ce4` passed 14 exact API comparisons against fresh baseline deployment `2b8ea4b5`: median first request 535 → 363 ms, median repeated request 416 → 153 ms; mean first request 616 → 637 ms due to two cold starts. Artifacts: `tmp/cs3-age-before.json`, `tmp/cs3-age-after.json`. The production configuration is prepared; no source pyramids are deleted and pipeline age cleanup remains held.
+Native age history builds passed every cell comparison for all 59 primary scans and 31 meta scans. Dev reader deployment `cd7d2ce4` passed 14 exact API comparisons against fresh baseline deployment `2b8ea4b5`: median first request 535 → 363 ms, median repeated request 416 → 153 ms; mean first request 616 → 637 ms due to two cold starts. Artifacts: `tmp/cs3-age-before.json`, `tmp/cs3-age-after.json`. The production age reader is deployed as `0728de95` / Pages `bc917fd7`; its post-deploy exact API check is running. No source pyramids are deleted and pipeline age cleanup remains held.
 
 The exact cleanup proposal in `tmp/cs3-cleanup-review.md` contains 621 keys / 7,946,358,883 bytes, checked against native dry-run counts. Nothing has been deleted. It preserves current and rollback static roots, the two newest primary scans, age files, the fixed retirement backup and all raw shards with unproved string identities. Execution needs Ryan's exact-key review. The raw retirement guard now handles string versions, empty shards and churn-backfill lineage.
 
@@ -70,3 +70,11 @@ The initial sample was about 80K requests/hour and 1.7 GB/day of raw JSON. The O
 [deployment]: r2-deployment.md
 [access compaction]: r2-access-compaction.md
 [The read-checkpoint implementation]: r2-read-checkpoint.md
+
+## Version-aware staging rollout
+
+The direct path-index builder needed opt-in opaque token support (`dc1c3962`, `-V`). Its canonical adapter preserves ETags and exact decimal GCS generations; directory tokens stay NULL. Both sorts and sharded/single-pass bytes passed 33 focused tests on each of Python 3.12/3.13. Native primary/meta migrations wrote separate candidates `2026-11-08r2v` / `2026-11-08metav`, preserving unknown historical tokens and leaving CURRENT unchanged. A primary candidate catch-up targets the manual scan with merging, compaction and pruning disabled.
+
+Both profiles are prepared to use `-V`; meta also uses lean path-only staging (`-O`), as primary already does. These options are not in the scheduled image yet. The pilot configuration remains available at pinned `6c709d6c` for dev-only reader comparisons; the final configuration follows CURRENT on both prod and dev. Do not pin a new image or move CURRENT until candidate answer/latency checks pass. [The ongoing retention proposal] separates remaining policy decisions from this additive rollout.
+
+[The ongoing retention proposal]: r2-cs3-retention-policy.md
