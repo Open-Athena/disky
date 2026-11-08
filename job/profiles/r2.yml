@@ -37,7 +37,7 @@ skip: [bucket-check, index-gc, over-time]
 # (specs/lean-scans.md §2): each run deletes the `path` sort of every scan but the newest once both stores hold it;
 # `cf-usage`: the Cloudflare usage snapshot (`snapshots/usage/<date>.json`, `/admin/usage`); `gcp-cost`: the day's GCP
 # cost snapshot (`/admin/cost/gcp`); both never fatal
-steps: [access-r2, retire, cf-usage, gcp-cost]
+steps: [access-r2, age-store, retire, cf-usage, gcp-cost]
 secrets:
   R2_ACCESS_KEY_ID: oa-r2-index-access-key-id
   R2_SECRET_ACCESS_KEY: oa-r2-index-secret-access-key
@@ -85,6 +85,8 @@ options:
   static-names: {gen: 2026-10-15r2b, current_key: static-names/primary-CURRENT.json, mem: 12GB, build_args: [-x, "16,8"]}
   publish-r2: {args: [-S]}
   interval-store: {mem: 12GB, source: data}
+  # Append and compare every histogram cell; source retirement stays a dry run pending its policy review.
+  age-store: {store: "r2://oa-r2-usage-index/history/primary-age", gen: 2026-11-08age, keep: 2, execute: false, copies: ["r2://oa-r2-usage-index"], mem: 8GB, threads: 4}
   index-sync:
     variants: [age-pyramid-1h, age-pyramid-3h, age-pyramid-6h, age-pyramid-12h, age-pyramid-1d, age-pyramid-2d, age-pyramid-4d, age-pyramid-8d]
   # the data store's per-scan sorts (the "pending" copy each append reads), then the R2 copy (`$R2_ARCHIVE`: the
