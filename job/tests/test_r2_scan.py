@@ -50,6 +50,23 @@ def test_maintenance_task_requires_command() -> None:
         module["maintenance_spec"](image, (), config, ())
 
 
+def test_maintenance_task_forwards_nested_options_verbatim(monkeypatch, tmp_path: Path) -> None:
+    from click.testing import CliRunner
+
+    callback = module['task'].callback
+    monkeypatch.setitem(callback.__globals__, 'HERE', tmp_path / 'job')
+    monkeypatch.setitem(callback.__globals__, 'profile', lambda: config)
+    command = ['dt-cloud', 'age-store', '-s', 'r2://own', '-g', 'new', '-n', 'nested-value']
+    result = CliRunner().invoke(module['task'], ['-N', '-n', 'oa-r2-maint-options', image, *command], catch_exceptions=False)
+    assert result.exit_code == 0
+    planned = loads(result.stdout)
+    task = planned['taskGroups'][0]['taskSpec']
+    assert task['environment']['secretVariables'] == {}
+    assert task['runnables'][0]['container']['commands'] == command[1:]
+    assert task['runnables'][0]['container']['entrypoint'] == command[0]
+    assert loads((tmp_path / 'tmp/oa-r2-maint-options.json').read_text()) == planned
+
+
 @pytest.fixture(autouse=True)
 def batch_identity(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setenv("OA_R2_JOB_NAME", "oa-r2-scan-test")

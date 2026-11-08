@@ -430,7 +430,7 @@ def maintenance_spec(image: str, command: tuple[str, ...], config: dict, secrets
     return planned
 
 
-@main.command('task', context_settings={'ignore_unknown_options': True})
+@main.command('task', context_settings={'allow_interspersed_args': False, 'ignore_unknown_options': True})
 @option('-N', '--dry-run', is_flag=True, help='Write and print the job plan; submit nothing')
 @option('-n', '--name', required=True, help='New job name, starting oa-r2-maint-')
 @option('-s', '--secret', 'secrets', multiple=True, help='Profile secret ENV or TARGET=PROFILE_ENV; default: no secrets')
