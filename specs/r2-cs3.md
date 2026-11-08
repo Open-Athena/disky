@@ -1,6 +1,19 @@
 # OA R2: constant-size steady state (CS3)
 
-Status: 2026-10-22. Lean primary path-sort retention is deployed; the deployment as a whole has not reached CS3. CS3 means bounded redundant/rebuildable storage for a fixed source workload. Exact historical versions still grow with changes; retaining unlimited history cannot promise a fixed total byte count.
+Status: 2026-11-08. CS3 is the primary deployment priority; the deployment has not reached it. CS3 means bounded redundant/rebuildable storage for a fixed source workload. Exact historical versions still grow with changes; retaining unlimited history cannot promise a fixed total byte count.
+
+## Current work
+
+- Shared `r/cloud` through `0a41e942` is merged as `5126d1de`; CI is running. This includes bounded static-compaction group caching and the common Pages/auth package. It is not deployed yet.
+- Primary and meta path histories are live, each following its own current pointer; meta's November 3 cutover passed exact-answer comparisons and a cold/warm benchmark. Both static lineages have independent current pointers. Primary per-scan path-sort retirement is executing.
+- The November 7 manual primary scan (`2026-11-07T1944`, image `nf-e277fe1c`) succeeded, with the serving probe at 16/16. The four D1 recipes applied November 7 were verified against the live schema and removed in `7b753e48`; CI passed.
+- The access collector's November 8 00:13 UTC run collected through November 7 22:00 UTC, its configured settling lag: zero waiting windows, gaps or errors, 128/400 pages used. It holds 1,728 active and 3,844 frozen windows. The cap/window repairs below are deployed; do not repeat their old plans.
+- Access processing still reads all historical aggregates per scan. [The read-checkpoint implementation] makes that incremental; archive deletion and collector bookkeeping retirement remain held.
+- Remaining storage work: raw primary/meta listings, age histories and their covered source pyramids, meta per-scan indexes, superseded history generations, and Nextflow work/reports. Use exact inventories, coverage/parity checks and explicit deletion plans. The meta profile also still skips its own warm-up and serving probe.
+
+## Historical audit (October 22)
+
+The observations and rollout plans below are retained as historical evidence, not current pending actions.
 
 ## Observed pipeline state
 
@@ -48,3 +61,4 @@ The initial sample was about 80K requests/hour and 1.7 GB/day of raw JSON. The O
 [Lean scans]: lean-scans.md
 [deployment]: r2-deployment.md
 [access compaction]: r2-access-compaction.md
+[The read-checkpoint implementation]: r2-read-checkpoint.md
