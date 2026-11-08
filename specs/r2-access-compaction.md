@@ -1,5 +1,7 @@
 # R2 access aggregates: compaction
 
+Current status, 2026-11-08: the collector is healthy after the windowed rollout (zero waiting windows, gaps or errors at 00:13 UTC). The incremental consumer is implemented in `dt-cloud access r2-sync`; see [r2-read-checkpoint.md]. Its single Parquet checkpoint replaces the daily/monthly rollup proposal below: cumulative closed per-key read statistics plus a bounded, freshly read active set. This bounds elapsed-window overhead under a fixed read-key workload. Bootstrap and unchanged-update parity tests are in CI; real-data comparison and profile enablement are pending. The collector's frozen map and old archive aggregates still grow, and no history retirement is authorized by this implementation. Steps 2–4 below describe the older proposal, not deployed behavior.
+
 Status: 2026-10-22. Steps 1 and 5 are live on OA (seven-day raw lifecycle verified October 20; read-only per-key aggregates deployed). The OA scan consumes the private archive through `access-r2` in `job/profiles/r2.yml`. Steps 2–4 remain proposed. Compact IDs deployed October 21 at 22:59 UTC; bounded JSON hashing/upload deployed October 22 around 00:42 UTC, both with Ryan's go. The collector cleared the original ~709K-request hour, but the next hour has ~4.17M estimated requests and cannot fit the 400-page budget. Five-minute resumable windows (`WINDOW_MINUTES=5`) and the compatible reader image went live October 22 at 11:41 UTC (Ryan's go). The first windowed run (12:13) advanced the watermark from 19:00 to 19:15 on October 19 (252 of 400 pages). The 13:13 run failed `provider_http_403` and published nothing. Recovery is not yet established. See [r2-cs3.md]. Follows [r2-access-logging.md] (the collector, `infra/cf/r2-access`).
 
 ## Why
@@ -91,3 +93,4 @@ GCS's access pipeline (usage-log CSVs → layer-2a) has its own retention (`usag
 
 [r2-access-logging.md]: r2-access-logging.md
 [r2-cs3.md]: r2-cs3.md
+[r2-read-checkpoint.md]: r2-read-checkpoint.md
