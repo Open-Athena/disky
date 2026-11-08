@@ -70,3 +70,58 @@ bucket_name = "oa-r2-usage-index"
 # Required private secrets before deployment:
 # SESSION_SECRET, a sign-in transport, and STORE_ENDPOINT / STORE_ACCESS_KEY_ID /
 # STORE_SECRET_ACCESS_KEY from the index-reader token, not the publisher token.
+
+# Dev age-history pilot; production remains on per-scan histograms until parity and latency gates pass.
+[env.preview.vars]
+STORE = "oa-r2"
+STORES_EXTRA = "meta"
+STORES_JSON = "{\"meta\":{\"path\":\"/meta\",\"vars\":{\"ROOT_LABEL\":\"OA R2 disky metadata\",\"SNAPSHOTS_SUBDIR\":\"meta\",\"STORE_SCHEME\":\"r2://\",\"STORE_BUCKETS\":\"oa-r2-usage-data,oa-r2-usage-index\",\"STORE_PREFIXES\":\"meta-l2/,snapshots/meta/\",\"STORE_BUCKET\":\"oa-r2-usage-index\",\"STORE_REGION\":\"auto\",\"ROOT_TITLE\":\"This deployment’s scan archive and serving indexes\",\"STATIC_CURRENT_KEY\":\"static-names/meta-CURRENT.json\",\"FILTER_STATIC_HEAVY\":\"1\",\"PATH_STORE\":\"intervals\",\"INTERVAL_STORE_PREFIX\":\"meta/interval-store\",\"AGE_STORE_PREFIX\":\"history/meta-age\"},\"secrets\":{\"STORE_ENDPOINT\":\"STORE_ENDPOINT\",\"STORE_ACCESS_KEY_ID\":\"STORE_ACCESS_KEY_ID\",\"STORE_SECRET_ACCESS_KEY\":\"STORE_SECRET_ACCESS_KEY\"}},\"all\":{\"union\":[\"primary\",\"meta\"],\"main\":true,\"sources\":{\"primary\":{\"label\":\"R2 buckets\",\"icon\":\"/icons/r2.svg\"},\"meta\":{\"label\":\"Scan metadata\",\"icon\":\"/icons/meta.svg\"}}}}"
+META_TREE_URL = "https://r2.oa.dev/meta"
+AUTH_MODE = "app"
+ROOT_LABEL = "Open Athena R2"
+MARK = "r2"
+OG_DEFAULT_COLOR = "w"
+OG_CARDS = "1"
+OG_ANONYMOUS = "full"
+BASE_SCOPE = "oa-r2"
+STORE_SCHEME = "r2://"
+STORE_BUCKETS = "marin-na,marin-discord,oa-cw-s3-usage-index,oa-gcs-usage-index"
+STORE_BUCKET = "oa-r2-usage-index"
+STORE_REGION = "auto"
+STORE_PREFIXES = "listing/,snapshots/r2/"
+SNAPSHOTS_SUBDIR = "r2"
+FILTER_INDEXED_ONLY = "1"
+PROD_HOST = "r2.oa.dev"
+DEV_HOST = "dev.r2.oa.dev"
+VIEWER_DOMAINS = "openathena.ai"
+STAFF_DOMAIN = ""
+ADMIN_EMAILS = "1"
+DISKY_LABELS = "app=disky,deployment=oa-r2"
+SLACK_ADMIN_CHANNEL = "C0C9U47KTM2"
+GCP_PROJECT = "oa-internal-450019"
+REPO_URL = "https://github.com/Open-Athena/disky"
+FILTER_STATIC = "1"
+STATIC_CURRENT_KEY = "static-names/primary-CURRENT.json"
+FILTER_STATIC_HEAVY = "1"
+PATH_STORE = "intervals"
+CF_ACCOUNT_ID = "74981a43be0de7712369306c7b19133d"
+CF_PAGES_SCRIPT = "pages-worker--21097822"
+AGE_STORE_PREFIX = "history/primary-age"
+DIFF_DESCENT = "1"
+
+[[env.preview.kv_namespaces]]
+binding = "CACHE_KV"
+id = "30572c48b81a4950883ff11f1d9a5c59"
+
+[[env.preview.d1_databases]]
+binding = "DB"
+database_name = "oa-r2-usage-db"
+database_id = "3bd87725-4f09-4316-877c-d089563a992e"
+
+[[env.preview.r2_buckets]]
+binding = "INDEX_R2"
+bucket_name = "oa-r2-usage-index"
+
+[[env.preview.analytics_engine_datasets]]
+binding = "USAGE"
+dataset = "disky_usage_r2"
