@@ -70,6 +70,10 @@ options:
   # oa-r2-access-logs since 2026-10-18), cut at the scan → `access/r2/agg.parquet`, the index's `-x`
   access-r2:
     state: r2://oa-r2-access-logs/state.json
+    # Ship this profile only after the new checkpoint's full-history bootstrap comparison passes.
+    checkpoint: gs://oa-r2-usage-data/access/r2/closed.parquet
+    mem: 2GB
+    threads: 2
     secrets: {AWS_ACCESS_KEY_ID: oa-r2-source-access-key-id, AWS_SECRET_ACCESS_KEY: oa-r2-source-secret-access-key}
   # Lean scans (specs/lean-scans.md §1.1): the `path` sort alone (`-O`), in the data store only; both stores append from
   # there (`static-names` always reads the data store, `interval-store` with `source: data`); R2 gets the snapshot JSONs
