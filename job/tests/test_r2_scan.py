@@ -13,6 +13,43 @@ config = module["profile"]()
 image = "us-west1-docker.pkg.dev/oa-internal-450019/oa-r2-usage/scan@sha256:" + "a" * 64
 
 
+def test_maintenance_task_has_no_secrets_by_default() -> None:
+    planned = module["maintenance_spec"](image, ("dt-cloud", "image-sha"), config, ())
+    task = planned["taskGroups"][0]["taskSpec"]
+    assert task["environment"]["secretVariables"] == {}
+    assert task["runnables"][0]["container"] == {
+        "imageUri": image,
+        "volumes": ["/mnt/disks/r2-stage:/stage"],
+        "entrypoint": "dt-cloud",
+        "commands": ["image-sha"],
+    }
+    labels = {"app": "disky", "deployment": "oa-r2", "component": "maintenance"}
+    assert planned["labels"] == labels
+    assert planned["allocationPolicy"]["labels"] == labels
+    assert task["environment"]["variables"]["DISKY_LABELS"] == "app=disky,deployment=oa-r2,component=maintenance"
+
+
+def test_maintenance_task_selects_only_explicit_profile_credentials() -> None:
+    planned = module["maintenance_spec"](image, ("dt-cloud", "access", "r2-sync"), config, (
+        "AWS_ACCESS_KEY_ID=SOURCE_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY=SOURCE_SECRET_ACCESS_KEY",
+    ))
+    assert planned["taskGroups"][0]["taskSpec"]["environment"]["secretVariables"] == {
+        "AWS_ACCESS_KEY_ID": "projects/oa-internal-450019/secrets/oa-r2-source-access-key-id/versions/latest",
+        "AWS_SECRET_ACCESS_KEY": "projects/oa-internal-450019/secrets/oa-r2-source-secret-access-key/versions/latest",
+    }
+
+
+@pytest.mark.parametrize("alias", ["AWS_ACCESS_KEY_ID=OTHER_DEPLOYMENT", "invalid=SOURCE_ACCESS_KEY_ID"])
+def test_maintenance_task_rejects_unknown_secret_alias(alias: str) -> None:
+    with pytest.raises(ValueError, match="^Unknown maintenance secret alias: " + alias + "$"):
+        module["maintenance_spec"](image, ("dt-cloud", "image-sha"), config, (alias,))
+
+
+def test_maintenance_task_requires_command() -> None:
+    with pytest.raises(ValueError, match="^A maintenance command is required$"):
+        module["maintenance_spec"](image, (), config, ())
+
+
 @pytest.fixture(autouse=True)
 def batch_identity(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setenv("OA_R2_JOB_NAME", "oa-r2-scan-test")

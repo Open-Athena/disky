@@ -17,7 +17,7 @@ from subprocess import run
 from sys import prefix as python_prefix, stderr
 from time import time
 
-from click import ClickException, argument, group, option
+from click import UNPROCESSED, ClickException, argument, group, option
 
 
 HERE = Path(__file__).resolve().parent
@@ -406,6 +406,51 @@ def submit(
         "gcloud", "batch", "jobs", "submit", name,
         "--project", config["project"], "--location", config["region"], "--config", str(spec),
     ], check=True)
+
+
+def maintenance_spec(image: str, command: tuple[str, ...], config: dict, secrets: tuple[str, ...]) -> dict:
+    """An isolated maintenance task, with only explicitly selected credentials from this deployment's profile."""
+    if not command:
+        raise ValueError('A maintenance command is required')
+    planned = job_spec(image, config)
+    task = planned['taskGroups'][0]['taskSpec']
+    available = task['environment']['secretVariables']
+    selected = {}
+    for alias in secrets:
+        target, sep, source = alias.partition('=')
+        source = source if sep else target
+        if not fullmatch(r'[A-Z_][A-Z0-9_]*', target) or source not in available:
+            raise ValueError(f'Unknown maintenance secret alias: {alias}')
+        selected[target] = available[source]
+    task['environment']['secretVariables'] = selected
+    task['runnables'][0]['container'].update(entrypoint=command[0], commands=list(command[1:]))
+    task['environment']['variables']['DISKY_LABELS'] = 'app=disky,deployment=oa-r2,component=maintenance'
+    planned['labels']['component'] = 'maintenance'
+    planned['allocationPolicy']['labels']['component'] = 'maintenance'
+    return planned
+
+
+@main.command('task', context_settings={'ignore_unknown_options': True})
+@option('-N', '--dry-run', is_flag=True, help='Write and print the job plan; submit nothing')
+@option('-n', '--name', required=True, help='New job name, starting oa-r2-maint-')
+@option('-s', '--secret', 'secrets', multiple=True, help='Profile secret ENV or TARGET=PROFILE_ENV; default: no secrets')
+@argument('image')
+@argument('command', nargs=-1, type=UNPROCESSED, required=True)
+def task(dry_run: bool, name: str, secrets: tuple[str, ...], image: str, command: tuple[str, ...]) -> None:
+    """Run one command on Batch with this deployment's image and service account (not a scan or a scheduler edit)."""
+    if not fullmatch(r'oa-r2-maint-[a-z0-9-]+', name) or len(name) > 63:
+        raise ClickException('Choose an oa-r2-maint- job name of at most 63 characters')
+    config = profile()
+    planned = maintenance_spec(image, command, config, secrets)
+    scratch = HERE.parent / 'tmp'
+    scratch.mkdir(exist_ok=True)
+    spec = scratch / f'{name}.json'
+    spec.write_text(dumps(planned, indent=2) + '\n')
+    if dry_run:
+        print(dumps(planned, indent=2))
+        return
+    run(['gcloud', 'batch', 'jobs', 'submit', name, '--project', config['project'], '--location', config['region'],
+         '--config', str(spec)], check=True)
 
 
 def set_trigger(planned: dict, trigger: str) -> None:
