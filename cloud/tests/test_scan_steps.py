@@ -720,7 +720,7 @@ def test_receipt_step_uses_a_durable_checkpoint_and_separate_writer_binding(tmp_
     assert c.profile.secrets_for('access-r2-receipt')['AWS_ACCESS_KEY_ID'] == 'receipt-writer'
     S.access_r2_receipt(c, None)
     work = '<tmp>/t/dt-scan/2026-10-16T1200/access-r2-receipt'
-    assert c.run.calls == [f'dt-cloud access r2-receipt -c gs://data/closed.parquet -o {work}/receipt.json -p r2://receipts/r2-read.json -w {work}/readback']
+    assert c.sh_impl.calls == [f'dt-cloud access r2-receipt -c gs://data/closed.parquet -o {work}/receipt.json -p r2://receipts/r2-read.json -w {work}/readback']
 
 
 def test_the_sites_step_table_is_the_registrys():
