@@ -1,0 +1,21 @@
+# R2 CS3: shared changes for upstream review
+
+R2 merged `r/cloud` through `0a41e942` as `5126d1de`; full CI passed. This handoff lists shared changes for the parent deployment owners to review/adopt individually. Do not merge R2 deployment configuration or apply another deployment's live cutover. R2's fleet credential remains the front-door owner's responsibility; no token is provisioned by this work.
+
+| Commits on `o/r2` | Shared behavior | Evidence |
+|---|---|---|
+| `a41af3fa`, `1938f9b0`, `21d8467f` | Raw retirement requires explicit string-version equality; empty shards do not falsely hold a scan; churn-backfill lineage retains existing parity proofs | Full CI `42434814479` passed; focused retirement checks passed |
+| `d038d6c8`, `93c79c8b`, `188edad0`, `fb45c9f6` | Opt-in `access r2-sync`: cumulative closed-history Parquet with per-bucket cursors, fresh active inputs, source/account/cut guards, atomic local/GCS publication and full-history parity | Full CI `42432632691`; focused checkpoint/retirement/integration checks on Python 3.12 and 3.13, 118 each; actual full archive parity + 2 GB steady update passed on Batch |
+| `58ac9f27`, `a55bf09e` | Read-only `store-audit` exact object-key/size inventories, with local or URL report output | Focused audit tests and full CI passed |
+| `4d6291ca`, `f935e89d` | `age-bench`: exact full-answer comparison plus first/repeated-request timings; failed baseline refused and no retries masking cold failures | Full CI `42434814479`; R2 dev 14 cases all exact and stable |
+| `8e9c3470` | Optional `--review` on native `scan retire` and `store-gc`: exact key/byte set required before deletion; D1 changes must be separately represented | Focused CI `42437259765` running; not yet used for deletion |
+
+R2-only maintenance tooling (`job/r2-scan task`), profile/image pins, new age roots and Pages variables stay with this deployment. The focused CI dispatch (`c03b29cf`) is optional parent workflow infrastructure, not needed for the runtime changes.
+
+The read checkpoint removes elapsed-window replay work; it does not yet retire the collector's frozen map or aggregates. The required producer/consumer handoff must publish a verified durable checkpoint receipt, make a missing or lagging checkpoint fail closed when a bounded state omits old windows, and retire original objects only under an explicit reviewed policy. No archive retention protocol or new permission is implied by adopting the consumer command.
+
+R2 historical cleanup is held for exact review: 621 keys / 7,946,358,883 bytes. Identity-bearing raw shards without matching proofs stay. Native primary/meta age builds passed all 59/31 scans before any reader change; the source pyramid files stay pending a separate retirement policy. No CURRENT moves for the new object-version candidates: native migrations preserve unknown historical identities and write separate generations.
+
+Shared `dc1c3962` fixes direct `path-index` dropping opaque versions even when the listing carried them. It adds opt-in `-V/--object-version`, exact numeric-to-string conversion through the canonical listing adapter, NULL directory identities, and split-bucket root/schema handling. Coverage compares both sorts and checks sharded bytes against a single pass. R2 profile opt-in and any live migration remain separate rollout steps.
+
+`bf539876` extends retirement lineage through `object-version-migration.json`; it does not make old numeric proofs authorize string-token deletion. Dev configuration pins separate new primary/meta candidates for the before/after reader gate; production still follows its existing CURRENT pointers.
