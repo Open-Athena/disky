@@ -1,0 +1,11 @@
+# R2 Nextflow retention: ownership before deletion
+
+Status: read-only audit, November 8; no planner, writer, executing step or bucket lifecycle has been enabled. This is remaining CS3 work, separate from the prepared raw/cache/age retirement policy.
+
+The current shared head writes reports to `<work>/runs/<scan>/`; a retry replaces those files (`scan_head.publish_reports`). The trace uses Nextflow's default shortened task hashes; `echo_task_logs` resolves them by a glob and reads a log only when exactly one directory matches. There is no explicit full-workdir trace field in `job/nf/base.config`. Therefore neither an old report nor a prefix's age alone proves a work directory is unused. Primary and meta can also share a report prefix when manually submitted in the same scan minute.
+
+Proposed recovery window: seven days after a successful, published and verified run, with active, failed, incomplete and ambiguous ownership held. Retain durable scan metadata, D1 telemetry and source/index archives outside `nf/`. Ryan has not approved that policy; the existing `runs/` lifecycle on the unrelated access collector is not authorization for Nextflow deletion.
+
+Before execution, the shared pipeline needs a per-run record containing the store, scan, actual job/session IDs, complete work-directory hashes, completion timestamp and published-output proof. Reports for distinct run IDs must remain distinguishable. The cleanup planner must examine every retained or active reference (including cached/resumed tasks), preserve shared workdirs, hold missing or shortened ownership, and list exact object keys, sizes and revisions. Conditional deletes must refuse rewritten objects, and a coordinator fence must prevent a new resume from beginning to use old work while it is being retired. An unrecorded/active run must not become eligible merely because its wall-clock age exceeds seven days.
+
+The first report must separate eligible successful work/report/state keys from held failed/active/unproved ones. Only after that report and the recovery-window decision should a reviewed executing pass and a bounded completion ledger be enabled. A prefix-only lifecycle on `nf/` is not a substitute for that protocol.
