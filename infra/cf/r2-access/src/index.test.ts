@@ -119,6 +119,36 @@ const quiet = (hour: string) => hourAgg(hour, { events: 0, rows: [] })
 
 afterEach(() => vi.restoreAllMocks())
 
+describe('opt-in checkpoint handoff', () => {
+  it.each(['available', 'missing', 'unavailable'] as const)('keeps collection working with a %s receipt', async mode => {
+    const { archive, env, read, order } = setup()
+    const old = '2026-10-01T00'
+    const stamp = Date.parse(old + ':00:00Z') / 1000
+    archive.set('state.json', { etag: 'seed', text: JSON.stringify({ schema_version: 2, account: env.ACCOUNT_ID,
+      buckets: { 'jc-taxes': { collected_through: from, first_from: from, gaps: [], verify_cursor: null,
+        hours: {}, frozen: { [old]: 'agg/old.json' } } } }) })
+    const checkpoint = 'gs://own-data/access/r2/closed.parquet'
+    const r = { schema_version: 1, kind: 'r2-read-checkpoint', account: env.ACCOUNT_ID,
+      source: `r2://${env.ARCHIVE_BUCKET_NAME}/state.json`, checkpoint: { uri: checkpoint, generation: '17', sha256: 'a'.repeat(64) },
+      cursors: { 'jc-taxes': stamp } }
+    const CHECKPOINTS = { get: vi.fn(async () => {
+      if (mode === 'unavailable') throw new Error('offline')
+      return mode === 'missing' ? null : { size: 1024, json: async () => r } as R2ObjectBody
+    }) }
+    vi.spyOn(console, 'warn').mockImplementation(() => {})
+    await collect(time, env.HOURLY_CRON, { ...env, CHECKPOINTS: CHECKPOINTS as unknown as R2Bucket,
+      CHECKPOINT_KEY: 'r2-read.json', READ_CHECKPOINT: checkpoint }, provider([]), 'receipt')
+    const published = read('state.json')
+    expect({ version: published.schema_version, frozen: published.buckets['jc-taxes'].frozen,
+      closed: published.buckets['jc-taxes'].closed ?? null, through: published.buckets['jc-taxes'].collected_through }).toEqual({
+      version: mode === 'available' ? 3 : 2, frozen: mode === 'available' ? {} : { [old]: 'agg/old.json' },
+      closed: mode === 'available' ? { through: stamp, checkpoint } : null, through: to,
+    })
+    expect(CHECKPOINTS.get.mock.calls).toEqual([['r2-read.json']])
+    expect(order.filter(k => k.startsWith('delete:'))).toEqual([])
+  })
+})
+
 describe('settings', () => {
   it('derives the hour schedule and budget', () => {
     const { env } = setup()
