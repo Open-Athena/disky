@@ -4,7 +4,7 @@ Status: proposal, November 8. The 621-key historical cleanup review is a separat
 
 ## Derived scan inputs
 
-Both profiles use path-only staging and carry opaque versions with `path-index -V` after their version-aware interval candidates pass exact answers and a cold/warm reader benchmark. Each native retirement pass keeps two recent inputs; older raw listings remain unless the passing marker explicitly compares string `version` identities, and attribution stays unless its history and comparison both cover the scan. Old unknown identities are never filled from a later observation. This bounds future redundant raw/cache/sort storage without deleting the fixed, unproved historical raw backlog.
+Both profiles now use path-only staging and carry opaque versions with `path-index -V`; their version-aware interval candidates passed exact answers and a cold/warm reader benchmark before promotion. Each native retirement pass keeps two recent inputs; older raw listings remain unless the passing marker explicitly compares string `version` identities, and attribution stays unless its history and comparison both cover the scan. Old unknown identities are never filled from a later observation. This bounds future redundant raw/cache/sort storage without deleting the fixed, unproved historical raw backlog.
 
 Primary and meta age histories append before path retirement, verify every new histogram cell before publication, and each keep two recent per-scan pyramid sets. Original pyramids retire only when both a passing cell comparison and published history coverage hold the scan; D1 age footers clear before their corresponding files. The independent age roots are `history/primary-age` and `history/meta-age`. Native carries/compaction retain their publication ordering and rollback grace. Prepare an exact historical pyramid list before the first executing pass.
 
@@ -22,4 +22,4 @@ Proposed resume window: seven days after a successfully published and verified r
 
 ## Gates
 
-The production age-reader release, complete primary checkpoint scan and isolated version candidates are being verified independently of deletion approval. Historical cleanup stays held until Ryan approves the concrete list. Enabling rolling cleanup is a distinct decision with the keep/proof/grace rules above; this file itself authorizes no apply, D1 mutation or deletion.
+The production age-reader release, complete primary checkpoint scan and version-aware history cutovers passed their independent verification gates; the newly pinned image is undergoing full primary/meta pipeline validation. Historical cleanup stays held until Ryan approves the concrete list. Enabling rolling cleanup is a distinct decision with the keep/proof/grace rules above; this file itself authorizes no apply, D1 mutation or deletion.
