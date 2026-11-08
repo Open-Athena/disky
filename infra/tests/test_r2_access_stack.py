@@ -118,4 +118,4 @@ def test_optional_receipt_bucket_is_private_and_isolated():
         ]
         assert mocks.resources['collector-cron']['schedules'] == []
 
-    return pulumi.Output.all(program['collector'].id).apply(check)
+    return pulumi.Output.all(program['schedules'].id).apply(check)
