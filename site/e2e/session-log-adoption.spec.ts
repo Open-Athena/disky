@@ -6,7 +6,7 @@ async function setup(page: Page, diagnostics = false) {
   const now = Date.now()
   const posted: Event[] = []
   const filters: string[] = []
-  const session = { sid: 'sid-actor1', email: null, via: 'grant', grant_id: 'grant-fixture', subject_name: 'Trusted recipient', build: 'fixture', ua: null, started_ms: now - 5000, last_ms: now, n_events: 2, n_errors: 0, n_batches: 1, first_url: '/', received_ts: Math.floor(now / 1000) }
+  const session = { sid: 'sid-actor1', email: null, via: 'grant', grant_id: 'grant-fixture', subject_name: 'Trusted recipient', build: 'fixture', ua: null, started_ms: now - 5000, last_ms: now, n_events: diagnostics ? 4 : 2, n_errors: diagnostics ? 1 : 0, n_batches: 1, first_url: '/', received_ts: Math.floor(now / 1000) }
   await page.route('**/api/**', async route => {
     const request = route.request(), url = new URL(request.url())
     let json: unknown = {}
