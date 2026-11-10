@@ -45,7 +45,7 @@ const store: Store = {
   about: (
     <>
       <p>
-        Every file in the <code>open-athena</code> org on Hugging Face, listed daily and summed by directory:
+        Every file in the <code>open-athena</code> org on Hugging Face, listed daily (08:00 UTC) and summed by directory:
         {' '}<code>buckets/&lt;bucket&gt;/…</code> for Storage Buckets, <code>models/</code>, <code>datasets/</code> and <code>spaces/</code> for repos.
         A repo’s sizes add up to what Hugging Face bills it (<code>usedStorage</code>): each stored LFS / Xet object once,
         with older versions the current tree no longer references in one <code>@history/@unlisted</code> row per repo.
