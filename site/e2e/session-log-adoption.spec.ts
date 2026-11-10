@@ -2,7 +2,7 @@ import { expect, test, type Page } from '@playwright/test'
 
 const FIXTURE = '/e2e/fixtures/session-log.html'
 interface Event { k: string; u?: string; s?: number; err?: string; msg?: string }
-async function setup(page: Page) {
+async function setup(page: Page, diagnostics = false) {
   const now = Date.now()
   const posted: Event[] = []
   const filters: string[] = []
@@ -19,7 +19,11 @@ async function setup(page: Page) {
       json = { sessions: [session], total: 1, offset: 0, prev: null, next: null }
     } else if (url.pathname === '/api/session-log/sessions/sid-actor1') json = { session, events: [
       { t: now - 5000, k: 'start', u: '/', pid: 'pid-fixture', seq: 0 },
-      { t: now, k: 'api', u: '/api/cancelled', s: 0, ms: 10, err: 'abort', pid: 'pid-fixture', seq: 0 },
+      ...(diagnostics ? [
+        { t: now - 4000, k: 'life', s: 'gap', ms: 48 * 60_000, on: true, vis: 'visible', pid: 'pid-fixture', seq: 0 },
+        { t: now - 3000, k: 'api', id: 7, u: '/api/series?path=marin-na', s: 0, ms: 2400, end: now - 600, err: 'TypeError: Failed to fetch', on0: true, on: false, vis0: 'visible', vis: 'visible', visMs: 0, gapMs: 48 * 60_000, gapAgo: 0, pid: 'pid-fixture', seq: 0 },
+        { t: now, k: 'api', id: 8, u: '/api/series?path=marin-na', s: 200, ms: 30, ray: '1234567890abcdef-EWR', pid: 'pid-fixture', seq: 0 },
+      ] : [{ t: now, k: 'api', u: '/api/cancelled', s: 0, ms: 10, err: 'abort', pid: 'pid-fixture', seq: 0 }]),
     ] }
     await route.fulfill({ json })
   })
@@ -40,6 +44,15 @@ test('renders the app switch, trusted recipient, URL filters and shared session 
   await page.locator('a[href="/admin/sessions/sid-actor1"]').click()
   await expect(page.getByText('GET /api/cancelled → cancelled · 10ms', { exact: true })).toBeVisible()
   await page.screenshot({ path: info.outputPath('timeline.png'), fullPage: true })
+})
+
+test('renders connectivity evidence and the later successful read while retaining the failed attempt', async ({ page }, info) => {
+  await setup(page, true)
+  await page.locator('a[href="/admin/sessions/sid-actor1"]').click()
+  await expect(page.getByText('browser gap 48m 00s · online hint · visible', { exact: true })).toBeVisible()
+  await expect(page.getByText('GET /api/series?path=marin-na → failed · 2400ms · TypeError: Failed to fetch · request #7 · online hint → offline hint · visible · 0ms since visible · timer gap 48m 00s, 0ms before request', { exact: true })).toBeVisible()
+  await expect(page.getByText('GET /api/series?path=marin-na → 200 · 30ms · request #8 · Ray 1234567890abcdef-EWR · later success after request #7 (600ms after failure)', { exact: true })).toBeVisible()
+  await page.screenshot({ path: info.outputPath('network-context.png'), fullPage: true })
 })
 
 test('shared client ignores benign browser errors and distinguishes aborts, navigation and real failures', async ({ page }) => {

@@ -1,39 +1,108 @@
---- a/src/client/session-log/logger.ts
-+++ b/src/client/session-log/logger.ts
+diff --git src/client/session-log/logger.ts src/client/session-log/logger.ts
+index d9d906b..52415eb 100644
+--- src/client/session-log/logger.ts
++++ src/client/session-log/logger.ts
 @@ -9 +9 @@
 -import { type AppEvents, bodySummary, BUILTIN_FIELDS, type Kind, LIMITS, type SlogBatch, type SlogEvent, TRUNC } from '../../core/session-log-shape.js'
 +import { type AppEvents, benignError, bodySummary, BUILTIN_FIELDS, type Kind, LIMITS, type SlogBatch, type SlogEvent, TRUNC } from '../../core/session-log-shape.js'
-@@ -13,0 +14 @@
+@@ -13,0 +14 @@ export const DEFAULT_ENDPOINT = '/api/session-log'
 +export const LEAVE_MS = 5_000
-@@ -85,0 +87 @@
+@@ -85,0 +87 @@ export class Logger {
 +    if (e.k === 'error' && benignError(e.msg)) return
-@@ -287,0 +290,10 @@
+@@ -203,0 +206 @@ export interface Page {
++    navigator?: { onLine?: boolean }
+@@ -205 +208 @@ export interface Page {
+-  doc: EventTarget & { visibilityState: string; referrer: string }
++  doc: EventTarget & { visibilityState: string; referrer: string; wasDiscarded?: boolean }
+@@ -230,0 +234,34 @@ export function install(p: Page, logger: Logger, opts: InstallOptions = {}): ()
++  const online = () => typeof win.navigator?.onLine === 'boolean' ? win.navigator.onLine : null
++  const state = () => ({ on: online(), vis: doc.visibilityState })
++  let visibility = doc.visibilityState
++  let visibleAt: number | null = visibility === 'visible' ? Date.now() : null
++  let lastPulse = Date.now()
++  let gapAt: number | null = null
++  let gapMs = 0
++  const pulse = () => {
++    const now = Date.now()
++    // Observe here too: query-library visibility handlers may start a fetch before our handler runs.
++    if (visibility !== doc.visibilityState) {
++      visibility = doc.visibilityState
++      visibleAt = visibility === 'visible' ? now : null
++    }
++    const elapsed = now - lastPulse
++    if (elapsed > 30_000) {
++      gapAt = now
++      gapMs = elapsed
++      // A scheduling gap can be throttling, suspension or a busy main thread; it is not proof of sleep.
++      logger.log('life', { s: 'gap', ms: elapsed, ...state() })
++    }
++    lastPulse = now
++  }
++  const pulseTimer = setInterval(safe(pulse), FLUSH_MS)
++  offs.push(() => clearInterval(pulseTimer))
++  logger.log('life', { s: 'init', ...state(), ...(typeof doc.wasDiscarded === 'boolean' ? { discarded: doc.wasDiscarded } : {}) })
++  const lifecycle = (s: string, event?: Event) => {
++    pulse()
++    const persisted = (event as PageTransitionEvent | undefined)?.persisted
++    logger.log('life', { s, ...state(), ...(typeof persisted === 'boolean' ? { persisted } : {}) })
++  }
++  for (const name of ['online', 'offline', 'pageshow']) on(win, name, safe(e => lifecycle(name, e)))
++  for (const name of ['freeze', 'resume']) on(doc, name, safe(e => lifecycle(name, e)))
++
+@@ -287,0 +325,10 @@ export function install(p: Page, logger: Logger, opts: InstallOptions = {}): ()
 +  // A full navigation can fail requests before pagehide: distinguish that from a page staying open.
 +  const held = new Map<SlogEvent, ReturnType<typeof setTimeout>>()
 +  const release = (leaving: boolean) => {
 +    for (const [event, timer] of held) {
 +      clearTimeout(timer)
-+      logger.push(leaving ? { ...event, err: 'abort' } as SlogEvent : event)
++      logger.push(leaving ? { ...event, err: 'abort', cancel: 'pagehide' } as SlogEvent : event)
 +    }
 +    held.clear()
 +  }
 +  offs.push(() => release(false))
-@@ -303 +315,8 @@
+@@ -288,0 +336 @@ export function install(p: Page, logger: Logger, opts: InstallOptions = {}): ()
++  let requestId = 0
+@@ -291,0 +340 @@ export function install(p: Page, logger: Logger, opts: InstallOptions = {}): ()
++    pulse()
+@@ -294,0 +344,4 @@ export function install(p: Page, logger: Logger, opts: InstallOptions = {}): ()
++      id: ++requestId,
++      on0: online(), vis0: doc.visibilityState,
++      ...(visibleAt !== null ? { visMs: Math.max(0, t - visibleAt) } : {}),
++      ...(gapAt !== null ? { gapMs, gapAgo: Math.max(0, t - gapAt) } : {}),
+@@ -298,0 +352 @@ export function install(p: Page, logger: Logger, opts: InstallOptions = {}): ()
++    const finish = () => ({ end: Date.now(), wall: Math.max(0, Date.now() - t), ...state() })
+@@ -303 +357,9 @@ export function install(p: Page, logger: Logger, opts: InstallOptions = {}): ()
 -      safe(() => logger.push({ t, k: 'api', ...base, s: 0, ms: Math.round(p.perfNow() - t0), err: tr((e as Error)?.name === 'AbortError' ? 'abort' : errMsg(e), TRUNC.msg) } as SlogEvent))()
 +      safe(() => {
-+        const event = { t, k: 'api', ...base, s: 0, ms: Math.round(p.perfNow() - t0) } as SlogEvent
-+        if ((e as Error)?.name === 'AbortError') logger.push({ ...event, err: 'abort' } as SlogEvent)
++        const event = { t, k: 'api', ...base, ...finish(), s: 0, ms: Math.round(p.perfNow() - t0) } as SlogEvent
++        const signal = init?.signal ?? (typeof input === 'object' && 'signal' in input ? input.signal : null)
++        if (signal?.aborted || (e as Error)?.name === 'AbortError') logger.push({ ...event, err: 'abort', cancel: signal?.aborted ? 'signal' : 'AbortError' } as SlogEvent)
 +        else {
 +          const failed = { ...event, err: tr(errMsg(e), TRUNC.msg) } as SlogEvent
 +          held.set(failed, setTimeout(safe(() => { held.delete(failed); logger.push(failed) }), LEAVE_MS))
 +        }
 +      })()
-@@ -358 +377 @@
+@@ -309 +371,4 @@ export function install(p: Page, logger: Logger, opts: InstallOptions = {}): ()
+-      const ev = { t, k: 'api', ...base, s: res.status, ms, ...(h.get('x-cache') ? { c: h.get('x-cache') } : {}), ...(h.get('x-query-engine') ? { qe: h.get('x-query-engine') } : {}) } as SlogEvent
++      const ray = h.get('cf-ray')
++      const ev = { t, k: 'api', ...base, ...finish(), s: res.status, ms, rt: res.type,
++        ...(ray && /^[a-f0-9]{16,32}(?:-[A-Z]{3})?$/.test(ray) ? { ray } : {}),
++        ...(h.get('x-cache') ? { c: h.get('x-cache') } : {}), ...(h.get('x-query-engine') ? { qe: h.get('x-query-engine') } : {}) } as SlogEvent
+@@ -354,0 +420 @@ export function install(p: Page, logger: Logger, opts: InstallOptions = {}): ()
++    pulse()
+@@ -358 +424 @@ export function install(p: Page, logger: Logger, opts: InstallOptions = {}): ()
 -  on(win, 'pagehide', safe(() => logger.flush(true)))
-+  on(win, 'pagehide', safe(() => { release(true); logger.flush(true) }))
---- a/src/core/session-log-shape.ts
-+++ b/src/core/session-log-shape.ts
-@@ -97,6 +97,16 @@
++  on(win, 'pagehide', safe(e => { release(true); lifecycle('pagehide', e); logger.flush(true) }))
+diff --git src/core/session-log-shape.ts src/core/session-log-shape.ts
+index 6d5dfe2..bc30ed8 100644
+--- src/core/session-log-shape.ts
++++ src/core/session-log-shape.ts
+@@ -21 +21 @@ export const BUILTIN_FIELDS = {
+-  api: ['m', 'u', 's', 'ms', 'c', 'qe', 'err', 'b'],
++  api: ['m', 'u', 's', 'ms', 'c', 'qe', 'err', 'b', 'id', 'end', 'wall', 'on0', 'on', 'vis0', 'vis', 'visMs', 'gapMs', 'gapAgo', 'ray', 'rt', 'cancel'],
+@@ -26,0 +27 @@ export const BUILTIN_FIELDS = {
++  life: ['s', 'on', 'vis', 'ms', 'persisted', 'discarded'],
+@@ -97,6 +98,16 @@ export const TRUNC = { label: 60, filter: 200, url: 300, msg: 300, stack: 1500 }
 -/** Kinds (and api statuses) that count as errors in the session summary. */
 -export const isErrorEvent = (e: { k: Kind; s?: unknown }): boolean =>
 -  e.k === 'error' ||
@@ -56,35 +125,65 @@
 +/** Kinds (and api statuses) that count as errors in the session summary; a cancelled request is not one. */
 +export const isErrorEvent = (e: Pick<SlogEvent, 'k'> & { s?: unknown, err?: unknown }): boolean =>
 +  e.k === 'error' || e.k === 'reject' || e.k === 'console' || isFailedApi(e)
---- a/src/react/session-log/model.ts
-+++ b/src/react/session-log/model.ts
+diff --git src/react/session-log/model.ts src/react/session-log/model.ts
+index aa7c3ef..b13b48b 100644
+--- src/react/session-log/model.ts
++++ src/react/session-log/model.ts
 @@ -6 +6 @@
 -import { isErrorEvent, KINDS, type SessionPage, type StoredEvent } from '../../core/session-log-shape.js'
-+import { isCancelled, isErrorEvent, KINDS, type SessionPage, type StoredEvent } from '../../core/session-log-shape.js'
-@@ -8 +8 @@
++import { isCancelled, isErrorEvent, isFailedApi, KINDS, type SessionPage, type StoredEvent } from '../../core/session-log-shape.js'
+@@ -8 +8 @@ import { isErrorEvent, KINDS, type SessionPage, type StoredEvent } from '../../c
 -/** `1h 02m`, `3m 07s`, `12s`, `450ms`. */
 +/** `4d 12h 43m`, `1h 02m`, `3m 07s`, `12s`, `450ms`. */
-@@ -15 +15,3 @@
+@@ -15 +15,3 @@ export function fmtDuration(ms: number): string {
 -  return `${Math.floor(m / 60)}h ${String(m % 60).padStart(2, '0')}m`
 +  const h = Math.floor(m / 60)
 +  if (h < 24) return `${h}h ${String(m % 60).padStart(2, '0')}m`
 +  return `${Math.floor(h / 24)}d ${String(h % 24).padStart(2, '0')}h`
-@@ -18 +20 @@
+@@ -18 +20 @@ export function fmtDuration(ms: number): string {
 -/** `+1:02.345` (offset into the session). */
 +/** An offset or gap: `+2.345s` under a minute (to the ms), else two units: `+3m 07s`, `+1h 02m`, `+4d 12h`. */
-@@ -21,2 +23 @@
+@@ -21,2 +23 @@ export function fmtOffset(ms: number): string {
 -  const m = Math.floor(t / 60_000), s = Math.floor((t % 60_000) / 1000), r = t % 1000
 -  return `+${m}:${String(s).padStart(2, '0')}.${String(r).padStart(3, '0')}`
 +  return `+${t < 60_000 ? `${(t / 1000).toFixed(3)}s` : fmtDuration(t)}`
-@@ -49 +50 @@
+@@ -49 +50,9 @@ export function summarize(e: StoredEvent): string {
 -      return `${str(e.m) || 'GET'} ${str(e.u)}${b} → ${e.s === 0 ? 'failed' : str(e.s)} · ${str(e.ms)}ms${e.c ? ` · ${str(e.c)}` : ''}${e.qe ? ` · ${str(e.qe)}` : ''}${e.err ? ` · ${str(e.err)}` : ''}`
-+      return `${str(e.m) || 'GET'} ${str(e.u)}${b} → ${isCancelled(e) ? 'cancelled' : e.s === 0 ? 'failed' : str(e.s)} · ${str(e.ms)}ms${e.c ? ` · ${str(e.c)}` : ''}${e.qe ? ` · ${str(e.qe)}` : ''}${e.err && !isCancelled(e) ? ` · ${str(e.err)}` : ''}`
---- a/src/session-log/routes.ts
-+++ b/src/session-log/routes.ts
-@@ -128 +128,2 @@
++      const on = (v: unknown) => v === true ? 'online hint' : v === false ? 'offline hint' : 'connectivity unknown'
++      const context = e.s === 0 || isFailedApi(e) ? [
++        e.on0 !== undefined && `${on(e.on0)}${e.on0 !== e.on ? ` → ${on(e.on)}` : ''}`,
++        e.vis0 && `${str(e.vis0)}${e.vis0 !== e.vis ? ` → ${str(e.vis)}` : ''}`,
++        typeof e.visMs === 'number' && `${fmtDuration(e.visMs)} since visible`,
++        typeof e.gapMs === 'number' && `timer gap ${fmtDuration(e.gapMs)}, ${fmtDuration(Number(e.gapAgo))} before request`,
++        e.cancel && `cancel: ${str(e.cancel)}`,
++      ].filter(Boolean) : []
++      return `${str(e.m) || 'GET'} ${str(e.u)}${b} → ${isCancelled(e) ? 'cancelled' : e.s === 0 ? 'failed' : str(e.s)} · ${str(e.ms)}ms${e.c ? ` · ${str(e.c)}` : ''}${e.qe ? ` · ${str(e.qe)}` : ''}${e.err && !isCancelled(e) ? ` · ${str(e.err)}` : ''}${e.id ? ` · request #${str(e.id)}` : ''}${context.length ? ` · ${context.join(' · ')}` : ''}${e.ray ? ` · Ray ${str(e.ray)}` : ''}${typeof e.wall === 'number' && Math.abs(e.wall - Number(e.ms)) > 1000 ? ` · wall ${fmtDuration(e.wall)}` : ''}`
+@@ -55,0 +65 @@ export function summarize(e: StoredEvent): string {
++    case 'life': return `browser ${str(e.s)}${typeof e.ms === 'number' ? ` ${fmtDuration(e.ms)}` : ''} · ${e.on === true ? 'online hint' : e.on === false ? 'offline hint' : 'connectivity unknown'} · ${str(e.vis)}${e.persisted === true ? ' · bfcache' : ''}${e.discarded === true ? ' · previously discarded' : ''}`
+@@ -95,0 +106 @@ export function timeline(events: readonly StoredEvent[]): Line[] {
++  const failed = new Map<string, { id: number; end: number }>()
+@@ -98 +109,12 @@ export function timeline(events: readonly StoredEvent[]): Line[] {
+-    return { i, t: e.t, off: e.t - t0, k: e.k, text: summarize(e), error: isErrorEvent(e), lane: laneOf(e), url: urlBy.get(e.pid) ?? null, pid: e.pid }
++    let later = ''
++    // Correlate only same-page, exact unmasked same-origin reads, never writes or concurrent earlier requests.
++    if (e.k === 'api' && typeof e.id === 'number' && typeof e.u === 'string' && e.u.startsWith('/') && !e.u.includes('…') && ['GET', 'HEAD'].includes(String(e.m ?? 'GET'))) {
++      const key = JSON.stringify([e.pid, e.m ?? 'GET', e.u])
++      const prior = failed.get(key)
++      if (isFailedApi(e) && typeof e.end === 'number') failed.set(key, { id: e.id, end: e.end })
++      else if (typeof e.s === 'number' && e.s >= 200 && e.s < 300 && prior && e.t >= prior.end) {
++        later = ` · later success after request #${prior.id} (${fmtDuration(e.t - prior.end)} after failure)`
++        failed.delete(key)
++      }
++    }
++    return { i, t: e.t, off: e.t - t0, k: e.k, text: summarize(e) + later, error: isErrorEvent(e), lane: laneOf(e), url: urlBy.get(e.pid) ?? null, pid: e.pid }
+diff --git src/session-log/routes.ts src/session-log/routes.ts
+index 9d85094..83a7c97 100644
+--- src/session-log/routes.ts
++++ src/session-log/routes.ts
+@@ -128 +128,2 @@ export function sessionLogRoutes(opts: SessionLogRoutesOptions) {
 -    await purgeLater(ctx, now)
 +    const viewer = await identify(req)
 +    if (viewer && viewer.via !== 'public') await purgeLater(ctx, now)
-@@ -134 +135 @@
+@@ -134 +135 @@ export function sessionLogRoutes(opts: SessionLogRoutesOptions) {
 -    if (!(await identify(req))) return off('no viewer identity')
 +    if (!viewer) return off('no viewer identity')

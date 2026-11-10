@@ -1,4 +1,5 @@
 diff --git a/dist/client/session-log/logger.d.ts b/dist/client/session-log/logger.d.ts
+index f5d5322e7bac34826106d807e137fd63ab40217b..011796b312581d34065a5107f5aa0ea9ca8edd6c 100644
 --- a/dist/client/session-log/logger.d.ts
 +++ b/dist/client/session-log/logger.d.ts
 @@ -9,6 +9,7 @@
@@ -9,7 +10,23 @@ diff --git a/dist/client/session-log/logger.d.ts b/dist/client/session-log/logge
  export declare const FLUSH_MS = 10000;
  export declare const FILTER_DEBOUNCE_MS = 800;
  export declare const RESIZE_DEBOUNCE_MS = 500;
+@@ -95,10 +96,14 @@ export interface Page {
+         innerHeight: number;
+         devicePixelRatio: number;
+         fetch: typeof fetch;
++        navigator?: {
++            onLine?: boolean;
++        };
+     };
+     doc: EventTarget & {
+         visibilityState: string;
+         referrer: string;
++        wasDiscarded?: boolean;
+     };
+     con: {
+         error: (...a: unknown[]) => void;
 diff --git a/dist/client/session-log/logger.js b/dist/client/session-log/logger.js
+index 19e7f820e1fe99e8cd61828f7af7a21eb627c0c8..6efd50f8eb9173bb328c0c15c04e06b3034d0960 100644
 --- a/dist/client/session-log/logger.js
 +++ b/dist/client/session-log/logger.js
 @@ -6,9 +6,10 @@
@@ -24,7 +41,7 @@ diff --git a/dist/client/session-log/logger.js b/dist/client/session-log/logger.
  export const FLUSH_MS = 10_000;
  export const FILTER_DEBOUNCE_MS = 800;
  export const RESIZE_DEBOUNCE_MS = 500;
-@@ -59,6 +60,8 @@
+@@ -59,6 +60,8 @@ export class Logger {
       * dropped, and a declared one keeps only its declared scalar fields.
       */
      push(e) {
@@ -33,7 +50,49 @@ diff --git a/dist/client/session-log/logger.js b/dist/client/session-log/logger.
          if (this.stopped)
              return;
          if (!Object.hasOwn(BUILTIN_FIELDS, e.k)) {
-@@ -273,6 +276,16 @@
+@@ -212,6 +215,41 @@ export function install(p, logger, opts = {}) {
+         fn(...a);
+     }
+     catch { /* the log never breaks the page */ } };
++    const online = () => typeof win.navigator?.onLine === 'boolean' ? win.navigator.onLine : null;
++    const state = () => ({ on: online(), vis: doc.visibilityState });
++    let visibility = doc.visibilityState;
++    let visibleAt = visibility === 'visible' ? Date.now() : null;
++    let lastPulse = Date.now();
++    let gapAt = null;
++    let gapMs = 0;
++    const pulse = () => {
++        const now = Date.now();
++        // Observe here too: query-library visibility handlers may start a fetch before our handler runs.
++        if (visibility !== doc.visibilityState) {
++            visibility = doc.visibilityState;
++            visibleAt = visibility === 'visible' ? now : null;
++        }
++        const elapsed = now - lastPulse;
++        if (elapsed > 30_000) {
++            gapAt = now;
++            gapMs = elapsed;
++            // A scheduling gap can be throttling, suspension or a busy main thread; it is not proof of sleep.
++            logger.log('life', { s: 'gap', ms: elapsed, ...state() });
++        }
++        lastPulse = now;
++    };
++    const pulseTimer = setInterval(safe(pulse), FLUSH_MS);
++    offs.push(() => clearInterval(pulseTimer));
++    logger.log('life', { s: 'init', ...state(), ...(typeof doc.wasDiscarded === 'boolean' ? { discarded: doc.wasDiscarded } : {}) });
++    const lifecycle = (s, event) => {
++        pulse();
++        const persisted = event?.persisted;
++        logger.log('life', { s, ...state(), ...(typeof persisted === 'boolean' ? { persisted } : {}) });
++    };
++    for (const name of ['online', 'offline', 'pageshow'])
++        on(win, name, safe(e => lifecycle(name, e)));
++    for (const name of ['freeze', 'resume'])
++        on(doc, name, safe(e => lifecycle(name, e)));
+     // URL state: the boot URL, then every change (router pushes, `?d=` / `f=` replaces, back / forward).
+     let lastHref = win.location.href;
+     logger.log('start', { u: redact(lastHref), ...(doc.referrer ? { ref: redact(doc.referrer) } : {}) });
+@@ -273,30 +311,59 @@ export function install(p, logger, opts = {}) {
          logger.log('pick', { n: tr(n, TRUNC.label), v: tr(t.value ?? '', TRUNC.label) });
      }), true);
      // API requests: route, status, duration, cache / engine headers, the error body's code.
@@ -42,23 +101,41 @@ diff --git a/dist/client/session-log/logger.js b/dist/client/session-log/logger.
 +    const release = (leaving) => {
 +        for (const [event, timer] of held) {
 +            clearTimeout(timer);
-+            logger.push(leaving ? { ...event, err: 'abort' } : event);
++            logger.push(leaving ? { ...event, err: 'abort', cancel: 'pagehide' } : event);
 +        }
 +        held.clear();
 +    };
 +    offs.push(() => release(false));
      const origFetch = win.fetch;
++    let requestId = 0;
      const wrapped = (async (input, init) => {
          const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
-@@ -290,7 +303,15 @@
+         if (url.includes(endpoint))
+             return origFetch.call(win, input, init);
++        pulse();
+         const t = Date.now(), t0 = p.perfNow();
+         const method = (init?.method ?? (typeof input === 'object' && 'method' in input ? input.method : 'GET')).toUpperCase();
+         const base = {
++            id: ++requestId,
++            on0: online(), vis0: doc.visibilityState,
++            ...(visibleAt !== null ? { visMs: Math.max(0, t - visibleAt) } : {}),
++            ...(gapAt !== null ? { gapMs, gapAgo: Math.max(0, t - gapAt) } : {}),
+             ...(method !== 'GET' ? { m: method } : {}),
+             u: redact(url),
+             ...(method !== 'GET' && init?.body != null ? { b: bodySummary(init.body) } : {}),
+         };
++        const finish = () => ({ end: Date.now(), wall: Math.max(0, Date.now() - t), ...state() });
+         let res;
+         try {
              res = await origFetch.call(win, input, init);
          }
          catch (e) {
 -            safe(() => logger.push({ t, k: 'api', ...base, s: 0, ms: Math.round(p.perfNow() - t0), err: tr(e?.name === 'AbortError' ? 'abort' : errMsg(e), TRUNC.msg) }))();
 +            safe(() => {
-+                const event = { t, k: 'api', ...base, s: 0, ms: Math.round(p.perfNow() - t0) };
-+                if (e?.name === 'AbortError')
-+                    logger.push({ ...event, err: 'abort' });
++                const event = { t, k: 'api', ...base, ...finish(), s: 0, ms: Math.round(p.perfNow() - t0) };
++                const signal = init?.signal ?? (typeof input === 'object' && 'signal' in input ? input.signal : null);
++                if (signal?.aborted || e?.name === 'AbortError')
++                    logger.push({ ...event, err: 'abort', cancel: signal?.aborted ? 'signal' : 'AbortError' });
 +                else {
 +                    const failed = { ...event, err: tr(errMsg(e), TRUNC.msg) };
 +                    held.set(failed, setTimeout(safe(() => { held.delete(failed); logger.push(failed); }), LEAVE_MS));
@@ -67,37 +144,97 @@ diff --git a/dist/client/session-log/logger.js b/dist/client/session-log/logger.
              throw e;
          }
          safe(() => {
-@@ -349,7 +370,7 @@
+             const ms = Math.round(p.perfNow() - t0);
+             const h = res.headers;
+-            const ev = { t, k: 'api', ...base, s: res.status, ms, ...(h.get('x-cache') ? { c: h.get('x-cache') } : {}), ...(h.get('x-query-engine') ? { qe: h.get('x-query-engine') } : {}) };
++            const ray = h.get('cf-ray');
++            const ev = { t, k: 'api', ...base, ...finish(), s: res.status, ms, rt: res.type,
++                ...(ray && /^[a-f0-9]{16,32}(?:-[A-Z]{3})?$/.test(ray) ? { ray } : {}),
++                ...(h.get('x-cache') ? { c: h.get('x-cache') } : {}), ...(h.get('x-query-engine') ? { qe: h.get('x-query-engine') } : {}) };
+             if (res.ok) {
+                 logger.push(ev);
+                 return;
+@@ -345,11 +412,12 @@ export function install(p, logger, opts = {}) {
+     offs.push(() => { if (rz)
+         clearTimeout(rz); });
+     on(doc, 'visibilitychange', safe(() => {
++        pulse();
+         logger.log('vis', { s: doc.visibilityState });
          if (doc.visibilityState === 'hidden')
              logger.flush(true);
      }));
 -    on(win, 'pagehide', safe(() => logger.flush(true)));
-+    on(win, 'pagehide', safe(() => { release(true); logger.flush(true); }));
++    on(win, 'pagehide', safe(e => { release(true); lifecycle('pagehide', e); logger.flush(true); }));
      return () => { for (const off of offs.splice(0).reverse())
          off(); };
  }
 diff --git a/dist/core/session-log-shape.d.ts b/dist/core/session-log-shape.d.ts
+index c12fbe78e7564486bf813a6458c3fc30d3f0de37..5836c60421feaebf1440c7ef532d8bd01a75ade6 100644
 --- a/dist/core/session-log-shape.d.ts
 +++ b/dist/core/session-log-shape.d.ts
-@@ -82,10 +82,10 @@
+@@ -17,12 +17,13 @@ export declare const BUILTIN_FIELDS: {
+     readonly filter: readonly ["n", "q"];
+     readonly pick: readonly ["n", "v"];
+     readonly prefetch: readonly ["w", "p", "d"];
+-    readonly api: readonly ["m", "u", "s", "ms", "c", "qe", "err", "b"];
++    readonly api: readonly ["m", "u", "s", "ms", "c", "qe", "err", "b", "id", "end", "wall", "on0", "on", "vis0", "vis", "visMs", "gapMs", "gapAgo", "ray", "rt", "cancel"];
+     readonly error: readonly ["msg", "src", "st"];
+     readonly reject: readonly ["msg", "st"];
+     readonly console: readonly ["msg"];
+     readonly viewport: readonly ["w", "h", "dpr"];
+     readonly vis: readonly ["s"];
++    readonly life: readonly ["s", "on", "vis", "ms", "persisted", "discarded"];
+     readonly dropped: readonly ["n"];
+ };
+ export type BuiltinKind = keyof typeof BUILTIN_FIELDS;
+@@ -81,10 +82,24 @@ export declare const TRUNC: {
+     readonly msg: 300;
      readonly stack: 1500;
  };
- /** Kinds (and api statuses) that count as errors in the session summary. */
+-/** Kinds (and api statuses) that count as errors in the session summary. */
 -export declare const isErrorEvent: (e: {
 -    k: Kind;
--    s?: unknown;
--}) => boolean;
++/** Whether an error message is one of `BENIGN_ERRORS` (neither logged by the client nor counted by the feed). */
 +export declare const benignError: (msg: unknown) => boolean;
-+export declare const isCancelled: (e: { k?: unknown; s?: unknown; err?: unknown }) => boolean;
-+export declare const isFailedApi: (e: { k?: unknown; s?: unknown; err?: unknown }) => boolean;
-+export declare const isErrorEvent: (e: { k: Kind; s?: unknown; err?: unknown }) => boolean;
++/** A request the page cancelled itself (`err: 'abort'`: its `AbortSignal` fired, e.g. a newer selection superseded it). */
++export declare const isCancelled: (e: {
++    k?: unknown;
++    s?: unknown;
++    err?: unknown;
++}) => boolean;
++/** A request that failed: no response (other than the page's own cancel) or a 5xx. */
++export declare const isFailedApi: (e: {
++    k?: unknown;
++    s?: unknown;
++    err?: unknown;
++}) => boolean;
++/** Kinds (and api statuses) that count as errors in the session summary; a cancelled request is not one. */
++export declare const isErrorEvent: (e: Pick<SlogEvent, "k"> & {
+     s?: unknown;
++    err?: unknown;
+ }) => boolean;
  /** The end (exclusive) of the UTC day `days` after `now`'s. */
  export declare const endOfUtcDay: (now: number, days: number) => number;
- /** Turning the switch on with no date: through the UTC day `LIMITS.defaultDays` from now. */
 diff --git a/dist/core/session-log-shape.js b/dist/core/session-log-shape.js
+index 71b958a24e77a4f643b2cf72c9d3dcc711183f25..1944f4ad3a71af3aac3b1d05838ec8b5db92255b 100644
 --- a/dist/core/session-log-shape.js
 +++ b/dist/core/session-log-shape.js
-@@ -63,11 +63,16 @@
+@@ -17,12 +17,13 @@ export const BUILTIN_FIELDS = {
+     filter: ['n', 'q'],
+     pick: ['n', 'v'],
+     prefetch: ['w', 'p', 'd'],
+-    api: ['m', 'u', 's', 'ms', 'c', 'qe', 'err', 'b'],
++    api: ['m', 'u', 's', 'ms', 'c', 'qe', 'err', 'b', 'id', 'end', 'wall', 'on0', 'on', 'vis0', 'vis', 'visMs', 'gapMs', 'gapAgo', 'ray', 'rt', 'cancel'],
+     error: ['msg', 'src', 'st'],
+     reject: ['msg', 'st'],
+     console: ['msg'],
+     viewport: ['w', 'h', 'dpr'],
+     vis: ['s'],
++    life: ['s', 'on', 'vis', 'ms', 'persisted', 'discarded'],
+     dropped: ['n'],
+ };
+ export const KINDS = Object.keys(BUILTIN_FIELDS);
+@@ -63,11 +64,16 @@ export const LIMITS = {
  };
  /** Client-side truncation, per field family. */
  export const TRUNC = { label: 60, filter: 200, url: 300, msg: 300, stack: 1500 };
@@ -119,7 +256,24 @@ diff --git a/dist/core/session-log-shape.js b/dist/core/session-log-shape.js
  const ID = /^[A-Za-z0-9_-]{6,40}$/;
  /** The end (exclusive) of the UTC day `days` after `now`'s. */
  export const endOfUtcDay = (now, days) => {
+diff --git a/dist/react/session-log/model.d.ts b/dist/react/session-log/model.d.ts
+index e1cafad92e643275f16b3ad2acedd9659ee52a27..f0686e3e8aa6fb3ae51a4126c17f5c5d06eecd03 100644
+--- a/dist/react/session-log/model.d.ts
++++ b/dist/react/session-log/model.d.ts
+@@ -4,9 +4,9 @@
+  * rendering is pinned by tests.
+  */
+ import { type SessionPage, type StoredEvent } from '../../core/session-log-shape.js';
+-/** `1h 02m`, `3m 07s`, `12s`, `450ms`. */
++/** `4d 12h 43m`, `1h 02m`, `3m 07s`, `12s`, `450ms`. */
+ export declare function fmtDuration(ms: number): string;
+-/** `+1:02.345` (offset into the session). */
++/** An offset or gap: `+2.345s` under a minute (to the ms), else two units: `+3m 07s`, `+1h 02m`, `+4d 12h`. */
+ export declare function fmtOffset(ms: number): string;
+ /** A local wall-clock time to the ms (`19:43:09.433`), led by the date (`Oct 13 19:43:09.433`) when its day isn't
+  *  `startMs`'s (the session header carries the start's date). */
 diff --git a/dist/react/session-log/model.js b/dist/react/session-log/model.js
+index b923e5d3238a9ff23bf505f4da9da0692d1e3d7d..c738cec12f248977121cfe4227ee4c6ce2bced4c 100644
 --- a/dist/react/session-log/model.js
 +++ b/dist/react/session-log/model.js
 @@ -3,8 +3,8 @@
@@ -128,12 +282,12 @@ diff --git a/dist/react/session-log/model.js b/dist/react/session-log/model.js
   */
 -import { isErrorEvent, KINDS } from '../../core/session-log-shape.js';
 -/** `1h 02m`, `3m 07s`, `12s`, `450ms`. */
-+import { isCancelled, isErrorEvent, KINDS } from '../../core/session-log-shape.js';
++import { isCancelled, isErrorEvent, isFailedApi, KINDS } from '../../core/session-log-shape.js';
 +/** `4d 12h 43m`, `1h 02m`, `3m 07s`, `12s`, `450ms`. */
  export function fmtDuration(ms) {
      if (ms < 1000)
          return `${Math.round(ms)}ms`;
-@@ -14,13 +14,15 @@
+@@ -14,13 +14,15 @@ export function fmtDuration(ms) {
      const m = Math.floor(s / 60);
      if (m < 60)
          return `${m}m ${String(s % 60).padStart(2, '0')}s`;
@@ -153,49 +307,52 @@ diff --git a/dist/react/session-log/model.js b/dist/react/session-log/model.js
  }
  /** A local wall-clock time to the ms (`19:43:09.433`), led by the date (`Oct 13 19:43:09.433`) when its day isn't
   *  `startMs`'s (the session header carries the start's date). */
-@@ -45,7 +47,7 @@
+@@ -45,13 +47,22 @@ export function summarize(e) {
          case 'prefetch': return `${str(e.w)} ${str(e.p) || '(root)'}${e.d ? ` @ ${str(e.d)}` : ''}`;
          case 'api': {
              const b = e.b && typeof e.b === 'object' ? ` {${Object.entries(e.b).map(([k, v]) => `${k}: ${v}`).join(', ')}}` : '';
 -            return `${str(e.m) || 'GET'} ${str(e.u)}${b} → ${e.s === 0 ? 'failed' : str(e.s)} · ${str(e.ms)}ms${e.c ? ` · ${str(e.c)}` : ''}${e.qe ? ` · ${str(e.qe)}` : ''}${e.err ? ` · ${str(e.err)}` : ''}`;
-+            return `${str(e.m) || 'GET'} ${str(e.u)}${b} → ${isCancelled(e) ? 'cancelled' : e.s === 0 ? 'failed' : str(e.s)} · ${str(e.ms)}ms${e.c ? ` · ${str(e.c)}` : ''}${e.qe ? ` · ${str(e.qe)}` : ''}${e.err && !isCancelled(e) ? ` · ${str(e.err)}` : ''}`;
++            const on = (v) => v === true ? 'online hint' : v === false ? 'offline hint' : 'connectivity unknown';
++            const context = e.s === 0 || isFailedApi(e) ? [
++                e.on0 !== undefined && `${on(e.on0)}${e.on0 !== e.on ? ` → ${on(e.on)}` : ''}`,
++                e.vis0 && `${str(e.vis0)}${e.vis0 !== e.vis ? ` → ${str(e.vis)}` : ''}`,
++                typeof e.visMs === 'number' && `${fmtDuration(e.visMs)} since visible`,
++                typeof e.gapMs === 'number' && `timer gap ${fmtDuration(e.gapMs)}, ${fmtDuration(Number(e.gapAgo))} before request`,
++                e.cancel && `cancel: ${str(e.cancel)}`,
++            ].filter(Boolean) : [];
++            return `${str(e.m) || 'GET'} ${str(e.u)}${b} → ${isCancelled(e) ? 'cancelled' : e.s === 0 ? 'failed' : str(e.s)} · ${str(e.ms)}ms${e.c ? ` · ${str(e.c)}` : ''}${e.qe ? ` · ${str(e.qe)}` : ''}${e.err && !isCancelled(e) ? ` · ${str(e.err)}` : ''}${e.id ? ` · request #${str(e.id)}` : ''}${context.length ? ` · ${context.join(' · ')}` : ''}${e.ray ? ` · Ray ${str(e.ray)}` : ''}${typeof e.wall === 'number' && Math.abs(e.wall - Number(e.ms)) > 1000 ? ` · wall ${fmtDuration(e.wall)}` : ''}`;
          }
          case 'error': return `${str(e.msg)}${e.src ? ` @ ${str(e.src)}` : ''}`;
          case 'reject': return `unhandled rejection: ${str(e.msg)}`;
-diff --git a/dist/session-log/routes.js b/dist/session-log/routes.js
---- a/dist/session-log/routes.js
-+++ b/dist/session-log/routes.js
-@@ -61,13 +61,15 @@
-     }
-     async function config(req, ctx) {
-         const now = Date.now();
--        await purgeLater(ctx, now);
-+        const viewer = await identify(req);
-+        if (viewer && viewer.via !== 'public')
-+            await purgeLater(ctx, now);
-         const u = await current(now);
-         const shared = { on: isOn(u), retainDays, appEvents };
-         const off = (reason) => json({ enabled: false, until: u.until, reason, ...shared }, 200, NO_STORE);
-         if (!isOn(u))
-             return off(u.reason);
--        if (!(await identify(req)))
-+        if (!viewer)
-             return off('no viewer identity');
-         return json({ enabled: true, until: u.until, reason: null, ...shared }, 200, NO_STORE);
-     }
-diff --git a/package.json b/package.json
---- a/package.json
-+++ b/package.json
-@@ -119,7 +119,11 @@
-       "default": "./dist/testing/index.js"
-     },
-     "./migrations/*": "./migrations/*",
--    "./package.json": "./package.json"
-+    "./package.json": "./package.json",
-+    "./session-log/model": {
-+      "types": "./dist/react/session-log/model.d.ts",
-+      "default": "./dist/react/session-log/model.js"
-+    }
-   },
-   "peerDependencies": {
-     "@cloudflare/workers-types": "*",
+         case 'console': return `console.error: ${str(e.msg)}`;
+         case 'viewport': return `${str(e.w)}×${str(e.h)} @${str(e.dpr)}x`;
+         case 'vis': return `tab ${str(e.s)}`;
++        case 'life': return `browser ${str(e.s)}${typeof e.ms === 'number' ? ` ${fmtDuration(e.ms)}` : ''} · ${e.on === true ? 'online hint' : e.on === false ? 'offline hint' : 'connectivity unknown'} · ${str(e.vis)}${e.persisted === true ? ' · bfcache' : ''}${e.discarded === true ? ' · previously discarded' : ''}`;
+         case 'dropped': return `${str(e.n)} events dropped (cap)`;
+         default: {
+             // An app event: its fields, in the order sent.
+@@ -73,10 +84,23 @@ export const laneOf = (e) => isErrorEvent(e) ? 'error'
+ export function timeline(events) {
+     const t0 = events[0]?.t ?? 0;
+     const urlBy = new Map();
++    const failed = new Map();
+     return events.map((e, i) => {
+         if ((e.k === 'start' || e.k === 'nav') && typeof e.u === 'string')
+             urlBy.set(e.pid, e.u);
+-        return { i, t: e.t, off: e.t - t0, k: e.k, text: summarize(e), error: isErrorEvent(e), lane: laneOf(e), url: urlBy.get(e.pid) ?? null, pid: e.pid };
++        let later = '';
++        // Correlate only same-page, exact unmasked same-origin reads, never writes or concurrent earlier requests.
++        if (e.k === 'api' && typeof e.id === 'number' && typeof e.u === 'string' && e.u.startsWith('/') && !e.u.includes('…') && ['GET', 'HEAD'].includes(String(e.m ?? 'GET'))) {
++            const key = JSON.stringify([e.pid, e.m ?? 'GET', e.u]);
++            const prior = failed.get(key);
++            if (isFailedApi(e) && typeof e.end === 'number')
++                failed.set(key, { id: e.id, end: e.end });
++            else if (typeof e.s === 'number' && e.s >= 200 && e.s < 300 && prior && e.t >= prior.end) {
++                later = ` · later success after request #${prior.id} (${fmtDuration(e.t - prior.end)} after failure)`;
++                failed.delete(key);
++            }
++        }
++        return { i, t: e.t, off: e.t - t0, k: e.k, text: summarize(e) + later, error: isErrorEvent(e), lane: laneOf(e), url: urlBy.get(e.pid) ?? null, pid: e.pid };
+     });
+ }
+ /** Ticks across `width` px: x by time (a zero-length session puts all at 0). */
