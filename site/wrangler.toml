@@ -42,6 +42,7 @@ OG_ANONYMOUS = "full"            # an anonymous unfurl gets the full card (label
 BASE_SCOPE = "hf"
 STAFF_DOMAIN = "openathena.ai"
 ADMIN_EMAILS = "1"
+SLACK_ADMIN_CHANNEL = "C0C9J9VDPV5"  # #hf-admin: activity bursts; bot token is a Pages secret
 # The plan prefix shape (`_lib/plans.ts`): one "bucket", the namespace. No staging / executor: nothing here deletes.
 STORE_SCHEME = "hf://"
 STORE_BUCKETS = "open-athena"
@@ -115,6 +116,7 @@ OG_ANONYMOUS = "full"
 BASE_SCOPE = "hf"
 STAFF_DOMAIN = "openathena.ai"
 ADMIN_EMAILS = "1"
+SLACK_ADMIN_CHANNEL = "C0C9J9VDPV5"
 STORE_SCHEME = "hf://"
 STORE_BUCKETS = "open-athena"
 STORE_ROOT = "open-athena"

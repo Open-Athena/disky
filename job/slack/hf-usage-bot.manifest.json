@@ -23,10 +23,12 @@
         "channels:history",
         "groups:history",
         "channels:read",
+        "channels:write.topic",
         "groups:read",
         "users:read",
         "users:read.email",
-        "emoji:read"
+        "emoji:read",
+        "pins:write"
       ]
     }
   },
