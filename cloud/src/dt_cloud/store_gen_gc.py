@@ -17,7 +17,11 @@ ones, and deletes the rest whose newest write is older than the grace (a reader 
 
 A dry run (the default) prints what would go; `-x` deletes. Each line: the generation, objects, bytes, newest write, and
 `delete` / `kept (…)`. Directories without a root `scans.json` generation marker stay held: source caches and
-unfinished builds are not made deletion candidates by their age or name."""
+unfinished builds are not made deletion candidates by their age or name.
+
+`-p/--payload-only` narrows static-name candidates to Parquet files while preserving all JSON/JSONL provenance,
+scan rosters and forwarding records. It keeps the same generation, grace and live-pin checks; execution additionally
+requires `-r/--review` with the exact candidate keys and sizes. A repeated pass keeps metadata-only predecessors."""
 from __future__ import annotations
 
 import json
@@ -47,7 +51,7 @@ def gen_dirs(store: Store, prefix: str) -> dict[str, dict[str, int]]:
     return out
 
 
-def plan(store: Store, kind: str, keep: list[str], *, lineage_only: bool, grace_s: float, now: float) -> list[dict]:
+def plan(store: Store, kind: str, keep: list[str], *, lineage_only: bool, grace_s: float, now: float, payload_only: bool = False) -> list[dict]:
     """One record per generation of `kind` in `store`: `{gen, objects, bytes, newest, action, reason}`."""
     from .scan_retire import lineage
 
@@ -88,22 +92,35 @@ def plan(store: Store, kind: str, keep: list[str], *, lineage_only: bool, grace_
             rec.update(action="keep", reason=f"written {round((now - mt) / 3600)}h ago (grace {round(grace_s / 3600)}h)")
         else:
             rec.update(action="delete", reason=None)
+        if payload_only and rec['action'] == 'delete':
+            payload = {key: size for key, size in files.items() if key.endswith('.parquet')}
+            rec.update(objects=len(payload), bytes=sum(payload.values()), retained_metadata_objects=len(files) - len(payload))
+            files = payload
+            # The fresh listing already holds the sizes; do not issue a HEAD for every payload key.
+            rec['_sizes'] = files
+            if not payload:
+                rec.update(action='keep', reason='no Parquet payloads')
         rec["_files"] = sorted(files)
         out.append(rec)
     return out
 
 
 def run(store: Store, kind: str, keep: list[str], *, lineage_only: bool = False, grace_s: float = GRACE_S, now: float,
-        execute: bool = False, review: Path | None = None) -> list[dict]:
-    recs = plan(store, kind, keep, lineage_only=lineage_only, grace_s=grace_s, now=now)
+        execute: bool = False, review: Path | None = None, payload_only: bool = False) -> list[dict]:
+    if payload_only and kind != 'static-names':
+        raise ValueError('payload-only retirement supports static-names only')
+    if payload_only and execute and review is None:
+        raise ValueError('payload-only retirement requires an exact --review manifest')
+    recs = plan(store, kind, keep, lineage_only=lineage_only, grace_s=grace_s, now=now, payload_only=payload_only)
     if review is not None:
         from .delete_review import validate
 
-        files = {key: store.size(key) for r in recs if r['action'] == 'delete' for key in r['_files']}
+        files = {key: r['_sizes'][key] if '_sizes' in r else store.size(key) for r in recs if r['action'] == 'delete' for key in r['_files']}
         validate(review, store.root, files)
     cur = ic.chain(store, ic.resolve(store)[0])[-1] if kind == "interval-store" else None
     for r in recs:
         files = r.pop("_files")
+        r.pop('_sizes', None)
         if r["action"] == "delete" and execute:
             if r["lineage"]:
                 r["markers"] = ic.carry_markers(store, r["gen"], cur)
@@ -118,16 +135,19 @@ def run(store: Store, kind: str, keep: list[str], *, lineage_only: bool = False,
 @option("-k", "--keep", multiple=True, help="A generation to keep whatever else holds (repeat): every one a site reads (`STATIC_GEN`, a pinned `INTERVAL_STORE_GEN`)")
 @option("-l", "--lineage-only", is_flag=True, help="interval-store: only what the current generation was compacted or backfilled from (the scan step's mode)")
 @option("-o", "--out", "store_root", required=True, help="The store: a dir or URL (where `interval-store/` / `static-names/` live)")
+@option("-p", "--payload-only", is_flag=True, help="static-names: retire only Parquet payloads; keep all metadata and forwarding records; -x requires -r")
 @option("-r", "--review", help="Require exact keys and sizes from a reviewed JSON manifest before deleting")
 @option("-t", "--kind", type=Choice(["interval-store", "static-names"]), required=True, help="Which generations")
 @option("-x", "--execute", is_flag=True, help="Delete (default: a dry run)")
-def store_gc_cmd(grace_s, keep, lineage_only, store_root, review, kind, execute) -> None:
+def store_gc_cmd(grace_s, keep, lineage_only, store_root, payload_only, review, kind, execute) -> None:
     """Delete superseded generations of a store's interval store or static name index, past a grace (a dry run unless
     -x). Prints a JSON summary."""
     import time
 
     if lineage_only and kind != "interval-store":
         raise SystemExit("-l: interval-store only")
+    if payload_only and kind != 'static-names':
+        raise SystemExit('-p: static-names only')
     recs = run(Store(store_url(store_root)), kind, list(keep), lineage_only=lineage_only, grace_s=grace_s, now=time.time(), execute=execute,
-               review=Path(review) if review else None)
+               review=Path(review) if review else None, payload_only=payload_only)
     print(json.dumps({"kind": kind, "execute": execute, "generations": recs}, indent=1))

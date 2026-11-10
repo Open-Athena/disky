@@ -56,3 +56,41 @@ def test_a_forwarding_record_does_not_publish_a_cache_directory(tmp_path):
     remaining = {k: data for k, data in contents.items() if k != 'static-names/old/scans.json'}
     assert {k: store.read_bytes(k) for k in store.listing('static-names')} == remaining
     assert json.loads(store.read_bytes('static-names/old/successor.json')) == {'gen': 'live'}
+
+
+def test_payload_retirement_keeps_all_metadata_and_requires_exact_review(tmp_path):
+    store = Store(str(tmp_path / 'store'))
+    contents = {
+        'static-names/CURRENT.json': b'{"gen":"live"}\n',
+        'static-names/live/scans.json': b'{"scans":[]}\n',
+        'static-names/live/data.parquet': b'live payload',
+        'static-names/old/scans.json': b'{"scans":[]}\n',
+        'static-names/old/successor.json': b'{"gen":"live"}\n',
+        'static-names/old/compaction.json': b'{"verified":true}\n',
+        'static-names/old/oracle.jsonl': b'{"expected":123}\n',
+        'static-names/old/drill/data.parquet': b'old payload',
+        'static-names/src/input.parquet': b'held source',
+    }
+    for key, data in contents.items():
+        store.write_bytes(key, data)
+    kwargs = dict(grace_s=0, now=4e9, payload_only=True)
+    dry = G.run(store, 'static-names', ['live'], **kwargs)
+    assert [(r['gen'], r['action'], r['objects'], r.get('retained_metadata_objects')) for r in dry] == [
+        ('live', 'keep', 2, None), ('old', 'delete', 1, 3), ('src', 'keep', 1, None),
+    ]
+    with pytest.raises(ValueError, match='^payload-only retirement requires an exact --review manifest$'):
+        G.run(store, 'static-names', ['live'], execute=True, **kwargs)
+    review = tmp_path / 'review.json'
+    review.write_text(json.dumps({'roots': [{'root': store.root, 'files': [{'key': 'static-names/old/drill/data.parquet', 'bytes': 12}]}]}))
+    with pytest.raises(ValueError, match='^deletion review mismatch: 0 extra, 0 missing, 1 size changes; nothing deleted$'):
+        G.run(store, 'static-names', ['live'], execute=True, review=review, **kwargs)
+    assert {key: store.read_bytes(key) for key in store.listing('static-names')} == contents
+    review.write_text(json.dumps({'roots': [{'root': store.root, 'files': [{'key': 'static-names/old/drill/data.parquet', 'bytes': 11}]}]}))
+    done = G.run(store, 'static-names', ['live'], execute=True, review=review, **kwargs)
+    assert [(r['gen'], r.get('deleted', 0)) for r in done] == [('live', 0), ('old', 1), ('src', 0)]
+    remaining = {key: data for key, data in contents.items() if key != 'static-names/old/drill/data.parquet'}
+    assert {key: store.read_bytes(key) for key in store.listing('static-names')} == remaining
+    again = G.run(store, 'static-names', ['live'], **kwargs)
+    assert [(r['gen'], r['action'], r['reason']) for r in again] == [
+        ('live', 'keep', 'current'), ('old', 'keep', 'no Parquet payloads'), ('src', 'keep', 'not a published generation (missing root scans.json)'),
+    ]
