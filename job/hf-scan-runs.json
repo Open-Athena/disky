@@ -10,6 +10,7 @@
      "scan": [{"env": "SNAP_ID"}, {"log": "^(?:HF-)?SCAN-JOB-DONE (\\S+)"}, {"started": "%Y-%m-%dT%H%M"}]}
   ],
   "error_marker": ["^\\+\\+ scan_err (?P<rc>\\d+) (?P<line>\\d+) (?P<cmd>.*)", "^\\+\\+ on_err (?P<rc>\\d+) (?P<line>\\d+) (?P<cmd>.*)"],
+  "nominal": {"state": "gs://oa-hf-usage-data/notifications/nominal", "site": "https://hf.oa.dev", "channel": "C0C9J9VDPV5", "title": "Hugging Face scans", "adopt_parent": "1794098956.878049", "site_token_secret": "hf-usage-job-grant"},
   "alerts": {"label": "Hugging Face scan", "logs_url": "https://console.cloud.google.com/logs/query;query=labels.job_uid%3D%22{job_uid}%22?project={project}"},
   "secrets": ["HF_TOKEN", "CLOUDFLARE_API_TOKEN", "CF_PAGES_TOKEN", "CLOUDFLARE_ACCOUNT_ID", "R2_ENDPOINT", "R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY", "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "SLACK_BOT_TOKEN", "SITE_TOKEN", "CF_ANALYTICS_TOKEN"],
   "outputs": [
