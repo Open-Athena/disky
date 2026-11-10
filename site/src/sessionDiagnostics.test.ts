@@ -32,6 +32,7 @@ async function rig() {
     performance: { now: () => perf },
   })) vi.stubGlobal(key, value)
   const client = await import('@open-athena/auth/session-log/client')
+  client.resetSessionLog()
   stop = () => { vi.setSystemTime(UNTIL); client.slog('pick', { n: 'stop', v: 'stop' }) }
   expect(await client.bootSessionLog({ build: 'diagnostics' })).toBe(true)
   const flush = async () => { win.dispatchEvent(new Event('pagehide')); await Promise.resolve() }
