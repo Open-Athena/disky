@@ -1,11 +1,12 @@
 config:
   gcp:project: oa-internal-450019
   gcp:region: us-west1
-  r2:dailyEnabled: true
+  r2:dailyEnabled: "true"
   r2:scanImage: us-west1-docker.pkg.dev/oa-internal-450019/oa-r2-usage/scan@sha256:dbafa347006a7d53a51957f6c1fece065c8da5e328ce1cc34b8f0cc348a6fae0
   r2:heads:
     - profile: r2.yml
       schedule: "15 7 * * *"
     - profile: r2-meta.yml
       schedule: "15 8 * * *"
-encryptionsalt: v1:4n8ZoN24W1M=:v1:ySInqEEkOMCnjmrx:lRyqE4LFIZIvLahnFniXqHbfJiUGWw==
+secretsprovider: gcpkms://projects/oa-internal-450019/locations/global/keyRings/ops/cryptoKeys/pulumi
+encryptedkey: CiQAqKOWSJNwC2YYdQi5DqTRn+411Sw7dLHLXSeWEAhT+d31YJMSSQAw+4V0tuzqoBLMSDCDjKW6gHOD0PF2bys3sfvJRf2nJc3mI9HN/aq84YPpV/uEAuyaKNqTNGCJmdrcQSgZ3amr86RX5QFEI7w=

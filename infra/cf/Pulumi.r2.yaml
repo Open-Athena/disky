@@ -7,7 +7,7 @@ config:
   oa-r2-usage-cf:d1Name: oa-r2-usage-db
   oa-r2-usage-cf:kvName: oa-r2-usage-cache
   oa-r2-usage-cf:r2Bucket: oa-r2-usage-index
-  oa-r2-usage-cf:d1Publisher: true
+  oa-r2-usage-cf:d1Publisher: "true"
   oa-r2-usage-cf:iconsProject: oa-r2-usage-icons
   oa-r2-usage-cf:sourceBuckets:
     - marin-na
@@ -17,4 +17,5 @@ config:
   oa-r2-usage-cf:branchAliases:
     - domain: dev.r2.oa.dev
       branch: r2
-encryptionsalt: v1:B1xVw+MI7So=:v1:2UhG5vh1Su4VvPvy:m2JftNanzN5Y3fW0TQ42vGtu2ikikg==
+secretsprovider: gcpkms://projects/oa-internal-450019/locations/global/keyRings/ops/cryptoKeys/pulumi
+encryptedkey: CiQAqKOWSL5RIzBb4pW5Kch1gUfy1QfMXWI/y7q9GlXPkkodgjUSSQAw+4V0IJfDjDN3qvtNwkFOaofFkKNP3N2mfMLNvZkfAIIzewUEstnMiyz9KkTWgs/RsKKkuHFuEUOh7vMgoAigrM0FTSnqFYA=

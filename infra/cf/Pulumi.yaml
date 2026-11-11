@@ -6,4 +6,4 @@ runtime:
   options:
     virtualenv: ../.venv
 backend:
-  url: file://./state
+  url: gs://oa-pulumi
