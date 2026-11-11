@@ -119,6 +119,17 @@ secrets = Secrets(
     accessor_email=job.email_literal,
     adopt=Adopt(False),
 )
+# The disky.oa.dev fleet dashboard's dedicated `oa-r2:read` grant (`dt-cloud job-token`, specs/fleet-read-grants.md):
+# root installs it as `FLEET_TOKEN_R2`; the job never reads it, so no accessor
+fleet_secrets = Secrets(
+    "r2-fleet-secrets",
+    project=project,
+    secrets={"oa-r2-fleet-token": {**labels, "component": "secret"}},
+    accessor=job.member,
+    accessor_email=job.email_literal,
+    adopt=Adopt(False),
+    grant_only=set(),
+)
 pulumi.export("job_account", job.email)
 pulumi.export("builder_account", builder.email)
 pulumi.export("data_bucket", profile["data_bucket"])
