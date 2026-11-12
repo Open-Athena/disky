@@ -29,7 +29,7 @@ def test_r2_token_roles_have_exact_scopes():
         "sourceBuckets": ["marin-na", "marin-discord", "oa-cw-s3-usage-index", "oa-gcs-usage-index"],
     }
     pulumi.runtime.set_all_config({f"oa-r2-usage-cf:{key}": value if isinstance(value, str) else dumps(value) for key, value in config.items()})
-    program = run_path(str(Path(__file__).resolve().parents[1] / "cf/stack/__main__.py"))
+    program = run_path(str(Path(__file__).resolve().parents[1] / "cf/r2/__main__.py"))
 
     def check(_: object) -> None:
         tokens = mocks.tokens

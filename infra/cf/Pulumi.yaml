@@ -1,6 +1,6 @@
 name: oa-r2-usage-cf
 description: Independent Cloudflare surface of r2.oa.dev
-main: stack/
+main: r2/
 runtime:
   name: python
   options:
