@@ -121,6 +121,8 @@ dt-cloud static-names add -g GEN -L LAYOUT -s SCANS -o STORE  # Append every sca
                           # gets them only by a rebuild into a new GEN — `manifests/<id>.json`), then the binary counter's carries; a URL
                           # store's generation is mirrored into `-w`, new files go up data → `meta.json`s → manifests.
                           # Small deployments' path (the r2 demo's daily ingest); gcs/cw run the stages on Batch
+dt-cloud generation-gc -t KIND -o STORE -k PIN…  # Collect verified compaction predecessors: plans by default, `-x -s SCRATCH` executes
+                          # (protocol, receipts, grace and pins: `specs/done/generation-gc-and-r2-copy.md`)
 dt-cloud interval-store migrate-object-version -g OLD -O NEW -o STORE  # Adopt string object versions without raw listings:
                           # fold existing ranges/runs; native GCS generations become exact strings, unknowns stay NULL.
                           # `-R` names borrowed source ranges. Source and CURRENT stay unchanged pending verification/cutover.
@@ -189,7 +191,7 @@ dt-cloud image-sha [-e SHA [-a]] [-j]  # The running image's source revision (`i
                           # `<sha> dirty` or `unstamped`; `-e` exits 1 unless the image is that sha (or a ≥7-char prefix),
                           # clean (`-a` accepts dirty) and stamped. Job entrypoints (`scan head`/`step`, the
                           # `interval-store` stage tasks) log it
-dt-cloud batch submit -c COMPONENT [-L REGION] [-b BUCKET]… [-X] JOB_ID SPEC  # The shell's Batch submit, through `batch.submit_job` (the
+dt-cloud batch submit -c COMPONENT [-L REGION] [-b BUCKET]… [-X] [-t] [-e] [-r SECONDS] JOB_ID SPEC  # The shell's Batch submit, through `batch.submit_job` (the
                           # one place a job is created): labelled from `$DISKY_LABELS` + `-c` on the job and its allocation policy
                           # (`cost_labels.py`), in `-L`, else `$BATCH_REGION`. There is no default region (`deploy.batch_region`): neither
                           # set is an error, here and in `job status|logs|watch|metrics`, `batch-cancel` (`-r`), `sweep sync-progress`,
@@ -199,13 +201,21 @@ dt-cloud batch submit -c COMPONENT [-L REGION] [-b BUCKET]… [-X] JOB_ID SPEC  
                           # per process; a multi-region bucket takes its continent's regions, a dual-region its two) unless
                           # `-X/--cross-region` (`job submit-listing -X` too; `$BATCH_CROSS_REGION=1` for the submitters with no flag:
                           # the static-names / interval-store runners, `scan-run task`). A bucket whose location can't be read is
-                          # noted on stderr and not checked; a bucket reached only by URL and not named isn't seen
+                          # noted on stderr and not checked; a bucket reached only by URL and not named isn't seen.
+                          # Idempotent (a scheduled submit): `-t` JOB_ID is a strftime template over UTC now (`scan-%Y%m%d`: one
+                          # job per period, `batch.job_id_at`, checked against Batch's id rule), `-e` a 409 for that id counts as
+                          # submitted, `-r` retries 429/5xx/connection failures (5 s doubling to 300 s) for that long, then exit 1
+                          # (`SubmitFailed`); `-r` needs `-e`, since only the id makes a retry after a lost answer safe
 dt-cloud soft-delete -b BUCKET… [-E ENDPOINT] [-o ROOT…] [-j]  # Each bucket's soft-delete retention now (`soft_delete.py`): GCS's (`NAME`, read with
                           # `storage.buckets.get`, and GCS restores nothing from a bucket whose policy is off), or an S3-style store's (`s3://NAME`:
                           # versioning plus the narrowest noncurrent rule; null = kept until purged). What a sweep's undo has to work with. `-o`: the day's `<ROOT>/<date>.json`; the opt-in scan step `soft-delete` writes it under
                           # `snapshots/soft-delete/` for each `gs://` and `s3://` source, and the site (whose own account can't read bucket
                           # metadata) reads the newest: a recorded undo on a bucket it shows off is "undo unavailable" (its control
                           # disabled, the route refusing), one on a bucket it doesn't name is "unverified". `sweep undo` asks GCS itself
+dt-cloud monitoring-relay serve [-c slack] [-p PORT]  # Cloud Monitoring incidents → `disk-tree notify` (specs/monitoring-relay.md):
+                          # a Pub/Sub push endpoint (infra `MonitoringRelay`'s Cloud Run service), each incident posted with the
+                          # deployment's own bot (policy, condition, opened/resolved, documentation, incident link); 204 once
+                          # posted, 500 to be redelivered. `render FILE` prints the text for a notification's JSON (`-s` posts it)
 dt-cloud diff-bench -a BEFORE -b AFTER [-S STORE] [-v DATE:PATH]… CASES  # The table a store-layout change ships with (no CURRENT move
                           # without it): the browser's diff + map requests (diff-check's CASES, `-v` views) on two hosts, each
                           # cold (`-n` random w×h cache buckets no page asks for) then warm (`-s`: also each diff's `summary=1`, which no page asks); per request kind, median cold
@@ -257,6 +267,8 @@ then `git rm`'d. `dt-cloud d1-schema check -d <db> [-c <wrangler config>]` compa
 One gate (`_lib/auth.ts`, `@open-athena/auth` over D1): `identify` → `Identity` (`via: session | grant | public`), `requireViewer` / `requireStager` / `requireAdmin`.
 - `/auth/google` (+ `/callback`, `/onetap`) — Google OIDC → email session; `/auth/email/*` — emailed code / magic link → email session
 - `/auth/oa` (+ `/callback`, `/client`) — "Sign in with OA" through OA's broker (`OA_LOGIN_*`, `specs/oa-login-rp.md`; unset: 404, no button) → email session. Where configured, the middleware sends a person's unauthenticated page visit there once with `prompt=none` before the wall (`_lib/silentSignIn.ts`; never a crawler, `fetch`, `?key=`/`?og=` link or public deployment); `/api/auth/logout` suppresses that until they click it or complete any sign-in
+- **Preview hosts** (`isPreviewHost`: exactly one label under `PAGES_SUBDOMAIN`, the project's `pages.dev` subdomain: a PR's `pr-N`, the `dev` alias, a deployment hash; never a custom domain): OA sign-in only through the broker's preview client (`OA_LOGIN_PREVIEW_CLIENT_ID` / `_SECRET`, Preview environment only) with `redirectFromOrigin`, else none (404, no button; never the deployment's own client), and no silent `prompt=none` attempt
+- **`AUTH_HOST_COOKIES = "1"`** (default off; switching it signs everyone out once): on https, the session (+ its `_rs` handle), both nonces and the Google hint are `__Host-` named (`cookieNames`), so the gate reads only `__Host-oa_auth` there; `gateFor(env, request)` needs the request for it
 - `/api/auth/*` — the package's routes: `whoami`, `exchange` (`?key=` share link → grant session), `logout`, request-access, admin grant/request/log console
 - `/api/token` — a session's personal agent token (a non-expiring Bearer grant, the base scope only; grants can't mint one)
 - `/api/admins` — the admins (`/admin`'s "Admins" section): every path to the `admin` scope (the list's rows with who added whom and when, the break-glass addresses, live admin-scope links, the staff domain where it is one), add / remove on the list, each logged to `admin_edits`; the last listed admin can't be removed
@@ -272,6 +284,10 @@ One gate (`_lib/auth.ts`, `@open-athena/auth` over D1): `identify` → `Identity
 3. Set `ADMIN_LIST` and `ADMIN_BOOTSTRAP` on **every environment sharing that D1, at the same time**, prod and dev stack alike: a dev stack on prod's D1 with the list off lets every staff sign-in edit the list from dev.
 
 ## Development
+
+Shared work done on a deployment branch is its own commit, subject prefixed `[cloud]`, with no deployment defaults; send its sha to the root `disky` session when committed. Config and wiring are separate `[<deploy>]` commits. An unsent `[cloud]` commit is how a fix stays on one deployment.
+
+Deploy sites and build release images only from committed source. `scripts/require-clean` refuses staged, unstaged and nonignored untracked changes; there is no dirty-source override. `site/deploy` checks again after building and records the verified commit. A deployment's image build (gcs/cw `job/build.sh`) uploads a Git archive of that commit, so concurrent working-tree edits cannot enter the image. Read-only deployment status and dry runs remain available on a dirty tree.
 
 During ongoing implementation, treat a concrete bug report about the code we own as an implied request to fix it: reproduce, implement, verify, and coordinate the deployment handoff without requiring a second prompt. Honor explicitly read-only requests. Code-fix authority does not imply unrelated infrastructure applies, permission changes, or another session's live cutover. Report separately what is fixed locally and what is actually deployed.
 

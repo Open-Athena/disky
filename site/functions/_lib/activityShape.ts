@@ -3,7 +3,7 @@
  * session-log events are which kind, bursts, and the Slack / Discord renderings. No Workers or DOM types; the D1 and
  * sink I/O is `activity.ts`.
  */
-import { benignError, isErrorEvent, isFailedApi, type SlogEvent, summarize, TRUNC } from './sessionLogShape.js'
+import { benignError, isErrorEvent, isFailedApi, offlineFailure, type SlogEvent, summarize, TRUNC } from './sessionLogShape.js'
 
 export const NOTIFY = ['off', 'count', 'line'] as const
 export type Notify = typeof NOTIFY[number]
@@ -29,7 +29,7 @@ export const KIND_DEFS: KindDef[] = [
   def('stage', 'server', 'Staged-deletion edits (each plan has its own thread)', ['staging edit', 'staging edits'], 'count'),
   def('deletion', 'server', 'Deletion runs dispatched, stopped, undone or purged', ['deletion action', 'deletion actions'], 'line'),
   def('access', 'server', 'Grants, share links, access requests, the sign-in allowlist', ['access change', 'access changes'], 'line'),
-  def('admin', 'server', 'Admin console edits and site settings', ['admin edit', 'admin edits'], 'line'),
+  def('admin', 'server', 'Admin console actions and site settings', ['admin action', 'admin actions'], 'line'),
   def('token', 'server', 'Agent / CLI token minted', ['token', 'tokens'], 'line'),
   def('profile', 'server', 'Profile name or avatar', ['profile edit', 'profile edits'], 'count'),
   def('digest', 'server', "The Slack digest job's own syncs (the OP's state, its plot)", ['digest sync', 'digest syncs'], 'off'),
@@ -45,7 +45,6 @@ export const KIND_DEFS: KindDef[] = [
   def('prefetch', 'client', 'Hover prefetches', ['prefetch', 'prefetches'], 'off'),
   def('viewport', 'client', 'Window size', ['resize', 'resizes'], 'off'),
   def('vis', 'client', 'Tab shown / hidden', ['visibility change', 'visibility changes'], 'off'),
-  def('life', 'client', 'Browser connectivity hints, lifecycle changes and long timer gaps', ['browser event', 'browser events'], 'off'),
 ]
 export const KIND_BY_NAME: Record<string, KindDef> = Object.fromEntries(KIND_DEFS.map(d => [d.kind, d]))
 
@@ -142,6 +141,42 @@ export interface Detail {
   [k: string]: unknown
 }
 
+/** A manual refresh of existing activity summaries. Targets are kept even when their counts happen to agree. */
+export interface ActivityRefresh {
+  action: 'activity-render'
+  requested: number[]
+  rendered: number[]
+  since?: string
+  reason?: string
+}
+
+export function activityRefreshLine(d: ActivityRefresh, fmt?: Fmt, origin = ''): string {
+  const esc = fmt?.esc ?? ((s: string) => s)
+  const rendered = new Set(d.rendered)
+  const skipped = d.requested.filter(id => !rendered.has(id)).length
+  const line = `refreshed ${d.rendered.length} activity ${d.rendered.length === 1 ? 'summary' : 'summaries'} (${d.requested.length} requested, ${skipped} skipped)`
+  const scope = d.since ? `active since ${esc(d.since)}` : ''
+  const reason = d.reason ? `reason: ${esc(d.reason)}` : 'display refresh of existing activity posts'
+  const targets = d.rendered.slice(0, 5).map(id => fmt && origin
+    ? fmt.link(`${origin}/admin/activity?burst=${id}`, `#${id}`)
+    : `#${id}`)
+  if (d.rendered.length > targets.length) targets.push(`+${d.rendered.length - targets.length} more`)
+  return [line, scope, reason, ...(targets.length ? [`summaries: ${targets.join(', ')}`] : [])].filter(Boolean).join(' · ')
+}
+
+/** A recorded refresh's targets as links; older events only kept the count. */
+export function activityEventLine(e: Pick<ServerEvent, 'line' | 'route' | 'detail'>, fmt: Fmt, origin: string): string {
+  const d = e.detail
+  const ids = (v: unknown): v is number[] => Array.isArray(v) && v.every(id => Number.isSafeInteger(id) && id > 0)
+  if (d?.action === 'activity-render' && ids(d.requested) && ids(d.rendered)) {
+    return activityRefreshLine({ action: 'activity-render', requested: d.requested, rendered: d.rendered,
+      ...(typeof d.since === 'string' ? { since: d.since } : {}), ...(typeof d.reason === 'string' ? { reason: d.reason } : {}),
+    }, fmt, origin)
+  }
+  const old = e.route === '/api/activity/render' && /^re-rendered (\d+) activity bursts?$/.exec(e.line)
+  return old ? `refreshed ${old[1]} existing activity summaries (display refresh; target IDs were not recorded)` : e.line
+}
+
 /** One actor's activity: no gap over `gapS` between events. */
 export interface Burst {
   id: number
@@ -191,8 +226,9 @@ export function addPages(pages: Record<string, number>, more: Record<string, num
 export interface ClientError { ts: number; line: string; page: string | null }
 
 /** A batch's client events, per kind (the recorded kinds only), the paths viewed (by count, and in order), and its
- *  errors (when `error` is recorded). An error's page is the latest `view` / `nav` before it in the batch. */
-export function tallyClient(events: readonly SlogEvent[], conf: KindsConf): {
+ *  errors (when `error` is recorded). An error's page is the latest `view` / `nav` before it in the batch;
+ *  the auth package's `offlineFailure`s count as requests (`receivedMs`: when the batch arrived). */
+export function tallyClient(events: readonly SlogEvent[], conf: KindsConf, receivedMs?: number): {
   counts: Record<string, number>; pages: Record<string, number>; trail: string[]; errors: ClientError[]
 } {
   const counts: Record<string, number> = {}
@@ -201,7 +237,7 @@ export function tallyClient(events: readonly SlogEvent[], conf: KindsConf): {
   const errors: ClientError[] = []
   let page: string | null = null
   for (const e of events) {
-    const k = clientKind(e)
+    const k = offlineFailure(e, receivedMs) ? 'api' : clientKind(e)
     if ((e.k === 'start' || e.k === 'nav') && typeof e.u === 'string') page = pathOf(e.u)
     if (!k || !conf[k]?.log || (k === 'error' && benignError(e.msg))) continue
     counts[k] = (counts[k] ?? 0) + 1
@@ -404,17 +440,17 @@ export const MAX_LINES = 30
 
 /** A `line` kind's list: a header, then one line per distinct line (oldest first; repeats folded in as `×N`, from
  *  the first's time), cut at `max`. An event's `href` (an error's session) links its time. */
-export function renderLines(kind: string, events: readonly (Pick<ServerEvent, 'ts' | 'line'> & { href?: string })[], fmt: Fmt, max = MAX_LINES): string {
-  const groups = new Map<string, { ts: number; href?: string; n: number }>()
+export function renderLines(kind: string, events: readonly (Pick<ServerEvent, 'ts' | 'line'> & { href?: string; route?: string })[], fmt: Fmt, max = MAX_LINES): string {
+  const groups = new Map<string, { ts: number; href?: string; n: number; requests: boolean }>()
   for (const e of events) {
     const g = groups.get(e.line)
-    if (g) g.n++
-    else groups.set(e.line, { ts: e.ts, href: e.href, n: 1 })
+    if (g) { g.n++; g.requests &&= e.route === '/api/activity/render' }
+    else groups.set(e.line, { ts: e.ts, href: e.href, n: 1, requests: e.route === '/api/activity/render' })
   }
   const all = [...groups]
   const out = [
     fmt.bold(countText(kind, events.length)),
-    ...all.slice(0, max).map(([line, g]) => `• ${g.href ? fmt.link(g.href, hm(g.ts)) : hm(g.ts)} ${line}${g.n > 1 ? ` ×${fmtN(g.n)}` : ''}`),
+    ...all.slice(0, max).map(([line, g]) => `• ${g.href ? fmt.link(g.href, hm(g.ts)) : hm(g.ts)} ${line}${g.n > 1 ? (kind === 'admin' ? ` (${fmtN(g.n)} ${g.requests ? 'requests' : 'actions'})` : ` ×${fmtN(g.n)}`) : ''}`),
   ]
   if (all.length > max) out.push(`+${fmtN(all.length - max)} more`)
   return out.join('\n')

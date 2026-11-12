@@ -2661,8 +2661,10 @@ a.staged-chip {
     .obj-dl { font-size: 12.5px; }
     .ext-link { margin-left: -6px; }
     .obj-close {
-      margin-left: auto; border: none; background: none; color: var(--ink-2);
-      font-size: 20px; line-height: 1; cursor: pointer; padding: 0 2px;
+      margin-left: auto; display: inline-flex; align-items: center; gap: 6px;
+      border: 1px solid var(--line); border-radius: 4px; background: none; color: var(--ink-2);
+      font-size: 12.5px; line-height: 1.2; min-height: 30px; cursor: pointer; padding: 4px 8px;
+      span { font-size: 18px; line-height: 1; }
       &:hover { color: var(--ink); }
     }
   }
@@ -3249,3 +3251,13 @@ a.sec-anchor {
   &:hover, &:focus-visible { text-decoration: underline; text-decoration-color: var(--ink-3); }
   &:hover::after { content: ' #'; color: var(--ink-3); font-weight: normal; }
 }
+
+.diff-remainder {
+  font-size: 0.8rem;
+  p { margin: 4px 0; color: var(--ink-2); white-space: normal; }
+  button { padding: 2px 7px; cursor: pointer; }
+  span { margin-left: 8px; color: var(--ink-2); white-space: normal; }
+}
+.diff-tm .dt-treemap-tip.dock:has(.diff-remainder) { height: auto; min-height: var(--dt-dock-h); }
+
+.diff-tm .dt-treemap-cell { cursor: pointer !important; }

@@ -416,9 +416,9 @@ export const URL_PARAMS: Record<string, UrlParamDoc> = {
     examples: ['c', 'name', '-o', 'idle'],
   },
   section: {
-    label: 'Section in view',
-    description: 'The section the page is scrolled to, written as the reader scrolls (unless the scroll-spy is turned off) and scrolled to on load. On the map, one of its sections (`diff`, `over-time`, …). On `/staged`, a batch (`batch-12`) or `runs`; an older `#batch-12` link is rewritten to it, and also opens that batch. When absent, the page opens at its top.',
-    examples: ['diff', 'batch-12', 'runs'],
+    label: 'Section in view (older spelling)',
+    description: 'The spelling of `v` before 2026-11-11, with the section id (`diff`, `over-time`, `batch-12`). Rewritten to `v` on load; link previews read either.',
+    examples: ['diff', 'over-time'],
   },
   si: {
     label: 'Decimal units',
@@ -491,6 +491,11 @@ export const URL_PARAMS: Record<string, UrlParamDoc> = {
     examples: ['d1_rows_written'],
     pages: ['/admin/usage'],
   },
+  v: {
+    label: 'Section in view',
+    description: 'The section the page is scrolled to, written as the reader scrolls (unless the scroll-spy is turned off) and scrolled to on load. On the map: `map`, `table`, `time` (size over time), `diff`, `mtime` (bytes by modification date). On `/staged`: a batch (`batch-12`) or `runs`; an older `#batch-12` link is rewritten to it, and also opens that batch. The one-letter codes briefly written on 2026-11-11 (`v=o`, `v=b12`) are read too. When absent, the page opens at its top.',
+    examples: ['d', 'o', 'b12', 'r'],
+  },
   w: {
     label: 'Run window',
     description: 'Lists only the scan runs that started in this UTC window, written as `START~END` stamps (`YYYY-MM-DDTHHMM`) and set by dragging on the duration chart. Esc clears it, and Back undoes it. When absent, every run is listed.',
@@ -511,8 +516,14 @@ export const URL_PARAMS: Record<string, UrlParamDoc> = {
   },
   xr: {
     label: 'Time range',
-    description: 'The size-over-time chart\'s displayed x-range: `1w` or `1m` (the last week / 30 days of scans), or `<from>..<to>` (two scan ids: the stretch brushed on the strip under the chart, or fitted to the diff window). It only frames the chart; the diff window is `w`. When absent, the chart shows all scans.',
+    description: 'The size-over-time or scan-duration chart\'s displayed x-range: `1w` or `1m` (the last week / 30 days), or `<from>..<to>` (two scan stamps: the stretch brushed on the overview strip, or fitted to the selection). It only frames the chart; the selected window is `w`. When absent, the chart shows every date.',
     examples: ['1w', '1m', '2026-09-01..2026-10-01'],
+  },
+  yb: {
+    label: 'Duration axis break',
+    description: 'On scan-duration charts, `0` shows the full linear y-axis. By default a large empty range is collapsed, with slash marks on the axis and affected bars and an explicit omitted-range label. Run ends and phase transitions are kept visible.',
+    examples: ['0'],
+    pages: ['/scans', '/dev/scan-durations'],
   },
   ym: {
     label: 'Y values',
