@@ -73,7 +73,7 @@ jobs:
           ref: ${{ needs.route.outputs.base_sha }}
           persist-credentials: false
       - id: gate
-        uses: Open-Athena/disky/.github/actions/cf-preview@4f3ff421ec2b035c0226ab690f97fd5a3b9d5919
+        uses: Open-Athena/disky/.github/actions/cf-preview@435f099c190f3fee139383e94db5283f7c666130
         with:
           operation: gate
           config: .github/cf-preview.json
@@ -135,7 +135,7 @@ jobs:
           name: preview-${{ needs.gate.outputs.sha }}
           path: ${{ runner.temp }}/preview-artifact
       - id: preview
-        uses: Open-Athena/disky/.github/actions/cf-preview@4f3ff421ec2b035c0226ab690f97fd5a3b9d5919
+        uses: Open-Athena/disky/.github/actions/cf-preview@435f099c190f3fee139383e94db5283f7c666130
         with:
           operation: publish
           config: .github/cf-preview.json
@@ -168,7 +168,7 @@ jobs:
           ref: ${{ needs.route.outputs.base_sha }}
           persist-credentials: false
       - id: retire
-        uses: Open-Athena/disky/.github/actions/cf-preview@4f3ff421ec2b035c0226ab690f97fd5a3b9d5919
+        uses: Open-Athena/disky/.github/actions/cf-preview@435f099c190f3fee139383e94db5283f7c666130
         with:
           operation: retire
           config: .github/cf-preview.json
