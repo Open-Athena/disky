@@ -367,7 +367,7 @@ A deployment's spec lists the baseline items it doesn't have yet as gaps, and th
 
 This branch is the hf.oa.dev deployment: the shared `cloud` base (everything above) plus the Hugging Face store, the org `open-athena`'s Storage Buckets and model, dataset and space repos as one bucket. This section covers what is hf's own. Apply state and the ordered checklist: `specs/hf-deployment.md`.
 
-The repo is **public**: no emails, account ids, tokens or other secrets in tracked files or commit messages. The CF account and zone ids come from the environment (`$CLOUDFLARE_ACCOUNT_ID`, `$CF_ZONE_ID`), never from `Pulumi.hf.yaml`; the job gets the account id and the R2 endpoint from Secret Manager.
+The repo is **public**: no emails, tokens or other secrets in tracked files or commit messages. Cloudflare account and zone ids aren't sensitive (they grant nothing without a token, and the PR-preview logs print the account id); they still come from the environment (`$CLOUDFLARE_ACCOUNT_ID`, `$CF_ZONE_ID`) rather than `Pulumi.hf.yaml`, as configuration, and the job gets the account id and the R2 endpoint from Secret Manager.
 
 ### Branches
 
