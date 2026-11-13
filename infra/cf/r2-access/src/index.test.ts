@@ -1,6 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import config from '../wrangler.json'
-import oa from '../wrangler.oa.json'
 import worker, {
   actionClass, boundedText, capture, collect, HourAccumulator, type HourAggregate, minute, parseCalculation, parsePage, plan,
   publicHour, reservePages, settings, subrequestBound, timeframe, upgrade, verifyOrder,
@@ -162,8 +161,8 @@ describe('settings', () => {
     expect([subrequestBound(50, 48), subrequestBound(450, 30), subrequestBound(450, 31), subrequestBound(400, 32, 5)]).toEqual([248, 994, 997, 996])
   })
 
-  it('sizes OA for five-minute windows and one nominal hour of reverification per run', () => {
-    const { env } = setup(oa.vars)
+  it('sizes a busy source for five-minute windows and one nominal hour of reverification per run', () => {
+    const { env } = setup({ LAG_HOURS: '2', PAGE_SIZE: '2000', MAX_PAGES: '400', MAX_HOURS: '32', WINDOW_MINUTES: '5', VERIFY_HOURS: '12', MAX_PAGE_BYTES: '8388608' })
     const parsed = settings(env, env.HOURLY_CRON, time)
     expect([parsed.window, parsed.maxHours, parsed.verifyHours, parsed.maxPages, parsed.pageSize]).toEqual([5 * M, 32, 12, 400, 2000])
     expect(subrequestBound(parsed.maxPages, parsed.maxHours, parsed.window / M)).toBe(996)

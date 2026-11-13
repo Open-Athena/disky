@@ -179,7 +179,7 @@ describe('static dispatch', () => {
   })
 
   it('accepts a native compaction generation in registry and summary contracts', async () => {
-    const generation = '2026-10-15r2b.c001', env = { ...ENV, STATIC_GEN: generation }, s = fixtureStore()
+    const generation = '2026-10-15b.c001', env = { ...ENV, STATIC_GEN: generation }, s = fixtureStore()
     const registry = parseNameRegistry(await staticRegistryBody(env, s))
     expect(registry.static).toEqual({ generation, max_rows: 4 })
     const response = await staticSummary(env, params({ date: '2026-09-01', name: 'foo' }), s)
