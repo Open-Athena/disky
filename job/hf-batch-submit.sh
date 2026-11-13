@@ -7,6 +7,8 @@
 #   DRY=1 job/hf-batch-submit.sh        # print the spec
 #   PIN=1 DRY=1 job/hf-batch-submit.sh  # the canonical spec: the Cloud Scheduler body (infra/gcp generates it)
 #   SNAP_ID=… GEN=… job/hf-batch-submit.sh  # resume that scan's session
+#   IMAGE=<repo>@sha256:… DT_SCAN_IMAGE=<repo>@sha256:… PROFILE=/app/job/profiles/hf-scratch.yml DT_RECORD=off DT_ALERTS=off \
+#     job/hf-batch-submit.sh  # smoke a candidate image: the head and every step task on it
 #
 # The head only drives the DAG: each step is a Batch task of its own, which fetches its own secrets (the profile's
 # `secrets`; Secret Manager containers from infra/gcp, values added by hand — specs/hf-deployment.md), so the head gets
@@ -55,7 +57,7 @@ v = {
     "DT_TRIGGER": "schedule" if pin else "manual",
 }
 if not pin:  # one-off overrides forwarded only for manual submits, never the cron spec
-    for k in ["SNAP_ID", "GEN", "DT_RECORD", "DT_ALERTS"]:
+    for k in ["SNAP_ID", "GEN", "DT_RECORD", "DT_ALERTS", "DT_SCAN_IMAGE"]:
         if k in os.environ:
             v[k] = os.environ[k]
 print(json.dumps(v))
