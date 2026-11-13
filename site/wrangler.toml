@@ -22,6 +22,7 @@ dataset = "disky_usage_r2"
 enabled = true
 
 [vars]
+PEERS = '[{"label": "GCS usage", "prod": "gcs.oa.dev", "dev": "dev.gcs.oa.dev", "owners": true, "staging": true, "meta": true}, {"label": "CoreWeave usage", "prod": "cw.oa.dev", "dev": "dev.cw.oa.dev", "staging": true, "meta": true}, {"label": "Hugging Face usage", "prod": "hf.oa.dev", "dev": "dev.hf.oa.dev", "meta": true}, {"label": "R2 usage", "prod": "r2.oa.dev", "dev": "dev.r2.oa.dev", "meta": true}]'
 STORE = "oa-r2"
 STORES_EXTRA = "meta"
 STORES_JSON = '{"meta":{"path":"/meta","vars":{"ROOT_LABEL":"OA R2 disky metadata","SNAPSHOTS_SUBDIR":"meta","STORE_SCHEME":"r2://","STORE_BUCKETS":"oa-r2-usage-data,oa-r2-usage-index","STORE_PREFIXES":"meta-l2/,snapshots/meta/","STORE_BUCKET":"oa-r2-usage-index","STORE_REGION":"auto","ROOT_TITLE":"This deployment\u2019s scan archive and serving indexes","STATIC_CURRENT_KEY":"static-names/meta-CURRENT.json","FILTER_STATIC_HEAVY":"1","PATH_STORE":"intervals","INTERVAL_STORE_PREFIX":"meta/interval-store","AGE_STORE_PREFIX":"history/meta-age"},"secrets":{"STORE_ENDPOINT":"STORE_ENDPOINT","STORE_ACCESS_KEY_ID":"STORE_ACCESS_KEY_ID","STORE_SECRET_ACCESS_KEY":"STORE_SECRET_ACCESS_KEY"}},"all":{"union":["primary","meta"],"main":true,"sources":{"primary":{"label":"R2 buckets","icon":"/icons/r2.svg"},"meta":{"label":"Scan metadata","icon":"/icons/meta.svg"}}}}'
@@ -80,6 +81,7 @@ bucket_name = "oa-r2-usage-index"
 
 # Dev shares the verified age histories; its progressive diff pilot remains independent.
 [env.preview.vars]
+SWEEP_DISPATCH = "0"
 STORE = "oa-r2"
 STORES_EXTRA = "meta"
 STORES_JSON = "{\"meta\":{\"path\":\"/meta\",\"vars\":{\"ROOT_LABEL\":\"OA R2 disky metadata\",\"SNAPSHOTS_SUBDIR\":\"meta\",\"STORE_SCHEME\":\"r2://\",\"STORE_BUCKETS\":\"oa-r2-usage-data,oa-r2-usage-index\",\"STORE_PREFIXES\":\"meta-l2/,snapshots/meta/\",\"STORE_BUCKET\":\"oa-r2-usage-index\",\"STORE_REGION\":\"auto\",\"ROOT_TITLE\":\"This deployment\\u2019s scan archive and serving indexes\",\"STATIC_CURRENT_KEY\":\"static-names/meta-CURRENT.json\",\"FILTER_STATIC_HEAVY\":\"1\",\"PATH_STORE\":\"intervals\",\"INTERVAL_STORE_PREFIX\":\"meta/interval-store\",\"AGE_STORE_PREFIX\":\"history/meta-age\"},\"secrets\":{\"STORE_ENDPOINT\":\"STORE_ENDPOINT\",\"STORE_ACCESS_KEY_ID\":\"STORE_ACCESS_KEY_ID\",\"STORE_SECRET_ACCESS_KEY\":\"STORE_SECRET_ACCESS_KEY\"}},\"all\":{\"union\":[\"primary\",\"meta\"],\"main\":true,\"sources\":{\"primary\":{\"label\":\"R2 buckets\",\"icon\":\"/icons/r2.svg\"},\"meta\":{\"label\":\"Scan metadata\",\"icon\":\"/icons/meta.svg\"}}}}"

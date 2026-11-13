@@ -34,7 +34,7 @@ Dry digest over prod snapshots (2026-10-16, `-n`, no plot without a site grant):
 5. **Slack app**: api.slack.com/apps → Create New App → From a manifest → the OA workspace → paste `job/slack/r2-usage-bot.manifest.json` → Create → Install to Workspace. Upload `site/public/icons/r2-512.png` as the app icon (Basic Information). Store the `xoxb-…` token: `gcloud secrets versions add oa-r2-slack-bot-token --project oa-internal-450019 --data-file=-` (paste, then Ctrl-D; never anywhere else).
 6. **Channels**: done — #r2-usage `C0C9J6CE8BD`, #r2-admin `C0C9U47KTM2` (alerts, and any staging, DR or deletion threads; renamed from #r2-usage-alerts 2026-10-16), in `job/r2.json`; #r2-usage carries the digest only. `/invite @R2 Usage Bot` in either if private (public ones need no invite: `chat:write.public`).
 7. **Site grant**: mint a read-only grant at https://r2.oa.dev/admin, then `gcloud secrets versions add oa-r2-site-grant --project oa-internal-450019 --data-file=-`.
-8. **Go live**: list all three in `optional_secrets_live`, build the image (`job/r2-scan build <tag>`), pin it in `infra/gcp/Pulumi.r2.yaml` (`r2:scanImage`), and `pulumi up -s r2` in `infra/gcp` again. The next scan warms, probes, posts the day's digest reply, and alerts on any failure.
+8. **Go live**: list all three in `optional_secrets_live`, build the image (`job/build.sh`, which prints its digest), pin it in `infra/gcp/Pulumi.r2.yaml` (`r2:scanImage`), and `pulumi up -s r2` in `infra/gcp` again. The next scan warms, probes, posts the day's digest reply, and alerts on any failure.
 
 Steps 1–4 can go before Slack exists; step 8 must follow 3, 5 and 7, since a listed secret without a version stops the job from starting.
 

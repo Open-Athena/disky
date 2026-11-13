@@ -29,6 +29,7 @@ import { DEFAULT_ACCOUNT_HINT_COOKIE } from '@open-athena/auth/oidc'
 import { OA_HINT_COOKIE, OA_NONCE_COOKIE, OA_WHO_COOKIE } from '@disk-tree/pages-kit/oa'
 import { d1AuditSink, d1GrantStore, d1ProfileStore, d1RequestStore } from '@open-athena/auth/d1'
 import type { AnalyticsEngineDataset, D1Database, KVNamespace, R2Bucket } from '@cloudflare/workers-types'
+import { isPreviewHost } from './previewHost.js'
 import { grantCaller, meterOf } from './usage.js'
 
 export interface Env {
@@ -191,6 +192,8 @@ export interface Env {
   SNAPSHOTS_SUBDIR?: string
   /** Dedicated SA key (Batch submit + actAs the job SA) for the sweep dispatch bridge. */
   GCP_SA_KEY?: string
+  /** `"0"`: no sweep or undo dispatch from this environment (`_lib/dispatch.ts` `sweepsOff`). */
+  SWEEP_DISPATCH?: string
   /** The service account dispatched Batch jobs run as (a `[vars]` entry). */
   JOB_SA?: string
   /** Secondary stores served beside the primary (`_lib/stores.ts`,
@@ -202,6 +205,9 @@ export interface Env {
   /** Set only on a secondary store's overlay: a scope its viewers need on top
    *  of the deployment's viewer scope (`requireViewer`). */
   STORE_SCOPE?: string
+  /** Set only on a secondary store's overlay with a `series_scope` (`STORES_JSON`): a scope that, with the
+   *  deployment's viewer scope, reads that store's root-level `/api/series` and nothing else of it (`api/series.ts`). */
+  STORE_SERIES_SCOPE?: string
   /** The footer LRU's budget (`_lib/footerCache.ts`, specs/done/footer-lru.md): the most
    *  `index_row_groups` rows its hot entries hold (default 1,000,000)… */
   FOOTER_CACHE_MAX_ROWS?: string
@@ -468,16 +474,7 @@ function grantStore(env: Env): GrantStore {
   }
 }
 
-/** Whether `request` came to a preview host: one DNS label under the project's `pages.dev` subdomain (`PAGES_SUBDOMAIN`,
- *  from config, never the request), as a PR's `pr-N` branch, the `dev` alias or a deployment hash. A custom domain
- *  (prod, `dev.<host>`) never is, nor the subdomain itself, nor anything deeper or longer. Such a host serves code no
- *  one reviewed for production: it signs in only through the broker's preview client, never silently. */
-export function isPreviewHost(env: Env, request: Request): boolean {
-  const sub = env.PAGES_SUBDOMAIN?.toLowerCase()
-  if (!sub || !/^[a-z0-9-]+\.pages\.dev$/.test(sub)) return false
-  const host = new URL(request.url).hostname
-  return host.endsWith(`.${sub}`) && /^[a-z0-9-]+$/.test(host.slice(0, -sub.length - 1))
-}
+export { isPreviewHost }
 
 /** The auth cookies' names on this request. */
 export interface CookieNames {

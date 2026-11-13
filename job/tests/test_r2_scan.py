@@ -229,33 +229,6 @@ def test_scheduler_reporter_reads_local_task_group_metadata_without_batch_iam(mo
     }]
 
 
-def test_source_revision_is_the_commit_and_tracked_changes_only(tmp_path: Path) -> None:
-    def git(*args: str) -> str:
-        return run(["git", "-C", str(tmp_path), "-c", "user.name=t", "-c", "user.email=t@example.com", *args], check=True, capture_output=True, text=True).stdout.strip()
-    git("init", "-q")
-    (tmp_path / "tracked").write_text("a\n")
-    git("add", "tracked")
-    git("commit", "-qm", "first")
-    sha = git("rev-parse", "HEAD")
-    assert module["source_revision"](tmp_path) == (sha, 0)
-    (tmp_path / "untracked").write_text("b\n")
-    assert module["source_revision"](tmp_path) == (sha, 0)
-    (tmp_path / "tracked").write_text("c\n")
-    assert module["source_revision"](tmp_path) == (sha, 1)
-
-
-def test_remote_build_uses_only_own_identity_and_staging() -> None:
-    assert module["build_command"](Path("context"), "first", config, "abc1234", 0) == [
-        "gcloud", "builds", "submit", "context",
-        "--project", "oa-internal-450019", "--region", "us-west1",
-        "--config", "context/job/cloudbuild.yaml",
-        "--service-account", "projects/oa-internal-450019/serviceAccounts/oa-r2-usage-builder@oa-internal-450019.iam.gserviceaccount.com",
-        "--gcs-source-staging-dir", "gs://oa-r2-usage-scratch/builds/source",
-        "--polling-interval", "15",
-        "--substitutions", "_IMAGE=us-west1-docker.pkg.dev/oa-internal-450019/oa-r2-usage/scan:first,_GIT_SHA=abc1234,_GIT_DIRTY=0",
-    ]
-
-
 @pytest.mark.parametrize("size", [99, 101])
 def test_publication_size_mismatch_refuses_pointer_update(size: int) -> None:
     class Publisher:
