@@ -1,0 +1,21 @@
+{
+ "project": "oa-internal-450019",
+ "repository": "us-central1-docker.pkg.dev/oa-internal-450019/hf-usage/scan",
+ "mode": "live",
+ "live_tags": [
+  "hf"
+ ],
+ "build_args": {
+  "UV_SYNC_ARGS": "--extra s3"
+ },
+ "context": [
+  "pyproject.toml",
+  "README.md",
+  "uv.lock",
+  "src",
+  "cloud/pyproject.toml",
+  "cloud/src",
+  "job",
+  "site/wrangler.toml"
+ ]
+}

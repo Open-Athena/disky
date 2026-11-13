@@ -27,6 +27,7 @@ dataset = "disky_usage_hf"
 
 [vars]
 MARK = "hf"                      # build-time: the 🤗 favicon / touch icons (`public/icons/hf*`, vite.config.ts)
+PEERS = '[{"label": "GCS usage", "prod": "gcs.oa.dev", "dev": "dev.gcs.oa.dev", "owners": true, "staging": true, "meta": true}, {"label": "CoreWeave usage", "prod": "cw.oa.dev", "dev": "dev.cw.oa.dev", "staging": true, "meta": true}, {"label": "Hugging Face usage", "prod": "hf.oa.dev", "dev": "dev.hf.oa.dev", "meta": true}, {"label": "R2 usage", "prod": "r2.oa.dev", "dev": "dev.r2.oa.dev", "meta": true}]'   # build-time: the OA deployments the omnibar and ☰ link (own host skipped)
 ROOT_LABEL = "Open Athena Hugging Face"   # the store root's crumb label
 ROOT_TITLE = "The open-athena org's Storage Buckets and model, dataset and space repos"
 # Build time (vite.config.ts): the `src/stores.ts` registry key, and the app's own sign-in.

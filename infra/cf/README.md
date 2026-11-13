@@ -7,7 +7,10 @@
 ```bash
 cd infra/cf
 pulumi preview -s <stack>   # read-only; `up` is a human's call
+infra/cf/run preview -s <stack>   # the same, as the IaC token: `$CF_IAC_TOKEN` (trimmed) as `CLOUDFLARE_API_TOKEN`
 ```
+
+`run` is `pulumi -C infra/cf "$@"` with the Cloudflare token swapped: a deployment's direnv usually exports a D1/Pages job token as `CLOUDFLARE_API_TOKEN`, which can't manage the stack, so `run` takes `CF_IAC_TOKEN` instead (and refuses to start without it).
 
 ## hf stack
 
@@ -19,4 +22,4 @@ The `hf` stack (hf.oa.dev) runs the shared program through `hf_stack.py` (`main:
 - the R2 index bucket `oa-hf-usage-index` and its read/write token (`r2_s3_*` outputs: the job's keys);
 - from `hf_stack.py`: a read-only token on that bucket (`site_r2_*`: the site's `STORE_*`) and the job's D1 token (`job_d1_token`).
 
-`hf-secrets` delivers those outputs (`-P`: Pages secrets, `-g`: Secret Manager versions) without printing a value; `run` runs `pulumi` with `CF_IAC_TOKEN`. The ordered apply: `../../specs/hf-deployment.md`.
+`hf-secrets` delivers those outputs (`-P`: Pages secrets, `-g`: Secret Manager versions) without printing a value. The ordered apply: `../../specs/hf-deployment.md`.
