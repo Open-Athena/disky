@@ -40,7 +40,7 @@ import { hasLedger } from './ledger.js'
 import { ownerAssignments } from './ownerTotals.js'
 import { HELD_BYTES, hitsBytes, IsoMap, joinOf, shared } from './shared.js'
 import { storeKey } from './stores.js'
-import { extrasFor } from './extras.js'
+import { extrasFor, type Provenance } from './extras.js'
 import { loadRegistry } from './identity.js'
 import { UPGRADE_DETAIL_GROUPS } from './edgeCache.js'
 import { covers, declined, dirsOnlyOf, dirsOnlySplit, type Found, type Hit, type HitOpts, type Rollup, rollupAt, staticCompound, staticFilterStore, staticKey, staticLiteral } from './staticFilter.js'
@@ -79,10 +79,34 @@ export const IV_BAND_ROWS = 1 << 16
  * read in 5–8 s. */
 export const V1_FILTER_SCAN_OBJECTS = 500_000
 
-/** A node of the served tree. `k`: what the path is — an object (`file`) or
- * a directory; a v1 generation only has directories, and a fold (`(other)`)
- * is drawn as a branch. */
-export type ViewNode = { n: string; k: 'file' | 'dir'; b: number; o: number; c?: ViewNode[]; f?: number } & Record<string, unknown>
+/** A node of the served tree (`/api/subtree`'s `tree`; specs/descriptive-field-names.md §3a). `kind`: what the
+ * path is — an object (`file`) or a directory; a v1 generation only has directories, and a fold (`(other)`) is
+ * drawn as a branch. */
+export interface ViewNode {
+  name: string
+  kind: 'file' | 'dir'
+  /** Bytes and objects at or under the node. */
+  bytes: number
+  objects: number
+  /** The newest write at or under the node, epoch seconds (absent when no row has one). */
+  mtime?: number
+  /** The newest read at or under the node, epoch days (access logs). */
+  last_read?: number
+  /** Non-Standard storage class id → bytes, largest first; Standard is `bytes` less their sum. */
+  class_bytes?: Record<string, number>
+  /** `[owner, bytes]`, largest first; unowned is `bytes` less their sum. */
+  owners?: [string, number][]
+  children?: ViewNode[]
+  /** An `(other)` fold: how many children it stands in for. */
+  folded?: number
+  /** The node matches the name filter. */
+  matched?: true
+  /** The top owner's inferred attribution: `[source, evidence, prefix]` (`extras.ts`). */
+  provenance?: Provenance
+  /** A union view's root child: the store it belongs to, and that store's scan at the view's cutoff (`union.ts`). */
+  store?: string
+  scan?: string
+}
 
 export interface ViewOpts {
   date: string
@@ -167,6 +191,14 @@ export interface ViewOpts {
  *  its D1 span plans were the whole cost and drew nothing (gcs 10-09 `nemotron`: `read:0`, 48 of 48 late). */
 export interface Phase2Gate { dead: boolean }
 
+/** A match root as a response lists it (`matched`): its scoped bytes and objects (specs/descriptive-field-names.md §3d). */
+export interface MatchRoot { path: string; bytes: number; objects: number }
+/** Every match root's count and summed bytes / objects (`matchCount`). */
+export interface MatchCount { count: number; bytes: number; objects: number }
+/** The readers' own `{ path, b, o }` / `{ n, b, o }` as a response's. */
+const matchRootOf = (m: { path: string; b: number; o: number }): MatchRoot => ({ path: m.path, bytes: m.b, objects: m.o })
+export const matchCountOf = (c: { n: number; b: number; o: number }): MatchCount => ({ count: c.n, bytes: c.b, objects: c.o })
+
 export interface View {
   tree: ViewNode
   /** Which tier answered: a v1 generation's `coarse<E>` or `fine`
@@ -182,23 +214,23 @@ export interface View {
   matches?: string[]
   /** With `query`: each match root's scoped total (the series / subtitles),
    * net of its excluded descendants (NOT). */
-  matched?: { path: string; b: number; o: number }[]
+  matched?: MatchRoot[]
   /** With a NOT query: the outermost excluded paths under the match roots
    * (subtracted from their roots' totals, absent from the tree). */
   excluded?: string[]
   /** With `query`: every match root's count and summed bytes / objects — `matches` and `matched` list
    * at most `MATCH_LIST_CAP` of them (the tree's own roots always, then the heaviest), `matchesCapped`
    * when they leave some out. */
-  matchCount?: { n: number; b: number; o: number }
+  matchCount?: MatchCount
   matchesCapped?: true
   /** With `query`, a heavy literal under a heavy directory (`staticDrill.ts`): the view is P's rollup —
    * its children's matched totals (the `children` holding match roots on any scan, `kept` of them by name,
    * the rest in `(other)`), not its match roots. The tree's top-level cells are those children, the drawn ones
    * nested in turn (`rollupRead`: each one's own rollup or match roots, to `FILTER_SUBDIV_LEVELS` below P);
-   * `matched` lists only the match roots those answers name, so `matchesCapped` is set, and `matchCount.n` is `rows`, the root rows under P over every scan (an upper
+   * `matched` lists only the match roots those answers name, so `matchesCapped` is set, and `matchCount.count` is `rows`, the root rows under P over every scan (an upper
    * bound on this scan's; at the fleet root a long literal's alias entry, a 1–2 character one's counted from
    * the roots index). `bucketsOnly`: the fleet root from the catalog with no drilldown (`FILTER_STATIC_HEAVY`
-   * off) — bucket tiles, exact bytes and objects, `rows` null (so `matchCount.n` counts only the matched
+   * off) — bucket tiles, exact bytes and objects, `rows` null (so `matchCount.count` counts only the matched
    * buckets); a bucket's view is refused (`term-too-common`) — unless `scopedBelow` (`^q`'s starts-with catalog), where
    * a view below answers when the term's rows there are few enough. */
   rollup?: { children: number; kept: number; rows: number | null; bucketsOnly?: true; scopedBelow?: true }
@@ -354,22 +386,19 @@ function scale(a: Agg, frac: number): Agg {
   return out
 }
 
-function display(a: Agg): Record<string, unknown> {
-  const out: Record<string, unknown> = {}
+function display(a: Agg): Pick<ViewNode, 'mtime' | 'last_read' | 'class_bytes' | 'owners'> {
+  const out: Pick<ViewNode, 'mtime' | 'last_read' | 'class_bytes' | 'owners'> = {}
   // A folder's date is its newest write, not a byte-weighted mean: a mean of
   // half-July, half-September reads "August", a date nothing was written on.
   // An mtime of 0 is a listing's "unknown" (no object was written in 1970): no date, as for none.
-  if (a.m) {
-    out.d = Math.floor(a.m / 86400)
-    // …and that write's instant (epoch seconds): the map's "last created" reads it with a time of day.
-    out.t = a.m
-  }
-  if (a.a != null) out.a = a.a
+  // Epoch seconds: the client takes its day (`mtimeDay`) where it buckets by day.
+  if (a.m) out.mtime = a.m
+  if (a.a != null) out.last_read = a.a
   const desc = (m: Record<string, number>) =>
     Object.fromEntries(Object.entries(m).sort((x, y) => y[1] - x[1]))
-  if (Object.keys(a.cb).length) out.cb = desc(a.cb)
+  if (Object.keys(a.cb).length) out.class_bytes = desc(a.cb)
   if (Object.keys(a.ub).length) {
-    out.us = Object.entries(a.ub).sort((x, y) => y[1] - x[1]).map(([u, b]) => [u, b])
+    out.owners = Object.entries(a.ub).sort((x, y) => y[1] - x[1]).map(([u, b]) => [u, b])
   }
   return out
 }
@@ -2710,21 +2739,21 @@ export async function buildView(env0: Env, o: ViewOpts): Promise<View> {
   // The provenance sidecar, beside the read (its own `extras` term in the trace: the served seam's).
   const [v, ex] = await Promise.all([readView(env, o, cov), extrasFor(env, o.date, path).then(x => { o.trace?.('extras', performance.now() - t0); return x })])
   if (!v) {
-    return { tree: { n: rootName(path, env), k: 'dir', b: 0, o: 0 }, tier: 'none', index: 'none', threshold: 0, nodes: 0, truncated: false, ...(query ? { matches: [], matched: [], ...coverageFields(cov) } : {}) }
+    return { tree: { name: rootName(path, env), kind: 'dir', bytes: 0, objects: 0 }, tier: 'none', index: 'none', threshold: 0, nodes: 0, truncated: false, ...(query ? { matches: [], matched: [], ...coverageFields(cov) } : {}) }
   }
   const { kept, aggDepth, foldedOf, thrAt } = v
   const nodeOf = (name: string, a: Agg): ViewNode => ({
-    n: name,
-    k: a.kind ?? 'dir',
-    b: Math.round(a.b),
-    o: Math.round(a.o),
+    name,
+    kind: a.kind ?? 'dir',
+    bytes: Math.round(a.b),
+    objects: Math.round(a.o),
     ...display(a),
   })
   const kidsOf = kidsIndex(kept, path)
   const matched = v.matchSet ?? new Set(v.matches ?? [])
   const build = (p: string, a: Agg): ViewNode => {
     const node = nodeOf(p === path ? rootName(path, env) : p.split('/').pop()!, a)
-    if (matched.has(p)) node.m = 1
+    if (matched.has(p)) node.matched = true
     // Index extras: the top owner's provenance, when the scan's generation
     // carries the sidecar.
     if (ex) {
@@ -2732,35 +2761,35 @@ export async function buildView(env0: Env, o: ViewOpts): Promise<View> {
       let topB = 0
       for (const [u, b] of Object.entries(a.ub)) if (b > topB) { top = u; topB = b }
       const pv = top ? ex.provenance(p, top) : null
-      if (pv) node.pv = pv
+      if (pv) node.provenance = pv
     }
     const childPaths = kidsOf.get(p) ?? []
     if (!childPaths.length) {
       // The view's own folder with children but none over the threshold (a flat folder of many small objects) is
       // drawn as one `(other)`, never as nothing; a frontier node below it, or a root standing for no children (a
       // filter's lone remaining object), is a leaf cell.
-      const f = p === path && node.k === 'dir' ? a.nc ?? foldedOf.get(p) ?? 0 : 0
-      if (f > 0) node.c = [{ ...nodeOf('(other)', subtract(a, [])), f } as ViewNode]
+      const f = p === path && node.kind === 'dir' ? a.nc ?? foldedOf.get(p) ?? 0 : 0
+      if (f > 0) node.children = [{ ...nodeOf('(other)', subtract(a, [])), folded: f }]
       return node
     }
     const kids = childPaths
       .map(cp => build(cp, kept.get(cp)!))
       // bytes, then name: equal-sized siblings never take the order the store happened to read them in
-      .sort((x, y) => y.b - x.b || (x.n < y.n ? -1 : x.n > y.n ? 1 : 0))
+      .sort((x, y) => y.bytes - x.bytes || (x.name < y.name ? -1 : x.name > y.name ? 1 : 0))
     const kidAggs = childPaths.map(cp => kept.get(cp)!)
     const rest = subtract(a, kidAggs)
-    node.c = kids
+    node.children = kids
     if (rest.b > thrAt((aggDepth.get(childPaths[0]!) ?? dP + 1))) {
       // What the fold stands in for: every child not named — objects and
       // dirs — where the row says how many children there are; else the
       // sub-threshold children the read saw (a v1 tier holds dirs only).
       const f = a.nc != null ? Math.max(0, a.nc - childPaths.length) : foldedOf.get(p) ?? 0
-      node.c.push({ ...nodeOf('(other)', rest), f } as ViewNode)
+      node.children.push({ ...nodeOf('(other)', rest), folded: f })
     }
     return node
   }
   const tree = build(path, v.rootAgg)
-  return { tree, tier: v.tier, index: v.idx.asOf != null ? `iv:${env.INTERVAL_STORE_GEN}` : v.idx.mode, threshold: v.threshold, nodes: kept.size, truncated: v.truncated, ...(v.matched ? { ...matchLists(v.matched, kept, v.matchTotal), ...(v.matchCount ? { matchCount: v.matchCount, matchesCapped: true as const } : {}) } : v.matches ? { matches: v.matches } : {}), ...(v.rollup ? { rollup: v.rollup } : {}), ...(v.excluded ? { excluded: v.excluded } : {}), ...(v.firstPaint ? { firstPaint: true } : {}), ...(v.interiors ? { interiors: v.interiors } : {}), ...(query ? coverageFields(cov) : {}) }
+  return { tree, tier: v.tier, index: v.idx.asOf != null ? `iv:${env.INTERVAL_STORE_GEN}` : v.idx.mode, threshold: v.threshold, nodes: kept.size, truncated: v.truncated, ...(v.matched ? { ...matchLists(v.matched, kept, v.matchTotal), ...(v.matchCount ? { matchCount: matchCountOf(v.matchCount), matchesCapped: true as const } : {}) } : v.matches ? { matches: v.matches } : {}), ...(v.rollup ? { rollup: v.rollup } : {}), ...(v.excluded ? { excluded: v.excluded } : {}), ...(v.firstPaint ? { firstPaint: true } : {}), ...(v.interiors ? { interiors: v.interiors } : {}), ...(query ? coverageFields(cov) : {}) }
 }
 
 /** The most match roots a response lists (`matches` / `matched`) beyond those the tree draws. */
@@ -2771,10 +2800,10 @@ export const MATCH_LIST_CAP = 200
 export function matchLists(matched: { path: string; b: number; o: number }[], kept: Map<string, unknown>, total?: { n: number; b: number; o: number }): Pick<View, 'matches' | 'matched' | 'matchCount' | 'matchesCapped'> {
   // `total`: the whole set's, when `matched` holds only the roots that can be listed (`foldPhase1`).
   const count = total ? { ...total } : { n: matched.length, b: matched.reduce((n, m) => n + m.b, 0), o: matched.reduce((n, m) => n + m.o, 0) }
-  if (count.n <= MATCH_LIST_CAP) return { matches: matched.map(m => m.path).sort(), matched, matchCount: count }
+  if (count.n <= MATCH_LIST_CAP) return { matches: matched.map(m => m.path).sort(), matched: matched.map(matchRootOf), matchCount: matchCountOf(count) }
   let room = MATCH_LIST_CAP
   const list = matched.filter(m => kept.has(m.path) || room-- > 0)
-  return { matches: list.map(m => m.path).sort(), matched: list, matchCount: count, matchesCapped: true }
+  return { matches: list.map(m => m.path).sort(), matched: list.map(matchRootOf), matchCount: matchCountOf(count), matchesCapped: true }
 }
 
 // --- the diff: two scans, one byte floor -----------------------------------
@@ -2804,22 +2833,30 @@ export interface DiffOpts extends Omit<ViewOpts, 'date'> {
   descentBudgetRows?: number
 }
 
+/** A diff row (`/api/diff`'s `rows`; specs/descriptive-field-names.md §3b). */
 export interface DiffRow {
   /** Path relative to P (`(other)` = the fold under its parent). */
-  p: string
-  d: number
+  path: string
+  depth: number
   /** What the path is on whichever side has it; a fold is `dir`. */
-  k: 'file' | 'dir'
-  s: 'added' | 'removed' | 'changed' | 'unchanged'
-  a: number
-  b: number
-  oa: number
-  ob: number
-  /** Expanded: its own Δ is carried by its children. */
-  x?: true
-  /** Read by a point lookup on the side where it sat under the floor. */
-  l?: 1 | 2
+  kind: 'file' | 'dir'
+  status: 'added' | 'removed' | 'changed' | 'unchanged'
+  /** Bytes and objects at the earlier scan (`before`) and the later one (`after`). */
+  bytes_before: number
+  bytes_after: number
+  objects_before: number
+  objects_after: number
+  /** Its own Δ is carried by its children. */
+  expanded?: true
+  /** Read by a point lookup on the side (1 before, 2 after) where it sat under the floor. */
+  lookup?: 1 | 2
 }
+
+/** A row's (or a total's) two sides: its bytes and objects before and after. */
+export type DiffSides = Pick<DiffRow, 'bytes_before' | 'bytes_after' | 'objects_before' | 'objects_after'>
+const zeroSides = (): DiffSides => ({ bytes_before: 0, bytes_after: 0, objects_before: 0, objects_after: 0 })
+/** |Δ bytes| of a row: what the tail ranks by. */
+const absDelta = (r: DiffSides): number => Math.abs(r.bytes_after - r.bytes_before)
 
 /** A diff's rows cut to `top` (every reader's tail): every expanded row (the skeleton), then the changed leaf rows by
  *  |Δ|, at most `top` of them, and each expanded row's (and the root's, `root`: the diff's totals) `(other)` derived
@@ -2830,63 +2867,67 @@ export interface DiffRow {
  *  A scan's rows are hierarchical, so this is the walk's own `(other)` plus the cut leaves wherever the walk read them
  *  all. `additive` false (a filtered diff: a parent's totals are its matched bytes, not its children's sum): the walk's
  *  own `(other)` plus the cut leaves instead. */
-export function capDiffRows(rows: DiffRow[], top: number, root: { a: number; b: number; oa: number; ob: number }, additive = true): { rows: DiffRow[]; cut: boolean } {
-  const isOther = (r: DiffRow) => r.p === '(other)' || r.p.endsWith('/(other)')
+export function capDiffRows(rows: DiffRow[], top: number, root: DiffSides, additive = true): { rows: DiffRow[]; cut: boolean } {
+  const isOther = (r: DiffRow) => r.path === '(other)' || r.path.endsWith('/(other)')
   const parentOf = (p: string) => { const i = p.lastIndexOf('/'); return i < 0 ? '' : p.slice(0, i) }
-  const skeleton = rows.filter(r => r.x)
-  const leaves = rows.filter(r => !r.x && !isOther(r) && r.s !== 'unchanged').sort((r1, r2) => Math.abs(r2.b - r2.a) - Math.abs(r1.b - r1.a))
+  const skeleton = rows.filter(r => r.expanded)
+  const leaves = rows.filter(r => !r.expanded && !isOther(r) && r.status !== 'unchanged').sort((r1, r2) => absDelta(r2) - absDelta(r1))
   const kept = leaves.slice(0, top)
-  type T = { a: number; b: number; oa: number; ob: number }
-  const zero = (): T => ({ a: 0, b: 0, oa: 0, ob: 0 })
-  const add = (t: T, r: T) => { t.a += r.a; t.b += r.b; t.oa += r.oa; t.ob += r.ob }
+  const add = (t: DiffSides, r: DiffSides) => {
+    t.bytes_before += r.bytes_before; t.bytes_after += r.bytes_after; t.objects_before += r.objects_before; t.objects_after += r.objects_after
+  }
   // The walk's own `(other)`s, plus the leaves cut.
-  const fold = new Map<string, T>()
+  const fold = new Map<string, DiffSides>()
   for (const r of [...rows.filter(isOther), ...leaves.slice(top)]) {
-    const q = parentOf(r.p)
-    const t = fold.get(q) ?? zero()
+    const q = parentOf(r.path)
+    const t = fold.get(q) ?? zeroSides()
     add(t, r)
     fold.set(q, t)
   }
   // The invariant's: each expanded row less its drawn children (kept, or unchanged: filler).
-  const drawn = new Map<string, T>()
-  for (const r of [...skeleton, ...kept, ...rows.filter(r => !r.x && !isOther(r) && r.s === 'unchanged')]) {
-    const q = parentOf(r.p)
-    const t = drawn.get(q) ?? zero()
+  const drawn = new Map<string, DiffSides>()
+  for (const r of [...skeleton, ...kept, ...rows.filter(r => !r.expanded && !isOther(r) && r.status === 'unchanged')]) {
+    const q = parentOf(r.path)
+    const t = drawn.get(q) ?? zeroSides()
     add(t, r)
     drawn.set(q, t)
   }
   const others: DiffRow[] = []
   // Every expanded row and the root, and any other parent the walk gave an `(other)` (a filtered diff's match root).
   // The root only when it was expanded (a drawn child, or the walk's own `(other)`), as every other parent.
-  const pars: { p: string; d: number; a: number; b: number; oa: number; ob: number; own?: true }[] = [...(drawn.has('') || fold.has('') ? [{ p: '', d: 0, ...root }] : []), ...skeleton]
-  const known = new Set(pars.map(x => x.p))
+  const pars: (DiffSides & { path: string; depth: number; own?: true })[] = [...(drawn.has('') || fold.has('') ? [{ path: '', depth: 0, ...root }] : []), ...skeleton]
+  const known = new Set(pars.map(x => x.path))
   for (const r of rows.filter(isOther)) {
-    const q = parentOf(r.p)
-    if (!known.has(q)) { known.add(q); pars.push({ p: q, d: r.d - 1, a: 0, b: 0, oa: 0, ob: 0, own: true }) }
+    const q = parentOf(r.path)
+    if (!known.has(q)) { known.add(q); pars.push({ path: q, depth: r.depth - 1, ...zeroSides(), own: true }) }
   }
   for (const par of pars) {
-    const f = fold.get(par.p) ?? zero()
-    const t = drawn.get(par.p) ?? zero()
-    const o = additive && !par.own
-      ? { a: Math.max(0, par.a - t.a), b: Math.max(0, par.b - t.b), oa: Math.max(0, par.oa - t.oa), ob: Math.max(0, par.ob - t.ob) }
+    const f = fold.get(par.path) ?? zeroSides()
+    const t = drawn.get(par.path) ?? zeroSides()
+    const o: DiffSides = additive && !par.own
+      ? {
+        bytes_before: Math.max(0, par.bytes_before - t.bytes_before), bytes_after: Math.max(0, par.bytes_after - t.bytes_after),
+        objects_before: Math.max(0, par.objects_before - t.objects_before), objects_after: Math.max(0, par.objects_after - t.objects_after),
+      }
       : f
     // Zero-byte objects count too: an `(other)` of objects alone (no bytes either side) is kept when they differ.
-    const s: DiffRow['s'] = !o.a && !o.b
-      ? (o.oa === o.ob ? 'unchanged' : !o.oa ? 'added' : !o.ob ? 'removed' : 'changed')
-      : !o.a ? 'added' : !o.b ? 'removed' : o.a !== o.b || o.oa !== o.ob ? 'changed' : 'unchanged'
-    if (s === 'unchanged') continue
-    others.push({ p: par.p === '' ? '(other)' : `${par.p}/(other)`, d: par.d + 1, k: 'dir', s, ...o })
+    const status: DiffRow['status'] = !o.bytes_before && !o.bytes_after
+      ? (o.objects_before === o.objects_after ? 'unchanged' : !o.objects_before ? 'added' : !o.objects_after ? 'removed' : 'changed')
+      : !o.bytes_before ? 'added' : !o.bytes_after ? 'removed' : o.bytes_before !== o.bytes_after || o.objects_before !== o.objects_after ? 'changed' : 'unchanged'
+    if (status === 'unchanged') continue
+    others.push({ path: par.path === '' ? '(other)' : `${par.path}/(other)`, depth: par.depth + 1, kind: 'dir', status, ...o })
   }
-  const tail = [...kept, ...others].sort((r1, r2) => Math.abs(r2.b - r2.a) - Math.abs(r1.b - r1.a))
+  const tail = [...kept, ...others].sort((r1, r2) => absDelta(r2) - absDelta(r1))
   return { rows: [...skeleton, ...tail], cut: leaves.length > top }
 }
 
 export interface Diff {
   rows: DiffRow[]
-  total_a: number
-  total_b: number
-  objects_a: number
-  objects_b: number
+  /** The path's totals at either scan. */
+  bytes_before: number
+  bytes_after: number
+  objects_before: number
+  objects_after: number
   expansions: number
   truncated: boolean
   threshold: number
@@ -2900,8 +2941,8 @@ export interface Diff {
   /** …by time (`FILTER_WALK_MS`). */
   lookups_late?: true
   /** With `q=`: the union of both scans' match roots (capped like a view's, `matchLists`). */
-  matched?: { path: string; b: number; o: number }[]
-  matchCount?: { n: number; b: number; o: number }
+  matched?: MatchRoot[]
+  matchCount?: MatchCount
   matchesCapped?: true
   /** With `q=`: either side's phase 2 left roots undivided (`View.interiors`), summed over the sides that did. */
   interiors?: { read: number; skipped: number; reason: string; late?: number }
@@ -3072,7 +3113,7 @@ export async function buildDiff(env0: Env, o: DiffOpts): Promise<Diff> {
   // Nothing in scope on either side (a filter with no matches, an empty owner
   // pool): an empty diff, not a crash on the missing views.
   if (!va && !vb) {
-    return { rows: [], total_a: 0, total_b: 0, objects_a: 0, objects_b: 0, threshold: 0, tier: 'none', ...(query ? { matched: [], ...coverageFields(cov) } : {}), expansions: 0, truncated: false, lookups: 0, lookups_capped: false }
+    return { rows: [], bytes_before: 0, bytes_after: 0, objects_before: 0, objects_after: 0, threshold: 0, tier: 'none', ...(query ? { matched: [], ...coverageFields(cov) } : {}), expansions: 0, truncated: false, lookups: 0, lookups_capped: false }
   }
   // One side a v1 generation (dirs only), the other a store (objects too):
   // the objects have no counterpart to be compared with, so they fold into
@@ -3091,10 +3132,10 @@ export async function buildDiff(env0: Env, o: DiffOpts): Promise<Diff> {
   const matchedOf = (v: Read | null) => v?.matched ?? (v?.matches?.length === 1 && v.matches[0] === path ? [{ path, b: Math.round(v.rootAgg.b), o: Math.round(v.rootAgg.o) }] : [])
   const matchedUnion = query ? [...new Map([...matchedOf(va), ...matchedOf(vb)].map(m => [m.path, m])).values()].sort((x, y) => x.path < y.path ? -1 : 1) : undefined
   const totals = {
-    total_a: Math.round(va?.rootAgg.b ?? 0),
-    total_b: Math.round(vb?.rootAgg.b ?? 0),
-    objects_a: Math.round(va?.rootAgg.o ?? 0),
-    objects_b: Math.round(vb?.rootAgg.o ?? 0),
+    bytes_before: Math.round(va?.rootAgg.b ?? 0),
+    bytes_after: Math.round(vb?.rootAgg.b ?? 0),
+    objects_before: Math.round(va?.rootAgg.o ?? 0),
+    objects_after: Math.round(vb?.rootAgg.o ?? 0),
     threshold: (vb ?? va)!.threshold,
     tier: (vb ?? va)!.tier,
     ...(matchedUnion ? (() => {
@@ -3102,7 +3143,7 @@ export async function buildDiff(env0: Env, o: DiffOpts): Promise<Diff> {
       const { matched, matchCount, matchesCapped } = matchLists([...matchedUnion].sort((x, y) => y.b - x.b || (x.path < y.path ? -1 : 1)), keptBoth, va?.matchTotal ?? vb?.matchTotal)
       // A rollup side lists only its kept children that are roots: its count is the rollup's bound.
       const roll = vb?.matchCount ?? va?.matchCount
-      return { matched: matched!.sort((x, y) => x.path < y.path ? -1 : 1), matchCount: roll ?? matchCount, ...(matchesCapped || roll ? { matchesCapped: true as const } : {}) }
+      return { matched: matched!.sort((x, y) => x.path < y.path ? -1 : 1), matchCount: roll ? matchCountOf(roll) : matchCount, ...(matchesCapped || roll ? { matchesCapped: true as const } : {}) }
     })() : {}),
     ...(va?.interiors || vb?.interiors ? { interiors: sumInteriors(va?.interiors, vb?.interiors) } : {}),
     ...(query ? coverageFields(cov) : {}),
@@ -3401,13 +3442,13 @@ export async function buildDiff(env0: Env, o: DiffOpts): Promise<Diff> {
   const rows: DiffRow[] = []
   let expansions = 0
   const rel = (p: string) => (path === '' ? p : p.slice(path.length + 1))
-  const status = (a: Agg | null, b: Agg | null): DiffRow['s'] =>
+  const status = (a: Agg | null, b: Agg | null): DiffRow['status'] =>
     !a ? 'added' : !b ? 'removed' : Math.round(a.b) !== Math.round(b.b) || Math.round(a.o) !== Math.round(b.o) ? 'changed' : 'unchanged'
   const emit = (p: string, d: number, a: Agg | null, b: Agg | null, x: boolean, l?: 1 | 2) => {
     rows.push({
-      p, d, k: a?.kind ?? b?.kind ?? 'dir', s: status(a, b),
-      a: Math.round(a?.b ?? 0), b: Math.round(b?.b ?? 0), oa: Math.round(a?.o ?? 0), ob: Math.round(b?.o ?? 0),
-      ...(x ? { x: true } : {}), ...(l ? { l } : {}),
+      path: p, depth: d, kind: a?.kind ?? b?.kind ?? 'dir', status: status(a, b),
+      bytes_before: Math.round(a?.b ?? 0), bytes_after: Math.round(b?.b ?? 0), objects_before: Math.round(a?.o ?? 0), objects_after: Math.round(b?.o ?? 0),
+      ...(x ? { expanded: true as const } : {}), ...(l ? { lookup: l } : {}),
     })
   }
   let level: Item[] = [{ p: path, d: dP, a: va?.rootAgg ?? null, b: vb?.rootAgg ?? null }]
@@ -3451,7 +3492,7 @@ export async function buildDiff(env0: Env, o: DiffOpts): Promise<Diff> {
   // the top-|Δ| changed frontier rows; unchanged frontier rows are inferred
   // as filler by the renderer.
   tr?.('walk', performance.now() - walkStart)
-  const capped0 = capDiffRows(rows, o.top, { a: totals.total_a, b: totals.total_b, oa: totals.objects_a, ob: totals.objects_b }, !query)
+  const capped0 = capDiffRows(rows, o.top, totals, !query)
   return {
     rows: capped0.rows,
     ...totals,
