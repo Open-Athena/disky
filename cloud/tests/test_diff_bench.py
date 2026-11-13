@@ -36,13 +36,6 @@ def test_stable_reader_mode_is_explicit_in_requests_and_report_names():
     ]
 
 
-def test_stable_reader_mode_is_explicit_in_requests_and_report_names():
-    assert requests_for([{'from': 'f', 'to': 't', 'path': 'm'}], [], 1152, 307, mode='max') == [
-        Req('diff f→t /m dm=max', 'diff:d1', '/api/diff', {'cv': 3, 'from': 'f', 'to': 't', 'path': 'm', 'w': 1152, 'h': 307, 'dm': 'max', 'depth': 1}),
-        Req('diff f→t /m dm=max', 'diff:full', '/api/diff', {'cv': 3, 'from': 'f', 'to': 't', 'path': 'm', 'w': 1152, 'h': 307, 'dm': 'max'}),
-    ]
-
-
 def test_a_secondary_stores_requests_name_it():
     assert requests_for([{"from": "f", "to": "t", "path": "m"}], ["d:"], 640, 307, "meta") == [
         Req("diff f→t /m", "diff:d1", "/api/diff", {"cv": CV, "store": "meta", "from": "f", "to": "t", "path": "m", "w": 640, "h": 307, "dm": "delta", "depth": 1}),
