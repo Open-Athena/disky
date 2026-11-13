@@ -141,6 +141,7 @@ STATIC_CURRENT_KEY = "static-names/primary-CURRENT.json"
 PATH_STORE = "intervals"
 DIFF_DESCENT = "1"
 AGE_STORE_PREFIX = "history/primary-age"
+SWEEP_DISPATCH = "0"   # shared prod data: no sweep, undo, purge, stop or digest re-apply starts from dev (none dispatch here today: no GCP_SA_KEY)
 STORES_EXTRA = "meta"
 STORES_JSON = '{"meta":{"path":"/meta","vars":{"ROOT_LABEL":"OA Hugging Face disky metadata","SNAPSHOTS_SUBDIR":"meta","STORE_SCHEME":"r2://","STORE_BUCKETS":"oa-hf-usage-data,oa-hf-usage-index","STORE_PREFIXES":"meta-l2/,snapshots/meta/","STORE_BUCKET":"oa-hf-usage-index","STORE_REGION":"auto","ROOT_TITLE":"The data behind this site: scans, indexes and listings in oa-hf-usage-data (GCS) and oa-hf-usage-index (R2)","FILTER_STATIC_HEAVY":"1","STATIC_CURRENT_KEY":"static-names/meta-CURRENT.json","PATH_STORE":"intervals","INTERVAL_STORE_PREFIX":"history/meta/interval-store","AGE_STORE_PREFIX":"history/meta-age"},"secrets":{"STORE_ENDPOINT":"STORE_ENDPOINT","STORE_ACCESS_KEY_ID":"STORE_ACCESS_KEY_ID","STORE_SECRET_ACCESS_KEY":"STORE_SECRET_ACCESS_KEY"}}}'
 META_TREE_URL = "https://dev.hf.oa.dev/meta"
