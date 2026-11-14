@@ -9,7 +9,7 @@ from subprocess import run
 import pulumi
 import pulumi_gcp as gcp
 
-from gcp_jobs import Adopt, JobAccount, Secrets, labeled_provider
+from gcp_jobs import Adopt, BatchSubmitCron, JobAccount, Secrets, labeled_provider
 
 
 profile = loads((Path(__file__).resolve().parents[2] / "job/r2.json").read_text())
@@ -30,6 +30,18 @@ builder = JobAccount(
     acts_as_self=False,
     adopt=Adopt(False),
 )
+# "Run a scan" on /scans (`/api/scan-runs/dispatch`) runs the primary head's submitter job as this account (its key is
+# the Pages secret `GCP_SA_KEY`, made by hand: keys stay out of state); it holds nothing else
+dispatch = JobAccount(
+    "r2-dispatch",
+    project=project,
+    account_id="oa-r2-usage-dispatch",
+    display_name="OA R2 scan dispatch",
+    description="Runs only the OA R2 primary scan's submitter job (oa-r2-usage-submit) from the site's /scans",
+    roles=[],
+    acts_as_self=False,
+    adopt=Adopt(False),
+)
 job = JobAccount(
     "r2-job",
     project=project,
@@ -41,6 +53,9 @@ job = JobAccount(
     # `gcp-cost` (`dt-cloud cost`): the buckets' `total_bytes` from Cloud Monitoring
     roles=["roles/batch.agentReporter", "roles/batch.jobsEditor", "roles/logging.logWriter", "roles/monitoring.viewer"],
     acts_as_self=True,
+    # the site's "Run a scan" account: runs the primary head's submitter (below), which submits as this account
+    actors=[f"oa-r2-usage-dispatch@{project}.iam.gserviceaccount.com"],
+    actor_deps=[dispatch.account],
     adopt=Adopt(False),
 )
 resources = []
@@ -166,21 +181,41 @@ if daily_enabled:
         role="roles/iam.serviceAccountUser",
         member=scheduler.email.apply(lambda email: f"serviceAccount:{email}"),
     )
+    # Each head's cron runs a submitter job (`BatchSubmitCron`, `job/scan-submit.sh`): the day's Batch job named for the
+    # day, transient failures retried, an alert if it still can't submit. The first head's is also "Run a scan"'s.
     for i, head in enumerate(heads):
         stem = (head["profile"] or "").removesuffix(".yml")
         suffix = "" if i == 0 else f"-{stem.removeprefix('r2-')}"
-        daily = gcp.cloudscheduler.Job(
-            f"r2-daily{suffix}", project=project, region=region, name=f"oa-r2-usage-daily{suffix}",
-            description=f"Daily Nextflow head over job/profiles/{head['profile']}" if head["profile"] else "Metadata-only daily scan of the four approved OA R2 buckets",
-            schedule=head["schedule"], time_zone="Etc/UTC", attempt_deadline="180s",
-            retry_config={"retry_count": 0, "max_retry_duration": "0s"},
-            http_target={
-                "uri": f"https://batch.googleapis.com/v1/projects/{project}/locations/{region}/jobs",
-                "http_method": "POST", "headers": {"Content-Type": "application/json"},
-                "body": b64encode(dumps(plan(head["profile"])).encode()).decode(),
-                "oauth_token": {"service_account_email": scheduler.email, "scope": "https://www.googleapis.com/auth/cloud-platform"},
+        submit_job = f"oa-r2-usage-submit{suffix}"
+        daily = BatchSubmitCron(
+            f"r2-daily{suffix}",
+            project=project,
+            region=region,
+            job=submit_job,
+            trigger=f"oa-r2-usage-daily{suffix}",
+            schedule=head["schedule"],
+            submitter=plan(head["profile"]),
+            script=Path(__file__).resolve().parents[2] / "job/scan-submit.sh",
+            sa_email=job.email_literal,
+            image=daily_config.require("scanImage"),
+            env={
+                "PROJECT": project,
+                "REGION": region,
+                "SUBMIT_JOB": submit_job,
+                "JOB_PREFIX": f"oa-r2-scan-daily{suffix}",
+                "SCAN_NAME": f"r2 {'daily' if i == 0 else stem.removeprefix('r2-')} scan",
+                "SLACK_ALERT_CHANNEL": profile["slack_alert_channel"],
+                "DISKY_LABELS": ",".join(f"{k}={v}" for k, v in labels.items()),
             },
-            opts=pulumi.ResourceOptions(depends_on=[submit_grant, act_as]),
+            secret_env={"SLACK_BOT_TOKEN": profile["optional_secrets"]["SLACK_BOT_TOKEN"]},
+            overridable=["DT_TRIGGER"],
+            dispatchers={"site": dispatch.member} if i == 0 else None,
+            labels={**labels, "component": "scan-submit"},
+            description=f"Daily Nextflow head over job/profiles/{head['profile']}: runs the submitter job, which names the day's Batch job, retries, and alerts",
+            cron_aliases=[f"urn:pulumi:r2::oa-r2-usage-gcp::gcp:cloudscheduler/job:Job::r2-daily{suffix}"],
+            adopt=Adopt(False),
+            opts=pulumi.ResourceOptions(depends_on=[secrets]),
         )
-        pulumi.export(f"daily_schedule{suffix}", daily.schedule)
+        pulumi.export(f"daily_schedule{suffix}", daily.cron.schedule)
+        pulumi.export(f"submit_job{suffix}", daily.job.id)
 pulumi.export("scheduler_enabled", daily_enabled)
