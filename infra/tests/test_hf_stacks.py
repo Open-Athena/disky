@@ -153,7 +153,12 @@ def test_gcp_stack(monkeypatch: pytest.MonkeyPatch):
             ("disky:gcp:Secrets", "hf-secrets"),
             *[("gcp:secretmanager/secret:Secret", s) for s in secrets],
             *[("gcp:secretmanager/secretIamMember:SecretIamMember", f"{s}-accessor") for s in secrets],
-            ("disky:gcp:BatchCron", "hf-usage-snapshot"),
+            ("disky:gcp:JobAccount", "hf-usage-dispatch"),
+            ("gcp:serviceaccount/account:Account", "hf-usage-dispatch"),
+            ("disky:gcp:BatchSubmitCron", "hf-usage-snapshot"),
+            ("gcp:cloudrunv2/job:Job", "hf-usage-snapshot-submit"),
+            ("gcp:cloudrunv2/jobIamMember:JobIamMember", "hf-usage-snapshot-submit-invoker"),
+            ("gcp:cloudrunv2/jobIamMember:JobIamMember", "hf-usage-snapshot-submit-dispatch-hf-usage-dispatch"),
             ("gcp:cloudscheduler/job:Job", "hf-usage-snapshot"),
             ("disky:gcp:BatchCron", "hf-usage-meta"),
             ("gcp:cloudscheduler/job:Job", "hf-usage-meta"),
@@ -182,9 +187,26 @@ def test_gcp_stack(monkeypatch: pytest.MonkeyPatch):
         assert {k: m.inputs("hf-usage-data-job")[k] for k in ("bucket", "role", "member")} == {
             "bucket": "oa-hf-usage-data", "role": "roles/storage.objectAdmin", "member": f"serviceAccount:{sa}",
         }
+        # the daily scan: Scheduler runs the submitter job as the job account, which submits the spec (`BATCH_SPEC`)
         cron = m.inputs("hf-usage-snapshot")
-        assert (cron["schedule"], cron["timeZone"], cron["httpTarget"]["oauthToken"]["serviceAccountEmail"]) == ("0 8 * * *", "Etc/UTC", submitter)
-        spec = json.loads(base64.b64decode(cron["httpTarget"]["body"]))
+        assert (cron["schedule"], cron["timeZone"], cron["httpTarget"]["oauthToken"]["serviceAccountEmail"]) == ("0 8 * * *", "Etc/UTC", sa)
+        assert cron["httpTarget"]["uri"] == f"https://us-central1-run.googleapis.com/apis/run.googleapis.com/v1/namespaces/{project}/jobs/hf-usage-snapshot-submit:run"
+        submit = m.inputs("hf-usage-snapshot-submit")["template"]["template"]
+        [container] = submit["containers"]
+        assert (submit["serviceAccount"], submit["maxRetries"], container["image"]) == (sa, 0, f"us-central1-docker.pkg.dev/{project}/hf-usage/scan:hf")
+        envs = {e["name"]: e.get("value", e.get("valueSource")) for e in container["envs"]}
+        spec = json.loads(envs.pop("BATCH_SPEC"))
+        assert envs == {
+            "DISKY_LABELS": "app=disky,deployment=hf", "SLACK_ALERT_CHANNEL": "C0C9J9VDPV5",
+            "SLACK_BOT_TOKEN": {"secretKeyRef": {"secret": "hf-usage-slack-bot-token", "version": "latest"}},
+        }
+        assert container["commands"][:2] == ["bash", "-c"]
+        assert container["commands"][2].endswith((REPO / "job" / "hf-scan-submit.sh").read_text())
+        # "Run a scan": the site's dispatch account may run that one job, overriding only `DT_TRIGGER`
+        dispatcher = f"hf-usage-dispatch@{project}.iam.gserviceaccount.com"
+        assert {k: m.inputs("hf-usage-snapshot-submit-dispatch-hf-usage-dispatch")[k] for k in ("name", "role", "member")} == {
+            "name": "hf-usage-snapshot-submit", "role": "roles/run.jobsExecutorWithOverrides", "member": f"serviceAccount:{dispatcher}",
+        }
         task = spec["taskGroups"][0]["taskSpec"]
         assert task["runnables"][0]["container"] == {
             "imageUri": f"us-central1-docker.pkg.dev/{project}/hf-usage/scan:hf",
@@ -217,7 +239,7 @@ def test_gcp_stack(monkeypatch: pytest.MonkeyPatch):
         meta_spec["taskGroups"][0]["taskSpec"]["runnables"][0]["container"]["commands"][2] = "/app/job/profiles/hf.yml"
         assert meta_spec == spec
 
-    return pulumi.Output.all(g["scan"].job.id, g["meta"].job.id, g["images_reader"].id, g["data_admin"].id).apply(check)
+    return pulumi.Output.all(g["scan"].job.id, g["scan"].cron.id, g["meta"].job.id, g["images_reader"].id, g["data_admin"].id).apply(check)
 
 
 def test_scan_profile_matches_the_site_and_the_stack():

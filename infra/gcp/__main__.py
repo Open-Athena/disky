@@ -16,7 +16,7 @@ from pathlib import Path
 import pulumi
 import pulumi_gcp as gcp
 
-from gcp_jobs import Adopt, BatchCron, JobAccount, Secrets, cost_labels, labeled_provider
+from gcp_jobs import Adopt, BatchCron, BatchSubmitCron, JobAccount, Secrets, cost_labels, labeled_provider
 
 cfg = pulumi.Config()
 gcp_cfg = pulumi.Config("gcp")
@@ -155,16 +155,45 @@ secrets = Secrets(
     adopt=adopt,
 )
 
-scan = BatchCron(
-    "hf-usage-snapshot",
+# "Run a scan" on /scans (`/api/scan-runs/dispatch`) runs the scan's submitter job as this account, overriding only
+# `DT_TRIGGER`. Its key is the Pages secret `GCP_SA_KEY` (prod and preview; keys stay out of state); it holds nothing
+# but `RUN_WITH_OVERRIDES` on that one job.
+dispatch = JobAccount(
+    "hf-usage-dispatch",
+    project=project,
+    account_id="hf-usage-dispatch",
+    display_name="hf scan dispatch",
+    description="Runs the hf.oa.dev scan submitter (hf-usage-snapshot-submit) from /scans' Run a scan; nothing else",
+    roles=[],
+    acts_as_self=False,
+    adopt=adopt,
+)
+
+# The daily scan: Cloud Scheduler → the Cloud Run job `hf-usage-snapshot-submit` → `job/hf-scan-submit.sh`, which
+# submits `job/hf-batch-submit.sh`'s PIN spec as `hf-usage-snapshot-YYYYMMDD` (a 409 for that name = already
+# submitted), retries transient failures for 30 min, and posts to #hf-admin if it still can't. It runs as the job
+# account, which the Batch job then runs as (as gcs and cw). The trigger keeps its name, adopted from its `BatchCron`.
+SCAN = "hf-usage-snapshot"
+scan = BatchSubmitCron(
+    SCAN,
     project=project,
     region=region,
+    job=f"{SCAN}-submit",
+    trigger=SCAN,
     schedule="0 8 * * *",
     submitter=job_dir / "hf-batch-submit.sh",
-    sa_email=scheduler.email,
-    description="Daily Hugging Face org scan (job/hf-batch-submit.sh PIN=1 DRY=1 body) -> hf.oa.dev",
+    script=job_dir / "hf-scan-submit.sh",
+    sa_email=job.email_literal,
+    image=f"{region}-docker.pkg.dev/{project}/hf-usage/scan:hf",
+    env={"SLACK_ALERT_CHANNEL": "C0C9J9VDPV5"},  # #hf-admin
+    secret_env={"SLACK_BOT_TOKEN": "hf-usage-slack-bot-token"},
+    overridable=["DT_TRIGGER"],
+    dispatchers={"hf-usage-dispatch": dispatch.member},
+    labels={"component": "scan-submit"},
+    description="The daily Hugging Face org scan: runs the submitter job, which names the day's Batch job, retries, and alerts",
+    cron_aliases=[f"urn:pulumi:{STACK}::{pulumi.get_project()}::disky:gcp:BatchCron$gcp:cloudscheduler/job:Job::{SCAN}"],
     adopt=adopt,
-    depends_on=[job, secrets, images_reader, submit_grant, data_admin],
+    opts=pulumi.ResourceOptions(depends_on=[job, secrets, images_reader, data_admin]),
 )
 
 # The "data behind this site" store's head (job/profiles/hf-meta.yml): after the day's scan has written its outputs
@@ -182,8 +211,10 @@ meta = BatchCron(
 
 pulumi.export("job_account", job.email)
 pulumi.export("scheduler_account", scheduler.email)
+pulumi.export("dispatch_account", dispatch.email)
+pulumi.export("scan_submit_job", scan.job.id)
 pulumi.export("image_repository", images.repository_id)
 pulumi.export("data_bucket", data.name)
 pulumi.export("secrets", HF_SECRETS)
-pulumi.export("cron", scan.job.name)
+pulumi.export("cron", scan.cron.name)
 pulumi.export("meta_cron", meta.job.name)
