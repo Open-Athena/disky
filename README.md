@@ -1,49 +1,262 @@
-# disky @ Open Athena
+# `@open-athena/treemap`
 
-**This branch deploys the public docs and staff-only fleet dashboard at [disky.oa.dev]. Each storage dashboard has its own deployment branch below.**
+A SOTA React **treemap** — and the layout/color primitives behind it.
+**Chart-lib-free** (no Plotly, no recharts; d3 only for the optional Voronoi
+variant) — everything is DIY SVG, plain DOM, or a single `<canvas>`. All
+components are accessor-based, so any node shape works.
 
-[disky] maps where storage goes: scheduled scans of a store's buckets, then a treemap site with sizes over time, diffs between scans, owners and read recency. Open Athena runs four deployments, one per storage provider. Each has its own branch in this repo, and each branch merges the shared base, this repo's [`cloud`][cloud] branch.
+Ships:
 
-<p>
-<a href="https://gcs.oa.dev"><img alt="gcs.oa.dev: the public preview (names and sizes omitted)" src="https://github.com/Open-Athena/disky/raw/gcs/site/public/og.jpg" width="49%"></a>
-<a href="https://cw.oa.dev"><img alt="cw.oa.dev: the latest scan's card" src="https://cw.oa.dev/og/map.png?policy=full&amp;r=8" width="49%"></a>
-<a href="https://hf.oa.dev"><img alt="hf.oa.dev: the latest scan's card" src="https://hf.oa.dev/og/map.png?policy=full&amp;r=8" width="49%"></a>
-<a href="https://r2.oa.dev"><img alt="r2.oa.dev: the latest scan's card" src="https://r2.oa.dev/og/map.png?policy=full&amp;r=8" width="49%"></a>
-</p>
+| Export | What |
+|---|---|
+| [`<Treemap>`](#treemap) | Squarified layout with **two renderers** (SVG/DOM default + whole-map `<canvas>`), drill-on-click, pin-on-leaf tooltip, keyboard nav, fold-small "…" dust tiles, shared-edge (gapless) tiling, per-cell coloring + [emphasis `ring`](#brushing), fullscreen, slot-based coloring/tooltip/legend/rollup, lazy subtrees. |
+| [`<VoronoiTreemap>`](#voronoitreemap) | Circle- (or polygon-) clipped Voronoi tessellation, areas ∝ value. Separate `@open-athena/treemap/voronoi` subpath — the only part with dependencies. |
+| [`useHoverPin`](#usehoverpin) | Headless hover+pin state (single pin, touch-safe, outside-click / Esc clear). |
+| `<TitleSpaceToggle>` | Controlled checkbox for `reclaimTitleSpace`; share its `checked` value with `<Treemap reclaimTitleSpace={checked}>`. |
+| `<BorderStepToggle>` | Controlled checkbox for `borderStep`; share its `checked` value with `<Treemap borderStep={checked}>`. |
+| `squarify` / `foldSmall` / `foldThin` / `squarifyRemainder` | Pure layout primitives if you want to render the cells yourself. |
+| `layoutCells` / `flattenPlaced` / `hitTest` / `isFolded` | Placed-cell layout + hit-testing, shared by both renderers. |
+| `resolveCellStyle` / `foldedOf` | Cell-style resolution (the `colorForCell` → `lens` → contrast-edge fall-through). |
+| `DEFAULT_PALETTE` / `parseColor` / `contrastEdge` / `CONTAINER_BG` | Color primitives (CSS-var-friendly). |
+| `divergingColor` / `divergingInk` | Red/green diverging scale for Δ views. |
+| `ageFade` / `ageDomain` / `age01` | Age lens: fade cells toward the panel background by any secondary scalar (`color-mix` in OKLCH, so equal age reads as equal fade across hues). Compose via the treemap's `lens` slot — stacks on any `colorForCell`. |
+| `parseQuery` / `filterNodes` / `dimUnmatched` | Filter plane: substring or `/regex/` path matching (a half-typed regex degrades to substring, never throws), plus a dim transform for the treemap's `lens` slot. |
 
-*Each card is the site's own link preview, drawn from its latest scan (gcs shows its static public preview: its cards are for signed-in viewers).*
+> disk-tree's **bytes/mtime/age-domain** widgets (`<TimeSeries>` / `<BytesOverTime>`,
+> `<StalenessScatter>`, `<AgeHistograms>`, `sumTbYears`) build on this core and
+> live in [`@disk-tree/react`](../react), which re-exports everything here.
 
-| branch | site | scans |
-|---|---|---|
-| [`gcs`] | [gcs.oa.dev] | Marin's GCS buckets (`marin-*`), with per-user ownership, read recency from access logs, and staged deletion |
-| [`cw`] | [cw.oa.dev] | Marin's CoreWeave (CAIOS) S3 buckets, with zone quotas and lifecycle rules |
-| [`hf`] | [hf.oa.dev] | the `open-athena` Hugging Face org: its buckets, models, datasets and spaces, including the history its storage bill counts |
-| [`r2`] | [r2.oa.dev] | Open Athena's Cloudflare R2 buckets, including disky's own indexes |
+## Install
 
-The sites are Open-Athena-gated. Each branch's README says how its scan runs, what it changes from `cloud`, and where its infrastructure lives.
+`reclaimTitleSpace` defaults to `false`: parents reserve a full-width title bar. Enabling it lets complete columns to the right of the measured label reclaim that strip, while all sibling rectangles retain one shared area multiplier. It works with DOM, canvas, hit-testing and export. `branchOutline="…"` adds quiet, one-pixel parent frames above descendants without changing layout; those frames also appear in exported images.
 
-## What's on this branch
+`borderStep` (shared tiling, default `false`) rounds every stroke to whole pixels and keeps each one at least 1px narrower than its parent's, so a parent's outer seam always reads wider than the seams between its children; the 1px floor is the only place two levels can tie. Give it a `borderWidth` that steps by level (e.g. levels-below + 1).
 
-- **`.github/workflows/health.yml`**: the hourly serving check across all four sites. It lives here because GitHub runs `schedule:` workflows only from a repo's default branch.
-- **Shared code from `cloud`**, including `fleet/`: public docs and a staff-only fleet page over the four deployments. `fleet/wrangler.toml` is this deployment's configuration; broker client and source tokens are encrypted Pages secrets.
-- **`CI`**: tests the shared code before publishing. The front-door deployment workflow builds and checks preview before production; `FLEET_DEPLOY_ENABLED=1` enables it after credentials are configured.
-- **The hourly fleet post** (`fleet-update.yml`, `FLEET_POST_ENABLED=1`) is not enabled until source tokens, sign-in and the first post are verified; the existing healthcheck keeps its own schedule.
+```bash
+pnpm add @open-athena/treemap
+```
 
-## Elsewhere
+```ts
+import '@open-athena/treemap/styles.css'
+```
 
-- **The shared base:** branch [`cloud`][cloud]: the scanning engine, the `dt-cloud` overlay, the site, the fleet app, and the specs. Shared work lands there first; the deployment branches merge it.
-- **A self-hosted example:** [r2.rbw.sh], a public deployment over the author's own R2 buckets, run from [`runsascoded/disky`][rac] as anyone could: take `cloud`, configure it, host it.
+The npm package is compiled (ESM + types per subpath: `@open-athena/treemap`, `/squarify`, `/parseColor`, `/divergingColor`,
+`/svg`, `/voronoi`), so it needs no JSX/TSX handling in your bundler. It's also on a SHA-pinnable **dist branch** (via
+[`npm-dist`][npm-dist]), the same build:
 
-[disky]: https://github.com/Open-Athena/disky/tree/cloud
-[cloud]: https://github.com/Open-Athena/disky/tree/cloud
-[rac]: https://github.com/runsascoded/disky
-[`gcs`]: https://github.com/Open-Athena/disky/tree/gcs
-[`cw`]: https://github.com/Open-Athena/disky/tree/cw
-[`hf`]: https://github.com/Open-Athena/disky/tree/hf
-[`r2`]: https://github.com/Open-Athena/disky/tree/r2
-[gcs.oa.dev]: https://gcs.oa.dev
-[cw.oa.dev]: https://cw.oa.dev
-[hf.oa.dev]: https://hf.oa.dev
-[r2.oa.dev]: https://r2.oa.dev
-[r2.rbw.sh]: https://r2.rbw.sh
-[disky.oa.dev]: https://disky.oa.dev
+```bash
+pnpm add github:runsascoded/disk-tree#<dist-sha>
+```
+
+Or, with [`pnpm-dep-source`][pds]:
+
+```bash
+pds init packages/treemap
+pds gh treemap   # switch to the latest GH dist SHA
+```
+
+You'll also need to `import '@open-athena/treemap/styles.css'` once somewhere in your
+app for the default cell/tooltip styling.
+
+`react` and `react-dom` ≥ 18 are peer deps.
+
+## `<Treemap>`
+
+```tsx
+import { Treemap } from '@open-athena/treemap'
+import '@open-athena/treemap/styles.css'
+
+interface Node { name: string; size: number; children?: Node[] }
+
+const root: Node = {
+  name: 'root', size: 300,
+  children: [
+    { name: 'foo', size: 200, children: [
+      { name: 'a.txt', size: 100 },
+      { name: 'b.txt', size: 100 },
+    ] },
+    { name: 'bar', size: 100 },
+  ],
+}
+
+<Treemap<Node>
+  root={root}
+  getSize={n => n.size}
+  getChildren={n => n.children}
+  getLabel={n => n.name}
+  // Optional slots — every one has a working default.
+  formatSize={n => `${n} B`}
+  renderer="dom"          // or "canvas" (one <canvas> for the whole map)
+  tiling="gaps"           // or "shared" (gapless — neighbors abut, half-stroke edges)
+  colorForCell={(n, path, depth) =>
+    // Return `null` to defer to the default 8-slot categorical palette.
+    n.isPlaceholder ? { bg: '#4a4a52', ink: '#d0d0d8' } : null
+  }
+  renderTooltip={(n, path) => <>{n.name}<br/>{n.size} B</>}
+  renderLegend={(current, path) => …}
+  renderRollup={(current, path) => …}
+  mapOverlay={busy ? <BusyPill /> : null}  // laid over the map box itself, clear of the bar / rollup / footer
+  onCellClick={(n, path, e) => { /* return true to skip built-in drill/pin */ }}
+  onCellHover={(n, path) => { /* outward hover signal for external brushing */ }}
+  onPathChange={path => console.log(path.map(n => n.name).join('/'))}
+/>
+```
+
+Built-in interaction: click a branch to drill in, click a leaf to pin its
+tooltip, Backspace/Escape pops the drill stack, Escape/outside-click unpins.
+
+### Brushing / selection: `CellStyle.ring`
+
+A `colorForCell`/`lens` result can set `ring` to give a cell an emphasis border —
+honored in **both** tiling modes (unlike `edge`, the shared-mode gutter
+half-stroke), painted as a box-shadow (DOM) or a stroked rounded-rect (canvas)
+so it never affects layout:
+
+```tsx
+lens={(n, path, depth, ctx, style) =>
+  n.path === selectedPath ? { ...style, ring: { color: '#78aaff', width: 3 } }
+  : n.path === hoveredPath ? { ...style, ring: '#fff' }   // shorthand: color at default width
+  : style
+}
+```
+
+`ring` is `string | { color: string; width?: number; inset?: boolean }` (default
+width 2px, `inset` true). It follows the cell's corner radius and composites over
+whatever structural `edge`/gutter the cell already has.
+
+### Lazy subtrees
+
+A tree that arrives one page at a time — disk-tree's
+`/api/scan?uri=…&depth=N`, a pruned static `tree.json` — can't say "this node has
+children" through `getChildren`, because nothing in hand and genuinely a leaf look
+identical. Two slots close that gap:
+
+```tsx
+<Treemap<Node>
+  root={root}
+  getSize={n => n.size}
+  getChildren={n => n.children}          // what this page carried
+  hasChildren={n => n.n_children > 0}    // what the server says exists
+  loadChildren={async n => fetchChildren(n.uri)}
+  renderLoading={n => `Loading ${n.name}…`}
+  renderLoadError={(n, path, err, retry) => <button onClick={retry}>{err.message} — retry</button>}
+  onChildrenLoaded={(n, path, kids) => cache(n, kids)}
+/>
+```
+
+A node is drillable when it has children *or* can fetch them. Only the **viewed**
+node loads — one request per drill, not one per cell on screen — and results are
+cached per node for as long as `root` is unchanged, so drilling back in is free.
+Rejections render with a retry; without `loadChildren`, `hasChildren` is ignored
+entirely, so eagerly materialized consumers are unaffected.
+
+## `<VoronoiTreemap>`
+
+An organic alternative to rectangles, from a **separate subpath** so the core
+package stays dependency-free:
+
+```bash
+pnpm add d3-voronoi-treemap d3-hierarchy   # optional peers
+```
+
+```tsx
+import { VoronoiTreemap } from '@open-athena/treemap/voronoi'
+
+<VoronoiTreemap<Row>
+  items={children}
+  getValue={r => r.size ?? 0}
+  getLabel={r => r.path}
+  shape="circle"          // or "rect", or pass an explicit `clip` polygon
+  seed={uri}              // same dir ⇒ same layout, every render
+  formatValue={formatSize}
+  onCellClick={r => navigate(pathFor(r))}
+/>
+```
+
+Read the caveats before reaching for it — they're why `<Treemap>` stays the
+default:
+
+- **It cannot render a wide value range.** The solver clamps tiny site weights,
+  so a child holding 0.1% of the bytes comes out ~200% too large and drags the
+  whole tessellation off target (measured: 421,710% worst-case error on a
+  13-child listing). `minShare` (default 0.005) drops those, and the component
+  reports how many and how much. Rect treemaps have no such floor.
+- **It is iterative, not exact.** `converged` / `error` report the worst per-cell
+  *relative* area error; the component labels the chart when it misses `tolerance`
+  (default 2%). Note the solver's own `convergenceRatio` is a fraction of the
+  *clip* area, a different and much weaker guarantee — hence our tighter 0.001
+  default.
+- **It is randomly seeded.** Unseeded, the same data lays out differently on every
+  render; `seed` (number or string) makes it a pure function.
+- Labels need room, so cells under ~900px² get none.
+
+`voronoiLayout` is exported for custom rendering, along with `circlePolygon`,
+`rectPolygon`, `polygonArea`, `polygonCentroid`, `maxAreaError`, `toPointsAttr`,
+and the `mulberry32` / `hashSeed` PRNG.
+
+## `useHoverPin`
+
+Headless single-pin state — pairs with any hover UI:
+
+```tsx
+import { useHoverPin } from '@open-athena/treemap'
+
+function Legend({ items }: { items: string[] }) {
+  const pin = useHoverPin<string>({ excludeRefs: [] })
+  return (
+    <>
+      {items.map(k => (
+        <span
+          key={k}
+          onMouseEnter={() => pin.hover(k)}
+          onMouseLeave={() => pin.hover(null)}
+          onClick={() => pin.togglePin(k)}
+          style={{ opacity: pin.active === k ? 1 : 0.4 }}
+        >
+          {k}
+        </span>
+      ))}
+    </>
+  )
+}
+```
+
+## Theming
+
+Every color and background is a CSS custom property with a sensible default —
+override on any ancestor:
+
+```css
+.dt-treemap {
+  --dt-treemap-container-bg: #202024;
+  --dt-treemap-ink: #d0d0d8;
+  --dt-treemap-folded: #4a4a52;
+  --dt-treemap-tip-bg: #1a1a1e;
+  /* … */
+}
+```
+
+## Contributing
+
+`packages/treemap/` is a workspace member of the [disk-tree] monorepo (where the
+widget is developed against a real consumer). Iterate from the repo root:
+
+```bash
+pnpm install                                  # workspace-wide
+cd packages/treemap
+pnpm typecheck
+pnpm test        # Vitest
+pnpm test:watch
+```
+
+The DT app under `ui/` and `@disk-tree/react` both consume this package via
+`"@open-athena/treemap": "workspace:*"` — changes flow through instantly during
+`pnpm dev`.
+
+## License
+
+Apache 2.0 (same as disk-tree).
+
+[disk-tree]: https://github.com/runsascoded/disk-tree
+[npm-dist]: https://github.com/runsascoded/npm-dist
+[pds]: https://github.com/runsascoded/pnpm-dep-source

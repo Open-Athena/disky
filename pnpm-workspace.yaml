@@ -1,6 +1,0 @@
-packages:
-  - "site"
-  - "fleet"
-  - "packages/*"
-  - "infra/cf/cron-dispatch"
-  - "infra/cf/r2-access"
