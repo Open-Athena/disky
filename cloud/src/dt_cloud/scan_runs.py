@@ -305,6 +305,7 @@ class JobKind:
     downstream: bool = False
     #: A standalone single-command job's phase, when older logs have no explicit phase markers.
     single_phase: str | None = None
+    #: This kind's no-work marker (a log-line regex), in place of the profile's `nop_marker`.
     nop_marker: str | None = None
 
 
