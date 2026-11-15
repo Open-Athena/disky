@@ -117,10 +117,13 @@ options:
   # the deployment's own buckets (named here: they carried `deployment=shared` until the stack's `up` relabels them
   # `gcs`, and a name holds either way) and its Batch jobs (`$DISKY_LABELS`)
   gcp-cost: {buckets: [oa-gcs-usage-dvx, oa-gcs-usage-scratch, oa-gcs-usage-backups]}
-  # each marin bucket's soft-deleted bytes, which GCS bills until they expire and the listing of live objects misses
-  # (specs/non-live-bytes.md): the root view's "Not in this view" line. Its own `side` task, which `index` never waits
-  # on. 11-05 → 11-13 these were ~1.4 PiB the bill kept charging after the fleet's live bytes dropped
-  non-live: {classes: [soft-deleted]}
+  # each marin bucket's soft-deleted, noncurrent and multipart-upload bytes, which GCS bills and the listing of live
+  # objects misses (specs/non-live-bytes.md): the root view's "Not in this view" line and its billed-bytes chart. From
+  # Cloud Monitoring (`source: metric`; the job's `monitoring.viewer` on the fleet project, infra/gcp), whose totals
+  # hold after a bucket's soft-delete policy is turned off (the listing then 400s while GCS still bills the bytes) and
+  # whose daily means go back two years (`snapshots/non-live/series.json`). Its own `side` task, which `index` never
+  # waits on. 11-05 → 11-13 these were ~1.4 PiB the bill kept charging after the fleet's live bytes dropped
+  non-live: {source: metric, classes: [soft-deleted, noncurrent, mpu]}
   # after each scan, the per-scan files the interval store + static index hold (specs/lean-scans.md §2) and the raw
   # listing shards (`layer1`, once the store's `generation` matches them), retired for real since the hand-run retires
   # of 2026-10-18/19; the interval-store append writes each scan's verify marker (a row-for-row check), and a scan
