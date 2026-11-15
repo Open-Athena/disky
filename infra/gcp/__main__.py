@@ -354,6 +354,9 @@ for bucket, swept in FLEET.items():
     for role in roles:
         grant_bucket(f"{bucket}-job-{role.split('.')[-1]}", bucket=bucket, role=role, member=job.member, member_email=job.email_literal, adopt=adopt, existing=True)
     grant_bucket(f"{bucket}-browse", bucket=bucket, role="roles/storage.objectViewer", member=browse.member, member_email=browse.email_literal, adopt=adopt, existing=True)
+# The `non-live` step's metric source (`non-live -s metric`): the fleet buckets' Cloud Monitoring
+# `storage/v2/total_bytes` series live in the fleet's project, read with `monitoring.timeSeries.list`
+gcp.projects.IAMMember("fleet-job-monitoring-viewer", project=cfg.require("fleetProject"), role="roles/monitoring.viewer", member=job.member)
 
 # Managed object deletion is deliberately opt-in: Storage Intelligence is
 # billed per managed object after its one-time 30-day trial. When enabled, the
