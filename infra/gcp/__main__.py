@@ -162,25 +162,6 @@ if daily_enabled:
         planned = run([str(Path(__file__).resolve().parents[2] / "job/r2-scan"), "plan", *head, daily_config.require("scanImage")],
                       capture_output=True, text=True, check=True)
         return loads(planned.stdout)
-    scheduler = gcp.serviceaccount.Account(
-        "r2-scheduler", project=project, account_id="oa-r2-usage-scheduler",
-        display_name="OA R2 daily scan submitter",
-        description="Submits OA R2 Batch scans as only the OA R2 job account",
-    )
-    submit_role = gcp.projects.IAMCustomRole(
-        "r2-batch-submit", project=project, role_id="oaR2BatchSubmit",
-        title="OA R2 Batch submission", permissions=["batch.jobs.create"],
-        description="Create Batch jobs; no access to existing jobs or other deployment accounts",
-    )
-    submit_grant = gcp.projects.IAMMember(
-        "r2-scheduler-submit", project=project, role=submit_role.name,
-        member=scheduler.email.apply(lambda email: f"serviceAccount:{email}"),
-    )
-    act_as = gcp.serviceaccount.IAMMember(
-        "r2-scheduler-job", service_account_id=f"projects/{project}/serviceAccounts/{job.email_literal}",
-        role="roles/iam.serviceAccountUser",
-        member=scheduler.email.apply(lambda email: f"serviceAccount:{email}"),
-    )
     # Each head's cron runs a submitter job (`BatchSubmitCron`, `job/scan-submit.sh`): the day's Batch job named for the
     # day, transient failures retried, an alert if it still can't submit. The first head's is also "Run a scan"'s.
     for i, head in enumerate(heads):
