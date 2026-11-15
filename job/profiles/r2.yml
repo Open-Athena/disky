@@ -26,7 +26,9 @@ machines:
   # path-index, the age pyramids and the check: the one-VM job's machine (DuckDB at 12 GB over ~57M rows)
   big: {type: e2-standard-8, disk: 100}
   list: {type: e2-standard-4, disk: 50}
-  static: {type: e2-standard-4, cpus: 4, memory: 14GB, disk: 100}
+  # static-names: a day's append peaks ~5 GB, but its compaction (every 2^5 scans; c001 → c002 on 2026-11-15) went past
+  # 14 GB building anchors and was killed (exit -9) on e2-standard-4
+  static: {type: e2-highmem-4, cpus: 4, memory: 30GB, disk: 100}
   post: e2-standard-8
 # r2 scans four approved buckets of an account that holds many more (specs/r2-deployment.md): an unscanned-bucket
 # alert would fire every run, and r2 holds no account-wide key to list the account's buckets with (by design)
