@@ -202,7 +202,7 @@ def test_gcp_stack(monkeypatch: pytest.MonkeyPatch):
         }
         assert container["commands"][:2] == ["bash", "-c"]
         assert container["commands"][2].endswith((REPO / "job" / "hf-scan-submit.sh").read_text())
-        # "Run a scan": the site's dispatch account may run that one job, overriding only `DT_TRIGGER`
+        # "Run a scan": the site's dispatch account may run that one job, overriding only `DT_TRIGGER` and `DT_TRIGGER_BY`
         dispatcher = f"hf-usage-dispatch@{project}.iam.gserviceaccount.com"
         assert {k: m.inputs("hf-usage-snapshot-submit-dispatch-hf-usage-dispatch")[k] for k in ("name", "role", "member")} == {
             "name": "hf-usage-snapshot-submit", "role": "roles/run.jobsExecutorWithOverrides", "member": f"serviceAccount:{dispatcher}",

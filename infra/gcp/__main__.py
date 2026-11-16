@@ -156,7 +156,7 @@ secrets = Secrets(
 )
 
 # "Run a scan" on /scans (`/api/scan-runs/dispatch`) runs the scan's submitter job as this account, overriding only
-# `DT_TRIGGER`. Its key is the Pages secret `GCP_SA_KEY` (prod and preview; keys stay out of state); it holds nothing
+# `DT_TRIGGER` and `DT_TRIGGER_BY`. Its key is the Pages secret `GCP_SA_KEY` (prod and preview; keys stay out of state); it holds nothing
 # but `RUN_WITH_OVERRIDES` on that one job.
 dispatch = JobAccount(
     "hf-usage-dispatch",
@@ -187,7 +187,7 @@ scan = BatchSubmitCron(
     image=f"{region}-docker.pkg.dev/{project}/hf-usage/scan:hf",
     env={"SLACK_ALERT_CHANNEL": "C0C9J9VDPV5"},  # #hf-admin
     secret_env={"SLACK_BOT_TOKEN": "hf-usage-slack-bot-token"},
-    overridable=["DT_TRIGGER"],
+    overridable=["DT_TRIGGER", "DT_TRIGGER_BY"],
     dispatchers={"hf-usage-dispatch": dispatch.member},
     labels={"component": "scan-submit"},
     description="The daily Hugging Face org scan: runs the submitter job, which names the day's Batch job, retries, and alerts",
