@@ -2,7 +2,7 @@ config:
   gcp:project: oa-internal-450019
   gcp:region: us-west1
   r2:dailyEnabled: "true"
-  r2:scanImage: us-west1-docker.pkg.dev/oa-internal-450019/oa-r2-usage/scan@sha256:47041916ae47ed41d7cf8f3b73ce882522e6a4de1e3e0161278acabbdfd80011
+  r2:scanImage: us-west1-docker.pkg.dev/oa-internal-450019/oa-r2-usage/scan@sha256:8a9c1c627e75214975a3b57921973d4a7ce8bb967a84564488c0e429a83345cf
   r2:heads:
     - profile: r2.yml
       schedule: "15 7 * * *"
