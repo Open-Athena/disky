@@ -158,7 +158,8 @@ fleet_secret = Secrets(
 # (`BatchCron`) can do neither: one POST, no job id, so a 502 is a silent missed scan (2026-11-08) and a retry a possible
 # second one. The trigger keeps its name, adopted from its `BatchCron` (`cron_aliases`) and updated in place.
 # "Run a scan" on /scans runs the same job as the site's dispatch account (`/api/scan-runs/dispatch`), overriding only
-# `DT_TRIGGER` (`manual`: the script names the job for the second and records the scan as manual).
+# `DT_TRIGGER` (`manual`: the script names the job for the second and records the scan as manual) and `DT_TRIGGER_BY`
+# (who started it, `scan_runs.trigger_by`).
 DAILY = "gcs-usage-snapshot-daily"
 daily = BatchSubmitCron(
     DAILY,
@@ -173,7 +174,7 @@ daily = BatchSubmitCron(
     image=f"{region}-docker.pkg.dev/{project}/cloud-run-source-deploy/gcs-usage-snapshot:latest",
     env={"SLACK_ALERT_CHANNEL": "C0C579HNRFB"},  # #gcs-admin
     secret_env={"SLACK_BOT_TOKEN": "gcs-alert-slack-bot-token"},
-    overridable=["DT_TRIGGER"],
+    overridable=["DT_TRIGGER", "DT_TRIGGER_BY"],
     dispatchers={"gcs-usage-dispatch": dispatch.member},
     labels={"component": "scan-submit"},
     description="The daily scan: runs the submitter job, which names the day's Batch job, retries, and alerts",
