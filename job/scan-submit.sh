@@ -38,7 +38,8 @@ import json, os, re, sys
 path = sys.argv[1]
 who = (os.environ.get("DT_TRIGGER_BY") or "").strip()
 if who and not re.fullmatch(r"[\w.+@:'() -]{1,200}", who):  # dt_cloud.scan_runs.TRIGGER_BY_RE
-    sys.exit("DT_TRIGGER_BY: want an address or handle")
+    print("note: DT_TRIGGER_BY is not an address or handle; the run's starter goes unrecorded", file=sys.stderr)
+    who = ""
 spec = json.load(open(path))
 envs = [g["taskSpec"]["environment"]["variables"] for g in spec["taskGroups"]]
 if not envs or any(v.get("DT_TRIGGER") != "schedule" for v in envs):
