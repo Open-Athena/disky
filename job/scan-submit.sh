@@ -34,11 +34,11 @@ case "$trigger" in
     batch_job=$(date -u "+$JOB_PREFIX-%Y%m%d-%H%M%S")
     # the cron's spec, its run recorded as manual (`scan_runs.trigger`); refused unless it carries the cron's trigger
     python3 - "$spec" <<'PY' || { rm -f "$spec" "$log"; exit 2; }
-import json, os, sys
+import json, os, re, sys
 path = sys.argv[1]
 who = (os.environ.get("DT_TRIGGER_BY") or "").strip()
-if len(who) > 200 or not who.isprintable():
-    sys.exit("DT_TRIGGER_BY: want printable text of at most 200 characters")
+if who and not re.fullmatch(r"[\w.+@:'() -]{1,200}", who):  # dt_cloud.scan_runs.TRIGGER_BY_RE
+    sys.exit("DT_TRIGGER_BY: want an address or handle")
 spec = json.load(open(path))
 envs = [g["taskSpec"]["environment"]["variables"] for g in spec["taskGroups"]]
 if not envs or any(v.get("DT_TRIGGER") != "schedule" for v in envs):
