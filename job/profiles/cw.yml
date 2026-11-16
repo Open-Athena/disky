@@ -108,7 +108,9 @@ options:
   # interval-store append and static-names both read them from the data bucket, in this region.
   publish-r2: {args: [-S], barrier: true, require: ["{snapshots}/{scan}/meta.json"]}
   # A failed append (3 of 106 scans in the 3 weeks to 2026-11-06) still lists the scan, and this site reads only R2.
-  interval-store: {timeout: 90m, mem: 12GB, source: data, publish_on_failure: true}
+  # `mem` 20GB on the n2-standard-8 (32 GB): DuckDB gets ~17.3 GiB of it; the tree peaks ~3.3 GiB over DuckDB's limit
+  # (at 12GB, 9.9 GiB of DuckDB ran out loading range r0002 from 2026-11-15T0603, as 02a grew)
+  interval-store: {timeout: 90m, mem: 20GB, source: data, publish_on_failure: true}
   over-time: {mem: 16GB}
   digest: {template: cw, config: /app/job/digest.yml}
   # cw's own GCS buckets (the CoreWeave buckets and R2 bill elsewhere); compute: every Batch job `$DISKY_LABELS` selects
