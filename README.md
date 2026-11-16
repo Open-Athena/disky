@@ -24,10 +24,10 @@ The sites are Open-Athena-gated. Each branch's README says how its scan runs, wh
 
 ## What's on this branch
 
-- **`.github/workflows/health.yml`**: the hourly serving check across all four sites. It lives here because GitHub runs `schedule:` workflows only from a repo's default branch.
+- **`.github/workflows/health.yml`**: the hourly serving check across all four sites, dispatched at :17 by the fleet clock Worker (`fleet/cron`, deployed with the site), since GitHub's `schedule:` ran late or not at all under load.
 - **Shared code from `cloud`**, including `fleet/`: public docs and a staff-only fleet page over the four deployments. `fleet/wrangler.toml` is this deployment's configuration; broker client and source tokens are encrypted Pages secrets.
 - **`CI`**: tests the shared code before publishing. The front-door deployment workflow builds and checks preview before production; `FLEET_DEPLOY_ENABLED=1` enables it after credentials are configured.
-- **The hourly fleet post** (`fleet-update.yml`): run by hand with `mode` `dry` (print the message, post nothing), `new` (post one to `#disky-admin` and keep it) or `update`; hourly it edits the kept post while `FLEET_POST_ENABLED=1`. The existing healthcheck keeps its own schedule.
+- **The hourly fleet post**: the fleet clock Worker edits the kept `#disky-admin` post at :43. `fleet-update.yml` is its by-hand twin: `mode` `dry` (print the message, post nothing), `new` (post one and keep it) or `update`.
 
 ## Elsewhere
 

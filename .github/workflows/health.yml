@@ -10,8 +10,8 @@ name: Healthcheck
 # (exit 0) when its secret is absent. Each entry checks out its own deploy
 # branch, rather than the front door's own copy of the shared code.
 on:
-  schedule:
-    - cron: "17 * * * *" # hourly, offset off the top of the hour
+  # Hourly at :17 by the fleet clock Worker (`fleet/cron`, `HEALTH_CRON`), which dispatches this through the API: GitHub's
+  # `schedule:` ran late or not at all under load. Run it by hand too.
   workflow_dispatch:
 
 jobs:

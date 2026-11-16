@@ -1,12 +1,10 @@
 name: Fleet status update
 
-# The `#disky-admin` fleet post (`specs/disky-oa-dev.md`): hourly, `update` edits the kept message in place, and only
-# while `FLEET_POST_ENABLED` is 1. By hand: `dry` prints the message's text without posting, `new` posts a message and
-# keeps it (FLEET_KV) for the hourly edits, `update` edits it now.
+# The `#disky-admin` fleet post (`specs/disky-oa-dev.md`), by hand: `dry` prints the message's text without posting,
+# `new` posts a message and keeps it (FLEET_KV) for the hourly edits, `update` edits it now. The hourly edit is the fleet
+# clock Worker's (`fleet/cron`, `SLACK_CRON`), not GitHub's `schedule:`, which ran late or not at all under load.
 
 on:
-  schedule:
-    - cron: "43 * * * *"
   workflow_dispatch:
     inputs:
       mode:
@@ -26,12 +24,11 @@ jobs:
   update:
     if: >-
       github.repository == 'Open-Athena/disky'
-      && (github.event_name == 'workflow_dispatch' || vars.FLEET_POST_ENABLED == '1')
     runs-on: ubuntu-latest
     timeout-minutes: 3
     env:
       FLEET_JOB_TOKEN: ${{ secrets.FLEET_JOB_TOKEN }}
-      MODE: ${{ inputs.mode || 'update' }}
+      MODE: ${{ inputs.mode }}
     steps:
       - name: Refresh the persistent fleet post
         run: |
