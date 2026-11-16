@@ -55,6 +55,7 @@ MARK = "gcs"                    # favicon + apple-touch icon: `public/icons/gcs*
 OG_CARDS = "1"                  # dynamic share cards for every page (specs/done/dogi.md)
 BASE_SCOPE = "gcs"              # the viewer scope this deployment grants (`_lib/auth.ts`)
 AUTH_HOST_COOKIES = "1"   # on https the session, its handle, both nonces and the Google hint are `__Host-` named; switched on 2026-11-13 (signed everyone out once)
+STAGED_CARD_GRANT = "giqyHV5Uwz5_"   # the job's grant (`gcs-snapshot-job`, its SITE_TOKEN): the scan's `staged-card` step re-renders the open plan's Slack card at the new scan (`/api/plans/staged/card`); prod only, dev names none
 DIFF_LOOKUP_CAP = "32"   # cloud's diff walk, at gcs prod's old latency (2026-11-13 sweep vs the reverted walk: same cold time, the gained names ~20× the lost by bytes)
 JOB_SA = "gcs-usage-job@oa-internal-450019.iam.gserviceaccount.com"  # the account sweep-dispatched Batch jobs run as (`_lib/planDispatch.ts`)
 # Deployment resources (specs/oa-decoupling.md): `cloud` carries no defaults for these.
