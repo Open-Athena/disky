@@ -52,7 +52,6 @@ remote = true
 enabled = true
 
 [vars]
-# OWNER_HISTORY_BATCH = "1"   # bounded fleet-root owner history from interval slice versions; canonical fallback
 # --- Build time (vite.config.ts) ---
 STORE = "my-store"                          # required: the `src/stores.ts` registry key this build serves
 AUTH_MODE = "app"                           # `app` (the app's own sign-in) | `public` (no sign-in wall)

@@ -1787,10 +1787,6 @@ def _cut(all_sorts, bucket, no_dyadic, profile, gen, index, jobs, as_jobs, mount
         print(json.dumps({k: v for k, v in doc.items() if k != "scans"}), flush=True)
         return
     stamps = None if no_dyadic else [s["ts"] for s in scans["scans"]]
-    # As `cut_gen` sizes each of `as_jobs` sorts at once: the cores split between them, each run and piece one share.
-    procs = workers or max(1, (os.cpu_count() or 1) // as_jobs)
-    budget = run_budget(con, as_jobs * procs)
-    err(f"cut: {procs} workers a sort, runs of ≤ {budget:,} B (as {as_jobs} sorts at once)")
     for sort in todo:
         sub, _, _ = SORTS[sort]
         if sub in ATTRIBUTION_SUBS and not attributed(scans):
