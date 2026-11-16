@@ -10,9 +10,11 @@
 # 5xx, connection) are retried for `$SUBMIT_RETRY_S` (default 30 min). If the submit still fails, this posts to
 # `$SLACK_ALERT_CHANNEL` (with `$SLACK_BOT_TOKEN`) and exits nonzero.
 #
-# A manual scan (`DT_TRIGGER=manual`: the site's "Run a scan", `/api/scan-runs/dispatch`, runs this job with that one
-# override, the only variable the job lets a run change) is the same spec with `DT_TRIGGER=manual` in its env, named for
-# the second (`<prefix>-YYYYMMDD-HHMMSS`), so it never meets the day's job; its alert says it was manual.
+# A manual scan (`DT_TRIGGER=manual`: the site's "Run a scan", `/api/scan-runs/dispatch`, runs this job with that
+# override, and `DT_TRIGGER_BY=<the admin's address>`: the only variables the job lets a run change) is the same spec
+# with `DT_TRIGGER=manual` (and `DT_TRIGGER_BY`, recorded as `scan_runs.trigger_by`) in its env, named for the second
+# (`<prefix>-YYYYMMDD-HHMMSS`), so it never meets the day's job; its alert says it was manual. A hand execute names
+# itself the same way: `--update-env-vars DT_TRIGGER=manual,DT_TRIGGER_BY=<who>`.
 set -uo pipefail
 
 : "${BATCH_SPEC:?the scan job spec (JSON), from the Cloud Run job env}"
@@ -32,14 +34,19 @@ case "$trigger" in
     batch_job=$(date -u "+$JOB_PREFIX-%Y%m%d-%H%M%S")
     # the cron's spec, its run recorded as manual (`scan_runs.trigger`); refused unless it carries the cron's trigger
     python3 - "$spec" <<'PY' || { rm -f "$spec" "$log"; exit 2; }
-import json, sys
+import json, os, sys
 path = sys.argv[1]
+who = (os.environ.get("DT_TRIGGER_BY") or "").strip()
+if len(who) > 200 or not who.isprintable():
+    sys.exit("DT_TRIGGER_BY: want printable text of at most 200 characters")
 spec = json.load(open(path))
 envs = [g["taskSpec"]["environment"]["variables"] for g in spec["taskGroups"]]
 if not envs or any(v.get("DT_TRIGGER") != "schedule" for v in envs):
     sys.exit("BATCH_SPEC: want DT_TRIGGER=schedule in every task group's env, to make it manual")
 for v in envs:
     v["DT_TRIGGER"] = "manual"
+    if who:
+        v["DT_TRIGGER_BY"] = who
 json.dump(spec, open(path, "w"))
 PY
     dt-cloud batch submit -c scan -p "$PROJECT" -L "$REGION" -e -r "${SUBMIT_RETRY_S:-1800}" "$batch_job" "$spec" 2>&1 | tee "$log"
