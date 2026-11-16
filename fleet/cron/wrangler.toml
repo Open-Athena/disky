@@ -1,0 +1,16 @@
+# disky.oa.dev's clock (fleet/cron/index.ts, specs/disky-oa-dev.md): `fleet-deploy.yml` deploys it after the site and
+# installs its secrets (FLEET_JOB_TOKEN, GH_DISPATCH_TOKEN ← the HEALTH_DISPATCH_TOKEN Actions secret).
+name = "disky-fleet-cron"
+main = "index.ts"
+compatibility_date = "2026-11-01"
+account_id = "74981a43be0de7712369306c7b19133d"
+workers_dev = false
+
+[triggers]
+crons = ["43 * * * *", "17 * * * *"]
+
+[vars]
+FLEET_SLACK_URL = "https://disky.oa.dev/api/fleet/slack"
+SLACK_CRON = "43 * * * *"                   # refresh the #disky-admin fleet post
+HEALTH_CRON = "17 * * * *"                  # dispatch the health checks
+HEALTH_WORKFLOW = "Open-Athena/disky/health.yml@front-door"

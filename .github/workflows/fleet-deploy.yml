@@ -63,3 +63,18 @@ jobs:
         run: pnpm exec wrangler pages deploy dist --project-name disky-oa --branch front-door
       - name: Verify production gates
         run: python fleet/scripts/smoke.py https://disky-oa.pages.dev
+      # The fleet's clock (fleet/cron/): its Cron Triggers refresh the #disky-admin post and dispatch health.yml.
+      # Secrets go in after the deploy (a JSON body on stdin: no value reaches the log or argv).
+      - name: Deploy the fleet clock
+        working-directory: fleet
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CF_FRONT_DOOR_TOKEN }}
+          FLEET_JOB_TOKEN: ${{ secrets.FLEET_JOB_TOKEN }}
+          HEALTH_DISPATCH_TOKEN: ${{ secrets.HEALTH_DISPATCH_TOKEN }}
+        run: |
+          set -euo pipefail
+          test -n "$FLEET_JOB_TOKEN"
+          test -n "$HEALTH_DISPATCH_TOKEN"
+          pnpm exec wrangler deploy -c cron/wrangler.toml
+          python3 -c 'import json, os; print(json.dumps({"FLEET_JOB_TOKEN": os.environ["FLEET_JOB_TOKEN"], "GH_DISPATCH_TOKEN": os.environ["HEALTH_DISPATCH_TOKEN"]}))' \
+            | pnpm exec wrangler secret bulk -c cron/wrangler.toml
