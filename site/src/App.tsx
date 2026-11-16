@@ -15,6 +15,7 @@ import { DiffTreemap, DiffHeader, useDiffModel } from './DiffTreemap'
 import { DiffTable } from './DiffTable'
 import { Allowances } from './Allowances'
 import { NonLive } from './NonLive'
+import { NonLiveHistory } from './NonLiveHistory'
 import { DiskSpace } from './DiskSpace'
 import { ExtLink } from './ExtLink'
 import { DiskSpaceDiff, diskDiffScan } from './DiskSpaceDiff'
@@ -81,7 +82,7 @@ import { selOf } from './scanSlug'
 import { SizeOverTime } from './SizeOverTime'
 import { useStore, useStoreFetch } from './store'
 import { listingTime } from './listingTime'
-import { knownBucket, storeDefaultColor } from './stores'
+import { DEFAULT_STORE, knownBucket, storeDefaultColor } from './stores'
 import { colorModeCodec as modeCodec, mapColorMode } from './colorMode'
 import { perf } from './perf'
 import { useDocTitle } from './title'
@@ -1182,7 +1183,7 @@ function AppContent() {
         <SiteNav />
         <p className="err">
           404 — <code>/{drillPath}</code> is not a bucket or page here.{' '}
-          <Link to={store.path}>home</Link>{store.staging && <> · <Link to="/staged">staged</Link></>}{store.owners && <> · <Link to="/users">users</Link></>}
+          <Link to={store.path}>home</Link>{DEFAULT_STORE.staging && <> · <Link to="/staged">staged</Link></>}{DEFAULT_STORE.owners && <> · <Link to="/users">users</Link></>}
         </p>
       </main>
     )
@@ -1432,6 +1433,7 @@ function AppContent() {
       <DiskSpace space={meta?.disk_space} />
       {atRoot && <Allowances spec={store.allowances} classBytes={meta?.class_bytes} />}
       {atRoot && <NonLive store={store} scan={asof} />}
+      {atRoot && store.key === DEFAULT_STORE.key && <NonLiveHistory />}
 
       {mapTree && !mapFailed ? (
         <>

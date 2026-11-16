@@ -294,6 +294,31 @@ def test_trigger_of():
         scan_runs.trigger_of({"DT_TRIGGER": "cron"})
 
 
+def test_record_trigger_by():
+    """Who started a manual run: set at start, kept by the later writes; a write without one never names the column."""
+    s = sink()
+    record(s, PROFILE, "2026-10-08", "uid-1", 100, start=True, trigger="manual", trigger_by="ada@example.org")
+    record(s, PROFILE, "2026-10-08", "uid-1", 300, exit_code=0)
+    record(s, PROFILE, "2026-10-08", "uid-2", 400, start=True, trigger="manual")
+    assert rows(s, "SELECT run_id, status, trigger, trigger_by FROM scan_runs ORDER BY run_id") == [
+        ("uid-1", "succeeded", "manual", "ada@example.org"),
+        ("uid-2", "running", "manual", None),
+    ]
+    sql = scan_runs.run_sql(scan_runs.Run("uid-3", "2026-10-08", "scan", "running", trigger="manual"), 500)
+    assert sql.split(" VALUES ")[0].endswith(", gen, trigger, updated_ts)")
+
+
+def test_trigger_by_of():
+    by = {"DT_TRIGGER_BY": " ada@example.org "}
+    assert [scan_runs.trigger_by_of(e, t) for e, t in ((by, "manual"), (by, "schedule"), (by, None), ({}, "manual"),
+                                                      ({"DT_TRIGGER_BY": " "}, "manual"))] == [
+        "ada@example.org", None, None, None, None]
+    assert scan_runs.trigger_by_of({"DT_TRIGGER_BY": "claude (disky-r2)"}, "manual") == "claude (disky-r2)"
+    for bad in ("x" * 201, "ada\nbob", "<!channel>", "<@U123>", "<https://x.test|ada>", "a&b"):
+        with pytest.raises(ValueError, match=r"^\$DT_TRIGGER_BY: want an address or handle"):
+            scan_runs.trigger_by_of({"DT_TRIGGER_BY": bad}, "manual")
+
+
 def test_record_failure_keeps_phases_and_names_the_error():
     s = sink()
     record(s, PROFILE, "2026-10-08", "uid-2", 100, start=True)
@@ -996,3 +1021,31 @@ def test_phase_skip_is_an_explicit_skip_clause():
         None,
         None,
     ]
+
+
+@pytest.mark.parametrize(('state', 'held', 'status', 'phase_status'), [
+    ('FAILED', False, 'failed', 'failed'), ('SUCCEEDED', False, 'succeeded', 'done'),
+    ('SUCCEEDED', True, 'nop', 'done'), ('RUNNING', False, 'running', 'running'),
+])
+def test_single_command_job_backfill(state, held, status, phase_status):
+    profile = parse_profile({'jobs': [{
+        'kind': 'poll', 'where': {'commands': 'poll'},
+        'scan': [{'created': '%Y-%m-%dT%H%M'}], 'single_phase': 'poll',
+        'nop_marker': '^lease held by ',
+    }]})
+    end = '2026-11-09T08:52:11Z'
+    events = [(*RUNNING, '2026-11-09T08:21:23Z')]
+    if state != 'RUNNING': events.append(('RUNNING', state, end))
+    j = job('poller', 'poller-uid', '2026-11-09T08:20:23Z', state, events, commands=['poll --once'])
+    logs = [log('poller-uid', end, 'lease held by other — skipping')] if held else []
+    recs = reconstruct(profile, [j], logs, None, ts('2026-11-09T09:00:00Z'))
+    assert len(recs) == 1
+    r = recs[0]
+    assert (r.run.kind, r.run.scan, r.run.parent, r.run.status, r.run.failed_phase) == (
+        'poll', '2026-11-09T0820', None, status, 'poll' if state == 'FAILED' else None,
+    )
+    assert r.phases == (Phase(
+        'poll', 0, ts('2026-11-09T08:21:23Z'), None if state == 'RUNNING' else ts(end), phase_status,
+        'skipped: job reported no work' if held else 'backfilled from Batch task window; no phase markers retained',
+    ),)
+    assert r.outputs == ()

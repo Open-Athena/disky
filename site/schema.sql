@@ -179,7 +179,7 @@ CREATE TABLE grants (
   revoked_at    INTEGER,
   first_used_at INTEGER,
   last_used_at  INTEGER
-, disabled_at INTEGER, expiry_ends_sessions INTEGER NOT NULL DEFAULT 1, sessions_invalid_before INTEGER);
+, disabled_at INTEGER, expiry_ends_sessions INTEGER NOT NULL DEFAULT 1, sessions_invalid_before INTEGER, service INTEGER NOT NULL DEFAULT 0, anon INTEGER NOT NULL DEFAULT 0, token_enc TEXT);
 
 CREATE TABLE index_row_groups (
   date      TEXT NOT NULL,
@@ -375,7 +375,7 @@ CREATE TABLE scan_runs (
   gen          TEXT,
   source       TEXT NOT NULL CHECK (source IN ('job', 'backfill')),
   updated_ts   INTEGER NOT NULL
-, trigger TEXT CHECK (trigger IN ('schedule', 'manual')));
+, trigger TEXT CHECK (trigger IN ('schedule', 'manual')), trigger_by TEXT);
 
 CREATE TABLE scan_run_dags (
   run_id  TEXT PRIMARY KEY REFERENCES scan_runs(run_id),
