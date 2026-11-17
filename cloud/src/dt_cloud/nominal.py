@@ -327,7 +327,7 @@ class Transport(Protocol):
     def pin(self, ts: str) -> None: ...
     def unpin(self, ts: str) -> None: ...
     def canvas_create(self, body: str) -> str: ...
-    def canvas_edit(self, canvas: str, body: str) -> None: ...
+    def canvas_edit(self, canvas: str, body: str) -> bool: ...
 
 
 class Slack:
@@ -414,12 +414,14 @@ class Slack:
                 raise
         info = self.client._request('conversations.info', {'channel': self.client.channel}, method='GET')
         canvas = info['channel']['properties']['canvas']['file_id']
-        self.canvas_edit(canvas, body)
+        if not self.canvas_edit(canvas, body):
+            raise RuntimeError('nominal: the channel names a canvas that no longer exists')
         return canvas
 
-    def canvas_edit(self, canvas: str, body: str) -> None:
-        self.client._request('canvases.edit', {'canvas_id': canvas, 'changes': [
-            {'operation': 'replace', 'document_content': {'type': 'markdown', 'markdown': body}}]})
+    def canvas_edit(self, canvas: str, body: str) -> bool:
+        """Replace the canvas's content; False when the canvas is gone (deleted)."""
+        return bool(self._ok('canvases.edit', {'canvas_id': canvas, 'changes': [
+            {'operation': 'replace', 'document_content': {'type': 'markdown', 'markdown': body}}]}, 'canvas_not_found', 'canvas_deleted'))
 
 
 #: State that outlives a thread: the pinned head (unpinned once a new head is pinned) and the channel canvas
@@ -474,9 +476,8 @@ def write_canvas(state: dict, slack: Transport, body: str, save: Callable[[dict]
     if state.get('canvas_body') == body:
         return
     slack.join()
-    if state.get('canvas'):
-        slack.canvas_edit(state['canvas'], body)
-    else:
+    # A canvas deleted by hand is created again rather than failing every later report
+    if not state.get('canvas') or not slack.canvas_edit(state['canvas'], body):
         state['canvas'] = slack.canvas_create(body)
     state['canvas_body'] = body
     save(state)

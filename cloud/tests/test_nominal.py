@@ -671,13 +671,17 @@ class Pins(Slack):
         self.pinned = [p for p in self.pinned if p != ts]
 
     def canvas_create(self, body):
-        self.canvases['F1'] = body
-        self.calls.append(('canvas_create', 'F1'))
-        return 'F1'
+        canvas = f'F{len(self.canvases) + 1}'
+        self.canvases[canvas] = body
+        self.calls.append(('canvas_create', canvas))
+        return canvas
 
     def canvas_edit(self, canvas, body):
-        self.canvases[canvas] = body
         self.calls.append(('canvas_edit', canvas))
+        if self.canvases.get(canvas) is None:
+            return False
+        self.canvases[canvas] = body
+        return True
 
 
 def test_the_open_heads_pin_moves_when_a_new_thread_starts_and_the_canvas_is_written_only_on_change():
@@ -701,6 +705,12 @@ def test_the_open_heads_pin_moves_when_a_new_thread_starts_and_the_canvas_is_wri
     w.run([row(6, 'failed'), row(5), row(4), row(3, 'failed'), *history(2)])
     w.run([row(7), row(6, 'failed'), row(5), row(4), row(3, 'failed'), *history(2)])
     assert {k: w.saved[k] for k in N.KEPT} == {'pinned': '4.0', 'canvas': 'F1', 'canvas_body': 'b\n'}
+    # deleted by hand: the next write creates it again
+    w.slack.canvases['F1'] = None
+    w.slack.calls.clear()
+    N.write_canvas(w.saved, w.slack, 'c\n', w.save)
+    assert (w.slack.calls, w.saved['canvas'], w.slack.canvases['F2']) == (
+        [('join',), ('canvas_edit', 'F1'), ('canvas_create', 'F2')], 'F2', 'c\n')
 
 
 def test_canvas_names_the_status_stores_latest_run_and_its_longest_phases_and_recent_runs():
