@@ -11,13 +11,15 @@ Each pool's mark is set by fill alone (`_mark`: 🔴 at `mark_pct`, 🟠 within 
 For each quota group (a bucket, or a zone's buckets summed), at a scan:
 
 - `rate_w`: net change per day over the last `w ∈ {1, 3, 7}` days, from the latest scan at or before `t − w` (the template holds 30 days back: `Month.pre + lead + rows`; the site's `CwRows` the same).
-- `growth` = max over the windows that have a scan (the fastest recent fill: a pool flat for the month that jumped yesterday still shows).
+- `growth` = max over the windows that have a scan (the fastest recent fill: a pool flat for the month that jumped yesterday still shows), with the window `w` it came from. A tie names the longest window: a shorter window that finds no scan of its own falls back to the same older one, so its rate is the longer window's and the longer names the span it was measured over.
 - `runway` = free ÷ growth, in days; ∞ when growth ≤ 0 or unknown; 0 when over quota.
 - Mark: 🔴 runway < 3 d or over quota; 🟠 runway < 14 d or fill ≥ 95%; 🟡 runway < 30 d; 🟢 otherwise.
-- Text: a clause whose runway is under 60 d gains `, +4.1 Ti/d, ≈8d to full` (commas: ` · ` separates the pools).
+- Text: a clause whose runway is under 60 d gains `, +4.1 Ti/d over 3d, ≈8d to full`: the rate, the window it came from, the runway (commas: ` · ` separates the pools). Ryan, 2026-11-17: the windows differ by pool and by day, so the text names the one behind each rate.
 - **Order stays fixed** (config order, as before the circles): a reply series reads by position; the marks draw the eye.
 
-Knobs: Python `quota_marks: runway` (beside `warning`, `circles`); the site's OP params `q=r` (beside `q=o` off, `q=c` circles). The quota alert keeps `alert_pct` for now.
+Knobs: Python `quota_marks: runway` (beside `warning`, `circles`); the site's OP params `q=r` (beside `q=o` off, `q=c` circles). The quota alert keeps `alert_pct` as its threshold.
+
+**The quota alert** (`digest_cw.alert_body`; Ryan, 2026-11-17): each pool at or over `alert_pct` with its runway text as above, under whatever `quota_marks` the replies use (e.g. `:warning: **Quota alert**: [02a](…): 96.5% of 1P (31.6 Ti free), +12.9 Ti/d over 1d, ≈2d to full · _as of 11/17 12:02Z_`). A pool not filling within 60 days, or already over, has none; its clause says so. The trailing "(≥ 90% of a quota; removed once every quota is back under)" is gone. A posted alert is edited in place when its text changes (`digest.converge_slack`).
 
 ## 3. Hue sweep (phase 2, built)
 
