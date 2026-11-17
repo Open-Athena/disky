@@ -43,6 +43,14 @@ class Config:
     #: `signature` the thread is the failure's report: a run's `fail` alerts defer to it (`defers_failures`), and post
     #: top-level only if the run isn't a reply in a failure thread once the report has run.
     group: str = "clean"
+    #: The stores the head summarizes (`stores_text`), as `{label: store}`: each one's size, object count and change over
+    #: the last week, linked to its page. Empty: no store lines.
+    stores: tuple[tuple[str, str], ...] = ()
+    #: Pin the open thread's head in the channel, unpinning the head it replaced (`pin_head`; the bot's `pins:write`,
+    #: `channels:join`).
+    pin: bool = False
+    #: Keep the channel's canvas as the deployment's status page (`canvas_text`; the bot's `canvases:write`).
+    canvas: bool = False
 
     def __post_init__(self) -> None:
         if not self.site.startswith("https://") or urlparse(self.site).query or urlparse(self.site).fragment:
@@ -55,6 +63,8 @@ class Config:
             raise ValueError("nominal: state, title, store and kind must be nonempty")
         if self.group not in GROUPS:
             raise ValueError(f"nominal.group: one of {', '.join(GROUPS)}")
+        if any(not label or not store for label, store in self.stores):
+            raise ValueError("nominal.stores: nonempty labels and store names")
 
     @property
     def namespace(self) -> str:
@@ -67,9 +77,15 @@ class Config:
     def link(self, run: dict) -> str:
         return f"{self.scans}/{quote(run['run_id'], safe='')}"
 
+    def page(self, store: str) -> str:
+        return self.site.rstrip('/') + ('/' if store == 'primary' else f"/{quote(store, safe='')}")
+
 
 def config(raw: Mapping) -> Config:
-    return Config(**dict(raw))
+    raw = dict(raw)
+    if isinstance(raw.get('stores'), Mapping):
+        raw['stores'] = tuple(raw['stores'].items())
+    return Config(**raw)
 
 
 def ordered(doc: dict, cfg: Config) -> list[dict]:
@@ -189,6 +205,60 @@ def reply(cfg: Config, row: dict) -> str:
             + ('' if ok else f" · {describe(row)}"))
 
 
+def si(n: float, sign: bool = False) -> str:
+    """Bytes at three significant figures in the site's SI units (`289 T`, `46.8 G`, `440 M`); `sign`: `+`/`−` first."""
+    head = ('+' if n >= 0 else '−') if sign else ('-' if n < 0 else '')
+    n = abs(n)
+    for div, unit in ((1e15, 'P'), (1e12, 'T'), (1e9, 'G'), (1e6, 'M'), (1e3, 'K')):
+        if n >= div:
+            v = n / div
+            return f"{head}{v:.{0 if v >= 100 else 1 if v >= 10 else 2}f} {unit}"
+    return f"{head}{int(n)} B"
+
+
+def outcome(row: dict, duration: bool = True) -> str:
+    """A finished run's duration, cost and output (its generated files' size and change), as far as recorded."""
+    seconds = row.get('secs') if duration else None
+    parts = [] if seconds is None else [f"{int(seconds) // 60}m {int(seconds) % 60:02d}s"]
+    if row.get('cost_usd') is not None:
+        parts.append(f"${row['cost_usd']:.2f}")
+    if row.get('out_bytes') is not None:
+        delta = row.get('delta_bytes')
+        parts.append(f"output {si(row['out_bytes'])}" + ('' if delta is None else f" ({si(delta, sign=True)})"))
+    return ' · '.join(parts)
+
+
+WEEK = 7 * 86400
+
+
+def series_ts(date: str) -> float:
+    return datetime.strptime(date, '%Y-%m-%dT%H%M').replace(tzinfo=timezone.utc).timestamp()
+
+
+def store_line(cfg: Config, label: str, store: str, series: dict | int) -> str:
+    """One store's line: its size and objects at its newest scan and the change since the newest scan at least a week
+    before (`over Nd`, N the span); `series` is its `/api/series` body, or the HTTP status that failed to read it."""
+    head = f"[{label}]({cfg.page(store)})"
+    if isinstance(series, int):
+        return f"{head}: size unavailable (HTTP {series})."
+    points = series.get('points') or []
+    if not points:
+        return f"{head}: no scans yet."
+    last = points[-1]
+    text = f"{head}: {si(last['bytes'])} · {last['objects']:,} objects"
+    end = series_ts(last['date'])
+    before = [p for p in points if series_ts(p['date']) <= end - WEEK]
+    if before:
+        days = round((end - series_ts(before[-1]['date'])) / 86400)
+        text += f" · {si(last['bytes'] - before[-1]['bytes'], sign=True)} over {days}d"
+    return text + '.'
+
+
+def stores_text(cfg: Config, series: Mapping[str, dict | int]) -> str:
+    """The head's store lines (`Config.stores`), each its own paragraph, or nothing."""
+    return ''.join(store_line(cfg, label, store, series[store]) + '\n\n' for label, store in cfg.stores)
+
+
 def running(cfg: Config, row: dict) -> str:
     """A live run's reply, posted when it starts and edited to its `reply` when it ends."""
     emoji, by = starter(row)
@@ -202,10 +272,11 @@ def running_now(cfg: Config, live_rows: list[dict]) -> str:
     return 'Running now: ' + ', '.join(f"[{stamp(r)}]({cfg.link(r['run'])})" for r in reversed(live_rows)) + '.\n\n'
 
 
-def parent(cfg: Config, good: list[dict], boundary: dict | None, live_rows: list[dict] | None = None) -> str:
-    """The thread's head: a clean thread's streak, or a failure thread's (`failed`), naming the runs going now."""
+def parent(cfg: Config, good: list[dict], boundary: dict | None, live_rows: list[dict] | None = None, stores: str = '') -> str:
+    """The thread's head: a clean thread's streak, or a failure thread's (`failed`), naming the runs going now, with
+    the latest run's outcome and the deployment's store lines (`stores_text`)."""
     if good and not clean(good[0]):
-        return failed(cfg, good, boundary, live_rows)
+        return failed(cfg, good, boundary, live_rows, stores)
     window = good[:10]
     counts = {k: sum(r['run']['trigger'] == k for r in window) for k in ('schedule', 'manual', None)}
     mix = f"{counts['schedule']} scheduled / {counts['manual']} manual" + (f" / {counts[None]} unknown" if counts[None] else '')
@@ -214,12 +285,13 @@ def parent(cfg: Config, good: list[dict], boundary: dict | None, live_rows: list
     after = f" after [{boundary['run']['scan']}]({cfg.link(boundary['run'])})" if boundary else ' (available run history)'
     return (f"✅ **{cfg.title}: {qualifier}{len(good)} consecutive clean run{'' if len(good) == 1 else 's'}**\n\n"
             f"Since {since}{after}.\n\n"
-            f"Latest completed: [{stamp(good[0])}]({cfg.link(good[0]['run'])}).\n\n"
+            f"Latest completed: [{stamp(good[0])}]({cfg.link(good[0]['run'])})" + (f" · {done}" if (done := outcome(good[0])) else '') + ".\n\n"
+            f"{stores}"
             f"{running_now(cfg, live_rows)}"
             f"Latest {plural(len(window), 'run')}: {mix}. Each reply links its scan record. [All scans]({cfg.scans}).")
 
 
-def failed(cfg: Config, bad: list[dict], boundary: dict | None, live_rows: list[dict] | None = None) -> str:
+def failed(cfg: Config, bad: list[dict], boundary: dict | None, live_rows: list[dict] | None = None, stores: str = '') -> str:
     """A failure thread's head: how many runs in a row failed (under `signature`, failed the same way), since when and
     after which run (the last clean one, or the last that failed differently), and the newest failure's reason."""
     qualifier = '' if boundary else 'at least '
@@ -233,6 +305,7 @@ def failed(cfg: Config, bad: list[dict], boundary: dict | None, live_rows: list[
     return (f"❌ **{cfg.title}: {qualifier}{len(bad)} consecutive failed run{'' if len(bad) == 1 else 's'}{how}**\n\n"
             f"Since {stamp(bad[-1])}{after}.\n\n"
             f"Latest: [{stamp(bad[0])}]({cfg.link(bad[0]['run'])}): {describe(bad[0])}.\n\n"
+            f"{stores}"
             f"{running_now(cfg, live_rows)}"
             f"Each reply links its scan record. [All scans]({cfg.scans}).")
 
@@ -250,6 +323,11 @@ class Transport(Protocol):
     def edit(self, ts: str, body: str) -> None: ...
     def alert(self, link: str, since: float) -> str | None: ...
     def permalink(self, ts: str) -> str: ...
+    def join(self) -> None: ...
+    def pin(self, ts: str) -> None: ...
+    def unpin(self, ts: str) -> None: ...
+    def canvas_create(self, body: str) -> str: ...
+    def canvas_edit(self, canvas: str, body: str) -> bool: ...
 
 
 class Slack:
@@ -309,6 +387,101 @@ class Slack:
     def permalink(self, ts: str) -> str:
         return self.client._request('chat.getPermalink', {'channel': self.client.channel, 'message_ts': ts}, method='GET')['permalink']
 
+    def _ok(self, method: str, args: dict, *benign: str) -> dict:
+        """A call whose listed errors mean the change is already in place."""
+        try:
+            return self.client._request(method, args)
+        except RuntimeError as e:
+            if any(str(e) == f'Slack API error: {code}' for code in benign):
+                return {}
+            raise
+
+    def join(self) -> None:
+        self._ok('conversations.join', {'channel': self.client.channel}, 'method_not_supported_for_channel_type')
+
+    def pin(self, ts: str) -> None:
+        self._ok('pins.add', {'channel': self.client.channel, 'timestamp': ts}, 'already_pinned')
+
+    def unpin(self, ts: str) -> None:
+        self._ok('pins.remove', {'channel': self.client.channel, 'timestamp': ts}, 'no_pin', 'message_not_found')
+
+    def canvas_create(self, body: str) -> str:
+        content = {'type': 'markdown', 'markdown': body}
+        try:
+            return self.client._request('conversations.canvases.create', {'channel_id': self.client.channel, 'document_content': content})['canvas_id']
+        except RuntimeError as e:
+            if str(e) != 'Slack API error: channel_canvas_already_exists':
+                raise
+        info = self.client._request('conversations.info', {'channel': self.client.channel}, method='GET')
+        canvas = info['channel']['properties']['canvas']['file_id']
+        if not self.canvas_edit(canvas, body):
+            raise RuntimeError('nominal: the channel names a canvas that no longer exists')
+        return canvas
+
+    def canvas_edit(self, canvas: str, body: str) -> bool:
+        """Replace the canvas's content; False when the canvas is gone (deleted)."""
+        return bool(self._ok('canvases.edit', {'canvas_id': canvas, 'changes': [
+            {'operation': 'replace', 'document_content': {'type': 'markdown', 'markdown': body}}]}, 'canvas_not_found', 'canvas_deleted'))
+
+
+#: State that outlives a thread: the pinned head (unpinned once a new head is pinned) and the channel canvas
+KEPT = ('pinned', 'canvas', 'canvas_body')
+
+
+def pin_head(state: dict, slack: Transport, save: Callable[[dict], None]) -> None:
+    """Pin the open thread's head, then unpin the head it replaced. Idempotent: a head already pinned, or one no longer
+    pinned (unpinned by hand, or deleted), is not an error."""
+    head, was = state.get('parent'), state.get('pinned')
+    if not head or head == was:
+        return
+    slack.join()
+    slack.pin(head)
+    if was:
+        slack.unpin(was)
+    state['pinned'] = head
+    save(state)
+
+
+def phases(row: dict, n: int = 5) -> str:
+    """A run's `n` longest phases, longest first (`list marin-na 9m 22s`)."""
+    spans = sorted((s for s in row.get('spans') or [] if s.get('end') is not None and s.get('start') is not None),
+                   key=lambda s: (s['start'] - s['end'], s['phase']))[:n]
+    return ' · '.join(f"{s['phase']} {int(s['end'] - s['start']) // 60}m {int(s['end'] - s['start']) % 60:02d}s" for s in spans)
+
+
+def canvas_text(cfg: Config, rows: list[dict], head: str, thread: str | None, series: Mapping[str, dict | int], now: float) -> str:
+    """The channel canvas: the thread head's first line, each store, the latest finished run's outcome and longest
+    phases, the last ten finished runs, and the site's pages. `rows` newest first; `thread` the head's permalink."""
+    done = [r for r in rows if not live(r)]
+    title = head.split('\n', 1)[0].replace('**', '')
+    at = datetime.fromtimestamp(now, timezone.utc).strftime('%Y-%m-%d %H:%M UTC')
+    out = [f"# {cfg.title}", f"{title}" + (f" · [thread]({thread})" if thread else '') + f"\n\nUpdated {at}."]
+    if cfg.stores:
+        out += ['## Stores', '\n'.join(f"- {store_line(cfg, label, store, series[store])}" for label, store in cfg.stores)]
+    if done:
+        latest = done[0]
+        line = f"{reply(cfg, latest)}" + (f" · {o}" if (o := outcome(latest, duration=False)) else '')
+        out += ['## Latest run', line + (f"\n\nLongest phases: {p}" if (p := phases(latest)) else '')]
+        out += ['## Recent runs', '\n'.join(f"- {reply(cfg, r)}" + (f" · ${r['cost_usd']:.2f}" if r.get('cost_usd') is not None else '')
+                                              for r in done[:10])]
+    site = cfg.site.rstrip('/')
+    out += ['## Pages', f"[All scans]({cfg.scans}) · [Health]({site}/health)"
+            + ''.join(f" · [{label}]({cfg.page(store)})" for label, store in cfg.stores)]
+    return '\n\n'.join(out) + '\n'
+
+
+def write_canvas(state: dict, slack: Transport, body: str, save: Callable[[dict], None]) -> None:
+    """Create the channel's canvas, or replace its content when the body changed. The canvas's Updated line changes
+    every run, so this writes once per report."""
+    if state.get('canvas_body') == body:
+        return
+    slack.join()
+    # A canvas deleted by hand is created again rather than failing every later report
+    if not state.get('canvas') or not slack.canvas_edit(state['canvas'], body):
+        state['canvas'] = slack.canvas_create(body)
+    state['canvas_body'] = body
+    save(state)
+
 
 def adopt(cfg: Config, rows: list[dict], slack: Transport) -> dict:
     if not cfg.adopt_parent:
@@ -346,6 +519,7 @@ def converge(
     save: Callable[[dict], None],
     check: Callable[[], None],
     now: Callable[[], float] = time.time,
+    stores: str = '',
 ) -> dict:
     """Caller holds the generation lease. Persist every send intent and returned/recovered message ID."""
     if state.get('namespace') != cfg.namespace:
@@ -411,8 +585,9 @@ def converge(
             state['closed'] = True
             persist()
         if good:
+            kept = {k: state[k] for k in KEPT if k in state}
             state.clear()
-            state.update(namespace=cfg.namespace, boundary=boundary_id, posted={})
+            state.update(namespace=cfg.namespace, boundary=boundary_id, posted={}, **kept)
             if head != 'clean':
                 state['key'] = head
             persist()
@@ -436,7 +611,7 @@ def converge(
             check()
             received(pending, slack.post(body, root, operation))
 
-        body = parent(cfg, good, boundary, live_rows)
+        body = parent(cfg, good, boundary, live_rows, stores)
         if not state.get('parent'):
             send('parent', body, None)
         # New threads bootstrap ten; established threads append every missing run after the newest known one.
@@ -524,6 +699,14 @@ def run(
             raise ValueError('nominal: authoritative terminal run record is not visible')
         return rows
 
+    def read_series() -> dict[str, dict | int]:
+        series: dict[str, dict | int] = {}
+        for _, name in cfg.stores:
+            response = http_fetch(cfg.site, token)('/api/series?' + urlencode({'store': name}))
+            # A store that can't be read is named as such in the head; the thread's run outcomes still post.
+            series[name] = json.loads(response.body) if response.status == 200 else response.status
+        return series
+
     if not execute:
         rows = read_rows()
         live_rows = [r for r in rows if live(r)]
@@ -545,7 +728,7 @@ def run(
                 raise RuntimeError('nominal: pending send needs reconciliation before a publish plan can be rendered')
             same = state.get('boundary') == (boundary['run']['run_id'] if boundary else None) and state.get('key', 'clean') == head
             pending_rows = missing(good, state.get('posted', {})) if same else good[:10]
-        return '\n\n+++\n\n'.join([parent(cfg, good, boundary, live_rows), *(reply(cfg, r) for r in reversed(pending_rows)),
+        return '\n\n+++\n\n'.join([parent(cfg, good, boundary, live_rows, stores_text(cfg, read_series())), *(reply(cfg, r) for r in reversed(pending_rows)),
                                     *(running(cfg, r) for r in reversed(live_rows))])
     bot = (env.get('SLACK_BOT_TOKEN') or '').strip()
     if not bot:
@@ -560,7 +743,14 @@ def run(
             store.write_text(key, json.dumps(value, indent=2) + '\n')
         check()
         save(state)
-        state = converge(cfg, rows, state, slack, save, check)
+        series = read_series()
+        state = converge(cfg, rows, state, slack, save, check, stores=stores_text(cfg, series))
+        if cfg.pin:
+            check()
+            pin_head(state, slack, save)
+        if cfg.canvas and state.get('parent_body'):
+            check()
+            write_canvas(state, slack, canvas_text(cfg, rows, state['parent_body'], slack.permalink(state['parent']), series, time.time()), save)
     if final is not None:
         final.append(state)
     return f"nominal: parent {state.get('parent', 'none')}; {len(state.get('posted', {}))} run replies"
