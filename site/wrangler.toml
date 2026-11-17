@@ -68,6 +68,7 @@ STORE_PREFIXES = "listing/,snapshots/,sweep/,cw-sweep/,cw-l2/"
 # allowlist on top of this (`ADMIN_EMAILS` says the table exists here).
 STAFF_DOMAIN = "openathena.ai"
 ADMIN_EMAILS = "1"
+PAGES_SUBDOMAIN = "oa-cw-s3-usage.pages.dev"   # `<one label>.<it>` (a PR's `pr-N`, the `dev` alias) signs in only via the broker's preview client
 OA_LOGIN_ISSUER = "https://login.oa.dev"   # "Sign in with OA" (specs/oa-login-rp.md): OA's broker
 OA_LOGIN_CLIENT_ID = "disky-cw"            # broker client, callbacks https://{,dev.}cw.oa.dev/auth/oa/callback; inert until the secret OA_LOGIN_CLIENT_SECRET is set
 # Sweep executor config (specs/oa-decoupling.md step 0; today's cwBatch/gcp.ts
@@ -225,6 +226,7 @@ SNAPSHOTS_SUBDIR = "cw"
 STORE_PREFIXES = "listing/,snapshots/,sweep/,cw-sweep/,cw-l2/"
 STAFF_DOMAIN = "openathena.ai"
 ADMIN_EMAILS = "1"
+PAGES_SUBDOMAIN = "oa-cw-s3-usage.pages.dev"   # `<one label>.<it>` (a PR's `pr-N`, the `dev` alias) signs in only via the broker's preview client
 OA_LOGIN_ISSUER = "https://login.oa.dev"   # "Sign in with OA" (specs/oa-login-rp.md): OA's broker
 OA_LOGIN_CLIENT_ID = "disky-cw"            # broker client, callbacks https://{,dev.}cw.oa.dev/auth/oa/callback; inert until the secret OA_LOGIN_CLIENT_SECRET is set
 # Sweep executor config (specs/oa-decoupling.md step 0; today's cwBatch/gcp.ts

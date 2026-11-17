@@ -1,0 +1,13 @@
+{
+  "repository": "Open-Athena/disky",
+  "targets": {
+    "cw": {
+      "provider": "pages",
+      "project": "oa-cw-s3-usage",
+      "subdomain": "oa-cw-s3-usage.pages.dev",
+      "working_directory": "../site",
+      "wrangler": ["node", "node_modules/wrangler/bin/wrangler.js"],
+      "verification": { "path": "/api/health", "header": "x-disky-build" }
+    }
+  }
+}
