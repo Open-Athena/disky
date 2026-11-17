@@ -4,6 +4,13 @@
 # byte-identical to `cloud`'s copy, whose tests hold its calls to those scripts (`plan` refuses to run otherwise;
 # specs/oa-release-workflow.md, "Tooling lives on `cloud`"). Off unless `OA_SITE_RELEASE_ENABLED` and the target's listed.
 name: OA site release
+# The runs list names each run by deployment and environment (GitHub files them all under `front-door`): a CI completion
+# releases to dev (the commit's subject), a dispatch promotes to prod (the sha). A push to `<d>-prod` is a dispatch:
+# `oa-prod-push.yml` on that commit hands it here (specs/branch-push-releases.md).
+run-name: >-
+  ${{ github.event_name == 'workflow_dispatch'
+    && format('{0} prod · {1}', inputs.deployment, inputs.sha)
+    || format('{0} dev · {1}', github.event.workflow_run.head_branch, github.event.workflow_run.display_title) }}
 on:
   workflow_run:
     workflows: [CI]
@@ -16,10 +23,7 @@ on:
         options: [gcs, cw, hf, r2]
         required: true
       sha:
-        description: Full source SHA already verified on dev
-        required: true
-      dev_deployment:
-        description: Successful GitHub dev deployment ID for that SHA
+        description: Full source SHA `<deployment>-prod` points at (released to dev first)
         required: true
 permissions:
   contents: read
@@ -34,6 +38,7 @@ jobs:
           (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push'))
     runs-on: ubuntu-latest
     outputs:
+      ok: ${{ steps.plan.outputs.ok }}
       control_sha: ${{ steps.control.outputs.sha }}
       sha: ${{ steps.plan.outputs.sha }}
       source_branch: ${{ steps.plan.outputs.source_branch }}
@@ -71,6 +76,8 @@ jobs:
         run: control/scripts/oa-release plan -e "$GITHUB_EVENT_PATH" -n "$GITHUB_EVENT_NAME" -r "$GITHUB_REPOSITORY" -o plan.json
   build:
     needs: plan
+    # `plan` sets `ok=false` (exit 0, a notice) for a release a newer push overtook: skipped, so a red run is a real failure
+    if: needs.plan.outputs.ok == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

@@ -74,6 +74,14 @@ When the run ends, the next report (its finish, or any later run's) edits that r
 
 The ⏳ reply's message and thread are kept in the state file's `running` map (cleared as runs end); its send goes through the same persisted intent and recovery as every other reply. A run that never finishes is resolved when the reaper records it failed and the next report runs.
 
+## Store lines and the latest run's outcome (2026-11-17)
+
+The head's "Latest completed" line carries that run's duration, compute cost and output (its generated files' size and change, from the run ledger's `secs`, `cost_usd`, `out_bytes`, `delta_bytes`). `nominal.stores` (`{label: store}`) adds one paragraph per store from its root `/api/series`: size and objects at its newest scan, and the change since the newest scan at least a week before (`over Nd`), linked to the store's page. A store whose series can't be read says so (`size unavailable (HTTP N)`); the run outcomes still post. The head is edited whenever this text changes, as before. A per-channel canvas with the fuller picture (phases, generations, gc, runway) is the next step and needs the bot's `canvases:write`.
+
+## Pinned head and the channel canvas (2026-11-17)
+
+`nominal.pin`: after each report, the open thread's head is pinned in the channel and the head it replaced unpinned (`pin_head`; the pinned ts survives a thread reset in `KEPT`). `nominal.canvas`: the channel's canvas is the deployment's status page (`canvas_text`): the head's first line and a link to the thread, each store, the latest finished run's outcome and five longest phases, the last ten finished runs, and the site's pages; written when its text changes (`write_canvas`: `conversations.canvases.create`, else `canvases.edit` replace; an existing channel canvas is adopted from `conversations.info`). Both join the public channel first (`conversations.join`) and need the app's `channels:join`, `pins:write`, `canvases:write` (`deploy/slack/README.md`): after a manifest update, *Reinstall to Workspace*. They run after the thread converges, so a missing scope logs a report failure and leaves the thread updated.
+
 [HF scan health]: https://openathena.slack.com/archives/C0C9J9VDPV5/p1794098956878049
 [CI]: https://github.com/Open-Athena/disky/actions/runs/42725869481
 [the fix’s full CI]: https://github.com/Open-Athena/disky/actions/runs/42728997968
