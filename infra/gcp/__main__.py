@@ -96,7 +96,6 @@ secrets = Secrets(
         "cf-pages-token": None,
         "gcs-alert-slack-bot-token": None,
         "gcs-alert-slack-webhook": None,
-        "gcs-sheet-sync-token": {"app": "gcs-usage", "role": "sheet-sync"},
         "gcs-usage-discord-webhook": None,
         "marin-discord-bot-token": None,
     },
