@@ -36,7 +36,7 @@ provisional: true
 alert_pct: 90
 # each pool's mark, in config order: a white arrow on a square (`:pool-chip-N-D:`, `job/gen-pool-chips.py`). Its color is the
 # runway, free ÷ the fastest net fill over the last 1/3/7 days; its arrow that fill as a share of what the pool holds. A pool
-# filling within 60 days adds `, +N Ti/d, ≈Nd to full` (specs/digest-runway-marks.md)
+# filling within 60 days adds `, +N Ti/d over Wd, ≈Nd to full`, W the window that fill came from (specs/digest-runway-marks.md)
 quota_marks: arrow-chip
 # the OP's text + plot request are the site's (`POST /api/digest-op`, the renderer /admin/slack previews with), under
 # `params` (its codec string, e.g. `qc,pp`; "" = the defaults): `qs,pp,lp` = each pool on its own line with its chip,
