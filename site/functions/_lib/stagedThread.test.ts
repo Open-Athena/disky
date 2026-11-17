@@ -493,6 +493,8 @@ describe('D1', () => {
         [
           `post in ${PARENT}: :wastebasket: *Ann Bee* staged 2 paths · *2.0 TiB* · 20 objects\nin \`b/ckpt/run-1/\`: \`step-0/\` 1.0 TiB, \`step-1/\` 1.0 TiB`,
           `post in ${PARENT}: :test_tube: Dry-run dispatched by Ann Bee via www on scan ${SCAN} (<${SITE}/staged?run=dry-1|dry-1>)`,
+          // The dispatch re-renders the reply (no Reject while the run is underway), then the thread refresh again.
+          `update 200.000001: :wastebasket: *Ann Bee* staged 2 paths · *2.0 TiB* · 20 objects\nin \`b/ckpt/run-1/\`: \`step-0/\` 1.0 TiB, \`step-1/\` 1.0 TiB`,
           `update 200.000001: :wastebasket: *Ann Bee* staged 2 paths · *2.0 TiB* · 20 objects\nin \`b/ckpt/run-1/\`: \`step-0/\` 1.0 TiB, \`step-1/\` 1.0 TiB`,
           `post in ${PARENT}: :no_entry_sign: Ann Bee rejected 1 batch (2 paths unstaged)`,
           'update 200.000001: :wastebasket: *Ann Bee* staged 1 batch · nothing left staged',
