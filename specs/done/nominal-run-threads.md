@@ -51,6 +51,18 @@ Full manual verification scan `hf-scan-nominal-20261110-0032` succeeded on the p
 
 The isolated shared implementation `f9cf9d97` and pagination fix `fdb5b46f3`, with passing CI and live verification evidence, are delivered to the cloud owner through Agent Mail. The `cloud` base has not yet adopted the reporter; that integration remains tracked by this shared spec, separately from the completed HF rollout. Keep the spec here until its owner adopts and closes it on the shared branch. No fleet credential, executor/auth migration or unrelated cutover was included in the HF reporter rollout.
 
+## Failure grouping (`nominal.group`, 2026-11-16)
+
+Requested by Ryan, 2026-11-16: failing runs repeat more often than they differ, so a run of failures should share a thread the way a run of clean runs does, and anyone can reply under one failure to dig into it. A deployment picks how its runs group into threads with `nominal.group`:
+
+- `clean` (the default; what HF and every earlier adopter run): only clean runs thread. A failure closes the thread ("clean-run sequence ended") and posts its own top-level alert, and the next clean run opens a new thread. Every byte this mode posted before is unchanged, except that a one-run streak now reads "1 consecutive clean run" / "Latest 1 run".
+- `color`: consecutive runs of one color share a thread, as deploy notices do (`specs/deploy-notifications.md`). A failure thread's parent is "❌ **<title>: N consecutive failed runs**": since when, after which run (the last clean one), and the newest failure's reason. Each reply is "❌ <trigger> [<time>](<record>) · <duration> · <reason>". A change of color edits the old parent ("failure sequence ended" / "clean-run sequence ended", naming the run that ended it) and opens the next thread.
+- `signature`: as `color`, but a failure thread holds only runs that failed the same way (`nominal.signature`): the phase a failed run failed in, or the set of phases a partial run's issues name. Error text is left out of the signature, since it carries times, ids and sizes that differ between runs failing the same way. A different failure closes the thread and opens its own; the parent says how ("… failed runs in interval-store", "… with phase issues").
+
+A reason is the failed phase and the recorded (already redacted) error, on one line, clipped to 160 characters, with `<`, `>` and backticks replaced so an error can't become a link, mention or code span.
+
+Under `color` and `signature` the failure thread is the failure's report: a top-level run's `fail` alerts are deferred (`nominal.defers_failures`, kept in the job's state file) and posted top-level by the finalizer only if the run did not become a reply in a failure thread (the report failed, was suppressed, or the thread didn't take the run). So the first failure of a run of them is the one top-level post, its thread's parent, and a repeat is a reply. `warn` alerts, child runs and other kinds/stores post at once, as before.
+
 [HF scan health]: https://openathena.slack.com/archives/C0C9J9VDPV5/p1794098956878049
 [CI]: https://github.com/Open-Athena/disky/actions/runs/42725869481
 [the fix’s full CI]: https://github.com/Open-Athena/disky/actions/runs/42728997968
