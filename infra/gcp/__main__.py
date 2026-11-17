@@ -236,25 +236,6 @@ meta = BatchCron(
     depends_on=[secrets, static_secrets],
 )
 
-# The hourly D1 → Google Sheet mirror (deploy/sheet-mirror/): `deploy.sh` ships
-# the image and the rendered config; this owns the job, its trigger and IAM.
-sheet_sync = RunJobCron(
-    "gcs-sheet-sync",
-    project=project,
-    region=region,
-    job="gcs-sheet-sync",
-    trigger="gcs-sheet-sync-hourly",
-    schedule="5 * * * *",
-    time_zone="UTC",
-    sa_email=job.email_literal,
-    image=f"{region}-docker.pkg.dev/{project}/cloud-run-source-deploy/gcs-sheet-sync:latest",
-    secret_env={"SITE_TOKEN": "gcs-sheet-sync-token"},
-    labels={"component": "sheet-sync"},
-    adopt=adopt,
-    existing=True,
-    opts=pulumi.ResourceOptions(depends_on=[secrets]),
-)
-
 # The scans' own bucket: snapshots, path indexes, access logs. The raw access
 # logs (`access/raw/`) are deleted at 7 days: nothing reads them after ingest
 # (`access/agg` + `access/sizes` are cut from the same chunk), so they are only a
@@ -378,4 +359,4 @@ if batch_delete_edition != "DISABLED":
     pulumi.export("storage_batch_service_agent", batch_delete.agent.email)
 
 pulumi.export("job_account", job.email)
-pulumi.export("crons", [daily.cron.name, meta.job.name, sheet_sync.cron.name])
+pulumi.export("crons", [daily.cron.name, meta.job.name])
