@@ -335,6 +335,13 @@ def test_reporting_failure_keeps_job_result_and_redacts_error(monkeypatch):
     assert N.report_job(job) is None
     assert said == ['nominal report failed: ValueError: <SECRET> refused']
 
+    def exit_(*args, **kwargs):
+        raise SystemExit(2)
+    monkeypatch.setattr(N, 'run', exit_)
+    said.clear()
+    assert N.report_job(job) is None
+    assert said == ['nominal report failed: SystemExit: 2']
+
 
 @pytest.mark.parametrize('facts, ran', [({}, [None]), ({'parent': 'p0'}, []), ({'kind': 'reproc'}, [])])
 def test_start_report_reads_the_live_ledger_for_top_level_runs_and_never_fails_the_job(monkeypatch, facts, ran):
@@ -348,12 +355,13 @@ def test_start_report_reads_the_live_ledger_for_top_level_runs_and_never_fails_t
     N.report_start(job)
     assert (calls, said) == (ran, ['nominal: ok'] if ran else [])
 
-    def fail(*args, **kwargs):
-        raise ValueError('lease busy')
-    monkeypatch.setattr(N, 'run', fail)
-    said.clear()
-    N.report_start(job)
-    assert said == (['nominal start report failed: ValueError: lease busy'] if ran else [])
+    for exc in (ValueError('lease busy'), SystemExit(2)):
+        def fail(*args, exc=exc, **kwargs):
+            raise exc
+        monkeypatch.setattr(N, 'run', fail)
+        said.clear()
+        N.report_start(job)
+        assert said == ([f'nominal start report failed: {type(exc).__name__}: {exc}'] if ran else [])
 
 
 @pytest.mark.parametrize('env', [{'DT_ALERTS': 'stderr'}, {'DT_ALERTS': 'off'}, {'DT_ALERTS': '0'}])

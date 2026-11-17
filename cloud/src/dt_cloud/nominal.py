@@ -590,7 +590,7 @@ def report_start(job: JobRun) -> None:
         if facts.get('parent') or facts.get('kind', 'scan') != cfg.kind or facts.get('store', job.profile.store) != cfg.store:
             return
         err(run(job.profile.nominal, job.env, job.profile.project, execute=True))
-    except Exception as exc:  # noqa: BLE001 — reporting must not fail the job
+    except (Exception, SystemExit) as exc:  # noqa: BLE001 — reporting must not fail (or end) the job
         err(job.redact(f'nominal start report failed: {type(exc).__name__}: {exc}'))
 
 
@@ -612,7 +612,7 @@ def report_job(job: JobRun) -> None:
         err(run(job.profile.nominal, job.env, job.profile.project, job.run_id, execute=True, final=final))
         state = final[0] if final else {}
         threaded = state.get('key', 'clean') != 'clean' and job.run_id in state.get('posted', {})
-    except Exception as exc:  # Reporting must not fail the job; its failure remains visible in the head log.
+    except (Exception, SystemExit) as exc:  # Reporting must not fail (or end) the job; its failure remains visible in the head log.
         err(job.redact(f'nominal report failed: {type(exc).__name__}: {exc}'))
     finally:
         if deferred and not threaded:
