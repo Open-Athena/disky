@@ -10,7 +10,7 @@ import json
 import re
 import time
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol
@@ -42,9 +42,6 @@ class Config:
     #: `signature` the thread is the failure's report: a run's `fail` alerts defer to it (`defers_failures`), and post
     #: top-level only if the run isn't a reply in a failure thread once the report has run.
     group: str = "clean"
-    #: Agents' Slack emoji, by the first word of a manual run's `trigger_via` (`{"claude": ":claude:"}`; the workspace's
-    #: custom emoji). An agent it doesn't name shows `AGENT_EMOJI` and its handle.
-    agents: Mapping[str, str] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if not self.site.startswith("https://") or urlparse(self.site).query or urlparse(self.site).fragment:
@@ -57,9 +54,6 @@ class Config:
             raise ValueError("nominal: state, title, store and kind must be nonempty")
         if self.group not in GROUPS:
             raise ValueError(f"nominal.group: one of {', '.join(GROUPS)}")
-        bad = [k for k, v in self.agents.items() if not re.fullmatch(r"[a-z0-9_-]+", k) or not SLACK_EMOJI_RE.fullmatch(v)]
-        if bad:
-            raise ValueError(f"nominal.agents: lowercase agent names to `:emoji:` ({', '.join(bad)})")
 
     @property
     def namespace(self) -> str:
@@ -166,20 +160,12 @@ def stamp(row: dict) -> str:
 #: A manual run's starter's own Slack emoji (`trigger_emoji`: `/api/scan-runs?emoji=1` asks OA's broker) replaces 👤 and their address
 SLACK_EMOJI_RE = re.compile(r":[a-z0-9_+'-]{1,100}:")
 TRIGGER_EMOJI = {'schedule': ':alarm_clock:', 'manual': ':bust_in_silhouette:', None: ':grey_question:'}
-#: Beside the starter's emoji, an agent that started a manual run for them (`trigger_via`) that `Config.agents` doesn't name
-AGENT_EMOJI = ':robot_face:'
-
-
-def agent(cfg: Config, via: str) -> tuple[str, bool]:
-    """A manual run's agent's emoji, and whether it's the agent's own (`Config.agents`; else `AGENT_EMOJI`)."""
-    own = cfg.agents.get(via.split()[0].lower())
-    return (own, True) if own else (AGENT_EMOJI, False)
 
 
 def reply(cfg: Config, row: dict) -> str:
-    """A run's line in its thread: ✅ or ❌, the trigger (a manual run's starter's own emoji when known, then the agent's
-    that started it for them), its time linked to its record, the duration, who started it (a manual run that recorded
-    it and has no emoji) and the agent (one without its own emoji), and a failed run's reason."""
+    """A run's line in its thread: ✅ or ❌, the trigger (a manual run's starter's own emoji when known), its time linked
+    to its record, the duration, who started it (a manual run that recorded it and has no emoji), and a failed run's
+    reason."""
     seconds = row.get('secs')
     duration = 'duration unknown' if seconds is None else f"{int(seconds) // 60}m {int(seconds) % 60:02d}s"
     by = row['run'].get('trigger_by') if row['run']['trigger'] == 'manual' else None
@@ -187,12 +173,8 @@ def reply(cfg: Config, row: dict) -> str:
     face = row['run'].get('trigger_emoji') if by else None
     face = face if face and SLACK_EMOJI_RE.fullmatch(face) else None
     emoji = face or TRIGGER_EMOJI[row['run']['trigger']]
-    via = row['run'].get('trigger_via') if row['run']['trigger'] == 'manual' else None
-    via = via if via and TRIGGER_BY_RE.fullmatch(via) else None
-    bot, named = agent(cfg, via) if via else (None, False)
     ok = clean(row)
-    return (f"{'✅' if ok else '❌'} {emoji}{f' {bot}' if bot else ''} [{stamp(row)}]({cfg.link(row['run'])}) · {duration}"
-            + (f" · {by}" if by and not face else "") + (f" · via {via}" if via and not named else "")
+    return (f"{'✅' if ok else '❌'} {emoji} [{stamp(row)}]({cfg.link(row['run'])}) · {duration}" + (f" · {by}" if by and not face else "")
             + ('' if ok else f" · {describe(row)}"))
 
 

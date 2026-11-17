@@ -55,11 +55,10 @@ export async function withStarterEmoji(
   }
 }
 
-/** The rows a viewer may see: a public (anonymous) viewer gets no run's starter (`trigger_by`, an address, nor the
- * agent that acted for them, `trigger_via`). */
+/** The rows a viewer may see: a public (anonymous) viewer gets no run's starter (`trigger_by`, an address). */
 export function withoutStarters(rows: ScanRunRows | null, id: { via: 'session' | 'grant' | 'public' }): ScanRunRows | null {
   if (!rows || id.via !== 'public') return rows
-  return { ...rows, runs: rows.runs.map(({ trigger_by: _, trigger_via: __, ...r }) => r) }
+  return { ...rows, runs: rows.runs.map(({ trigger_by: _, ...r }) => r) }
 }
 
 /** The run's pipeline DAG (the engine-neutral graph its head stored), or null: a one-VM run, or no `scan_run_dags`. */
