@@ -297,12 +297,13 @@ def test_trigger_of():
 def test_record_trigger_by():
     """Who started a manual run: set at start, kept by the later writes; a write without one never names the column."""
     s = sink()
-    record(s, PROFILE, "2026-10-08", "uid-1", 100, start=True, trigger="manual", trigger_by="ada@example.org")
+    record(s, PROFILE, "2026-10-08", "uid-1", 100, start=True, trigger="manual", trigger_by="ada@example.org",
+           trigger_via="claude (r2)")
     record(s, PROFILE, "2026-10-08", "uid-1", 300, exit_code=0)
     record(s, PROFILE, "2026-10-08", "uid-2", 400, start=True, trigger="manual")
-    assert rows(s, "SELECT run_id, status, trigger, trigger_by FROM scan_runs ORDER BY run_id") == [
-        ("uid-1", "succeeded", "manual", "ada@example.org"),
-        ("uid-2", "running", "manual", None),
+    assert rows(s, "SELECT run_id, status, trigger, trigger_by, trigger_via FROM scan_runs ORDER BY run_id") == [
+        ("uid-1", "succeeded", "manual", "ada@example.org", "claude (r2)"),
+        ("uid-2", "running", "manual", None, None),
     ]
     sql = scan_runs.run_sql(scan_runs.Run("uid-3", "2026-10-08", "scan", "running", trigger="manual"), 500)
     assert sql.split(" VALUES ")[0].endswith(", gen, trigger, updated_ts)")
@@ -317,6 +318,14 @@ def test_trigger_by_of():
     for bad in ("x" * 201, "ada\nbob", "<!channel>", "<@U123>", "<https://x.test|ada>", "a&b"):
         with pytest.raises(ValueError, match=r"^\$DT_TRIGGER_BY: want an address or handle"):
             scan_runs.trigger_by_of({"DT_TRIGGER_BY": bad}, "manual")
+
+
+def test_trigger_via_of():
+    via = {"DT_TRIGGER_VIA": " claude (disky-r2) "}
+    assert [scan_runs.trigger_via_of(e, t) for e, t in ((via, "manual"), (via, "schedule"), (via, None), ({}, "manual"))] == [
+        "claude (disky-r2)", None, None, None]
+    with pytest.raises(ValueError, match=r"^\$DT_TRIGGER_VIA: want an agent's handle"):
+        scan_runs.trigger_via_of({"DT_TRIGGER_VIA": "<!channel>"}, "manual")
 
 
 def test_record_failure_keeps_phases_and_names_the_error():

@@ -4,14 +4,14 @@ import type { ScanRun } from '../../src/scanRunsModel.js'
 
 const run = (run_id: string, trigger: 'schedule' | 'manual', trigger_by: string | null) =>
   ({ run_id, scan: '2026-11-16T1055', kind: 'scan', status: 'succeeded', trigger, trigger_by }) as unknown as ScanRun
-const rows: ScanRunRows = { runs: [run('a', 'manual', 'ada@example.org'), run('b', 'schedule', null)], phases: [], outputs: [] }
+const rows: ScanRunRows = { runs: [{ ...run('a', 'manual', 'ada@example.org'), trigger_via: 'claude (r2)' }, run('b', 'schedule', null)], phases: [], outputs: [] }
 
 describe('withoutStarters', () => {
   it('keeps a manual run’s starter for a signed-in viewer and a grant', () => {
     expect(withoutStarters(rows, { via: 'session' })).toBe(rows)
     expect(withoutStarters(rows, { via: 'grant' })).toBe(rows)
   })
-  it('drops every run’s starter for a public viewer, and nothing else', () => {
+  it('drops every run’s starter and its agent for a public viewer, and nothing else', () => {
     expect(withoutStarters(rows, { via: 'public' })).toEqual({
       runs: [
         { run_id: 'a', scan: '2026-11-16T1055', kind: 'scan', status: 'succeeded', trigger: 'manual' },

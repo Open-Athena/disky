@@ -1,5 +1,6 @@
 """Exact nominal-thread copy, authoritative outcomes, adoption and interrupted/concurrent writer behavior."""
 from copy import deepcopy
+from dataclasses import replace
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
@@ -64,6 +65,13 @@ class Writer:
         return N.converge(self.cfg, rows, deepcopy(self.saved), self.slack, self.save, lambda: None, now=lambda: 1000)
 
 
+def test_config_agents():
+    assert N.config({'state': 's', 'site': 'https://site.test', 'channel': 'C1', 'title': 't',
+                     'agents': {'claude': ':claude:'}}).agents == {'claude': ':claude:'}
+    with pytest.raises(ValueError, match='nominal.agents'):
+        N.config({'state': 's', 'site': 'https://site.test', 'channel': 'C1', 'title': 't', 'agents': {'claude': '<!channel>'}})
+
+
 def test_copy_states_boundary_trigger_mix_and_exact_run_links():
     rows = [row(2, trigger='manual'), row(1), row(0, 'failed')]
     good, boundary = N.streak(rows)
@@ -89,6 +97,23 @@ def test_copy_states_boundary_trigger_mix_and_exact_run_links():
     )
     assert N.reply(CFG, {**manual, 'run': {**manual['run'], 'trigger_by': 'ada@example.org', 'trigger_emoji': '<!channel>'}}) == (
         '✅ :bust_in_silhouette: [2026-11-06 08:00 UTC](https://site.test/scans/r5) · 1m 00s · ada@example.org'
+    )
+    agents = replace(CFG, agents={'claude': ':claude:'})
+    ada = {**manual['run'], 'trigger_by': 'ada@example.org', 'trigger_emoji': ':ada:'}
+    assert N.reply(agents, {**manual, 'run': {**ada, 'trigger_via': 'claude (disky-r2)'}}) == (
+        '✅ :ada: :claude: [2026-11-06 08:00 UTC](https://site.test/scans/r5) · 1m 00s'
+    )
+    assert N.reply(agents, {**manual, 'run': {**ada, 'trigger_via': 'codex (gcs)'}}) == (
+        '✅ :ada: :robot_face: [2026-11-06 08:00 UTC](https://site.test/scans/r5) · 1m 00s · via codex (gcs)'
+    )
+    assert N.reply(agents, {**manual, 'run': {**ada, 'trigger_via': '<!channel>'}}) == (
+        '✅ :ada: [2026-11-06 08:00 UTC](https://site.test/scans/r5) · 1m 00s'
+    )
+    assert N.reply(agents, {**manual, 'run': {**manual['run'], 'trigger_by': 'ada@example.org', 'trigger_via': 'claude (r2)'}}) == (
+        '✅ :bust_in_silhouette: :claude: [2026-11-06 08:00 UTC](https://site.test/scans/r5) · 1m 00s · ada@example.org'
+    )
+    assert N.reply(agents, {**row(6), 'run': {**row(6)['run'], 'trigger_via': 'claude (r2)'}}) == (
+        '✅ :alarm_clock: [2026-11-07 08:00 UTC](https://site.test/scans/r6) · 1m 00s'
     )
     sched = row(6)
     assert N.reply(CFG, {**sched, 'run': {**sched['run'], 'trigger_by': 'ada@example.org'}}) == (
@@ -156,7 +181,6 @@ def test_delayed_slack_history_retains_ambiguous_send_without_posting_again(duri
 
 
 def test_adopt_existing_parent_and_replies_preserves_foreign_reply():
-    from dataclasses import replace
 
     w = Writer()
     w.run(history(2))
@@ -382,7 +406,6 @@ def test_a_single_clean_run_reads_singular():
 
 
 def test_unknown_group_is_refused():
-    from dataclasses import replace
 
     with pytest.raises(ValueError, match='nominal.group: one of clean, color, signature'):
         replace(CFG, group='phase')
@@ -403,7 +426,6 @@ def test_failed_reply_names_phase_and_error_without_markup():
 
 
 def test_color_threads_consecutive_failures_and_each_change_of_color_closes_the_last():
-    from dataclasses import replace
 
     w = Writer(replace(CFG, group='color'))
     w.run(history(2))
@@ -439,7 +461,6 @@ def test_color_threads_consecutive_failures_and_each_change_of_color_closes_the_
 
 
 def test_signature_threads_a_failure_while_it_repeats_and_a_different_one_opens_its_own():
-    from dataclasses import replace
 
     w = Writer(replace(CFG, group='signature'))
     a3, a4 = row(3, 'failed', failed_phase='interval-store', error='OOM'), row(4, 'failed', failed_phase='interval-store', error='OOM again')
