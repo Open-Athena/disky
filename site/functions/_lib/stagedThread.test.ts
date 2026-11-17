@@ -53,6 +53,8 @@ function fakeSlack({ reactions = {} as Record<string, string[]>, delayMs = 0, on
   const json = (o: unknown) => new Response(JSON.stringify(o))
   vi.stubGlobal('fetch', vi.fn(async (input: string, init?: RequestInit) => {
     const url = new URL(input)
+    // Anything but Slack's API (a sender's face, fetched to badge it) isn't there: the post keeps the plain face.
+    if (url.host !== 'slack.com') return new Response('', { status: 404 })
     const method = url.pathname.replace('/api/', '')
     const body = (init?.body ? JSON.parse(String(init.body)) : Object.fromEntries(url.searchParams)) as Record<string, string>
     if (method !== 'users.lookupByEmail' && method !== 'users.info') calls.push({ method, body })
@@ -138,6 +140,8 @@ describe('D1', () => {
       await announceFinished(env as Parameters<typeof announceFinished>[0], db, [{ run_id: 'r1', ok: true }], SITE)
       const buttons = (c: Call) => (c.body.blocks as { type: string; elements?: { action_id: string; text: { text: string } }[] }[])
         .flatMap(b => b.type === 'actions' ? b.elements!.map(e => `${e.action_id}: ${e.text.text}`) : [])
+      // The run's end posts as whoever dispatched it.
+      expect(calls.filter(c => c.method === 'chat.postMessage').map(c => [c.body.username, c.body.icon_url])).toEqual([['Ann Bee · finished', 'https://img/ann.png']])
       expect(calls.filter(c => c.method === 'chat.update' && String(c.body.ts).startsWith('300.')).map(c => [c.body.ts, sectionText(c.body.blocks).split('\n')[0], buttons(c)])).toEqual([
         ['300.000001', ':wastebasket: *Ann Bee* staged 1 batch · nothing left staged', ['staged_open: View in www']],
         ['300.000002', ':wastebasket: *Ann Bee* staged 1 path · *1.0 TiB* · 10 objects', ['staged_reject: Reject batch', 'staged_open: View in www']],
