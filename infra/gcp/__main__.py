@@ -96,6 +96,9 @@ secrets = Secrets(
         "cf-pages-token": None,
         "gcs-alert-slack-bot-token": None,
         "gcs-alert-slack-webhook": None,
+        # A read-only (`gcs:read`) service grant's token: the sweep / undo jobs' $SITE_TOKEN
+        # (`sweepDispatch.ts` names this secret) and GitHub's `GCS_USAGE_TOKEN` (the Healthcheck).
+        "gcs-sheet-sync-token": {"app": "gcs-usage", "role": "site-read"},
         "gcs-usage-discord-webhook": None,
         "marin-discord-bot-token": None,
     },
