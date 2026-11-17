@@ -189,7 +189,7 @@ if daily_enabled:
                 "DISKY_LABELS": ",".join(f"{k}={v}" for k, v in labels.items()),
             },
             secret_env={"SLACK_BOT_TOKEN": profile["optional_secrets"]["SLACK_BOT_TOKEN"]},
-            overridable=["DT_TRIGGER", "DT_TRIGGER_BY"],
+            overridable=["DT_TRIGGER", "DT_TRIGGER_BY", "DT_TRIGGER_VIA"],
             dispatchers={"site": dispatch.member} if i == 0 else None,
             labels={**labels, "component": "scan-submit"},
             description=f"Daily Nextflow head over job/profiles/{head['profile']}: runs the submitter job, which names the day's Batch job, retries, and alerts",

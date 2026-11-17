@@ -14,7 +14,8 @@
 # override, and `DT_TRIGGER_BY=<the admin's address>`: the only variables the job lets a run change) is the same spec
 # with `DT_TRIGGER=manual` (and `DT_TRIGGER_BY`, recorded as `scan_runs.trigger_by`) in its env, named for the second
 # (`<prefix>-YYYYMMDD-HHMMSS`), so it never meets the day's job; its alert says it was manual. A hand execute names
-# itself the same way: `--update-env-vars DT_TRIGGER=manual,DT_TRIGGER_BY=<who>`.
+# itself the same way: `--update-env-vars DT_TRIGGER=manual,DT_TRIGGER_BY=<who>`; an agent's names the person it works
+# for there and itself in `DT_TRIGGER_VIA=<agent (session)>` (`scan_runs.trigger_via`).
 set -uo pipefail
 
 : "${BATCH_SPEC:?the scan job spec (JSON), from the Cloud Run job env}"
@@ -36,18 +37,20 @@ case "$trigger" in
     python3 - "$spec" <<'PY' || { rm -f "$spec" "$log"; exit 2; }
 import json, os, re, sys
 path = sys.argv[1]
-who = (os.environ.get("DT_TRIGGER_BY") or "").strip()
-if who and not re.fullmatch(r"[\w.+@:'() -]{1,200}", who):  # dt_cloud.scan_runs.TRIGGER_BY_RE
-    print("note: DT_TRIGGER_BY is not an address or handle; the run's starter goes unrecorded", file=sys.stderr)
-    who = ""
+starters = {}
+for name in ("DT_TRIGGER_BY", "DT_TRIGGER_VIA"):
+    value = (os.environ.get(name) or "").strip()
+    if value and not re.fullmatch(r"[\w.+@:'() -]{1,200}", value):  # dt_cloud.scan_runs.TRIGGER_BY_RE
+        print(f"note: {name} is not an address or handle; it goes unrecorded", file=sys.stderr)
+    elif value:
+        starters[name] = value
 spec = json.load(open(path))
 envs = [g["taskSpec"]["environment"]["variables"] for g in spec["taskGroups"]]
 if not envs or any(v.get("DT_TRIGGER") != "schedule" for v in envs):
     sys.exit("BATCH_SPEC: want DT_TRIGGER=schedule in every task group's env, to make it manual")
 for v in envs:
     v["DT_TRIGGER"] = "manual"
-    if who:
-        v["DT_TRIGGER_BY"] = who
+    v.update(starters)
 json.dump(spec, open(path, "w"))
 PY
     dt-cloud batch submit -c scan -p "$PROJECT" -L "$REGION" -e -r "${SUBMIT_RETRY_S:-1800}" "$batch_job" "$spec" 2>&1 | tee "$log"

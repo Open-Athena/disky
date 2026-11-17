@@ -10,7 +10,7 @@
     {"kind": "scan", "where": {"commands": "^scan head /app/job/profiles/r2(-meta)?\\.yml$"},
      "scan": [{"env": "SNAP_ID"}, {"log": "^SCAN-JOB-DONE (\\S+)"}, {"started": "%Y-%m-%dT%H%M"}]}
   ],
-  "nominal": {"state": "gs://oa-r2-usage-data/notifications/nominal", "site": "https://r2.oa.dev", "channel": "C0C9U47KTM2", "title": "OA R2 scans", "site_token_secret": "oa-r2-site-grant"},
+  "nominal": {"state": "gs://oa-r2-usage-data/notifications/nominal", "site": "https://r2.oa.dev", "channel": "C0C9U47KTM2", "title": "OA R2 scans", "site_token_secret": "oa-r2-site-grant", "agents": {"claude": ":claude:", "codex": ":codex:"}},
   "alerts": {"label": "OA R2 scan", "logs_url": "https://console.cloud.google.com/logs/query;query=labels.job_uid%3D%22{job_uid}%22?project={project}"},
   "secrets": ["AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY", "CLOUDFLARE_API_TOKEN", "SLACK_BOT_TOKEN", "SITE_TOKEN", "CF_PAGES_TOKEN"],
   "outputs": [
