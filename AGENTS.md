@@ -412,7 +412,8 @@ The repo is **public**: no emails or other PII in tracked files or commit messag
 ### Dev workflow
 
 - `site/dev`: Vite on **:3263** + `wrangler pages dev` on **:3264** (`devPort` in `site/package.json`; `./dev --refresh` seeds a local D1 from a prod export).
-- `site/deploy` (run from `site/`): manual deploy to cw.oa.dev, then pushes the branch + `cw-prod` to `o` (`-P` skips the push). `--dev` deploys the preview branch (dev.cw.oa.dev; prod D1). `--status` compares deployed vs HEAD.
+- Releases (specs/branch-push-releases.md): a push to `o/cw` deploys dev.cw.oa.dev once its CI passes (`oa-release.yml`); a push to `o/cw-prod` deploys cw.oa.dev (`oa-prod-push.yml` dispatches the release), only for a sha whose cw dev release succeeded: `git push o <sha>:cw-prod`. A non-fast-forward push is a rollback, under the same check. A hand dispatch (`gh workflow run oa-release.yml -R Open-Athena/disky --ref front-door -f deployment=cw -f sha=<sha>`) only re-runs the pointer's current sha. PRs into `cw` get `pr-N.oa-cw-s3-usage.pages.dev` previews (`.github/cf-preview.json`, the `cw-preview` environment; specs/cf-pr-previews.md).
+- `site/deploy` (run from `site/`): a manual deploy outside that lane (`--dev`: dev.cw.oa.dev; `--status` compares deployed vs HEAD); production goes through `cw-prod`.
 - D1: a pending recipe applies with `wrangler d1 execute oa-cw-s3-usage-db --remote --file site/migrations/<slug>.sql` (separate from deploy; needs `CLOUDFLARE_ACCOUNT_ID`); a new database starts from `--file site/schema.sql`.
 - Tests: `PYTHONPATH=$PWD/src:$PWD/cloud/src pytest tests cloud/tests`; `cd site && pnpm build && pnpm vitest run`.
 - Serving health: `dt-cloud healthcheck -u https://cw.oa.dev -s cw/` with a `cw`-scoped token (Secret Manager `cw-s3-job-grant`).
