@@ -1,9 +1,17 @@
 #!/usr/bin/env python3
-"""Anonymous production-contract checks; never fetch private fleet data."""
+"""Anonymous production-contract checks; never fetch private fleet data. The unsigned card is the anonymous frame, or
+the full card where `fleet/wrangler.toml` sets `FLEET_CARD_PUBLIC = "1"` (nothing on it is private, Ryan 11-16)."""
 from argparse import ArgumentParser
+from pathlib import Path
+import re
 from json import loads
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
+
+
+# The tier an unsigned `/og/fleet.png` answers with, by this deployment's config.
+PUBLIC = re.search(r'^FLEET_CARD_PUBLIC\s*=\s*"1"', (Path(__file__).parent.parent / 'wrangler.toml').read_text(), re.M)
+CARD_TIER = 'full (public)' if PUBLIC else 'anon'
 
 
 def check(origin: str) -> None:
@@ -21,8 +29,8 @@ def check(origin: str) -> None:
             if expected == 401 and loads(body) != {'error': 'unauthenticated'}:
                 raise RuntimeError(f'{method} {path}: unexpected anonymous response')
             if path == '/og/fleet.png':
-                if response.headers.get('x-og-tier') != 'anon' or body[:8] != b'\x89PNG\r\n\x1a\n':
-                    raise RuntimeError('Anonymous card did not return a redacted PNG')
+                if response.headers.get('x-og-tier') != CARD_TIER or body[:8] != b'\x89PNG\r\n\x1a\n':
+                    raise RuntimeError(f"unsigned card: want a PNG at tier {CARD_TIER!r}, got {response.headers.get('x-og-tier')!r}")
             print(f'{method} {path}: {expected}')
 
 
