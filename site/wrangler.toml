@@ -76,6 +76,7 @@ ZSTD_WASM = "1"   # parquet pages decode in wasm; watch `zstd wasm: … fzstd fr
 # Admin is the `admin_emails` table (and the break-glass secret `ADMIN_BOOTSTRAP`), not the staff domain.
 ADMIN_LIST = "1"
 SWEEP_IMAGE = "us-central1-docker.pkg.dev/oa-internal-450019/cloud-run-source-deploy/gcs-usage-snapshot@sha256:a981f93b249311ce29023f8e2dd4b32f182b4d2ba1c40c5afbdf7f22392de003"
+SWEEP_SITE_TOKEN_SECRET = "gcs-sheet-sync-token"   # a read-only service grant (`gcs-site-read`): sweep jobs' $SITE_TOKEN
 SWEEP_PACING = "guided"   # Feedback control within the cold-ramp envelope; adaptive after benchmark validation.
 CF_ACCOUNT_ID = "74981a43be0de7712369306c7b19133d"
 CF_PAGES_SCRIPT = "pages-worker--16777874"   # the project's Functions scripts in the analytics datasets: `<this>-production` / `-preview` (`dt-cloud cf-usage`; the Pages API's `production_script_name`)
@@ -215,6 +216,7 @@ ZSTD_WASM = "1"
 # Admin is the `admin_emails` table (and the break-glass secret `ADMIN_BOOTSTRAP`), not the staff domain.
 ADMIN_LIST = "1"
 SWEEP_IMAGE = "us-central1-docker.pkg.dev/oa-internal-450019/cloud-run-source-deploy/gcs-usage-snapshot@sha256:a981f93b249311ce29023f8e2dd4b32f182b4d2ba1c40c5afbdf7f22392de003"
+SWEEP_SITE_TOKEN_SECRET = "gcs-sheet-sync-token"   # a read-only service grant (`gcs-site-read`): sweep jobs' $SITE_TOKEN
 SWEEP_PACING = "guided"
 CF_ACCOUNT_ID = "74981a43be0de7712369306c7b19133d"
 D1_DB_ID = "e52398b7-5538-4bc4-83db-3355a1b5ef9a"   # the `DB` binding's D1: executor jobs record their runs there
