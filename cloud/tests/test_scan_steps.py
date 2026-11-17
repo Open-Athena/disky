@@ -1761,7 +1761,7 @@ def test_access_requesters_rolls_up_the_days_before_the_scan(tmp_path, env):
     c = ctx(tmp_path, env, steps=["access-requesters"])
     S.access_requesters(c, None)
     assert c.sh_impl.calls == ["dt-cloud access requesters -s -r <tmp>/data/access -D2 2026-10-14 2026-10-15"]
-    c = ctx(tmp_path, env, steps=["access-requesters"], options={"access-requesters": {"days": 1, "depth": 3, "mem": "48GB", "threads": 8}})
+    c = ctx(tmp_path, env, steps=["access-requesters"], options={**NL_OPTS, "access-requesters": {"days": 1, "depth": 3, "mem": "48GB", "threads": 8}})
     S.access_requesters(c, None)
     assert c.sh_impl.calls == ["dt-cloud access requesters -s -r <tmp>/data/access -D3 -M 48GB -p 8 2026-10-15"]
     none = ctx(tmp_path, {**env, "REPROC": "1"}, steps=["access-requesters"])
