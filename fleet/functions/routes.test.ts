@@ -162,6 +162,11 @@ describe('/og/fleet.png', () => {
       [200, 'image/png', 'full', 'private, no-store', 'PNG'],
     ])
   })
+  it('with `FLEET_CARD_PUBLIC`: the full card for anyone, signed or not, held 5 min', async () => {
+    const r = await og(ctx(req('/og/fleet.png'), envOf({ FLEET_CARD_PUBLIC: '1' })))
+    expect([r.status, r.headers.get('content-type'), r.headers.get('x-og-tier'), r.headers.get('cache-control')])
+      .toEqual([200, 'image/png', 'full (public)', 'public, max-age=300'])
+  })
   it('any other card is not found', async () => {
     expect((await og(ctx(req('/og/map.png'), envOf()))).status).toBe(404)
   })
@@ -198,9 +203,9 @@ describe('POST /api/fleet/slack', () => {
       { action: 'posted', channel: 'C0FLEET', ts: '1762524000.000100', image: image(NOW) },
       { action: 'updated', channel: 'C0FLEET', ts: '1762524000.000100', image: image(NOW + 3600) },
     ])
-    expect(slackCalls.map(c => [c.method, c.body.channel, c.body.ts ?? null, sigless((c.body.blocks as { image_url?: string }[])[1].image_url!)])).toEqual([
-      ['chat.postMessage', 'C0FLEET', null, image(NOW)],
-      ['chat.update', 'C0FLEET', '1762524000.000100', image(NOW + 3600)],
+    expect(slackCalls.map(c => [c.method, c.body.channel, c.body.ts ?? null, sigless((c.body.blocks as { image_url?: string }[])[1].image_url!), c.body.unfurl_links, c.body.unfurl_media])).toEqual([
+      ['chat.postMessage', 'C0FLEET', null, image(NOW), false, false],
+      ['chat.update', 'C0FLEET', '1762524000.000100', image(NOW + 3600), false, false],
     ])
     expect([...kv]).toEqual([['slack-fleet-post', '{"channel":"C0FLEET","ts":"1762524000.000100"}']])
   })
