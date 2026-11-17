@@ -32,7 +32,6 @@ from urllib.parse import urlparse
 import pyarrow as pa
 import pyarrow.parquet as pq
 from click import Choice, IntRange, argument, command, option
-from disk_tree.find.gcs_client import storage_client
 
 from .static_names import err
 
@@ -96,6 +95,7 @@ def gcs_soft_deleted(bucket: str, prefix: str, client=None) -> Total:
     soft delete off holds none (its deletes are final): a row of zeros, not an error."""
     from google.api_core.exceptions import BadRequest
 
+    from disk_tree.find.gcs_client import storage_client
     client = client or storage_client("non-live")
     t = Total(bucket, "soft-deleted")
     try:

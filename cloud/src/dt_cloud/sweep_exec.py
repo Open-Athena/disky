@@ -21,7 +21,6 @@ import threading
 import time
 from bisect import bisect_right
 from collections import Counter
-from disk_tree.find.gcs_client import storage_client
 from collections.abc import Callable, Iterable
 from concurrent.futures import ThreadPoolExecutor
 from functools import partial
@@ -300,6 +299,7 @@ def execute_plan(
         plan = json.load(fh)
     if for_real and plan.get("diagnostic"):
         raise ValueError("diagnostic manifests cannot be used for real deletion")
+    from disk_tree.find.gcs_client import storage_client
     client = client or storage_client("sweep")
     approved = tuple(plan.get("approved") or ())
     approved_objects = tuple(plan.get("approved_objects") or ())
@@ -961,6 +961,7 @@ def undo_run(
         logged_buckets = list(dsum["buckets"])
     approved = tuple(plan.get("approved") or ())
     if client is None:
+        from disk_tree.find.gcs_client import storage_client
         client = storage_client("sweep")
     from google.api_core.exceptions import NotFound, PreconditionFailed
 
