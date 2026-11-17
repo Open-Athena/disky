@@ -416,4 +416,4 @@ The repo is **public**: no emails, tokens or other secrets in tracked files or c
 
 - Tests: `infra/tests/test_hf_stacks.py` (both stacks under Pulumi's mocks, the cron body against the secrets and the profile); `cd site && pnpm build && pnpm vitest run`.
 - A scratch run of the DAG on Batch (one space, under `gs://oa-hf-usage-data/scratch/`, no record or alerts): `PROFILE=/app/job/profiles/hf-scratch.yml DT_RECORD=off DT_ALERTS=off job/hf-batch-submit.sh`. Never list the whole org from the laptop.
-- `site/deploy` (from `site/`): deploys to hf.oa.dev and pushes to `o` (`-P` skips the push); `CLOUDFLARE_ACCOUNT_ID` from the environment.
+- Releases (`specs/branch-push-releases.md`): a push to `hf` deploys dev after CI; prod is `git push o <sha>:hf-prod` once that sha's dev release succeeded (`oa-prod-push.yml` dispatches front-door's `oa-release.yml`; a non-fast-forward is a rollback, same gate). Hand retry of the pointer's current sha: `gh workflow run oa-release.yml -R Open-Athena/disky --ref front-door -f deployment=hf -f sha=<hf-prod's sha>`. `site/deploy` (from `site/`) is the by-hand fallback.
