@@ -736,6 +736,10 @@ def run(
     with coordinator_lease(lease) as check:
         rows = read_rows()  # Re-read after acquiring the lease, so a waiting writer cannot publish stale state.
         slack = Slack(bot, cfg.channel)
+        if cfg.pin or cfg.canvas:
+            # Those need the bot in the channel (`channels:join`); joining first also lets the thread's reads (history,
+            # a run's alert) work where the bot only ever posted by `chat:write.public`.
+            slack.join()
         state = store.read_json(key) if store.exists(key) else adopt(cfg, rows, slack) if cfg.adopt_parent else {'namespace': cfg.namespace}
         if state.get('namespace') != cfg.namespace:
             raise ValueError('nominal: state belongs to another site/store/channel')
