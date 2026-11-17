@@ -48,7 +48,8 @@ Adding a step (gcs's access-ingest, rules, healthcheck, … are steps like any o
   (`ctx.need(path)`), and `scan head -F` reruns every task with the cache off (each then skips what's done).
 
 Tests and DAG checks: `DT_SCAN_STEP_FAKE=<file>` makes every step append `<name> <arg>` to the file and return;
-`DT_SCAN_STEP_FAIL=<name>` makes that step exit 1 (its marker unwritten).
+`DT_SCAN_STEP_FAIL=<name>` makes that step exit 1 (its marker unwritten); `DT_SCAN_STEP_FAIL_ONCE=<name> <arg>` (a marker
+line) makes only its first run exit 1 (a `<fake file>.failed` sentinel), so a retry succeeds.
 """
 from __future__ import annotations
 
@@ -80,6 +81,7 @@ PROFILE_PATH_ENV = "DT_SCAN_PROFILE"
 DATA_MOUNT_ENV = "DT_DATA_MOUNT"
 FAKE_ENV = "DT_SCAN_STEP_FAKE"
 FAIL_ENV = "DT_SCAN_STEP_FAIL"
+FAIL_ONCE_ENV = "DT_SCAN_STEP_FAIL_ONCE"
 IDENTITY = ("SNAP_ID", "GEN", "DT_JOB_START")
 #: Credentials whose absence turns a serving step into a logged skip (the gate; the values never reach argv or logs).
 CF = ("CLOUDFLARE_API_TOKEN", "CLOUDFLARE_ACCOUNT_ID")
@@ -1920,6 +1922,31 @@ def soft_delete(ctx: Ctx, arg: str | None) -> None:
                fatal=False, warn="soft-delete reading failed (the scan's outputs stand; the site keeps the last one, dated)")
 
 
+@step("access-requesters", core=False, soft=True, options={"days": int, "depth": int, "mem": str, "threads": int},
+      requires=primary_only("access-requesters", "the rollup is the deployment's, written once by its primary"),
+      side=True, leaves="the previous days' requester rollups not written: `dt-cloud access requesters -s` backfills them")
+def access_requesters(ctx: Ctx, arg: str | None) -> None:
+    """Who made the scanned buckets' requests (`dt-cloud access requesters`): the access logs' raw rows for each of the
+    `options.access-requesters.days` (default 2) UTC days before the scan's, rolled up per bucket × operation ×
+    client × requester × path prefix into `<data>/access/requesters/<day>.parquet`. A day already written is left (`-s`),
+    so a day the access ingest hadn't finished is written by a later scan only if it was never written: `days: 2`
+    gives each day a second chance. Needs `access/raw/` (the access ingest's). Skipped on REPROC; never fatal."""
+    if ctx.reproc:
+        err("REPROC: skipping the requester rollup")
+        return
+    import datetime as dt
+
+    scan_day = dt.date.fromisoformat(ctx.date)
+    days = [(scan_day - dt.timedelta(days=k)).isoformat() for k in range(int(ctx.opt("access-requesters", "days", 2)), 0, -1)]
+    args = [f"-D{ctx.opt('access-requesters', 'depth', 2)}"]
+    for flag, key in (("-M", "mem"), ("-p", "threads")):
+        if ctx.opt("access-requesters", key):
+            args += [flag, str(ctx.opt("access-requesters", key))]
+    with ctx.phase("access-requesters"):
+        ctx.sh(["dt-cloud", "access", "requesters", "-s", "-r", f"{ctx.data_uri}/access", *args, *days],
+               fatal=False, warn="requester rollup failed (the scan's outputs stand; `dt-cloud access requesters -s` backfills)")
+
+
 def _vm_pack_check(p: ScanProfile) -> list[str]:
     from .vm_pack import batch_problems
 
@@ -2083,6 +2110,11 @@ def run_step(name: str, arg: str | None, env: dict[str, str] | None = None, prof
         return 2
     if env.get(FAIL_ENV) == name:
         err(f"scan step {name}: failing ({FAIL_ENV})")
+        return 1
+    once = Path(f"{env.get(FAKE_ENV)}.failed")
+    if env.get(FAKE_ENV) and env.get(FAIL_ONCE_ENV) == f"{name} {arg or ''}".rstrip() and not once.exists():
+        once.write_text(f"{name} {arg or ''}".rstrip() + "\n")
+        err(f"scan step {name}: failing once ({FAIL_ONCE_ENV})")
         return 1
     if env.get(FAKE_ENV):
         with open(env[FAKE_ENV], "a") as f:
