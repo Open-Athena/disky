@@ -54,6 +54,7 @@ import time
 from collections.abc import Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
+from disk_tree.find.gcs_client import storage_client
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -103,9 +104,8 @@ def compare(ref: Listing, other: Listing) -> tuple[str, int, int]:
 def gcs_lister(max_objects: int) -> Lister:
     """Lists a copy on GCS (`<bucket>/<rel>`): an object's own metadata, a dir's objects under `<rel>/` (at most
     `max_objects`, name order)."""
-    from google.cloud import storage
 
-    client = storage.Client()
+    client = storage_client("dups")
 
     def lister(path: str, kind: str) -> Listing:
         bucket, _, key = path.partition("/")
