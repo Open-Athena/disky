@@ -13,7 +13,7 @@
  */
 import type { D1Database } from '@cloudflare/workers-types'
 import type { RunOutcome } from '../../src/runs.js'
-import { type FinishedRun, openPlanId, planDigest, planItemLines, planRuns, type RunRow, scanDeletions, unstageDeleted } from './plans.js'
+import { batchDeletions, type FinishedRun, openPlanId, planDigest, planHistory, planItemLines, planRuns, type RunRow, scanDeletions, unstageDeleted } from './plans.js'
 import { withoutDeleted } from '../../src/stagedScan.js'
 import { slackApi, slackPeople, type SlackPerson, slackReady, type SlackEnv, type SlackResult } from './slack.js'
 import type { Env } from './auth.js'
@@ -29,7 +29,6 @@ import type { Registry } from '../../src/identityRegistry.js'
 import { BATCH_GAP_S } from './batchGroups.js'
 import { Memo, reqOf } from './shared.js'
 import { lastRunOutcome } from './sweepOutcome.js'
-import { slackPermalink } from './activityShape.js'
 
 export type { RunRow }
 
@@ -197,9 +196,7 @@ export function renderParent(v: ParentView): { text: string; blocks: unknown[] }
   const buttons: unknown[] = [
     { type: 'button', action_id: 'staged_open', text: { type: 'plain_text', text: 'Open in www' }, url: `${v.siteUrl}/staged` },
   ]
-  // While a run is underway (dry or real) the thread says so, and nothing offers to start another or reject what it acts on.
-  const running = v.runs.some(r => r.finished_ts == null)
-  if (v.actions && !v.closed && v.items && !running) {
+  if (v.actions && !v.closed && v.items) {
     buttons.push({ type: 'button', action_id: 'staged_dry', value: String(v.planId), text: { type: 'plain_text', text: 'Dry-run' } })
     // A link: a real delete needs a site session, and no dry run (`plans.realRun`). Its own `action_id`: Slack refuses two alike in a block.
     buttons.push({ type: 'button', action_id: 'staged_delete_link', text: { type: 'plain_text', text: 'Delete for real…' }, url: `${v.siteUrl}/staged` })
@@ -331,6 +328,9 @@ export interface ReplyView {
   batches: number
   /** What its batches still have staged. */
   prefixes: string[]
+  /** What real runs deleted of its batches (`batchDeletions`): paths, their bands' totals, and the batches they were in.
+   *  Absent: nothing yet. The reply then reads staged (deleted + left) / deleted / left, as the parent does. */
+  deleted?: { paths: number; bytes: number; objects: number; batches: number[] }
   /** Each prefix's batch: the counts shown are of the batches still holding a
    *  path (a batch absorbed or unstaged entirely drops out), as the parent's are. */
   batchOf: Record<string, number>
@@ -339,8 +339,6 @@ export interface ReplyView {
   /** The latest batch note, if any. */
   note: string | null
   siteUrl: string
-  /** A run of the plan is underway: no Reject (the run acts on what was dispatched). */
-  running?: boolean
 }
 
 /** A stage reply, compact enough for a phone: who staged how many paths in how
@@ -356,6 +354,7 @@ export function stageReply(v: ReplyView): { text: string; blocks: unknown[] } {
   // The batches holding what is shown (the title), and what a reject unstages (the button).
   const shown = batchesOf(held.length ? held : v.prefixes)
   const live = batchesOf(v.prefixes)
+  if (v.deleted?.paths) return withDeleted(v, v.deleted, { held, empty, b, o, live })
   const inBatches = shown > 1 ? ` in ${plural(shown, 'batch', 'batches')}` : ''
   const emptyNote = empty ? ` (+${fmtN(empty)} empty at scan)` : ''
   const size = v.stats ? ` · *${fmtBytes(b)}* · ${plural(o, 'object')}${emptyNote}` : ''
@@ -383,13 +382,57 @@ export function stageReply(v: ReplyView): { text: string; blocks: unknown[] } {
   }
   if (!held.length) {
     const head = `${v.by} staged ${plural(n, 'path')}${inBatches} · all empty at scan`
-    return { text: head, blocks: [{ type: 'section', text: { type: 'mrkdwn', text: `:wastebasket: *${v.by}* staged ${plural(n, 'path')}${inBatches} · all empty at scan${note}` } }, { type: 'actions', elements: v.running ? [view] : [reject, view] }] }
+    return { text: head, blocks: [{ type: 'section', text: { type: 'mrkdwn', text: `:wastebasket: *${v.by}* staged ${plural(n, 'path')}${inBatches} · all empty at scan${note}` } }, { type: 'actions', elements: [reject, view] }] }
   }
   return {
     text: `${v.by} staged ${plural(held.length, 'path')}${inBatches}${v.stats ? ` · ${fmtBytes(b)}${emptyNote}` : ''}`,
     blocks: [
       { type: 'section', text: { type: 'mrkdwn', text: `:wastebasket: *${v.by}* staged ${plural(held.length, 'path')}${inBatches}${size}\n${topFolders(held, v.stats)}${note}` } },
-      { type: 'actions', elements: v.running ? [view] : [reject, view] },
+      { type: 'actions', elements: [reject, view] },
+    ],
+  }
+}
+
+/** `stageReply` once a real run deleted some of what the reply staged: the first line what it staged (deleted + left, sized
+ *  as the parent sizes its tally: the deleted bands plus what is left at the latest scan), the second what was deleted and
+ *  what is left; Reject only while something is left. */
+function withDeleted(v: ReplyView, d: NonNullable<ReplyView['deleted']>, at: { held: string[]; empty: number; b: number; o: number; live: number }): { text: string; blocks: unknown[] } {
+  const { held, empty, b, o, live } = at
+  const batches = new Set([...held.map(p => v.batchOf[p]), ...d.batches]).size
+  const inBatches = batches > 1 ? ` in ${plural(batches, 'batch', 'batches')}` : ''
+  const sized = (bytes: number, objects: number) => ` · ${fmtBytes(bytes)} · ${fmtCount(objects)} objects`
+  const staged = `staged ${plural(d.paths + held.length, 'path')}${inBatches}${v.stats ? sized(d.bytes + b, d.objects + o) : ''}`
+  const deleted = `deleted ${fmtN(d.paths)}${sized(d.bytes, d.objects)}`
+  const emptyNote = empty ? ` (+${fmtN(empty)} empty at scan)` : ''
+  const left = `left ${fmtN(held.length)}${v.stats ? sized(b, o) : ''}${emptyNote}`
+  const note = v.note ? `\n> ${(v.note.length > 140 ? `${v.note.slice(0, 139)}…` : v.note).replace(/\s*\n\s*/g, ' ')}` : ''
+  const view = { type: 'button', action_id: 'staged_open', text: { type: 'plain_text', text: 'View in www' }, url: `${v.siteUrl}/staged` }
+  if (!v.prefixes.length) {
+    return {
+      text: `${v.by} ${staged}: all deleted`,
+      blocks: [
+        { type: 'section', text: { type: 'mrkdwn', text: `:white_check_mark: *${v.by}* ${staged} · *all deleted*${note}` } },
+        { type: 'actions', elements: [view] },
+      ],
+    }
+  }
+  const many = live > 1
+  const reject = {
+    type: 'button', action_id: 'staged_reject', value: v.replyId != null ? `${v.planId}:r${v.replyId}` : `${v.planId}:${v.batchId}`,
+    text: { type: 'plain_text', text: many ? `Reject ${fmtN(live)} batches` : 'Reject batch' },
+    confirm: {
+      title: { type: 'plain_text', text: many ? `Reject these ${fmtN(live)} batches?` : 'Reject this batch?' },
+      text: { type: 'mrkdwn', text: `Unstages the ${plural(v.prefixes.length, 'path')} left. Nothing is deleted.` },
+      confirm: { type: 'plain_text', text: 'Reject' },
+      deny: { type: 'plain_text', text: 'Cancel' },
+    },
+  }
+  const folders = held.length ? `\n${topFolders(held, v.stats)}` : ''
+  return {
+    text: `${v.by} ${staged}: ${deleted}, ${left}`,
+    blocks: [
+      { type: 'section', text: { type: 'mrkdwn', text: `:wastebasket: *${v.by}* ${staged}\n${deleted} · *${left}*${folders}${note}` } },
+      { type: 'actions', elements: [reject, view] },
     ],
   }
 }
@@ -655,7 +698,7 @@ async function detach(db: D1Database, planId: number, ts: string): Promise<{ won
 
 /** A stage reply's content from D1: a coalesced reply (`replyId`: its batches)
  *  or a pre-coalescing one (`batchId`). Null when it no longer exists. */
-async function loadReply(db: D1Database, planId: number, ref: { replyId: number } | { batchId: number }): Promise<{ by: string; batches: number; prefixes: string[]; batchOf: Record<string, number>; note: string | null } | null> {
+async function loadReply(db: D1Database, planId: number, ref: { replyId: number } | { batchId: number }): Promise<{ by: string; batches: number; batchIds: number[]; prefixes: string[]; batchOf: Record<string, number>; note: string | null } | null> {
   const batches = 'replyId' in ref
     ? (await db.prepare('SELECT id, note, created_by FROM stage_batches WHERE reply_id = ? AND plan_id = ? ORDER BY id').bind(ref.replyId, planId).all<{ id: number; note: string | null; created_by: string }>()).results
     : (await db.prepare('SELECT id, note, created_by FROM stage_batches WHERE id = ? AND plan_id = ?').bind(ref.batchId, planId).all<{ id: number; note: string | null; created_by: string }>()).results
@@ -663,14 +706,28 @@ async function loadReply(db: D1Database, planId: number, ref: { replyId: number 
   const ids = batches.map(b => b.id)
   const items = (await db.prepare('SELECT prefix, batch_id FROM plan_items WHERE plan_id = ? AND batch_id IN (SELECT value FROM json_each(?)) ORDER BY prefix').bind(planId, JSON.stringify(ids)).all<{ prefix: string; batch_id: number }>()).results
   const note = [...batches].reverse().find(b => b.note)?.note ?? null
-  return { by: batches[0].created_by, batches: batches.length, prefixes: items.map(i => i.prefix), batchOf: Object.fromEntries(items.map(i => [i.prefix, i.batch_id])), note }
+  return { by: batches[0].created_by, batches: batches.length, batchIds: ids, prefixes: items.map(i => i.prefix), batchOf: Object.fromEntries(items.map(i => [i.prefix, i.batch_id])), note }
 }
 
-interface ReplyCtx { planId: number; siteUrl: string; names: Names; stats: Record<string, PrefixStat> | null; running?: boolean }
+/** `deletions`: each batch's deletions so far (`batchDeletions`). */
+interface ReplyCtx { planId: number; siteUrl: string; names: Names; stats: Record<string, PrefixStat> | null; deletions: ReturnType<typeof batchDeletions> }
+
+/** A reply's batches' deletions summed (`ReplyView.deleted`); undefined when none. */
+function replyDeleted(c: ReplyCtx, batchIds: readonly number[]): ReplyView['deleted'] {
+  let paths = 0, bytes = 0, objects = 0
+  const batches: number[] = []
+  for (const id of batchIds) {
+    const d = c.deletions.get(id)
+    if (!d) continue
+    paths += d.deleted; bytes += d.deletion?.bytes ?? 0; objects += d.deletion?.objects ?? 0
+    batches.push(id)
+  }
+  return paths ? { paths, bytes, objects, batches } : undefined
+}
 async function renderReply(db: D1Database, c: ReplyCtx, ref: { replyId: number } | { batchId: number }): Promise<{ text: string; blocks: unknown[] } | null> {
   const r = await loadReply(db, c.planId, ref)
   if (!r) return null
-  return stageReply({ planId: c.planId, replyId: 'replyId' in ref ? ref.replyId : null, batchId: 'batchId' in ref ? ref.batchId : undefined, by: who(r.by, c.names), batches: r.batches, prefixes: r.prefixes, batchOf: r.batchOf, stats: c.stats, note: r.note, siteUrl: c.siteUrl, running: c.running })
+  return stageReply({ planId: c.planId, replyId: 'replyId' in ref ? ref.replyId : null, batchId: 'batchId' in ref ? ref.batchId : undefined, by: who(r.by, c.names), batches: r.batches, prefixes: r.prefixes, batchOf: r.batchOf, deleted: replyDeleted(c, r.batchIds), stats: c.stats, note: r.note, siteUrl: c.siteUrl })
 }
 
 /** A claimed reply not posted within this many seconds was claimed by a
@@ -852,14 +909,13 @@ export async function notifyPlan(env: NotifyEnv, db: D1Database, planId: number,
       await sendParent(env, channel, ts, ts === v.slack_ts ? parent : first)
     }
     if (old) {
-      // `chat.getPermalink` can fail (its scope, a rate limit); the workspace-free form still opens the new parent.
-      const pl = await slackApi(env, 'chat.getPermalink', { channel, message_ts: ts }).catch(() => null)
-      const link = pl?.ok && typeof pl.permalink === 'string' ? pl.permalink : slackPermalink(channel, ts)
+      const pl = await slackApi(env, 'chat.getPermalink', { channel, message_ts: ts })
+      const link = pl.ok && typeof pl.permalink === 'string' ? pl.permalink : null
       await slackApi(env, 'chat.postMessage', { channel, thread_ts: old, text: `${ended} Continued in ${link ? `<${link}|a new thread>` : 'a new thread'}.`, ...PLAN_SENDER, unfurl_links: false })
       await slackApi(env, 'chat.update', { channel, ts: old, ...closedParent(planId, siteUrl, link, summary) })
     }
-    const running = v.runs.some(r => r.finished_ts == null)
-    const ctx: ReplyCtx = { planId, siteUrl, names, stats: at?.stats ?? null, running }
+    const { edits, bands } = await planHistory(db, planId)
+    const ctx: ReplyCtx = { planId, siteUrl, names, stats: at?.stats ?? null, deletions: batchDeletions(edits, bands) }
     if (stage) {
       await announceStage(env, db, {
         channel, thread: ts, batchId: stage.batchId, stager: stage.by, now, ctx,
@@ -868,8 +924,6 @@ export async function notifyPlan(env: NotifyEnv, db: D1Database, planId: number,
     } else if (event) {
       await slackApi(env, 'chat.postMessage', { channel, thread_ts: ts, text: event.text as string, ...(event.blocks ? { blocks: event.blocks } : {}), ...(event.sender ?? PLAN_SENDER), unfurl_links: false })
     }
-    // A run starting or ending shows or hides each stage reply's Reject.
-    if (runEv) await updateReplies(env, db, planId, siteUrl).catch(e => console.log(`staged slack replies refresh failed for plan ${planId}: ${(e as Error).message}`))
     // Batches no reply shows (their own notify died) are announced now, by
     // whichever notify runs next, each in its stager's reply.
     if (!opts.quiet) for (const s of await unshownStagers(db, planId, now)) {
@@ -885,7 +939,7 @@ export async function notifyPlan(env: NotifyEnv, db: D1Database, planId: number,
       const again = await render(now2)
       await sendParent(env, channel, ts, again.parent)
       if (stage) await announceStage(env, db, {
-        channel, thread: ts, stager: stage.by, now, ctx: { planId, siteUrl, names: again.names, stats: again.at?.stats ?? null, running },
+        channel, thread: ts, stager: stage.by, now, ctx: { ...ctx, names: again.names, stats: again.at?.stats ?? null },
         sender: personSender(stage.by, again.people[stage.by.toLowerCase()], 'staged'),
       })
     }
@@ -911,12 +965,12 @@ export async function updateReplies(env: NotifyEnv, db: D1Database, planId: numb
   if (!posted.length && !legacyTs.length) return out
   const items = (await db.prepare('SELECT prefix, added_by FROM plan_items WHERE plan_id = ?').bind(planId).all<{ prefix: string; added_by: string }>()).results
   const batchBy = (await db.prepare('SELECT created_by FROM stage_batches WHERE plan_id = ?').bind(planId).all<{ created_by: string }>()).results.map(b => b.created_by)
-  const [at, names] = await Promise.all([
+  const [at, names, { edits, bands }] = await Promise.all([
     stagedStats(env as NotifyEnv & Env, items.map(i => i.prefix), db).catch(() => null),
     slackNames(env, [...new Set(batchBy)]),
+    planHistory(db, planId),
   ])
-  const running = !!(await db.prepare('SELECT 1 AS x FROM deletion_runs WHERE plan_id = ? AND finished_ts IS NULL LIMIT 1').bind(planId).first())
-  const ctx: ReplyCtx = { planId, siteUrl, names, stats: at?.stats ?? null, running }
+  const ctx: ReplyCtx = { planId, siteUrl, names, stats: at?.stats ?? null, deletions: batchDeletions(edits, bands) }
   for (const r of posted) {
     const m = await renderReply(db, ctx, { replyId: r.id })
     if (!m) { out.coalesced[r.id] = 'no batches'; continue }
@@ -965,8 +1019,14 @@ export async function announceFinished(env: NotifyEnv, db: D1Database, runs: rea
   for (const { run_id, ok, reason, outcome } of runs) {
     const r = await db.prepare('SELECT * FROM deletion_runs WHERE run_id = ?').bind(run_id).first<RunRow & { plan_id: number | null }>()
     if (r?.plan_id == null) continue
-    // What the run deleted leaves the queue before the thread re-renders.
-    if (ok) await unstageDeleted(db, r.plan_id, [run_id])
+    // What the run deleted leaves the queue before the thread re-renders; each stage reply that showed a deleted path
+    // is re-rendered after (`chat.update`), so its counts drop and a reply left with nothing loses its Reject button.
+    const shownBy = ok ? new Map((await db.prepare(
+      'SELECT i.prefix, b.reply_id FROM plan_items i JOIN stage_batches b ON b.id = i.batch_id WHERE i.plan_id = ? AND b.reply_id IS NOT NULL',
+    ).bind(r.plan_id).all<{ prefix: string; reply_id: number }>()).results.map(x => [x.prefix, x.reply_id])) : new Map<string, number>()
+    const gone = ok ? await unstageDeleted(db, r.plan_id, [run_id]) : []
     await notifyPlan(env, db, r.plan_id, siteUrl, { run: r, phase: ok ? 'finished' : 'failed', reason, outcome })
+    const replyIds = [...new Set(gone.flatMap(p => shownBy.has(p) ? [shownBy.get(p)!] : []))].sort((a, b) => a - b)
+    if (replyIds.length) await updateReplies(env, db, r.plan_id, siteUrl, { replyIds })
   }
 }
