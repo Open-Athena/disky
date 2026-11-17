@@ -19,7 +19,7 @@ import { NonLiveHistory } from './NonLiveHistory'
 import { DiskSpace } from './DiskSpace'
 import { ExtLink } from './ExtLink'
 import { DiskSpaceDiff, diskDiffScan } from './DiskSpaceDiff'
-import { diffLoadingLabel, type DiffData } from './diffModel'
+import { diffLoadingLabel, diffMiss, type DiffData } from './diffModel'
 import { ScanCombobox } from './ScanCombobox'
 import { ago, buildUserIndex, epochDaysToDate } from './colors'
 import { ChildrenTable } from './ChildrenTable'
@@ -33,6 +33,7 @@ import { useRules } from './rules'
 import { useSectionSpy, withoutSection, type SectionMode } from 'use-prms/sections'
 import { decodeSection, encodeSection, LEGACY_ANCHORS, SECTION_IDS, SECTION_KEY } from './homeSections'
 import { useScrollSpyPref } from './prefs'
+import { useKeepInView } from './keepInView'
 import { SectionAnchor } from './SectionAnchor'
 import { barControls } from './pageBar'
 import { LifecycleFold } from './LifecycleFold'
@@ -735,6 +736,8 @@ function AppContent() {
     write: spy === 'on' ? 'replace' : 'off',
     mode: SECTION_MODE,
   })
+  // A drill from the diff keeps the diff where it was on screen (the spy scrolls a new path to the top).
+  const holdDiff = useKeepInView('diff', location.key)
   // Turned off: drop the section it last wrote, so a copied link doesn't open (or unfurl) at a section no longer in
   // view. After the spy has stopped writing: stripped in the same tick, the still-writing spy put it back.
   const spyWas = useRef(spy)
@@ -947,6 +950,7 @@ function AppContent() {
   })
   const diff: DiffData | null = diffQ.data ?? null
   const diffErr = diffQ.error
+  const diffMissed = diffErr ? diffMiss(diffErr.message) : null
   // The shown diff is the previous pair's (placeholder) or the pair is still
   // aligning: its numbers describe another pair, so the subtitle says
   // "aligning" instead, and the drawn treemap dims under a marker.
@@ -1696,7 +1700,11 @@ function AppContent() {
             {diff && !diffStale ? null : diffErr && !diffStale && /^(404|409)/.test(diffErr.message) ? (
               <span className="tab-note">
                 {' '}· {diffErr.message.startsWith('404')
-                  ? <><code>{graftPath || '/'}</code> is in neither scan’s index — pick other scans or drill up.</>
+                  ? diffMissed && 'scan' in diffMissed
+                    // An end the server doesn't serve: a scan whose index is still publishing (the list can name it
+                    // first), not a path missing from both.
+                    ? <>{fmtS(diffMissed.scan)} isn’t served yet — its index is still publishing; pick {diffMissed.end === 'to' ? 'an earlier end' : 'another start'}, or retry in a few minutes.</>
+                    : <><code>{graftPath || '/'}</code> is in neither scan’s index — pick other scans or drill up.</>
                   : <>no per-user index for one of these scans — pick newer scans, or clear the user.</>}
               </span>
             ) : diffErr && !diffStale ? (
@@ -1717,11 +1725,12 @@ function AppContent() {
             <div ref={diffSlotRef} className={diffStaleOther ? 'diff-slot busy-host stale' : 'diff-slot busy-host'} style={diffStale && diffSlotH.current ? { minHeight: diffSlotH.current } : undefined}>
               {/* A drill in the diff drills the page: the map, the table and
                   the chart follow, and the diff itself re-reads at the new
-                  prefix (its rows are relative to the drilled path). */}
-              <DiffTreemap model={diffModel} onDrill={rel => drillTo([...diffSegs, ...rel])} onOpen={rel => openObject([...diffSegs, ...rel])} />
+                  prefix (its rows are relative to the drilled path). The diff
+                  stays where it was on screen (`holdDiff`). */}
+              <DiffTreemap model={diffModel} onDrill={rel => { holdDiff(); drillTo([...diffSegs, ...rel]) }} onOpen={rel => openObject([...diffSegs, ...rel])} />
               {/* The map's tabular twin: the same cells as rows, sortable; a
-                  row's name drills like its cell (and scrolls the maps up). */}
-              <DiffTable model={diffModel} scheme={store.scheme} segs={diffSegs} onDrill={rel => openPath([...diffSegs, ...rel])} onOpen={rel => openObject([...diffSegs, ...rel])} />
+                  row's name drills like its cell. */}
+              <DiffTable model={diffModel} scheme={store.scheme} segs={diffSegs} onDrill={rel => { holdDiff(); openPath([...diffSegs, ...rel]) }} onOpen={rel => openObject([...diffSegs, ...rel])} />
               {diffStaleOther || diffStale
                 ? <Busy label={`aligning ${fmtS(diffPrev)} → ${fmtS(asof)}…`} />
                 : diffRefining
