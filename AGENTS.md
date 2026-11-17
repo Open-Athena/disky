@@ -509,12 +509,20 @@ which replaces the repository's whole set (the file is all of it). A config that
 
 - `site/dev` — Vite on **:3253** + `wrangler pages dev` on **:3254** (a stale
   `oa_auth` cookie on localhost disables the DEV_IDENTITY stub → sign-in wall).
-- `site/deploy` — **manual** deploy to gcs.oa.dev (pushing git does NOT deploy);
-  moves the local `gcs-prod` pointer to the shipped SHA and pushes only the
-  source branch to GitHub (`o`) by default (`-P` to skip). The deployment
-  pointers stay local. `site/deploy --status` checks canonical production;
-  `site/deploy --dev` ships to dev.gcs.oa.dev and moves only local `gcs-dev`,
-  without pushing. `site/deploy --status --dev` checks that preview branch.
+- Releases go through GitHub's "OA site release" (`front-door`'s `oa-release.yml`, running `cloud`'s
+  `scripts/oa-release`; `specs/oa-release-workflow.md`): a push to `gcs` whose CI passes deploys
+  dev.gcs.oa.dev (environment `gcs-dev`). Production promotes that sha after checking dev:
+  `gh workflow run oa-release.yml --ref front-door -f deployment=gcs -f sha=<sha> -f dev_deployment=<id>`
+  (`gcs-prod`). Each host's `/api/health` names its build (`x-disky-build`). Don't push again before the
+  dev deploy lands: a newer tip makes the pending one obsolete.
+- PR previews (`front-door`'s `pr-preview.yml`, `.github/cf-preview.json`; `specs/cf-pr-previews.md`): a PR
+  into `gcs` (branch `work/gcs/<slug>`) from a write+ author deploys its full build to
+  `pr-N.oa-gcs-usage.pages.dev` (environment `gcs-preview`), on the dev stack's data and sign-in; others
+  need a maintainer's `/preview <sha>`. Closing the PR retires it.
+- `site/deploy` — a by-hand deploy from this checkout, for when the workflow can't run: moves the local
+  `gcs-prod` pointer to the shipped SHA and pushes only the source branch to GitHub (`o`) by default (`-P`
+  to skip). `site/deploy --status` checks canonical production; `site/deploy --dev` ships to
+  dev.gcs.oa.dev and moves only local `gcs-dev`. `site/deploy --status --dev` checks that preview branch.
 - D1 schema: `site/schema.sql` is gcs's own (`specs/done/d1-migrations.md`). A
   change is a recipe `site/migrations/<slug>.sql` plus `dt-cloud d1-schema dump
   site/schema.sql site/migrations/<slug>.sql -o site/schema.sql`; apply with
