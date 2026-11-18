@@ -28,7 +28,9 @@
         "users:read",
         "users:read.email",
         "emoji:read",
-        "pins:write"
+        "pins:write",
+        "channels:join",
+        "canvases:write"
       ]
     }
   },
