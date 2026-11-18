@@ -174,17 +174,21 @@ def slack(n: Notice, env: Mapping[str, str], post: Post, now: Optional[float] = 
                       and m['metadata'].get('event_payload', {}).get('group') == n.group), None)
     except (RuntimeError, URLError, OSError):
         pass
-    if found:
-        was = found['metadata']['event_payload']
-        top = n.priority > was.get('priority', 0)
-        group = {**was, 'title': n.title if top else was['title'], 'priority': max(n.priority, was.get('priority', 0)),
-                 'lines': [*was['lines'], line], 'links': [list(x) for x in n.links] or was['links']}
-        _slack_call(SLACK_UPDATE_URL, {'channel': channel, 'ts': found['ts'], 'text': slack_group_text(group),
-                                       'metadata': {'event_type': SLACK_GROUP_EVENT, 'event_payload': group}}, env, post)
-        return
-    group = {'group': n.group, 'title': n.title, 'priority': n.priority, 'lines': [line], 'links': [list(x) for x in n.links]}
-    _slack_call(SLACK_URL, {'channel': channel, 'text': slack_group_text(group), 'unfurl_links': False, 'unfurl_media': False,
-                            'metadata': {'event_type': SLACK_GROUP_EVENT, 'event_payload': group}}, env, post)
+    try:
+        if found:
+            was = found['metadata']['event_payload']
+            top = n.priority > was.get('priority', 0)
+            group = {**was, 'title': n.title if top else was['title'], 'priority': max(n.priority, was.get('priority', 0)),
+                     'lines': [*was['lines'], line], 'links': [list(x) for x in n.links] or was['links']}
+            _slack_call(SLACK_UPDATE_URL, {'channel': channel, 'ts': found['ts'], 'text': slack_group_text(group),
+                                           'metadata': {'event_type': SLACK_GROUP_EVENT, 'event_payload': group}}, env, post)
+            return
+        group = {'group': n.group, 'title': n.title, 'priority': n.priority, 'lines': [line], 'links': [list(x) for x in n.links]}
+        _slack_call(SLACK_URL, {'channel': channel, 'text': slack_group_text(group), 'unfurl_links': False, 'unfurl_media': False,
+                                'metadata': {'event_type': SLACK_GROUP_EVENT, 'event_payload': group}}, env, post)
+    except RuntimeError:
+        # The grouped write refused (its metadata, or the message gone): the alert posts on its own, as ungrouped.
+        _slack_call(SLACK_URL, {'channel': channel, 'text': slack_text(n), 'unfurl_links': False, 'unfurl_media': False}, env, post)
 
 
 SENDERS: dict[str, Callable[[Notice, Mapping[str, str], Post], None]] = {'pushover': pushover, 'discord': discord, 'slack': slack}

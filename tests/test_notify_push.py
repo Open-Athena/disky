@@ -150,10 +150,11 @@ class SlackGroups:
     """A `Post` seam over one Slack channel: `chat.postMessage` (ts 1.0, 2.0, …), `chat.update` and
     `conversations.history` (newest first, with metadata), recording each call's method."""
 
-    def __init__(self, fail_history: bool = False):
+    def __init__(self, fail_history: bool = False, refuse_metadata: bool = False):
         self.messages: list[dict] = []
         self.methods: list[str] = []
         self.fail_history = fail_history
+        self.refuse_metadata = refuse_metadata
 
     def __call__(self, url: str, body: bytes, headers: dict[str, str]) -> tuple[int, str]:
         method = url.rsplit('/', 1)[1]
@@ -164,6 +165,8 @@ class SlackGroups:
                 return 200, '{"ok":false,"error":"missing_scope"}'
             return 200, json.dumps({'ok': True, 'messages': list(reversed(self.messages))})
         p = json.loads(body)
+        if self.refuse_metadata and 'metadata' in p:
+            return 200, '{"ok":false,"error":"invalid_metadata_format"}'
         if method == 'chat.postMessage':
             self.messages.append({'ts': f'{len(self.messages) + 1}.0', 'text': p['text'], **({'metadata': p['metadata']} if 'metadata' in p else {})})
         else:
@@ -208,3 +211,12 @@ def test_a_grouped_alert_whose_message_cant_be_looked_up_posts_its_own():
         assert send(step('⚠️ t', 'm', uid), ['slack'], env=SLACK, post=ch) == [('slack', None)]
     assert ch.methods == ['conversations.history', 'chat.postMessage'] * 2
     assert [m['ts'] for m in ch.messages] == ['1.0', '2.0']
+
+
+def test_a_grouped_alert_slack_refuses_posts_plain():
+    ch = SlackGroups(refuse_metadata=True)
+    assert send(step('⚠️ t', 'm', 'u1'), ['slack'], env=SLACK, post=ch) == [('slack', None)]
+    assert ch.methods == ['conversations.history', 'chat.postMessage', 'chat.postMessage']
+    assert [m['text'] for m in ch.messages] == [
+        '*⚠️ t*\nm\n<https://logs.test/q?uid=u1|task logs> · <https://site.test/scans/r1|scan> · <https://site.test/scans|all scans>',
+    ]
