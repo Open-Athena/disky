@@ -403,6 +403,8 @@ def slack_posts(monkeypatch) -> list[dict]:
 
     posts = []
     def post(url: str, body: bytes, headers: dict) -> tuple[int, str]:
+        if url == push.SLACK_HISTORY_URL:  # a run's alerts are one message; none posted yet
+            return 200, '{"ok": true, "messages": []}'
         posts.append({"url": url, "auth": headers["Authorization"], **loads(body)})
         return 200, '{"ok": true}'
     monkeypatch.setattr(push, "http_post", post)
@@ -428,9 +430,14 @@ def test_failed_run_alerts_the_alert_channel_once_naming_its_phase(monkeypatch, 
                 raise CalledProcessError(7, ["path-index", "xoxb-secret"])
     assert posts == [{
         "url": "https://slack.com/api/chat.postMessage", "auth": "Bearer xoxb-secret", "channel": "C0R2ALERTS",
-        "text": "*❌ OA R2 scan 2026-10-13T0716*\npath-index failed (exit 7): CalledProcessError\n"
+        "text": "*❌ OA R2 scan 2026-10-13T0716*\npath-index failed (exit 7): CalledProcessError · "
                 "<https://console.cloud.google.com/logs/query;query=labels.job_uid%3D%22own-uid%22?project=oa-internal-450019|task logs>",
         "unfurl_links": False, "unfurl_media": False,
+        "metadata": {"event_type": "disky_alert", "event_payload": {
+            "group": "own-uid", "title": "❌ OA R2 scan 2026-10-13T0716", "priority": 1, "links": [], "lines": [{
+                "message": "path-index failed (exit 7): CalledProcessError", "url_title": "task logs",
+                "url": "https://console.cloud.google.com/logs/query;query=labels.job_uid%3D%22own-uid%22?project=oa-internal-450019",
+            }]}},
     }]
 
 
@@ -513,7 +520,7 @@ def test_a_failed_step_records_its_phase_failed_warns_once_and_the_scan_stands(m
     assert rc == 3
     assert sink.query("SELECT status, failed_phase, error FROM scan_runs") == [{"status": "succeeded", "failed_phase": None, "error": None}]
     assert sink.query("SELECT phase, status, note FROM scan_run_phases") == [{"phase": "probe", "status": "failed", "note": "failed (exit 3)"}]
-    assert [post["text"].split("\n")[:2] for post in posts] == [["*⚠️ OA R2 scan 2026-10-16T0715*", "probe failed (exit 3): a page load 5xx'd"]]
+    assert [post["text"].split(" · ")[0].split("\n") for post in posts] == [["*⚠️ OA R2 scan 2026-10-16T0715*", "probe failed (exit 3): a page load 5xx'd"]]
 
 
 @pytest.mark.parametrize("live", [False, True])
