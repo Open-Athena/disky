@@ -1,7 +1,7 @@
-# hf's Slack usage digest (`dt-cloud digest -T cw -C job/digest.yml`): the `cw` template (a monthly thread, one reply
+# hf's Slack usage digest (`dt-cloud digest -T quota -C job/digest.yml`): the `quota` template (a monthly thread, one reply
 # per UTC day), spelled out field by field as cw-s3's `job/digest.yml`. Validated on load: unknown keys raise.
 # Secrets stay env-only (`SLACK_BOT_TOKEN`, `SLACK_CHANNEL`; the channel is #hf-usage, set by `job/hf-batch-submit.sh`).
-template: cw
+template: quota
 title: Hugging Face usage
 site_url: https://hf.oa.dev
 # R2 (the step passes it as `-r`: job/profiles/hf.yml `options.digest.root`)

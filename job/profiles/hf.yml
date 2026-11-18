@@ -93,5 +93,5 @@ options:
   store-gc: {store: "r2://oa-hf-usage-index", execute: true, static_gens: [2026-10-18hfb, 2026-10-18hfmetab]}
   # The digest's live thread state and the earlier scans' snapshots are on R2 (publish-r2 lands this scan's before
   # `post`): the data store's root would find no state and post a second OP.
-  digest: {template: cw, config: /app/job/digest.yml, root: "r2://oa-hf-usage-index/{snapshots}"}
+  digest: {template: quota, config: /app/job/digest.yml, root: "r2://oa-hf-usage-index/{snapshots}"}
   cf-usage: {config: /app/site/wrangler.toml}
