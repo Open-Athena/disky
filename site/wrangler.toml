@@ -91,7 +91,7 @@ HISTORY_SECRETS = '{"R2_ENDPOINT":"cw-s3-r2-endpoint","R2_ACCESS_KEY_ID":"cw-s3-
 
 DISKY_LABELS = "app=disky,deployment=cw"  # cost labels on executor jobs (specs/cost-labels.md)
 SWEEP_S3_ENDPOINT = "https://cwobject.com"
-REPO_URL = "https://github.com/Open-Athena/marin-gcs-usage"  # the site's "Source on GitHub" link (build-time)
+REPO_URL = "https://github.com/Open-Athena/disky"  # the site's "Source on GitHub" link (build-time)
 CF_PAGES_SCRIPT = "pages-worker--18550629"   # the project's Functions scripts in the analytics datasets: `<this>-production` / `-preview` (`dt-cloud cf-usage`; the Pages API's `production_script_name`)
 # The in-app viewer policy (specs/done/oidc-cutover-cw.md): these domains get the
 # `cw` scope with no `allowed_emails` row.
@@ -207,7 +207,7 @@ database_id = "7f1e1326-b879-4ecd-8621-846621c24f36"
 [env.preview.vars]
 PROD_HOST = "cw.oa.dev"
 DEV_HOST = "dev.cw.oa.dev"
-REPO_URL = "https://github.com/Open-Athena/marin-gcs-usage"
+REPO_URL = "https://github.com/Open-Athena/disky"
 HOST_REDIRECTS = "cw-s3.oa.dev=cw.oa.dev,dev.cw-s3.oa.dev=dev.cw.oa.dev"
 ROOT_LABEL = "Marin CoreWeave (dev)"
 # Response-cache namespace (`_lib/edgeCache.ts`): this stack shares prod's KV, so its keys carry their own tag;
