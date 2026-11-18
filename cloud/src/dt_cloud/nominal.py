@@ -438,8 +438,9 @@ class Slack:
 
     def alert_messages(self, link: str, since: float) -> list[dict]:
         """Our top-level messages since `since` linking `link` (a run's alerts, when they went to this channel), oldest
-        first, each `{ts, text, metadata}`."""
-        hits = [m for m in self._read(None, since) if self.owns(m) and m.get('thread_ts', m['ts']) == m['ts'] and link in m.get('text', '')]
+        first, each `{ts, text, metadata}`; never a thread's own head (`disky_nominal` metadata), which links runs too."""
+        hits = [m for m in self._read(None, since) if self.owns(m) and m.get('thread_ts', m['ts']) == m['ts'] and link in m.get('text', '')
+                and (m.get('metadata') or {}).get('event_type') != 'disky_nominal']
         return [{'ts': m['ts'], 'text': m.get('text', ''), 'metadata': m.get('metadata') or {}} for m in sorted(hits, key=lambda m: float(m['ts']))]
 
     def alert(self, link: str, since: float) -> str | None:
