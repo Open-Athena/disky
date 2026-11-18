@@ -5,3 +5,5 @@ A PR into `hf` gets a preview (`full` mode, [`cf-pr-previews.md`]): front-door's
 Pilot 2 (2026-11-18): create, update on a new head, sign-in, and retire on close through the front-door caller (pilot 1, PR #3 on 2026-11-12, ran through the retired `hf-preview.yml`).
 
 [`cf-pr-previews.md`]: cf-pr-previews.md
+
+Create: run 44296024236 published `73eb66ee3` to `pr-8.oa-hf-usage.pages.dev` (the probe read its `x-disky-build`).
