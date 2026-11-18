@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# cw's Slack digest from this checkout: `dt-cloud digest -T cw -C job/digest.yml "$@"` with this worktree's code, the
+# cw's Slack digest from this checkout: `dt-cloud digest -T quota -C job/digest.yml "$@"` with this worktree's code, the
 # deployment's buckets and gcloud, and its secrets fetched from Secret Manager into the command's environment only
 # (`dt-cloud secrets exec`: never in argv, never printed). The plot goes to `job/icons-cw` unless `-i` says otherwise.
 #
@@ -25,4 +25,4 @@ exec dt-cloud secrets exec -p oa-internal-450019 \
   -s DISK_TREE_R2_ENDPOINT_URL=cw-s3-r2-endpoint \
   -s AWS_ACCESS_KEY_ID=cw-s3-isolated-r2-access-key-id \
   -s AWS_SECRET_ACCESS_KEY=cw-s3-isolated-r2-secret-access-key \
-  -- dt-cloud digest -T cw -C job/digest.yml "${icons[@]}" "$@"
+  -- dt-cloud digest -T quota -C job/digest.yml "${icons[@]}" "$@"

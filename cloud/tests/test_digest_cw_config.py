@@ -1,6 +1,6 @@
 """cw-s3's digest config file (`job/digest.yml`): the `cw` template plus this
 deployment's site, plot host, icons, buckets and quotas (the presets on `cloud`
-carry template shape only). Loading it yields exactly `CW`, it sets every field
+carry template shape only); it names the `quota` template (formerly `cw`). Loading it yields exactly `CW`, it sets every field
 on its own, and a dry run with it renders the golden thread over the shared
 fixture scans (the file's buckets re-keyed to the fixture's names)."""
 from __future__ import annotations
@@ -18,7 +18,7 @@ TIB = 1024**4
 Q100 = DG.Quota(100 * TIB, "100 TiB", "100Ti")  # US-EAST-06A, US-WEST-04A, US-EAST-01A, US-EAST-04A, RNO2A (shared by its buckets)
 Q08A = DG.Quota(500 * TIB, "500 TiB", "500Ti")  # US-EAST-08A, shared by its buckets
 CW = DG.DigestConfig(
-    template="cw",
+    template="quota",
     title="CoreWeave usage",
     site_url="https://cw.oa.dev",
     root="gs://{DATA_BUCKET}/snapshots/cw",
@@ -58,7 +58,8 @@ CW = DG.DigestConfig(
 
 
 def test_config_is_cw_s3s():
-    assert DG.load_config("cw", CONFIG) == CW
+    assert DG.load_config("quota", CONFIG) == CW
+    assert DG.load_config("cw", CONFIG) == CW  # the old name, an alias
     assert DG.load_config("gcs", CONFIG) == CW  # the file names its template
 
 
@@ -83,7 +84,7 @@ def test_dry_run_with_config(monkeypatch, tmp_path: Path):
     args = ["-C", str(config), "-n", "-r", str(root), "-m", "2026-09"]
     (tmp_path / "a").mkdir()
     (tmp_path / "b").mkdir()
-    out = _dry_run(monkeypatch, tmp_path / "a", ["digest", "-T", "cw", *args])
+    out = _dry_run(monkeypatch, tmp_path / "a", ["digest", "-T", "quota", *args])
     golden("cw-s3-dry-run.txt", out)
-    # `cw-digest` is `digest -T cw`
+    # `cw-digest` is `digest -T quota`
     assert _dry_run(monkeypatch, tmp_path / "b", ["cw-digest", *args]) == out

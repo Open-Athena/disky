@@ -1,8 +1,8 @@
-# cw-s3's Slack usage digest (`dt-cloud digest -T cw -C job/digest.yml`): every
+# cw-s3's Slack usage digest (`dt-cloud digest -T quota -C job/digest.yml`): every
 # `DigestConfig` field, spelled out, so this file alone is the deployment's
 # digest policy (the `cw` preset on `cloud` can then go). Validated on load:
 # unknown keys raise. Secrets stay env-only (`SLACK_BOT_TOKEN`, `SLACK_CHANNEL`).
-template: cw
+template: quota
 title: CoreWeave usage
 units: TiB                 # binary sizes (the default; `TB` for a store billed in decimal TB)
 site_url: https://cw.oa.dev

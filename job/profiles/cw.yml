@@ -117,7 +117,7 @@ options:
   # ~26 min a scan at 40 GB (2026-11-16, 5.5M new rows in r0002); 150m lets a run catch up ~5 scans after a miss.
   interval-store: {timeout: 150m, mem: 40GB, source: data, publish_on_failure: true}
   over-time: {mem: 16GB}
-  digest: {template: cw, config: /app/job/digest.yml}
+  digest: {template: quota, config: /app/job/digest.yml}
   # cw's own GCS buckets (the CoreWeave buckets and R2 bill elsewhere); compute: every Batch job `$DISKY_LABELS` selects
   gcp-cost: {buckets: [oa-cw-s3-usage-data, oa-cw-s3-usage-scratch]}
   # the Nextflow task's cwd isn't the image's `/app`

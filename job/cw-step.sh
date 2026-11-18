@@ -294,7 +294,7 @@ step_digest() {
 # fails the scan.
 begin digest
 if [ -n "${SLACK_BOT_TOKEN:+set}" ] && [ -n "${SLACK_CHANNEL:-}" ]; then  # `:+set`: xtrace must not print the token
-  dt-cloud digest -T cw -C job/digest.yml -r "gs://$DATA/snapshots/cw" \
+  dt-cloud digest -T quota -C job/digest.yml -r "gs://$DATA/snapshots/cw" \
     || echo "WARN: usage-digest step failed" >&2
 else
   echo "no Slack bot transport (SLACK_BOT_TOKEN+SLACK_CHANNEL) — skipping usage digest" >&2
