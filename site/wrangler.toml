@@ -41,6 +41,7 @@ AUTH_HOST_COOKIES = "1"          # `__Host-` session/nonce cookies on https
 OA_LOGIN_ISSUER = "https://login.oa.dev"   # "Sign in with OA" (specs/oa-login-rp.md) since 2026-11-17 (Ryan): the wall's button, the silent sign-in, the scan thread's starter emoji (`/api/scan-runs?emoji=1`)
 OA_LOGIN_CLIENT_ID = "disky-hf"            # broker client, callbacks https://{,dev.}hf.oa.dev/auth/oa/callback; secret OA_LOGIN_CLIENT_SECRET (production + preview envs). PR previews use the broker's preview pair
 REPO_URL = "https://github.com/Open-Athena/disky"
+SLACK_PR_EMOJI = ":github-pr:"   # OA Slack's PR emoji, before a PR preview's `[#N]` on #hf-admin activity posts (`hostTag`)
 SOURCE_REF = "hf"
 OG_CARDS = "1"
 OG_ANONYMOUS = "full"            # an anonymous unfurl gets the full card (labelled tiles, sizes; OA-owned data, as cw)
@@ -123,6 +124,7 @@ AUTH_HOST_COOKIES = "1"          # `__Host-` session/nonce cookies on https
 OA_LOGIN_ISSUER = "https://login.oa.dev"   # "Sign in with OA" (specs/oa-login-rp.md) since 2026-11-17 (Ryan): the wall's button, the silent sign-in, the scan thread's starter emoji (`/api/scan-runs?emoji=1`)
 OA_LOGIN_CLIENT_ID = "disky-hf"            # broker client, callbacks https://{,dev.}hf.oa.dev/auth/oa/callback; secret OA_LOGIN_CLIENT_SECRET (production + preview envs). PR previews use the broker's preview pair
 REPO_URL = "https://github.com/Open-Athena/disky"
+SLACK_PR_EMOJI = ":github-pr:"   # OA Slack's PR emoji, before a PR preview's `[#N]` on #hf-admin activity posts (`hostTag`)
 SOURCE_REF = "hf"
 OG_CARDS = "1"
 OG_ANONYMOUS = "full"
