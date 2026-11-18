@@ -40,7 +40,7 @@ TABLES = ("scan_runs", "scan_run_phases", "scan_run_outputs", "scan_run_dags")
 STATUSES = ("running", "succeeded", "failed", "nop")
 #: What started the run, as GitHub Actions' `event_name`: the deployment's cron (its job body sets `DT_TRIGGER=schedule`)
 #: or a hand submit / resume (its submitter sets `manual`). Opt-in per deployment, with migration `scan-run-trigger`:
-#: unset, nothing is recorded, and the digest goes by the clock. A scan's trigger is its first run's (`digest_cw.scan_triggers`).
+#: unset, nothing is recorded, and the digest goes by the clock. A scan's trigger is its first run's (`digest_quota.scan_triggers`).
 TRIGGER_ENV = "DT_TRIGGER"
 TRIGGERS = ("schedule", "manual")
 #: Who started a manual run: the signed-in address the site's "Run a scan" dispatches as, or what a hand submit names
@@ -1606,7 +1606,7 @@ class JobRun:
                 return
             url = self.logs_url()
             links = scan_alert_links(self.env.get("SITE_URL"), self.run_id, self.facts().get("store", "primary"))
-            notice = push.Notice(title, message, url, "task logs" if url else None, 1 if level == "fail" else 0, links)
+            notice = push.Notice(title, message, url, "task logs" if url else None, 1 if level == "fail" else 0, links, group=self.run_id)
             for c, e in push.send(notice, chans, env=self.env, post=push.http_post):
                 err(self.redact(f"alert: {c}: {e or 'sent'}"))
         except Exception as e:  # noqa: BLE001
