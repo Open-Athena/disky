@@ -108,7 +108,7 @@ options:
   # sorts are read only as a fallback, from their cold `.groups.parquet` (specs/d1-footer-writes.md: ~247K rows a scan,
   # each a few D1 row writes, then as many deletes when `retire` drops them two scans later)
   index-sync: {retain: 30, d1_rows: false}
-  digest: {template: gcs, config: /app/job/digest.yml, platforms: [slack, discord]}
+  digest: {template: cost, config: /app/job/digest.yml, platforms: [slack, discord]}
   # the hourly poller (`gcs-access-ingest-hourly`, job/access-submit.sh) ingests the usage logs as they land; the scan
   # leaves `access-ingest` out and `index` reads `access/agg` as it stands (`meta.access.through`)
   access-ingest: {poller: true}

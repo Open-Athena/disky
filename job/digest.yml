@@ -1,7 +1,7 @@
 # gcs.oa.dev's monthly digest (Slack + its Discord twin): `dt-cloud digest -C job/digest.yml`
 # (job/run.sh). Every value is explicit, so nothing here depends on cloud's built-in presets.
 # Secrets stay in the env; this file only names the env vars that hold them.
-template: gcs
+template: cost
 title: GCS usage
 site_url: https://gcs.oa.dev
 root: gs://{DATA_BUCKET}/snapshots
