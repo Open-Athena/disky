@@ -46,6 +46,7 @@ PEERS = '[{"label": "GCS usage", "prod": "gcs.oa.dev", "dev": "dev.gcs.oa.dev", 
 # The rename (specs/done/rename-cw.md): the old hosts stay attached and 301 GETs here (`_lib/hostRedirect.ts`)
 HOST_REDIRECTS = "cw-s3.oa.dev=cw.oa.dev,dev.cw-s3.oa.dev=dev.cw.oa.dev"
 AUTH_MODE = "app"                # own sign-in: Google OIDC + emailed codes (specs/done/oidc-cutover-cw.md P4, 2026-09-28)
+AUTH_HOST_COOKIES = "1"          # `__Host-` session/nonce cookies on https (signs everyone out once; Ryan's go for each deployment with PR previews, 2026-11-12)
 OG_CARDS = "1"
 OG_ANONYMOUS = "full"            # Link previews show the full card (labelled tiles, sizes, owners): the site stays behind
                                  # sign-in, its unfurls don't (Ryan 2026-10-16: OA's storage is gifted, the project's
@@ -216,6 +217,7 @@ CACHE_NS = "dev.cw-s3.oa.dev"
 STORE = "cw"
 MARK = "cw"
 AUTH_MODE = "app"                     # own sign-in (specs/done/oidc-cutover-cw.md P3); production flips at P4
+AUTH_HOST_COOKIES = "1"          # `__Host-` session/nonce cookies on https (signs everyone out once; Ryan's go for each deployment with PR previews, 2026-11-12)
 OG_CARDS = "1"
 OG_ANONYMOUS = "full"
 OG_DEFAULT_COLOR = "t"
