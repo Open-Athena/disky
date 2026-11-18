@@ -10,7 +10,7 @@
 name: PR preview
 on:
   pull_request_target:
-    branches: [hf, cw, gcs]
+    branches: [hf, cw, gcs, r2]
     types: [opened, reopened, synchronize, ready_for_review, labeled, unlabeled, closed]
   issue_comment:
     types: [created]
@@ -45,7 +45,7 @@ jobs:
       - id: route
         env:
           GH_TOKEN: ${{ github.token }}
-          PREVIEW_BASES: '["hf","cw","gcs"]'
+          PREVIEW_BASES: '["hf","cw","gcs","r2"]'
           PR: ${{ github.event.pull_request.number || github.event.issue.number || inputs.pr }}
           ACTION: ${{ github.event.action }}
         run: |
