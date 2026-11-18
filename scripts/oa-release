@@ -60,6 +60,11 @@ def paginated(path: str) -> list:
     raise ClickException('GitHub pagination exceeded 100 pages; narrow the release query')
 
 
+class Superseded(ClickException):
+    """A release a newer push has overtaken (the branch or the prod pointer moved on): skipped, not failed, so the
+    newer push's run is the one that releases and a red run means a release itself failed."""
+
+
 def require(condition: bool, message: str) -> None:
     if not condition:
         raise ClickException(message)
@@ -74,6 +79,41 @@ def recipes_at(prefix: str, ref: str) -> list[str]:
                   if entry['type'] == 'file' and entry['name'].endswith('.sql'))
 
 
+def ours(deployment: dict, environment: str, target: str) -> bool:
+    """A GitHub deployment this release controller recorded, of `target` into `environment`."""
+    payload = deployment.get('payload') or {}
+    return (deployment['environment'] == environment and deployment['creator']['login'] == 'github-actions[bot]'
+            and payload.get('protocol') == PROTOCOL and payload.get('source_branch') == target)
+
+
+def succeeded(statuses: list[dict]) -> bool:
+    """A deployment that went live: its newest status `success`, or `inactive` (replaced since) after a `success`."""
+    return bool(statuses) and statuses[0]['state'] in ('success', 'inactive') and any(s['state'] == 'success' for s in statuses)
+
+
+def dev_release(prefix: str, target: str, sha: str) -> str:
+    """The newest successful dev release of `sha` this controller recorded: a production release's proof, found rather
+    than named (a push to `<d>-prod` carries only the sha)."""
+    newest = None
+    for deployment in paginated(f'{prefix}/deployments?{urlencode({"environment": f"{target}-dev", "sha": sha})}'):
+        if deployment['sha'] != sha or not ours(deployment, f'{target}-dev', target):
+            continue
+        statuses = paginated(f'{prefix}/deployments/{deployment["id"]}/statuses')
+        if succeeded(statuses):
+            return str(deployment['id'])
+        newest = newest or (statuses[0]['state'] if statuses else 'none')
+    raise ClickException(f'{sha[:12]} has no successful dev release'
+                         + (f' (its newest: {newest})' if newest else '') + f': push it to {target} first')
+
+
+def released(prefix: str, environment: str, target: str) -> str | None:
+    """The sha of the newest release into `environment` that went live (what it served before this one), if any."""
+    for deployment in paginated(f'{prefix}/deployments?{urlencode({"environment": environment})}'):
+        if ours(deployment, environment, target) and succeeded(paginated(f'{prefix}/deployments/{deployment["id"]}/statuses')):
+            return deployment['sha']
+    return None
+
+
 def plan_release(event: dict, event_name: str, repository: str) -> dict:
     config = loads(CONFIG.read_text())
     require(repository == config['repository'], 'OA releases run only in the configured repository')
@@ -86,34 +126,32 @@ def plan_release(event: dict, event_name: str, repository: str) -> dict:
                 'Only successful in-repository integration push CI can deploy dev')
         dev_id = None
     elif event_name == 'workflow_dispatch':
+        # A push to `<d>-prod` (`oa-prod-push.yml` dispatches it), or a hand retry of what the pointer names
         inputs = event['inputs']
         target, sha, mode = inputs['deployment'], inputs['sha'], 'prod'
-        dev_id = inputs['dev_deployment']
-        require(bool(fullmatch(r'[1-9][0-9]*', dev_id)), 'Name the successful dev deployment ID')
     else:
         raise ClickException('Unsupported release event')
     require(target in config['sites'], 'Unknown OA deployment')
     require(bool(fullmatch(r'[0-9a-f]{40}', sha)), 'A full lowercase source SHA is required')
     site = config['sites'][target]
-    tip_recipes = None
+    tip_recipes = dev_id = previous = None
     if mode == 'dev':
         tip = api(f'{prefix}/git/ref/heads/{target}')['object']['sha']
-        require(tip == sha, 'Obsolete CI completion: source branch has moved')
+        if tip != sha:
+            raise Superseded('Obsolete CI completion: source branch has moved')
     else:
+        # Production releases what `<d>-prod` points at: a dispatch for a sha the pointer has since moved off is stale
+        pointer = api(f'{prefix}/git/ref/heads/{target}-prod')['object']['sha']
+        if pointer != sha:
+            raise Superseded(f'{target}-prod points at {pointer[:12]}, not {sha[:12]}: production releases the pointer '
+                             f'(git push o <sha>:{target}-prod)')
         # A promotion or rollback may name an older sha: `seal` holds only the recipes still pending at the branch's tip
         tip = api(f'{prefix}/git/ref/heads/{target}')['object']['sha']
         tip_recipes = recipes_at(prefix, tip)
         comparison = api(f'{prefix}/compare/{sha}...{target}')
         require(comparison['status'] in ('ahead', 'identical'), 'Production SHA is not on the deployment branch')
-        proof = api(f'{prefix}/deployments/{dev_id}')
-        payload = proof.get('payload') or {}
-        statuses = paginated(f'{prefix}/deployments/{dev_id}/statuses')
-        require(proof['sha'] == sha and proof['environment'] == f'{target}-dev'
-                and proof['creator']['login'] == 'github-actions[bot]'
-                and payload.get('protocol') == PROTOCOL and payload.get('source_branch') == target
-                and statuses and statuses[0]['state'] in ('success', 'inactive')
-                and any(s['state'] == 'success' for s in statuses),
-                'Production requires a successful exact-SHA dev release from this controller')
+        dev_id = dev_release(prefix, target, sha)
+        previous = released(prefix, f'{target}-prod', target)
         runs = paginated(f'{prefix}/actions/workflows/ci.yml/runs?{urlencode({"head_sha": sha, "event": "push", "branch": target})}')
         require(bool(runs), 'No CI receipt for this source SHA')
         ci = runs[0]
@@ -123,8 +161,9 @@ def plan_release(event: dict, event_name: str, repository: str) -> dict:
     return {
         'protocol': PROTOCOL, 'repository': repository, 'source_branch': target, 'sha': sha,
         'mode': mode, 'environment': f'{target}-{mode}', 'project': site['project'],
-        'pages_branch': site[f'{mode}_branch'], 'host': site[f'{mode}_host'],
-        'ci_run': ci['id'], 'dev_deployment': dev_id, 'tip_recipes': tip_recipes,
+        'pages_branch': site[f'{mode}_branch'], 'host': site[f'{mode}_host'], 'admin_channel': site['admin_channel'],
+        'ci_run': ci['id'], 'dev_deployment': dev_id, 'tip_recipes': tip_recipes, 'previous': previous,
+        'rollback': bool(previous and previous != sha and api(f'{prefix}/compare/{sha}...{previous}')['status'] == 'ahead'),
     }
 
 
@@ -210,13 +249,33 @@ def setup(live_enabled: str, live_targets: str, output: Path, targets: tuple[str
 @option('-o', '--output', type=ClickPath(path_type=Path), required=True)
 @option('-r', '--repository', required=True)
 def plan(event: Path, event_name: str, output: Path, repository: str) -> None:
-    value = plan_release(loads(event.read_text()), event_name, repository)
-    output.write_text(dumps(value, indent=2) + '\n')
     github_output = environ.get('GITHUB_OUTPUT')
+    try:
+        value = plan_release(loads(event.read_text()), event_name, repository)
+    except Superseded as skip:
+        # Exit 0 with `ok=false`: the stub skips build and release, and the run reads as skipped rather than failed
+        echo(f'::notice::{skip.message}')
+        if github_output:
+            with open(github_output, 'a') as file:
+                file.write('ok=false\n')
+        summary = environ.get('GITHUB_STEP_SUMMARY')
+        if summary:
+            with open(summary, 'a') as file:
+                file.write(f'Skipped: {skip.message}\n')
+        return
+    output.write_text(dumps(value, indent=2) + '\n')
     if github_output:
         with open(github_output, 'a') as file:
-            for key in ['sha', 'source_branch', 'mode', 'environment', 'project', 'pages_branch', 'host']:
+            file.write('ok=true\n')
+            for key in ['sha', 'source_branch', 'mode', 'environment', 'project', 'pages_branch', 'host', 'admin_channel']:
                 file.write(f'{key}={value[key]}\n')
+    summary = environ.get('GITHUB_STEP_SUMMARY')
+    if summary and value['mode'] == 'prod':
+        before = value['previous']
+        how = ('first release' if not before else 'the build it already serves' if before == value['sha']
+               else f'rollback from `{before[:12]}`' if value['rollback'] else f'replacing `{before[:12]}`')
+        with open(summary, 'a') as file:
+            file.write(f"Production: `{value['source_branch']}` at `{value['sha'][:12]}` ({how}); dev release {value['dev_deployment']}\n")
     print(dumps(value, indent=2))
 
 
@@ -311,6 +370,30 @@ def begin(output: Path, plan_path: Path, seal_path: Path, source: Path) -> None:
     status(receipt, 'in_progress')
 
 
+#: An entry asset's GET: a 404, a 5xx or a dropped connection is retried this many times, `LIVE_RETRY_S` apart. A fresh
+#: deployment's edge answered an asset 500 for under a minute, and a new asset path 404 for 17 s after the build header
+#: already matched (cw's dev releases, 2026-11-17): entry assets are content-hashed, so a new one can't be a stale path.
+#: Any other 4xx (a 403 from bot rules, a 401) is an answer. "A dropped connection" is any `OSError`: a reset can come
+#: during `read()`, after `urlopen` returned, as a bare `ConnectionResetError` (cw's prod release 44141535596)
+LIVE_RETRIES = 6
+LIVE_RETRY_S = 10
+
+
+def live_get(url: str) -> bytes:
+    for attempt in range(LIVE_RETRIES + 1):
+        try:
+            with urlopen(Request(url, headers=LIVE_HEADERS), timeout=30) as response:
+                return response.read()
+        except HTTPError as error:
+            if (error.code != 404 and error.code < 500) or attempt == LIVE_RETRIES:
+                raise
+        except OSError:  # `URLError`, and a reset or timeout mid-read
+            if attempt == LIVE_RETRIES:
+                raise
+        sleep(LIVE_RETRY_S)
+    raise AssertionError('unreachable')
+
+
 @main.command('finish')
 @option('-f', '--failed', is_flag=True)
 @argument('receipt_path', type=ClickPath(path_type=Path))
@@ -331,12 +414,19 @@ def finish(failed: bool, receipt_path: Path) -> None:
             and deployment['latest_stage']['status'] == 'success', 'Cloudflare is not serving the clean requested revision')
     for attempt in range(12):
         req = Request(f'https://{receipt["host"]}/api/health?release-check={environ["GITHUB_RUN_ID"]}-{attempt}', headers=LIVE_HEADERS)
+        # A 5xx or a dropped connection is a host not answering yet: the next attempt, as a stale build is
         try:
             response = urlopen(req, timeout=20)
         except HTTPError as error:
+            if error.code >= 500:
+                sleep(5)
+                continue
             if error.code not in (401, 403):
                 raise
             response = error
+        except OSError:
+            sleep(5)
+            continue
         with response:
             build = response.headers.get('x-disky-build', '').split(' ', 1)[0]
         if build == receipt['sha']:
@@ -345,8 +435,8 @@ def finish(failed: bool, receipt_path: Path) -> None:
     else:
         raise ClickException('Live host did not return the requested build header')
     for asset, digest in receipt['entry_assets'].items():
-        with urlopen(Request(f'https://{receipt["host"]}/{asset}', headers=LIVE_HEADERS), timeout=30) as response:
-            require(sha256(response.read()).hexdigest() == digest, f'Live entry asset differs: {asset}')
+        body = live_get(f'https://{receipt["host"]}/{asset}')
+        require(sha256(body).hexdigest() == digest, f'Live entry asset differs: {asset}')
     receipt['cloudflare_deployment'] = deployment['id']
     receipt['cloudflare_url'] = deployment['url']
     receipt_path.write_text(dumps(receipt, indent=2) + '\n')
