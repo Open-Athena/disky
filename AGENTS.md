@@ -513,9 +513,11 @@ which replaces the repository's whole set (the file is all of it). A config that
   `oa_auth` cookie on localhost disables the DEV_IDENTITY stub → sign-in wall).
 - Releases go through GitHub's "OA site release" (`front-door`'s `oa-release.yml`, running `cloud`'s
   `scripts/oa-release`; `specs/oa-release-workflow.md`): a push to `gcs` whose CI passes deploys
-  dev.gcs.oa.dev (environment `gcs-dev`). Production promotes that sha after checking dev:
-  `gh workflow run oa-release.yml --ref front-door -f deployment=gcs -f sha=<sha> -f dev_deployment=<id>`
-  (`gcs-prod`). Each host's `/api/health` names its build (`x-disky-build`). Don't push again before the
+  dev.gcs.oa.dev (environment `gcs-dev`). Production promotes a sha whose dev release succeeded by a push to
+  `gcs-prod`: `git push o <sha>:gcs-prod` (`oa-prod-push.yml` on that commit dispatches the release, environment
+  `gcs-prod`; `specs/branch-push-releases.md`). By hand, with `gcs-prod` already there:
+  `gh workflow run oa-release.yml -R Open-Athena/disky --ref front-door -f deployment=gcs -f sha=<gcs-prod's sha>`.
+  Each host's `/api/health` names its build (`x-disky-build`). Don't push again before the
   dev deploy lands: a newer tip makes the pending one obsolete.
 - PR previews (`front-door`'s `pr-preview.yml`, `.github/cf-preview.json`; `specs/cf-pr-previews.md`): a PR
   into `gcs` (branch `work/gcs/<slug>`) from a write+ author deploys its full build to
