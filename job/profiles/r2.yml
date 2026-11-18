@@ -101,7 +101,7 @@ options:
   cf-usage: {config: /app/site/wrangler.toml}
   gcp-cost: {buckets: [oa-r2-usage-data, oa-r2-usage-scratch]}
   digest:
-    template: cw
+    template: quota
     # the thread state (`digest/r2/…`) and every earlier scan's snapshots are on R2, as the one-VM job reads them
     root: r2://oa-r2-usage-index/{snapshots}
     config: /app/job/digest.yml

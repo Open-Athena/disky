@@ -479,7 +479,7 @@ def test_serving_steps_with_every_credential_end_in_the_digest(monkeypatch) -> N
     assert serve_names(monkeypatch, SITE_TOKEN="grant", SLACK_BOT_TOKEN="xoxb", SLACK_CHANNEL="C0R2USAGE", CF_PAGES_TOKEN="pages\n") == [
         ("warm-cache", ["dt-cloud", "warm-cache", "-d", "2026-10-16T0715", "-r", "r2://oa-r2-usage-index/snapshots/r2"], None),
         ("probe", ["dt-cloud", "probe", "-c", "-s", "r2", "-u", "https://r2.oa.dev", "-o", "r2://oa-r2-usage-index/probes/r2/"], None),
-        ("digest", ["dt-cloud", "digest", "-T", "cw", "-C", str(here / "digest.yml"), "-i", str(here / "icons-r2"), "-r", "r2://oa-r2-usage-index/snapshots/r2"], "pages"),
+        ("digest", ["dt-cloud", "digest", "-T", "quota", "-C", str(here / "digest.yml"), "-i", str(here / "icons-r2"), "-r", "r2://oa-r2-usage-index/snapshots/r2"], "pages"),
     ]
 
 

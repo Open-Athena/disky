@@ -1,7 +1,7 @@
-# r2.oa.dev's Slack usage digest (`dt-cloud digest -T cw -C job/digest.yml`): the `cw` template (a monthly thread, one
+# r2.oa.dev's Slack usage digest (`dt-cloud digest -T quota -C job/digest.yml`): the `quota` template (a monthly thread, one
 # reply per UTC day), field by field as cw-s3's and hf's `job/digest.yml`. Validated on load: unknown keys raise.
 # Secrets and the channel stay env-only (`SLACK_BOT_TOKEN`, `SLACK_CHANNEL` = #r2-usage, from `job/r2.json`).
-template: cw
+template: quota
 title: Open Athena R2
 site_url: https://r2.oa.dev
 # the job passes `-r` anyway

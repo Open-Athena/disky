@@ -576,7 +576,7 @@ def serve_steps(config: dict, scan: str) -> list[tuple[str, list[str], dict[str,
         print("no SITE_TOKEN: cache warm-up and the serving probe skipped", file=stderr, flush=True)
     if all(environ.get(name, "").strip() for name in ("SLACK_BOT_TOKEN", "SLACK_CHANNEL", "SITE_TOKEN", "CF_PAGES_TOKEN")):
         # wrangler (the plot's `pages deploy`) gets the Pages token for this step only
-        steps.append(("digest", ["dt-cloud", "digest", "-T", "cw", "-C", str(HERE / "digest.yml"), "-i", str(HERE / "icons-r2"), "-r", f"{root}/snapshots/r2"],
+        steps.append(("digest", ["dt-cloud", "digest", "-T", "quota", "-C", str(HERE / "digest.yml"), "-i", str(HERE / "icons-r2"), "-r", f"{root}/snapshots/r2"],
                       {**env, "CLOUDFLARE_API_TOKEN": environ["CF_PAGES_TOKEN"].strip()}, "today's #r2-usage digest reply didn't post (the scan is fine)"))
     else:
         print("no SLACK_BOT_TOKEN + SLACK_CHANNEL + SITE_TOKEN + CF_PAGES_TOKEN: the Slack digest skipped", file=stderr, flush=True)
