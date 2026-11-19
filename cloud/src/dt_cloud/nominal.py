@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING, Protocol
 from urllib.parse import quote, unquote, urlencode, urlparse
 from uuid import NAMESPACE_URL, uuid5
 
+from . import slack_api
 from .scan_id import scan_time
 from .scan_runs import TRIGGER_BY_RE
 
@@ -386,8 +387,9 @@ class Transport(Protocol):
     def join(self) -> None: ...
     def pin(self, ts: str) -> None: ...
     def unpin(self, ts: str) -> None: ...
-    def canvas_create(self, body: str) -> str: ...
+    def canvas_create(self, body: str, title: str) -> str: ...
     def canvas_edit(self, canvas: str, body: str) -> bool: ...
+    def canvas_rename(self, canvas: str, title: str) -> bool: ...
 
 
 class Slack:
@@ -456,32 +458,28 @@ class Slack:
 
     def _ok(self, method: str, args: dict, *benign: str) -> dict:
         """A call whose listed errors mean the change is already in place."""
-        try:
-            return self.client._request(method, args)
-        except RuntimeError as e:
-            if any(str(e) == f'Slack API error: {code}' for code in benign):
-                return {}
-            raise
+        return slack_api.call_ok(self.client, method, args, *benign)
 
     def join(self) -> None:
-        self._ok('conversations.join', {'channel': self.client.channel}, 'method_not_supported_for_channel_type')
+        slack_api.join(self.client, self.client.channel)
 
     def pin(self, ts: str) -> None:
-        self._ok('pins.add', {'channel': self.client.channel, 'timestamp': ts}, 'already_pinned')
+        slack_api.pin(self.client, self.client.channel, ts)
 
     def unpin(self, ts: str) -> None:
-        self._ok('pins.remove', {'channel': self.client.channel, 'timestamp': ts}, 'no_pin', 'message_not_found')
+        slack_api.unpin(self.client, self.client.channel, ts)
 
-    def canvas_create(self, body: str) -> str:
+    def canvas_create(self, body: str, title: str) -> str:
         content = {'type': 'markdown', 'markdown': body}
         try:
-            return self.client._request('conversations.canvases.create', {'channel_id': self.client.channel, 'document_content': content})['canvas_id']
+            return self.client._request('conversations.canvases.create', {
+                'channel_id': self.client.channel, 'title': title, 'document_content': content})['canvas_id']
         except RuntimeError as e:
             if str(e) != 'Slack API error: channel_canvas_already_exists':
                 raise
         info = self.client._request('conversations.info', {'channel': self.client.channel}, method='GET')
         canvas = info['channel']['properties']['canvas']['file_id']
-        if not self.canvas_edit(canvas, body):
+        if not self.canvas_edit(canvas, body) or not self.canvas_rename(canvas, title):
             raise RuntimeError('nominal: the channel names a canvas that no longer exists')
         return canvas
 
@@ -490,9 +488,14 @@ class Slack:
         return bool(self._ok('canvases.edit', {'canvas_id': canvas, 'changes': [
             {'operation': 'replace', 'document_content': {'type': 'markdown', 'markdown': body}}]}, 'canvas_not_found', 'canvas_deleted'))
 
+    def canvas_rename(self, canvas: str, title: str) -> bool:
+        """Set the canvas's title (its channel tab's label); False when the canvas is gone."""
+        return bool(self._ok('canvases.edit', {'canvas_id': canvas, 'changes': [
+            {'operation': 'rename', 'title_content': {'type': 'markdown', 'markdown': title}}]}, 'canvas_not_found', 'canvas_deleted'))
+
 
 #: State that outlives a thread: the pinned head (unpinned once a new head is pinned) and the channel canvas
-KEPT = ('pinned', 'canvas', 'canvas_body')
+KEPT = ('pinned', 'canvas', 'canvas_body', 'canvas_title')
 
 
 def pin_head(state: dict, slack: Transport, save: Callable[[dict], None]) -> None:
@@ -538,7 +541,7 @@ def canvas_text(cfg: Config, rows: list[dict], thread: str | None, series: Mappi
     done = [r for r in rows if not live(r)]
     title = status(cfg, done)
     at = datetime.fromtimestamp(now, timezone.utc).strftime('%Y-%m-%d %H:%M UTC')
-    out = [f"# {cfg.title}", f"{title}" + (f" · [thread]({thread})" if thread else '') + f"\n\nUpdated {at}."]
+    out = [f"{title}" + (f" · [thread]({thread})" if thread else '') + f"\n\nUpdated {at}."]
     if cfg.stores:
         out += ['## Stores', '\n'.join(f"- {store_line(cfg, label, store, series[store])}" for label, store in cfg.stores)]
     if done:
@@ -553,16 +556,17 @@ def canvas_text(cfg: Config, rows: list[dict], thread: str | None, series: Mappi
     return '\n\n'.join(out) + '\n'
 
 
-def write_canvas(state: dict, slack: Transport, body: str, save: Callable[[dict], None]) -> None:
-    """Create the channel's canvas, or replace its content when the body changed. The canvas's Updated line changes
-    every run, so this writes once per report."""
-    if state.get('canvas_body') == body:
+def write_canvas(state: dict, slack: Transport, body: str, title: str, save: Callable[[dict], None]) -> None:
+    """Create the channel's canvas titled `title` (its tab's label), or replace its content when the body changed and
+    its title when that did. The canvas's Updated line changes every run, so this writes once per report."""
+    if state.get('canvas_body') == body and state.get('canvas_title') == title:
         return
     slack.join()
     # A canvas deleted by hand is created again rather than failing every later report
-    if not state.get('canvas') or not slack.canvas_edit(state['canvas'], body):
-        state['canvas'] = slack.canvas_create(body)
-    state['canvas_body'] = body
+    if not state.get('canvas') or not slack.canvas_edit(state['canvas'], body) or (
+            state.get('canvas_title') != title and not slack.canvas_rename(state['canvas'], title)):
+        state['canvas'] = slack.canvas_create(body, title)
+    state['canvas_body'], state['canvas_title'] = body, title
     save(state)
 
 
@@ -847,7 +851,7 @@ def run(
         if cfg.canvas:
             check()
             thread = slack.permalink(state['parent']) if state.get('parent') and not state.get('closed') else None
-            write_canvas(state, slack, canvas_text(cfg, rows, thread, series, time.time()), save)
+            write_canvas(state, slack, canvas_text(cfg, rows, thread, series, time.time()), cfg.title, save)
     if final is not None:
         final.append(state)
     return f"nominal: parent {state.get('parent', 'none')}; {len(state.get('posted', {}))} run replies"

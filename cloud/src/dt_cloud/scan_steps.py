@@ -1939,15 +1939,23 @@ def soft_delete(ctx: Ctx, arg: str | None) -> None:
                fatal=False, warn="soft-delete reading failed (the scan's outputs stand; the site keeps the last one, dated)")
 
 
-@step("access-requesters", core=False, soft=True, options={"days": int, "depth": int, "mem": str, "threads": int},
+@step("access-requesters", core=False, soft=True, options={"days": int, "depth": int, "mem": str, "threads": int, "hourly": int,
+                                                         "attribute": bool},
       requires=primary_only("access-requesters", "the rollup is the deployment's, written once by its primary"),
       side=True, leaves="the previous days' requester rollups not written: `dt-cloud access requesters -s` backfills them")
 def access_requesters(ctx: Ctx, arg: str | None) -> None:
     """Who made the scanned buckets' requests (`dt-cloud access requesters`): the access logs' raw rows for each of the
     `options.access-requesters.days` (default 2) UTC days before the scan's, rolled up per bucket × operation ×
-    client × requester × path prefix into `<data>/access/requesters/<day>.parquet`. A day already written is left (`-s`),
-    so a day the access ingest hadn't finished is written by a later scan only if it was never written: `days: 2`
-    gives each day a second chance. Needs `access/raw/` (the access ingest's). Skipped on REPROC; never fatal."""
+    client × requester × path prefix into `<data>/access/requesters/<day>.parquet`. A day already written from the raw
+    parts there now is left (`-s`); one the access ingest has added to since is rolled again, so `days: 2` gives each
+    day a second pass after its logs have landed (gcs's ingest lags its logs by up to ~14 h, so the first pass, the
+    next morning, misses the day's last hours). Needs `access/raw/` (the access ingest's). Skipped on REPROC; never
+    fatal.
+
+    `hourly: N` also rolls the days up per UTC hour, keeping N path segments (`requesters-hourly/`, `-H -D N`: 3 keeps
+    the store a training job reads); `attribute: true` then joins those to the hourly host snapshots and the job tables
+    (`access hosts`, `access-jobs`) into `attributed/<day>.parquet` (`dt-cloud access attribute -s`: a day is redone
+    when its inputs changed, so the job tables that land after this run reach it on the next)."""
     if ctx.reproc:
         err("REPROC: skipping the requester rollup")
         return
@@ -1962,6 +1970,43 @@ def access_requesters(ctx: Ctx, arg: str | None) -> None:
     with ctx.phase("access-requesters"):
         ctx.sh(["dt-cloud", "access", "requesters", "-s", "-r", f"{ctx.data_uri}/access", *args, *days],
                fatal=False, warn="requester rollup failed (the scan's outputs stand; `dt-cloud access requesters -s` backfills)")
+        if hourly := ctx.opt("access-requesters", "hourly"):
+            ok = ctx.sh(["dt-cloud", "access", "requesters", "-s", "-H", "-r", f"{ctx.data_uri}/access", f"-D{hourly}", *args[1:], *days],
+                        fatal=False, warn="hourly requester rollup failed (`dt-cloud access requesters -s -H` backfills)")
+            if ok is not None and ctx.opt("access-requesters", "attribute"):
+                ctx.sh(["dt-cloud", "access", "attribute", "-s", "-r", f"{ctx.data_uri}/access", *days],
+                       fatal=False, warn="request attribution failed (`dt-cloud access attribute -s` backfills)")
+
+
+def _access_jobs_check(p: ScanProfile) -> list[str]:
+    from .access_jobs import batch_problems
+
+    return primary_only("access-jobs", "the job tables are the deployment's, written once by its primary")(p) + batch_problems(p.opts("access-jobs").get("batch") or {})
+
+
+@step("access-jobs", core=False, soft=True, options={"days": int, "batch": dict},
+      requires=_access_jobs_check,
+      side=True, converges=True, leaves="the previous days' job tables not written: a later run's job writes every missing day in its window")
+def access_jobs(ctx: Ctx, arg: str | None) -> None:
+    """Which jobs ran on which VMs (`dt-cloud access jobs`, specs/access-job-attribution.md phase 2): for each of the
+    `options.access-jobs.days` (default 2) UTC days before the scan's not yet under `<data>/access/jobs/<day>/`, the
+    deployment's own job-table image (`options.access-jobs.batch.image`: its scheduler's client, kept out of this
+    image) runs as a Batch job of its own. Submitted, not waited on. A day before the newest still missing means an
+    earlier run's job failed: it is resubmitted and the phase warns. `batch`'s keys (`access_jobs.BATCH_KEYS`) are
+    `access jobs`'s options: `image` (required), `service_account` (`$JOB_SA`), `region` (`$BATCH_REGION`), `project`,
+    `machine`, `spot`, `env`, `secrets`, `cross_region`. Not core: a deployment opts in (`steps`)."""
+    if ctx.reproc:
+        err("REPROC: not submitting job tables")
+        return
+    import datetime as dt
+
+    from .access_jobs import submit_args
+
+    scan_day = dt.date.fromisoformat(ctx.date)
+    days = [(scan_day - dt.timedelta(days=k)).isoformat() for k in range(int(ctx.opt("access-jobs", "days", 2)), 0, -1)]
+    with ctx.phase("access-jobs"):
+        ctx.sh(["dt-cloud", "access", "jobs", "-r", f"{ctx.data_uri}/access/jobs", *submit_args(ctx.opt("access-jobs", "batch") or {}), *days],
+               fatal=False, warn="job tables missing or their job not submitted (a later run resubmits every missing day in its window)")
 
 
 def _vm_pack_check(p: ScanProfile) -> list[str]:
