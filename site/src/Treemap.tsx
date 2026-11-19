@@ -812,7 +812,7 @@ export function Treemap({ root, mode, shade = 'none', userIdx, dateRange, readRa
             {fmtBytes(n.bytes)} · {fmtN(n.objects)} objects{share(n)}
             {newestLabel(n) && <> · last {time.label} {newestLabel(n)}</>}
           </div>
-          <div className="vc-hint">Hover a cell for its details · click one to open it.</div>
+          <div className="vc-hint">Hover a cell for its details · click one to open it. (PR #9 preview pilot)</div>
         </div>
       )}
       renderRollup={renderRollup}
