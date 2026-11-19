@@ -14,6 +14,18 @@ sr() { dt-cloud scan-run "$@"; }
 trap 'rc=$?; sr finish -x "$rc"; exit "$rc"' EXIT
 echo "access-run.sh: image $(dt-cloud image-sha)" >&2
 sr start -B -k access-ingest "$SCAN_ID"
+# The VMs behind the requests, while they live (their external IPs aren't kept anywhere else): every hour, even when
+# another run holds the ingest lease. Never fatal; a failure posts once a day (the 00 UTC run), not hourly.
+export ACCESS_HOSTS_PROJECTS=${ACCESS_HOSTS_PROJECTS:-hai-gcp-models}
+sr phase-begin access-hosts
+set +e
+dt-cloud access hosts
+hrc=$?
+set -e
+sr phase-end -x "$hrc" access-hosts || true
+if [ "$hrc" -ne 0 ] && [ "$(date -u +%H)" = 00 ]; then
+  DISKY_NOTIFY=slack disk-tree notify -t "gcs access hosts" "host snapshot failed (exit $hrc): requester IPs this hour won't map to VMs · ${SITE_URL%/}/scans/${BATCH_JOB_UID:-unknown}" || true
+fi
 sr phase-begin access-ingest
 summary=${ACCESS_SUMMARY_FILE:-access.json}
 set +e
