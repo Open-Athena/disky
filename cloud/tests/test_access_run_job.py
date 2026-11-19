@@ -7,8 +7,15 @@ from subprocess import run
 import pytest
 
 
-@pytest.mark.parametrize(('rc', 'lease', 'expected_status'), [(0, 'taken', 'done'), (0, 'held', 'nop'), (1, None, 'failed'), (3, 'taken', 'failed')])
-def test_access_job_lifecycle(tmp_path, rc, lease, expected_status):
+@pytest.mark.parametrize(('rc', 'lease', 'expected_status', 'hosts_rc', 'run_id'), [
+    (0, 'taken', 'done', 0, '2026-11-09T0820'),
+    (0, 'held', 'nop', 0, '2026-11-09T0820'),
+    (1, None, 'failed', 0, '2026-11-09T0820'),
+    (3, 'taken', 'failed', 0, '2026-11-09T0820'),
+    (0, 'taken', 'done', 1, '2026-11-09T0820'),  # a host snapshot failure: recorded, not posted, ingest goes on
+    (0, 'taken', 'done', 1, '2026-11-09T0005'),  # ... posted once a day, by the 00 UTC run
+])
+def test_access_job_lifecycle(tmp_path, rc, lease, expected_status, hosts_rc, run_id):
     script = Path(__file__).resolve().parents[2] / 'job' / 'access-run.sh'
     if not script.exists():
         pytest.skip('GCS deployment entrypoint only')
@@ -20,6 +27,7 @@ args=sys.argv[1:]
 p=Path(os.environ['CALLS'])
 with p.open('a') as f: f.write(json.dumps(args)+'\\n')
 if args==['image-sha']: print('test-sha')
+if args[:2]==['access','hosts']: sys.exit(int(os.environ['HOSTS_RC']))
 if args[:2]==['access','ingest']:
  lease=os.environ.get('LEASE')
  if lease: print(json.dumps({'lease':lease,'buckets':[],'stalled':['b'] if os.environ['RC']=='3' else []}))
@@ -30,15 +38,19 @@ if args[:2]==['access','ingest']:
     calls = tmp_path / 'calls.jsonl'
     result = run(['bash', str(script)], cwd=tmp_path, env={
         **os.environ, 'PATH': f'{tmp_path}:{os.environ["PATH"]}', 'CALLS': str(calls), 'RC': str(rc),
-        'LEASE': lease or '', 'ACCESS_RUN_ID': '2026-11-09T0820', 'BATCH_JOB_UID': 'uid',
+        'LEASE': lease or '', 'HOSTS_RC': str(hosts_rc), 'ACCESS_RUN_ID': run_id, 'BATCH_JOB_UID': 'uid',
         'SITE_URL': 'https://gcs.oa.dev', 'PARALLEL': '1',
     }, capture_output=True, text=True)
     actual = [json.loads(line) for line in calls.read_text().splitlines()]
     note = 'skipped (busy): ingest lease held by another run' if lease == 'held' else 'ingest lease taken; all configured buckets checked' if rc == 0 else ''
     expected = [
-        ['image-sha'], ['scan-run', 'start', '-B', '-k', 'access-ingest', '2026-11-09T0820'],
-        ['scan-run', 'phase-begin', 'access-ingest'], ['access', 'ingest', '-j', '-x', '-P', '1', '-M', '48GB'],
+        ['image-sha'], ['scan-run', 'start', '-B', '-k', 'access-ingest', run_id],
+        ['scan-run', 'phase-begin', 'access-hosts'], ['access', 'hosts'], ['scan-run', 'phase-end', '-x', str(hosts_rc), 'access-hosts'],
     ]
+    if hosts_rc and run_id.endswith('T0005'):
+        expected.append(['notify', '-t', 'gcs access hosts',
+                         f"host snapshot failed (exit {hosts_rc}): requester IPs this hour won't map to VMs · https://gcs.oa.dev/scans/uid"])
+    expected += [['scan-run', 'phase-begin', 'access-ingest'], ['access', 'ingest', '-j', '-x', '-P', '1', '-M', '48GB']]
     if expected_status == 'nop': expected.append(['scan-run', 'nop'])
     expected.append(['scan-run', 'phase-end', '-x', str(rc), '-q', note, 'access-ingest'])
     if rc:

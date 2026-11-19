@@ -23,7 +23,7 @@ dt-cloud access hosts
 hrc=$?
 set -e
 sr phase-end -x "$hrc" access-hosts || true
-if [ "$hrc" -ne 0 ] && [ "$(date -u +%H)" = 00 ]; then
+if [ "$hrc" -ne 0 ] && [ "${SCAN_ID:11:2}" = 00 ]; then  # the run's UTC hour
   DISKY_NOTIFY=slack disk-tree notify -t "gcs access hosts" "host snapshot failed (exit $hrc): requester IPs this hour won't map to VMs · ${SITE_URL%/}/scans/${BATCH_JOB_UID:-unknown}" || true
 fi
 sr phase-begin access-ingest
