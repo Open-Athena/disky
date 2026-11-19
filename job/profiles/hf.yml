@@ -21,9 +21,11 @@ layout:
   snapshots: hf
   # the raw listing (shards + the lister's `_SUCCESS.json`: the billing reconciliation), expired after 30 days
   listing: raw/{scan}/
-# The whole org is one source: a Hub lister following the token's rate-limit headers, one process.
+# The whole org is one source: a Hub lister following the token's rate-limit headers, one process. `-L`: each repo's
+# old LFS versions by the branch they were pushed to (`@history/<branch>/…`), through `lfs-files`, which takes a
+# write-scoped token: `HF_LFS_TOKEN`, this source's list task's alone (every other request keeps `HF_TOKEN`'s read scope).
 sources:
-  - {uri: "hf://open-athena", threads: 3}
+  - {uri: "hf://open-athena", threads: 3, args: [-L], secrets: {HF_LFS_TOKEN: hf-usage-hf-lfs-token}}
 # Small machines: the listing waits on the Hub, and the import, sorts, static names and interval store over one org
 # are minutes at 8 GB of DuckDB (the one-VM job ran all of it on one e2-standard-4).
 machines:

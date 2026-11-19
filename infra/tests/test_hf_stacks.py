@@ -257,10 +257,12 @@ def test_scan_profile_matches_the_site_and_the_stack():
     assert p.opts("age-store")["store"] == f"r2://{w['vars']['STORE_BUCKET']}/{w['vars']['AGE_STORE_PREFIX']}"
     block = re.search(r"^HF_SECRETS = \[\n(.*?)^\]", (INFRA / "gcp" / "__main__.py").read_text(), re.M | re.S).group(1)
     stack_secrets = re.findall(r'^    "([a-z0-9-]+)",', block, re.M)
-    assert len(stack_secrets) == 10
-    assert set(p.secrets.values()) <= set(stack_secrets)
+    assert len(stack_secrets) == 11
+    source_secrets = {k: v for s in p.sources for k, v in s.secrets.items()}
+    assert source_secrets == {"HF_LFS_TOKEN": "hf-usage-hf-lfs-token"}
+    assert set(p.secrets.values()) | set(source_secrets.values()) <= set(stack_secrets)
     redacted = json.loads((REPO / "job" / "hf-scan-runs.json").read_text())["secrets"]
-    assert set(p.secrets) <= set(redacted)
+    assert set(p.secrets) | set(source_secrets) <= set(redacted)
     assert (p.data, p.work, p.executor.service_account) == (
         "gs://oa-hf-usage-data", "gs://oa-hf-usage-data/nf", "hf-usage-job@oa-internal-450019.iam.gserviceaccount.com")
 

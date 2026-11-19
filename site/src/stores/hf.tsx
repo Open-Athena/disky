@@ -18,8 +18,11 @@ const enc = (segs: string[]) => segs.map(encodeURIComponent).join('/')
 
 /** A path's page on the Hub, by the listing's layout (`find/bulk_hf.py`): `<org>/buckets/<b>/…` →
  *  `/buckets/<org>/<b>/tree/…` (files and folders alike); `<org>/{models,datasets,spaces}/<repo>/…` → the repo's
- *  `tree/main/…` (folder) or `blob/main/…` (file), a model repo without the kind prefix; a repo's `@history` (the
- *  versions its tree no longer references) → its commits; the org and a kind's folder → the org's listing tab. */
+ *  `tree/main/…` (folder) or `blob/main/…` (file), a model repo without the kind prefix; a repo's `@history/<branch>/…`
+ *  (versions its tree no longer references, by the branch they were pushed to) → that branch's `tree/…` / `blob/…`
+ *  (an `/<oid>` leaf dropped: the file's page), and the rest of `@history` (its root, `@unlisted`, `@no-ref`, `refs/…`)
+ *  → the repo's commits; the org and a kind's folder → the org's listing tab. A branch whose name has a `/` links
+ *  wrong (its first segment taken as the branch). */
 export function hubLink(segs: string[], dir: boolean): ExternalLink | undefined {
   const [org, kind, name, ...rest] = segs
   if (!org) return undefined
@@ -30,7 +33,12 @@ export function hubLink(segs: string[], dir: boolean): ExternalLink | undefined 
   if (kind === 'buckets') return { href: `${HUB}/${enc(['buckets', org, name])}${rest.length ? `/tree/${enc(rest)}` : ''}`, label }
   const repo = `${HUB}/${enc(kind === 'models' ? [org, name] : [kind, org, name])}`
   if (!rest.length) return { href: repo, label }
-  if (rest[0] === '@history') return { href: `${repo}/commits/main`, label }
+  if (rest[0] === '@history') {
+    const [, ref, ...file] = rest
+    if (!ref || ref.startsWith('@') || ref === 'refs') return { href: `${repo}/commits/main`, label }
+    if (!dir && file.length > 1 && /^[0-9a-f]{64}$/.test(file[file.length - 1])) file.pop()
+    return { href: `${repo}/${dir || !file.length ? 'tree' : 'blob'}/${enc([ref, ...file])}`, label }
+  }
   return { href: `${repo}/${dir ? 'tree' : 'blob'}/main/${enc(rest)}`, label }
 }
 
@@ -47,7 +55,9 @@ const store: Store = {
         Every file in the <code>open-athena</code> org on Hugging Face, listed daily (08:00 UTC) and summed by directory:
         {' '}<code>buckets/&lt;bucket&gt;/…</code> for Storage Buckets, <code>models/</code>, <code>datasets/</code> and <code>spaces/</code> for repos.
         A repo’s sizes add up to what Hugging Face bills it (<code>usedStorage</code>): each stored LFS / Xet object once,
-        with older versions the current tree no longer references in one <code>@history/@unlisted</code> row per repo.
+        with older versions the current tree no longer references under <code>@history/&lt;branch&gt;/…</code>,
+        by the branch each was pushed to (a repo that keeps a branch per checkpoint shows one folder per checkpoint),
+        and anything still unaccounted for in one <code>@history/@unlisted</code> row.
         Plain git files (READMEs, small JSON) are listed at their size but aren’t billed.
       </p>
       <p>

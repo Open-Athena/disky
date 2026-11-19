@@ -136,6 +136,7 @@ images_reader = gcp.artifactregistry.RepositoryIamMember(
 # it) are secrets so that no account id is in git.
 HF_SECRETS = [
     "hf-usage-hf-token",              # HF_TOKEN: a Hub read token that sees the org's private repos and buckets
+    "hf-usage-hf-lfs-token",          # HF_LFS_TOKEN: the org's repos' write scope, for `lfs-files` only (the list task's)
     "hf-usage-cf-token",              # CLOUDFLARE_API_TOKEN: D1 edit (index-sync, scan runs); the `job_d1_token` CF output
     "hf-usage-cf-pages-token",        # CF_PAGES_TOKEN: Pages edit, the digest's plot upload; the `job_pages_token` CF output
     "hf-usage-cf-account-id",         # CLOUDFLARE_ACCOUNT_ID
