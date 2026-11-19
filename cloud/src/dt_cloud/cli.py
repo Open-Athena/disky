@@ -2920,33 +2920,64 @@ def access_status(buckets: tuple[str, ...], data_bucket: str, log_bucket: str | 
 @access.command("requesters")
 @option("-D", "--depth", type=int, default=2, show_default=True, help="Path segments kept as each row's prefix")
 @option("-d", "--data-bucket", envvar="DATA_BUCKET", default=None, help="The access store's bucket (`gs://<it>/access`); default $DATA_BUCKET")
+@option("-H", "--hourly", is_flag=True, help="Per UTC hour too (an `hour` column), into `<root>/requesters-hourly` by default: what joins a requester IP to the host and job behind it at the time")
 @option("-M", "--mem", default=None, help="DuckDB memory limit (e.g. 48GB)")
-@option("-o", "--out", default=None, help="Output dir or URL (default: `<root>/requesters`); one `<day>.parquet` per day")
+@option("-o", "--out", default=None, help="Output dir or URL (default: `<root>/requesters`, or `requesters-hourly` with -H); one `<day>.parquet` per day")
 @option("-p", "--threads", type=int, default=None, help="DuckDB threads")
 @option("-r", "--root", default=None, help="The access store (a dir or `gs://` URL holding `raw/`); default `gs://$DATA_BUCKET/access`")
-@option("-s", "--skip-existing", is_flag=True, help="Leave a day whose `<day>.parquet` is already written")
+@option("-s", "--skip-existing", is_flag=True, help="Leave a day whose `<day>.parquet` was written from the raw parts there now (one the access ingest has added to since is rolled again)")
 @argument("days", nargs=-1, required=True)
-def access_requesters(depth: int, data_bucket: str | None, mem: str | None, out: str | None, threads: int | None, root: str | None, skip_existing: bool, days: tuple[str, ...]) -> None:
+def access_requesters(depth: int, data_bucket: str | None, hourly: bool, mem: str | None, out: str | None, threads: int | None, root: str | None, skip_existing: bool, days: tuple[str, ...]) -> None:
     """Who made each day's requests: layer-1a rolled up per day × bucket × operation × client × requester × path prefix
     (`access_requesters.py`), one `<day>.parquet` per DAY (YYYY-MM-DD, UTC) under `-o`. Prints each day's row count."""
     import datetime as dt
 
-    from .access_requesters import exists, rollup_day
+    from .access_requesters import day_parts, part_key, raw_parts, rollup_day, written_parts
 
     if not root:
         if not data_bucket:
             raise SystemExit("access requesters: -r or -d/$DATA_BUCKET")
         root = f"gs://{data_bucket}/access"
-    out = (out or f"{root.rstrip('/')}/requesters").rstrip("/")
+    out = (out or f"{root.rstrip('/')}/requesters{'-hourly' if hourly else ''}").rstrip("/")
     if not out.startswith("gs://"):
         Path(out).mkdir(parents=True, exist_ok=True)
+    names = raw_parts(root)
     for d in days:
         day = dt.date.fromisoformat(d)
         dest = f"{out}/{day.isoformat()}.parquet"
-        if skip_existing and exists(dest):
-            err(f"requesters {day}: {dest} already written")
+        if skip_existing and written_parts(dest) == sorted(part_key(f) for f in day_parts(names, day)):
+            err(f"requesters {day}: {dest} already written from these raw parts")
             continue
-        print(f"{day}\t{rollup_day(root, day, dest, depth, mem, threads)}")
+        print(f"{day}\t{rollup_day(root, day, dest, depth, mem, threads, names, hourly)}")
+
+
+@access.command("hosts")
+@option("-d", "--data-bucket", envvar="DATA_BUCKET", default=None, help="The access store's bucket; default $DATA_BUCKET")
+@option("-n", "--dry-run", is_flag=True, help="Print the snapshot's row counts; write nothing")
+@option("-o", "--out", default=None, help="Output root (default `gs://$DATA_BUCKET/access/hosts`); the snapshot lands at `<out>/<day>/<HH>.parquet`")
+@option("-p", "--project", "projects", multiple=True, envvar="ACCESS_HOSTS_PROJECTS", help="A project whose VMs read the buckets (repeatable; default $ACCESS_HOSTS_PROJECTS, space-separated)")
+def access_hosts(data_bucket: str | None, dry_run: bool, out: str | None, projects: tuple[str, ...]) -> None:
+    """Snapshot the VMs behind the buckets' requests (`access_hosts.py`): each project's TPU nodes and Compute instances
+    with their internal and external IPs, which only the live APIs report, so a requester IP can later be joined to the
+    VM it was at the time (`specs/access-job-attribution.md`). Prints the path and rows by kind."""
+    from collections import Counter
+
+    from .access_hosts import snapshot, write
+
+    projects = tuple(p for ps in projects for p in ps.split())
+    if not projects:
+        raise SystemExit("access hosts: -p or $ACCESS_HOSTS_PROJECTS")
+    table = snapshot(list(projects))
+    kinds = Counter(table.column("kind").to_pylist())
+    summary = " ".join(f"{k}={n}" for k, n in sorted(kinds.items()))
+    if dry_run:
+        print(f"(dry run) {table.num_rows} rows: {summary}")
+        return
+    if not out:
+        if not data_bucket:
+            raise SystemExit("access hosts: -o or -d/$DATA_BUCKET")
+        out = f"gs://{data_bucket}/access/hosts"
+    print(f"{write(table, out)}\t{table.num_rows} rows: {summary}")
 
 
 @access.command("readers")
@@ -3525,11 +3556,8 @@ def _digest(
     variant = variant or cfg.variant
     if variant not in tpl.variants:
         raise SystemExit(f"digest: the {cfg.template} template has no {variant!r} variant ({' | '.join(tpl.variants)})")
-    m = (
-        dt.datetime.strptime(month, "%Y-%m").date()
-        if month
-        else dt.datetime.now(dt.timezone.utc).date().replace(day=1)
-    )
+    this_month = dt.datetime.now(dt.timezone.utc).date().replace(day=1)
+    m = dt.datetime.strptime(month, "%Y-%m").date() if month else this_month
     root = root or cfg.resolve_root()
 
     since_d = dt.date.fromisoformat(since) if since else None
@@ -3593,9 +3621,14 @@ def _digest(
             return
         _print_redo_plan(plan, f"{m:%Y-%m} in {channel} ({variant})", since_d)
         return
-    # the scheduled run (no -m) also closes the previous month's thread if its last day's provisional reply is still up
-    converge = dg.converge_slack if month else dg.converge_slack_now
-    converge(tpl, root, m, client, channel, variant, icons_dir=icons, deploy_plot=deploy, reply_delay=reply_delay, edit_replies=edit_replies)
+    # the scheduled run (no -m) also closes the previous month's thread if its last day's provisional reply is still up,
+    # and pins this month's OP; an explicit -m pins only when it names the current month
+    if month:
+        dg.converge_slack(tpl, root, m, client, channel, variant, icons_dir=icons, deploy_plot=deploy, reply_delay=reply_delay,
+                          edit_replies=edit_replies, current=m == this_month)
+    else:
+        dg.converge_slack_now(tpl, root, m, client, channel, variant, icons_dir=icons, deploy_plot=deploy, reply_delay=reply_delay,
+                              edit_replies=edit_replies)
     err(f"digest: converged {m:%Y-%m} ({cfg.template}, {variant})")
 
 
