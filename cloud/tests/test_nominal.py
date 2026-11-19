@@ -9,7 +9,8 @@ from dt_cloud import nominal as N
 from dt_cloud.append_runner import Busy, LocalLeaseFile, coordinator_lease
 
 T0 = int(datetime(2026, 11, 1, 8, tzinfo=timezone.utc).timestamp())
-CFG = N.Config(state='unused', site='https://site.test', channel='C123', title='Test scans')
+#: `clean` grouping: most tests below pin its copy; `color` (the default) is tested with `replace(CFG, group='color')`.
+CFG = N.Config(state='unused', site='https://site.test', channel='C123', title='Test scans', group='clean')
 
 
 def row(i, status='succeeded', issues=None, **fields):
@@ -51,6 +52,25 @@ class Slack:
         self.calls.append(('edit', ts, body))
         self.messages_by_id[ts]['text'] = body
 
+    alerts = {}
+
+    def alert(self, link, since):
+        return self.alerts.get(link)
+
+    def top_alert(self, link, text, metadata=None):
+        """A run's top-level alert in the channel, as its steps post it (`alerts` finds it by the run's link)."""
+        ts = f'{len(self.messages_by_id) + 1}.0'
+        self.messages_by_id[ts] = dict(ts=ts, parent=None, operation=None, text=text, bot_id='B1', link=link, metadata=metadata or {})
+        return ts
+
+    def alert_messages(self, link, since):
+        """As Slack's: top-level messages linking `link`, but none of the threads' own (their `operation` metadata)."""
+        return [{'ts': m['ts'], 'text': m['text'], 'metadata': m.get('metadata', {})}
+                for m in self.messages_by_id.values() if m['parent'] is None and link in m['text'] and m['operation'] is None]
+
+    def permalink(self, ts):
+        return f'https://slack.test/p{ts}'
+
 
 class Writer:
     def __init__(self, cfg=CFG):
@@ -70,7 +90,7 @@ def test_copy_states_boundary_trigger_mix_and_exact_run_links():
     assert N.parent(CFG, good, boundary) == (
         '✅ **Test scans: 2 consecutive clean runs**\n\n'
         'Since 2026-11-02 08:00 UTC after [2026-11-01T0800](https://site.test/scans/r0).\n\n'
-        'Latest completed: [2026-11-03 08:00 UTC](https://site.test/scans/r2).\n\n'
+        'Latest completed: [2026-11-03 08:00 UTC](https://site.test/scans/r2) · 1m 00s.\n\n'
         'Latest 2 runs: 1 scheduled / 1 manual. Each reply links its scan record. [All scans](https://site.test/scans).'
     )
     assert [N.reply(CFG, r) for r in reversed(good)] == [
@@ -192,10 +212,80 @@ def test_every_nonclean_boundary_closes_once_then_recovery_gets_new_parent(bad):
 
 
 def test_running_or_unfinalized_head_does_not_announce_success():
-    w = Writer()
-    for unfinished in [row(2, 'running', finished_ts=None), row(2, finished_ts=None)]:
-        w.run([unfinished, *history(1)])
+    for unfinished in [row(3, 'running', finished_ts=None), row(3, finished_ts=None)]:
+        w = Writer()
+        w.run(history(2))
+        w.slack.calls.clear()
+        w.run([unfinished, *history(2)])
+        assert bodies(w.slack) == [
+            ('post', '4.0', '⏳ :alarm_clock: [2026-11-04 08:00 UTC](https://site.test/scans/r3) · running'),
+            ('edit', '1.0', RUNNING_PARENT),
+        ]
+        assert (w.saved['posted'], w.saved['running']) == ({'r1': '2.0', 'r2': '3.0'}, {'r3': {'ts': '4.0', 'parent': '1.0'}})
+
+
+#: history(2)'s thread head while r3 runs
+RUNNING_PARENT = (
+    '✅ **Test scans: 2 consecutive clean runs**\n\n'
+    'Since 2026-11-02 08:00 UTC after [2026-11-01T0800](https://site.test/scans/r0).\n\n'
+    'Latest completed: [2026-11-03 08:00 UTC](https://site.test/scans/r2) · 1m 00s.\n\n'
+    'Running now: [2026-11-04 08:00 UTC](https://site.test/scans/r3).\n\n'
+    'Latest 2 runs: 2 scheduled / 0 manual. Each reply links its scan record. [All scans](https://site.test/scans).'
+)
+ADA = dict(trigger='manual', trigger_by='ada@example.org', trigger_emoji=':ada:')
+
+
+def running_writer(cfg=CFG):
+    """history(2)'s thread, with r3 (Ada's) running: its ⏳ reply 4.0, the head 1.0 naming it."""
+    w = Writer(cfg)
+    w.run(history(2))
+    w.run([row(3, 'running', finished_ts=None, **ADA), *history(2)])
+    assert w.slack.calls[-2:] == [
+        ('post', '4.0', '1.0', '⏳ :ada: [2026-11-04 08:00 UTC](https://site.test/scans/r3) · running'),
+        ('edit', '1.0', RUNNING_PARENT),
+    ]
+    w.slack.calls.clear()
+    w.run([row(3, 'running', finished_ts=None, **ADA), *history(2)])
     assert w.slack.calls == []
+    return w
+
+
+def test_a_running_reply_becomes_its_runs_reply_in_place():
+    w = running_writer()
+    w.run([row(3, **ADA), *history(2)])
+    assert bodies(w.slack) == [
+        ('edit', '4.0', '✅ :ada: [2026-11-04 08:00 UTC](https://site.test/scans/r3) · 1m 00s'),
+        ('edit', '1.0', '✅ **Test scans: 3 consecutive clean runs**\n\n'
+                        'Since 2026-11-02 08:00 UTC after [2026-11-01T0800](https://site.test/scans/r0).\n\n'
+                        'Latest completed: [2026-11-04 08:00 UTC](https://site.test/scans/r3) · 1m 00s.\n\n'
+                        'Latest 3 runs: 2 scheduled / 1 manual. Each reply links its scan record. [All scans](https://site.test/scans).'),
+    ]
+    assert (w.saved['posted'], 'running' in w.saved) == ({'r1': '2.0', 'r2': '3.0', 'r3': '4.0'}, False)
+
+
+@pytest.mark.parametrize('alert, suffix', [('99.0', ' · [alert](https://slack.test/p99.0)'), (None, '')])
+def test_a_clean_threads_running_reply_that_fails_closes_it_and_links_the_alert(alert, suffix):
+    w = running_writer()
+    w.slack.alerts = {'https://site.test/scans/r3': alert} if alert else {}
+    w.run([row(3, 'failed', failed_phase='index', error='boom', **ADA), *history(2)])
+    assert bodies(w.slack) == [
+        ('edit', '1.0', '✅ **Test scans: 2 consecutive clean runs (ended)**\n\n'
+                        'Since 2026-11-02 08:00 UTC after [2026-11-01T0800](https://site.test/scans/r0); last [2026-11-03 08:00 UTC](https://site.test/scans/r2).\n\n'
+                        'Ended by [2026-11-04 08:00 UTC](https://site.test/scans/r3): failed. [All scans](https://site.test/scans).'),
+        ('edit', '4.0', '❌ :ada: [2026-11-04 08:00 UTC](https://site.test/scans/r3) · 1m 00s · failed in index: boom' + suffix),
+    ]
+    assert (w.saved['closed'], 'running' in w.saved) == (True, False)
+
+
+def test_a_running_reply_whose_run_opens_a_failure_thread_links_it():
+    from dataclasses import replace
+
+    w = running_writer(replace(CFG, group='color'))
+    w.run([row(3, 'failed', failed_phase='index', error='boom', **ADA), *history(2)])
+    failed = '❌ :ada: [2026-11-04 08:00 UTC](https://site.test/scans/r3) · 1m 00s · failed in index: boom'
+    assert [(c[0], c[1]) for c in w.slack.calls] == [('edit', '1.0'), ('post', '5.0'), ('post', '6.0'), ('edit', '4.0')]
+    assert bodies(w.slack)[2:] == [('post', '6.0', failed), ('edit', '4.0', failed + ' · [thread](https://slack.test/p5.0)')]
+    assert (w.saved['parent'], w.saved['posted'], 'running' in w.saved) == ('5.0', {'r3': '6.0'}, False)
 
 
 def test_lost_history_boundary_does_not_announce_a_false_recovery_or_reset():
@@ -257,6 +347,34 @@ def test_reporting_failure_keeps_job_result_and_redacts_error(monkeypatch):
                           dry_run=False, env={}, run_id='r1', state=lambda: {}, redact=lambda s: s.replace('secret-123', '<SECRET>'))
     assert N.report_job(job) is None
     assert said == ['nominal report failed: ValueError: <SECRET> refused']
+
+    def exit_(*args, **kwargs):
+        raise SystemExit(2)
+    monkeypatch.setattr(N, 'run', exit_)
+    said.clear()
+    assert N.report_job(job) is None
+    assert said == ['nominal report failed: SystemExit: 2']
+
+
+@pytest.mark.parametrize('facts, ran', [({}, [None]), ({'parent': 'p0'}, []), ({'kind': 'reproc'}, [])])
+def test_start_report_reads_the_live_ledger_for_top_level_runs_and_never_fails_the_job(monkeypatch, facts, ran):
+    from dt_cloud import scan_runs
+
+    said, calls = [], []
+    monkeypatch.setattr(scan_runs, 'err', said.append)
+    monkeypatch.setattr(N, 'run', lambda raw, env, project, run_id=None, execute=False: calls.append(run_id) or 'nominal: ok')
+    job = SimpleNamespace(profile=SimpleNamespace(nominal=vars(CFG), project='p', store='primary'), recording=True,
+                          dry_run=False, env={}, run_id='r1', state=lambda: facts, redact=lambda s: s)
+    N.report_start(job)
+    assert (calls, said) == (ran, ['nominal: ok'] if ran else [])
+
+    for exc in (ValueError('lease busy'), SystemExit(2)):
+        def fail(*args, exc=exc, **kwargs):
+            raise exc
+        monkeypatch.setattr(N, 'run', fail)
+        said.clear()
+        N.report_start(job)
+        assert said == ([f'nominal start report failed: {type(exc).__name__}: {exc}'] if ran else [])
 
 
 @pytest.mark.parametrize('env', [{'DT_ALERTS': 'stderr'}, {'DT_ALERTS': 'off'}, {'DT_ALERTS': '0'}])
@@ -412,8 +530,9 @@ def test_color_threads_consecutive_failures_and_each_change_of_color_closes_the_
     f4 = row(4, 'failed', failed_phase='probe')
     w.run([f4, f3, *history(2)])
     assert bodies(w.slack) == [
-        ('edit', '1.0', '**Test scans: clean-run sequence ended**\n\n'
-                        '[2026-11-04 08:00 UTC](https://site.test/scans/r3): failed. [All scans](https://site.test/scans).'),
+        ('edit', '1.0', '✅ **Test scans: 2 consecutive clean runs (ended)**\n\n'
+                        'Since 2026-11-02 08:00 UTC after [2026-11-01T0800](https://site.test/scans/r0); last [2026-11-03 08:00 UTC](https://site.test/scans/r2).\n\n'
+                        'Ended by [2026-11-04 08:00 UTC](https://site.test/scans/r3): failed. [All scans](https://site.test/scans).'),
         ('post', '4.0', '❌ **Test scans: 2 consecutive failed runs**\n\n'
                         'Since 2026-11-04 08:00 UTC after [2026-11-03T0800](https://site.test/scans/r2) (clean).\n\n'
                         'Latest: [2026-11-05 08:00 UTC](https://site.test/scans/r4): failed in probe.\n\n'
@@ -427,11 +546,12 @@ def test_color_threads_consecutive_failures_and_each_change_of_color_closes_the_
     assert w.slack.calls == []
     w.run([row(5), f4, f3, *history(2)])
     assert bodies(w.slack) == [
-        ('edit', '4.0', '**Test scans: failure sequence ended**\n\n'
-                        '[2026-11-06 08:00 UTC](https://site.test/scans/r5): clean. [All scans](https://site.test/scans).'),
+        ('edit', '4.0', '❌ **Test scans: 2 consecutive failed runs (ended)**\n\n'
+                        'Since 2026-11-04 08:00 UTC after [2026-11-03T0800](https://site.test/scans/r2); last [2026-11-05 08:00 UTC](https://site.test/scans/r4).\n\n'
+                        'Ended by [2026-11-06 08:00 UTC](https://site.test/scans/r5): clean. [All scans](https://site.test/scans).'),
         ('post', '7.0', '✅ **Test scans: 1 consecutive clean run**\n\n'
                         'Since 2026-11-06 08:00 UTC after [2026-11-05T0800](https://site.test/scans/r4).\n\n'
-                        'Latest completed: [2026-11-06 08:00 UTC](https://site.test/scans/r5).\n\n'
+                        'Latest completed: [2026-11-06 08:00 UTC](https://site.test/scans/r5) · 1m 00s.\n\n'
                         'Latest 1 run: 1 scheduled / 0 manual. Each reply links its scan record. [All scans](https://site.test/scans).'),
         ('post', '8.0', '✅ :alarm_clock: [2026-11-06 08:00 UTC](https://site.test/scans/r5) · 1m 00s'),
     ]
@@ -454,8 +574,9 @@ def test_signature_threads_a_failure_while_it_repeats_and_a_different_one_opens_
     b5 = row(5, issues=[{'phase': 'probe'}])
     w.run([b5, a4, a3, *history(1)])
     assert bodies(w.slack) == [
-        ('edit', '1.0', '**Test scans: failure sequence ended**\n\n'
-                        '[2026-11-06 08:00 UTC](https://site.test/scans/r5): phase issues: probe. [All scans](https://site.test/scans).'),
+        ('edit', '1.0', '❌ **Test scans: 2 consecutive failed runs (ended)**\n\n'
+                        'Since 2026-11-04 08:00 UTC after [2026-11-02T0800](https://site.test/scans/r1); last [2026-11-05 08:00 UTC](https://site.test/scans/r4).\n\n'
+                        'Ended by [2026-11-06 08:00 UTC](https://site.test/scans/r5): phase issues: probe. [All scans](https://site.test/scans).'),
         ('post', '4.0', '❌ **Test scans: 1 consecutive failed run with phase issues**\n\n'
                         'Since 2026-11-06 08:00 UTC after [2026-11-05T0800](https://site.test/scans/r4) (failed in interval-store: OOM again).\n\n'
                         'Latest: [2026-11-06 08:00 UTC](https://site.test/scans/r5): phase issues: probe.\n\n'
@@ -517,3 +638,206 @@ def test_alerts_post_at_once_without_failure_grouping_or_with_reports_off(tmp_pa
     job.alert('fail', 'run failed (exit 1)')
     job.alert('warn', 'probe slow')
     assert (posted, job.state().get('deferred_alerts')) == ([('fail', 'run failed (exit 1)'), ('warn', 'probe slow')], None)
+
+
+def test_head_carries_the_latest_runs_outcome_and_each_configured_stores_size_and_week():
+    cfg = N.config(dict(state='unused', site='https://site.test', channel='C123', title='Test scans',
+                        stores={'Data': 'primary', 'Metadata': 'meta'}))
+    assert cfg.stores == (('Data', 'primary'), ('Metadata', 'meta'))
+    latest = {**row(2), 'secs': 2343, 'cost_usd': 0.1607, 'out_bytes': 439_552_060, 'delta_bytes': -818_040}
+    week = [dict(date='2026-11-02T0800', bytes=288_000_000_000_000, objects=3_700_000),
+            dict(date='2026-11-03T0800', bytes=289_890_807_590_998, objects=3_719_843),
+            dict(date='2026-11-09T0800', bytes=289_500_000_000_000, objects=3_710_000),
+            dict(date='2026-11-10T0900', bytes=288_966_905_203_791, objects=3_703_266)]
+    stores = N.stores_text(cfg, {'primary': {'path': '', 'points': week}, 'meta': 503})
+    assert N.parent(cfg, [latest, row(1)], row(0, 'failed'), stores=stores).split('\n\n') == [
+        '✅ **Test scans: 2 consecutive clean runs**',
+        'Since 2026-11-02 08:00 UTC after [2026-11-01T0800](https://site.test/scans/r0).',
+        'Latest completed: [2026-11-03 08:00 UTC](https://site.test/scans/r2) · 39m 03s · $0.16 · output 440 M (−818 K).',
+        '[Data](https://site.test/): 289 T · 3,703,266 objects · −924 G over 7d.',
+        '[Metadata](https://site.test/meta): size unavailable (HTTP 503).',
+        'Latest 2 runs: 2 scheduled / 0 manual. Each reply links its scan record. [All scans](https://site.test/scans).',
+    ]
+    assert [N.store_line(cfg, 'Meta', 'meta', s) for s in ({'points': []}, {'points': week[:1]})] == [
+        '[Meta](https://site.test/meta): no scans yet.',
+        '[Meta](https://site.test/meta): 288 T · 3,700,000 objects.',
+    ]
+    assert [N.si(v) for v in (0, 999, 46_844_611_976, 7_176_822_198, 288_966_905_203_791, 1.2e15)] == [
+        '0 B', '999 B', '46.8 G', '7.18 G', '289 T', '1.20 P']
+    assert N.outcome({**row(1), 'secs': None}) == ''
+
+
+def test_a_date_only_scan_id_in_a_stores_series_reads_as_its_midnight():
+    """A deployment's first scans may be ids of a bare date (hf's `2026-10-15`): a series point is any scan id."""
+    cfg = N.config(dict(state='unused', site='https://site.test', channel='C123', title='Test scans'))
+    points = [dict(date='2026-10-15', bytes=1_000_000, objects=10),
+              dict(date='2026-10-22T0800', bytes=1_500_000, objects=12)]
+    assert N.store_line(cfg, 'Data', 'primary', {'points': points}) == '[Data](https://site.test/): 1.50 M · 12 objects · +500 K over 7d.'
+
+
+class Pins(Slack):
+    """The fake Slack with the channel's pins and canvas."""
+
+    def __init__(self):
+        super().__init__()
+        self.pinned, self.canvases, self.titles = [], {}, {}
+
+    def join(self):
+        self.calls.append(('join',))
+
+    def pin(self, ts):
+        self.calls.append(('pin', ts))
+        if ts not in self.pinned:
+            self.pinned.append(ts)
+
+    def unpin(self, ts):
+        self.calls.append(('unpin', ts))
+        self.pinned = [p for p in self.pinned if p != ts]
+
+    def canvas_create(self, body, title):
+        canvas = f'F{len(self.canvases) + 1}'
+        self.canvases[canvas] = body
+        self.titles[canvas] = title
+        self.calls.append(('canvas_create', canvas))
+        return canvas
+
+    def canvas_edit(self, canvas, body):
+        self.calls.append(('canvas_edit', canvas))
+        if self.canvases.get(canvas) is None:
+            return False
+        self.canvases[canvas] = body
+        return True
+
+    def canvas_rename(self, canvas, title):
+        self.calls.append(('canvas_rename', canvas))
+        if self.canvases.get(canvas) is None:
+            return False
+        self.titles[canvas] = title
+        return True
+
+
+def test_the_open_heads_pin_moves_when_a_new_thread_starts_and_the_canvas_is_written_only_on_change():
+    w = Writer()
+    w.slack = Pins()
+    w.run(history(2))
+    N.pin_head(w.saved, w.slack, w.save)
+    N.pin_head(w.saved, w.slack, w.save)
+    assert (w.slack.pinned, w.saved['pinned']) == (['1.0'], '1.0')
+    # a failure closes the thread and unpins its head at once; the recovery's head takes the pin
+    w.run([row(3, 'failed'), *history(2)])
+    N.pin_head(w.saved, w.slack, w.save)
+    N.pin_head(w.saved, w.slack, w.save)
+    assert (w.slack.pinned, w.saved['closed'], 'pinned' in w.saved) == ([], True, False)
+    w.run([row(4), row(3, 'failed'), *history(2)])
+    assert w.saved['parent'] == '4.0'
+    N.pin_head(w.saved, w.slack, w.save)
+    assert (w.slack.pinned, w.saved['pinned']) == (['4.0'], '4.0')
+
+    w.slack.calls.clear()
+    N.write_canvas(w.saved, w.slack, 'a\n', 'T', w.save)
+    N.write_canvas(w.saved, w.slack, 'a\n', 'T', w.save)
+    N.write_canvas(w.saved, w.slack, 'b\n', 'T', w.save)
+    assert (w.slack.calls, w.slack.titles) == ([('join',), ('canvas_create', 'F1'), ('join',), ('canvas_edit', 'F1')], {'F1': 'T'})
+    w.run([row(6, 'failed'), row(5), row(4), row(3, 'failed'), *history(2)])
+    w.run([row(7), row(6, 'failed'), row(5), row(4), row(3, 'failed'), *history(2)])
+    assert {k: w.saved[k] for k in N.KEPT} == {'pinned': '4.0', 'canvas': 'F1', 'canvas_body': 'b\n', 'canvas_title': 'T'}
+    # a canvas made before titles (state without one) is renamed once, its body unchanged
+    del w.saved['canvas_title']
+    w.slack.calls.clear()
+    N.write_canvas(w.saved, w.slack, 'b\n', 'T2', w.save)
+    N.write_canvas(w.saved, w.slack, 'b\n', 'T2', w.save)
+    assert (w.slack.calls, w.slack.titles, w.saved['canvas_title']) == (
+        [('join',), ('canvas_edit', 'F1'), ('canvas_rename', 'F1')], {'F1': 'T2'}, 'T2')
+    # deleted by hand: the next write creates it again
+    w.slack.canvases['F1'] = None
+    w.slack.calls.clear()
+    N.write_canvas(w.saved, w.slack, 'c\n', 'T2', w.save)
+    assert (w.slack.calls, w.saved['canvas'], w.slack.canvases['F2'], w.slack.titles['F2']) == (
+        [('join',), ('canvas_edit', 'F1'), ('canvas_create', 'F2')], 'F2', 'c\n', 'T2')
+
+
+def test_canvas_names_the_status_stores_latest_run_and_its_longest_phases_and_recent_runs():
+    cfg = N.config(dict(state='unused', site='https://site.test', channel='C123', title='Test scans', stores={'Meta': 'meta'}))
+    latest = {**row(2, **ADA), 'cost_usd': 0.1607, 'out_bytes': 439_552_060, 'delta_bytes': -818_040,
+              'spans': [dict(phase='list a', start=0, end=562), dict(phase='index', start=600, end=624),
+                        dict(phase='static-names', start=700, end=1176), dict(phase='open', start=1200, end=None)]}
+    rows = [row(3, 'running', finished_ts=None), latest, row(1, 'failed', failed_phase='index', error='boom')]
+    text = N.canvas_text(cfg, rows, 'https://slack.test/p1.0', {'meta': 503}, N.series_ts('2026-11-03T0900'))
+    assert text.split('\n\n') == [
+        '✅ Test scans: 1 consecutive clean run · [thread](https://slack.test/p1.0)',
+        'Updated 2026-11-03 09:00 UTC.',
+        '## Stores',
+        '- [Meta](https://site.test/meta): size unavailable (HTTP 503).',
+        '## Latest run',
+        '✅ :ada: [2026-11-03 08:00 UTC](https://site.test/scans/r2) · 1m 00s · $0.16 · output 440 M (−818 K)',
+        'Longest phases: list a 9m 22s · static-names 7m 56s · index 0m 24s',
+        '## Recent runs',
+        '- ✅ :ada: [2026-11-03 08:00 UTC](https://site.test/scans/r2) · 1m 00s · $0.16\n'
+        '- ❌ :alarm_clock: [2026-11-02 08:00 UTC](https://site.test/scans/r1) · 1m 00s · failed in index: boom',
+        '## Pages',
+        '[All scans](https://site.test/scans) · [Health](https://site.test/health) · [Meta](https://site.test/meta)\n',
+    ]
+
+
+def test_canvas_status_is_the_open_streak_else_the_newest_failure():
+    failed = row(3, 'failed', failed_phase='list', error='throttled')
+    issues = row(3, issues=[dict(phase='probe', outcome='failed', recovery=None)])
+    assert [N.status(CFG, rows) for rows in (history(2), [failed, *history(2)], [issues, *history(2)], [])] == [
+        '✅ Test scans: 2 consecutive clean runs',
+        '❌ Test scans: latest run failed in list: throttled',
+        '❌ Test scans: latest run phase issues: probe',
+        'Test scans: no finished runs yet',
+    ]
+
+
+def test_color_is_the_default_grouping():
+    assert N.Config(state='unused', site='https://site.test', channel='C123', title='Test scans').group == 'color'
+
+
+def test_a_failure_threads_reply_folds_its_runs_top_level_alerts_and_leaves_each_a_pointer():
+    """r2 2026-11-18: a run's static-names and probe warnings posted top-level (the second before alerts grouped). In a
+    failure thread the run's reply carries their lines, and each alert becomes a one-line pointer to that reply."""
+    from dataclasses import replace
+
+    w = Writer(replace(CFG, group='color'))
+    w.run(history(2))
+    link = 'https://site.test/scans/r3'
+    grouped = w.slack.top_alert(link, f'*⚠️ Test scans 2026-11-04T0800*\nstatic-names failed (exit 1) · <https://logs.test/u1|task logs>\n<{link}|scan>', {
+        'event_type': 'disky_alert', 'event_payload': {'group': 'r3', 'title': '⚠️ Test scans 2026-11-04T0800', 'priority': 0, 'links': [], 'lines': [
+            {'message': 'static-names failed (exit 1)', 'url': 'https://logs.test/u1', 'url_title': 'task logs'}]}})
+    plain = w.slack.top_alert(link, f'*⚠️ Test scans 2026-11-04T0800*\nprobe failed (exit 1): 4 failed\n<https://logs.test/u2|task logs> · <{link}|scan>')
+    w.slack.calls.clear()
+    r3 = row(3, issues=[{'phase': 'static-names'}, {'phase': 'probe'}])
+    w.run([r3, *history(2)])
+    assert bodies(w.slack)[1:] == [
+        ('post', '6.0', '❌ **Test scans: 1 consecutive failed run**\n\n'
+                        'Since 2026-11-04 08:00 UTC after [2026-11-03T0800](https://site.test/scans/r2) (clean).\n\n'
+                        'Latest: [2026-11-04 08:00 UTC](https://site.test/scans/r3): phase issues: probe, static-names.\n\n'
+                        'Each reply links its scan record. [All scans](https://site.test/scans).'),
+        ('post', '7.0', '❌ :alarm_clock: [2026-11-04 08:00 UTC](https://site.test/scans/r3) · 1m 00s · phase issues: probe, static-names\n'
+                        'static-names failed (exit 1) · [task logs](https://logs.test/u1)\n'
+                        'probe failed (exit 1): 4 failed · [task logs](https://logs.test/u2)'),
+        ('edit', grouped, '↪ ⚠️ Test scans 2026-11-04T0800: in the [failure thread](https://slack.test/p7.0)'),
+        ('edit', plain, '↪ ⚠️ Test scans 2026-11-04T0800: in the [failure thread](https://slack.test/p7.0)'),
+    ]
+    w.slack.calls.clear()
+    w.run([r3, *history(2)])
+    assert w.slack.calls == []
+
+
+def test_alert_messages_never_returns_a_threads_own_head():
+    """r2 2026-11-18: a failure thread's head links its newest run, so the run's fold took the head for one of its alerts
+    and edited it into a pointer. A thread's messages carry `disky_nominal` metadata; alerts don't."""
+    slack = object.__new__(N.Slack)
+    link = 'https://site.test/scans/r3'
+    history = [
+        {'ts': '3.0', 'bot_id': 'B1', 'text': f'❌ *Test scans: 1 consecutive failed run* … <{link}|…>',
+         'metadata': {'event_type': 'disky_nominal', 'event_payload': {'operation': 'op'}}},
+        {'ts': '2.0', 'bot_id': 'B1', 'text': f'*⚠️ scan* probe failed <{link}|scan>', 'metadata': {'event_type': 'disky_alert', 'event_payload': {}}},
+        {'ts': '1.0', 'bot_id': 'B1', 'text': f'*⚠️ scan* static-names failed <{link}|scan>'},
+        {'ts': '0.5', 'bot_id': 'B1', 'text': 'another run <https://site.test/scans/r2|scan>'},
+        {'ts': '0.4', 'user': 'U9', 'text': f'a person quoting <{link}|it>'},
+    ]
+    slack.client = SimpleNamespace(channel='C123', bot_ids=(None, 'B1'), _request=lambda api, args, **kw: {'messages': history})
+    assert [m['ts'] for m in slack.alert_messages(link, 0)] == ['1.0', '2.0']
+    assert slack.alert(link, 0) == '1.0'

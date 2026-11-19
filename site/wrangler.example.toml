@@ -62,6 +62,7 @@ AUTH_MODE = "app"                           # `app` (the app's own sign-in) | `p
 # CACHE_NS = ""                               # response-cache env tag (`_lib/edgeCache.ts`): unset = the request host,
 #                                             #   except PROD_HOST (prod's keys); set "" on a prod with no PROD_HOST
 # REPO_URL = "https://github.com/me/my-fork"  # the "Source on GitHub" link; unset = this repo
+# SLACK_PR_EMOJI = ":github-pr:"                # the Slack workspace's PR emoji: a PR preview's activity posts lead with `<it> [#N]`; unset = `[#N]`
 # PEERS = '[{"label": "Other usage", "prod": "other.example.com", "dev": "dev.other.example.com", "meta": true}]'
 #                                             # sibling deployments the omnibar / site menu link (src/peers.ts): a JSON
 #                                             #   array in a TOML literal string; may list this one; unset = none
@@ -133,6 +134,7 @@ ROOT_LABEL = "my buckets"                   # the store root's crumb label
 # BUCKET_REGIONS = '{"my-bucket": "us-east1"}'  # a one-region bucket cut runs its job there, beside the data; unset = BATCH_REGION
 # DATA_BUCKET = "my-data"                      # the bucket a run's plan.json, manifest and logs land in (dispatch requires it)
 # SWEEP_IMAGE = "<region>-docker.pkg.dev/<project>/<repo>/<image>:<tag>"  # the executor's image (dispatch requires it)
+# SWEEP_SITE_TOKEN_SECRET = "site-token"         # Secret Manager secret (in GCP_PROJECT) holding a read-only site token: the `sweep` executor's jobs get it as $SITE_TOKEN (dispatch and undo require it)
 # History retention is opt-in: jobs build immutable candidates; adoption is a separate environment CAS.
 # HISTORY_CURRENT_KEY = "history/environments/dev/CURRENT.json"  # unset: follow the scan pipeline's writer generations
 # HISTORY_IMAGE = "<region>-docker.pkg.dev/<project>/<repo>/<image>@sha256:<digest>"  # pinned history worker image

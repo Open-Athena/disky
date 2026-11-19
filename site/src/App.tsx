@@ -19,20 +19,21 @@ import { NonLiveHistory } from './NonLiveHistory'
 import { DiskSpace } from './DiskSpace'
 import { ExtLink } from './ExtLink'
 import { DiskSpaceDiff, diskDiffScan } from './DiskSpaceDiff'
-import { diffLoadingLabel, type DiffData } from './diffModel'
+import { diffLoadingLabel, diffMiss, type DiffData } from './diffModel'
 import { ScanCombobox } from './ScanCombobox'
 import { ago, buildUserIndex, epochDaysToDate } from './colors'
 import { ChildrenTable } from './ChildrenTable'
 import { FitSelect } from './FitSelect'
 import { PathPopover } from './PathPopover'
 import { fromUrlPath, mountedSegs, pathCopy, pathText, urlSegsOf } from './pathCrumbs'
-import { listsObjects, openHref, treeHref } from './objects'
+import { hrefOf, listsObjects, openHref, treeHref, type CellHrefs } from './objects'
 import { useFolderSearch } from './folderSearch'
 import { Busy, Loading, Skeleton } from './Busy'
 import { useRules } from './rules'
 import { useSectionSpy, withoutSection, type SectionMode } from 'use-prms/sections'
 import { decodeSection, encodeSection, LEGACY_ANCHORS, SECTION_IDS, SECTION_KEY } from './homeSections'
 import { useScrollSpyPref } from './prefs'
+import { useKeepInView } from './keepInView'
 import { SectionAnchor } from './SectionAnchor'
 import { barControls } from './pageBar'
 import { LifecycleFold } from './LifecycleFold'
@@ -735,6 +736,8 @@ function AppContent() {
     write: spy === 'on' ? 'replace' : 'off',
     mode: SECTION_MODE,
   })
+  // A drill from the diff keeps the diff where it was on screen (the spy scrolls a new path to the top).
+  const holdDiff = useKeepInView('diff', location.key)
   // Turned off: drop the section it last wrote, so a copied link doesn't open (or unfurl) at a section no longer in
   // view. After the spy has stopped writing: stripped in the same tick, the still-writing spy put it back.
   const spyWas = useRef(spy)
@@ -798,6 +801,22 @@ function AppContent() {
     enabled: !!asof,
     staleTime: Infinity,
   })
+  // A scan whose run hasn't finished has no age rows yet (its age tiers are listed by the run's last step,
+  // `index-sync`, after search indexing). When the scan before it has rows here, the section says so and links it,
+  // rather than vanishing; a deployment with no age index at all (both empty) still shows nothing.
+  const ageEmpty = !ageQ.isPending && !ageQ.isError && !(ageQ.data?.records.length) && !!asof
+  const agePrevQ = useQuery({
+    queryKey: ['age', store.key, prevScan, drillPath, ageBudget],
+    queryFn: async () => {
+      const r = await sfetch(`/api/age-pyramid?date=${prevScan}&path=${encodeURIComponent(drillPath)}&bin_budget=${ageBudget}`, { credentials: 'include', cache: 'no-cache' })
+      if (!r.ok) throw new Error(`age ${r.status}`)
+      return await r.json() as { records: { dt: number; b: number; o: number }[] }
+    },
+    enabled: ageEmpty && !!prevScan,
+    staleTime: Infinity,
+  })
+  const ageWaiting = ageEmpty && !!agePrevQ.data?.records.length
+  const agePrevHref = ageWaiting && prevScan ? hrefWithScan(pathname, search, selOf(new URLSearchParams(search)), prevScan, true, times, scans) : null
   const age: AgeRow[] = useMemo(
     () => (ageQ.data?.records ?? []).map(r => ({ d: Math.floor(r.dt / 86400_000), b: r.b, o: r.o })),
     [ageQ.data],
@@ -826,17 +845,23 @@ function AppContent() {
   // (`useSectionSpy`). Never copy the router's section into a navigation — the spy
   // rewrites the URL's behind the router's back, so it's whatever section was
   // last *linked*, not the one in view (a crumb click warped to it).
-  const drillTo = (segs: string[]) => {
+  const drillLoc = (segs: string[]) => {
     const q = new URLSearchParams(withoutSection(search))
     q.delete('open')
-    navigate({ pathname: treeHref(store, segs), search: q.size ? `?${q}` : '' })
+    return { pathname: treeHref(store, segs), search: q.size ? `?${q}` : '' }
   }
+  const drillTo = (segs: string[]) => navigate(drillLoc(segs))
   // `?open=<name>`: an object under the drilled directory, shown in the leaf
   // viewer below the map (objects.ts `openHref`). Opening pushes history, so
   // Back closes it.
   const [openP, setOpenP] = useUrlState('open', stringParam(), true)
   // Without the router's section: the spy names the one in view on the reader's next scroll.
   const openObject = (segs: string[]) => navigate(openHref(store, segs, withoutSection(search)))
+  // The same two navigations as hrefs: a map cell's link (⌘-click / middle-click opens it in a new tab).
+  const cellHrefs: CellHrefs = {
+    drill: segs => hrefOf(drillLoc(segs)),
+    open: segs => hrefOf(openHref(store, segs, withoutSection(search))),
+  }
   // ⌘K: the folders and files named for the query, largest first, at this scan; a pick drills there (`folderSearch.ts`).
   useFolderSearch({ fetcher: sfetch, date: asof ?? null, indexed: indexedOnly0 ? covered : null, at: endAt, qs: syntax.id, drill: drillTo, open: openObject, filter: q => setFq(q), size: fmtBytes })
   // Read-recency lens domain: the access-log observation window (meta), not
@@ -947,6 +972,7 @@ function AppContent() {
   })
   const diff: DiffData | null = diffQ.data ?? null
   const diffErr = diffQ.error
+  const diffMissed = diffErr ? diffMiss(diffErr.message) : null
   // The shown diff is the previous pair's (placeholder) or the pair is still
   // aligning: its numbers describe another pair, so the subtitle says
   // "aligning" instead, and the drawn treemap dims under a marker.
@@ -1483,6 +1509,7 @@ function AppContent() {
             onPathChange={onMapPath}
             objects={objects}
             onOpen={p => openObject(p.slice(1).map(n => n.name))}
+            hrefs={cellHrefs}
             brush={brush}
             onBrush={setBrush}
             band={band}
@@ -1696,7 +1723,11 @@ function AppContent() {
             {diff && !diffStale ? null : diffErr && !diffStale && /^(404|409)/.test(diffErr.message) ? (
               <span className="tab-note">
                 {' '}· {diffErr.message.startsWith('404')
-                  ? <><code>{graftPath || '/'}</code> is in neither scan’s index — pick other scans or drill up.</>
+                  ? diffMissed && 'scan' in diffMissed
+                    // An end the server doesn't serve: a scan whose index is still publishing (the list can name it
+                    // first), not a path missing from both.
+                    ? <>{fmtS(diffMissed.scan)} isn’t served yet — its index is still publishing; pick {diffMissed.end === 'to' ? 'an earlier end' : 'another start'}, or retry in a few minutes.</>
+                    : <><code>{graftPath || '/'}</code> is in neither scan’s index — pick other scans or drill up.</>
                   : <>no per-user index for one of these scans — pick newer scans, or clear the user.</>}
               </span>
             ) : diffErr && !diffStale ? (
@@ -1717,11 +1748,12 @@ function AppContent() {
             <div ref={diffSlotRef} className={diffStaleOther ? 'diff-slot busy-host stale' : 'diff-slot busy-host'} style={diffStale && diffSlotH.current ? { minHeight: diffSlotH.current } : undefined}>
               {/* A drill in the diff drills the page: the map, the table and
                   the chart follow, and the diff itself re-reads at the new
-                  prefix (its rows are relative to the drilled path). */}
-              <DiffTreemap model={diffModel} onDrill={rel => drillTo([...diffSegs, ...rel])} onOpen={rel => openObject([...diffSegs, ...rel])} />
+                  prefix (its rows are relative to the drilled path). The diff
+                  stays where it was on screen (`holdDiff`). */}
+              <DiffTreemap model={diffModel} onDrill={rel => { holdDiff(); drillTo([...diffSegs, ...rel]) }} onOpen={rel => openObject([...diffSegs, ...rel])} hrefs={{ drill: rel => cellHrefs.drill([...diffSegs, ...rel]), open: rel => cellHrefs.open([...diffSegs, ...rel]) }} />
               {/* The map's tabular twin: the same cells as rows, sortable; a
-                  row's name drills like its cell (and scrolls the maps up). */}
-              <DiffTable model={diffModel} scheme={store.scheme} segs={diffSegs} onDrill={rel => openPath([...diffSegs, ...rel])} onOpen={rel => openObject([...diffSegs, ...rel])} />
+                  row's name drills like its cell. */}
+              <DiffTable model={diffModel} scheme={store.scheme} segs={diffSegs} onDrill={rel => { holdDiff(); openPath([...diffSegs, ...rel]) }} onOpen={rel => openObject([...diffSegs, ...rel])} />
               {diffStaleOther || diffStale
                 ? <Busy label={`aligning ${fmtS(diffPrev)} → ${fmtS(asof)}…`} />
                 : diffRefining
@@ -1741,7 +1773,7 @@ function AppContent() {
           their place naming them. */}
       {(() => {
         const present: BlindPanel[] = [
-          ...(!lensScoped && (ageQ.isPending || age.length > 0) ? ['age' as const] : []),
+          ...(!lensScoped && (ageQ.isPending || age.length > 0 || ageWaiting) ? ['age' as const] : []),
           ...(store.lifecycle ? ['lifecycle' as const] : []),
           ...(meta && store.prices ? ['classes' as const] : []),
           ...(hasAttr && mapTree ? ['ownership' as const] : []),
@@ -1752,7 +1784,7 @@ function AppContent() {
 
       {/* Hidden when there's no age index for this deploy (e.g. r2 has no
           age-pyramid tier yet): show while loading or once rows arrive. */}
-      {blindShown(!!fq) && !lensScoped && (ageQ.isPending || age.length > 0) && (
+      {blindShown(!!fq) && !lensScoped && (ageQ.isPending || age.length > 0 || ageWaiting) && (
       <section id="mtime">
         {/* Granularity is auto-picked (and user-switchable) inside AgeChart, so
             the heading stays unit-free rather than lying about "month". */}
@@ -1765,6 +1797,12 @@ function AppContent() {
           </>}><span className="info" tabIndex={0} aria-label="about this chart">ⓘ</span></Tooltip>
         </h2>
         {ageQ.isPending && !!asof && <Skeleton height={220} label="loading ages…" />}
+        {ageWaiting && (
+          <p className="hint">
+            This scan’s ages appear once its run finishes publishing
+            {agePrevHref && prevScan ? <>; <a href={agePrevHref}>{fmtS(prevScan)}</a> has them</> : null}.
+          </p>
+        )}
         {age.length > 0 && (
           <AgeChart rows={age} baseRows={diffPrev ? ageBase : undefined} diffLabels={diffPrev && asof ? { from: fmtS(diffPrev), to: fmtS(asof) } : undefined} catOrder={catOrder} mode={ageMode} mapMode={effMode} picked={ageModeP === ageMode} dateAxis={dateRange} onMode={m => setAgeModeP(m)} modes={ageModes} userIdx={userIdx} readRange={ageReadRange} readThrough={ageReadRange ? readThru : null} readTint={readTint} readUnlogged={readUnlogged} scheme={store.scheme} band={band} onBand={setBand} />
         )}

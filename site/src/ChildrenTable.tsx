@@ -28,6 +28,7 @@ import { rowLabel, type RowMatches, rowsCover } from './filterCover'
 import { ActStatus, RowActs, type RowSource, useActDeps, useKeepFocus, useMatchAct } from './MatchActions'
 import { RootSourceTag } from './UnionNotes'
 import { flatRows, LARGEST_MAX, LARGEST_STEP, useLargest } from './largest'
+import { StickyTable } from './stickyHead'
 
 // Sortable, paged listing of the treemap's current node's children — the
 // tabular twin of the map above it: every named row is a link, a directory
@@ -325,7 +326,7 @@ export function ChildrenTable({ node, segs, scheme, bucketSchemes, scan, flatOk 
   return (
     <section className="children-tbl" onClick={clearOnDeadClick}>
       <div className="pager top">{modes}{pager}</div>
-      {flatNote || <table className="worklist selectable">
+      {flatNote || <StickyTable className="worklist selectable">
         <thead>
           <tr>
             {showSel && <th className="col-sel" onClick={e => { e.stopPropagation(); if (!(e.target as HTMLElement).closest('input')) sel.togglePage() }}><input type="checkbox" aria-label="select / deselect this page" title="select / deselect this page (⇧x)" checked={sel.pageAll} onChange={sel.togglePage} /></th>}
@@ -411,9 +412,9 @@ export function ChildrenTable({ node, segs, scheme, bucketSchemes, scan, flatOk 
                       ? <Tooltip content={<code className="elide-full">{pathText(schemeOf(fullSegs), fullSegs)}</code>} placement="right">{name}</Tooltip>
                       : name
                     const inside = mark?.as === 'inside' && <Tooltip content={`${mark.n.toLocaleString('en-US')} staged ${mark.n === 1 ? 'item' : 'items'} inside: review them at /staged`}><a className="row-n staged-n" href="/staged"> · {mark.n.toLocaleString('en-US')} staged</a></Tooltip>
-                    // A union root's row: its store's mark, that store's scan in its tip (`store`/`scan`).
+                    // A union root's row: its store's mark before its name (so names stay aligned), that store's scan in its tip (`store`/`scan`).
                     const src = <RootSourceTag node={k} />
-                    return count ? <>{cell}{src}<span className="row-n"> · {count.toLocaleString('en-US')}{atLeast ? '+' : ''} {count === 1 && !atLeast ? 'match' : 'matches'}</span>{inside}</> : <>{cell}{src}{inside}</>
+                    return count ? <>{src}{cell}<span className="row-n"> · {count.toLocaleString('en-US')}{atLeast ? '+' : ''} {count === 1 && !atLeast ? 'match' : 'matches'}</span>{inside}</> : <>{src}{cell}{inside}</>
                   })()}
                 </td>
                 <td className="num">{fmtBytes(k.bytes)}</td>
@@ -484,7 +485,7 @@ export function ChildrenTable({ node, segs, scheme, bucketSchemes, scan, flatOk 
             <td colSpan={(hasYr ? 3 : 2) + (hasRead ? 1 : 0) + (hasOwners ? 1 : 0) + (showSel ? 1 : 0)} />
           </tr>
         </tfoot>
-      </table>}
+      </StickyTable>}
       {pager && <div className="pager">{pager}</div>}
       {/* The selection bar docks BELOW the table (sticky), so making a
           selection never shifts the rows you're clicking. The dock is ALWAYS

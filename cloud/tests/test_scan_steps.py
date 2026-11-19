@@ -482,7 +482,7 @@ def gcs_ctx(tmp_path, env, monkeypatch, **opts):
                            "index": {"mode": "path-index", "attribution": ["attr/a.parquet"], "access": "access/agg/*/*.parquet",
                                      "args": ["-u", "bysize"], "lifecycle": True, "rules": True},
                            "static-names": {"profile": "sn.json"},
-                           "digest": {"template": "gcs", "config": "d.yml", "platforms": ["slack", "discord"]}, **opts}})
+                           "digest": {"template": "cost", "config": "d.yml", "platforms": ["slack", "discord"]}, **opts}})
     c = S.make_ctx(p, {**env, "DT_DATA_MOUNT": str(tmp_path / "mnt")})
     c.sh_impl = Runner(tmp_path)
     return c
@@ -577,7 +577,7 @@ def test_gcs_extra_steps(tmp_path, env, monkeypatch):
         f"dt-cloud index-sync -p -d <tmp>/mnt/dvx/{k} -g G1 -k {k} -M <tmp>/mnt/dvx/snapshots 2026-10-16T1200",
         "dt-cloud index-gc -r 30 2026-10-16T1200",
         "dt-cloud healthcheck -d 2026-10-16T1200",
-        "dt-cloud digest -T gcs -C d.yml -P slack -r gs://dvx/snapshots",
+        "dt-cloud digest -T cost -C d.yml -P slack -r gs://dvx/snapshots",
     ]
 
 
@@ -708,6 +708,8 @@ def test_soft_steps_classification():
         "cf-usage": "side converges",
         "gcp-cost": "side",
         "soft-delete": "side",
+        "access-requesters": "side",
+        "access-jobs": "side converges",
         "vm-pack": "side converges",
     }
 
@@ -802,6 +804,23 @@ def test_interval_store_failure_publishes_the_scans_sorts_when_asked(tmp_path, e
     assert [x for x in c.sh_impl.calls if x.startswith("dt-cloud publish-r2")] == published
 
 
+@pytest.mark.parametrize(("rc", "token", "warmed"), [(0, True, True), (1, True, False), (0, False, False)])
+def test_interval_store_warms_the_series_once_its_append_lands(tmp_path, env, monkeypatch, rc, token, warmed):
+    """A landed append changes every size-over-time series' cache key: the step warms them then (`warm-cache -S`, two at a
+    time), not hours later at `warm-cache`; only with the site's token, never after a failed append."""
+    from dt_cloud import scan_runs
+
+    monkeypatch.setattr(scan_runs, "run_grouped", lambda cmd, timeout, grace, **kw: scan_runs.Ran(rc, False, None))
+    env["R2_ARCHIVE"] = "r2://idx"
+    if token:
+        env.update(SITE_TOKEN="st", SITE_URL="https://site.example.org")
+    c = gcs_ctx(tmp_path, dict(env), monkeypatch)
+    c.sh_impl = Runner(tmp_path, stdout={"dt-cloud interval-store current": "g1\n"})
+    S.interval_store(c, None)
+    warm = [x for x in c.sh_impl.calls if x.startswith("dt-cloud warm-cache")]
+    assert warm == ([f"dt-cloud warm-cache -S -j 2 -d 2026-10-16T1200 -r {S._snap_root(c)}"] if warmed else [])
+
+
 def test_interval_store_adds_from_the_store_or_the_data_store(tmp_path, env, monkeypatch):
     """The one-machine `add` reads the scans' sorts from the store by default, and from the data store with
     `source: data` (so `publish-r2 -S` needn't copy them; specs/lean-scans.md §1.1); `compact` passes the policy (`-C`);
@@ -848,7 +867,7 @@ def hf_profile(**kw):
                          "index": {"webdata": ["dt-cloud", "path-index", "-d", "{scan}", "-l", "{data}/raw/{scan}/ns/*.parquet", "-o", "{web}"],
                                    "args": ["-T", "{work}/duckdb-tmp"]},
                          "static-names": {"gen": "2026-10-15hf", "mem": "8GB", "build_args": ["-x", "16,8"]},
-                         "digest": {"template": "cw", "config": "d.yml"}}, **kw)
+                         "digest": {"template": "quota", "config": "d.yml"}}, **kw)
 
 
 def test_hf_list_then_index(tmp_path, env, monkeypatch):
@@ -933,8 +952,8 @@ def test_digest_uploads_with_the_pages_token(tmp_path, env):
     del env["CF_PAGES_TOKEN"]
     S.digest(c, None)
     assert [(cmd, e["CLOUDFLARE_API_TOKEN"]) for cmd, e in zip(c.sh_impl.calls, c.sh_impl.envs)] == [
-        ("dt-cloud digest -T cw -C d.yml -P slack -r <tmp>/data/snapshots/hf", "pages"),
-        ("dt-cloud digest -T cw -C d.yml -P slack -r <tmp>/data/snapshots/hf", "d1"),
+        ("dt-cloud digest -T quota -C d.yml -P slack -r <tmp>/data/snapshots/hf", "pages"),
+        ("dt-cloud digest -T quota -C d.yml -P slack -r <tmp>/data/snapshots/hf", "d1"),
     ]
 
 
@@ -945,7 +964,7 @@ def test_digest_root_from_the_profile(tmp_path, env):
     hf = hf_profile()
     c = ctx(tmp_path, env, **{**hf, "options": {**hf["options"], "digest": {**hf["options"]["digest"], "root": "r2://idx/{snapshots}"}}})
     S.digest(c, None)
-    assert c.sh_impl.calls == ["dt-cloud digest -T cw -C d.yml -P slack -r r2://idx/snapshots/hf"]
+    assert c.sh_impl.calls == ["dt-cloud digest -T quota -C d.yml -P slack -r r2://idx/snapshots/hf"]
 
 
 class Ends:
@@ -1085,8 +1104,8 @@ def test_digest_failure_fails_its_phase(tmp_path, env):
         ("begin", "digest"), ("end", "digest", 1, True, "slack usage-digest step failed"),
         ("begin", "digest"), ("end", "digest", 0, False, None),
     ], [
-        "dt-cloud digest -T cw -C d.yml -P slack -r <tmp>/data/snapshots/hf",
-        "dt-cloud digest -T cw -C d.yml -P discord -r <tmp>/data/snapshots/hf",
+        "dt-cloud digest -T quota -C d.yml -P slack -r <tmp>/data/snapshots/hf",
+        "dt-cloud digest -T quota -C d.yml -P discord -r <tmp>/data/snapshots/hf",
     ], None)
 
 
@@ -1751,6 +1770,41 @@ def test_soft_delete_reads_each_gcs_source_to_the_data_store_and_r2(tmp_path, en
     for none in (ctx(tmp_path, env, steps=["soft-delete"], sources=[{"uri": "r2://r", "endpoint": "https://r2.example.org"}]), ctx(tmp_path, {**env, "REPROC": "1"}, steps=["soft-delete"], sources=sources)):
         S.soft_delete(none, None)
         assert none.sh_impl.calls == []
+
+
+def test_access_requesters_rolls_up_the_days_before_the_scan(tmp_path, env):
+    """`access-requesters` (listed in `steps`): `dt-cloud access requesters -s` over the data store's access logs, for
+    the `days` (default 2) UTC days before the scan's, oldest first, with the depth and DuckDB limits it's given;
+    REPROC: nothing run."""
+    c = ctx(tmp_path, env, steps=["access-requesters"])
+    S.access_requesters(c, None)
+    assert c.sh_impl.calls == ["dt-cloud access requesters -s -r <tmp>/data/access -D2 2026-10-14 2026-10-15"]
+    c = ctx(tmp_path, env, steps=["access-requesters"], options={**NL_OPTS, "access-requesters": {"days": 1, "depth": 3, "mem": "48GB", "threads": 8}})
+    S.access_requesters(c, None)
+    assert c.sh_impl.calls == ["dt-cloud access requesters -s -r <tmp>/data/access -D3 -M 48GB -p 8 2026-10-15"]
+    c = ctx(tmp_path, env, steps=["access-requesters"], options={**NL_OPTS, "access-requesters": {"mem": "48GB", "hourly": 3, "attribute": True}})
+    S.access_requesters(c, None)
+    assert c.sh_impl.calls == [
+        "dt-cloud access requesters -s -r <tmp>/data/access -D2 -M 48GB 2026-10-14 2026-10-15",
+        "dt-cloud access requesters -s -H -r <tmp>/data/access -D3 -M 48GB 2026-10-14 2026-10-15",
+        "dt-cloud access attribute -s -r <tmp>/data/access 2026-10-14 2026-10-15",
+    ]
+    none = ctx(tmp_path, {**env, "REPROC": "1"}, steps=["access-requesters"])
+    S.access_requesters(none, None)
+    assert none.sh_impl.calls == []
+
+
+def test_access_jobs_submits_the_deployments_image_for_the_days_before_the_scan(tmp_path, env):
+    """`access-jobs` (listed in `steps`): `dt-cloud access jobs` under the data store's `access/jobs`, for the `days`
+    (default 2) UTC days before the scan's, with `batch`'s options as its flags; REPROC: nothing run."""
+    batch = {"image": "r/finelog:latest", "region": "us-central1", "cross_region": True, "env": {"MARIN_MIRROR_BUDGET_GB": "5"}}
+    c = ctx(tmp_path, env, steps=["access-jobs"], options={**NL_OPTS, "access-jobs": {"batch": batch}})
+    S.access_jobs(c, None)
+    assert c.sh_impl.calls == ["dt-cloud access jobs -r <tmp>/data/access/jobs -i r/finelog:latest -L us-central1 -X "
+                               "-e MARIN_MIRROR_BUDGET_GB=5 2026-10-14 2026-10-15"]
+    none = ctx(tmp_path, {**env, "REPROC": "1"}, steps=["access-jobs"], options={**NL_OPTS, "access-jobs": {"batch": batch}})
+    S.access_jobs(none, None)
+    assert none.sh_impl.calls == []
 
 
 def test_soft_delete_failure_fails_its_phase_not_the_run(tmp_path, env):

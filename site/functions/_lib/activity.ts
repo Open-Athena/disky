@@ -11,14 +11,14 @@ import { slackApi, type SlackEnv, slackScopes, slackPeople } from './slack.js'
 import { dataUriImage, identiconPng, identiconSeed, publishAvatar, serviceIconPng } from './publicAvatar.js'
 import type { SlogBatch, SlogEvent } from './sessionLogShape.js'
 import {
-  activityEventLine, addPages, addTrail, type Burst, DISCORD, emptyTrail, type Fmt, fmtGap, highlights, joins, KIND_DEFS, type KindConf,
+  activityEventLine, addPages, addTrail, type Burst, DISCORD, emptyTrail, type Fmt, fmtGap, highlights, hostTag, type HostTagEnv, joins, KIND_DEFS, type KindConf,
   type KindRow, type KindsConf, actorName, mergeKinds, type Notice, pathOf, plainName, renderDetails, renderDiscord, renderHeadline, renderLines,
   renderSummary, reported, senderName, serviceName, serviceReasons, type ServerEvent, sessionUrl,
   SLACK, tallyClient, uaFamily,
 } from './activityShape.js'
 import type { AccessEvent, AuditSink } from '@open-athena/auth'
 
-export interface ActivityEnv extends SlackEnv {
+export interface ActivityEnv extends SlackEnv, HostTagEnv {
   DB?: D1Database
   /** A Discord channel webhook URL (a secret). Unset = no Discord. */
   DISCORD_ADMIN_WEBHOOK?: string
@@ -91,14 +91,14 @@ export async function loadBurst(db: D1Database, id: number): Promise<StoredBurst
 /** How far back a tab's session resumes its own earlier burst (`burstFor`'s `sid`). */
 export const RESUME_S = 7 * 86400
 
-/** The actor's burst for an event at `ts`: their latest, if within `BATCH_GAP_S`; else, given the event's session `sid`,
- *  the newest burst (within `RESUME_S`) that session was already in, so one tab keeps one thread (`resumed` is the gap,
- *  in seconds); else a new one. */
+/** The actor's burst for an event at `ts` on `origin` (a burst is one server's, so its post says which): their latest
+ *  there, if within `BATCH_GAP_S`; else, given the event's session `sid`, the newest burst (within `RESUME_S`) that session
+ *  was already in, so one tab keeps one thread (`resumed` is the gap, in seconds); else a new one. */
 export async function burstFor(
   db: D1Database, actor: string, via: string, origin: string, ts: number, gapS: number = BATCH_GAP_S, sid?: string,
 ): Promise<{ id: number; resumed?: number }> {
-  const latest = await db.prepare('SELECT id, last_ts FROM activity_bursts WHERE actor = ? ORDER BY last_ts DESC LIMIT 1')
-    .bind(actor).first<{ id: number; last_ts: number }>()
+  const latest = await db.prepare('SELECT id, last_ts FROM activity_bursts WHERE actor = ? AND origin = ? ORDER BY last_ts DESC LIMIT 1')
+    .bind(actor, origin).first<{ id: number; last_ts: number }>()
   const extend = (id: number) => db.prepare('UPDATE activity_bursts SET first_ts = MIN(first_ts, ?1), last_ts = MAX(last_ts, ?1), via = ?2 WHERE id = ?3')
     .bind(ts, via, id).run()
   if (latest && joins(latest, ts, gapS)) {
@@ -107,9 +107,9 @@ export async function burstFor(
   }
   if (sid) {
     const prior = await db.prepare(
-      `SELECT id, last_ts FROM activity_bursts WHERE actor = ? AND last_ts >= ? AND last_ts <= ?
+      `SELECT id, last_ts FROM activity_bursts WHERE actor = ? AND origin = ? AND last_ts >= ? AND last_ts <= ?
        AND EXISTS (SELECT 1 FROM json_each(sids) WHERE value = ?) ORDER BY last_ts DESC LIMIT 1`,
-    ).bind(actor, ts - RESUME_S, ts, sid).first<{ id: number; last_ts: number }>()
+    ).bind(actor, origin, ts - RESUME_S, ts, sid).first<{ id: number; last_ts: number }>()
     if (prior) {
       await extend(prior.id)
       const gap = ts - prior.last_ts
@@ -395,7 +395,7 @@ async function render(env: ActivityEnv, b: StoredBurst, conf: KindsConf, now: nu
     const asUser = (await slackScopes(env)).has('chat:write.customize')
     const slackWho = asUser ? await slackSenderOf(env, b, who) : who
     const sender = asUser ? { username: slackWho.name, ...(slackWho.icon ? { icon_url: slackWho.icon } : {}) } : {}
-    const text = renderHeadline(shown, { fmt: SLACK, conf, name, notice }, asUser)
+    const text = renderHeadline(shown, { fmt: SLACK, conf, name, notice, tag: hostTag(b.origin, env, SLACK, env.SLACK_PR_EMOJI) }, asUser)
     const parent = await ensurePost(db, b.id, 'slack', 'parent', now,
       async () => (await slackApi(env, 'chat.postMessage', { channel, text, ...sender, unfurl_links: false, unfurl_media: false })).ts ?? null,
       ts => slackApi(env, 'chat.update', { channel, ts, text }))
@@ -419,7 +419,7 @@ async function render(env: ActivityEnv, b: StoredBurst, conf: KindsConf, now: nu
     const notice = notices?.discord ?? undefined
     const url = env.DISCORD_ADMIN_WEBHOOK!
     const content = renderDiscord(
-      renderSummary(shown, { fmt: DISCORD, conf, highlights: h, name, notice }),
+      renderSummary(shown, { fmt: DISCORD, conf, highlights: h, name, notice, tag: hostTag(b.origin, env, DISCORD) }),
       lineKinds.map(([kind, es]) => renderLines(kind, lineEvents(es, DISCORD), DISCORD)),
       `${b.origin}/admin/activity?burst=${b.id}`,
     )

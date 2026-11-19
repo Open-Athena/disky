@@ -11,7 +11,7 @@ import {
 import { serviceIconPng, sha256Hex } from './publicAvatar'
 import {
   activityEventLine, activityRefreshLine, addTrail, authLine, type Burst, clientKind, DISCORD, emptyTrail, highlights, joins, keptEvents, mergeKinds, pageLines,
-  renderDetails, renderDiscord, renderHeadline, renderLines, renderSummary, senderName, type ServerEvent, serverKind, serviceReasons, sessionLinks, SLACK,
+  hostTag, renderDetails, renderDiscord, renderHeadline, renderLines, renderSummary, senderName, type ServerEvent, serverKind, serviceReasons, sessionLinks, SLACK,
   tallyClient, uaFamily,
 } from './activityShape'
 import { captureWrite, noteActivity } from './activityHook'
@@ -221,6 +221,26 @@ describe('rendering', () => {
     ])
   })
 
+  it("an admin post says which server it came from: nothing for prod, 🚧 dev for the dev stack, [#N] (the PR) for a PR's preview", () => {
+    const env = { DEV_HOST: 'dev.x.test', PAGES_SUBDOMAIN: 'oa-x.pages.dev', REPO_URL: 'https://github.com/o/r/' }
+    const pr = 'https://github.com/o/r/pull/8'
+    expect([
+      'https://x.test', 'https://dev.x.test', 'https://dev.oa-x.pages.dev', 'https://pr-8.oa-x.pages.dev', 'https://1a2b3c4d.oa-x.pages.dev',
+      'https://oa-x.pages.dev', 'https://a.b.oa-x.pages.dev', 'https://pr-8.other.pages.dev', '',
+    ].map(o => hostTag(o, env, SLACK))).toEqual(['', '🚧 dev', '🚧 dev', `[<${pr}|#8>]`, '[1a2b3c4d]', '', '', '', ''])
+    expect([
+      hostTag('https://pr-8.oa-x.pages.dev', env, SLACK, ':github-pr:'),
+      hostTag('https://pr-8.oa-x.pages.dev', env, DISCORD),
+      hostTag('https://pr-8.oa-x.pages.dev', { PAGES_SUBDOMAIN: 'oa-x.pages.dev' }, SLACK, ':gh:'),
+      hostTag('https://dev.x.test', {}, SLACK),
+    ]).toEqual([`:github-pr: [<${pr}|#8>]`, `[[#8](<${pr}>)]`, ':gh: [#8]', ''])
+    const o = { fmt: SLACK, conf, highlights: highlights(events), tag: '🚧 dev' }
+    expect([renderHeadline(burst, o, true), renderSummary(burst, { ...o, fmt: DISCORD }).split('\n')[0]]).toEqual([
+      `🚧 dev · 3 assignments · 4 page loads · 9 URL changes · 2026-10-21 14:20–15:00Z · <${ORIGIN}/admin/activity?burst=7|activity>`,
+      '🚧 dev · **ann** (browser) · 2026-10-21 14:20–15:00Z',
+    ])
+  })
+
   it("Slack's post is one line (sent as the user when signed in, else naming who and how); the rest is its first reply", () => {
     const o = { fmt: SLACK, conf, highlights: highlights(events) }
     const act = `<${ORIGIN}/admin/activity?burst=7|activity>`
@@ -245,6 +265,10 @@ describe('rendering', () => {
       `<${ORIGIN}/admin/sessions/sid-aaaaaaaaaa|session sid-aaaa>`,
     ])
     expect(renderDetails({ ...burst, pages: {}, trail: emptyTrail(), sids: [] }, { ...o, highlights: {} })).toBe('')
+    const deletion = [{ ts: S, kind: 'deletion', line: 'real deletion of plan #2 dispatched (cw-sweep-real-x)', detail: { plan: 2, job: 'cw-sweep-real-x', mode: 'real', thread: { channel: 'C01', ts: '1794900000.123456' } } }]
+    expect(highlights(deletion)).toEqual({ plans: [2], threads: { 2: { channel: 'C01', ts: '1794900000.123456' } } })
+    expect(renderDetails({ ...burst, pages: {}, trail: emptyTrail(), sids: [] }, { ...o, highlights: highlights(deletion) })).toBe(
+      `<${ORIGIN}/staged?plan=2|plan 2> (<https://slack.com/archives/C01/p1794900000123456|thread>)`)
     expect([senderName('ann@example.test', 'Ann Lee'), senderName('ann@example.test', ' '), senderName('ann@example.test', null)]).toEqual(['Ann Lee', 'ann', 'ann'])
   })
 
@@ -347,6 +371,16 @@ describe('D1 and sinks', () => {
       counts: { assign: 3 }, pages: {}, trail: { n: 0, last: [] }, sids: [], rendered_ms: null, dirty: false,
     })
     expect((await eventsOf(db, 1)).map(e => e.line)).toEqual(['`gs://b/x/` → bob', '`gs://b/y/` → bob', '`gs://b/z/` → bob'])
+  })
+
+  it('a burst is one server\'s: the same person on another origin within the gap opens its own', async () => {
+    const { db, env, wait } = await setup()
+    const dev = { ...who, origin: 'https://dev.example.test' }
+    const a = await recordServer(env, who, [assign(S, 'gs://b/x/')], wait, NOW)
+    const b = await recordServer(env, dev, [assign(S + 60, 'gs://b/y/')], wait, NOW + 60_000)
+    const c = await recordServer(env, who, [assign(S + 120, 'gs://b/z/')], wait, NOW + 120_000)
+    expect([a, b, c]).toEqual([1, 2, 1])
+    expect([(await loadBurst(db, 1))!.origin, (await loadBurst(db, 2))!.origin]).toEqual([ORIGIN, 'https://dev.example.test'])
   })
 
   it('feeds client batches into the same burst; unrecorded kinds are not counted', async () => {

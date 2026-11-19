@@ -334,14 +334,20 @@ export interface Highlights {
   largest?: { pattern: string; bytes: number; owner: string | null }
   /** Owners assigned to (null = cleared), in first-seen order. */
   owners?: (string | null)[]
-  /** The staged plans touched. */
+  /** The staged plans touched (staging edits, deletion runs). */
   plans?: number[]
+  /** A plan's Slack thread, where a deletion event recorded it (`detail.thread`). */
+  threads?: Record<number, { channel: string; ts: string }>
 }
+
+/** A Slack message's link (`chat.getPermalink`'s shape without the workspace: slack.com redirects to it). */
+export const slackPermalink = (channel: string, ts: string): string => `https://slack.com/archives/${channel}/p${ts.replace('.', '')}`
 
 export function highlights(events: readonly Pick<ServerEvent, 'kind' | 'detail'>[]): Highlights {
   const out: Highlights = {}
   const owners: (string | null)[] = []
   const plans: number[] = []
+  const threads: Record<number, { channel: string; ts: string }> = {}
   for (const e of events) {
     const d = e.detail ?? {}
     if (e.kind === 'assign') {
@@ -351,10 +357,15 @@ export function highlights(events: readonly Pick<ServerEvent, 'kind' | 'detail'>
         out.largest = { pattern: d.pattern, bytes: d.bytes, owner }
       }
     }
-    if (e.kind === 'stage' && typeof d.plan === 'number' && !plans.includes(d.plan)) plans.push(d.plan)
+    if ((e.kind === 'stage' || e.kind === 'deletion') && typeof d.plan === 'number') {
+      if (!plans.includes(d.plan)) plans.push(d.plan)
+      const t = d.thread as { channel?: unknown; ts?: unknown } | undefined
+      if (typeof t?.channel === 'string' && typeof t.ts === 'string') threads[d.plan] = { channel: t.channel, ts: t.ts }
+    }
   }
   if (owners.length) out.owners = owners
   if (plans.length) out.plans = plans
+  if (Object.keys(threads).length) out.threads = threads
   return out
 }
 
@@ -368,6 +379,31 @@ export interface SummaryOpts {
   notice?: Notice
   /** Who the burst is, as resolved for its sender (a profile's or grant's name); default `actorName(actor)`. */
   name?: string
+  /** Which server the burst came from (`hostTag`), leading the headline / summary; empty for production. */
+  tag?: string
+}
+
+/** The vars `hostTag` reads: the dev stack's custom host, the Pages project's `pages.dev` subdomain (`isPreviewHost`),
+ *  the repository PRs link into, and the Slack workspace's PR emoji (a shortcode; unset: none). */
+export interface HostTagEnv { DEV_HOST?: string; PAGES_SUBDOMAIN?: string; REPO_URL?: string; SLACK_PR_EMOJI?: string }
+
+/** Which server an `origin` is, for an admin post: nothing for production (or any host it can't place), `🚧 dev` for
+ *  the dev stack (`DEV_HOST`, or the `dev` alias under `PAGES_SUBDOMAIN`), `[#N]` for a PR's `pr-N` preview (the PR
+ *  linked under `REPO_URL`), after `emoji` when the sink's workspace has one (`SLACK_PR_EMOJI`), and `[<label>]` for any
+ *  other preview host (a deployment hash). */
+export function hostTag(origin: string, env: HostTagEnv, fmt: Fmt, emoji?: string): string {
+  let host: string
+  try { host = new URL(origin).hostname.toLowerCase() } catch { return '' }
+  if (env.DEV_HOST && host === env.DEV_HOST.toLowerCase()) return '🚧 dev'
+  const sub = env.PAGES_SUBDOMAIN?.toLowerCase()
+  if (!sub || !host.endsWith(`.${sub}`)) return ''
+  const label = host.slice(0, -sub.length - 1)
+  if (!/^[a-z0-9-]+$/.test(label)) return ''
+  if (label === 'dev') return '🚧 dev'
+  const pr = /^pr-([1-9][0-9]*)$/.exec(label)
+  if (!pr) return `[${label}]`
+  const ref = env.REPO_URL ? fmt.link(`${env.REPO_URL.replace(/\/+$/, '')}/pull/${pr[1]}`, `#${pr[1]}`) : `#${pr[1]}`
+  return `${emoji ? `${emoji} ` : ''}[${ref}]`
 }
 
 const via = (v: string): string => v === 'grant' ? 'agent token / share link' : v === 'service' ? 'service' : v === 'public' ? 'signed out' : 'browser'
@@ -382,7 +418,7 @@ const activityLink = (b: Pick<Burst, 'origin' | 'id'>, fmt: Fmt): string => fmt.
 export function renderSummary(b: Burst, o: SummaryOpts): string {
   const { fmt, conf } = o
   const counts = countsText(b, conf)
-  const lead = o.notice ? `${noticeText(o.notice, fmt)} · ` : ''
+  const lead = [...(o.tag ? [o.tag] : []), ...(o.notice ? [noticeText(o.notice, fmt)] : [])].map(x => `${x} · `).join('')
   const lines = [`${lead}${fmt.bold(o.name ?? actorName(b.actor))} (${via(b.via)}) · ${spanText(b)}`, ...(counts.length ? [counts.join(' · ')] : [])]
   return [...lines, ...detailLines(b, o, [activityLink(b, fmt)])].join('\n')
 }
@@ -390,10 +426,10 @@ export function renderSummary(b: Burst, o: SummaryOpts): string {
 /** A burst's Slack post, one line: the counts, when, the activity link. Sent as its actor (`asUser`: their name and
  *  face as the sender) the line leaves out who, keeping how for a grant (`agent token / share link`); otherwise it
  *  leads with who and how. */
-export function renderHeadline(b: Burst, o: Pick<SummaryOpts, 'fmt' | 'conf' | 'name' | 'notice'>, asUser: boolean): string {
+export function renderHeadline(b: Burst, o: Pick<SummaryOpts, 'fmt' | 'conf' | 'name' | 'notice' | 'tag'>, asUser: boolean): string {
   const { fmt, conf } = o
   const who = asUser ? (b.via === 'session' ? [] : [via(b.via)]) : [`${fmt.bold(o.name ?? actorName(b.actor))} (${via(b.via)})`]
-  return [...(o.notice ? [noticeText(o.notice, fmt)] : []), ...who, ...countsText(b, conf), spanText(b), activityLink(b, fmt)].join(' · ')
+  return [...(o.tag ? [o.tag] : []), ...(o.notice ? [noticeText(o.notice, fmt)] : []), ...who, ...countsText(b, conf), spanText(b), activityLink(b, fmt)].join(' · ')
 }
 
 /** The rest of a burst's Slack post, as its first reply: highlights, pages, session / plan links. */
@@ -407,7 +443,10 @@ function detailLines(b: Burst, o: SummaryOpts, lead: string[]): string[] {
   if (h.owners && (h.owners.length > 1 || !h.largest)) lines.push(`Owners: ${h.owners.map(x => x ?? 'cleared').join(', ')}`)
   if (conf.view?.notify !== 'off') lines.push(...pageLines(b, fmt, o.topPages ?? 5))
   const links = [...lead, ...sessionLinks(b, fmt)]
-  for (const p of h.plans ?? []) links.push(fmt.link(`${b.origin}/staged?plan=${p}`, `plan ${p}`))
+  for (const p of h.plans ?? []) {
+    const t = h.threads?.[p]
+    links.push(fmt.link(`${b.origin}/staged?plan=${p}`, `plan ${p}`) + (t ? ` (${fmt.link(slackPermalink(t.channel, t.ts), 'thread')})` : ''))
+  }
   if (links.length) lines.push(links.join(' · '))
   return lines
 }

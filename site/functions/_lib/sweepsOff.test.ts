@@ -19,7 +19,7 @@ vi.mock('./stagedSlack.js', async original => ({ ...await original<typeof import
 
 const CW_RUN = 'cw-sweep-real-20261106-000000z'
 const GCS_RUN = 'gcs-sweep-real-20261106-000000z'
-const DIGEST_REAPPLY = JSON.stringify({ template: 't', config: 'job/digest.yml', root: 'snapshots/s', env_script: 'job/env.sh', r2_bucket: 'r2b', secrets: { SITE_TOKEN: 'site-token' } })
+const DIGEST_REAPPLY = JSON.stringify({ template: 'quota', config: 'job/digest.yml', root: 'snapshots/s', env_script: 'job/env.sh', r2_bucket: 'r2b', secrets: { SITE_TOKEN: 'site-token' } })
 
 let env: Record<string, unknown>
 let token: string
@@ -37,7 +37,7 @@ beforeEach(async () => {
     VALUES (?, 1, 'm', 'scan', 0, 0, 'actor', 'real', 100, 200, 'logs', 300, 'pending')`).run(CW_RUN)
   env = {
     DB: db, SESSION_SECRET: 's'.repeat(32), BASE_SCOPE: 'cw', GCP_SA_KEY: 'key', JOB_SA: 'job@example.test', GCP_PROJECT: 'p', BATCH_REGION: 'r', DATA_BUCKET: 'data',
-    SWEEP_IMAGE: 'image', SWEEP_S3_ENDPOINT: 'https://s3.example.test', STORE_SCHEME: 's3://', STORE_BUCKETS: 'b', DIGEST_REAPPLY, STATIC_GEN: 'g',
+    SWEEP_IMAGE: 'image', SWEEP_SITE_TOKEN_SECRET: 'site-token', SWEEP_S3_ENDPOINT: 'https://s3.example.test', STORE_SCHEME: 's3://', STORE_BUCKETS: 'b', DIGEST_REAPPLY, STATIC_GEN: 'g',
   }
   token = (await gateFor(env as never)!.mint({ email: 'ops@example.test', scopes: ['cw', 'admin'], name: 'ops', createdBy: 'test', expiresAt: null, maxRedeems: null })).token
 })
@@ -94,7 +94,7 @@ describe('`SWEEP_DISPATCH` unset: past the guard, to the GCP call', () => {
   it('digest re-apply submits its Batch job', async () => {
     expect(await post(digestReapply as Route, '/api/digest-reapply', { month: '2026-11', channel: 'C01234567', target: 'thread', dry_run: true })).toEqual([
       500, { error: 'batch submit failed (500)', detail: '{}' },
-      ['https://batch.googleapis.com/v1/projects/p/locations/r/jobs?job_id=t-digest-<stamp>z'],
+      ['https://batch.googleapis.com/v1/projects/p/locations/r/jobs?job_id=quota-digest-<stamp>z'],
     ])
   })
 })

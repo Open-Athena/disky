@@ -1,4 +1,5 @@
-"""Nominal scan threads, after the authoritative run has finished (specs/done/nominal-run-threads.md).
+"""Nominal scan threads (specs/done/nominal-run-threads.md): each run's reply, posted ⏳ when it starts and edited to
+its outcome once the authoritative run record has finished.
 
 The site's run summaries are the outcome oracle. A renewed object-generation lease serializes writers; a
 persisted send intent and owned Slack message metadata recover a post whose response/state write was lost.
@@ -8,6 +9,7 @@ from __future__ import annotations
 
 import json
 import re
+import sys
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
@@ -17,6 +19,8 @@ from typing import TYPE_CHECKING, Protocol
 from urllib.parse import quote, unquote, urlencode, urlparse
 from uuid import NAMESPACE_URL, uuid5
 
+from . import slack_api
+from .scan_id import scan_time
 from .scan_runs import TRIGGER_BY_RE
 
 if TYPE_CHECKING:
@@ -36,12 +40,22 @@ class Config:
     kind: str = "scan"
     adopt_parent: str | None = None
     site_token_secret: str | None = None
-    #: How runs group into threads (`GROUPS`): `clean` threads only clean runs, a failure closing the thread (its alert
-    #: posts top-level); `color` also threads consecutive failed runs; `signature` threads consecutive failed runs only
-    #: while they fail the same way (`signature`: the failed phase, or the phases with issues). Under `color` and
-    #: `signature` the thread is the failure's report: a run's `fail` alerts defer to it (`defers_failures`), and post
-    #: top-level only if the run isn't a reply in a failure thread once the report has run.
-    group: str = "clean"
+    #: How runs group into threads (`GROUPS`): `color` (the default) threads consecutive clean runs and consecutive
+    #: failed runs, each run of a color its own thread; `clean` threads only clean runs, a failure closing the thread
+    #: (its alert posts top-level); `signature` threads consecutive failed runs only while they fail the same way (the
+    #: failed phase, or the phases with issues). Under `color` and `signature` the thread is the failure's report: a
+    #: run's `fail` alerts defer to it (`defers_failures`), and post top-level only if the run isn't a reply in a
+    #: failure thread once the report has run; the alerts its steps posted while it ran are folded into its reply
+    #: (`fold`), each left as a one-line pointer to it.
+    group: str = "color"
+    #: The stores the head summarizes (`stores_text`), as `{label: store}`: each one's size, object count and change over
+    #: the last week, linked to its page. Empty: no store lines.
+    stores: tuple[tuple[str, str], ...] = ()
+    #: Pin the open thread's head in the channel, unpinning the head it replaced (`pin_head`; the bot's `pins:write`,
+    #: `channels:join`).
+    pin: bool = False
+    #: Keep the channel's canvas as the deployment's status page (`canvas_text`; the bot's `canvases:write`).
+    canvas: bool = False
 
     def __post_init__(self) -> None:
         if not self.site.startswith("https://") or urlparse(self.site).query or urlparse(self.site).fragment:
@@ -54,6 +68,8 @@ class Config:
             raise ValueError("nominal: state, title, store and kind must be nonempty")
         if self.group not in GROUPS:
             raise ValueError(f"nominal.group: one of {', '.join(GROUPS)}")
+        if any(not label or not store for label, store in self.stores):
+            raise ValueError("nominal.stores: nonempty labels and store names")
 
     @property
     def namespace(self) -> str:
@@ -66,9 +82,15 @@ class Config:
     def link(self, run: dict) -> str:
         return f"{self.scans}/{quote(run['run_id'], safe='')}"
 
+    def page(self, store: str) -> str:
+        return self.site.rstrip('/') + ('/' if store == 'primary' else f"/{quote(store, safe='')}")
+
 
 def config(raw: Mapping) -> Config:
-    return Config(**dict(raw))
+    raw = dict(raw)
+    if isinstance(raw.get('stores'), Mapping):
+        raw['stores'] = tuple(raw['stores'].items())
+    return Config(**raw)
 
 
 def ordered(doc: dict, cfg: Config) -> list[dict]:
@@ -83,6 +105,11 @@ def ordered(doc: dict, cfg: Config) -> list[dict]:
         if row['run']['started_ts'] is None:
             raise ValueError("nominal: a run has no start time")
     return sorted(rows, key=lambda r: (r['run']['started_ts'], r['run']['run_id']), reverse=True)
+
+
+def live(row: dict) -> bool:
+    """A run still going: recorded running, or not yet finalized. Its outcome isn't known, so it never counts."""
+    return row['run']['status'] == 'running' or row['run']['finished_ts'] is None
 
 
 def clean(row: dict) -> bool:
@@ -162,26 +189,100 @@ SLACK_EMOJI_RE = re.compile(r":[a-z0-9_+'-]{1,100}:")
 TRIGGER_EMOJI = {'schedule': ':alarm_clock:', 'manual': ':bust_in_silhouette:', None: ':grey_question:'}
 
 
-def reply(cfg: Config, row: dict) -> str:
-    """A run's line in its thread: ✅ or ❌, the trigger (a manual run's starter's own emoji when known), its time linked
-    to its record, the duration, who started it (a manual run that recorded it and has no emoji), and a failed run's
-    reason."""
-    seconds = row.get('secs')
-    duration = 'duration unknown' if seconds is None else f"{int(seconds) // 60}m {int(seconds) % 60:02d}s"
+def starter(row: dict) -> tuple[str, str | None]:
+    """A run's trigger emoji (a manual run's starter's own when known), and who started it when that is recorded and
+    their emoji isn't shown."""
     by = row['run'].get('trigger_by') if row['run']['trigger'] == 'manual' else None
     by = by if by and TRIGGER_BY_RE.fullmatch(by) else None  # never markup into mrkdwn, whatever a row holds
     face = row['run'].get('trigger_emoji') if by else None
     face = face if face and SLACK_EMOJI_RE.fullmatch(face) else None
-    emoji = face or TRIGGER_EMOJI[row['run']['trigger']]
+    return face or TRIGGER_EMOJI[row['run']['trigger']], None if face else by
+
+
+def reply(cfg: Config, row: dict) -> str:
+    """A run's line in its thread: ✅ or ❌, the trigger (`starter`), its time linked to its record, the duration, who
+    started it, and a failed run's reason."""
+    seconds = row.get('secs')
+    duration = 'duration unknown' if seconds is None else f"{int(seconds) // 60}m {int(seconds) % 60:02d}s"
+    emoji, by = starter(row)
     ok = clean(row)
-    return (f"{'✅' if ok else '❌'} {emoji} [{stamp(row)}]({cfg.link(row['run'])}) · {duration}" + (f" · {by}" if by and not face else "")
+    return (f"{'✅' if ok else '❌'} {emoji} [{stamp(row)}]({cfg.link(row['run'])}) · {duration}" + (f" · {by}" if by else "")
             + ('' if ok else f" · {describe(row)}"))
 
 
-def parent(cfg: Config, good: list[dict], boundary: dict | None) -> str:
-    """The thread's head: a clean thread's streak, or a failure thread's (`failed`)."""
+def si(n: float, sign: bool = False) -> str:
+    """Bytes at three significant figures in the site's SI units (`289 T`, `46.8 G`, `440 M`); `sign`: `+`/`−` first."""
+    head = ('+' if n >= 0 else '−') if sign else ('-' if n < 0 else '')
+    n = abs(n)
+    for div, unit in ((1e15, 'P'), (1e12, 'T'), (1e9, 'G'), (1e6, 'M'), (1e3, 'K')):
+        if n >= div:
+            v = n / div
+            return f"{head}{v:.{0 if v >= 100 else 1 if v >= 10 else 2}f} {unit}"
+    return f"{head}{int(n)} B"
+
+
+def outcome(row: dict, duration: bool = True) -> str:
+    """A finished run's duration, cost and output (its generated files' size and change), as far as recorded."""
+    seconds = row.get('secs') if duration else None
+    parts = [] if seconds is None else [f"{int(seconds) // 60}m {int(seconds) % 60:02d}s"]
+    if row.get('cost_usd') is not None:
+        parts.append(f"${row['cost_usd']:.2f}")
+    if row.get('out_bytes') is not None:
+        delta = row.get('delta_bytes')
+        parts.append(f"output {si(row['out_bytes'])}" + ('' if delta is None else f" ({si(delta, sign=True)})"))
+    return ' · '.join(parts)
+
+
+WEEK = 7 * 86400
+
+
+def series_ts(date: str) -> float:
+    """A series point's scan id as a timestamp; a date-only id (a deployment's first scans) is its midnight."""
+    return scan_time(date).timestamp()
+
+
+def store_line(cfg: Config, label: str, store: str, series: dict | int) -> str:
+    """One store's line: its size and objects at its newest scan and the change since the newest scan at least a week
+    before (`over Nd`, N the span); `series` is its `/api/series` body, or the HTTP status that failed to read it."""
+    head = f"[{label}]({cfg.page(store)})"
+    if isinstance(series, int):
+        return f"{head}: size unavailable (HTTP {series})."
+    points = series.get('points') or []
+    if not points:
+        return f"{head}: no scans yet."
+    last = points[-1]
+    text = f"{head}: {si(last['bytes'])} · {last['objects']:,} objects"
+    end = series_ts(last['date'])
+    before = [p for p in points if series_ts(p['date']) <= end - WEEK]
+    if before:
+        days = round((end - series_ts(before[-1]['date'])) / 86400)
+        text += f" · {si(last['bytes'] - before[-1]['bytes'], sign=True)} over {days}d"
+    return text + '.'
+
+
+def stores_text(cfg: Config, series: Mapping[str, dict | int]) -> str:
+    """The head's store lines (`Config.stores`), each its own paragraph, or nothing."""
+    return ''.join(store_line(cfg, label, store, series[store]) + '\n\n' for label, store in cfg.stores)
+
+
+def running(cfg: Config, row: dict) -> str:
+    """A live run's reply, posted when it starts and edited to its `reply` when it ends."""
+    emoji, by = starter(row)
+    return f"⏳ {emoji} [{stamp(row)}]({cfg.link(row['run'])}) · running" + (f" · {by}" if by else "")
+
+
+def running_now(cfg: Config, live_rows: list[dict]) -> str:
+    """A thread head's line for the runs going now (oldest first), or nothing."""
+    if not live_rows:
+        return ''
+    return 'Running now: ' + ', '.join(f"[{stamp(r)}]({cfg.link(r['run'])})" for r in reversed(live_rows)) + '.\n\n'
+
+
+def parent(cfg: Config, good: list[dict], boundary: dict | None, live_rows: list[dict] | None = None, stores: str = '') -> str:
+    """The thread's head: a clean thread's streak, or a failure thread's (`failed`), naming the runs going now, with
+    the latest run's outcome and the deployment's store lines (`stores_text`)."""
     if good and not clean(good[0]):
-        return failed(cfg, good, boundary)
+        return failed(cfg, good, boundary, live_rows, stores)
     window = good[:10]
     counts = {k: sum(r['run']['trigger'] == k for r in window) for k in ('schedule', 'manual', None)}
     mix = f"{counts['schedule']} scheduled / {counts['manual']} manual" + (f" / {counts[None]} unknown" if counts[None] else '')
@@ -190,11 +291,13 @@ def parent(cfg: Config, good: list[dict], boundary: dict | None) -> str:
     after = f" after [{boundary['run']['scan']}]({cfg.link(boundary['run'])})" if boundary else ' (available run history)'
     return (f"✅ **{cfg.title}: {qualifier}{len(good)} consecutive clean run{'' if len(good) == 1 else 's'}**\n\n"
             f"Since {since}{after}.\n\n"
-            f"Latest completed: [{stamp(good[0])}]({cfg.link(good[0]['run'])}).\n\n"
+            f"Latest completed: [{stamp(good[0])}]({cfg.link(good[0]['run'])})" + (f" · {done}" if (done := outcome(good[0])) else '') + ".\n\n"
+            f"{stores}"
+            f"{running_now(cfg, live_rows)}"
             f"Latest {plural(len(window), 'run')}: {mix}. Each reply links its scan record. [All scans]({cfg.scans}).")
 
 
-def failed(cfg: Config, bad: list[dict], boundary: dict | None) -> str:
+def failed(cfg: Config, bad: list[dict], boundary: dict | None, live_rows: list[dict] | None = None, stores: str = '') -> str:
     """A failure thread's head: how many runs in a row failed (under `signature`, failed the same way), since when and
     after which run (the last clean one, or the last that failed differently), and the newest failure's reason."""
     qualifier = '' if boundary else 'at least '
@@ -208,7 +311,63 @@ def failed(cfg: Config, bad: list[dict], boundary: dict | None) -> str:
     return (f"❌ **{cfg.title}: {qualifier}{len(bad)} consecutive failed run{'' if len(bad) == 1 else 's'}{how}**\n\n"
             f"Since {stamp(bad[-1])}{after}.\n\n"
             f"Latest: [{stamp(bad[0])}]({cfg.link(bad[0]['run'])}): {describe(bad[0])}.\n\n"
+            f"{stores}"
+            f"{running_now(cfg, live_rows)}"
             f"Each reply links its scan record. [All scans]({cfg.scans}).")
+
+
+def closed_runs(rows: list[dict], stop: dict, boundary_id: str | None) -> tuple[list[dict], dict | None]:
+    """A closing thread's runs (newest first: those older than `stop`, back to its recorded boundary) and that
+    boundary's row (None when run history no longer reaches it)."""
+    ids = [r['run']['run_id'] for r in rows]
+    start = ids.index(stop['run']['run_id']) + 1 if stop['run']['run_id'] in ids else 0
+    end = ids.index(boundary_id) if boundary_id in ids else len(rows)
+    return rows[start:end], (rows[end] if end < len(rows) else None)
+
+
+def closed_head(cfg: Config, was: str, old: tuple[list[dict], dict | None], stop: dict, reason: str) -> str:
+    """A closed thread's head: how many runs it held, since when, its newest, and the run that ended it."""
+    runs, boundary = old
+    kind, mark, adj = ('clean-run', '✅', 'clean') if was == 'clean' else ('failure', '❌', 'failed')
+    if not runs:
+        return f"{mark} **{cfg.title}: {kind} sequence ended**\n\n[{stamp(stop)}]({cfg.link(stop['run'])}): {reason}. [All scans]({cfg.scans})."
+    qualifier = '' if boundary else 'at least '
+    after = f" after [{boundary['run']['scan']}]({cfg.link(boundary['run'])})" if boundary else ' (available run history)'
+    return (f"{mark} **{cfg.title}: {qualifier}{len(runs)} consecutive {adj} run{'' if len(runs) == 1 else 's'} (ended)**\n\n"
+            f"Since {stamp(runs[-1])}{after}; last [{stamp(runs[0])}]({cfg.link(runs[0]['run'])}).\n\n"
+            f"Ended by [{stamp(stop)}]({cfg.link(stop['run'])}): {reason}. [All scans]({cfg.scans}).")
+
+
+#: A folded alert's text starts with this; it is never folded again.
+FOLDED = '↪'
+
+
+def alert_lines(alert: dict) -> tuple[str, list[str]]:
+    """A run's top-level alert as its title and its lines (each step's message, with its task logs), in the thread's
+    markdown: from its `disky_alert` metadata (`push.Notice.group`), else parsed from an ungrouped alert's text."""
+    payload = alert.get('metadata', {}).get('event_payload') or {}
+    if alert.get('metadata', {}).get('event_type') == 'disky_alert' and payload.get('lines'):
+        return payload['title'], [line['message'] + (f" · [{line.get('url_title') or 'logs'}]({line['url']})" if line.get('url') else '')
+                                  for line in payload['lines']]
+    head, *rest = alert['text'].split('\n')
+    logs = ''
+    if rest and rest[-1].startswith('<'):
+        hit = re.search(r'<([^|>]+)\|task logs>', rest.pop())
+        logs = f" · [task logs]({hit.group(1)})" if hit else ''
+    return head.strip('*'), [' '.join(rest) + logs] if rest else []
+
+
+def fold(cfg: Config, slack: Transport, row: dict) -> tuple[list[dict], str]:
+    """A run's unfolded top-level alerts, and the lines they add to its reply in a failure thread."""
+    found = [a for a in slack.alert_messages(cfg.link(row['run']), row['run']['started_ts']) if not a['text'].startswith(FOLDED)]
+    return found, ''.join(f"\n{line}" for a in found for line in alert_lines(a)[1])
+
+
+def folded(slack: Transport, alerts: list[dict], reply_ts: str) -> None:
+    """Each folded alert left as a pointer to the reply that now carries its lines."""
+    link = slack.permalink(reply_ts)
+    for a in alerts:
+        slack.edit(a['ts'], f"{FOLDED} {alert_lines(a)[0]}: in the [failure thread]({link})")
 
 
 def missing(good: list[dict], posted: dict) -> list[dict]:
@@ -222,6 +381,15 @@ class Transport(Protocol):
     def find(self, operation: str, parent: str | None, since: float) -> str | None: ...
     def post(self, body: str, parent: str | None, operation: str) -> str: ...
     def edit(self, ts: str, body: str) -> None: ...
+    def alert(self, link: str, since: float) -> str | None: ...
+    def alert_messages(self, link: str, since: float) -> list[dict]: ...
+    def permalink(self, ts: str) -> str: ...
+    def join(self) -> None: ...
+    def pin(self, ts: str) -> None: ...
+    def unpin(self, ts: str) -> None: ...
+    def canvas_create(self, body: str, title: str) -> str: ...
+    def canvas_edit(self, canvas: str, body: str) -> bool: ...
+    def canvas_rename(self, canvas: str, title: str) -> bool: ...
 
 
 class Slack:
@@ -272,6 +440,135 @@ class Slack:
     def edit(self, ts: str, body: str) -> None:
         self.client.edit(ts, body)
 
+    def alert_messages(self, link: str, since: float) -> list[dict]:
+        """Our top-level messages since `since` linking `link` (a run's alerts, when they went to this channel), oldest
+        first, each `{ts, text, metadata}`; never a thread's own head (`disky_nominal` metadata), which links runs too."""
+        hits = [m for m in self._read(None, since) if self.owns(m) and m.get('thread_ts', m['ts']) == m['ts'] and link in m.get('text', '')
+                and (m.get('metadata') or {}).get('event_type') != 'disky_nominal']
+        return [{'ts': m['ts'], 'text': m.get('text', ''), 'metadata': m.get('metadata') or {}} for m in sorted(hits, key=lambda m: float(m['ts']))]
+
+    def alert(self, link: str, since: float) -> str | None:
+        """The first top-level message of ours since `since` linking `link`: a run's `fail` alert, when it went to this
+        channel."""
+        hits = self.alert_messages(link, since)
+        return hits[0]['ts'] if hits else None
+
+    def permalink(self, ts: str) -> str:
+        return self.client._request('chat.getPermalink', {'channel': self.client.channel, 'message_ts': ts}, method='GET')['permalink']
+
+    def _ok(self, method: str, args: dict, *benign: str) -> dict:
+        """A call whose listed errors mean the change is already in place."""
+        return slack_api.call_ok(self.client, method, args, *benign)
+
+    def join(self) -> None:
+        slack_api.join(self.client, self.client.channel)
+
+    def pin(self, ts: str) -> None:
+        slack_api.pin(self.client, self.client.channel, ts)
+
+    def unpin(self, ts: str) -> None:
+        slack_api.unpin(self.client, self.client.channel, ts)
+
+    def canvas_create(self, body: str, title: str) -> str:
+        content = {'type': 'markdown', 'markdown': body}
+        try:
+            return self.client._request('conversations.canvases.create', {
+                'channel_id': self.client.channel, 'title': title, 'document_content': content})['canvas_id']
+        except RuntimeError as e:
+            if str(e) != 'Slack API error: channel_canvas_already_exists':
+                raise
+        info = self.client._request('conversations.info', {'channel': self.client.channel}, method='GET')
+        canvas = info['channel']['properties']['canvas']['file_id']
+        if not self.canvas_edit(canvas, body) or not self.canvas_rename(canvas, title):
+            raise RuntimeError('nominal: the channel names a canvas that no longer exists')
+        return canvas
+
+    def canvas_edit(self, canvas: str, body: str) -> bool:
+        """Replace the canvas's content; False when the canvas is gone (deleted)."""
+        return bool(self._ok('canvases.edit', {'canvas_id': canvas, 'changes': [
+            {'operation': 'replace', 'document_content': {'type': 'markdown', 'markdown': body}}]}, 'canvas_not_found', 'canvas_deleted'))
+
+    def canvas_rename(self, canvas: str, title: str) -> bool:
+        """Set the canvas's title (its channel tab's label); False when the canvas is gone."""
+        return bool(self._ok('canvases.edit', {'canvas_id': canvas, 'changes': [
+            {'operation': 'rename', 'title_content': {'type': 'markdown', 'markdown': title}}]}, 'canvas_not_found', 'canvas_deleted'))
+
+
+#: State that outlives a thread: the pinned head (unpinned once a new head is pinned) and the channel canvas
+KEPT = ('pinned', 'canvas', 'canvas_body', 'canvas_title')
+
+
+def pin_head(state: dict, slack: Transport, save: Callable[[dict], None]) -> None:
+    """Pin the open thread's head, then unpin the head it replaced; a closed thread's head is unpinned at once (the
+    channel then pins nothing until the next thread opens). Idempotent: a head already pinned, or one no longer
+    pinned (unpinned by hand, or deleted), is not an error."""
+    head, was = state.get('parent'), state.get('pinned')
+    if state.get('closed'):
+        if was:
+            slack.join()
+            slack.unpin(was)
+            del state['pinned']
+            save(state)
+        return
+    if not head or head == was:
+        return
+    slack.join()
+    slack.pin(head)
+    if was:
+        slack.unpin(was)
+    state['pinned'] = head
+    save(state)
+
+
+def phases(row: dict, n: int = 5) -> str:
+    """A run's `n` longest phases, longest first (`list marin-na 9m 22s`)."""
+    spans = sorted((s for s in row.get('spans') or [] if s.get('end') is not None and s.get('start') is not None),
+                   key=lambda s: (s['start'] - s['end'], s['phase']))[:n]
+    return ' · '.join(f"{s['phase']} {int(s['end'] - s['start']) // 60}m {int(s['end'] - s['start']) % 60:02d}s" for s in spans)
+
+
+def status(cfg: Config, done: list[dict]) -> str:
+    """The deployment's state in a line: an open thread's headline (its streak), else the newest run's failure."""
+    _, good, boundary = segment(cfg, done)
+    if good:
+        return parent(cfg, good, boundary).split('\n', 1)[0].replace('**', '')
+    return f"❌ {cfg.title}: latest run {describe(done[0])}" if done else f"{cfg.title}: no finished runs yet"
+
+
+def canvas_text(cfg: Config, rows: list[dict], thread: str | None, series: Mapping[str, dict | int], now: float) -> str:
+    """The channel canvas: the deployment's `status`, each store, the latest finished run's outcome and longest phases,
+    the last ten finished runs, and the site's pages. `rows` newest first; `thread` the open thread head's permalink."""
+    done = [r for r in rows if not live(r)]
+    title = status(cfg, done)
+    at = datetime.fromtimestamp(now, timezone.utc).strftime('%Y-%m-%d %H:%M UTC')
+    out = [f"{title}" + (f" · [thread]({thread})" if thread else '') + f"\n\nUpdated {at}."]
+    if cfg.stores:
+        out += ['## Stores', '\n'.join(f"- {store_line(cfg, label, store, series[store])}" for label, store in cfg.stores)]
+    if done:
+        latest = done[0]
+        line = f"{reply(cfg, latest)}" + (f" · {o}" if (o := outcome(latest, duration=False)) else '')
+        out += ['## Latest run', line + (f"\n\nLongest phases: {p}" if (p := phases(latest)) else '')]
+        out += ['## Recent runs', '\n'.join(f"- {reply(cfg, r)}" + (f" · ${r['cost_usd']:.2f}" if r.get('cost_usd') is not None else '')
+                                              for r in done[:10])]
+    site = cfg.site.rstrip('/')
+    out += ['## Pages', f"[All scans]({cfg.scans}) · [Health]({site}/health)"
+            + ''.join(f" · [{label}]({cfg.page(store)})" for label, store in cfg.stores)]
+    return '\n\n'.join(out) + '\n'
+
+
+def write_canvas(state: dict, slack: Transport, body: str, title: str, save: Callable[[dict], None]) -> None:
+    """Create the channel's canvas titled `title` (its tab's label), or replace its content when the body changed and
+    its title when that did. The canvas's Updated line changes every run, so this writes once per report."""
+    if state.get('canvas_body') == body and state.get('canvas_title') == title:
+        return
+    slack.join()
+    # A canvas deleted by hand is created again rather than failing every later report
+    if not state.get('canvas') or not slack.canvas_edit(state['canvas'], body) or (
+            state.get('canvas_title') != title and not slack.canvas_rename(state['canvas'], title)):
+        state['canvas'] = slack.canvas_create(body, title)
+    state['canvas_body'], state['canvas_title'] = body, title
+    save(state)
+
 
 def adopt(cfg: Config, rows: list[dict], slack: Transport) -> dict:
     if not cfg.adopt_parent:
@@ -309,6 +606,7 @@ def converge(
     save: Callable[[dict], None],
     check: Callable[[], None],
     now: Callable[[], float] = time.time,
+    stores: str = '',
 ) -> dict:
     """Caller holds the generation lease. Persist every send intent and returned/recovered message ID."""
     if state.get('namespace') != cfg.namespace:
@@ -321,6 +619,8 @@ def converge(
     def received(pending: dict, ts: str) -> None:
         if pending['key'] == 'parent':
             state.update(parent=ts, parent_body=pending['body'])
+        elif pending['key'].startswith('running:'):
+            state.setdefault('running', {})[pending['key'].removeprefix('running:')] = {'ts': ts, 'parent': pending['parent']}
         else:
             state.setdefault('posted', {})[pending['key']] = ts
         state.pop('pending', None)
@@ -344,7 +644,12 @@ def converge(
             state['operator_required'] = pending['operation']
             persist()
             raise RuntimeError(f"nominal: send remains ambiguous ({pending['operation']}); inspect Slack and the persisted intent; no resend attempted")
-    if not rows or rows[0]['run']['status'] == 'running' or rows[0]['run']['finished_ts'] is None:
+    # The thread is decided by finished runs only; a live run gets a ⏳ reply in the open thread (`running`), which
+    # becomes its reply there when it ends in that thread, else is edited where it stands, linking where it was reported.
+    live_rows = [r for r in rows if live(r)]
+    rows = [r for r in rows if not live(r)]
+    waiting: dict = dict(state.get('running') or {})
+    if not rows:
         return state
     head, good, boundary = segment(cfg, rows)
     boundary_id = boundary['run']['run_id'] if boundary else None
@@ -357,54 +662,93 @@ def converge(
             newest = next((i for i, r in enumerate(rows) if r['run']['run_id'] in state.get('posted', {})), None)
             stop = rows[newest - 1] if newest else boundary or rows[0]
             if was == 'clean':
-                reason = stop['run']['status'] if not stop['phase_issues'] else 'phase issues'
-                body = f"**{cfg.title}: clean-run sequence ended**\n\n[{stamp(stop)}]({cfg.link(stop['run'])}): {reason}. [All scans]({cfg.scans})."
+                reason = 'phase issues' if stop['run']['status'] == 'succeeded' and stop['phase_issues'] else stop['run']['status']
             else:
                 reason = 'clean' if clean(stop) else describe(stop)
-                body = f"**{cfg.title}: failure sequence ended**\n\n[{stamp(stop)}]({cfg.link(stop['run'])}): {reason}. [All scans]({cfg.scans})."
+            body = closed_head(cfg, was, closed_runs(rows, stop, state.get('boundary')), stop, reason)
             check()
             slack.edit(state['parent'], body)
             state['closed'] = True
             persist()
         if good:
+            kept = {k: state[k] for k in KEPT if k in state}
             state.clear()
-            state.update(namespace=cfg.namespace, boundary=boundary_id, posted={})
+            state.update(namespace=cfg.namespace, boundary=boundary_id, posted={}, **kept)
             if head != 'clean':
                 state['key'] = head
             persist()
-    if not good:
-        return state
-    state['boundary'] = boundary_id
-    if head == 'clean':
-        state.pop('key', None)
-    else:
-        state['key'] = head
-    # A clean thread keeps the operation ids it always had; a failure thread's name its key too
-    scope = boundary_id if head == 'clean' else f'{head}|{boundary_id}'
+    ended = {r['run']['run_id']: r for r in rows if r['run']['run_id'] in waiting}
+    good_ids = {r['run']['run_id'] for r in good}
+    here = {rid for rid in ended if rid in good_ids and not state.get('closed') and state.get('parent') == waiting[rid]['parent']}
+    if good:
+        state['boundary'] = boundary_id
+        if head == 'clean':
+            state.pop('key', None)
+        else:
+            state['key'] = head
+        # A clean thread keeps the operation ids it always had; a failure thread's name its key too
+        scope = boundary_id if head == 'clean' else f'{head}|{boundary_id}'
 
-    def send(key: str, body: str, root: str | None) -> None:
-        operation = str(uuid5(NAMESPACE_URL, f'{cfg.namespace}|{scope}|{key}'))
-        pending = {'key': key, 'body': body, 'parent': root, 'operation': operation, 'since': now() - 1}
-        state['pending'] = pending
-        persist()
-        check()
-        received(pending, slack.post(body, root, operation))
+        def send(key: str, body: str, root: str | None) -> None:
+            operation = str(uuid5(NAMESPACE_URL, f'{cfg.namespace}|{scope}|{key}'))
+            pending = {'key': key, 'body': body, 'parent': root, 'operation': operation, 'since': now() - 1}
+            state['pending'] = pending
+            persist()
+            check()
+            received(pending, slack.post(body, root, operation))
 
-    body = parent(cfg, good, boundary)
-    if not state.get('parent'):
-        send('parent', body, None)
-    # New threads bootstrap ten; established threads append every missing run after the newest known one.
-    posted = state.setdefault('posted', {})
-    for row in reversed(missing(good, posted)):
-        send(row['run']['run_id'], reply(cfg, row), state['parent'])
-    if state.get('parent_body') != body:
+        body = parent(cfg, good, boundary, live_rows, stores)
+        if not state.get('parent'):
+            send('parent', body, None)
+        # New threads bootstrap ten; established threads append every missing run after the newest known one.
+        posted = state.setdefault('posted', {})
+        todo = missing(good, posted)
+        # In a failure thread a run's reply takes the lines its steps' top-level alerts posted (`fold`)
+        folding = head != 'clean'
+        for rid in sorted(here, key=lambda rid: ended[rid]['run']['started_ts']):
+            alerts, extra = fold(cfg, slack, ended[rid]) if folding and not clean(ended[rid]) else ([], '')
+            check()
+            slack.edit(waiting[rid]['ts'], reply(cfg, ended[rid]) + extra)
+            posted[rid] = waiting.pop(rid)['ts']
+            state.get('running', {}).pop(rid, None)
+            persist()
+            folded(slack, alerts, posted[rid])
+        for row in reversed(todo):
+            if row['run']['run_id'] not in posted:
+                alerts, extra = fold(cfg, slack, row) if folding and not clean(row) else ([], '')
+                send(row['run']['run_id'], reply(cfg, row) + extra, state['parent'])
+                folded(slack, alerts, posted[row['run']['run_id']])
+        for row in reversed(live_rows):
+            if row['run']['run_id'] not in state.get('running', {}):
+                send('running:' + row['run']['run_id'], running(cfg, row), state['parent'])
+        if state.get('parent_body') != body:
+            check()
+            slack.edit(state['parent'], body)
+            state['parent_body'] = body
+            persist()
+        recent = {r['run']['run_id']: posted[r['run']['run_id']] for r in reversed(good[:10]) if r['run']['run_id'] in posted}
+        if recent != posted:
+            state['posted'] = recent
+            persist()
+    # A ⏳ reply whose run ended outside its thread: its outcome where it stands, linking the thread that took the run,
+    # else the run's top-level alert in this channel (a `clean` thread's failure), when there is one.
+    for rid, row in sorted(ended.items(), key=lambda kv: kv[1]['run']['started_ts']):
+        if rid not in waiting:
+            continue
+        if rid in state.get('posted', {}) and state.get('parent'):
+            label, ts = 'thread', state['parent']
+        else:
+            label, ts = 'alert', slack.alert(cfg.link(row['run']), row['run']['started_ts'])
+        suffix = f" · [{label}]({slack.permalink(ts)})" if ts else ''
         check()
-        slack.edit(state['parent'], body)
-        state['parent_body'] = body
+        slack.edit(waiting.pop(rid)['ts'], reply(cfg, row) + suffix)
+    live_ids = {r['run']['run_id'] for r in live_rows}
+    keep = {rid: v for rid, v in {**waiting, **(state.get('running') or {})}.items() if rid in live_ids}
+    if keep and state.get('running') != keep:
+        state['running'] = keep
         persist()
-    recent = {r['run']['run_id']: posted[r['run']['run_id']] for r in reversed(good[:10]) if r['run']['run_id'] in posted}
-    if recent != posted:
-        state['posted'] = recent
+    elif not keep and 'running' in state:
+        del state['running']
         persist()
     return state
 
@@ -447,9 +791,19 @@ def run(
             raise ValueError('nominal: authoritative terminal run record is not visible')
         return rows
 
+    def read_series() -> dict[str, dict | int]:
+        series: dict[str, dict | int] = {}
+        for _, name in cfg.stores:
+            response = http_fetch(cfg.site, token)('/api/series?' + urlencode({'store': name}))
+            # A store that can't be read is named as such in the head; the thread's run outcomes still post.
+            series[name] = json.loads(response.body) if response.status == 200 else response.status
+        return series
+
     if not execute:
         rows = read_rows()
-        if not rows or rows[0]['run']['status'] == 'running' or rows[0]['run']['finished_ts'] is None:
+        live_rows = [r for r in rows if live(r)]
+        rows = [r for r in rows if not live(r)]
+        if not rows:
             return 'nominal: waiting for a terminal run'
         head, good, boundary = segment(cfg, rows)
         if not good:
@@ -466,13 +820,22 @@ def run(
                 raise RuntimeError('nominal: pending send needs reconciliation before a publish plan can be rendered')
             same = state.get('boundary') == (boundary['run']['run_id'] if boundary else None) and state.get('key', 'clean') == head
             pending_rows = missing(good, state.get('posted', {})) if same else good[:10]
-        return '\n\n+++\n\n'.join([parent(cfg, good, boundary), *(reply(cfg, r) for r in reversed(pending_rows))])
+        return '\n\n+++\n\n'.join([parent(cfg, good, boundary, live_rows, stores_text(cfg, read_series())), *(reply(cfg, r) for r in reversed(pending_rows)),
+                                    *(running(cfg, r) for r in reversed(live_rows))])
     bot = (env.get('SLACK_BOT_TOKEN') or '').strip()
     if not bot:
         raise ValueError('nominal: need SLACK_BOT_TOKEN')
     with coordinator_lease(lease) as check:
         rows = read_rows()  # Re-read after acquiring the lease, so a waiting writer cannot publish stale state.
         slack = Slack(bot, cfg.channel)
+        if cfg.pin or cfg.canvas:
+            # Those need the bot in the channel (`channels:join`); joining first also lets the thread's reads (history,
+            # a run's alert) work where the bot only ever posted by `chat:write.public`. Best effort: an app not yet
+            # reinstalled with the scope still posts its thread; `pin_head` / `write_canvas` join again and fail there.
+            try:
+                slack.join()
+            except RuntimeError as e:
+                print(f'nominal: channel join failed ({e}); posting the thread anyway', file=sys.stderr)
         state = store.read_json(key) if store.exists(key) else adopt(cfg, rows, slack) if cfg.adopt_parent else {'namespace': cfg.namespace}
         if state.get('namespace') != cfg.namespace:
             raise ValueError('nominal: state belongs to another site/store/channel')
@@ -480,7 +843,15 @@ def run(
             store.write_text(key, json.dumps(value, indent=2) + '\n')
         check()
         save(state)
-        state = converge(cfg, rows, state, slack, save, check)
+        series = read_series()
+        state = converge(cfg, rows, state, slack, save, check, stores=stores_text(cfg, series))
+        if cfg.pin:
+            check()
+            pin_head(state, slack, save)
+        if cfg.canvas:
+            check()
+            thread = slack.permalink(state['parent']) if state.get('parent') and not state.get('closed') else None
+            write_canvas(state, slack, canvas_text(cfg, rows, thread, series, time.time()), cfg.title, save)
     if final is not None:
         final.append(state)
     return f"nominal: parent {state.get('parent', 'none')}; {len(state.get('posted', {}))} run replies"
@@ -495,6 +866,23 @@ def defers_failures(job: JobRun) -> bool:
     facts = job.state()
     return (cfg.group != 'clean' and not facts.get('parent') and facts.get('kind', 'scan') == cfg.kind
             and facts.get('store', job.profile.store) == cfg.store)
+
+
+def report_start(job: JobRun) -> None:
+    """Opt-in, after `start` records the run: its ⏳ reply in the open thread, and the head's "Running now". A failure is
+    logged, never the job's; the run's finish reports it whatever happened here."""
+    if not job.profile.nominal or not job.recording or job.dry_run or (job.env.get('DT_ALERTS') or '').strip() in ('stderr', 'off', '0'):
+        return
+    from .scan_runs import err
+
+    try:
+        facts = job.state()
+        cfg = config(job.profile.nominal)
+        if facts.get('parent') or facts.get('kind', 'scan') != cfg.kind or facts.get('store', job.profile.store) != cfg.store:
+            return
+        err(run(job.profile.nominal, job.env, job.profile.project, execute=True))
+    except (Exception, SystemExit) as exc:  # noqa: BLE001 — reporting must not fail (or end) the job
+        err(job.redact(f'nominal start report failed: {type(exc).__name__}: {exc}'))
 
 
 def report_job(job: JobRun) -> None:
@@ -515,7 +903,7 @@ def report_job(job: JobRun) -> None:
         err(run(job.profile.nominal, job.env, job.profile.project, job.run_id, execute=True, final=final))
         state = final[0] if final else {}
         threaded = state.get('key', 'clean') != 'clean' and job.run_id in state.get('posted', {})
-    except Exception as exc:  # Reporting must not fail the job; its failure remains visible in the head log.
+    except (Exception, SystemExit) as exc:  # Reporting must not fail (or end) the job; its failure remains visible in the head log.
         err(job.redact(f'nominal report failed: {type(exc).__name__}: {exc}'))
     finally:
         if deferred and not threaded:

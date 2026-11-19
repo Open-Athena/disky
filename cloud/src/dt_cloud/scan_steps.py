@@ -48,7 +48,8 @@ Adding a step (gcs's access-ingest, rules, healthcheck, … are steps like any o
   (`ctx.need(path)`), and `scan head -F` reruns every task with the cache off (each then skips what's done).
 
 Tests and DAG checks: `DT_SCAN_STEP_FAKE=<file>` makes every step append `<name> <arg>` to the file and return;
-`DT_SCAN_STEP_FAIL=<name>` makes that step exit 1 (its marker unwritten).
+`DT_SCAN_STEP_FAIL=<name>` makes that step exit 1 (its marker unwritten); `DT_SCAN_STEP_FAIL_ONCE=<name> <arg>` (a marker
+line) makes only its first run exit 1 (a `<fake file>.failed` sentinel), so a retry succeeds.
 """
 from __future__ import annotations
 
@@ -80,6 +81,7 @@ PROFILE_PATH_ENV = "DT_SCAN_PROFILE"
 DATA_MOUNT_ENV = "DT_DATA_MOUNT"
 FAKE_ENV = "DT_SCAN_STEP_FAKE"
 FAIL_ENV = "DT_SCAN_STEP_FAIL"
+FAIL_ONCE_ENV = "DT_SCAN_STEP_FAIL_ONCE"
 IDENTITY = ("SNAP_ID", "GEN", "DT_JOB_START")
 #: Credentials whose absence turns a serving step into a logged skip (the gate; the values never reach argv or logs).
 CF = ("CLOUDFLARE_API_TOKEN", "CLOUDFLARE_ACCOUNT_ID")
@@ -1283,6 +1285,8 @@ def interval_store(ctx: Ctx, arg: str | None) -> None:
             return
         ctx.run.end("interval-store", ran.rc, warn=True, msg="the scan reads per-scan until a later run appends it",
                     timed_out=timeout if ran.timed_out else None, terminated=ran.signal if ran.rc else None)
+        if not ran.rc:
+            warm_series(ctx)
         return
     store = ctx.opt("interval-store", "store") or ctx.env.get("R2_ARCHIVE")
     if not store:
@@ -1308,8 +1312,23 @@ def interval_store(ctx: Ctx, arg: str | None) -> None:
         ran = run_grouped(cmd, duration(timeout) if timeout else None, 30.0, env=ctx.env, tail=tail)
     ctx.run.end("interval-store", ran.rc, warn=True, msg="the scan reads per-scan until a later run appends it",
                 timed_out=timeout if ran.timed_out else None, terminated=ran.signal if ran.rc else None)
+    if not ran.rc:
+        warm_series(ctx)
     if ran.rc and ctx.opt("interval-store", "publish_on_failure", False):
         ctx.sh(["dt-cloud", "publish-r2", "-a", ctx.scan], fatal=False, warn=f"publish-r2 of {ctx.scan}'s sorts failed: the site can't read it until a later run appends it")
+
+
+def warm_series(ctx: Ctx) -> None:
+    """Warm the size-over-time series (`warm-cache -S`) the moment an append lands: the new run changes every series'
+    cache key, and `warm-cache` itself runs only at the run's end (after `static-names`: 03:48Z on cw's 2026-11-18T0002,
+    80 min after its append), so a root `split=roots` series asked in between computed cold, and under the page's other
+    requests answered 503 after 64 s. Two at a time, as cold series under more concurrency 503 (`warm.SERVER_RETRIES`).
+    Only where `warm-cache` runs (its gate: the primary store, a site token, not REPROC); never fatal."""
+    if ("warm-cache" not in ctx.profile.enabled() or not ctx.profile.primary or ctx.reproc
+            or not (ctx.has("SITE_TOKEN") or ctx.has("CF_ACCESS_CLIENT_ID", "CF_ACCESS_CLIENT_SECRET"))):
+        return
+    ctx.sh(["dt-cloud", "warm-cache", "-S", "-j", "2", "-d", ctx.scan, "-r", _snap_root(ctx)], fatal=False,
+           warn=f"series warm-up after {ctx.scan}'s append failed: its first size-over-time views load cold")
 
 
 #: Why a scan's staged interval-store step was skipped (`append` exit `BUSY`): its phase note.
@@ -1920,6 +1939,76 @@ def soft_delete(ctx: Ctx, arg: str | None) -> None:
                fatal=False, warn="soft-delete reading failed (the scan's outputs stand; the site keeps the last one, dated)")
 
 
+@step("access-requesters", core=False, soft=True, options={"days": int, "depth": int, "mem": str, "threads": int, "hourly": int,
+                                                         "attribute": bool},
+      requires=primary_only("access-requesters", "the rollup is the deployment's, written once by its primary"),
+      side=True, leaves="the previous days' requester rollups not written: `dt-cloud access requesters -s` backfills them")
+def access_requesters(ctx: Ctx, arg: str | None) -> None:
+    """Who made the scanned buckets' requests (`dt-cloud access requesters`): the access logs' raw rows for each of the
+    `options.access-requesters.days` (default 2) UTC days before the scan's, rolled up per bucket × operation ×
+    client × requester × path prefix into `<data>/access/requesters/<day>.parquet`. A day already written from the raw
+    parts there now is left (`-s`); one the access ingest has added to since is rolled again, so `days: 2` gives each
+    day a second pass after its logs have landed (gcs's ingest lags its logs by up to ~14 h, so the first pass, the
+    next morning, misses the day's last hours). Needs `access/raw/` (the access ingest's). Skipped on REPROC; never
+    fatal.
+
+    `hourly: N` also rolls the days up per UTC hour, keeping N path segments (`requesters-hourly/`, `-H -D N`: 3 keeps
+    the store a training job reads); `attribute: true` then joins those to the hourly host snapshots and the job tables
+    (`access hosts`, `access-jobs`) into `attributed/<day>.parquet` (`dt-cloud access attribute -s`: a day is redone
+    when its inputs changed, so the job tables that land after this run reach it on the next)."""
+    if ctx.reproc:
+        err("REPROC: skipping the requester rollup")
+        return
+    import datetime as dt
+
+    scan_day = dt.date.fromisoformat(ctx.date)
+    days = [(scan_day - dt.timedelta(days=k)).isoformat() for k in range(int(ctx.opt("access-requesters", "days", 2)), 0, -1)]
+    args = [f"-D{ctx.opt('access-requesters', 'depth', 2)}"]
+    for flag, key in (("-M", "mem"), ("-p", "threads")):
+        if ctx.opt("access-requesters", key):
+            args += [flag, str(ctx.opt("access-requesters", key))]
+    with ctx.phase("access-requesters"):
+        ctx.sh(["dt-cloud", "access", "requesters", "-s", "-r", f"{ctx.data_uri}/access", *args, *days],
+               fatal=False, warn="requester rollup failed (the scan's outputs stand; `dt-cloud access requesters -s` backfills)")
+        if hourly := ctx.opt("access-requesters", "hourly"):
+            ok = ctx.sh(["dt-cloud", "access", "requesters", "-s", "-H", "-r", f"{ctx.data_uri}/access", f"-D{hourly}", *args[1:], *days],
+                        fatal=False, warn="hourly requester rollup failed (`dt-cloud access requesters -s -H` backfills)")
+            if ok is not None and ctx.opt("access-requesters", "attribute"):
+                ctx.sh(["dt-cloud", "access", "attribute", "-s", "-r", f"{ctx.data_uri}/access", *days],
+                       fatal=False, warn="request attribution failed (`dt-cloud access attribute -s` backfills)")
+
+
+def _access_jobs_check(p: ScanProfile) -> list[str]:
+    from .access_jobs import batch_problems
+
+    return primary_only("access-jobs", "the job tables are the deployment's, written once by its primary")(p) + batch_problems(p.opts("access-jobs").get("batch") or {})
+
+
+@step("access-jobs", core=False, soft=True, options={"days": int, "batch": dict},
+      requires=_access_jobs_check,
+      side=True, converges=True, leaves="the previous days' job tables not written: a later run's job writes every missing day in its window")
+def access_jobs(ctx: Ctx, arg: str | None) -> None:
+    """Which jobs ran on which VMs (`dt-cloud access jobs`, specs/access-job-attribution.md phase 2): for each of the
+    `options.access-jobs.days` (default 2) UTC days before the scan's not yet under `<data>/access/jobs/<day>/`, the
+    deployment's own job-table image (`options.access-jobs.batch.image`: its scheduler's client, kept out of this
+    image) runs as a Batch job of its own. Submitted, not waited on. A day before the newest still missing means an
+    earlier run's job failed: it is resubmitted and the phase warns. `batch`'s keys (`access_jobs.BATCH_KEYS`) are
+    `access jobs`'s options: `image` (required), `service_account` (`$JOB_SA`), `region` (`$BATCH_REGION`), `project`,
+    `machine`, `spot`, `env`, `secrets`, `cross_region`. Not core: a deployment opts in (`steps`)."""
+    if ctx.reproc:
+        err("REPROC: not submitting job tables")
+        return
+    import datetime as dt
+
+    from .access_jobs import submit_args
+
+    scan_day = dt.date.fromisoformat(ctx.date)
+    days = [(scan_day - dt.timedelta(days=k)).isoformat() for k in range(int(ctx.opt("access-jobs", "days", 2)), 0, -1)]
+    with ctx.phase("access-jobs"):
+        ctx.sh(["dt-cloud", "access", "jobs", "-r", f"{ctx.data_uri}/access/jobs", *submit_args(ctx.opt("access-jobs", "batch") or {}), *days],
+               fatal=False, warn="job tables missing or their job not submitted (a later run resubmits every missing day in its window)")
+
+
 def _vm_pack_check(p: ScanProfile) -> list[str]:
     from .vm_pack import batch_problems
 
@@ -2083,6 +2172,11 @@ def run_step(name: str, arg: str | None, env: dict[str, str] | None = None, prof
         return 2
     if env.get(FAIL_ENV) == name:
         err(f"scan step {name}: failing ({FAIL_ENV})")
+        return 1
+    once = Path(f"{env.get(FAKE_ENV)}.failed")
+    if env.get(FAKE_ENV) and env.get(FAIL_ONCE_ENV) == f"{name} {arg or ''}".rstrip() and not once.exists():
+        once.write_text(f"{name} {arg or ''}".rstrip() + "\n")
+        err(f"scan step {name}: failing once ({FAIL_ONCE_ENV})")
         return 1
     if env.get(FAKE_ENV):
         with open(env[FAKE_ENV], "a") as f:

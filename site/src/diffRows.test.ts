@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
-import { buildTree, diffLoadingLabel } from './diffModel'
+import { buildTree, diffLoadingLabel, diffMiss } from './diffModel'
 import type { DiffData, DiffRow } from './diffModel'
-import { deltaPct, diffCellAction, diffTableRows, fmtPct, sortDiffRows } from './diffRows'
+import { deltaPct, diffCellAction, diffCellHref, diffTableRows, fmtPct, sortDiffRows } from './diffRows'
 import type { DiffTableRow } from './diffRows'
 
 const row = (path: string, status: DiffRow['status'], bytes_before: number, bytes_after: number, objects_before: number, objects_after: number, expanded?: true, kind: DiffRow['kind'] = 'dir'): DiffRow =>
@@ -103,6 +103,27 @@ describe('diffCellAction', () => {
   })
 })
 
+describe('diffCellHref', () => {
+  it('links where a plain click goes: objects open, directories drill, a remainder its parent; the root and a scope-level remainder have none', () => {
+    const { cells } = buildTree(data([
+      row('ckpt', 'changed', 10_000_000, 13_000_000, 10, 11, true),
+      row('ckpt/model.safetensors', 'added', 0, 3_000_000, 0, 1, undefined, 'file'),
+      row('logs', 'changed', 800, 200, 80, 20),
+      row('(other)', 'changed', 90, 100, 900, 950),
+    ]), 'max', false)
+    const all = [...cells, ...cells.flatMap(c => c.children ?? [])]
+    const hrefs = { drill: (segs: string[]) => `/d/${segs.join('/')}`, open: (segs: string[]) => `/o/${segs.join('/')}` }
+    expect(all.map(n => [n.key, diffCellHref(n, hrefs)])).toEqual([
+      ['ckpt', '/d/ckpt'],
+      ['(other)', undefined],
+      ['logs', '/d/logs'],
+      ['ckpt/model.safetensors', '/o/ckpt/model.safetensors'],
+      ['ckpt/__unchanged__', '/d/ckpt'],
+    ])
+    expect(diffCellHref({ key: '', k: 'dir', status: 'root', label: 'ctbk' }, hrefs)).toBe(undefined)
+  })
+})
+
 describe('sortDiffRows', () => {
   const rows = diffTableRows(buildTree(data(ROWS), 'max', false).cells)
   const order = (k: Parameters<typeof sortDiffRows>[1], asc: boolean) => sortDiffRows(rows, k, asc).map(r => r.key)
@@ -149,5 +170,15 @@ describe('deltaPct / fmtPct', () => {
 describe('diffLoadingLabel: the diff header while the full walk aligns', () => {
   it('names the pair until its first paint (`depth=1`) is on the map, then says the rows are what\'s left', () => {
     expect([diffLoadingLabel(false, '11/4 → 11/5'), diffLoadingLabel(true, '11/4 → 11/5')]).toEqual(['Aligning 11/4 → 11/5…', 'Aligning the rows…'])
+  })
+})
+
+describe('diffMiss: which miss a diff 404 is', () => {
+  it('names an end the server doesn\'t serve, else the path', () => {
+    expect([
+      diffMiss('404: {"error":"no scan matches to=2026-11-17T1202"}'),
+      diffMiss('404: {"error":"no scan matches from=2026-10-08"}'),
+      diffMiss('404: path not found in either scan'),
+    ]).toEqual([{ scan: '2026-11-17T1202', end: 'to' }, { scan: '2026-10-08', end: 'from' }, { path: true }])
   })
 })

@@ -27,6 +27,14 @@ describe('renderParent', () => {
     ])('%s', (_, runs) => expect(buttons(runs)).toEqual([OPEN, DRY, LINK]))
   })
 
+  it('offers no Dry-run or Delete while a run (dry or real) is underway', () => {
+    expect([
+      ids(renderParent({ ...base, runs: [run({ finished_ts: null })] }).blocks),
+      ids(renderParent({ ...base, runs: [run({}), run({ mode: 'real', run_id: 'r', finished_ts: null })] }).blocks),
+      ids(renderParent({ ...base, runs: [run({}), run({ mode: 'real', run_id: 'r' })] }).blocks),
+    ]).toEqual([['staged_open'], ['staged_open'], ['staged_open', 'staged_dry', 'staged_delete_link']])
+  })
+
   it('shows only the www link when dispatch is not wired, the plan is closed, or empty', () => {
     expect(ids(renderParent({ ...base, runs: [run({})], actions: false }).blocks)).toEqual(['staged_open'])
     expect(ids(renderParent({ ...base, runs: [run({})], closed: true }).blocks)).toEqual(['staged_open'])
@@ -330,6 +338,13 @@ describe('stage replies: compact, phone-width', () => {
       [['staged_reject', '1:r3', 'Reject batch'], ['staged_open', null, 'View in www']],
     ])
   })
+  it('while a run is underway, no Reject: only the www link', () => {
+    const ps = ['gs://b/x/']
+    expect([buttons(reply({ prefixes: ps, running: true })), buttons(reply({ prefixes: ps, stats: stats({ 'gs://b/x/': 0 }), running: true }))]).toEqual([
+      [['staged_open', null, 'View in www']],
+      [['staged_open', null, 'View in www']],
+    ])
+  })
   it('many: grouped by parent folder, the top 3 and how many more; unsized, by count', () => {
     const ps = [...['a', 'b', 'c'].map(s => `gs://b/r1/${s}/`), ...['a', 'b'].map(s => `gs://b/r2/${s}/`), 'gs://b/r3/a/', 'gs://b/r4/a/']
     const m = reply({ prefixes: ps, batches: 4, batchOf: Object.fromEntries(ps.map((p, i) => [p, 1 + (i % 4)])) })
@@ -382,14 +397,23 @@ describe('stage replies: compact, phone-width', () => {
 })
 
 describe('senders', () => {
-  it('an event posts as the person (their Slack avatar), else their local part with a generic icon', () => {
+  it('an event posts as the person (their Slack avatar), else their local part with a generic icon; each carries the face to badge with what they did', () => {
+    const ANN = { name: 'Ann Bee', image: 'https://img/a.png' }
     expect([
-      personSender('a.b@example.org', { name: 'Ann Bee', image: 'https://img/a.png' }, 'staged'),
+      personSender('a.b@example.org', ANN, 'staged'),
       personSender('c.d@example.org', undefined, 'staged'),
+      personSender('a.b@example.org', ANN, 'dispatched', 'dry'),
+      personSender('a.b@example.org', ANN, 'finished', 'real'),
+      personSender('a.b@example.org', ANN, 'rejected'),
+      personSender('a.b@example.org', ANN, 'noted'),
       PLAN_SENDER,
     ]).toEqual([
-      { username: 'Ann Bee · staged', icon_url: 'https://img/a.png' },
-      { username: 'c.d · staged', icon_emoji: ':bust_in_silhouette:' },
+      { username: 'Ann Bee · staged', icon_url: 'https://img/a.png', face: { email: 'a.b@example.org', image: 'https://img/a.png', badge: 'staged' } },
+      { username: 'c.d · staged', icon_emoji: ':bust_in_silhouette:', face: { email: 'c.d@example.org', image: null, badge: 'staged' } },
+      { username: 'Ann Bee · dry run', icon_url: 'https://img/a.png', face: { email: 'a.b@example.org', image: 'https://img/a.png', badge: 'dry' } },
+      { username: 'Ann Bee · finished', icon_url: 'https://img/a.png', face: { email: 'a.b@example.org', image: 'https://img/a.png', badge: 'finished' } },
+      { username: 'Ann Bee · rejected', icon_url: 'https://img/a.png', face: { email: 'a.b@example.org', image: 'https://img/a.png', badge: 'undone' } },
+      { username: 'Ann Bee · noted', icon_url: 'https://img/a.png' },
       { username: 'Staged deletions', icon_emoji: ':wastebasket:' },
     ])
   })

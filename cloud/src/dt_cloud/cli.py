@@ -1,10 +1,5 @@
-"""``dt-cloud`` CLI.
-
-``build`` derives the sparse dir -> user attribution table from a marin
-``scan_gcs`` objects listing (parquet). The listing never loads fully into
-pandas: DuckDB pre-filters it down to the two small row sets the signals
-need (distinct ``users/<seg>/`` prefixes and record-file rows).
-"""
+"""``dt-cloud`` CLI: the cloud overlay's commands (scans, the path store and its indexes, the site's
+data, attribution, sweeps, the digest)."""
 
 from __future__ import annotations
 
@@ -30,9 +25,11 @@ from .deploy import data_bucket, layer2_prefix as resolve_layer2, site_token, si
 from .secrets import env_secret, secret
 from .index_footer import INDEX_VARIANTS
 from .prefixes import load_prefix_map
-from .records import mine_record_rows
 from .scan_id import scan_id_option, snapshot_scans
-from .signals import RECORD_BASENAME, manual_rows, record_file_paths, user_prefix_rows
+
+# gcsfs ≥ 2026.8.1's adaptive prefetcher hangs a process at exit when a read handle outlives fsspec's loop (see
+# `disk_tree.blobfs`, which opts out the same way); `access attribute` failing on 2026-11-19 then hung its scan step 7 h
+os.environ.setdefault("USE_EXPERIMENTAL_ADAPTIVE_PREFETCHING", "false")
 
 err = partial(print, file=sys.stderr)
 
@@ -51,7 +48,7 @@ def _connect() -> "duckdb.DuckDBPyConnection":
 
 @group()
 def main() -> None:
-    """Per-user attribution and reporting for Marin GCS storage."""
+    """Cloud storage usage: scans, indexes, attribution and reporting over a deployment's buckets."""
 
 
 def _hard_exit() -> None:
@@ -70,97 +67,21 @@ err = partial(print, file=sys.stderr)
 err = partial(print, file=sys.stderr)
 
 
-@main.command()
-@option("-i", "--identities", "identities_path", envvar=IDENTITIES_ENV, required=True, help=f"identities.yaml path or URL (${IDENTITIES_ENV}): the deployment's roster, kept outside the repo")
-@option("-l", "--listing", "listings", required=True, multiple=True, help="Listing parquet glob(s): scan_gcs or SII inventory schema; repeatable — earlier sources win per bucket")
-@option("-o", "--out", required=True, type=Path, help="Output parquet path for the attribution table")
-@option("-R", "--no-records", is_flag=True, help="Skip artifact-record mining (no GETs; path signals only)")
-@option("-w", "--workers", default=16, help="Concurrent record reads")
-def build(
-    identities_path: str,
-    listings: tuple[str, ...],
-    out: Path,
-    no_records: bool,
-    workers: int,
-) -> None:
-    """Build the attribution table from a listing parquet."""
-    identities = load_identities(identities_path)
-    asof = dt.date.today()
-    con = _connect()
-    from disk_tree.listing import prepare_listing
-
-    src = prepare_listing(con, listings)
-
-    users_df = con.execute(
-        "SELECT DISTINCT bucket, regexp_extract(name, '^users/[^/]+/') AS name"
-        f" FROM {src} WHERE name LIKE 'users/%'"
-    ).df()
-    records_df = con.execute(
-        f"SELECT DISTINCT bucket, name FROM {src}"
-        " WHERE regexp_extract(name, '[^/]+$') = ?",
-        [RECORD_BASENAME],
-    ).df()
-
-    rows = user_prefix_rows(users_df, identities, asof) + manual_rows(identities, asof)
-    if not no_records:
-        paths = record_file_paths(records_df)
-        err(f"record files to mine: {len(paths)}")
-        record_rows, failed = mine_record_rows(paths, identities, asof, max_workers=workers)
-        rows += record_rows
-        if failed:
-            err(f"unreadable record files ({len(failed)}):")
-            for path in failed:
-                err(f"  {path}")
-
-    table = pd.DataFrame([asdict(row) for row in rows])
-    out.parent.mkdir(parents=True, exist_ok=True)
-    table.to_parquet(out, index=False)
-
-    by_source = Counter(row.source for row in rows)
-    err(f"wrote {len(rows)} attribution rows to {out}: {dict(by_source)}")
-    unknown_users = sorted({row.user for row in rows if row.user is not None and not identities.known(row.user)})
-    if unknown_users:
-        err(f"users not in {identities_path} (add name/github/aliases): {unknown_users}")
-
-
-@main.command("executor-mine")
-@option("-l", "--listing", "listings", required=True, multiple=True, help="Listing parquet glob(s): scan_gcs or SII inventory schema; repeatable — earlier sources win per bucket")
-@option("-o", "--out", "out_path", type=Path, default=Path("tmp/executor-infos.parquet"), help="Output parquet")
-@option("-w", "--workers", default=64, help="Concurrent GETs")
-def executor_mine(listings: tuple[str, ...], out_path: Path, workers: int) -> None:
-    """Targeted-GET mine of legacy `.executor_info` sidecars (name/output_path/config gs paths)."""
-    from .executor_info import mine_executor_infos
-
-    con = _connect()
-    from disk_tree.listing import prepare_listing
-
-    src = prepare_listing(con, listings)
-    paths = [
-        f"gs://{b}/{n}"
-        for b, n in con.execute(
-            f"SELECT DISTINCT bucket, name FROM {src} WHERE name LIKE '%.executor_info'"
-        ).fetchall()
-    ]
-    mine_executor_infos(paths, out_path, max_workers=workers)
-
-
 @main.command("wandb-attr")
 @option("-i", "--identities", "identities_path", envvar=IDENTITIES_ENV, required=True, help=f"identities.yaml path or URL (${IDENTITIES_ENV}): the deployment's roster, kept outside the repo")
 @option("-l", "--listing", "listings", required=True, multiple=True, help="Listing parquet glob(s): scan_gcs or SII inventory schema; repeatable — earlier sources win per bucket")
 @option("-o", "--out", required=True, type=Path, help="Output parquet path for wandb attribution rows")
 @option("-p", "--run-root", "run_roots", multiple=True, default=("checkpoints",), help="Top-level dir holding run-named dirs (repeatable; default `checkpoints`)")
 @option("-r", "--runs", "runs_path", required=True, type=Path, help="wandb-mine output parquet")
-@option("-x", "--executor-infos", "executor_path", type=Path, default=None, help="executor-mine output parquet (adds executor-wandb rows)")
 def wandb_attr(
     identities_path: str,
     listings: tuple[str, ...],
     out: Path,
     run_roots: tuple[str, ...],
     runs_path: Path,
-    executor_path: Path | None,
 ) -> None:
     """Attribution rows from W&B runs: run-name ↔ dirs under the run roots (`-p`) + writer-path configs."""
-    from .wandb_signal import executor_rows, run_name_rows, writer_path_rows
+    from .wandb_signal import run_name_rows, writer_path_rows
 
     identities = load_identities(identities_path)
     asof = dt.date.today()
@@ -194,10 +115,6 @@ def wandb_attr(
     ).df()
     err(f"{len(run_dirs)} level-2/3/4 dirs under {', '.join(run_roots)}")
     rows = run_name_rows(runs, run_dirs, identities, asof) + writer_path_rows(runs, identities, asof)
-    if executor_path is not None:
-        executor_df = pd.read_parquet(executor_path)
-        err(f"{len(executor_df)} executor sidecars")
-        rows += executor_rows(runs, executor_df, identities, asof)
     table = pd.DataFrame([asdict(row) for row in rows])
     out.parent.mkdir(parents=True, exist_ok=True)
     table.to_parquet(out, index=False)
@@ -1647,10 +1564,11 @@ def index_extras(attributions: tuple[str, ...], identities_path: str, out_dir: P
 @option("-j", "--jobs", default=4, type=int, help="Concurrent requests (default 4)")
 @option("-n", "--dry-run", is_flag=True, help="Print the request paths; fetch nothing")
 @option("-r", "--root", help="Snapshots root: a dir or URL (`r2://<bucket>/snapshots`, `gs://…`); default gs://$DATA_BUCKET/snapshots[/$SNAPSHOTS_SUBDIR]")
+@option("-S", "--series-only", is_flag=True, help="Only each path's size-over-time series (`/api/series`): what a new interval-store run makes cold, warmed as it lands")
 @option("-t", "--token", help="Site read token (default $SITE_TOKEN)")
 @option("-u", "--url", "site_url", default=None, help="Site base (default $SITE_URL)")
 @option("-W", "--widths", default="512,1280,1536,1792,1920", help="Canvas widths to warm (the client sends ceil(innerWidth/128)*128; default = phone + common laptops)")
-def warm_cache(date: str | None, jobs: int, dry_run: bool, root: str | None, token: str | None, site_url: str | None, widths: str) -> None:
+def warm_cache(date: str | None, jobs: int, dry_run: bool, root: str | None, series_only: bool, token: str | None, site_url: str | None, widths: str) -> None:
     """Warm the site's subtree + diff caches for a scan: replay the home
     page's default requests (the subtree, the diff span chips 1d/3d/7d/14d/30d
     and the previous-scan pair: each one's first paint, `depth=1`, and its full
@@ -1687,7 +1605,7 @@ def warm_cache(date: str | None, jobs: int, dry_run: bool, root: str | None, tok
         # No `WARM_PATHS`: the root + its top level, as the site lists them.
         headers = auth()
         targets = wm.top_paths(site_url, headers, date)
-    paths = wm.plan(date, dates, targets, tuple(int(w) for w in widths.split(",")))
+    paths = [wm.series_url(t) for t in targets] if series_only else wm.plan(date, dates, targets, tuple(int(w) for w in widths.split(",")))
     if dry_run:
         for p in paths:
             print(p)
@@ -2916,6 +2834,180 @@ def access_status(buckets: tuple[str, ...], data_bucket: str, log_bucket: str | 
         )
 
 
+@access.command("requesters")
+@option("-D", "--depth", type=int, default=2, show_default=True, help="Path segments kept as each row's prefix")
+@option("-d", "--data-bucket", envvar="DATA_BUCKET", default=None, help="The access store's bucket (`gs://<it>/access`); default $DATA_BUCKET")
+@option("-H", "--hourly", is_flag=True, help="Per UTC hour too (an `hour` column), into `<root>/requesters-hourly` by default: what joins a requester IP to the host and job behind it at the time")
+@option("-M", "--mem", default=None, help="DuckDB memory limit (e.g. 48GB)")
+@option("-o", "--out", default=None, help="Output dir or URL (default: `<root>/requesters`, or `requesters-hourly` with -H); one `<day>.parquet` per day")
+@option("-p", "--threads", type=int, default=None, help="DuckDB threads")
+@option("-r", "--root", default=None, help="The access store (a dir or `gs://` URL holding `raw/`); default `gs://$DATA_BUCKET/access`")
+@option("-s", "--skip-existing", is_flag=True, help="Leave a day whose `<day>.parquet` was written from the raw parts there now (one the access ingest has added to since is rolled again)")
+@argument("days", nargs=-1, required=True)
+def access_requesters(depth: int, data_bucket: str | None, hourly: bool, mem: str | None, out: str | None, threads: int | None, root: str | None, skip_existing: bool, days: tuple[str, ...]) -> None:
+    """Who made each day's requests: layer-1a rolled up per day × bucket × operation × client × requester × path prefix
+    (`access_requesters.py`), one `<day>.parquet` per DAY (YYYY-MM-DD, UTC) under `-o`. Prints each day's row count."""
+    import datetime as dt
+
+    from .access_requesters import day_parts, part_key, raw_parts, rollup_day, written_parts
+
+    if not root:
+        if not data_bucket:
+            raise SystemExit("access requesters: -r or -d/$DATA_BUCKET")
+        root = f"gs://{data_bucket}/access"
+    out = (out or f"{root.rstrip('/')}/requesters{'-hourly' if hourly else ''}").rstrip("/")
+    if not out.startswith("gs://"):
+        Path(out).mkdir(parents=True, exist_ok=True)
+    names = raw_parts(root)
+    for d in days:
+        day = dt.date.fromisoformat(d)
+        dest = f"{out}/{day.isoformat()}.parquet"
+        if skip_existing and written_parts(dest) == sorted(part_key(f) for f in day_parts(names, day)):
+            err(f"requesters {day}: {dest} already written from these raw parts")
+            continue
+        print(f"{day}\t{rollup_day(root, day, dest, depth, mem, threads, names, hourly)}")
+
+
+@access.command("hosts")
+@option("-d", "--data-bucket", envvar="DATA_BUCKET", default=None, help="The access store's bucket; default $DATA_BUCKET")
+@option("-n", "--dry-run", is_flag=True, help="Print the snapshot's row counts; write nothing")
+@option("-o", "--out", default=None, help="Output root (default `gs://$DATA_BUCKET/access/hosts`); the snapshot lands at `<out>/<day>/<HH>.parquet`")
+@option("-p", "--project", "projects", multiple=True, envvar="ACCESS_HOSTS_PROJECTS", help="A project whose VMs read the buckets (repeatable; default $ACCESS_HOSTS_PROJECTS, space-separated)")
+def access_hosts(data_bucket: str | None, dry_run: bool, out: str | None, projects: tuple[str, ...]) -> None:
+    """Snapshot the VMs behind the buckets' requests (`access_hosts.py`): each project's TPU nodes and Compute instances
+    with their internal and external IPs, which only the live APIs report, so a requester IP can later be joined to the
+    VM it was at the time (`specs/access-job-attribution.md`). Prints the path and rows by kind."""
+    from collections import Counter
+
+    from .access_hosts import snapshot, write
+
+    projects = tuple(p for ps in projects for p in ps.split())
+    if not projects:
+        raise SystemExit("access hosts: -p or $ACCESS_HOSTS_PROJECTS")
+    table = snapshot(list(projects))
+    kinds = Counter(table.column("kind").to_pylist())
+    summary = " ".join(f"{k}={n}" for k, n in sorted(kinds.items()))
+    if dry_run:
+        print(f"(dry run) {table.num_rows} rows: {summary}")
+        return
+    if not out:
+        if not data_bucket:
+            raise SystemExit("access hosts: -o or -d/$DATA_BUCKET")
+        out = f"gs://{data_bucket}/access/hosts"
+    print(f"{write(table, out)}\t{table.num_rows} rows: {summary}")
+
+
+@access.command("attribute")
+@option("-d", "--data-bucket", envvar="DATA_BUCKET", default=None, help="The access store's bucket; default $DATA_BUCKET")
+@option("-r", "--root", default=None, help="The access store's root (default `gs://$DATA_BUCKET/access`)")
+@option("-s", "--skip-unchanged", is_flag=True, help="Leave a day already attributed from the same inputs")
+@argument("days", nargs=-1, required=True)
+def access_attribute_cmd(data_bucket: str | None, root: str | None, skip_unchanged: bool, days: tuple[str, ...]) -> None:
+    """Attribute each of DAYS' (YYYY-MM-DD) requests to the jobs that made them (`access_attribute.py`): the hourly
+    rollup ⋈ host snapshots (requester IP → VM) ⋈ job tables (VM → tasks, split by samples), into
+    `<root>/attributed/<day>.parquet`; `access readers -r <root>/attributed -b owner,job` reads it. One JSON line per
+    day (`status`: written | unchanged | no-rollup, and each `via`'s share of the requests)."""
+    import datetime as dt
+
+    from .access_attribute import attribute_day
+
+    if not root:
+        if not data_bucket:
+            raise SystemExit("access attribute: -r or -d/$DATA_BUCKET")
+        root = f"gs://{data_bucket}/access"
+    for d in days:
+        print(json.dumps(attribute_day(root, dt.date.fromisoformat(d), skip_unchanged=skip_unchanged)), flush=True)
+
+
+@access.command("jobs")
+@option("-a", "--service-account", envvar="JOB_SA", default=None, help="The job's service account (default $JOB_SA)")
+@option("-d", "--data-bucket", envvar="DATA_BUCKET", default=None, help="The access store's bucket; default $DATA_BUCKET")
+@option("-e", "--env", "env_items", multiple=True, help="K=V into the job's environment (repeatable)")
+@option("-i", "--image", required=True, help="The deployment's job-table image (entrypoint takes `-o ROOT DAY…`)")
+@option("-L", "--region", envvar="BATCH_REGION", default=None, help="The job's region (default $BATCH_REGION)")
+@option("-m", "--machine", default=None, help="Machine type (default `access_jobs.MACHINE`)")
+@option("-n", "--dry-run", is_flag=True, help="Print the missing days, the job id and its spec; submit nothing")
+@option("-P", "--project", envvar="GCP_PROJECT", default=None, help="The job's project (default $GCP_PROJECT)")
+@option("-r", "--root", default=None, help="Output root (default `gs://$DATA_BUCKET/access/jobs`): `<root>/<day>/{workers,tasks}.parquet`")
+@option("-s", "--secret", "secret_items", multiple=True, help="VAR=SECRET (a Secret Manager secret in the project) into the job (repeatable)")
+@option("-S", "--no-spot", is_flag=True, help="A standard VM, not spot")
+@option("-X", "--cross-region", is_flag=True, help="Allow the root's bucket outside the job's region")
+@argument("days", nargs=-1, required=True)
+def access_jobs_cmd(service_account: str | None, data_bucket: str | None, env_items: tuple[str, ...], image: str,
+                    region: str | None, machine: str | None, dry_run: bool, project: str | None, root: str | None,
+                    secret_items: tuple[str, ...], no_spot: bool, cross_region: bool, days: tuple[str, ...]) -> None:
+    """Submit the deployment's job-table image (`access_jobs.py`) as its own Batch job for those of DAYS (YYYY-MM-DD)
+    not yet written: each day's hourly workers (internal address) and tasks, the VM → job leg of attributing requests
+    (`specs/access-job-attribution.md`). Not waited on; none missing, no job. Exit 3 when a day other than the newest is
+    still missing: an earlier run's job failed or left it (it is resubmitted here)."""
+    import datetime as dt
+
+    from .access_jobs import MACHINE, submit
+    from .vm_pack import pairs
+
+    for d in days:
+        dt.date.fromisoformat(d)
+    if not root:
+        if not data_bucket:
+            raise SystemExit("access jobs: -r or -d/$DATA_BUCKET")
+        root = f"gs://{data_bucket}/access/jobs"
+    missing = [k for k, v in (("-a/$JOB_SA", service_account), ("-L/$BATCH_REGION", region), ("-P/$GCP_PROJECT", project)) if not v]
+    if missing and not dry_run:
+        raise SystemExit(f"access jobs: need {', '.join(missing)}")
+    out = submit(root, days, image=image, service_account=service_account or "", region=region or "", project=project or "",
+                 machine=machine or MACHINE, spot=not no_spot, env=pairs(env_items, "-e"), secrets=pairs(secret_items, "-s"),
+                 cross_region=cross_region, dry_run=dry_run)
+    print(json.dumps(out, indent=2 if dry_run else None))
+    if out["overdue"]:
+        err(f"access jobs: {', '.join(out['overdue'])} still missing (an earlier job failed or left them uncovered)")
+        sys.exit(3)
+
+
+@access.command("readers")
+@option("-b", "--by", default="client,bucket,prefix", show_default=True, help="Group by these rollup columns (comma-separated)")
+@option("-d", "--data-bucket", envvar="DATA_BUCKET", default=None, help="The access store's bucket; default $DATA_BUCKET")
+@option("-f", "--from", "from_", default=None, help="First day (YYYY-MM-DD; default: the newest rollup's day)")
+@option("-j", "--json", "as_json", is_flag=True, help="JSON instead of a table")
+@option("-n", "--top", type=int, default=15, show_default=True, help="Groups shown; the rest as one row")
+@option("-r", "--root", default=None, help="The rollups' dir or `gs://` URL (default `gs://$DATA_BUCKET/access/requesters`)")
+@option("-t", "--to", default=None, help="Last day (default: the newest rollup's day)")
+def access_readers(by: str, data_bucket: str | None, from_: str | None, as_json: bool, top: int, root: str | None, to: str | None) -> None:
+    """Who made the requests over a range of `access requesters` rollups: requests per day by Class A (listings,
+    writes) and Class B (reads), and an estimated cost at list prices (`PRICE_PER_M`), top groups first."""
+    import json as _json
+
+    from .access_requesters import PRICE_PER_M, readers
+
+    if not root:
+        if not data_bucket:
+            raise SystemExit("access readers: -r or -d/$DATA_BUCKET")
+        root = f"gs://{data_bucket}/access/requesters"
+    root = root.rstrip("/")
+    if root.startswith("gs://"):
+        import gcsfs
+
+        names = sorted(f"gs://{p}" for p in gcsfs.GCSFileSystem().glob(f"{root.removeprefix('gs://')}/*.parquet"))
+    else:
+        names = sorted(str(p) for p in Path(root).glob("*.parquet"))
+    day_of = {n: n.rsplit("/", 1)[-1].removesuffix(".parquet") for n in names}
+    if not names:
+        raise SystemExit(f"access readers: no rollups under {root}")
+    last = max(day_of.values())
+    lo, hi = from_ or (to or last), to or last
+    files = [n for n in names if lo <= day_of[n] <= hi]
+    out = readers(files, tuple(b.strip() for b in by.split(",") if b.strip()), top)
+    if as_json:
+        print(_json.dumps({**out, "from": lo, "to": hi, "prices_per_m": PRICE_PER_M}, default=str))
+        return
+    print(f"{lo} … {hi} ({out['days']} days with rollups); per day; $ at list prices (A ${PRICE_PER_M['A']}/M, B ${PRICE_PER_M['B']}/M)")
+    cols = out["by"]
+    w = [max(len(c), *(len(str(r[c])[:60]) for r in out["rows"])) for c in cols]
+    print("  ".join(f"{c:{n}}" for c, n in zip(cols, w)) + f"  {'A M/d':>8}  {'B M/d':>8}  {'$/d':>7}")
+    for r in [*out["rows"], {**{c: "" for c in cols[1:]}, cols[0]: "total", **out["total"]}]:
+        print("  ".join(f"{str(r[c])[:60]:{n}}" for c, n in zip(cols, w)) + f"  {r['a_per_day'] / 1e6:8.2f}  {r['b_per_day'] / 1e6:8.1f}  {r['usd_per_day']:7.0f}")
+
+
+
 @main.group()
 def job() -> None:
     """Read-only ops for the daily snapshot Batch job (status/logs/watch/metrics), in `$BATCH_REGION`."""
@@ -3367,7 +3459,7 @@ def _icons_dir(rel: str = "job/icons", config: Path | None = None) -> Path:
 
 
 def _digest_options(template_default: str):
-    """`digest`'s options; `cw-digest` is the same command defaulting to `-T cw`."""
+    """`digest`'s options; `cw-digest` is the same command defaulting to `-T quota`."""
     opts = [
         option("-b", "--bot-token", help="Discord bot token: opens the month's thread + resolves app emoji (default $DISCORD_BOT_TOKEN; with -P discord)"),
         option("-c", "--channel", help="Slack channel id (default $SLACK_CHANNEL)"),
@@ -3376,7 +3468,7 @@ def _digest_options(template_default: str):
         option("-D", "--reply-delay", "reply_delay", default=0.0, type=float, help="Seconds to sleep between replies (e.g. 305 for a spaced Slack backfill so per-reply sender chrome survives; Discord needs none)"),
         option("-E", "--edit-replies", is_flag=True, help="Re-edit every already-posted reply to its current body (backfill after a format change; a Slack sender-variant reply keeps its name + avatar)"),
         option("-F", "--for-real", is_flag=True, help="With --redo-replies: actually post the new replies and delete the old ones (default: print the plan)"),
-        option("-H", "--reply-hour", type=int, default=None, help="cw template: UTC hour the sender variant's daily reply is taken from — the day's first scan at/after it (default 12 → the 12:01Z morning scan, 8:01 am ET; the day's other scans still feed the OP + plot, and with the config's `provisional: true` its earlier ones post a provisional reply)"),
+        option("-H", "--reply-hour", type=int, default=None, help="quota template: UTC hour the sender variant's daily reply is taken from — the day's first scan at/after it (default 12 → the 12:01Z morning scan, 8:01 am ET; the day's other scans still feed the OP + plot, and with the config's `provisional: true` its earlier ones post a provisional reply)"),
         option("-i", "--icons-dir", type=Path, default=None, help="Where the plot PNG is written + deployed from (default the config's `icons_dir`: job/icons, job/icons-cw)"),
         option("-L", "--file-settings", is_flag=True, help="Use the config file's `params` / `quota_marks`, not the site's live settings (`/api/digest-settings`, edited on /admin/slack; the default when the site has a row)"),
         option("-m", "--month", help="Month YYYY-MM (default: current UTC month)"),
@@ -3389,9 +3481,9 @@ def _digest_options(template_default: str):
         option("-R", "--redo-replies", is_flag=True, help="Re-post the month's replies under the current day rule, then delete the old ones (Slack, or Discord with -P discord; dry-run unless --for-real)"),
         option("-s", "--since", help="With --redo-replies: redo only the days from this one (YYYY-MM-DD) on; earlier days keep their replies, re-keyed to the current rule (a day's extra replies stay in the thread)"),
         option("-t", "--token", help="Slack bot token (default $SLACK_BOT_TOKEN)"),
-        option("-T", "--template", type=Choice(["gcs", "cw"]), default=template_default, help=f"Post style + preset config (default {template_default}): gcs = a reply per day, $/mo by storage class, class mosaic; cw = a reply per day, % of quota per bucket, quota sparkline + diff treemap"),
+        option("-T", "--template", type=Choice(["cost", "quota", "gcs", "cw"]), default=template_default, help=f"Post style + preset config (default {template_default}): cost = a reply per day, $/mo by storage class, class mosaic; quota = a reply per day, % of quota per bucket, quota sparkline + diff treemap (old names: gcs = cost, cw = quota)"),
         option("-u", "--url", "site_url", default=None, help="Site base for links (default the config's `site_url`, else $SITE_URL)"),
-        option("-V", "--variant", type=Choice(["sender", "body"]), default=None, help="Reply style (cw template): headline as the sender name, posted once from the day's morning scan (sender, default) or bold in the body, edited as the day's scans land (body)"),
+        option("-V", "--variant", type=Choice(["sender", "body"]), default=None, help="Reply style (quota template): headline as the sender name, posted once from the day's morning scan (sender, default) or bold in the body, edited as the day's scans land (body)"),
         option("-y", "--replies", "reply_range", help="Re-apply only the already-posted replies of this inclusive day range (`A..B`, YYYY-MM-DD) to their current rendering, as -d/--reply"),
         option("-w", "--webhook", help="Discord webhook URL in the digest channel (default $<config discord_webhook_env>: gcs $DISCORD_GCS_USAGE_WEBHOOK, cw none; with -P discord)"),
         option("-W", "--preview-only", "preview_key", help="Write only the month's preview bundle under this channel key (a lowercase slug, listed in /admin/slack's thread selector): no Slack client, no plot hosted, nothing posted or edited"),
@@ -3447,11 +3539,8 @@ def _digest(
     variant = variant or cfg.variant
     if variant not in tpl.variants:
         raise SystemExit(f"digest: the {cfg.template} template has no {variant!r} variant ({' | '.join(tpl.variants)})")
-    m = (
-        dt.datetime.strptime(month, "%Y-%m").date()
-        if month
-        else dt.datetime.now(dt.timezone.utc).date().replace(day=1)
-    )
+    this_month = dt.datetime.now(dt.timezone.utc).date().replace(day=1)
+    m = dt.datetime.strptime(month, "%Y-%m").date() if month else this_month
     root = root or cfg.resolve_root()
 
     since_d = dt.date.fromisoformat(since) if since else None
@@ -3515,9 +3604,14 @@ def _digest(
             return
         _print_redo_plan(plan, f"{m:%Y-%m} in {channel} ({variant})", since_d)
         return
-    # the scheduled run (no -m) also closes the previous month's thread if its last day's provisional reply is still up
-    converge = dg.converge_slack if month else dg.converge_slack_now
-    converge(tpl, root, m, client, channel, variant, icons_dir=icons, deploy_plot=deploy, reply_delay=reply_delay, edit_replies=edit_replies)
+    # the scheduled run (no -m) also closes the previous month's thread if its last day's provisional reply is still up,
+    # and pins this month's OP; an explicit -m pins only when it names the current month
+    if month:
+        dg.converge_slack(tpl, root, m, client, channel, variant, icons_dir=icons, deploy_plot=deploy, reply_delay=reply_delay,
+                          edit_replies=edit_replies, current=m == this_month)
+    else:
+        dg.converge_slack_now(tpl, root, m, client, channel, variant, icons_dir=icons, deploy_plot=deploy, reply_delay=reply_delay,
+                              edit_replies=edit_replies)
     err(f"digest: converged {m:%Y-%m} ({cfg.template}, {variant})")
 
 
@@ -3541,21 +3635,21 @@ def _print_redo_plan(plan: dict, where: str, since: dt.date | None) -> None:
 
 
 @main.command()
-@_digest_options("gcs")
+@_digest_options("cost")
 def digest(**kw) -> None:
     """Converge the monthly digest thread: an OP (month-to-date headline,
     per-week bullets, plot) edited in place + one reply per UTC day, in Slack (default) or its Discord twin (`-P discord`:
     webhook OP with the plot attached, bot-opened thread, webhook replies).
     State beside the snapshots, per the config's `state`/`discord_state`
-    (gcs: digest/<YYYY-MM>.json; cw: digest/cw/<channel>/<variant>/<YYYY-MM>.json).
+    (cost: digest/<YYYY-MM>.json; quota: digest/<channel>/<variant>/<YYYY-MM>.json).
     See specs/done/digest-unification.md."""
     _digest(**kw)
 
 
 @main.command("cw-digest")
-@_digest_options("cw")
+@_digest_options("quota")
 def cw_digest(**kw) -> None:
-    """`digest -T cw` (kept so the cw job's invocation is unchanged)."""
+    """`digest -T quota` (kept so the cw job's invocation is unchanged)."""
     _digest(**kw)
 
 

@@ -3,17 +3,19 @@ its Discord twin) per calendar month — an OP edited in place as scans land
 (month-to-date headline, per-ISO-week bullets, a hosted plot) plus one reply
 per scan or per day, each reply's arrow colour-coding its trend. Posts through
 `thrds`; converge state is a per-month JSON beside the snapshots, so every run
-is idempotent and an interrupted backfill resumes.
+is idempotent and an interrupted backfill resumes. The current month's OP is
+pinned in the channel, taking the pin from last month's (`pin_op`).
 
 What a deployment chooses is DATA, a :class:`DigestConfig` (a preset in
 :data:`PRESETS`, overlaid by ``--config FILE``): its template, title, site,
 snapshot root, state layout, plot host, bucket labels and quotas, prices.
 What differs in the posts lives in two TEMPLATES — opinionated styles,
-neither intrinsic to one store:
+neither intrinsic to one store (their old names, ``gcs`` and ``cw``, are accepted as
+aliases: :data:`TEMPLATE_ALIASES`):
 
-- ``gcs`` (`digest_gcs`): a reply per day (its first scheduled scan), the headline as the sender name,
+- ``cost`` (`digest_cost`): a reply per day (its first scheduled scan), the headline as the sender name,
   $/mo by storage class in the body, the site's storage-class image.
-- ``cw`` (`digest_cw`): a reply per UTC day in two variants (``sender``: the
+- ``quota`` (`digest_quota`): a reply per UTC day in two variants (``sender``: the
   headline as the sender name, posted once from the morning scan — optionally
   preceded by a ``provisional`` reply the earlier scans edit; ``body``: bold
   in the body, edited as the day's scans land), multi-bucket `% of quota
@@ -76,7 +78,7 @@ UNITS = {"TiB": Units("TiB", TIB, "Ti"), "TB": Units("TB", 10**12, "T")}
 class Quota:
     """A bucket's quota: ``bytes``, its long ``name`` (the OP + plot: `1 PB`)
     and an optional ``short`` label (the reply tail: `1P`; None → SI from
-    ``bytes``, see `digest_cw._qlabel`). ``classes``: the storage-class ids it
+    ``bytes``, see `digest_quota._qlabel`). ``classes``: the storage-class ids it
     counts (`meta.json` `class_bytes`; Hugging Face's public allowance counts
     class 1, its private one class 5); empty: every byte."""
 
@@ -126,28 +128,30 @@ class DigestConfig:
     rendered and `wrangler pages deploy`ed from (relative: the cwd's or the
     repo checkout's); it lands on ``plot_project``'s ``plot_branch``, served at
     ``plot_base`` unless wrangler names its deployment URL. ``primary`` +
-    ``buckets`` (cw template) pick the headline bucket and label/quota each;
-    ``prices`` (gcs template) are $/GiB-month by storage-class id.
-    ``op_icon``: the month OP's sender icon (and the cw day line's), a URL or a
+    ``buckets`` (quota template) pick the headline bucket and label/quota each;
+    ``prices`` (cost template) are $/GiB-month by storage-class id.
+    ``op_icon``: the month OP's sender icon (and the quota template's day line), a URL or a
     file under ``icons_base`` (the deployment's mark, e.g. ``mark.png``); unset, 📆.
-    ``units`` (cw template): `TiB` (default) or `TB`, every size the digest
-    renders (text and plot). ``provisional`` (cw ``sender``): post a day's early scans as one
+    ``units`` (quota template): `TiB` (default) or `TB`, every size the digest
+    renders (text and plot). ``provisional`` (quota ``sender``): post a day's early scans as one
     provisional reply, edited in place, replaced by the final reply when the
-    day's reply scan lands (see `digest_cw`). ``alert_pct`` (cw): a quota at
+    day's reply scan lands (see `digest_quota`). ``alert_pct`` (quota): a quota at
     or over this percent gets a `:warning:` in the daily replies, and the
     month's thread one alert reply also sent to the channel (Slack
     `reply_broadcast`), edited as its numbers move and deleted once every quota
-    is back under; None: neither. ``quota_marks`` (cw replies): `warning` (the default) keeps the
+    is back under; None: neither. ``quota_marks`` (quota replies): `warning` (the default) keeps the
     clauses in config order, `:warning:` on those at or over ``alert_pct``; `circles` sorts them fullest first and
     marks each `:red_circle:` at or over ``mark_pct`` (``alert_pct``, else 90), `:large_orange_circle:` within 10
     points below, `:large_yellow_circle:` within 40, `:large_green_circle:` under that (specs/digest-quota-pressure.md);
-    `runway` keeps config order and marks each by how soon it fills at its fastest recent growth (`digest_cw._runway_mark`,
+    `runway` keeps config order and marks each by how soon it fills at its fastest recent growth (`digest_quota._runway_mark`,
     specs/digest-runway-marks.md); `runway-hue` the same with `:runway-1:` (red) … `:runway-8:` (green)
-    workspace emoji, `:runway-<shape>-N:` for a bucket with a ``shape`` (`digest_cw._runway_hue`). The OP's text and plot request are the site's (`POST /api/digest-op`,
+    workspace emoji, `:runway-<shape>-N:` for a bucket with a ``shape`` (`digest_quota._runway_hue`). The OP's text and plot request are the site's (`POST /api/digest-op`,
     the renderer `/admin/slack` previews with; specs/slack-preview-page.md), under ``params`` (the site's
     `src/digest/codec` string, `''`: the defaults). ``preview``: where each Slack converge writes the month's preview bundle
     (`preview_bundle`, for the site's `/admin/slack-preview`), a dir or URL template (``{channel}``,
-    ``{variant}``) in the deployment's served store; None: none written."""
+    ``{variant}``) in the deployment's served store; None: none written. ``pin``: the current month's OP is pinned in
+    the channel and the previous month's unpinned (`pin_op`; the bot needs ``pins:write``, and ``channels:join`` when
+    it isn't a member); False: neither."""
 
     template: str
     title: str
@@ -166,9 +170,9 @@ class DigestConfig:
     reply_hour: int = 12
     provisional: bool = False
     primary: str | None = None
-    # cw: a reply's headline totals every bucket the scan has, not the primary's alone
+    # quota: a reply's headline totals every bucket the scan has, not the primary's alone
     total_headline: bool = False
-    # cw: a reply's pools each on their own line, not ` · `-joined
+    # quota: a reply's pools each on their own line, not ` · `-joined
     reply_lines: bool = False
     buckets: dict[str, Bucket] = field(default_factory=dict)
     prices: dict[str, float] = field(default_factory=dict)
@@ -177,6 +181,7 @@ class DigestConfig:
     quota_marks: str = "warning"
     params: str = ""
     preview: str | None = None
+    pin: bool = True
 
     @property
     def unit(self) -> Units:
@@ -197,7 +202,7 @@ class DigestConfig:
         return v
 
     def op_sender(self) -> dict[str, str]:
-        """The month's OP (and the cw template's day line) sender icon: ``op_icon`` (a URL, or a file under ``icons_base``, e.g.
+        """The month's OP (and the quota template's day line) sender icon: ``op_icon`` (a URL, or a file under ``icons_base``, e.g.
         the deployment's mark) as ``icon_url``, else the 📆 emoji."""
         if not self.op_icon:
             return {"icon_emoji": ":calendar:"}
@@ -231,8 +236,8 @@ class DigestConfig:
 PRESETS: dict[str, DigestConfig] = {
     # Template shape only: a deployment's site, hosts, buckets and quotas come
     # from its config file (``-C``); an empty ``site_url`` reads ``$SITE_URL``.
-    "gcs": DigestConfig(
-        template="gcs",
+    "cost": DigestConfig(
+        template="cost",
         title="Storage usage",
         site_url="",
         root="gs://{DATA_BUCKET}/snapshots",
@@ -240,8 +245,8 @@ PRESETS: dict[str, DigestConfig] = {
         # US list $/GiB-mo by GCS storage class id (1 Standard / 2 Nearline / 3 Coldline / 4 Archive)
         prices={"1": 0.02, "2": 0.01, "3": 0.004, "4": 0.0012},
     ),
-    "cw": DigestConfig(
-        template="cw",
+    "quota": DigestConfig(
+        template="quota",
         title="Storage usage",
         site_url="",
         root="gs://{DATA_BUCKET}/snapshots",
@@ -264,7 +269,21 @@ def parse_bytes(v: int | str) -> int:
     return round(float(m.group(1)) * _UNITS[(m.group(2) or "").upper()])
 
 
-TEMPLATES = ("gcs", "cw")
+TEMPLATES = ("cost", "quota")
+#: Each template's old name → its name (deployments' configs and scan profiles still pass them); every input
+#: (`-T`, a config file's ``template``, `config_from_dict`) goes through `canonical_template`, so nothing past it
+#: sees an alias.
+TEMPLATE_ALIASES = {"gcs": "cost", "cw": "quota"}
+
+
+def canonical_template(name: str) -> str:
+    """``name``, or the template its old name stands for; anything else raises ``ValueError``."""
+    name = TEMPLATE_ALIASES.get(name, name)
+    if name not in TEMPLATES:
+        raise ValueError(f"digest template {name!r} is not one of {TEMPLATES}")
+    return name
+
+
 QUOTA_MARKS = ("warning", "circles", "runway", "runway-hue", "arrow-chip")
 #: A bucket's `runway-hue` mark (`Bucket.shape`); the site's `digest/mrkdwn.ts` draws each.
 QUOTA_SHAPES = ("circle", "square", "diamond", "triangle", "star")
@@ -275,7 +294,7 @@ _SCALAR_TYPES: dict[str, tuple[type, ...]] = {
     "icons_dir": (str,), "op_icon": (str,), "plot_project": (str,), "plot_branch": (str,), "plot_base": (str,),
     "variant": (str,), "reply_hour": (int,), "provisional": (bool,), "primary": (str, type(None)),
     "units": (str,), "alert_pct": (int, float, type(None)), "quota_marks": (str,), "params": (str,),
-    "preview": (str, type(None)),
+    "preview": (str, type(None)), "pin": (bool,),
 }
 
 
@@ -349,8 +368,10 @@ def config_from_dict(d: dict, base: DigestConfig | None = None) -> DigestConfig:
             raise ValueError(f"digest config {k}: expected {want}, got {d[k]!r}")
     if base is None and "template" not in d:
         raise ValueError(f"digest config: no template (one of {TEMPLATES}): a deployment names its own")
-    if "template" in d and d["template"] not in TEMPLATES:
-        raise ValueError(f"digest config template: {d['template']!r} is not one of {TEMPLATES}")
+    if "template" in d:
+        if (name := TEMPLATE_ALIASES.get(d["template"], d["template"])) not in TEMPLATES:
+            raise ValueError(f"digest config template: {d['template']!r} is not one of {TEMPLATES}")
+        d["template"] = name
     if "units" in d and d["units"] not in UNITS:
         raise ValueError(f"digest config units: {d['units']!r} is not one of {tuple(UNITS)}")
     if d.get("alert_pct") is not None and not 0 < d["alert_pct"] <= 100:
@@ -373,6 +394,7 @@ def config_from_dict(d: dict, base: DigestConfig | None = None) -> DigestConfig:
 
 def load_config(template: str, path: str | Path | None = None) -> DigestConfig:
     """The ``template`` preset, overlaid by the YAML/JSON file at ``path``."""
+    template = canonical_template(template)
     if path is None:
         return PRESETS[template]
     import yaml
@@ -566,7 +588,7 @@ class Template(Protocol):
     ``variants`` are its reply styles (the first is the default);
     ``edited_variants`` re-edit a day's reply when a later scan of it lands;
     ``track_scan`` stores each posted reply as ``{ts, scan}`` (else the bare
-    ts — the gcs template's existing state format). ``provisional`` is the
+    ts — the cost template's existing state format). ``provisional`` is the
     still-open unit's stand-in reply (``cfg.provisional``), or None."""
 
     cfg: DigestConfig
@@ -591,15 +613,15 @@ def template(cfg: DigestConfig) -> Template:
         from .deploy import site_url
 
         cfg = replace(cfg, site_url=site_url())
-    if cfg.template == "gcs":
-        from .digest_gcs import Gcs
+    if cfg.template == "cost":
+        from .digest_cost import CostTemplate
 
-        return Gcs(cfg)
-    if cfg.template == "cw":
-        from .digest_cw import Cw
+        return CostTemplate(cfg)
+    if cfg.template == "quota":
+        from .digest_quota import QuotaTemplate
 
-        return Cw(cfg)
-    raise ValueError(f"unknown digest template {cfg.template!r} (gcs | cw)")
+        return QuotaTemplate(cfg)
+    raise ValueError(f"unknown digest template {cfg.template!r} (cost | quota)")
 
 
 # ---- IO (side-effecting) --------------------------------------------------------
@@ -845,13 +867,46 @@ def _op_render(tpl: Template, data, root: str, month: dt.date, state: dict, clie
     # with `invalid_blocks`. Poll until the URL is live (or give up + warn).
     if icons_dir is not None and deploy_plot is not None:
         _wait_reachable(plot_url)
-    # the previous month's thread, linked from the OP (its converge state, same channel and variant)
-    prev_op = load_state(state_path(root, prior_month(month), cfg.state.format(channel=channel, variant=variant))).get("op_ts")
+    # the previous month's thread, linked from the OP
+    prev_op = _prev_op(cfg, root, month, channel, variant)
     prev_url = client.permalink(prev_op) if prev_op else None
     return tpl.op_body(data, month, plot_url, prev_url), plot_url, prev_url
 
 
-def converge_slack(tpl: Template, root: str, month: dt.date, client, channel: str, variant: str | None = None, *, icons_dir=None, deploy_plot=None, reply_delay: float = 0.0, edit_replies: bool = False) -> dict:
+def _prev_op(cfg: DigestConfig, root: str, month: dt.date, channel: str, variant: str) -> str | None:
+    """The previous month's OP ts in ``channel`` (its converge state, same variant), or None: never posted."""
+    return load_state(state_path(root, prior_month(month), cfg.state.format(channel=channel, variant=variant))).get("op_ts")
+
+
+def pin_op(client, channel: str, state: dict, op_ts: str, prev_op: str | None) -> bool:
+    """Pin the month's OP (``op_ts``) in ``channel`` and unpin the previous month's (``prev_op``), then record
+    ``state["pinned"]``; True when that changed the state. A no-op once ``op_ts`` is recorded. ``not_in_channel``
+    joins the channel once and pins again. Any failure (a missing ``pins:write`` / ``channels:join`` scope, a private
+    channel the bot isn't in, Slack down) never fails the digest: one warning naming Slack's error, nothing recorded,
+    and the next run retries (a pin already in place, or an unpin of a message no longer pinned, is not an error)."""
+    from . import slack_api
+
+    if state.get("pinned") == op_ts:
+        return False
+    try:
+        try:
+            slack_api.pin(client, channel, op_ts)
+        except RuntimeError as e:
+            if slack_api.error_code(e) != "not_in_channel":
+                raise
+            slack_api.join(client, channel)
+            slack_api.pin(client, channel, op_ts)
+        if prev_op:
+            slack_api.unpin(client, channel, prev_op)
+    except Exception as e:  # noqa: BLE001 — a pin is a convenience: the thread is converged either way
+        _err(f"digest: WARN could not pin the OP {op_ts}: {slack_api.error_code(e) or e} (retried next run)")
+        return False
+    state["pinned"] = op_ts
+    _err(f"digest: pinned the OP {op_ts}" + (f", unpinned {prev_op}" if prev_op else ""))
+    return True
+
+
+def converge_slack(tpl: Template, root: str, month: dt.date, client, channel: str, variant: str | None = None, *, icons_dir=None, deploy_plot=None, reply_delay: float = 0.0, edit_replies: bool = False, current: bool = False) -> dict:
     """Converge the month's Slack thread: render+host the plot, post/edit the
     OP, then per reply unit post it if none exists — or, on an edited variant,
     edit it when a later scan has landed. Then the provisional reply
@@ -868,7 +923,11 @@ def converge_slack(tpl: Template, root: str, month: dt.date, client, channel: st
     Slack doesn't collapse same-sender chrome). ``edit_replies`` re-edits every
     already-posted reply to its current body (a format change's backfill; the
     sender variant's name and avatar are fixed at post time, so only its body
-    changes). ``client`` is a thrds ``SlackClient`` (or a fake)."""
+    changes). ``current``: ``month`` is the current UTC month, whose OP takes
+    the channel's pin from the previous month's (`pin_op`, unless ``cfg.pin``
+    is off); the caller says so, so a backfill or a closing re-converge of an
+    older month never moves the pin. ``client`` is a thrds ``SlackClient`` (or
+    a fake)."""
     import time
 
     cfg = tpl.cfg
@@ -891,6 +950,8 @@ def converge_slack(tpl: Template, root: str, month: dt.date, client, channel: st
         op_ts = client.post(body, username=f"{cfg.title} — {month:%B %Y}", **cfg.op_sender()).id
         state["op_ts"] = op_ts
         _err(f"digest: posted OP {op_ts}")
+    if current and cfg.pin and pin_op(client, channel, state, op_ts, _prev_op(cfg, root, month, channel, variant)):
+        save_state(path, state)
     if cfg.preview:
         _write_preview(cfg, preview_bundle(tpl, data, month, op=body, plot_url=plot_url, prev_url=prev_url, channel=channel,
                                            variant=variant, op_ts=op_ts, permalink=client.permalink(op_ts)))
@@ -1029,19 +1090,20 @@ def day_range(spec: str) -> list[str]:
     return [(lo + dt.timedelta(days=i)).isoformat() for i in range((hi - lo).days + 1)]
 
 def converge_slack_now(tpl: Template, root: str, month: dt.date, client, channel: str, variant: str | None = None, **kw) -> dict:
-    """The scheduled run's converge: ``month``'s thread (the current one),
-    after first re-converging the PREVIOUS month's if its state still holds a
-    provisional reply. That happens when a month's last day never got its
-    reply scan: only a scan after the month (this month's first) lets the
-    stand-in rule give that day a final reply, and only then can the
-    provisional go. Idempotent like `converge_slack`; ``kw`` passes through."""
+    """The scheduled run's converge: ``month``'s thread (the current one,
+    whose OP it pins: ``current``), after first re-converging the PREVIOUS
+    month's if its state still holds a provisional reply. That happens when a
+    month's last day never got its reply scan: only a scan after the month
+    (this month's first) lets the stand-in rule give that day a final reply,
+    and only then can the provisional go. Idempotent like `converge_slack`;
+    ``kw`` passes through."""
     variant = variant or tpl.variants[0]
     prev = (month - dt.timedelta(days=1)).replace(day=1)
     prev_state = load_state(state_path(root, prev, tpl.cfg.state.format(channel=channel, variant=variant)))
     if prev_state.get("provisional") or prev_state.get("alert"):
         _err(f"digest: {prev:%Y-%m} still has a {'provisional reply' if prev_state.get('provisional') else 'quota alert'} — closing it first")
         converge_slack(tpl, root, prev, client, channel, variant, **kw)
-    return converge_slack(tpl, root, month, client, channel, variant, **kw)
+    return converge_slack(tpl, root, month, client, channel, variant, current=True, **kw)
 
 
 def redo_replies(tpl: Template, root: str, month: dt.date, client, channel: str, variant: str | None = None, *, since: dt.date | None = None, icons_dir=None, deploy_plot=None, reply_delay: float = 0.0, for_real: bool = False) -> dict:
