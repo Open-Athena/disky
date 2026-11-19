@@ -67,16 +67,16 @@ def setup_api(monkeypatch, *, tip=SHA, pointer=SHA, dev=None, states=None, runs=
     return calls
 
 
-@pytest.mark.parametrize(('branch', 'project', 'pages'), [
-    ('gcs', 'oa-gcs-usage', 'dev'), ('cw', 'oa-cw-s3-usage', 'dev'),
-    ('hf', 'oa-hf-usage', 'dev'), ('r2', 'oa-r2-usage', 'r2'),
+@pytest.mark.parametrize(('branch', 'project', 'pages', 'channel'), [
+    ('gcs', 'oa-gcs-usage', 'dev', 'C0C579HNRFB'), ('cw', 'oa-cw-s3-usage', 'dev', 'C0C53CPM886'),
+    ('hf', 'oa-hf-usage', 'dev', 'C0C9J9VDPV5'), ('r2', 'oa-r2-usage', 'r2', 'C0C9U47KTM2'),
 ])
-def test_exact_dev_plan(monkeypatch, branch, project, pages):
+def test_exact_dev_plan(monkeypatch, branch, project, pages, channel):
     calls = setup_api(monkeypatch)
     assert release.plan_release({'workflow_run': ci(branch)}, 'workflow_run', REPO) == {
         'protocol': 'disky-pages-v1', 'repository': REPO, 'source_branch': branch, 'sha': SHA,
         'mode': 'dev', 'environment': f'{branch}-dev', 'project': project, 'pages_branch': pages,
-        'host': f'dev.{branch}.oa.dev', 'ci_run': 42, 'dev_deployment': None, 'tip_recipes': None,
+        'host': f'dev.{branch}.oa.dev', 'admin_channel': channel, 'ci_run': 42, 'dev_deployment': None, 'tip_recipes': None,
         'previous': None, 'rollback': False,
     }
     assert calls == [(f'repos/{REPO}/git/ref/heads/{branch}', None)]
@@ -126,7 +126,7 @@ def test_production_finds_its_dev_proof_even_after_branch_advances(monkeypatch):
     assert promote() == {
         'protocol': 'disky-pages-v1', 'repository': REPO, 'source_branch': 'hf', 'sha': SHA,
         'mode': 'prod', 'environment': 'hf-prod', 'project': 'oa-hf-usage', 'pages_branch': 'main',
-        'host': 'hf.oa.dev', 'ci_run': 42, 'dev_deployment': '91', 'tip_recipes': ['c-new.sql'],
+        'host': 'hf.oa.dev', 'admin_channel': 'C0C9J9VDPV5', 'ci_run': 42, 'dev_deployment': '91', 'tip_recipes': ['c-new.sql'],
         'previous': PREV, 'rollback': False,
     }
 
@@ -327,6 +327,68 @@ def test_begin_records_source_sha_and_exact_artifact_not_controller_sha(tmp_path
     ]
 
 
+def test_finish_rereads_cloudflare_until_it_serves_the_requested_revision(tmp_path, monkeypatch):
+    """The deployments list can lag the upload (gcs's dev release 44431263157): `finish` reads it again, 5 s apart,
+    until the dev branch's newest deployment is the clean requested one, and fails only after 12 retries."""
+    from io import BytesIO
+    receipt = {'repository': REPO, 'id': 73, 'run_url': f'https://github.com/{REPO}/actions/runs/123', 'mode': 'dev',
+               'sha': SHA, 'project': 'oa-hf-usage', 'pages_branch': 'dev', 'host': 'dev.hf.oa.dev', 'entry_assets': {}}
+    path = tmp_path / 'receipt.json'
+    path.write_text(dumps(receipt))
+    old = {'id': 'cf72', 'url': 'https://cf72.oa-hf-usage.pages.dev', 'latest_stage': {'status': 'success'},
+           'deployment_trigger': {'metadata': {'branch': 'dev', 'commit_hash': 'b' * 40, 'commit_dirty': False}}}
+    building = {'id': 'cf73', 'url': 'https://cf73.oa-hf-usage.pages.dev', 'latest_stage': {'status': 'active'},
+                'deployment_trigger': {'metadata': {'branch': 'dev', 'commit_hash': SHA, 'commit_dirty': False}}}
+    done = {**building, 'latest_stage': {'status': 'success'}}
+    lists = [[old], [building, old], [done, old]]
+    read = []
+
+    def pages(path):
+        read.append(path)
+        return lists.pop(0)
+
+    slept = []
+    monkeypatch.setattr(release, 'pages', pages)
+    monkeypatch.setattr(release, 'sleep', slept.append)
+    monkeypatch.setattr(release, 'api', lambda path, body=None: None)
+
+    def urlopen(request, timeout):
+        response = BytesIO(b'')
+        response.headers = {'x-disky-build': f'{SHA} 2026-11-19T00:44:28Z'}
+        return response
+
+    monkeypatch.setattr(release, 'urlopen', urlopen)
+    result = CliRunner().invoke(release.main, ['finish', str(path)], env={'GITHUB_RUN_ID': '123'})
+    assert (result.exit_code, read, slept) == (0, ['oa-hf-usage/deployments?env=preview'] * 3, [5, 5])
+    assert loads(path.read_text())['cloudflare_deployment'] == 'cf73'
+
+    lists, read[:], slept[:] = [[old]] * 13, [], []
+    path.write_text(dumps(receipt))
+    result = CliRunner().invoke(release.main, ['finish', str(path)], env={'GITHUB_RUN_ID': '123'})
+    assert (result.exit_code, result.output, len(read), slept) == (
+        1, f'Error: Cloudflare is not serving the clean requested revision {SHA[:12]} (read: {"b" * 12}, stage success)\n', 13, [5] * 12,
+    )
+
+
+def readback(sha, stage='success', dirty=False, branch='dev'):
+    return {'id': 'cf73', 'url': 'https://cf73.oa-hf-usage.pages.dev', 'latest_stage': {'status': stage},
+            'deployment_trigger': {'metadata': {'branch': branch, 'commit_hash': sha, 'commit_dirty': dirty}}}
+
+
+@pytest.mark.parametrize('listed, expected', [
+    ([readback(SHA)], (readback(SHA), f'{SHA[:12]}, stage success')),
+    ([readback(SHA, branch='main'), readback('b' * 40)], (None, 'bbbbbbbbbbbb, stage success')),
+    ([readback(SHA, stage='active')], (None, f'{SHA[:12]}, stage active')),
+    ([readback(SHA, dirty=True)], (None, f'{SHA[:12]} dirty, stage success')),
+    ([readback(SHA, branch='main')], (None, 'no deployment for the branch')),
+])
+def test_serving_says_what_the_readback_named(monkeypatch, listed, expected):
+    """A refusal names what Cloudflare served instead: the sha (and dirty), its stage, or no deployment at all."""
+    monkeypatch.setattr(release, 'pages', lambda path: listed)
+    receipt = {'mode': 'dev', 'sha': SHA, 'project': 'oa-hf-usage', 'pages_branch': 'dev'}
+    assert release.serving(receipt) == expected
+
+
 @pytest.mark.parametrize('wrong_asset', [False, True])
 def test_success_requires_live_build_and_exact_entry_asset(tmp_path, monkeypatch, wrong_asset):
     from io import BytesIO
@@ -393,8 +455,20 @@ def test_workflow_guards_and_secret_boundaries():
     ]
     notice = [step for key in jobs for step in jobs[key]['steps'] if 'SLACK_DEPLOY_BOT_TOKEN' in str(step)]
     assert [(step['name'], step['if'], step['continue-on-error']) for step in notice] == [
-        ('Deploy notice', "always() && vars.DEPLOY_NOTIFICATIONS_ENABLED == '1'", 'true'),
+        ('Deploy notice', "always() && needs.plan.outputs.admin_channel != ''", 'true'),
     ]
+
+
+def test_deploy_notice_without_a_bot_token_skips_and_succeeds(tmp_path):
+    """An environment with `admin_channel` but no `SLACK_DEPLOY_BOT_TOKEN` (gcs/cw/r2 until their owners set it): the step's
+    script exits 0 with a notice before touching `deploy-notify`, so the release isn't marked red (`continue-on-error` aside)."""
+    from subprocess import run
+    [step] = [step for step in workflow()['jobs']['release']['steps'] if step.get('name') == 'Deploy notice']
+    env = {'PATH': '/usr/bin:/bin', 'SLACK_DEPLOY_BOT_TOKEN': '', 'SLACK_DEPLOY_CHANNEL': 'C0C579HNRFB', 'JOB_STATUS': 'success'}
+    result = run(['bash', '-e', '-c', step['run']], cwd=tmp_path, env=env, capture_output=True, text=True)
+    assert (result.returncode, result.stdout, result.stderr) == (
+        0, '::notice::No SLACK_DEPLOY_BOT_TOKEN in this environment: no Slack notice\n', '',
+    )
 
 
 def workflow() -> dict:
@@ -509,7 +583,7 @@ def test_stub_calls_parse_against_the_scripts():
 def test_stub_reads_exactly_the_outputs_plan_writes(tmp_path, monkeypatch):
     """`plan`'s `$GITHUB_OUTPUT` keys are exactly the `steps.plan.outputs.*` the stub reads."""
     planned = {'sha': SHA, 'source_branch': 'hf', 'mode': 'dev', 'environment': 'hf-dev', 'project': 'oa-hf-usage',
-               'pages_branch': 'dev', 'host': 'dev.hf.oa.dev', 'repository': REPO}
+               'pages_branch': 'dev', 'host': 'dev.hf.oa.dev', 'admin_channel': 'C0C9J9VDPV5', 'repository': REPO}
     monkeypatch.setattr(release, 'plan_release', lambda event, event_name, repository: planned)
     event, out = tmp_path / 'event.json', tmp_path / 'github_output'
     event.write_text('{}')
@@ -518,7 +592,7 @@ def test_stub_reads_exactly_the_outputs_plan_writes(tmp_path, monkeypatch):
     assert result.exit_code == 0, result.output
     written = sorted(line.split('=', 1)[0] for line in out.read_text().splitlines())
     read = sorted(set(findall(r'steps\.plan\.outputs\.(\w+)', (ROOT / '.github/workflows/oa-release.yml').read_text())))
-    assert read == written == ['environment', 'host', 'mode', 'ok', 'pages_branch', 'project', 'sha', 'source_branch']
+    assert read == written == ['admin_channel', 'environment', 'host', 'mode', 'ok', 'pages_branch', 'project', 'sha', 'source_branch']
 
 
 @pytest.mark.parametrize(('event_name', 'event', 'message'), [
