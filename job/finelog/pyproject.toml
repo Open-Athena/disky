@@ -1,0 +1,21 @@
+# The `access-jobs` image's own environment (specs/access-job-attribution.md phase 2): Marin's Finelog client pinned to
+# one Marin commit, kept out of disky's workspace lock. Bump `MARIN_REV` (both sources) deliberately, then `uv lock`.
+[project]
+name = "disky-finelog"
+version = "0.1.0"
+requires-python = ">=3.13"
+dependencies = [
+    "click>=8.3",
+    "duckdb>=1.4",
+    "gcsfs>=2025.1",
+    "marin-finelog",
+    "marin-rigging",
+    "pyarrow>=23",
+]
+
+[tool.uv]
+package = false
+
+[tool.uv.sources]
+marin-finelog = { git = "https://github.com/marin-community/marin", rev = "10b2167aed28f7d50f1a622a76f1820bafe2dbf2", subdirectory = "lib/finelog" }
+marin-rigging = { git = "https://github.com/marin-community/marin", rev = "10b2167aed28f7d50f1a622a76f1820bafe2dbf2", subdirectory = "lib/rigging" }

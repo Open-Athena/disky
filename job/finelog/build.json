@@ -1,0 +1,16 @@
+{
+ "project": "oa-internal-450019",
+ "repository": "us-central1-docker.pkg.dev/oa-internal-450019/cloud-run-source-deploy/gcs-access-jobs",
+ "mode": "candidate",
+ "live_tags": [
+  "latest"
+ ],
+ "dockerfile": "job/finelog/Dockerfile",
+ "context": [
+  "job/finelog"
+ ],
+ "cloudbuild": {
+  "machine_type": "E2_HIGHCPU_8",
+  "timeout": "1200s"
+ }
+}
