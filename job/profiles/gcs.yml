@@ -45,7 +45,7 @@ machines:
   # default disk filled on 2026-10-21 and every step after retire failed; and its DuckDB is tuned for 80 GB (a 32 GB
   # machine was killed mid-verify the same day). Scans appended since the check need neither (specs/scan-cs3.md item 4)
   post: {type: e2-highmem-16, disk: 400}
-steps: [access-ingest, healthcheck, retire, dups, cf-usage, gcp-cost, soft-delete, non-live, store-gc, staged-card, access-requesters]
+steps: [access-ingest, healthcheck, retire, dups, cf-usage, gcp-cost, soft-delete, non-live, store-gc, staged-card, access-requesters, access-jobs]
 # over-time groups and the generation-file sweep (`index-gc -F`) aren't in the one-VM job yet: each is its own change
 skip: [bucket-check, over-time, index-gc]
 secrets:
@@ -125,8 +125,17 @@ options:
   # waits on. 11-05 → 11-13 these were ~1.4 PiB the bill kept charging after the fleet's live bytes dropped
   non-live: {source: metric, classes: [soft-deleted, noncurrent, mpu]}
   # who reads the marin buckets (GCS bills reads as Class B operations): the access logs rolled up per day by
-  # bucket, client, requester and path prefix, `access/requesters/<day>.parquet` (`dt-cloud access requesters`)
-  access-requesters: {mem: 48GB, threads: 8}
+  # bucket, client, requester and path prefix, `access/requesters/<day>.parquet` (`dt-cloud access requesters`);
+  # per hour too with the store a job reads (`hourly: 3`), joined to the VMs (the hourly access job's `access hosts`)
+  # and Iris jobs (`access-jobs`) behind each requester IP: `access/attributed/<day>.parquet`
+  # (specs/access-job-attribution.md)
+  access-requesters: {mem: 48GB, threads: 8, hourly: 3, attribute: true}
+  # which Iris tasks ran on which VMs each hour, from Marin's Finelog: `job/finelog/`'s image (Marin's own client,
+  # pinned there) as its own Batch job, in us-central1 beside Finelog's us-central2 bucket; its writes to the data
+  # bucket (us-east1) are a few MB a day. Finelog reads are capped at 5 GB a run (a day: ~0.2 GB)
+  access-jobs:
+    batch: {image: us-central1-docker.pkg.dev/oa-internal-450019/cloud-run-source-deploy/gcs-access-jobs:latest,
+            region: us-central1, cross_region: true, env: {FINELOG_READ_BUDGET_GB: "5"}}
   # after each scan, the per-scan files the interval store + static index hold (specs/lean-scans.md §2) and the raw
   # listing shards (`layer1`, once the store's `generation` matches them), retired for real since the hand-run retires
   # of 2026-10-18/19; the interval-store append writes each scan's verify marker (a row-for-row check), and a scan
