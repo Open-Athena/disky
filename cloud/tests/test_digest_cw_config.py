@@ -39,6 +39,7 @@ CW = DG.DigestConfig(
     variant="sender",
     reply_hour=12,
     provisional=True,
+    pin=True,
     alert_pct=90,
     primary="marin-us-east-02a",
     buckets={

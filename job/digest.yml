@@ -31,6 +31,8 @@ reply_hour: 12
 # (`10/3 · so far`, numbers in the body, edited in place), deleted when the
 # final reply posts
 provisional: true
+# the current month's thread is pinned in the channel, last month's unpinned (the bot's `pins:write`, `channels:join`)
+pin: true
 # a quota at/over this percent: :red_circle: in the daily replies + one alert reply also sent to the channel (thrds
 # `post(broadcast=True)`), deleted once every quota is back under
 alert_pct: 90
