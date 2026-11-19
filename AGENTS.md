@@ -499,6 +499,13 @@ refused unless `-D`. A benchmark on a throwaway tag: `job/build.sh -t
 bench-<sha7>`, then the job runs `dt-cloud image-sha -e <sha>` (or the
 harness's `-E <sha>`) before measuring.
 
+`job/ship.sh SHA` is the lane a job change ships by: that sha's CI green, a candidate
+built from a pinned worktree at it (`wt/ship-gcs`), a Batch smoke run
+(`job/smoke-spec.py`), no scan running, promote, then a manual scan through the
+cron's submitter (`DT_TRIGGER_BY` = who it records as starting it), so the 07:00
+cron is never a new image's first run. `-n` stops after promote, `-c` after the
+smoke; logs under `tmp/ship/<sha12>/`.
+
 The primary repository's cleanup (`job/image-cleanup.json`, scoped to the
 `gcs-usage-snapshot` package): `latest` and `pin-*` tags kept, the newest 10
 builds kept, anything else (bench, race, candidate tags included) deleted after
