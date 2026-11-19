@@ -17,7 +17,7 @@ CREATE TABLE access_log (
   referer     TEXT,
   reason      TEXT,
   bucket      INTEGER
-, city TEXT, region TEXT, as_org TEXT);
+, city TEXT, region TEXT, as_org TEXT, sid TEXT NOT NULL DEFAULT '');
 
 CREATE TABLE access_log_daily (
   day      INTEGER NOT NULL,
@@ -506,7 +506,7 @@ CREATE TABLE user_emails (
   ts    INTEGER NOT NULL
 );
 
-CREATE UNIQUE INDEX access_log_dedupe ON access_log (event, session_sub, path, bucket) WHERE bucket IS NOT NULL;
+CREATE UNIQUE INDEX access_log_dedupe ON access_log (event, session_sub, sid, path, bucket) WHERE bucket IS NOT NULL;
 
 CREATE INDEX access_log_grant ON access_log (grant_id, ts DESC);
 
