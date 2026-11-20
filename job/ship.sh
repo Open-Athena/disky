@@ -89,5 +89,6 @@ say PROMOTED
 gcloud run jobs execute $SUBMITTER --region $HEAD_REGION --project $PROJECT --wait \
   --update-env-vars "DT_TRIGGER=manual,DT_TRIGGER_BY=$DT_TRIGGER_BY" > "$logs/scan-submit.log" 2>&1 \
   || { say SCAN-SUBMIT-FAIL; tail -5 "$logs/scan-submit.log"; exit 1; }
-job=$(gcloud batch jobs list --location $HEAD_REGION --project $PROJECT --filter="$HEAD_FILTER" --sort-by=~createTime --limit 1 --format='value(name.basename())')
+# The newest live head (gcloud's `--sort-by` with `--limit` lists nothing here, so sort locally)
+job=$(gcloud batch jobs list --location $HEAD_REGION --project $PROJECT --filter="$HEAD_FILTER" --format='value(createTime,name.basename())' | sort | tail -1 | cut -f2)
 say "SCAN-SUBMITTED ${job:-(job not listed yet)}"
