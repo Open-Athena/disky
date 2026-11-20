@@ -16,6 +16,7 @@ import { SiteKbd } from './SiteKbd'
 import { Tooltip } from './Tooltip'
 import { Explain } from './Help'
 import { RunScanButton } from './RunScan'
+import { CancelScanButton } from './CancelScan'
 import { axisTicks, includeRunKind, inSpan, runFilterKinds, runKindLabel, runKindMatches, type RunSpan, runKindParam, runSpanParam, runStatusParam } from './runChart'
 import { fmtBytesPrecise, fmtN, type Meta } from './types'
 import { readThrough } from './readLens'
@@ -927,6 +928,7 @@ export function ScanRunPage() {
           {r.cost_usd != null && <> · ~{usd(r.cost_usd)}</>}
           {map && <> · <Link to={map}>map at this scan</Link></>}
           {' · '}<Links run={r} links={d} />
+          {isScanProducer(r.kind) && <>{' '}<CancelScanButton run={r} invalidate={[['scan-run', store.key, id], ['scan-runs', store.key]]} /></>}
         </p>
         {r.status === 'succeeded' && isScanProducer(r.kind) && kinds.has('access-ingest') && <ScanAccessInput scan={r.scan} store={store} />}
         {r.status === 'failed' && <div className="sr-failure"><b>Failed {d.failed_at ? (d.failed_at.startsWith('after') ? d.failed_at : `in ${d.failed_at}`) : ''}</b>{r.error && <div><code>{r.error}</code></div>}</div>}
@@ -943,6 +945,7 @@ export function ScanRunPage() {
           {r.gen && <div><dt>{isMaintenance(r.kind) ? 'store generation' : 'index generation'}</dt><dd><code>{r.gen}</code></dd></div>}
           {r.image && <div><dt>image</dt><dd><code>{r.image}</code></dd></div>}
           {r.trigger && <div><dt>started by</dt><dd>{r.trigger === 'schedule' ? 'the schedule (cron)' : r.trigger_by ?? 'hand (a submit or a resume)'}</dd></div>}
+          {r.thread_url && <div><dt>reported in</dt><dd><a href={r.thread_url} target="_blank" rel="noreferrer">its run thread (Slack)</a></dd></div>}
           <div><dt>recorded by</dt><dd>{r.source === 'job' ? 'the job' : 'backfill (Batch, logs, the bucket)'}</dd></div>
         </dl>
         {d.dag && <>

@@ -186,6 +186,12 @@ def run_sql(run: Run, now: int) -> str:
             f"ON CONFLICT(run_id) DO UPDATE SET {', '.join(sets)}")
 
 
+def thread_url_sql(run_id: str, url: str) -> str:
+    """Where the run's reply in its deployment's run thread is (`nominal.link_threads`: the reply's Slack permalink);
+    migration `scan-run-thread-url`. A run reported again in a later thread moves to that reply."""
+    return f"UPDATE scan_runs SET thread_url = {lit(url)} WHERE run_id = {lit(run_id)}"
+
+
 def heartbeat_sql(run_id: str, now: int) -> str:
     """A running run's liveness: `updated_ts` alone, and only while the row is `running` (a beat racing the job's
     finishing write never moves its status back, nor stamps a finished row)."""
@@ -945,7 +951,8 @@ def batch_lookup(project: str, name: str, region: str) -> Mapping | None:
 
 def lost_reason(job: Mapping | None) -> tuple[str, int | None] | None:
     """Why a `running` row's run is over, and when it ended, from its Batch job (None: not found); None while the job
-    still runs. The reason names the state and the job's last status event, on one line."""
+    still runs. The reason names the state and the job's last status event, on one line; a cancelled job is just
+    `cancelled` (someone stopped it on purpose; Batch's event adds only its own wording)."""
     if job is None:
         return "lost: Batch job not found (deleted)", None
     st = job.get("status", {})
@@ -954,6 +961,9 @@ def lost_reason(job: Mapping | None) -> tuple[str, int | None] | None:
         return None
     events = st.get("statusEvents") or ()
     last = " ".join((events[-1].get("description") or "").split()) if events else ""
+    if state == "CANCELLED":
+        return "cancelled", next((_epoch(ev["eventTime"]) for ev in reversed(events)
+                                  if " to CANCELLED" in ev.get("description", "") and ev.get("eventTime")), None)
     what = f"Batch job {state}" + (", but the run never recorded its end" if state == "SUCCEEDED" else "")
     ended = next((_epoch(ev["eventTime"]) for ev in reversed(events)
                   if re.search(r" to (SUCCEEDED|FAILED|CANCELLED)", ev.get("description", "")) and ev.get("eventTime")), None)
@@ -2113,7 +2123,9 @@ def nominal_cmd(adopt_check: bool, profile_path: str | None, out: str | None, ru
     p = load_profile(profile_path)
     if not p.nominal:
         raise ValueError('scan-run nominal: profile has no nominal configuration')
-    text = run(p.nominal, os.environ, p.project, run_id, execute, adopt_check)
+    # An executed report records each reply's link on its run (`scan_runs.thread_url`) where the profile names a D1
+    db = (os.environ.get("D1_DB_ID") or "").strip() if execute else ""
+    text = run(p.nominal, os.environ, p.project, run_id, execute, adopt_check, sink=D1Sink(db) if db else None)
     if out:
         Path(out).write_text(text.rstrip() + '\n')
     else:
