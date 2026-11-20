@@ -17,5 +17,14 @@
   "cloud/src",
   "job",
   "site/wrangler.toml"
- ]
+ ],
+ "repoint": {
+  "region": "us-central1",
+  "jobs": [
+   "hf-usage-snapshot-submit"
+  ],
+  "services": [
+   "hf-scan-events"
+  ]
+ }
 }

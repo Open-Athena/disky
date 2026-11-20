@@ -15,8 +15,9 @@ from pathlib import Path
 
 import pulumi
 import pulumi_gcp as gcp
+import yaml
 
-from gcp_jobs import Adopt, BatchCron, BatchSubmitCron, JobAccount, Secrets, cost_labels, labeled_provider
+from gcp_jobs import Adopt, BatchCron, BatchEvents, BatchSubmitCron, JobAccount, Secrets, cost_labels, labeled_provider
 
 cfg = pulumi.Config()
 gcp_cfg = pulumi.Config("gcp")
@@ -170,6 +171,29 @@ dispatch = JobAccount(
     adopt=adopt,
 )
 
+# The scan head's Batch state changes → `dt-cloud batch-events serve` (`BatchEvents`): a head that ended without
+# recording it (cancelled from /scans, a lost VM) is marked failed and the run thread in #hf-admin converged as it
+# happens, not at the next day's scan. Runs as the job account, with the scan profile's D1 and the job's CF + Slack
+# secrets; the scan spec (below, `notify`) names the topic. Re-pointed at `:hf` on each promote (job/build.json).
+scan_env = yaml.safe_load((job_dir / "profiles" / "hf.yml").read_text())["env"]
+events = BatchEvents(
+    "hf-scan-events",
+    project=project,
+    region=region,
+    image=f"{region}-docker.pkg.dev/{project}/hf-usage/scan:hf",
+    command=["dt-cloud", "batch-events", "serve"],
+    run_as=job.email_literal,
+    account_id="hf-scan-events-push",
+    env={k: scan_env[k] for k in ("SCAN_RUNS_PROFILE", "D1_DB_ID")},
+    secret_env={
+        "CLOUDFLARE_API_TOKEN": "hf-usage-cf-token",
+        "CLOUDFLARE_ACCOUNT_ID": "hf-usage-cf-account-id",
+        "SLACK_BOT_TOKEN": "hf-usage-slack-bot-token",
+    },
+    opts=pulumi.ResourceOptions(depends_on=[secrets, images_reader]),
+)
+pulumi.export("scan_events_topic", events.topic_path)
+
 # The daily scan: Cloud Scheduler → the Cloud Run job `hf-usage-snapshot-submit` → `job/hf-scan-submit.sh`, which
 # submits `job/hf-batch-submit.sh`'s PIN spec as `hf-usage-snapshot-YYYYMMDD` (a 409 for that name = already
 # submitted), retries transient failures for 30 min, and posts to #hf-admin if it still can't. It runs as the job
@@ -190,6 +214,7 @@ scan = BatchSubmitCron(
     secret_env={"SLACK_BOT_TOKEN": "hf-usage-slack-bot-token"},
     overridable=["DT_TRIGGER", "DT_TRIGGER_BY"],
     dispatchers={"hf-usage-dispatch": dispatch.member},
+    notify=[events.topic_path],
     labels={"component": "scan-submit"},
     description="The daily Hugging Face org scan: runs the submitter job, which names the day's Batch job, retries, and alerts",
     cron_aliases=[f"urn:pulumi:{STACK}::{pulumi.get_project()}::disky:gcp:BatchCron$gcp:cloudscheduler/job:Job::{SCAN}"],

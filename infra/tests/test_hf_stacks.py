@@ -32,6 +32,8 @@ class Mocks(pulumi.runtime.Mocks):
         extra = {"value": "fixture-token"}
         if args.typ == "gcp:serviceaccount/account:Account":
             extra["email"] = f"{args.inputs['accountId']}@{args.inputs['project']}.iam.gserviceaccount.com"
+        if args.typ == "gcp:cloudrunv2/service:Service":
+            extra["uri"] = f"https://{args.name}.run.app"
         return f"{args.name}-id", {**args.inputs, **extra}
 
     def call(self, args: pulumi.runtime.MockCallArgs):
@@ -42,9 +44,10 @@ class Mocks(pulumi.runtime.Mocks):
     def created(self) -> list[tuple[str, str]]:
         return sorted(self.resources)
 
-    def inputs(self, name: str) -> dict:
-        """The one custom (provider) resource named `name`'s inputs."""
-        [inputs] = [v for (t, n), v in self.resources.items() if n == name and t.split(":")[0] in ("cloudflare", "gcp")]
+    def inputs(self, name: str, typ: str | None = None) -> dict:
+        """The one custom (provider) resource named `name` (of type `typ`, when names are shared)'s inputs."""
+        [inputs] = [v for (t, n), v in self.resources.items()
+                    if n == name and t.split(":")[0] in ("cloudflare", "gcp") and typ in (None, t)]
         return inputs
 
 
@@ -162,7 +165,30 @@ def test_gcp_stack(monkeypatch: pytest.MonkeyPatch):
             ("gcp:cloudscheduler/job:Job", "hf-usage-snapshot"),
             ("disky:gcp:BatchCron", "hf-usage-meta"),
             ("gcp:cloudscheduler/job:Job", "hf-usage-meta"),
+            ("disky:gcp:BatchEvents", "hf-scan-events"),
+            ("gcp:projects/service:Service", "hf-scan-events-pubsub-api"),
+            ("gcp:projects/serviceIdentity:ServiceIdentity", "hf-scan-events-pubsub-agent"),
+            ("gcp:pubsub/topic:Topic", "hf-scan-events"),
+            ("gcp:pubsub/topicIAMMember:TopicIAMMember", "hf-scan-events-batch-publisher"),
+            ("gcp:serviceaccount/account:Account", "hf-scan-events-sa"),
+            ("gcp:cloudrunv2/service:Service", "hf-scan-events"),
+            ("gcp:cloudrunv2/serviceIamMember:ServiceIamMember", "hf-scan-events-invoker"),
+            ("gcp:serviceaccount/iAMMember:IAMMember", "hf-scan-events-pubsub-token"),
+            ("gcp:pubsub/subscription:Subscription", "hf-scan-events"),
         ])
+        # Batch events: the scan head's state changes → `batch-events serve`, as the job account, with the scan's D1
+        events_tpl = m.inputs("hf-scan-events", "gcp:cloudrunv2/service:Service")["template"]
+        [ec] = events_tpl["containers"]
+        assert (events_tpl["serviceAccount"], ec["image"], ec["commands"]) == (
+            sa, f"us-central1-docker.pkg.dev/{project}/hf-usage/scan:hf", ["dt-cloud", "batch-events", "serve"])
+        assert {e["name"]: e.get("value", e.get("valueSource", {}).get("secretKeyRef", {}).get("secret")) for e in ec["envs"]} == {
+            "SCAN_RUNS_PROFILE": "/app/job/hf-scan-runs.json",
+            "D1_DB_ID": "2f83fdf9-509f-491c-9664-04bef9944988",
+            "CLOUDFLARE_API_TOKEN": "hf-usage-cf-token",
+            "CLOUDFLARE_ACCOUNT_ID": "hf-usage-cf-account-id",
+            "SLACK_BOT_TOKEN": "hf-usage-slack-bot-token",
+        }
+        assert m.inputs("hf-scan-events", "gcp:pubsub/subscription:Subscription")["pushConfig"]["pushEndpoint"] == "https://hf-scan-events.run.app"
         assert m.inputs("hf-usage-images")["repositoryId"] == "hf-usage"
         # the cron's caller may only create jobs, and act as the job account (which submits its step tasks as itself)
         assert m.inputs("hf-usage-batch-submit")["permissions"] == ["batch.jobs.create"]
@@ -237,9 +263,12 @@ def test_gcp_stack(monkeypatch: pytest.MonkeyPatch):
         meta_spec = json.loads(base64.b64decode(meta["httpTarget"]["body"]))
         assert meta_spec["taskGroups"][0]["taskSpec"]["runnables"][0]["container"]["commands"] == ["scan", "head", "/app/job/profiles/hf-meta.yml"]
         meta_spec["taskGroups"][0]["taskSpec"]["runnables"][0]["container"]["commands"][2] = "/app/job/profiles/hf.yml"
+        # the scan head's state changes go to the Batch-events topic; the meta head's don't (its runs aren't the thread's)
+        assert spec.pop("notifications") == [{"message": {"type": "JOB_STATE_CHANGED"}, "pubsubTopic": f"projects/{project}/topics/hf-scan-events"}]
         assert meta_spec == spec
 
-    return pulumi.Output.all(g["scan"].job.id, g["scan"].cron.id, g["meta"].job.id, g["images_reader"].id, g["data_admin"].id).apply(check)
+    return pulumi.Output.all(g["scan"].job.id, g["scan"].cron.id, g["meta"].job.id, g["images_reader"].id, g["data_admin"].id,
+                             g["events"].subscription.id).apply(check)
 
 
 def test_scan_profile_matches_the_site_and_the_stack():
