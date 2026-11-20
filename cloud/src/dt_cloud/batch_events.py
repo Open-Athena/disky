@@ -85,11 +85,12 @@ def converge(env: Mapping[str, str]) -> Act:
         profile = load_profile(None)
         if not profile.project:
             raise ValueError("the profile names no project")
-        lost = reconcile(sink_for(False, None, None), profile, int(time.time()), partial(batch_lookup, profile.project), 0)
+        sink = sink_for(False, None, None)
+        lost = reconcile(sink, profile, int(time.time()), partial(batch_lookup, profile.project), 0)
         for r in lost:
             err(f"batch-events: {attrs.get('JobUID')}: recorded {r.run_id} ({r.scan}) failed: {r.error}")
         if profile.nominal:
-            err(run(profile.nominal, env, profile.project, execute=True))
+            err(run(profile.nominal, env, profile.project, execute=True, sink=sink))  # and each reply's link (`thread_url`)
 
     return act
 
