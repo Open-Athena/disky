@@ -6,7 +6,7 @@ compatibility_date = "2026-11-07"
 STAFF_DOMAIN = "openathena.ai"
 OA_LOGIN_ISSUER = "https://login.oa.dev"
 OA_LOGIN_CLIENT_ID = "oa-disky"
-FLEET_JSON = '[{"name":"gcs","url":"https://gcs.oa.dev","token":"FLEET_TOKEN_GCS","color":"#EA4335"},{"name":"cw","url":"https://cw.oa.dev","token":"FLEET_TOKEN_CW","color":"#4C5FF0"},{"name":"hf","url":"https://hf.oa.dev","token":"FLEET_TOKEN_HF","color":"#FFD21E"},{"name":"r2","url":"https://r2.oa.dev","token":"FLEET_TOKEN_R2","color":"#F38020"}]'
+FLEET_JSON = '[{"name":"gcs","url":"https://gcs.oa.dev","token":"FLEET_TOKEN_GCS","color":"#EA4335","channel":"C0C579HNRFB"},{"name":"cw","url":"https://cw.oa.dev","token":"FLEET_TOKEN_CW","color":"#4C5FF0","channel":"C0C53CPM886"},{"name":"hf","url":"https://hf.oa.dev","token":"FLEET_TOKEN_HF","color":"#FFD21E","channel":"C0C9J9VDPV5"},{"name":"r2","url":"https://r2.oa.dev","token":"FLEET_TOKEN_R2","color":"#F38020","channel":"C0C9U47KTM2"}]'
 FLEET_CARD_PUBLIC = "1"               # the full card in link previews (Ryan, 11-16: nothing on it is sensitive; the storage bill is, and it isn't shown)
 SLACK_FLEET_CHANNEL = "C0CFMN7FYG4"
 
@@ -18,7 +18,7 @@ id = "be540648c50f46c2b667de5b669de17b"
 STAFF_DOMAIN = "openathena.ai"
 OA_LOGIN_ISSUER = "https://login.oa.dev"
 OA_LOGIN_CLIENT_ID = "oa-disky-dev"
-FLEET_JSON = '[{"name":"gcs","url":"https://gcs.oa.dev","token":"FLEET_TOKEN_GCS","color":"#EA4335"},{"name":"cw","url":"https://cw.oa.dev","token":"FLEET_TOKEN_CW","color":"#4C5FF0"},{"name":"hf","url":"https://hf.oa.dev","token":"FLEET_TOKEN_HF","color":"#FFD21E"},{"name":"r2","url":"https://r2.oa.dev","token":"FLEET_TOKEN_R2","color":"#F38020"}]'
+FLEET_JSON = '[{"name":"gcs","url":"https://gcs.oa.dev","token":"FLEET_TOKEN_GCS","color":"#EA4335","channel":"C0C579HNRFB"},{"name":"cw","url":"https://cw.oa.dev","token":"FLEET_TOKEN_CW","color":"#4C5FF0","channel":"C0C53CPM886"},{"name":"hf","url":"https://hf.oa.dev","token":"FLEET_TOKEN_HF","color":"#FFD21E","channel":"C0C9J9VDPV5"},{"name":"r2","url":"https://r2.oa.dev","token":"FLEET_TOKEN_R2","color":"#F38020","channel":"C0C9U47KTM2"}]'
 FLEET_CARD_PUBLIC = "1"               # the full card in link previews (Ryan, 11-16: nothing on it is sensitive; the storage bill is, and it isn't shown)
 SLACK_FLEET_CHANNEL = ""
 
