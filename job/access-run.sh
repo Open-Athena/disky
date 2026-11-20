@@ -45,9 +45,4 @@ if [ "$rc" -ne 0 ]; then
   fi
   DISKY_NOTIFY=slack disk-tree notify -t "gcs access logs" "$what · ${SITE_URL%/}/scans/${BATCH_JOB_UID:-unknown}" || true
 fi
-# The scan thread in #gcs-admin (`nominal`) re-renders from the run records only inside a scan's own job, at its start
-# and finish. A scan whose head was cancelled (/scans "Cancel") or lost never finishes, so its reply stayed ⏳ until the
-# next scan; `start` above records a lost one as failed, and this hourly converge carries any such change to Slack (a
-# no-op when nothing changed). Never fatal.
-dt-cloud scan-run nominal -x >&2 || echo "access-run.sh: nominal converge failed" >&2
 exit "$rc"
