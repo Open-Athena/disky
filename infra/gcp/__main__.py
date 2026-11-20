@@ -11,7 +11,7 @@ from pathlib import Path
 import pulumi
 import pulumi_gcp as gcp
 
-from gcp_jobs import Adopt, BatchCron, BatchSubmitCron, CronAlerts, DeploymentImages, JobAccount, MonitoringRelay, RunJobCron, Secrets, StorageBatchDelete, cost_labels, grant_bucket, labeled_provider
+from gcp_jobs import Adopt, BatchCron, BatchEvents, BatchSubmitCron, CronAlerts, DeploymentImages, JobAccount, MonitoringRelay, RunJobCron, Secrets, StorageBatchDelete, cost_labels, grant_bucket, labeled_provider
 from task_logs import TaskLogBucket, TaskLogView
 
 cfg = pulumi.Config()
@@ -162,6 +162,28 @@ fleet_secret = Secrets(
 # "Run a scan" on /scans runs the same job as the site's dispatch account (`/api/scan-runs/dispatch`), overriding only
 # `DT_TRIGGER` (`manual`: the script names the job for the second and records the scan as manual) and `DT_TRIGGER_BY`
 # (who started it, `scan_runs.trigger_by`).
+# - `scanEvents: true`: the scan head's Batch state changes → `dt-cloud batch-events serve` (`BatchEvents`), which records
+#   a head that ended without recording it (cancelled, lost) and converges the scan thread in #gcs-admin, as it happens.
+#   The service runs as the job's own account, with the job's D1 and Slack tokens; the head's spec (below) names the topic.
+events = None
+if cfg.get_bool("scanEvents"):
+    events = BatchEvents(
+        "gcs-scan-events",
+        project=project,
+        region=region,
+        image=f"{region}-docker.pkg.dev/{project}/cloud-run-source-deploy/gcs-usage-snapshot:latest",
+        command=["dt-cloud", "batch-events", "serve"],
+        run_as=job.email_literal,
+        account_id="gcs-scan-events-push",
+        env={
+            "SCAN_RUNS_PROFILE": "/app/job/scan-runs.json",
+            "D1_DB_ID": "e52398b7-5538-4bc4-83db-3355a1b5ef9a",
+            "CLOUDFLARE_ACCOUNT_ID": "74981a43be0de7712369306c7b19133d",
+        },
+        secret_env={"CLOUDFLARE_API_TOKEN": "cf-pages-token", "SLACK_BOT_TOKEN": "gcs-alert-slack-bot-token"},
+        opts=pulumi.ResourceOptions(depends_on=[secrets]),
+    )
+    pulumi.export("scan_events_topic", events.topic_path)
 DAILY = "gcs-usage-snapshot-daily"
 daily = BatchSubmitCron(
     DAILY,
@@ -178,6 +200,7 @@ daily = BatchSubmitCron(
     secret_env={"SLACK_BOT_TOKEN": "gcs-alert-slack-bot-token"},
     overridable=["DT_TRIGGER", "DT_TRIGGER_BY"],
     dispatchers={"gcs-usage-dispatch": dispatch.member},
+    notify=[events.topic_path] if events else [],
     labels={"component": "scan-submit"},
     description="The daily scan: runs the submitter job, which names the day's Batch job, retries, and alerts",
     cron_aliases=[f"urn:pulumi:{STACK}::{pulumi.get_project()}::disky:gcp:BatchCron$gcp:cloudscheduler/job:Job::{DAILY}"],
