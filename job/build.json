@@ -38,7 +38,8 @@
    "gcs-usage-snapshot-submit"
   ],
   "services": [
-   "gcs-alert-relay"
+   "gcs-alert-relay",
+   "gcs-scan-events"
   ]
  }
 }
