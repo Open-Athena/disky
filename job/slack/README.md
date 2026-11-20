@@ -4,4 +4,4 @@
 
 Create at api.slack.com/apps → *Create New App* → *From a manifest* → paste the JSON; set the app icon to `deploy/slack/icons/cw.png` (the store mark at 1024 px, shared with the GCS / HF bots' marks in that dir); install to the workspace; the Bot User OAuth Token (`xoxb-…`) goes to Secret Manager as `cw-s3-slack-bot-token` (accessor grant to `gcs-usage-job@`). The manifest carries no comments because Slack rejects unknown top-level keys.
 
-Scopes = what thrds's `SlackClient` calls (`chat.postMessage/update/delete/getPermalink`, `conversations.history/replies/info/list`, `users.info`, `emoji.list`) + `chat:write.customize` for the per-message sender/avatar; `chat:write.public` lets it post to public channels without an `/invite`.
+Scopes = what thrds's `SlackClient` calls (`chat.postMessage/update/delete/getPermalink`, `conversations.history/replies/info/list`, `users.info`, `emoji.list`, and `files.getUploadURLExternal/completeUploadExternal/info/delete` for the digest plot attached to its OP) + `chat:write.customize` for the per-message sender/avatar; `chat:write.public` lets it post to public channels without an `/invite`.

@@ -31,7 +31,9 @@
         "channels:join",
         "channels:write.topic",
         "pins:write",
-        "canvases:write"
+        "canvases:write",
+        "files:write",
+        "files:read"
       ]
     }
   },
