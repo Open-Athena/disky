@@ -30,7 +30,9 @@
         "emoji:read",
         "pins:write",
         "channels:join",
-        "canvases:write"
+        "canvases:write",
+        "files:write",
+        "files:read"
       ]
     }
   },
