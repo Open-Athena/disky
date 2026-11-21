@@ -9,7 +9,7 @@ from subprocess import run
 import pulumi
 import pulumi_gcp as gcp
 
-from gcp_jobs import Adopt, BatchSubmitCron, JobAccount, Secrets, labeled_provider
+from gcp_jobs import Adopt, BatchEvents, BatchSubmitCron, JobAccount, Secrets, labeled_provider
 
 
 profile = loads((Path(__file__).resolve().parents[2] / "job/r2.json").read_text())
@@ -152,6 +152,33 @@ pulumi.export("scratch_bucket", profile["scratch_bucket"])
 pulumi.export("image_repository", repository.repository_id)
 daily_config = pulumi.Config("r2")
 daily_enabled = daily_config.get_bool("dailyEnabled") or False
+# `r2:scanEvents`: each head's Batch state changes → `dt-cloud batch-events serve` (`BatchEvents`), which records a head
+# that ended without recording it (cancelled from /scans, a lost VM) and converges the run thread in #r2-admin as it
+# happens, instead of at the next scan. The service runs the pinned scan image as the job's own account, with the job's
+# D1 and Slack tokens; each head's submitter spec names the topic (`notify` below).
+events = None
+if daily_config.get_bool("scanEvents"):
+    events = BatchEvents(
+        "oa-r2-scan-events",
+        project=project,
+        region=region,
+        image=daily_config.require("scanImage"),
+        command=["dt-cloud", "batch-events", "serve"],
+        run_as=job.email_literal,
+        account_id="oa-r2-scan-events-push",
+        env={
+            "SCAN_RUNS_PROFILE": "/app/job/r2-nf-scan-runs.json",
+            "D1_DB_ID": profile["database_id"],
+            "CLOUDFLARE_ACCOUNT_ID": profile["account"],
+        },
+        secret_env={
+            "CLOUDFLARE_API_TOKEN": profile["secrets"]["CLOUDFLARE_API_TOKEN"],
+            "SLACK_BOT_TOKEN": profile["optional_secrets"]["SLACK_BOT_TOKEN"],
+        },
+        labels=labels,
+        opts=pulumi.ResourceOptions(depends_on=[secrets]),
+    )
+    pulumi.export("scan_events_topic", events.topic_path)
 if daily_enabled:
     # `r2:heads` ([{profile, schedule}], `job/profiles/` names): one scheduler job per Nextflow head (each its own Batch
     # job, so its own run record), the first keeping `r2-daily`; unset, `r2-daily` submits the one-VM scan.
@@ -191,6 +218,7 @@ if daily_enabled:
             secret_env={"SLACK_BOT_TOKEN": profile["optional_secrets"]["SLACK_BOT_TOKEN"]},
             overridable=["DT_TRIGGER", "DT_TRIGGER_BY"],
             dispatchers={"site": dispatch.member} if i == 0 else None,
+            notify=[events.topic_path] if events else [],
             labels={**labels, "component": "scan-submit"},
             description=f"Daily Nextflow head over job/profiles/{head['profile']}: runs the submitter job, which names the day's Batch job, retries, and alerts",
             cron_aliases=[f"urn:pulumi:r2::oa-r2-usage-gcp::gcp:cloudscheduler/job:Job::r2-daily{suffix}"],
