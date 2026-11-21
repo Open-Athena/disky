@@ -25,7 +25,6 @@ CW = DG.DigestConfig(
     state="digest/cw/{channel}/{variant}",
     quota_marks="arrow-chip",
     params="qs,pp,lp",
-    plot_parts=True,
     total_headline=True,
     reply_lines=True,
     preview="r2://oa-cw-s3-usage-index/digest/preview/{channel}/{variant}",
