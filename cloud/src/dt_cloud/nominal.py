@@ -1070,8 +1070,17 @@ def converge(
             before = dict(posted)
             for row in reversed(good[:10]):
                 posted.setdefault(row['run']['run_id'], state['rolling'])
+            # Per-run replies from before the thread was quiet: their runs link the rolling reply (saved first), then
+            # they go, so a quiet thread converges to its head and the one reply whatever posted it before
+            stale = sorted({ts for ts in posted.values() if ts not in (state['rolling'], state['parent'])})
+            for rid, ts in posted.items():
+                if ts in stale:
+                    posted[rid] = state['rolling']
             if posted != before:
                 persist()
+            for ts in stale:
+                check()
+                slack.delete(ts)
         # In a failure thread a run's reply takes the lines its steps' top-level alerts posted (`fold`)
         folding = head != 'clean'
         for rid in sorted(here, key=lambda rid: ended[rid]['run']['started_ts']):
