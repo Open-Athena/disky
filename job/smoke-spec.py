@@ -9,7 +9,7 @@ dt-cloud image-sha -e {sha}
 disk-tree --help >/dev/null
 dt-cloud scan head --help >/dev/null
 dt-cloud monitoring-relay serve --help >/dev/null
-test "$DT_NF_DIR" = /app/job/nf && test -f /app/job/nf/scan.nf
+test "$DT_NF_DIR" = /app/job/nf && test -f /app/job/nf/prelude.nf && test -f /app/job/nf/base.config
 command -v nextflow && nextflow -version
 node --version
 wrangler --version
