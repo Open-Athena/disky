@@ -99,6 +99,10 @@ Requested by Ryan, 2026-11-21: Slack should notify only when something is wrong.
 
 Choices made in implementation: the per-run trail is the rolling reply rather than the head alone, so the thread still lists each run with its link and /scans links resolve; it is posted with the head, before anyone follows the thread, so it notifies nobody. An open clean thread from before quiet mode keeps its per-run replies and gains the rolling reply at its next report (one post, once); its runs' links keep their own replies. Turning `quiet` off later resumes per-run replies after the newest run the state names, without backfilling the runs the rolling reply listed.
 
+## Status as the sender (`nominal.senders`, 2026-11-22)
+
+Every post carries a name and an icon saying what it is (`specs/done/scan-thread-senders.md`): heads `<title> · clean` / `· failing`, the rolling reply `<title> · runs`, a run's reply its own line (`11/21 19:31Z · 115m 54s · phase issues: static-names`) under its outcome's icon. A head's text drops the emoji and title its sender says; a run's ⏳ reply is deleted and posted again under its outcome when the run ends. Off (`senders: false`): everything above, as the app.
+
 [HF scan health]: https://openathena.slack.com/archives/C0C9J9VDPV5/p1794098956878049
 [CI]: https://github.com/Open-Athena/disky/actions/runs/42725869481
 [the fix’s full CI]: https://github.com/Open-Athena/disky/actions/runs/42728997968
