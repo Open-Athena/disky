@@ -44,8 +44,8 @@ quota_marks: arrow-chip
 # `params` (its codec string, e.g. `qc,pp`; "" = the defaults): `qs,pp,lp` = each pool on its own line with its chip,
 # under a key to them, every bucket in the headline and weekly lines + the plot as % of each pool's quota
 params: qs,pp,lp
-# one reply under the OP, as its sender, with the plot as two image blocks (the chart, then the diff map), edited each run
-split_reply: true
+# one reply under the OP, as its sender, with the plot as two image blocks (the chart, then the diff map), edited each run; false: none (Ryan, #81), and a recorded one is deleted
+split_reply: false
 primary: marin-us-east-02a
 # a reply's headline (the sender name + arrow): the primary's size, or every bucket's when true
 total_headline: true
