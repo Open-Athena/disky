@@ -662,20 +662,20 @@ def test_a_cancelled_run_is_no_outcome_its_running_reply_reads_cancelled_and_the
     cancelled = row(3, 'cancelled', error='cancelled from /scans', **ADA)
     w.run([cancelled, *history(2)])
     assert bodies(w.slack) == [
-        ('edit', '4.0', '🚫 :ada: [2026-11-04 08:00 UTC](https://site.test/scans/r3) · 1m 00s · cancelled'),
+        ('edit', '4.0', '🚫 :ada: [11/04 08:00Z](https://site.test/scans/r3) · 1m 00s · cancelled'),
         ('edit', '1.0', '✅ **Test scans: 2 consecutive clean runs**\n\n'
-                        'Since 2026-11-02 08:00 UTC after [2026-11-01T0800](https://site.test/scans/r0).\n\n'
-                        'Latest completed: [2026-11-03 08:00 UTC](https://site.test/scans/r2) · 1m 00s.\n\n'
+                        'Since 11/02 08:00Z after [2026-11-01T0800](https://site.test/scans/r0).\n\n'
+                        'Latest completed: [11/03 08:00Z](https://site.test/scans/r2) · 1m 00s.\n\n'
                         'Latest 2 runs: 2 scheduled / 0 manual. Each reply links its scan record. [All scans](https://site.test/scans).'),
     ]
     assert (w.saved['posted'], 'running' in w.saved, 'closed' in w.saved) == ({'r1': '2.0', 'r2': '3.0'}, False, False)
     w.slack.calls.clear()
     w.run([row(4), cancelled, *history(2)])
     assert bodies(w.slack) == [
-        ('post', '5.0', '✅ :alarm_clock: [2026-11-05 08:00 UTC](https://site.test/scans/r4) · 1m 00s'),
+        ('post', '5.0', '✅ :alarm_clock: [11/05 08:00Z](https://site.test/scans/r4) · 1m 00s'),
         ('edit', '1.0', '✅ **Test scans: 3 consecutive clean runs**\n\n'
-                        'Since 2026-11-02 08:00 UTC after [2026-11-01T0800](https://site.test/scans/r0).\n\n'
-                        'Latest completed: [2026-11-05 08:00 UTC](https://site.test/scans/r4) · 1m 00s.\n\n'
+                        'Since 11/02 08:00Z after [2026-11-01T0800](https://site.test/scans/r0).\n\n'
+                        'Latest completed: [11/05 08:00Z](https://site.test/scans/r4) · 1m 00s.\n\n'
                         'Latest 3 runs: 3 scheduled / 0 manual. Each reply links its scan record. [All scans](https://site.test/scans).'),
     ]
 
@@ -949,13 +949,13 @@ QUIET = replace(CFG, group='color', quiet=True)
 #: history(2)'s quiet thread head (1.0) and its rolling reply (2.0)
 QUIET_HEAD = (
     '✅ **Test scans: 2 consecutive clean runs**\n\n'
-    'Since 2026-11-02 08:00 UTC after [2026-11-01T0800](https://site.test/scans/r0).\n\n'
-    'Latest completed: [2026-11-03 08:00 UTC](https://site.test/scans/r2) · 1m 00s.\n\n'
+    'Since 11/02 08:00Z after [2026-11-01T0800](https://site.test/scans/r0).\n\n'
+    'Latest completed: [11/03 08:00Z](https://site.test/scans/r2) · 1m 00s.\n\n'
     'Latest 2 runs: 2 scheduled / 0 manual. One reply lists the runs, each linking its scan record. [All scans](https://site.test/scans).'
 )
-TRAIL = ('✅ :alarm_clock: [2026-11-02 08:00 UTC](https://site.test/scans/r1) · 1m 00s\n'
-         '✅ :alarm_clock: [2026-11-03 08:00 UTC](https://site.test/scans/r2) · 1m 00s')
-R3_RUNNING = '⏳ :ada: [2026-11-04 08:00 UTC](https://site.test/scans/r3) · running'
+TRAIL = ('✅ :alarm_clock: [11/02 08:00Z](https://site.test/scans/r1) · 1m 00s\n'
+         '✅ :alarm_clock: [11/03 08:00Z](https://site.test/scans/r2) · 1m 00s')
+R3_RUNNING = '⏳ :ada: [11/04 08:00Z](https://site.test/scans/r3) · running'
 
 
 def quiet_running_writer():
@@ -968,7 +968,7 @@ def quiet_running_writer():
     w.run([row(3, 'running', finished_ts=None, **ADA), *history(2)])
     assert bodies(w.slack) == [
         ('edit', '2.0', f'{TRAIL}\n{R3_RUNNING}'),
-        ('edit', '1.0', QUIET_HEAD.replace('Latest 2 runs', 'Running now: [2026-11-04 08:00 UTC](https://site.test/scans/r3).\n\nLatest 2 runs')),
+        ('edit', '1.0', QUIET_HEAD.replace('Latest 2 runs', 'Running now: [11/04 08:00Z](https://site.test/scans/r3).\n\nLatest 2 runs')),
     ]
     assert ('running' in w.saved) is False
     w.slack.calls.clear()
@@ -987,10 +987,10 @@ def test_a_quiet_clean_thread_posts_its_head_and_one_rolling_reply_then_only_edi
     w = quiet_running_writer()
     w.run([row(3, **ADA), *history(2)])
     assert bodies(w.slack) == [
-        ('edit', '2.0', f'{TRAIL}\n✅ :ada: [2026-11-04 08:00 UTC](https://site.test/scans/r3) · 1m 00s'),
+        ('edit', '2.0', f'{TRAIL}\n✅ :ada: [11/04 08:00Z](https://site.test/scans/r3) · 1m 00s'),
         ('edit', '1.0', '✅ **Test scans: 3 consecutive clean runs**\n\n'
-                        'Since 2026-11-02 08:00 UTC after [2026-11-01T0800](https://site.test/scans/r0).\n\n'
-                        'Latest completed: [2026-11-04 08:00 UTC](https://site.test/scans/r3) · 1m 00s.\n\n'
+                        'Since 11/02 08:00Z after [2026-11-01T0800](https://site.test/scans/r0).\n\n'
+                        'Latest completed: [11/04 08:00Z](https://site.test/scans/r3) · 1m 00s.\n\n'
                         'Latest 3 runs: 2 scheduled / 1 manual. One reply lists the runs, each linking its scan record. [All scans](https://site.test/scans).'),
     ]
     assert w.saved['posted'] == {'r1': '2.0', 'r2': '2.0', 'r3': '2.0'}
@@ -1011,15 +1011,15 @@ def test_a_failure_in_a_quiet_thread_posts_and_closes_it_and_a_recovery_opens_a_
     w = quiet_running_writer()
     f3 = row(3, 'failed', failed_phase='index', error='boom', **ADA)
     w.run([f3, *history(2)])
-    failed = '❌ :ada: [2026-11-04 08:00 UTC](https://site.test/scans/r3) · 1m 00s · failed in index: boom'
+    failed = '❌ :ada: [11/04 08:00Z](https://site.test/scans/r3) · 1m 00s · failed in index: boom'
     assert bodies(w.slack) == [
         ('edit', '1.0', '✅ **Test scans: 2 consecutive clean runs (ended)**\n\n'
-                        'Since 2026-11-02 08:00 UTC after [2026-11-01T0800](https://site.test/scans/r0); last [2026-11-03 08:00 UTC](https://site.test/scans/r2).\n\n'
-                        'Ended by [2026-11-04 08:00 UTC](https://site.test/scans/r3): failed. [All scans](https://site.test/scans).'),
+                        'Since 11/02 08:00Z after [2026-11-01T0800](https://site.test/scans/r0); last [11/03 08:00Z](https://site.test/scans/r2).\n\n'
+                        'Ended by [11/04 08:00Z](https://site.test/scans/r3): failed. [All scans](https://site.test/scans).'),
         ('edit', '2.0', f'{TRAIL}\n{failed}'),
         ('post', '3.0', '❌ **Test scans: 1 consecutive failed run**\n\n'
-                        'Since 2026-11-04 08:00 UTC after [2026-11-03T0800](https://site.test/scans/r2) (clean).\n\n'
-                        'Latest: [2026-11-04 08:00 UTC](https://site.test/scans/r3): failed in index: boom.\n\n'
+                        'Since 11/04 08:00Z after [2026-11-03T0800](https://site.test/scans/r2) (clean).\n\n'
+                        'Latest: [11/04 08:00Z](https://site.test/scans/r3): failed in index: boom.\n\n'
                         'Each reply links its scan record. [All scans](https://site.test/scans).'),
         ('post', '4.0', failed),
     ]
@@ -1032,14 +1032,14 @@ def test_a_failure_in_a_quiet_thread_posts_and_closes_it_and_a_recovery_opens_a_
     w.run([row(4), f3, *history(2)])
     assert bodies(w.slack) == [
         ('edit', '3.0', '❌ **Test scans: 1 consecutive failed run (ended)**\n\n'
-                        'Since 2026-11-04 08:00 UTC after [2026-11-03T0800](https://site.test/scans/r2); last [2026-11-04 08:00 UTC](https://site.test/scans/r3).\n\n'
-                        'Ended by [2026-11-05 08:00 UTC](https://site.test/scans/r4): clean. [All scans](https://site.test/scans).'),
+                        'Since 11/04 08:00Z after [2026-11-03T0800](https://site.test/scans/r2); last [11/04 08:00Z](https://site.test/scans/r3).\n\n'
+                        'Ended by [11/05 08:00Z](https://site.test/scans/r4): clean. [All scans](https://site.test/scans).'),
         ('post', '6.0', '✅ **Test scans: 1 consecutive clean run**\n\n'
-                        'Since 2026-11-05 08:00 UTC after [2026-11-04T0800](https://site.test/scans/r3).\n\n'
-                        'Latest completed: [2026-11-05 08:00 UTC](https://site.test/scans/r4) · 1m 00s.\n\n'
+                        'Since 11/05 08:00Z after [2026-11-04T0800](https://site.test/scans/r3).\n\n'
+                        'Latest completed: [11/05 08:00Z](https://site.test/scans/r4) · 1m 00s.\n\n'
                         'Latest 1 run: 1 scheduled / 0 manual. One reply lists the runs, each linking its scan record. [All scans](https://site.test/scans).'),
-        ('post', '7.0', '✅ :alarm_clock: [2026-11-05 08:00 UTC](https://site.test/scans/r4) · 1m 00s'),
-        ('edit', '5.0', '✅ :alarm_clock: [2026-11-05 08:00 UTC](https://site.test/scans/r4) · 1m 00s · [thread](https://slack.test/p6.0)'),
+        ('post', '7.0', '✅ :alarm_clock: [11/05 08:00Z](https://site.test/scans/r4) · 1m 00s'),
+        ('edit', '5.0', '✅ :alarm_clock: [11/05 08:00Z](https://site.test/scans/r4) · 1m 00s · [thread](https://slack.test/p6.0)'),
     ]
     assert (w.saved['parent'], w.saved['rolling'], w.saved['posted'], 'running' in w.saved) == ('6.0', '7.0', {'r4': '7.0'}, False)
 
