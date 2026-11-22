@@ -38,6 +38,7 @@
       "secret": "gcs-static-index-r2-secret"
     },
     "project": "oa-internal-450019",
+    "events_topic": "projects/oa-internal-450019/topics/gcs-scan-events",
     "region": "us-east1",
     "sa": "gcs-usage-job@oa-internal-450019.iam.gserviceaccount.com",
     "append_tasks": 16,
