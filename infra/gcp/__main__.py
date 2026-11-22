@@ -18,8 +18,9 @@ from pathlib import Path
 
 import pulumi
 import pulumi_gcp as gcp
+import yaml
 
-from gcp_jobs import Adopt, BatchCron, BatchSubmitCron, JobAccount, Secrets, cost_labels, grant_bucket, grant_secret, labeled_provider
+from gcp_jobs import Adopt, BatchCron, BatchEvents, BatchSubmitCron, JobAccount, Secrets, cost_labels, grant_bucket, grant_secret, labeled_provider
 from cw_isolation import prepare_credentials, prepare_dispatcher, prepare_isolation
 
 cfg = pulumi.Config()
@@ -118,6 +119,25 @@ if cfg.get_bool("prepareIsolation"):
     isolation_ready.extend(prepare_dispatcher(dispatch.member))
 
 ready = [job, secrets, *shared_ready, *isolation_ready]
+# The scan head's Batch state changes → `dt-cloud batch-events serve` (`BatchEvents`): a head that ended without
+# recording it (cancelled from /scans, a lost VM) is marked failed and the run thread in #cw-admin converged as it
+# happens, not at the next scan. Runs as the job account, with the scan profile's D1 and the head's CF + Slack secrets
+# (the site token by name, `nominal.site_token_secret`); the scan spec (below, `notify`) names the topic. Re-pointed at
+# `:latest` on each promote (job/build.json `repoint`).
+scan_env = yaml.safe_load((job_dir / "profiles" / "cw.yml").read_text())["env"]
+events = BatchEvents(
+    "cw-scan-events",
+    project=project,
+    region=region,
+    image=f"{region}-docker.pkg.dev/{project}/cw-s3-usage/scan:latest",
+    command=["dt-cloud", "batch-events", "serve"],
+    run_as=job.email_literal,
+    account_id="cw-scan-events-push",
+    env={k: scan_env[k] for k in ("SCAN_RUNS_PROFILE", "D1_DB_ID", "CLOUDFLARE_ACCOUNT_ID")},
+    secret_env={"CLOUDFLARE_API_TOKEN": "cw-s3-cf-pages-token", "SLACK_BOT_TOKEN": "cw-s3-slack-bot-token"},
+    opts=pulumi.ResourceOptions(depends_on=ready),
+)
+pulumi.export("scan_events_topic", events.topic_path)
 # The 6-hourly scan: Cloud Scheduler → the Cloud Run job `cw-usage-snapshot-submit` → `job/cw-scan-submit.sh`, which
 # submits `job/cw-batch-submit.sh`'s PIN spec as `cw-usage-snapshot-YYYYMMDD-HH` (a 409 for that name = already
 # submitted), retries transient failures for 30 min, and posts to #cw-s3-admin if it still can't. Scheduler posting the
@@ -142,6 +162,7 @@ scan = BatchSubmitCron(
     secret_env={"SLACK_BOT_TOKEN": "cw-s3-slack-bot-token"},
     overridable=["DT_TRIGGER", "DT_TRIGGER_BY"],
     dispatchers={"cw-s3-dispatch": dispatch.member},
+    notify=[events.topic_path],
     labels={"component": "scan-submit"},
     description="The 6-hourly scan: runs the submitter job, which names the slot's Batch job, retries, and alerts",
     cron_aliases=[f"urn:pulumi:{STACK}::{pulumi.get_project()}::disky:gcp:BatchCron$gcp:cloudscheduler/job:Job::{SCAN}"],
