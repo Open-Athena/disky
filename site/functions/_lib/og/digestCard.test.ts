@@ -1,7 +1,7 @@
 /** The digest image: its chart and map texts, and the PNG it rasterizes to
  * (written to `tmp/digest-sample.png` for a look). */
 import { beforeAll, describe, expect, it } from 'vitest'
-import { digestSvg, fmtIn, niceTicks, poolsSvg, spread, TIER_COLORS, tiersSvg, yRange, type DigestCardInput, type PoolsCardInput, type TiersCardInput } from './digestCard'
+import { digestSvg, fmtIn, fmtT, niceTicks, poolsSvg, spread, TIER_COLORS, tiersSvg, yRange, type DigestCardInput, type PoolsCardInput, type TiersCardInput } from './digestCard'
 import { ensureWasm, svgToPng } from './render'
 import { diffRoot } from '../../../src/diffStyle'
 import type { DiffData } from '../../../src/diffModel'
@@ -118,9 +118,18 @@ describe('poolsSvg', () => {
       '0%', '25%', '50%', '75%', '100%',
       'quota (each pool’s own)',
       '10/5', '10/12', '10/19', '10/26',
-      '02a 75%', '06a 89%', 'rno2a zone 68%',
+      '02a 75%', '(678 Ti / 910 Ti)', '06a 89%', '(88.5 Ti / 100 Ti)', 'rno2a zone 68%', '(68 Ti / 100 Ti)',
       'also: 04a 0%',
     ])
+  })
+  it('a TB card labels its sizes in T', () => {
+    expect(texts(poolsSvg({ ...poolsInput(), units: 'TB' })).filter(s => s.startsWith('('))).toEqual(['(745 T / 1,001 T)', '(97.3 T / 110 T)', '(74.8 T / 110 T)'])
+  })
+})
+
+describe('fmtT', () => {
+  it('whole with commas from 100, else three significant figures', () => {
+    expect([1367.4, 1480, 100, 99.94, 88.5, 68, 0.2, 0].map(fmtT)).toEqual(['1,367', '1,480', '100', '99.9', '88.5', '68', '0.2', '0'])
   })
 })
 
