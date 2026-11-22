@@ -41,11 +41,11 @@ Steps 1–4 can go before Slack exists; step 8 must follow 3, 5 and 7, since a l
 ## Still open
 
 - `index_gc_files` (R2 deletion of unpointed generation dirs) stays off until Ryan reviews a run's `index-gc-files` list.
-- **Digest re-apply (`/admin/slack`) is off** (2026-11-22): `DIGEST_REAPPLY` is unset, so `/api/digest-reapply` answers 503. Its recipes (`digest-settings`, `rewrite-receipts`) are applied, and the site's `SLACK_BOT_TOKEN` is the digest bot's: both come from `oa-r2-slack-bot-token`, which has had one version since 10-16, older than the Pages secret (set 11-07). To enable it:
-  - **[cloud]** `reapplyScript` reads the digest root as `gs://$DATA_BUCKET/<root>`, but r2's thread state and snapshots are on R2 (`r2://oa-r2-usage-index/{snapshots}`). `root` needs to accept a full URL. The run's output and plan can stay on `gs://oa-r2-usage-data/digest/reapply/`.
-  - **[r2]** an env script for the task (`job/r2-env.sh`: strip the secrets, set up the R2 profile as the digest step does).
-  - **[r2]** prod vars: `DIGEST_REAPPLY` (template `quota`, `job/digest.yml`, `r2_bucket` `oa-r2-usage-index`, and the secrets `SLACK_BOT_TOKEN`, `SITE_TOKEN`, `CF_PAGES_TOKEN`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, all existing), `DIGEST_CHANNEL` (#r2-usage), `JOB_SA`, `DATA_BUCKET`, `BATCH_REGION`, `SWEEP_IMAGE` (a tagged scan image), and `SWEEP_S3_ENDPOINT`.
-  - **IAM (Ryan's go):** the site's `GCP_SA_KEY` account (`oa-r2-usage-dispatch`) can now only run the submitter job. It also needs `batch.jobsEditor` (to submit, read and cancel the job) and `objectViewer` on `oa-r2-usage-data` (to read run output and plans). It can already act as the job account (`actors`), and the job account already reads the five secrets.
+- **Digest re-apply (`/admin/slack`)** is configured on prod (2026-11-22). `DIGEST_REAPPLY` runs the scan image `scan:54b2ba0914c2` (which has `job/r2-env.sh`) with root `r2://oa-r2-usage-index/snapshots/r2`. The site's `SLACK_BOT_TOKEN` is the digest bot's: both come from `oa-r2-slack-bot-token`, which has had one version since 10-16, older than the Pages secret (set 11-07).
+  - Grants, applied with Ryan's go (0ea935755): `oa-r2-usage-dispatch` holds `batch.jobsEditor`, plus `objectViewer` on `oa-r2-usage-data` limited to `digest/reapply/`.
+  - No `SWEEP_IMAGE` / `SWEEP_S3_ENDPOINT`, so the plan-sweep executor stays unconfigured.
+  - The dev stack dispatches none (`SWEEP_DISPATCH = "0"`).
+  - Still open: the first run is a dry `-o`, and nothing is applied until Ryan says so.
 
 [`done/r2-launch.md`]: done/r2-launch.md
 

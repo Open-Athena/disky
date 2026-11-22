@@ -56,6 +56,16 @@ DISKY_LABELS = "app=disky,deployment=oa-r2"
 # Activity posts (`_lib/activity.ts`): #r2-admin, with the production-only Pages secret `SLACK_BOT_TOKEN` (the dev stack has none, so it never posts)
 SLACK_ADMIN_CHANNEL = "C0C9U47KTM2"
 GCP_PROJECT = "oa-internal-450019"
+# `/admin/slack`'s digest re-apply (`/api/digest-reapply`): a Batch job in us-west1 as the job account, on the scan image
+# (by its tag), sourcing `job/r2-env.sh`; the thread state and snapshots are on R2, the run's output and rewrite plan
+# under `gs://oa-r2-usage-data/digest/reapply/` (the only objects `GCP_SA_KEY`'s account reads). No `SWEEP_IMAGE` /
+# `SWEEP_S3_ENDPOINT`: r2 has no plan-sweep executor, and re-apply never configures one. Production only: the dev stack
+# dispatches none (`SWEEP_DISPATCH = "0"`).
+DIGEST_CHANNEL = "C0C9J6CE8BD"
+JOB_SA = "oa-r2-usage-job@oa-internal-450019.iam.gserviceaccount.com"
+DATA_BUCKET = "oa-r2-usage-data"
+BATCH_REGION = "us-west1"
+DIGEST_REAPPLY = '{"template":"quota","config":"job/digest.yml","root":"r2://oa-r2-usage-index/snapshots/r2","env_script":"job/r2-env.sh","r2_bucket":"oa-r2-usage-index","image":"us-west1-docker.pkg.dev/oa-internal-450019/oa-r2-usage/scan:54b2ba0914c2","secrets":{"SITE_TOKEN":"oa-r2-site-grant","SLACK_BOT_TOKEN":"oa-r2-slack-bot-token","CLOUDFLARE_API_TOKEN":"oa-r2-cf-pages-token","R2_ACCESS_KEY_ID":"oa-r2-index-access-key-id","R2_SECRET_ACCESS_KEY":"oa-r2-index-secret-access-key"}}'
 REPO_URL = "https://github.com/Open-Athena/disky"
 SOURCE_REF = "r2"
 
