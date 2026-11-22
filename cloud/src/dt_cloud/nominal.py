@@ -28,6 +28,10 @@ if TYPE_CHECKING:
 
 
 GROUPS = ('clean', 'color', 'signature')
+#: The reply emoji a deployment may set (`Config.emoji`), with their defaults
+EMOJI = {'cancelled': '🚫'}
+#: An emoji setting: a Slack `:shortcode:`, or emoji characters (never markup)
+EMOJI_RE = re.compile(r":[a-z0-9_+'-]{1,100}:|[^\x00-\x7f]{1,8}")
 
 
 @dataclass(frozen=True)
@@ -56,6 +60,8 @@ class Config:
     pin: bool = False
     #: Keep the channel's canvas as the deployment's status page (`canvas_text`; the bot's `canvases:write`).
     canvas: bool = False
+    #: Reply emoji overrides, as `{outcome: emoji}` (`EMOJI`'s keys; a `:shortcode:` or emoji characters). Unset: `EMOJI`.
+    emoji: tuple[tuple[str, str], ...] = ()
 
     def __post_init__(self) -> None:
         if not self.site.startswith("https://") or urlparse(self.site).query or urlparse(self.site).fragment:
@@ -70,6 +76,12 @@ class Config:
             raise ValueError(f"nominal.group: one of {', '.join(GROUPS)}")
         if any(not label or not store for label, store in self.stores):
             raise ValueError("nominal.stores: nonempty labels and store names")
+        if any(k not in EMOJI or not EMOJI_RE.fullmatch(v) for k, v in self.emoji):
+            raise ValueError(f"nominal.emoji: {{outcome: emoji}} for {', '.join(EMOJI)}, each a :shortcode: or emoji characters")
+
+    def mark(self, outcome: str) -> str:
+        """A reply's emoji for `outcome` (`EMOJI`'s keys): the deployment's, else the default."""
+        return dict(self.emoji).get(outcome, EMOJI[outcome])
 
     @property
     def namespace(self) -> str:
@@ -88,8 +100,9 @@ class Config:
 
 def config(raw: Mapping) -> Config:
     raw = dict(raw)
-    if isinstance(raw.get('stores'), Mapping):
-        raw['stores'] = tuple(raw['stores'].items())
+    for field in ('stores', 'emoji'):
+        if isinstance(raw.get(field), Mapping):
+            raw[field] = tuple(raw[field].items())
     return Config(**raw)
 
 
@@ -115,6 +128,25 @@ def live(row: dict) -> bool:
 def clean(row: dict) -> bool:
     # A later recovery does not rewrite a historically partial run into a clean run.
     return row['run']['status'] == 'succeeded' and row['run']['finished_ts'] is not None and not row['phase_issues']
+
+
+#: A run's error when it was stopped on purpose: Batch's CANCELLED, read by the reaper (`scan_runs.lost_reason`), and
+#: /scans's Cancel (`site/functions/_lib/scanCancel.ts` `CANCELLED_ERROR`)
+CANCEL_ERRORS = ('cancelled', 'cancelled from /scans')
+
+
+def cancelled(row: dict) -> bool:
+    """A pure cancel: a run stopped on purpose before any step failed (no failed phase, no phase issues). It is neither
+    clean nor a failure: it gets its own reply in the thread it falls in, and never ends a thread or counts in one's
+    streak (`thread_keys`). A run that failed first and was cancelled after is a failure."""
+    run = row['run']
+    return (run['status'] == 'failed' and run.get('error') in CANCEL_ERRORS and not run.get('failed_phase')
+            and not row['phase_issues'])
+
+
+def failure(row: dict) -> bool:
+    """A finished run that failed or has phase issues (not a pure cancel)."""
+    return not clean(row) and not cancelled(row)
 
 
 def streak(rows: list[dict]) -> tuple[list[dict], dict | None]:
@@ -145,17 +177,34 @@ def key(cfg: Config, row: dict) -> str | None:
     return None if cfg.group == 'clean' else 'fail' if cfg.group == 'color' else 'fail:' + signature(row)
 
 
+def thread_keys(cfg: Config, rows: list[dict]) -> list[str | None]:
+    """Each run's thread key (`key`; `rows` newest first). A pure cancel (`cancelled`) takes the key of the run before it
+    (the next older one that isn't a cancel), so it joins the thread it happened in and never moves out of it; cancels
+    older than every other run take the oldest one's (None when every run is a cancel)."""
+    keys: list[str | None] = []
+    first: int | None = None  # the oldest run that isn't a cancel (oldest first)
+    for row in reversed(rows):
+        if not cancelled(row):
+            first = len(keys) if first is None else first
+            keys.append(key(cfg, row))
+        else:
+            keys.append(keys[-1] if first is not None else None)
+    if first:
+        keys[:first] = [keys[first]] * first
+    return keys[::-1]
+
+
 def segment(cfg: Config, rows: list[dict]) -> tuple[str | None, list[dict], dict | None]:
-    """The newest runs sharing the head's thread key, and the run before them (None: the history's start)."""
-    head = key(cfg, rows[0]) if rows else None
-    if head is None:
-        return None, [], rows[0] if rows else None
-    out: list[dict] = []
-    for row in rows:
-        if key(cfg, row) != head:
-            return head, out, row
-        out.append(row)
-    return head, out, None
+    """The newest runs sharing the head's thread key (`thread_keys`: with the pure cancels among them), and the run
+    before them (None: the history's start), never a cancel."""
+    keys = thread_keys(cfg, rows)
+    real = (r for r in rows if not cancelled(r))
+    if not rows or keys[0] is None:
+        return None, [], next(real, rows[0] if rows else None)
+    for i, k in enumerate(keys):
+        if k != keys[0]:
+            return keys[0], rows[:i], next((r for r in rows[i:] if not cancelled(r)), None)
+    return keys[0], rows, None
 
 
 #: An error in a reply: one line, clipped, with nothing Slack reads as a link, mention or code span
@@ -164,6 +213,8 @@ _MARKUP = str.maketrans({'<': '‹', '>': '›', '`': "'", '\n': ' ', '\r': ' '}
 
 def describe(row: dict) -> str:
     run = row['run']
+    if cancelled(row):
+        return str(run['error'])
     if run['status'] == 'failed':
         error = ' '.join(str(run.get('error') or '').translate(_MARKUP).split())
         error = error if len(error) <= 160 else error[:159] + '…'
@@ -200,13 +251,14 @@ def starter(row: dict) -> tuple[str, str | None]:
 
 
 def reply(cfg: Config, row: dict) -> str:
-    """A run's line in its thread: ✅ or ❌, the trigger (`starter`), its time linked to its record, the duration, who
-    started it, and a failed run's reason."""
+    """A run's line in its thread: ✅, ❌, or a pure cancel's mark (`Config.mark`), the trigger (`starter`), its time linked
+    to its record, the duration, who started it, and why a run that isn't clean isn't."""
     seconds = row.get('secs')
     duration = 'duration unknown' if seconds is None else f"{int(seconds) // 60}m {int(seconds) % 60:02d}s"
     emoji, by = starter(row)
     ok = clean(row)
-    return (f"{'✅' if ok else '❌'} {emoji} [{stamp(row)}]({cfg.link(row['run'])}) · {duration}" + (f" · {by}" if by else "")
+    mark = '✅' if ok else cfg.mark('cancelled') if cancelled(row) else '❌'
+    return (f"{mark} {emoji} [{stamp(row)}]({cfg.link(row['run'])}) · {duration}" + (f" · {by}" if by else "")
             + ('' if ok else f" · {describe(row)}"))
 
 
@@ -278,11 +330,14 @@ def running_now(cfg: Config, live_rows: list[dict]) -> str:
     return 'Running now: ' + ', '.join(f"[{stamp(r)}]({cfg.link(r['run'])})" for r in reversed(live_rows)) + '.\n\n'
 
 
-def parent(cfg: Config, good: list[dict], boundary: dict | None, live_rows: list[dict] | None = None, stores: str = '') -> str:
+def parent(cfg: Config, good: list[dict], boundary: dict | None, live_rows: list[dict] | None = None, stores: str = '',
+           prev: str | None = None) -> str:
     """The thread's head: a clean thread's streak, or a failure thread's (`failed`), naming the runs going now, with
-    the latest run's outcome and the deployment's store lines (`stores_text`)."""
+    the latest run's outcome, the deployment's store lines (`stores_text`) and the thread before it (`prev`, a
+    permalink). Its counts leave out pure cancels (`cancelled`), which have replies in it but neither extend nor end it."""
+    good = [r for r in good if not cancelled(r)]
     if good and not clean(good[0]):
-        return failed(cfg, good, boundary, live_rows, stores)
+        return failed(cfg, good, boundary, live_rows, stores, prev)
     window = good[:10]
     counts = {k: sum(r['run']['trigger'] == k for r in window) for k in ('schedule', 'manual', None)}
     mix = f"{counts['schedule']} scheduled / {counts['manual']} manual" + (f" / {counts[None]} unknown" if counts[None] else '')
@@ -290,14 +345,20 @@ def parent(cfg: Config, good: list[dict], boundary: dict | None, live_rows: list
     qualifier = '' if boundary else 'at least '
     after = f" after [{boundary['run']['scan']}]({cfg.link(boundary['run'])})" if boundary else ' (available run history)'
     return (f"✅ **{cfg.title}: {qualifier}{len(good)} consecutive clean run{'' if len(good) == 1 else 's'}**\n\n"
-            f"Since {since}{after}.\n\n"
+            f"Since {since}{after}{previous(prev)}.\n\n"
             f"Latest completed: [{stamp(good[0])}]({cfg.link(good[0]['run'])})" + (f" · {done}" if (done := outcome(good[0])) else '') + ".\n\n"
             f"{stores}"
             f"{running_now(cfg, live_rows)}"
             f"Latest {plural(len(window), 'run')}: {mix}. Each reply links its scan record. [All scans]({cfg.scans}).")
 
 
-def failed(cfg: Config, bad: list[dict], boundary: dict | None, live_rows: list[dict] | None = None, stores: str = '') -> str:
+def previous(prev: str | None) -> str:
+    """A head's link to the thread before it, after its "Since …"."""
+    return f" · [previous thread]({prev})" if prev else ''
+
+
+def failed(cfg: Config, bad: list[dict], boundary: dict | None, live_rows: list[dict] | None = None, stores: str = '',
+           prev: str | None = None) -> str:
     """A failure thread's head: how many runs in a row failed (under `signature`, failed the same way), since when and
     after which run (the last clean one, or the last that failed differently), and the newest failure's reason."""
     qualifier = '' if boundary else 'at least '
@@ -309,7 +370,7 @@ def failed(cfg: Config, bad: list[dict], boundary: dict | None, live_rows: list[
     after = (f" after [{boundary['run']['scan']}]({cfg.link(boundary['run'])})" + (' (clean)' if clean(boundary) else f" ({describe(boundary)})")
              if boundary else ' (available run history)')
     return (f"❌ **{cfg.title}: {qualifier}{len(bad)} consecutive failed run{'' if len(bad) == 1 else 's'}{how}**\n\n"
-            f"Since {stamp(bad[-1])}{after}.\n\n"
+            f"Since {stamp(bad[-1])}{after}{previous(prev)}.\n\n"
             f"Latest: [{stamp(bad[0])}]({cfg.link(bad[0]['run'])}): {describe(bad[0])}.\n\n"
             f"{stores}"
             f"{running_now(cfg, live_rows)}"
@@ -327,7 +388,7 @@ def closed_runs(rows: list[dict], stop: dict, boundary_id: str | None) -> tuple[
 
 def closed_head(cfg: Config, was: str, old: tuple[list[dict], dict | None], stop: dict, reason: str) -> str:
     """A closed thread's head: how many runs it held, since when, its newest, and the run that ended it."""
-    runs, boundary = old
+    runs, boundary = [r for r in old[0] if not cancelled(r)], old[1]
     kind, mark, adj = ('clean-run', '✅', 'clean') if was == 'clean' else ('failure', '❌', 'failed')
     if not runs:
         return f"{mark} **{cfg.title}: {kind} sequence ended**\n\n[{stamp(stop)}]({cfg.link(stop['run'])}): {reason}. [All scans]({cfg.scans})."
@@ -336,6 +397,14 @@ def closed_head(cfg: Config, was: str, old: tuple[list[dict], dict | None], stop
     return (f"{mark} **{cfg.title}: {qualifier}{len(runs)} consecutive {adj} run{'' if len(runs) == 1 else 's'} (ended)**\n\n"
             f"Since {stamp(runs[-1])}{after}; last [{stamp(runs[0])}]({cfg.link(runs[0]['run'])}).\n\n"
             f"Ended by [{stamp(stop)}]({cfg.link(stop['run'])}): {reason}. [All scans]({cfg.scans}).")
+
+
+def next_thread(cfg: Config, body: str, url: str) -> str:
+    """A closed head (`closed_head`) whose "Ended by …" line links the thread after it (`url`, a permalink)."""
+    tail = f". [All scans]({cfg.scans})."
+    if not body.endswith(tail):
+        raise ValueError("nominal: a closed head without its All scans link")
+    return body[:-len(tail)] + f" · [next thread]({url})" + tail
 
 
 #: A folded alert's text starts with this; it is never folded again.
@@ -675,7 +744,8 @@ def converge(
         if not state.get('closed'):
             # What ended the thread: the run after its newest reply (else, as before replies existed, the boundary)
             newest = next((i for i, r in enumerate(rows) if r['run']['run_id'] in state.get('posted', {})), None)
-            stop = rows[newest - 1] if newest else boundary or rows[0]
+            # (the oldest run after it that isn't a pure cancel: a cancel ends nothing)
+            stop = next((r for r in reversed(rows[:newest]) if not cancelled(r)), rows[newest - 1]) if newest else boundary or rows[0]
             if was == 'clean':
                 reason = 'phase issues' if stop['run']['status'] == 'succeeded' and stop['phase_issues'] else stop['run']['status']
             else:
@@ -683,12 +753,16 @@ def converge(
             body = closed_head(cfg, was, closed_runs(rows, stop, state.get('boundary')), stop, reason)
             check()
             slack.edit(state['parent'], body)
-            state['closed'] = True
+            state.update(closed=True, closed_body=body)
             persist()
         if good:
             kept = {k: state[k] for k in KEPT if k in state}
+            # The new head links the closed one (`previous_url`); once it is posted, the closed head's "Ended by" line
+            # links it back (`previous_body`: the closed head as last written, dropped once relinked)
+            prev = {'previous': state['parent'], 'previous_url': slack.permalink(state['parent']),
+                    **({'previous_body': state['closed_body']} if state.get('closed_body') else {})}
             state.clear()
-            state.update(namespace=cfg.namespace, boundary=boundary_id, posted={}, **kept)
+            state.update(namespace=cfg.namespace, boundary=boundary_id, posted={}, **kept, **prev)
             if head != 'clean':
                 state['key'] = head
             persist()
@@ -712,16 +786,21 @@ def converge(
             check()
             received(pending, slack.post(body, root, operation))
 
-        body = parent(cfg, good, boundary, live_rows, stores)
+        body = parent(cfg, good, boundary, live_rows, stores, state.get('previous_url'))
         if not state.get('parent'):
             send('parent', body, None)
+        if state.get('previous_body'):
+            check()
+            slack.edit(state['previous'], next_thread(cfg, state['previous_body'], slack.permalink(state['parent'])))
+            del state['previous_body']
+            persist()
         # New threads bootstrap ten; established threads append every missing run after the newest known one.
         posted = state.setdefault('posted', {})
         todo = missing(good, posted)
         # In a failure thread a run's reply takes the lines its steps' top-level alerts posted (`fold`)
         folding = head != 'clean'
         for rid in sorted(here, key=lambda rid: ended[rid]['run']['started_ts']):
-            alerts, extra = fold(cfg, slack, ended[rid]) if folding and not clean(ended[rid]) else ([], '')
+            alerts, extra = fold(cfg, slack, ended[rid]) if folding and failure(ended[rid]) else ([], '')
             check()
             slack.edit(waiting[rid]['ts'], reply(cfg, ended[rid]) + extra)
             posted[rid] = waiting.pop(rid)['ts']
@@ -730,7 +809,7 @@ def converge(
             folded(slack, alerts, posted[rid])
         for row in reversed(todo):
             if row['run']['run_id'] not in posted:
-                alerts, extra = fold(cfg, slack, row) if folding and not clean(row) else ([], '')
+                alerts, extra = fold(cfg, slack, row) if folding and failure(row) else ([], '')
                 send(row['run']['run_id'], reply(cfg, row) + extra, state['parent'])
                 folded(slack, alerts, posted[row['run']['run_id']])
         for row in reversed(live_rows):
