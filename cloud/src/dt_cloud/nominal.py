@@ -21,6 +21,7 @@ from typing import TYPE_CHECKING, Protocol
 from urllib.parse import quote, unquote, urlencode, urlparse
 from uuid import NAMESPACE_URL, uuid5
 
+from . import emoji_vocab as V
 from . import slack_api
 from .scan_id import scan_time
 from .scan_runs import TRIGGER_BY_RE
@@ -34,13 +35,12 @@ GROUPS = ('clean', 'color', 'signature')
 #: Each run outcome's emoji (`Config.emoji` overrides any): `clean`; `issues`, a run that succeeded with phase issues
 #: (a step failed, skipped or behind, the scan published: the fleet strip's ⚠️); `failed`, any other finished run that
 #: isn't clean; `running`, a live run's reply; `cancelled`, a run stopped on purpose (`counted`: in no streak)
-EMOJI = {'clean': '✅', 'issues': '⚠️', 'failed': '❌', 'running': '⏳', 'cancelled': '🚫'}
+EMOJI = {o: V.stock(f'run.{o}') for o in V.OUTCOMES}
 #: An `emoji` override: a Slack `:name:` code, or emoji characters (nothing Slack reads as markup)
 EMOJI_RE = re.compile(r":[a-z0-9_+'-]{1,100}:|[^\x00-\x7f]{1,16}")
 #: Each sender's stock icon (`icon_emoji`, which takes only `:name:` codes): the outcomes' (`EMOJI`), and the quiet
 #: clean thread's rolling reply (`runs`)
-ICON = {'clean': ':white_check_mark:', 'issues': ':warning:', 'failed': ':x:', 'running': ':hourglass_flowing_sand:',
-        'cancelled': ':no_entry_sign:', 'runs': ':receipt:'}
+ICON = {**{o: V.key(f'run.{o}').code for o in V.OUTCOMES}, 'runs': ':receipt:'}
 #: The emoji characters an `emoji` override may be that have an icon: their Slack codes (variation selectors dropped).
 #: Any other character keeps its kind's stock icon; give the override as a `:name:` code to move it into the icon.
 CODES = {'✅': ':white_check_mark:', '✔': ':heavy_check_mark:', '☑': ':ballot_box_with_check:', '🟢': ':large_green_circle:',
@@ -336,7 +336,17 @@ def stamp(row: dict) -> str:
 #: parent's run mix spells them out.
 #: A manual run's starter's own Slack emoji (`trigger_emoji`: `/api/scan-runs?emoji=1` asks OA's broker) replaces 👤 and their address
 SLACK_EMOJI_RE = re.compile(r":[a-z0-9_+'-]{1,100}:")
-TRIGGER_EMOJI = {'schedule': ':alarm_clock:', 'manual': ':bust_in_silhouette:', None: ':grey_question:'}
+TRIGGER_EMOJI = {t: V.key(f'trigger.{t or "unknown"}').code for t in ('schedule', 'manual', None)}
+
+
+def faces(rows: list[dict], have: set[str] | None) -> list[dict]:
+    """``rows`` with each starter's own emoji (`trigger_emoji`, OA's broker's) dropped where the posting workspace
+    (``have``: its custom emoji names) lacks it, so `starter` shows 👤 and their address there instead of the raw
+    ``:name:``; ``rows`` as they are when the workspace is unknown (None)."""
+    if have is None:
+        return rows
+    return [{**r, 'run': {k: v for k, v in r['run'].items() if k != 'trigger_emoji'}}
+            if (f := r['run'].get('trigger_emoji')) and f.strip(':') not in have else r for r in rows]
 
 
 def starter(row: dict) -> tuple[str, str | None]:
@@ -420,11 +430,19 @@ def stores_text(cfg: Config, series: Mapping[str, dict | int]) -> str:
     return ''.join(store_line(cfg, label, store, series[store]) + '\n\n' for label, store in cfg.stores)
 
 
-def running(cfg: Config, row: dict) -> str:
+def started_ago(row: dict) -> str:
+    """When a live run started, relative to whoever reads it (Slack's `{ago}` date token, rendered by each client when
+    shown: "started 31 minutes ago"), its stamp the fallback. Where nothing else says it: the quiet thread's rolling
+    reply has no post of the run's own, so no message time (Ryan, 2026-11-22), and the head's "Running now"."""
+    return f"<!date^{int(row['run']['started_ts'])}^started {{ago}}|started {stamp(row)}>"
+
+
+def running(cfg: Config, row: dict, ago: bool = False) -> str:
     """A live run's reply, posted when it starts, and edited to its `reply` when it ends (with `Config.senders`, deleted
-    and posted again: `run_post`)."""
+    and posted again: `run_post`); `ago`: its line in a rolling reply (`trail`), saying when it started (`started_ago`)."""
     emoji, by = starter(row)
-    return f"{cfg.mark('running')} {emoji} [{stamp(row)}]({cfg.link(row['run'])}) · running" + (f" · {by}" if by else "")
+    return (f"{cfg.mark('running')} {emoji} [{stamp(row)}]({cfg.link(row['run'])}) · running" + (f" · {by}" if by else "")
+            + (f" · {started_ago(row)}" if ago else ""))
 
 
 def run_sender(cfg: Config, row: dict, live: bool = False) -> dict[str, str]:
@@ -461,7 +479,7 @@ def running_now(cfg: Config, live_rows: list[dict]) -> str:
     """A thread head's line for the runs going now (oldest first), or nothing."""
     if not live_rows:
         return ''
-    return 'Running now: ' + ', '.join(f"[{stamp(r)}]({cfg.link(r['run'])})" for r in reversed(live_rows)) + '.\n\n'
+    return 'Running now: ' + ', '.join(f"[{stamp(r)}]({cfg.link(r['run'])}) ({started_ago(r)})" for r in reversed(live_rows)) + '.\n\n'
 
 
 def parent(
@@ -499,7 +517,7 @@ def parent(
 def trail(cfg: Config, runs: list[dict], live_rows: list[dict] | None = None) -> str:
     """A quiet clean thread's one rolling reply: its newest ten runs' lines (`reply`), oldest first, then the runs going
     now (`running`); edited in place as runs start and end. `runs` newest first."""
-    lines = [reply(cfg, r) for r in reversed(runs[:10])] + [running(cfg, r) for r in reversed(live_rows or [])]
+    lines = [reply(cfg, r) for r in reversed(runs[:10])] + [running(cfg, r, ago=True) for r in reversed(live_rows or [])]
     return '\n'.join(lines)
 
 
@@ -630,6 +648,9 @@ def missing(good: list[dict], posted: dict) -> list[dict]:
 
 
 class Transport(Protocol):
+    #: The workspace's custom emoji names (None: unknown), for `faces`
+    have: set[str] | None
+
     def messages(self, parent: str) -> list[dict]: ...
     def owns(self, message: dict) -> bool: ...
     def find(self, operation: str, parent: str | None, since: float) -> str | None: ...
@@ -654,6 +675,14 @@ class Slack:
         from thrds import SlackClient
 
         self.client = SlackClient(token=token, channel=channel)
+
+    @property
+    def have(self) -> set[str] | None:
+        """The workspace's custom emoji names, read once, at first use (`emoji_vocab.workspace_custom`); None when
+        unreadable."""
+        if '_have' not in vars(self):
+            self._have = V.workspace_custom(self.client, 'nominal')
+        return self._have
 
     def owns(self, message: dict) -> bool:
         """Ours by the bot's user or bot id, never its name: a post with a sender (`Config.sender`) is a `bot_message`
@@ -688,7 +717,10 @@ class Slack:
     def post(self, body: str, parent: str | None, operation: str, sender: Mapping[str, str] | None = None) -> str:
         """Post `body` (in `parent`'s thread) under `sender` (`Config.sender`: `username` and `icon_emoji` or `icon_url`,
         fixed once posted; the bot's `chat:write.customize`), else as the app."""
-        # thrds' own sync uses this metadata seam around post(). The payload contains no credentials.
+        # A vocabulary custom emoji the workspace lacks goes out as its stock one (`emoji_vocab.fallback`), before the
+        # metadata is keyed by the text. thrds' own sync uses this metadata seam around post(). The payload contains no
+        # credentials.
+        body = V.fallback(body, self.have)
         previous = self.client._metadata_by_content
         self.client._metadata_by_content = {body: {'event_type': 'disky_nominal', 'event_payload': {'operation': operation}}}
         try:
@@ -697,7 +729,7 @@ class Slack:
             self.client._metadata_by_content = previous
 
     def edit(self, ts: str, body: str) -> None:
-        self.client.edit(ts, body)
+        self.client.edit(ts, V.fallback(body, self.have))
 
     def delete(self, ts: str) -> None:
         """Delete our message (a reply with no replies of its own leaves no tombstone); one already gone is not an
@@ -1243,6 +1275,7 @@ def run(
     with coordinator_lease(lease) as check:
         rows = read_rows()  # Re-read after acquiring the lease, so a waiting writer cannot publish stale state.
         slack = Slack(bot, cfg.channel)
+        rows = faces(rows, slack.have)
         if cfg.pin or cfg.canvas:
             # Those need the bot in the channel (`channels:join`); joining first also lets the thread's reads (history,
             # a run's alert) work where the bot only ever posted by `chat:write.public`. Best effort: an app not yet
