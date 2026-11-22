@@ -924,15 +924,19 @@ def test_only_a_cancel_before_any_failure_is_pure_and_cancels_take_the_thread_be
     assert [N.cancelled(r) for r in [
         row(1, 'failed', error='cancelled'),
         row(1, 'failed', error='cancelled from /scans'),
+        row(1, 'cancelled'),
+        row(1, 'cancelled', failed_phase='access'),
+        row(1, 'failed', error='errored, then hung; cancelled'),
         row(1, 'failed', error='cancelled', failed_phase='access'),
         row(1, 'failed', error='cancelled', issues=[{'phase': 'access'}]),
         row(1, 'failed', error='lost: Batch job FAILED'),
         row(1, error='cancelled'),
-    ]] == [True, True, False, False, False, False]
+    ]] == [True, True, True, False, False, False, False, False, False]
     cfg = replace(CFG, group='color')
     c = row(9, 'failed', error='cancelled')
     assert N.thread_keys(cfg, [c, row(2, 'failed'), c, row(1), c]) == ['fail', 'fail', 'clean', 'clean', 'clean']
     assert N.thread_keys(cfg, [c, c]) == [None, None]
+    assert N.reply(cfg, row(3, 'cancelled')) == '🚫 :alarm_clock: [2026-11-04 08:00 UTC](https://site.test/scans/r3) · 1m 00s · cancelled'
     assert N.segment(cfg, [c, c]) == (None, [], c)
 
 

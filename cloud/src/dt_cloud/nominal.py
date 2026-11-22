@@ -130,18 +130,19 @@ def clean(row: dict) -> bool:
     return row['run']['status'] == 'succeeded' and row['run']['finished_ts'] is not None and not row['phase_issues']
 
 
-#: A run's error when it was stopped on purpose: Batch's CANCELLED, read by the reaper (`scan_runs.lost_reason`), and
-#: /scans's Cancel (`site/functions/_lib/scanCancel.ts` `CANCELLED_ERROR`)
+#: A failed run's error when it was stopped on purpose, before `scan_runs` had a `cancelled` status: Batch's CANCELLED,
+#: read by the reaper (`scan_runs.lost_reason`), and /scans's Cancel (`site/functions/_lib/scanCancel.ts` `CANCELLED_ERROR`)
 CANCEL_ERRORS = ('cancelled', 'cancelled from /scans')
 
 
 def cancelled(row: dict) -> bool:
-    """A pure cancel: a run stopped on purpose before any step failed (no failed phase, no phase issues). It is neither
+    """A pure cancel: a run stopped on purpose (status `cancelled`, or failed with a `CANCEL_ERRORS` error) before any
+    step failed (no failed phase, no phase issues). It is neither
     clean nor a failure: it gets its own reply in the thread it falls in, and never ends a thread or counts in one's
     streak (`thread_keys`). A run that failed first and was cancelled after is a failure."""
     run = row['run']
-    return (run['status'] == 'failed' and run.get('error') in CANCEL_ERRORS and not run.get('failed_phase')
-            and not row['phase_issues'])
+    return ((run['status'] == 'cancelled' or run['status'] == 'failed' and run.get('error') in CANCEL_ERRORS)
+            and not run.get('failed_phase') and not row['phase_issues'])
 
 
 def failure(row: dict) -> bool:
@@ -214,7 +215,7 @@ _MARKUP = str.maketrans({'<': '‹', '>': '›', '`': "'", '\n': ' ', '\r': ' '}
 def describe(row: dict) -> str:
     run = row['run']
     if cancelled(row):
-        return str(run['error'])
+        return str(run.get('error') or 'cancelled')
     if run['status'] == 'failed':
         error = ' '.join(str(run.get('error') or '').translate(_MARKUP).split())
         error = error if len(error) <= 160 else error[:159] + '…'
