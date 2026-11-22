@@ -1,5 +1,5 @@
 # hf.oa.dev's "data behind this site" store (`store: meta`, specs/pipelines-everywhere.md §3.1, as `r2`'s `r2-meta.yml`):
-# its own data and serving buckets through the same `scan.nf`, a second head beside `hf.yml`'s (`job/hf-meta-submit.sh`,
+# its own data and serving buckets through the same pipeline (its own rendered `scan.nf`), a second head beside `hf.yml`'s (`job/hf-meta-submit.sh`,
 # the `hf-usage-meta` cron). Its path and age histories have independent R2 namespaces and current pointers.
 # Warm-cache / probe carry no `store=` yet. The R2 source lists through `$R2_ENDPOINT` (a secret), with the job's key.
 deployment: hf
