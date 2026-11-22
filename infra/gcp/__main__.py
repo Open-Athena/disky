@@ -17,7 +17,7 @@ import pulumi
 import pulumi_gcp as gcp
 import yaml
 
-from gcp_jobs import Adopt, BatchCron, BatchEvents, BatchSubmitCron, JobAccount, Secrets, cost_labels, labeled_provider
+from gcp_jobs import Adopt, BatchCron, BatchEvents, BatchSubmitCron, JobAccount, Secrets, SiteDispatcher, cost_labels, labeled_provider
 
 cfg = pulumi.Config()
 gcp_cfg = pulumi.Config("gcp")
@@ -60,6 +60,20 @@ submit_grant = gcp.projects.IAMMember(
     project=project,
     role=submit_role.name,
     member=scheduler.member,
+)
+
+# The site's GCP account (its key is the Pages secret `GCP_SA_KEY`, prod and preview; keys stay out of state): "Run a
+# scan" on /scans runs the scan's submitter job as it (`BatchSubmitCron(dispatchers=…)`, below), and its other
+# capabilities are `site_dispatch`'s (`SiteDispatcher`): digest re-apply
+dispatch = JobAccount(
+    "hf-usage-dispatch",
+    project=project,
+    account_id="hf-usage-dispatch",
+    display_name="hf scan dispatch",
+    description="Runs the hf.oa.dev scan submitter (hf-usage-snapshot-submit) from /scans' Run a scan, and /admin/slack's digest re-apply job",
+    roles=[],
+    acts_as_self=False,
+    adopt=adopt,
 )
 
 job = JobAccount(
@@ -113,6 +127,16 @@ data_admin = gcp.storage.BucketIAMMember(
     role="roles/storage.objectAdmin",
     member=job.member,
 )
+# What the site starts on GCP beyond "Run a scan": `/admin/slack`'s digest re-apply (its Batch job, run as the job
+# account; its output and plans read under `digest/reapply/`). No sweeps: hf has no sweep executor.
+site_dispatch = SiteDispatcher(
+    "hf-usage-dispatch",
+    project=project,
+    account=dispatch,
+    job=job,
+    data_bucket=data.name,
+    reapply=True,
+)
 
 images = gcp.artifactregistry.Repository(
     "hf-usage-images",
@@ -154,20 +178,6 @@ secrets = Secrets(
     secrets={sid: {"component": "secret"} for sid in HF_SECRETS},
     accessor=job.member,
     accessor_email=job.email_literal,
-    adopt=adopt,
-)
-
-# "Run a scan" on /scans (`/api/scan-runs/dispatch`) runs the scan's submitter job as this account, overriding only
-# `DT_TRIGGER` and `DT_TRIGGER_BY`. Its key is the Pages secret `GCP_SA_KEY` (prod and preview; keys stay out of state); it holds nothing
-# but `RUN_WITH_OVERRIDES` on that one job.
-dispatch = JobAccount(
-    "hf-usage-dispatch",
-    project=project,
-    account_id="hf-usage-dispatch",
-    display_name="hf scan dispatch",
-    description="Runs the hf.oa.dev scan submitter (hf-usage-snapshot-submit) from /scans' Run a scan; nothing else",
-    roles=[],
-    acts_as_self=False,
     adopt=adopt,
 )
 
