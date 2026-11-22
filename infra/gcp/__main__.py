@@ -30,15 +30,17 @@ builder = JobAccount(
     acts_as_self=False,
     adopt=Adopt(False),
 )
-# "Run a scan" on /scans (`/api/scan-runs/dispatch`) runs the primary head's submitter job as this account (its key is
-# the Pages secret `GCP_SA_KEY`, made by hand: keys stay out of state); it holds nothing else
+# The site's GCP account (its key is the Pages secret `GCP_SA_KEY`, made by hand: keys stay out of state): "Run a scan"
+# on /scans (`/api/scan-runs/dispatch`) runs the primary head's submitter job as it, and `/admin/slack`'s digest
+# re-apply (`/api/digest-reapply`) submits, reads and cancels its Batch job as the job account (`batch.jobsEditor`; Batch
+# has no per-job IAM) and reads the run's output and rewrite plan under `digest/reapply/` (below)
 dispatch = JobAccount(
     "r2-dispatch",
     project=project,
     account_id="oa-r2-usage-dispatch",
     display_name="OA R2 scan dispatch",
-    description="Runs only the OA R2 primary scan's submitter job (oa-r2-usage-submit) from the site's /scans",
-    roles=[],
+    description="Runs the OA R2 primary scan's submitter job from /scans, and /admin/slack's digest re-apply job",
+    roles=["roles/batch.jobsEditor"],
     acts_as_self=False,
     adopt=Adopt(False),
 )
@@ -91,6 +93,20 @@ for component, name, days in (
         member=job.member,
     )
     resources.extend([bucket, grant, viewer])
+    if component == "data":
+        # the site's digest re-apply reads its runs' output and plans (`digest/reapply/<job>.{txt,plan.json}`), nothing else
+        reapply_reader = gcp.storage.BucketIAMMember(
+            "r2-data-dispatch-reapply",
+            bucket=bucket.name,
+            role="roles/storage.objectViewer",
+            member=dispatch.member,
+            condition={
+                "title": "digest-reapply-runs",
+                "description": "Only /admin/slack's digest re-apply output and rewrite plans",
+                "expression": f'resource.name.startsWith("projects/_/buckets/{name}/objects/digest/reapply/")',
+            },
+        )
+        resources.append(reapply_reader)
     build_grant = gcp.storage.BucketIAMMember(
         f"r2-{component}-builder",
         bucket=bucket.name,
