@@ -438,6 +438,7 @@ def test_failed_run_alerts_the_alert_channel_once_naming_its_phase(monkeypatch, 
                 "message": "path-index failed (exit 7): CalledProcessError", "url_title": "task logs",
                 "url": "https://console.cloud.google.com/logs/query;query=labels.job_uid%3D%22own-uid%22?project=oa-internal-450019",
             }]}},
+        "icon_emoji": ":x:",
     }]
 
 
