@@ -1086,6 +1086,19 @@ def test_a_quiet_threads_runs_each_link_its_rolling_reply():
     assert writes == [[('r1', 'https://slack.test/p2.0'), ('r2', 'https://slack.test/p2.0')]]
 
 
+def test_a_thread_from_before_quiet_mode_converges_to_its_head_and_rolling_reply():
+    """A clean thread opened with a reply per run, once quiet, gains the rolling reply; each run then links it (saved
+    first), and the old per-run replies are deleted (Ryan, 2026-11-22: the quiet shape, whatever posted before)."""
+    w = Writer(replace(CFG, quiet=False))
+    w.run(history(2))
+    assert w.saved['posted'] == {'r1': '2.0', 'r2': '3.0'}
+    w.cfg, w.slack.calls = replace(CFG, quiet=True), []
+    w.run(history(2))
+    assert [(c[0], c[1]) for c in w.slack.calls if c[0] in ('post', 'delete')] == [('post', '4.0'), ('delete', '2.0'), ('delete', '3.0')]
+    assert w.saved['posted'] == {'r1': '4.0', 'r2': '4.0'}
+    assert sorted(w.slack.messages_by_id) == ['1.0', '4.0']
+
+
 def test_a_quiet_preview_renders_the_head_and_the_rolling_reply(tmp_path, monkeypatch):
     import json
 
