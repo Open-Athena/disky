@@ -21,6 +21,7 @@ from typing import TYPE_CHECKING, Protocol
 from urllib.parse import quote, unquote, urlencode, urlparse
 from uuid import NAMESPACE_URL, uuid5
 
+from . import emoji_vocab as V
 from . import slack_api
 from .scan_id import scan_time
 from .scan_runs import TRIGGER_BY_RE
@@ -34,13 +35,12 @@ GROUPS = ('clean', 'color', 'signature')
 #: Each run outcome's emoji (`Config.emoji` overrides any): `clean`; `issues`, a run that succeeded with phase issues
 #: (a step failed, skipped or behind, the scan published: the fleet strip's ⚠️); `failed`, any other finished run that
 #: isn't clean; `running`, a live run's reply; `cancelled`, a run stopped on purpose (`counted`: in no streak)
-EMOJI = {'clean': '✅', 'issues': '⚠️', 'failed': '❌', 'running': '⏳', 'cancelled': '🚫'}
+EMOJI = {o: V.stock(f'run.{o}') for o in V.OUTCOMES}
 #: An `emoji` override: a Slack `:name:` code, or emoji characters (nothing Slack reads as markup)
 EMOJI_RE = re.compile(r":[a-z0-9_+'-]{1,100}:|[^\x00-\x7f]{1,16}")
 #: Each sender's stock icon (`icon_emoji`, which takes only `:name:` codes): the outcomes' (`EMOJI`), and the quiet
 #: clean thread's rolling reply (`runs`)
-ICON = {'clean': ':white_check_mark:', 'issues': ':warning:', 'failed': ':x:', 'running': ':hourglass_flowing_sand:',
-        'cancelled': ':no_entry_sign:', 'runs': ':receipt:'}
+ICON = {**{o: V.key(f'run.{o}').code for o in V.OUTCOMES}, 'runs': ':receipt:'}
 #: The emoji characters an `emoji` override may be that have an icon: their Slack codes (variation selectors dropped).
 #: Any other character keeps its kind's stock icon; give the override as a `:name:` code to move it into the icon.
 CODES = {'✅': ':white_check_mark:', '✔': ':heavy_check_mark:', '☑': ':ballot_box_with_check:', '🟢': ':large_green_circle:',
@@ -219,9 +219,26 @@ def counted(row: dict) -> bool:
     return not live(row) and not cancelled(row)
 
 
+#: Phase issues that leave a run clean: a `deferred` append (a compaction held the interval store; a later run's append
+#: takes the scan, and its step alerts once per episode when one doesn't: `scan_steps.interval_store`). The site's
+#: `scanRunsModel` `DEFERRED`.
+TOLERATED = ('deferred',)
+
+
+def issues(row: dict) -> list[dict]:
+    """A run's phase issues that count against it (not `TOLERATED`)."""
+    return [i for i in row['phase_issues'] if i.get('outcome') not in TOLERATED]
+
+
+def deferred(row: dict) -> str:
+    """A clean run's `TOLERATED` issues, as ` · deferred: <phases>` (else nothing), for its reply and its sender."""
+    phases = sorted({str(i.get('phase')) for i in row['phase_issues'] if i.get('outcome') in TOLERATED})
+    return f" · deferred: {', '.join(phases)}" if phases else ''
+
+
 def clean(row: dict) -> bool:
-    # A later recovery does not rewrite a historically partial run into a clean run.
-    return row['run']['status'] == 'succeeded' and row['run']['finished_ts'] is not None and not row['phase_issues']
+    # A later recovery does not rewrite a historically partial run into a clean run; a deferred append was never a failure.
+    return row['run']['status'] == 'succeeded' and row['run']['finished_ts'] is not None and not issues(row)
 
 
 def grade(row: dict) -> str:
@@ -232,7 +249,7 @@ def grade(row: dict) -> str:
     if cancelled(row):
         return 'cancelled'
     run = row['run']
-    return 'issues' if run['status'] == 'succeeded' and run['finished_ts'] is not None and row['phase_issues'] else 'failed'
+    return 'issues' if run['status'] == 'succeeded' and run['finished_ts'] is not None and issues(row) else 'failed'
 
 
 def streak(rows: list[dict]) -> tuple[list[dict], dict | None]:
@@ -251,8 +268,8 @@ def signature(row: dict) -> str:
     run = row['run']
     if run['status'] == 'failed':
         return f"failed:{run.get('failed_phase') or ''}"
-    if row['phase_issues']:
-        return 'issues:' + ','.join(sorted({str(i.get('phase')) for i in row['phase_issues']}))
+    if issues(row):
+        return 'issues:' + ','.join(sorted({str(i.get('phase')) for i in issues(row)}))
     return run['status']
 
 
@@ -288,8 +305,8 @@ def short(row: dict) -> str:
         return 'failed' + (f" in {run['failed_phase']}" if run.get('failed_phase') else '')
     if run['status'] == 'cancelled':
         return 'cancelled'
-    if row['phase_issues']:
-        return 'phase issues: ' + ', '.join(sorted({str(i.get('phase')) for i in row['phase_issues']}))
+    if issues(row):
+        return 'phase issues: ' + ', '.join(sorted({str(i.get('phase')) for i in issues(row)}))
     return str(run['status'])
 
 
@@ -319,7 +336,17 @@ def stamp(row: dict) -> str:
 #: parent's run mix spells them out.
 #: A manual run's starter's own Slack emoji (`trigger_emoji`: `/api/scan-runs?emoji=1` asks OA's broker) replaces 👤 and their address
 SLACK_EMOJI_RE = re.compile(r":[a-z0-9_+'-]{1,100}:")
-TRIGGER_EMOJI = {'schedule': ':alarm_clock:', 'manual': ':bust_in_silhouette:', None: ':grey_question:'}
+TRIGGER_EMOJI = {t: V.key(f'trigger.{t or "unknown"}').code for t in ('schedule', 'manual', None)}
+
+
+def faces(rows: list[dict], have: set[str] | None) -> list[dict]:
+    """``rows`` with each starter's own emoji (`trigger_emoji`, OA's broker's) dropped where the posting workspace
+    (``have``: its custom emoji names) lacks it, so `starter` shows 👤 and their address there instead of the raw
+    ``:name:``; ``rows`` as they are when the workspace is unknown (None)."""
+    if have is None:
+        return rows
+    return [{**r, 'run': {k: v for k, v in r['run'].items() if k != 'trigger_emoji'}}
+            if (f := r['run'].get('trigger_emoji')) and f.strip(':') not in have else r for r in rows]
 
 
 def starter(row: dict) -> tuple[str, str | None]:
@@ -345,7 +372,7 @@ def reply(cfg: Config, row: dict) -> str:
     emoji, by = starter(row)
     ok = clean(row)
     return (f"{cfg.mark(grade(row))} {emoji} [{stamp(row)}]({cfg.link(row['run'])}) · {duration}" + (f" · {by}" if by else "")
-            + ('' if ok else f" · {describe(row)}"))
+            + (deferred(row) if ok else f" · {describe(row)}"))
 
 
 def si(n: float, sign: bool = False) -> str:
@@ -403,11 +430,19 @@ def stores_text(cfg: Config, series: Mapping[str, dict | int]) -> str:
     return ''.join(store_line(cfg, label, store, series[store]) + '\n\n' for label, store in cfg.stores)
 
 
-def running(cfg: Config, row: dict) -> str:
+def started_ago(row: dict) -> str:
+    """When a live run started, relative to whoever reads it (Slack's `{ago}` date token, rendered by each client when
+    shown: "started 31 minutes ago"), its stamp the fallback. Where nothing else says it: the quiet thread's rolling
+    reply has no post of the run's own, so no message time (Ryan, 2026-11-22), and the head's "Running now"."""
+    return f"<!date^{int(row['run']['started_ts'])}^started {{ago}}|started {stamp(row)}>"
+
+
+def running(cfg: Config, row: dict, ago: bool = False) -> str:
     """A live run's reply, posted when it starts, and edited to its `reply` when it ends (with `Config.senders`, deleted
-    and posted again: `run_post`)."""
+    and posted again: `run_post`); `ago`: its line in a rolling reply (`trail`), saying when it started (`started_ago`)."""
     emoji, by = starter(row)
-    return f"{cfg.mark('running')} {emoji} [{stamp(row)}]({cfg.link(row['run'])}) · running" + (f" · {by}" if by else "")
+    return (f"{cfg.mark('running')} {emoji} [{stamp(row)}]({cfg.link(row['run'])}) · running" + (f" · {by}" if by else "")
+            + (f" · {started_ago(row)}" if ago else ""))
 
 
 def run_sender(cfg: Config, row: dict, live: bool = False) -> dict[str, str]:
@@ -416,7 +451,7 @@ def run_sender(cfg: Config, row: dict, live: bool = False) -> dict[str, str]:
     trigger as a corner badge where `badges` names images, else the outcome's icon alone (`avatar`)."""
     outcome = 'running' if live else grade(row)
     head = f"{stamp(row)} · " + ('' if live else f"{took(row)} · ")
-    what = 'running' if live else 'clean' if outcome == 'clean' else short(row)
+    what = 'running' if live else 'clean' + deferred(row) if outcome == 'clean' else short(row)
     if len(head + what) > USERNAME_MAX:
         what = what[:USERNAME_MAX - len(head) - 1] + '…'
     icon = ({'icon_url': cfg.badges.format(outcome=outcome, trigger=TRIGGERS[row['run']['trigger']])} if cfg.badges
@@ -444,7 +479,7 @@ def running_now(cfg: Config, live_rows: list[dict]) -> str:
     """A thread head's line for the runs going now (oldest first), or nothing."""
     if not live_rows:
         return ''
-    return 'Running now: ' + ', '.join(f"[{stamp(r)}]({cfg.link(r['run'])})" for r in reversed(live_rows)) + '.\n\n'
+    return 'Running now: ' + ', '.join(f"[{stamp(r)}]({cfg.link(r['run'])}) ({started_ago(r)})" for r in reversed(live_rows)) + '.\n\n'
 
 
 def parent(
@@ -455,12 +490,14 @@ def parent(
     stores: str = '',
     quiet: bool = False,
     bare: bool = False,
+    prev: str | None = None,
 ) -> str:
     """The thread's head: a clean thread's streak, or a failure thread's (`failed`), naming the runs going now, with
-    the latest run's outcome and the deployment's store lines (`stores_text`). `quiet`: its runs are listed in one
-    rolling reply (`trail`), not a reply each. `bare`: no leading emoji and title, which its sender says (`lead`)."""
+    the latest run's outcome, the deployment's store lines (`stores_text`) and the thread before it (`prev`, a
+    permalink: `previous`). `quiet`: its runs are listed in one rolling reply (`trail`), not a reply each. `bare`: no
+    leading emoji and title, which its sender says (`lead`)."""
     if good and not clean(good[0]):
-        return failed(cfg, good, boundary, live_rows, stores, bare)
+        return failed(cfg, good, boundary, live_rows, stores, bare, prev)
     window = good[:10]
     counts = {k: sum(r['run']['trigger'] == k for r in window) for k in ('schedule', 'manual', None)}
     mix = f"{counts['schedule']} scheduled / {counts['manual']} manual" + (f" / {counts[None]} unknown" if counts[None] else '')
@@ -468,7 +505,7 @@ def parent(
     qualifier = '' if boundary else 'at least '
     after = f" after [{boundary['run']['scan']}]({cfg.link(boundary['run'])})" if boundary else ' (available run history)'
     return (f"{lead(cfg, cfg.mark('clean'), bare)}{qualifier}{len(good)} consecutive clean run{'' if len(good) == 1 else 's'}**\n\n"
-            f"Since {since}{after}.\n\n"
+            f"Since {since}{after}{previous(prev)}.\n\n"
             f"Latest completed: [{stamp(good[0])}]({cfg.link(good[0]['run'])})" + (f" · {done}" if (done := outcome(good[0])) else '') + ".\n\n"
             f"{stores}"
             f"{running_now(cfg, live_rows)}"
@@ -480,7 +517,7 @@ def parent(
 def trail(cfg: Config, runs: list[dict], live_rows: list[dict] | None = None) -> str:
     """A quiet clean thread's one rolling reply: its newest ten runs' lines (`reply`), oldest first, then the runs going
     now (`running`); edited in place as runs start and end. `runs` newest first."""
-    lines = [reply(cfg, r) for r in reversed(runs[:10])] + [running(cfg, r) for r in reversed(live_rows or [])]
+    lines = [reply(cfg, r) for r in reversed(runs[:10])] + [running(cfg, r, ago=True) for r in reversed(live_rows or [])]
     return '\n'.join(lines)
 
 
@@ -492,6 +529,11 @@ def unclean(cfg: Config, runs: list[dict], qualifier: str = '') -> tuple[str, st
     if grades == {'issues'}:
         return cfg.mark('issues'), f"{qualifier}{n} consecutive run{s} with phase issues"
     return cfg.mark('failed'), f"{qualifier}{n} consecutive " + (f"run{s} failed or with phase issues" if 'issues' in grades else f"failed run{s}")
+
+
+def previous(prev: str | None) -> str:
+    """A head's link to the thread before it, after its "Since …"."""
+    return f" · [previous thread]({prev})" if prev else ''
 
 
 def lead(cfg: Config, mark: str, bare: bool) -> str:
@@ -507,6 +549,7 @@ def failed(
     live_rows: list[dict] | None = None,
     stores: str = '',
     bare: bool = False,
+    prev: str | None = None,
 ) -> str:
     """A failure thread's head (`unclean`): how many runs in a row failed or had phase issues (under `signature`, the
     same way), since when and after which run (the last clean one, or the last that failed differently), and the newest
@@ -520,7 +563,7 @@ def failed(
     after = (f" after [{boundary['run']['scan']}]({cfg.link(boundary['run'])})" + (' (clean)' if clean(boundary) else f" ({describe(boundary)})")
              if boundary else ' (available run history)')
     return (f"{lead(cfg, mark, bare)}{words}{how}**\n\n"
-            f"Since {stamp(bad[-1])}{after}.\n\n"
+            f"Since {stamp(bad[-1])}{after}{previous(prev)}.\n\n"
             f"Latest: [{stamp(bad[0])}]({cfg.link(bad[0]['run'])}): {describe(bad[0])}.\n\n"
             f"{stores}"
             f"{running_now(cfg, live_rows)}"
@@ -557,6 +600,14 @@ def closed_head(
     return (f"{lead(cfg, mark, bare)}{words} (ended)**\n\n"
             f"Since {stamp(runs[-1])}{after}; last [{stamp(runs[0])}]({cfg.link(runs[0]['run'])}).\n\n"
             f"Ended by [{stamp(stop)}]({cfg.link(stop['run'])}): {reason}. [All scans]({cfg.scans}).")
+
+
+def next_thread(cfg: Config, body: str, url: str) -> str:
+    """A closed head (`closed_head`) whose "Ended by …" line links the thread after it (`url`, a permalink)."""
+    tail = f". [All scans]({cfg.scans})."
+    if not body.endswith(tail):
+        raise ValueError("nominal: a closed head without its All scans link")
+    return body[:-len(tail)] + f" · [next thread]({url})" + tail
 
 
 #: A folded alert's text starts with this; it is never folded again.
@@ -597,6 +648,9 @@ def missing(good: list[dict], posted: dict) -> list[dict]:
 
 
 class Transport(Protocol):
+    #: The workspace's custom emoji names (None: unknown), for `faces`
+    have: set[str] | None
+
     def messages(self, parent: str) -> list[dict]: ...
     def owns(self, message: dict) -> bool: ...
     def find(self, operation: str, parent: str | None, since: float) -> str | None: ...
@@ -621,6 +675,14 @@ class Slack:
         from thrds import SlackClient
 
         self.client = SlackClient(token=token, channel=channel)
+
+    @property
+    def have(self) -> set[str] | None:
+        """The workspace's custom emoji names, read once, at first use (`emoji_vocab.workspace_custom`); None when
+        unreadable."""
+        if '_have' not in vars(self):
+            self._have = V.workspace_custom(self.client, 'nominal')
+        return self._have
 
     def owns(self, message: dict) -> bool:
         """Ours by the bot's user or bot id, never its name: a post with a sender (`Config.sender`) is a `bot_message`
@@ -655,7 +717,10 @@ class Slack:
     def post(self, body: str, parent: str | None, operation: str, sender: Mapping[str, str] | None = None) -> str:
         """Post `body` (in `parent`'s thread) under `sender` (`Config.sender`: `username` and `icon_emoji` or `icon_url`,
         fixed once posted; the bot's `chat:write.customize`), else as the app."""
-        # thrds' own sync uses this metadata seam around post(). The payload contains no credentials.
+        # A vocabulary custom emoji the workspace lacks goes out as its stock one (`emoji_vocab.fallback`), before the
+        # metadata is keyed by the text. thrds' own sync uses this metadata seam around post(). The payload contains no
+        # credentials.
+        body = V.fallback(body, self.have)
         previous = self.client._metadata_by_content
         self.client._metadata_by_content = {body: {'event_type': 'disky_nominal', 'event_payload': {'operation': operation}}}
         try:
@@ -664,7 +729,7 @@ class Slack:
             self.client._metadata_by_content = previous
 
     def edit(self, ts: str, body: str) -> None:
-        self.client.edit(ts, body)
+        self.client.edit(ts, V.fallback(body, self.have))
 
     def delete(self, ts: str) -> None:
         """Delete our message (a reply with no replies of its own leaves no tombstone); one already gone is not an
@@ -967,14 +1032,14 @@ def converge(
             newest = next((i for i, r in enumerate(rows) if r['run']['run_id'] in state.get('posted', {})), None)
             stop = rows[newest - 1] if newest else boundary or rows[0]
             if was == 'clean':
-                reason = 'phase issues' if stop['run']['status'] == 'succeeded' and stop['phase_issues'] else stop['run']['status']
+                reason = 'phase issues' if stop['run']['status'] == 'succeeded' and issues(stop) else stop['run']['status']
             else:
                 reason = 'clean' if clean(stop) else describe(stop)
             old = closed_runs(rows, stop, state.get('boundary'))
             body = closed_head(cfg, was, old, stop, reason, bare=bool(state.get('head_sender')))
             check()
             slack.edit(state['parent'], body)
-            state['closed'] = True
+            state.update(closed=True, closed_body=body)
             persist()
             if state.get('rolling'):
                 # A quiet thread's rolling reply ends as its runs and the one that ended it, with no runs going
@@ -986,8 +1051,12 @@ def converge(
                     persist()
         if good:
             kept = {k: state[k] for k in KEPT if k in state}
+            # The new head links the closed one (`previous_url`); once it is posted, the closed head's "Ended by" line
+            # links it back (`previous_body`: the closed head as last written, dropped once relinked)
+            prev = {'previous': state['parent'], 'previous_url': slack.permalink(state['parent']),
+                    **({'previous_body': state['closed_body']} if state.get('closed_body') else {})}
             state.clear()
-            state.update(namespace=cfg.namespace, boundary=boundary_id, posted={}, **kept)
+            state.update(namespace=cfg.namespace, boundary=boundary_id, posted={}, **kept, **prev)
             if head != 'clean':
                 state['key'] = head
             if cfg.senders:
@@ -1008,10 +1077,15 @@ def converge(
         quiet = cfg.quiet and head == 'clean'
         # A head posted with a sender drops what the sender says; one posted without (before senders) keeps it
         bare = bool(state.get('head_sender')) if state.get('parent') else cfg.senders
-        body = parent(cfg, good, boundary, live_rows, stores, quiet=quiet, bare=bare)
+        body = parent(cfg, good, boundary, live_rows, stores, quiet=quiet, bare=bare, prev=state.get('previous_url'))
         if not state.get('parent'):
             kind = 'clean' if head == 'clean' else 'issues' if grade(good[-1]) == 'issues' else 'failed'
             send('parent', body, None, scope, cfg.sender(kind))
+        if state.get('previous_body'):
+            check()
+            slack.edit(state['previous'], next_thread(cfg, state['previous_body'], slack.permalink(state['parent'])))
+            del state['previous_body']
+            persist()
         # New threads bootstrap ten; established threads append every missing run after the newest known one. A quiet
         # thread posts none: its runs are lines of one rolling reply, which each run's link (`link_threads`) names.
         posted = state.setdefault('posted', {})
@@ -1028,8 +1102,17 @@ def converge(
             before = dict(posted)
             for row in reversed(good[:10]):
                 posted.setdefault(row['run']['run_id'], state['rolling'])
+            # Per-run replies from before the thread was quiet: their runs link the rolling reply (saved first), then
+            # they go, so a quiet thread converges to its head and the one reply whatever posted it before
+            stale = sorted({ts for ts in posted.values() if ts not in (state['rolling'], state['parent'])})
+            for rid, ts in posted.items():
+                if ts in stale:
+                    posted[rid] = state['rolling']
             if posted != before:
                 persist()
+            for ts in stale:
+                check()
+                slack.delete(ts)
         # In a failure thread a run's reply takes the lines its steps' top-level alerts posted (`fold`)
         folding = head != 'clean'
         for rid in sorted(here, key=lambda rid: ended[rid]['run']['started_ts']):
@@ -1192,6 +1275,7 @@ def run(
     with coordinator_lease(lease) as check:
         rows = read_rows()  # Re-read after acquiring the lease, so a waiting writer cannot publish stale state.
         slack = Slack(bot, cfg.channel)
+        rows = faces(rows, slack.have)
         if cfg.pin or cfg.canvas:
             # Those need the bot in the channel (`channels:join`); joining first also lets the thread's reads (history,
             # a run's alert) work where the bot only ever posted by `chat:write.public`. Best effort: an app not yet

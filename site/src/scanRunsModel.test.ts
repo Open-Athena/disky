@@ -1,8 +1,8 @@
 // specs/done/scan-runs-ui.md: the derivations /scans shows from the D1 rows.
 import { describe, expect, it } from 'vitest'
 import {
-  batchHref, failedAt, logsHref, mapHref, metaHref, outputIndex, phaseIssues, phaseOutcome, phaseOrder, phaseSpans, runTime, type ScanRun, type ScanRunOutput,
-  type ScanRunPhase, manualScans, scanRunOf, structureOf, summarize, withDeltas, runOutcome, runOutcomeLine, phaseSkip, overlappingFailures, runTasks, taskLogsHref,
+  batchHref, failedAt, logsHref, mapHref, metaHref, outputIndex, phaseFill, phaseIssues, phaseOutcome, phaseOrder, phaseSpans, runTime, type ScanRun, type ScanRunOutput,
+  type ScanRunPhase, manualScans, scanRunOf, structureOf, summarize, withDeltas, runOutcome, runOutcomeLine, phaseDeferred, phaseSkip, overlappingFailures, runTasks, taskLogsHref,
   isMaintenance, liveness, LOST_S, maintStore, phaseStatus, processingSecs, QUIET_S, issueLeaves, issueNext, issueState, issueWhat, outcomeParts, outcomeSteps, passingSince, runOutcomeLabel, statusMatches,
   stepFailure, STATUS_FILTERS, typicalScanSecs, aboutDur,
   type PhaseIssue,
@@ -444,6 +444,29 @@ describe('a succeeded run\'s issues, by what their steps declare (`scanSteps.jso
       [{ phase: 'static-names', outcome: 'skipped', recovery: retry, reason: skip }],
     ])
   })
+  it('a deferred append (a compaction held the store) is neither a skip nor a failure: `deferred`, below search behind, recovered by a later run\'s append', () => {
+    const why = 'generation g3.c001 is being compacted by iv-compact-x (since 2026-11-21T04:36:00+00:00); the next run\'s append, after it publishes, catches this scan up'
+    const deferred = { ...phase('b', 'interval-store', 0, 2300, 2310), note: `deferred: ${why}` }
+    const ps: ScanRunPhase[] = [deferred, { ...phase('c', 'interval-store', 0, 3100, 3300), note: `deferred: ${why}` }]
+    // the next run deferred too: no recovery (its phase did no work); a run after it that appended recovers both
+    const open = phaseIssues(RUNS[2], [RUNS[2], later], ps)
+    const done = phaseIssues(RUNS[2], [RUNS[2], later, run({ run_id: 'd', scan: '2026-10-09', started_ts: 4000, finished_ts: 4600 })], [...ps, phase('d', 'interval-store', 0, 4100, 4300)])
+    expect([phaseDeferred(deferred), phaseDeferred({ status: 'running', note: `deferred: ${why}` }), phaseSkip(deferred)]).toEqual([why, null, null])
+    expect([open, done.map(i => [i.phase, i.outcome, i.recovery?.run_id])]).toEqual([
+      [{ phase: 'interval-store', outcome: 'deferred', recovery: null, reason: why }],
+      [['interval-store', 'deferred', 'd']],
+    ])
+    expect([issueState(open[0]), issueWhat(open[0]), issueNext(open[0]), issueLeaves(open[0]), runOutcome(RUNS[2], open), runOutcomeLine(RUNS[2], open), issueState(done[0])]).toEqual([
+      'deferred', 'deferred', 'A later run\'s interval-store step appends this scan once the compaction has published.', undefined,
+      'deferred', `deferred: interval-store ${why}`, 'recovered',
+    ])
+    // ranked below search behind, above everything but incomplete
+    expect([
+      runOutcome(RUNS[2], [open[0], { phase: 'probe', outcome: 'search behind', recovery: null, reason: 'lag' }]),
+      runOutcome(RUNS[2], [open[0], { ...issue('warm-cache') }]),
+      runOutcome(RUNS[2], [open[0], { ...issue('publish') }]),
+    ]).toEqual(['search behind', 'deferred', 'incomplete'])
+  })
   it('says what happened to an issue\'s phase, and where an open one goes from here', () => {
     const issues: PhaseIssue[] = [
       issue('warm-cache'), { ...issue('probe'), attempts: 2 }, { ...issue('static-names'), outcome: 'timed out' },
@@ -473,12 +496,12 @@ describe('a succeeded run\'s issues, by what their steps declare (`scanSteps.jso
     expect(STATUS_FILTERS.map(f => [f.key, f.label])).toEqual([
       ['attention', 'needs attention (failed, incomplete)'], ['succeeded', 'succeeded'], ['partial', 'partial (a side step failed)'],
       ['passing', 'passing since (a check failed, and has passed since)'],
-      ['incomplete', 'incomplete'], ['behind', 'search behind'], ['recovered', 'recovered'], ['failed', 'failed'], ['running', 'running'], ['nop', 'no-op'],
-      ['cancelled', 'cancelled'],
+      ['incomplete', 'incomplete'], ['behind', 'search behind'], ['deferred', 'deferred (a compaction held the append)'],
+      ['recovered', 'recovered'], ['failed', 'failed'], ['running', 'running'], ['nop', 'no-op'], ['cancelled', 'cancelled'],
     ])
-    const outcomes = ['succeeded', 'partial', 'passing since', 'incomplete', 'search behind', 'recovered', 'failed', 'running', 'no-op', 'cancelled']
-    expect(['', 'attention', 'partial', 'passing', 'behind', 'nop', 'cancelled', 'bogus'].map(k => outcomes.filter(o => statusMatches(k, o)))).toEqual([
-      outcomes, ['incomplete', 'failed'], ['partial'], ['passing since'], ['search behind'], ['no-op'], ['cancelled'], [],
+    const outcomes = ['succeeded', 'partial', 'passing since', 'incomplete', 'search behind', 'deferred', 'recovered', 'failed', 'running', 'no-op', 'cancelled']
+    expect(['', 'attention', 'partial', 'passing', 'behind', 'deferred', 'nop', 'cancelled', 'bogus'].map(k => outcomes.filter(o => statusMatches(k, o)))).toEqual([
+      outcomes, ['incomplete', 'failed'], ['partial'], ['passing since'], ['search behind'], ['deferred'], ['no-op'], ['cancelled'], [],
     ])
   })
   it('a cancelled run (stopped on purpose) is its own outcome, never a failure: no failed step, not one to look at', () => {
@@ -532,6 +555,41 @@ describe('runTasks', () => {
   })
   it('is empty for a one-VM run', () => {
     expect(runTasks([phase('u1', 'listing', 0, 0, 10)])).toEqual([])
+  })
+})
+
+describe('a cancelled run\'s stopped step', () => {
+  // hf's a4287bea: the cancel killed `list_source`'s task; `reconcile` closed its phase `failed (lost)`
+  const r = run({ run_id: 'x', scan: '2026-11-21T0251', status: 'cancelled', error: 'cancelled from /scans', started_ts: 0, finished_ts: 900 })
+  const ps: ScanRunPhase[] = [
+    { ...phase('x', 'bucket-check', 0, 0, 5), job_name: 'nf-bc' },
+    { ...phase('x', 'list open-athena', 1, 5, 725), status: 'failed', note: 'failed (lost)', job_name: 'nf-l' },
+  ]
+  const color = () => 'var(--hue)'
+  it('reads cancelled in spans, tasks and fills, and is no issue', () => {
+    const spans = phaseSpans(r, ps)
+    expect(spans.map(s => [s.phase, s.status, phaseOutcome(s), phaseFill(s, color)])).toEqual([
+      ['bucket-check', 'done', 'done', 'var(--hue)'],
+      ['list open-athena', 'cancelled', 'cancelled', 'var(--ink-3)'],
+    ])
+    expect(runTasks(ps, r).map(t => [t.job_name, t.status])).toEqual([['nf-bc', 'done'], ['nf-l', 'cancelled']])
+    expect(phaseIssues(r, [r], ps)).toEqual([])
+  })
+  it('reads cancelled while still open, its span ending at the cancel (gcs\'s 2026-11-22T1959, before `reconcile`)', () => {
+    const open: ScanRunPhase[] = [ps[0], { ...phase('x', 'list open-athena', 1, 5, 0), finished_ts: null, status: 'running', note: '1m · listing', job_name: 'nf-l' }]
+    expect(phaseSpans(r, open).map(s => [s.phase, s.status, s.start, s.end])).toEqual([
+      ['bucket-check', 'done', 0, 5],
+      ['list open-athena', 'cancelled', 5, 900],
+    ])
+    expect(runTasks(open, r).map(t => [t.job_name, t.status, t.end])).toEqual([['nf-bc', 'done', 5], ['nf-l', 'cancelled', 900]])
+    expect(phaseIssues(r, [r], open)).toEqual([])
+    expect(phaseSpans({ ...r, status: 'running' }, open, 600).map(s => [s.status, s.end])).toEqual([['done', 5], ['running', 600]])
+  })
+  it('stays failed in a failed run', () => {
+    const f = { ...r, status: 'failed' as const }
+    expect(phaseSpans(f, ps).map(s => s.status)).toEqual(['done', 'failed'])
+    expect(runTasks(ps).map(t => t.status)).toEqual(['done', 'failed'])
+    expect(phaseIssues(f, [f], ps)).toEqual([{ phase: 'list open-athena', outcome: 'failed', recovery: null }])
   })
 })
 

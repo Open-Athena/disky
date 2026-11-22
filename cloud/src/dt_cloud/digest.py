@@ -41,6 +41,7 @@ from dataclasses import dataclass, field, fields, replace
 from pathlib import Path
 from typing import Any, Protocol
 
+from . import emoji_vocab
 from .scan_id import META_PATH, min_slug, scan_slug, scan_time, start_key, times_needed
 
 TIB = 1024**4
@@ -554,27 +555,21 @@ class Unit:
     reply: Reply
 
 
-_EMOJI_RE = re.compile(r":arrow_deg(-?\d+):")
-
-
 def emoji_name(d: int) -> str:
-    """Discord application-emoji name for a signed arrow degree. Discord emoji
-    names are ``[A-Za-z0-9_]`` only (no ``-``), so a negative reads
-    ``arrow_degm30`` where the Slack custom emoji is ``arrow_deg-30``."""
-    return f"arrow_deg{d}" if d >= 0 else f"arrow_degm{-d}"
+    """Discord application-emoji name for a signed arrow degree (`emoji_vocab`'s ``trend.<d>``). Discord emoji names
+    are ``[A-Za-z0-9_]`` only (no ``-``), so a negative reads ``arrow_degm30`` where the Slack custom emoji is
+    ``arrow_deg-30``."""
+    discord = emoji_vocab.key(f"trend.{d}").discord
+    assert discord is not None
+    return discord
 
 
 def discordify(text: str, emoji: dict[str, str]) -> str:
-    """Rewrite the Slack ``:arrow_degN:`` shortcodes in ``text`` to Discord's
-    ``<:name:id>`` form via ``emoji`` (app-emoji name -> id; uploaded by
-    `dt-cloud discord-emoji`). The rest of the markdown (bold, italics, masked
-    links) renders the same on both platforms."""
-    def sub(m: re.Match) -> str:
-        name = emoji_name(int(m.group(1)))
-        if name not in emoji:
-            raise ValueError(f"discord app emoji {name!r} missing — run `dt-cloud discord-emoji` to upload the arrow set")
-        return f"<:{name}:{emoji[name]}>"
-    return _EMOJI_RE.sub(sub, text)
+    """Rewrite the vocabulary's Slack custom shortcodes in ``text`` (``:arrow_degN:``, ``:runway-N:``,
+    ``:pool-chip-N-D:``) to Discord's ``<:name:id>`` form via ``emoji`` (app-emoji name -> id; uploaded by
+    `dt-cloud discord-emoji`), or to the key's stock emoji where the app lacks one (`emoji_vocab.discordify`). The
+    rest of the markdown (bold, italics, masked links) renders the same on both platforms."""
+    return emoji_vocab.discordify(text, emoji)
 
 
 # ---- templates ------------------------------------------------------------------
@@ -1134,12 +1129,15 @@ class Change:
 
 
 def apply_slack(tpl: Template, root: str, month: dt.date, client, channel: str, variant: str | None = None, *, op: bool = False,
-                days: Collection[str] = (), icons_dir=None, deploy_plot=None, dry_run: bool = False) -> list[Change]:
+                days: Collection[str] = (), icons_dir=None, deploy_plot=None, dry_run: bool = False, host: bool = False) -> list[Change]:
     """Re-apply exactly the selected, already-posted messages of the month's thread to their current rendering: the
     OP (``op``: its plot re-rendered and hosted too) and the replies of ``days`` (UTC dates; a sender-variant reply
     keeps its name and avatar). Nothing else is touched: no new reply, no provisional reply, no alert, no plot unless
     ``op``. A selected day without a posted reply is skipped (and logged). ``dry_run``: render and return the changes,
-    edit nothing, host nothing, save no state. Returns the changes, in thread order."""
+    edit nothing, host nothing, save no state. ``host`` (with ``dry_run``): the OP's plot is still rendered and hosted,
+    so a rewrite plan's OP edit (`rewrite_plan`) names an image that's served: the deployment-specific URL of a Pages
+    deployment of its own, which a plan that's never applied leaves unused (the config's ``plot_branch`` alias does
+    move to it, as a converge's would). Returns the changes, in thread order."""
     cfg = tpl.cfg
     variant = variant or tpl.variants[0]
     data = tpl.load(root, month)
@@ -1151,8 +1149,9 @@ def apply_slack(tpl: Template, root: str, month: dt.date, client, channel: str, 
     if op:
         if not state.get("op_ts"):
             raise SystemExit(f"digest: {month:%Y-%m} has no OP in {channel} yet (converge posts it)")
+        hosted = host or not dry_run
         body, _, _, _ = _op_render(tpl, data, root, month, state, client, channel, variant,
-                                   None if dry_run else icons_dir, None if dry_run else deploy_plot)
+                                   icons_dir if hosted else None, deploy_plot if hosted else None)
         out.append(Change("op", state["op_ts"], body))
     want = set(days)
     posted = state.get("posted", {})
@@ -1173,6 +1172,52 @@ def apply_slack(tpl: Template, root: str, month: dt.date, client, channel: str, 
     if out:
         save_state(path, state)
     return out
+
+
+def edit_desired(body: str):
+    """``body`` (the digest's markdown) as `SlackClient.edit(ts, body)` sends it, as a thrds rewrite ``Desired``: the
+    trailing `![alt](url)` lines lifted to image blocks under a section of the converted text, else the text alone
+    (an edit then clears the blocks, as `edit` does). The sender is left unset, so the message keeps its own: a
+    sender-variant reply plans as an ``edit``, never a ``repost``."""
+    from thrds.imageblock import bust_token, is_upload_ref, split_trailing_images, to_block
+    from thrds.mrkdwn import to_slack
+    from thrds.rewrite import Desired
+    from thrds.slack import SLACK_SECTION_LIMIT
+
+    text, refs = split_trailing_images(body)
+    wire = to_slack(text)
+    if not refs:
+        return Desired(wire)
+    if any(is_upload_ref(r) for r in refs):
+        raise ValueError("digest: a rewrite plan can't carry an image to upload; the digest's images are hosted URLs")
+    if not wire.strip() or len(wire) > SLACK_SECTION_LIMIT:
+        raise ValueError(f"digest: a body with image blocks needs 1–{SLACK_SECTION_LIMIT} chars of text, not {len(wire)}")
+    token = bust_token()
+    return Desired(wire, blocks=[{"type": "section", "text": {"type": "mrkdwn", "text": wire}}, *(to_block(r, token) for r in refs)])
+
+
+def rewrite_plan(found: Iterable[Any], changes: Iterable[Change], have: Collection[str] | None = None):
+    """The thrds bulk-rewrite plan (`thrds.rewrite.Plan`) of an `apply_slack` dry run's ``changes``: each change's
+    message, as read from Slack (``found``: `thrds.rewrite.find_ids` over the changes' ts), planned to its new body
+    (`edit_desired`) after the emoji fallback the live client applies (`emoji_vocab.fallback` over the workspace's custom
+    emoji, ``have``; None: unknown, as written), so an applied plan posts what a converge would; a found message
+    without a change is skipped. The site's `/admin/slack` reviews it and applies a selection
+    (`/api/digest-reapply/<job>/apply`)."""
+    from thrds.rewrite import Skip, plan
+
+    from .emoji_vocab import fallback
+
+    want = {c.ts: edit_desired(fallback(c.body, have)) for c in changes}
+    return plan(found, lambda f: want.get(f.ts, Skip("not selected")))
+
+
+def write_plan(path: str, p: Any) -> None:
+    """A rewrite plan's JSON at ``path`` (a local path, or a `blobfs` URL), as `Plan.save` writes it."""
+    from disk_tree import blobfs
+
+    if not blobfs.is_url(path):
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
+    blobfs.write_text(path, json.dumps(p.to_json(), indent=2, ensure_ascii=False) + "\n")
 
 
 def day_range(spec: str) -> list[str]:

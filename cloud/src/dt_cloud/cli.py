@@ -3470,6 +3470,7 @@ def _digest_options(template_default: str):
         option("-F", "--for-real", is_flag=True, help="With --redo-replies: actually post the new replies and delete the old ones (default: print the plan)"),
         option("-H", "--reply-hour", type=int, default=None, help="quota template: UTC hour the sender variant's daily reply is taken from — the day's first scan at/after it (default 12 → the 12:01Z morning scan, 8:01 am ET; the day's other scans still feed the OP + plot, and with the config's `provisional: true` its earlier ones post a provisional reply)"),
         option("-i", "--icons-dir", type=Path, default=None, help="Where the plot PNG is written + deployed from (default the config's `icons_dir`: job/icons, job/icons-cw)"),
+        option("-j", "--plan", "plan_path", help="With -n and -o/-d/-y: also write the selected edits as a thrds bulk-rewrite plan (JSON) to this path or URL, for review and apply on /admin/slack; the OP's plot is hosted, so its planned edit names a served image"),
         option("-L", "--file-settings", is_flag=True, help="Use the config file's `params` / `quota_marks`, not the site's live settings (`/api/digest-settings`, edited on /admin/slack; the default when the site has a row)"),
         option("-m", "--month", help="Month YYYY-MM (default: current UTC month)"),
         option("-n", "--dry-run", is_flag=True, help="Render the plot + print OP/replies; post & host nothing"),
@@ -3506,6 +3507,7 @@ def _digest(
     for_real: bool,
     reply_hour: int | None,
     icons_dir: Path | None,
+    plan_path: str | None,
     file_settings: bool,
     month: str | None,
     dry_run: bool,
@@ -3550,6 +3552,8 @@ def _digest(
     selected = op_only or bool(days)
     if selected and (edit_replies or redo_replies or platform != "slack"):
         raise UsageError("-o/--op, -d/--reply and -y/--replies re-apply Slack messages on their own (not with -E, -R or -P discord)")
+    if plan_path and not (selected and dry_run):
+        raise UsageError("-j/--plan writes a dry run's edits (-n with -o, -d or -y)")
     if preview_key:
         if selected or dry_run or edit_replies or redo_replies or platform != "slack":
             raise UsageError("-W/--preview-only writes only the bundle (not with -n, -o, -d, -y, -E, -R or -P discord)")
@@ -3576,7 +3580,10 @@ def _digest(
         raise SystemExit("digest: need SLACK_BOT_TOKEN + SLACK_CHANNEL (or -t/-c)")
     from thrds.slack import SlackClient
 
-    client = SlackClient(token, channel)
+    from .emoji_vocab import with_fallback
+
+    # the workspace's custom emoji are read once, at the first write: a disky emoji it lacks is posted as its stock one
+    client = with_fallback(SlackClient(token, channel), "digest")
     icons = icons_dir or _icons_dir(cfg.icons_dir, config_path)
 
     def deploy(local: Path, name: str) -> str | None:
@@ -3587,12 +3594,18 @@ def _digest(
 
     if selected:
         changes = dg.apply_slack(tpl, root, m, client, channel, variant, op=op_only, days=days, icons_dir=icons, deploy_plot=deploy,
-                                 dry_run=dry_run)
+                                 dry_run=dry_run, host=bool(plan_path))
         if dry_run:
             print(f"digest {m:%Y-%m} in {channel} ({variant}): {len(changes)} to edit; dry-run, nothing edited")
             for c in changes:
                 print(f"  {'OP' if c.what == 'op' else c.what}  ts={c.ts}")
                 print("\n".join(f"    {line}" for line in c.body.split("\n")))
+            if plan_path:
+                from thrds.rewrite import find_ids
+
+                rp = dg.rewrite_plan(find_ids(client, [c.ts for c in changes]), changes, have=client.have)
+                dg.write_plan(plan_path, rp)
+                print(f"plan: {rp.summary() or 'nothing found'} -> {plan_path}")
         else:
             err(f"digest: re-applied {len(changes)} message(s) in {m:%Y-%m}'s thread ({variant})")
         return
@@ -3655,32 +3668,102 @@ def cw_digest(**kw) -> None:
 
 
 
+@main.group("emoji")
+def _emoji() -> None:
+    """disky's emoji vocabulary (`emoji_vocab`, specs/emoji-vocabulary.md): its TS table, the `disky` pack's images,
+    and which of them a Slack workspace lacks."""
+
+
+@_emoji.command("vocab")
+def _emoji_vocab() -> None:
+    """Print the vocabulary as JSON for the TS side: `packages/pages-kit/src/emoji/vocab.json` is this output
+    (`dt-cloud emoji vocab > packages/pages-kit/src/emoji/vocab.json` after changing a key; a test compares them)."""
+    from .emoji_vocab import vocab_json
+
+    sys.stdout.write(vocab_json())
+
+
+def _emoji_keys(keys: tuple[str, ...], keys_file) -> list[str]:
+    """`-k` keys plus `-K` file's (the first tab-separated column of each nonblank line: `emoji check`'s output)."""
+    return [*keys, *(line.split("\t")[0].strip() for line in (keys_file or []) if line.strip())]
+
+
+@_emoji.command("build")
+@option("-a", "--all", "everything", is_flag=True, help="Also the keys no writer produces today (a shrinking pool's chip in a color it can't have)")
+@option("-k", "--key", "keys", multiple=True, help="A key or a family prefix (`trend`, `runway.star`, `pool.3`); repeatable; default the whole pack")
+@option("-K", "--keys-file", type=File("r"), help="Keys, one a line (first tab-separated column; `-` stdin): `dt-cloud emoji check | dt-cloud emoji build -o DIR -K -`")
+@option("-o", "--out", type=Path, required=True, help="Dir to write `<name>.png` into: only the emoji, named so Slack's upload fills in each name")
+@option("-p", "--pack", default="disky", help="The pack (default disky)")
+@option("-s", "--sheet", type=Path, help="Also write a contact sheet PNG here (light and dark rows), outside -o")
+def _emoji_build(everything: bool, keys: tuple[str, ...], keys_file, out: Path, pack: str, sheet: Path | None) -> None:
+    """Render the pack's custom emoji (128 px, transparent, at most 128 KB each: Slack's limits): the trend arrows
+    (`arrow_degN`), runway colors (`runway-N`, `runway-<shape>-N`) and arrow chips (`pool-chip-N-D`). Needs Pillow
+    (the `emoji` extra)."""
+    from .emoji_draw import build
+    from .emoji_vocab import selected
+
+    want = _emoji_keys(keys, keys_file)
+    if keys_file is not None and not want:
+        err("emoji build: no keys given (nothing missing?); nothing written")
+        return
+    chosen = selected(want, pack, everything)
+    if want and not chosen:
+        raise SystemExit(f"emoji build: no {pack} emoji under {', '.join(want)}")
+    paths = build(chosen, out, sheet)
+    err(f"emoji build: {len(paths)} emoji in {out}" + (f", sheet {sheet}" if sheet else ""))
+
+
+@_emoji.command("check")
+@option("-a", "--all", "everything", is_flag=True, help="Also the keys no writer produces today")
+@option("-k", "--key", "keys", multiple=True, help="A key or a family prefix (`trend`, `runway`, `pool`); repeatable; default the whole pack")
+@option("-p", "--pack", default="disky", help="The pack (default disky)")
+@option("-t", "--token", help="Slack bot token with `emoji:read` (default $SLACK_BOT_TOKEN)")
+def _emoji_check(everything: bool, keys: tuple[str, ...], pack: str, token: str | None) -> None:
+    """Which of the pack's custom emoji the token's Slack workspace lacks: one `<key>\t:<name>:` line each on stdout
+    (what `emoji build -K -` reads), the workspace and a count on stderr. Exit 0 when it has them all, 1 when any are
+    missing (posts show those as their stock emoji), 3 when the workspace's emoji can't be read."""
+    from thrds.slack import SlackClient
+
+    from .emoji_vocab import missing, selected
+
+    token = secret(token, "SLACK_BOT_TOKEN")
+    if not token:
+        raise SystemExit("emoji check: need SLACK_BOT_TOKEN (or -t)")
+    client = SlackClient(token=token, channel="")
+    try:
+        who = client._request("auth.test")
+        have = set(client.fetch_workspace_emoji())
+    except Exception as e:  # noqa: BLE001 — reported, exit 3: no answer either way
+        print(f"emoji check: can't read the workspace's emoji ({type(e).__name__}: {e})", file=sys.stderr)
+        sys.exit(3)
+    chosen = selected(keys, pack, everything)
+    lacking = missing(chosen, have)
+    for k in lacking:
+        print(f"{k.key}\t:{k.custom}:")
+    print(f"emoji check: {who.get('team', '?')} ({who.get('url', '?')}): {len(lacking)} of {len(chosen)} {pack} emoji missing", file=sys.stderr)
+    sys.exit(1 if lacking else 0)
+
+
 @main.command("discord-emoji")
 @option("-b", "--bot-token", help="Discord bot token (default $DISCORD_BOT_TOKEN)")
-@option("-i", "--icons", type=Path, help="Dir of arrow_deg*.png glyphs (default job/icons/arrows)")
+@option("-i", "--icons", type=Path, help="Dir of the pack's PNGs, each named for its Slack emoji (`dt-cloud emoji build -o DIR`; default job/icons/arrows, the trend arrows)")
 @option("-n", "--dry-run", is_flag=True, help="Say what would be uploaded; upload nothing")
 def discord_emoji(bot_token: str | None, icons: Path | None, dry_run: bool) -> None:
-    """Upload the digest's trend-arrow glyphs (arrow_deg-80 … arrow_deg80) as
-    application emoji on the bot, so `digest -P discord` can render `:arrow_degN:`
-    as `<:arrow_degN:id>` (negatives become `arrow_degmN`: Discord names allow no
-    `-`). Idempotent: names already on the app are kept. Prints `name id` for the
-    whole set on stdout."""
-    import re
-
-    from . import digest as dg
+    """Upload the emoji vocabulary's images in ``-i`` (`emoji_vocab`: `<custom>.png`, e.g. `arrow_deg-30.png`,
+    `runway-3.png`, `pool-chip-8-40.png`) as application emoji on the bot, each under its Discord name (Discord names
+    allow no `-`: `arrow_degm30`, `runway_3`, `pool_chip_8_40`), so `digest -P discord` renders them as `<:name:id>`;
+    one the app lacks is posted as its stock emoji. Idempotent: names already on the app are kept. Prints `name id` for
+    the whole set on stdout."""
     from . import discord_api as api
+    from .emoji_vocab import BY_CUSTOM
 
     bot_token = secret(bot_token, "DISCORD_BOT_TOKEN")
     if not bot_token:
         raise SystemExit("discord-emoji: need DISCORD_BOT_TOKEN (or -b)")
     icons = icons or _icons_dir() / "arrows"
-    glyphs = {
-        dg.emoji_name(int(m.group(1))): p
-        for p in sorted(icons.glob("arrow_deg*.png"))
-        if (m := re.fullmatch(r"arrow_deg(-?\d+)\.png", p.name))
-    }
+    glyphs = {k.discord: p for p in sorted(icons.glob("*.png")) if (k := BY_CUSTOM.get(p.stem)) and k.discord}
     if not glyphs:
-        raise SystemExit(f"discord-emoji: no arrow_deg*.png under {icons}")
+        raise SystemExit(f"discord-emoji: no vocabulary emoji (`<custom name>.png`) under {icons}")
     app = api.app_id(bot_token)
     have = api.app_emojis(bot_token, app)
     for name, p in glyphs.items():
@@ -3850,7 +3933,7 @@ main.add_command(_diff_bench)
 from .vm_pack import cli as _vm_pack  # noqa: E402
 main.add_command(_vm_pack)
 from .interval_store import cli as _interval_store  # noqa: E402
-from .interval_append import append_cmd as _interval_append, cli as _interval_runs, merge_cmd as _interval_merge  # noqa: E402
+from .interval_append import append_cmd as _interval_append, cli as _interval_runs, deferral_cmd as _interval_deferral, merge_cmd as _interval_merge  # noqa: E402
 from .interval_local import add_cmd as _interval_local_add, build_cmd as _interval_local_build, current_cmd as _interval_local_current  # noqa: E402
 from .interval_export import export_cmd as _interval_export  # noqa: E402
 from .interval_backfill import backfill_cmd as _interval_backfill  # noqa: E402
@@ -3875,6 +3958,7 @@ _interval_store.add_command(_interval_backfill_attribution)
 _interval_store.add_command(_interval_attribution_convert)
 _interval_store.add_command(_interval_append)
 _interval_store.add_command(_interval_merge)
+_interval_store.add_command(_interval_deferral)
 _interval_store.add_command(_interval_runs)
 _interval_store.add_command(_interval_layout_sim)
 _interval_store.add_command(_interval_level_sim)
