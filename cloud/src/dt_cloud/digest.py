@@ -166,8 +166,6 @@ class DigestConfig:
     plot_project: str = ""
     plot_branch: str = "main"
     plot_base: str = ""
-    # the OP's plot attached as two images, its chart and its diff map (`_plot_parts`), not one; false: the one
-    plot_parts: bool = True
     variant: str = "sender"
     reply_hour: int = 12
     provisional: bool = False
@@ -184,6 +182,9 @@ class DigestConfig:
     params: str = ""
     preview: str | None = None
     pin: bool = True
+    # one reply under the OP carrying its plot split in two image blocks, the chart then the diff map
+    # (`/api/digest-image` ``part``), to compare with the OP's single image (`_plot_parts`)
+    split_reply: bool = True
 
     @property
     def unit(self) -> Units:
@@ -296,7 +297,7 @@ _SCALAR_TYPES: dict[str, tuple[type, ...]] = {
     "icons_dir": (str,), "op_icon": (str,), "plot_project": (str,), "plot_branch": (str,), "plot_base": (str,),
     "variant": (str,), "reply_hour": (int,), "provisional": (bool,), "primary": (str, type(None)),
     "units": (str,), "alert_pct": (int, float, type(None)), "quota_marks": (str,), "params": (str,),
-    "preview": (str, type(None)), "pin": (bool,),
+    "preview": (str, type(None)), "pin": (bool,), "split_reply": (bool,),
 }
 
 
@@ -846,173 +847,101 @@ def _ts(rec: str | dict) -> str:
 
 
 def _op_render(tpl: Template, data, root: str, month: dt.date, state: dict, client, channel: str, variant: str, icons_dir,
-               deploy_plot) -> tuple[str, str, str | None, list[Path] | None]:
-    """The OP's body, plot URL, previous-month link and the images it attaches (`_plot_parts`): renders + hosts the plot (``icons_dir``;
-    ``deploy_plot(local, basename)`` publishes it and returns the host serving it, None → ``cfg.plot_base``), recording
-    its name in ``state["plot_name"]``. Without ``icons_dir`` nothing is rendered (the PNG is None): the URL names the
-    state's plot on ``plot_base``."""
+               deploy_plot) -> tuple[str, str, str | None, list[tuple[str, str]] | None]:
+    """The OP's body, plot URL, previous-month link and the split reply's images (`_plot_parts`: ``(alt, url)`` for the
+    chart and the map, else None): renders + hosts the plot (``icons_dir``; ``deploy_plot(local, basename)`` publishes
+    the directory and returns the host serving it, None → ``cfg.plot_base``), recording its name in
+    ``state["plot_name"]``. Without ``icons_dir`` nothing is rendered: the URL names the state's plot on ``plot_base``,
+    and there are no parts."""
     cfg = tpl.cfg
     plot_name = state.get("plot_name") or f"plot-{secrets.token_hex(16)}.png"
     base = cfg.need("plot_base")
-    local = None
+    parts: list[Path] | None = None
     if icons_dir is not None:
         local = Path(icons_dir) / plot_name
         tpl.render_plot(data, month, local, root)
+        if cfg.split_reply:
+            parts = _plot_parts(tpl, data, month, local)
         if deploy_plot is not None:
             # the deployment-specific host serves the just-uploaded plot
             # immediately (no alias propagation race → no invalid_blocks)
             dep = deploy_plot(local, plot_name)
             if dep:
                 base = dep
-    plot_url = f"{base}/{plot_name}?v={int(dt.datetime.now(dt.timezone.utc).timestamp())}"
+    v = int(dt.datetime.now(dt.timezone.utc).timestamp())
+    plot_url = f"{base}/{plot_name}?v={v}"
     state["plot_name"] = plot_name
+    split = None if parts is None else [(_plot_alt(cfg, month, p), f"{base}/{p.name}?v={v}") for p in parts]
     # A just-deployed Pages asset isn't instantly served at an alias; if we post
     # before it propagates, Slack's image-block validation 500s the whole message
     # with `invalid_blocks`. Poll until the URL is live (or give up + warn).
     if icons_dir is not None and deploy_plot is not None:
-        _wait_reachable(plot_url)
+        for url in [plot_url, *(u for _, u in split or [])]:
+            _wait_reachable(url)
     # the previous month's thread, linked from the OP
     prev_op = _prev_op(cfg, root, month, channel, variant)
     prev_url = client.permalink(prev_op) if prev_op else None
-    return tpl.op_body(data, month, plot_url, prev_url), plot_url, prev_url, None if local is None else _plot_parts(tpl, data, month, local)
+    return tpl.op_body(data, month, plot_url, prev_url), plot_url, prev_url, split
 
 
-#: The OP's plot parts (`/api/digest-image` ``part``), in the order they're attached, and each one's alt-text suffix.
+#: The plot's parts (`/api/digest-image` ``part``), in the split reply's order, and each one's alt-text suffix.
 PLOT_PARTS = {"chart": "chart", "map": "what changed"}
 
+#: The split reply's text, above its two images.
+SPLIT_TEXT = "Same plot as two images: chart, then what changed"
 
-def _plot_parts(tpl: Template, data, month: dt.date, whole: Path) -> list[Path]:
-    """The images the OP attaches: the plot's chart and its diff map as two files beside ``whole``
-    (``<stem>-chart.png``, ``<stem>-map.png``; ``cfg.plot_parts``), each drawn by the site (`/api/digest-image`
-    ``part``), so a phone shows each at its own size, with its own Download; else ``whole``. ``whole`` is attached
-    instead when the plot has no map (its request no ``diff``), when the site predates ``part`` (its answer names no
-    ``X-Digest-Part``), or when drawing a part fails (a warning): the OP keeps a plot either way."""
-    if not tpl.cfg.plot_parts:
-        return [whole]
+
+def _plot_parts(tpl: Template, data, month: dt.date, whole: Path) -> list[Path] | None:
+    """The plot's chart and its diff map as two files beside ``whole`` (``<stem>-chart.png``, ``<stem>-map.png``), each
+    drawn by the site (`/api/digest-image` ``part``), for the split reply (``cfg.split_reply``). None, and no reply, when
+    the plot has no map (its request no ``diff``); with a warning when the site predates ``part`` (its answer names no
+    ``X-Digest-Part``) or drawing a part fails: the OP's own plot is drawn either way."""
     from .deploy import site_token
     from .site import post_json
 
     try:
         req = tpl.image_request(data, month)
         if not req.get("diff"):
-            return [whole]
+            return None
         out = []
         for part in PLOT_PARTS:
             got: dict = {}
             png = post_json(tpl.cfg.site_url, site_token(), "/api/digest-image", {**req, "part": part}, headers=got)
             if got.get("x-digest-part") != part:
-                _err("digest: the site draws no plot parts (no `part` support yet); attaching the whole plot")
-                return [whole]
+                _err("digest: WARN the site draws no plot parts (no `part` support yet); no split reply")
+                return None
             path = whole.with_name(f"{whole.stem}-{part}.png")
             path.write_bytes(png)
             out.append(path)
         return out
-    except Exception as e:  # noqa: BLE001 — the whole plot is already drawn: a failed part costs only the split
-        _err(f"digest: WARN could not draw the plot's parts ({type(e).__name__}: {e}); attaching the whole plot")
-        return [whole]
+    except Exception as e:  # noqa: BLE001 — the split reply is a comparison: the OP's own plot is already drawn
+        _err(f"digest: WARN could not draw the plot's parts ({type(e).__name__}: {e}); no split reply")
+        return None
 
 
-def _plot_alt(cfg: DigestConfig, month: dt.date, plot: Path) -> str:
-    """A plot file's alt text: the OP's title, and which part it is (`PLOT_PARTS`)."""
-    part = PLOT_PARTS.get(plot.stem.rsplit("-", 1)[-1])
-    return f"{cfg.title} — {month:%B %Y}" + (f" ({part})" if part else "")
+def _plot_alt(cfg: DigestConfig, month: dt.date, part: Path) -> str:
+    """A part's alt text: the OP's title, and which part it is (`PLOT_PARTS`)."""
+    return f"{cfg.title} — {month:%B %Y} ({PLOT_PARTS[part.stem.rsplit('-', 1)[-1]]})"
 
 
-def _post_op(tpl: Template, data, month: dt.date, client, state: dict, body: str, plots: list[Path] | None, prev_url: str | None) -> str:
-    """Post or edit the month's OP (``state["op_ts"]``), returning its ts. Rendered ``plots`` (`_plot_parts`) are
-    attached as Slack files, in order, below a body without the image line (``state["plot_files"]``): unlike an image
-    block, an attached file offers Download on Slack's phone apps. Each edit swaps in the new files (thrds
-    `replace_files`: each uploaded and processed, then attached, and only then the replaced ones deleted). A bot Slack
-    won't let upload (no ``files:write`` / ``files:read``) keeps the image block (``body``), with a warning. Without
-    newly rendered plots, an OP whose plot is already attached keeps its files under the plain body; otherwise ``body``
-    as is. ``state["plot_file"]`` (one file, before the parts) counts as the attached files.
-
-    Each attach is read back (`_files_shown`): Slack can accept an edit's ``file_ids`` and record the share while the
-    message shows none of them (cw's OP, a username-override ``bot_message``, 2026-11-20). Then the OP is edited back
-    to ``body`` (the image block), the uploads deleted, and ``state["files_unrendered"]`` names the OP, whose later
-    runs keep the image block without uploading."""
-    from thrds.slack import FilesNotAttachedError, FileSpec, FileSwapError
-
-    cfg = tpl.cfg
-    op_ts = state.get("op_ts")
-    if op_ts and state.get("files_unrendered") == op_ts:
-        plots = None
-    old = state.get("plot_files") or ([state["plot_file"]] if state.get("plot_file") else [])
-    if not plots:
-        if op_ts:
-            # an OP already carrying its plot as files keeps them (`files` unset), under the body without the image line
-            client.edit(op_ts, tpl.op_body(data, month, None, prev_url) if old else body)
-            return op_ts
-        return client.post(body, username=f"{cfg.title} — {month:%B %Y}", **cfg.op_sender()).id
-    plain = tpl.op_body(data, month, None, prev_url)
-    specs = [FileSpec(p.name, p.read_bytes(), alt_text=_plot_alt(cfg, month, p)) for p in plots]
-    file_ids: list[str] = []
-    try:
-        if op_ts:
-            swap = client.replace_files(op_ts, specs, plain, previous=[(f, None) for f in old])
-            for fid, e in swap.undeleted:
-                _err(f"digest: WARN could not delete the replaced plot {fid}: {e}")
-            state["plot_files"] = swap.file_ids
-            state.pop("plot_file", None)
-            if not _files_shown(client, op_ts, swap.file_ids):
-                _files_unrendered(client, state, op_ts, body)
-            return op_ts
-        for spec in specs:
-            file_ids.append(client.upload(spec.name, spec.data, alt_text=spec.alt_text))
-    except FileSwapError:
-        raise
-    except Exception as e:  # noqa: BLE001 — a bot without the file scopes still gets its plot, as an image block
-        _err(f"digest: WARN could not upload the plot ({type(e).__name__}: {e}); it stays an image block")
-        _delete_files(client, file_ids)
-        if op_ts:
-            client.edit(op_ts, body)
-            return op_ts
-        return client.post(body, username=f"{cfg.title} — {month:%B %Y}", **cfg.op_sender()).id
-    try:
-        ts = client.post(plain, username=f"{cfg.title} — {month:%B %Y}", files=file_ids, **cfg.op_sender()).id
-    except FilesNotAttachedError as e:
-        # the OP landed without its plot: keep the OP (the next run's edit attaches fresh ones), drop these uploads
-        _err(f"digest: WARN posted the OP {e.ts} but attaching its plot failed ({e.__cause__}); the next run attaches it")
-        _delete_files(client, file_ids)
-        return e.ts
-    except Exception:
-        _delete_files(client, file_ids)
-        raise
-    state["plot_files"] = file_ids
-    state.pop("plot_file", None)
-    if not _files_shown(client, ts, file_ids):
-        _files_unrendered(client, state, ts, body)
-    return ts
+def split_body(images: list[tuple[str, str]]) -> str:
+    """The split reply: `SPLIT_TEXT`, then each ``(alt, url)`` as a trailing image line (thrds lifts each into a Block
+    Kit ``image`` block, in order)."""
+    return "\n\n".join([SPLIT_TEXT, *(f"![{alt}]({url})" for alt, url in images)])
 
 
-def _files_shown(client, ts: str, file_ids: list[str]) -> bool:
-    """Whether message ``ts`` shows any of ``file_ids`` (`attached_files`, read back after the edit that attached them).
-    A failed read warns and counts as shown: only Slack saying the message has none of them reverts it."""
-    try:
-        shown = {fid for fid, _ in client.attached_files(ts)}
-    except Exception as e:  # noqa: BLE001 — unverifiable is not unrendered
-        _err(f"digest: WARN could not read back the OP {ts}'s files ({type(e).__name__}: {e}); assuming they show")
-        return True
-    return bool(shown & set(file_ids))
-
-
-def _files_unrendered(client, state: dict, ts: str, body: str) -> None:
-    """The OP ``ts`` took its plot files without showing them (`_files_shown`): edit it back to ``body`` (the image
-    block, detaching them), delete them, and record the OP in ``state["files_unrendered"]``."""
-    file_ids = state.pop("plot_files", None) or []
-    _err(f"digest: WARN Slack attached the plot files {file_ids} to the OP {ts} but it shows none; reverting to the image block")
-    client.edit(ts, body, files=[])
-    _delete_files(client, file_ids)
-    state["files_unrendered"] = ts
-
-
-def _delete_files(client, file_ids: list[str]) -> None:
-    """Delete uploads no message carries; a failure only warns (the caller's own failure, if any, is the one raised)."""
-    for file_id in file_ids:
-        try:
-            client.delete_file(file_id)
-        except Exception as e:  # noqa: BLE001
-            _err(f"digest: WARN could not delete the unattached plot {file_id}: {e}")
+def _split_reply(cfg: DigestConfig, month: dt.date, client, state: dict, op_ts: str, split: list[tuple[str, str]]) -> bool:
+    """Post the split reply under the OP once (as the OP's sender), recording its ts in ``state["split_reply"]``, or edit
+    it to ``split``'s fresh URLs; True when it was posted. Not a unit: never in ``posted``, never redone or deleted."""
+    body = split_body(split)
+    have = state.get("split_reply")
+    if have:
+        client.edit(have, body)
+        _err(f"digest: edited split reply {have}")
+        return False
+    state["split_reply"] = client.post(body, thread_id=op_ts, username=f"{cfg.title} — {month:%B %Y}", **cfg.op_sender()).id
+    _err(f"digest: posted split reply {state['split_reply']}")
+    return True
 
 
 def _prev_op(cfg: DigestConfig, root: str, month: dt.date, channel: str, variant: str) -> str | None:
@@ -1081,19 +1010,20 @@ def converge_slack(tpl: Template, root: str, month: dt.date, client, channel: st
     path = state_path(root, month, cfg.state.format(channel=channel, variant=variant))
     state = load_state(path)
 
-    body, plot_url, prev_url, plots = _op_render(tpl, data, root, month, state, client, channel, variant, icons_dir, deploy_plot)
+    body, plot_url, prev_url, split = _op_render(tpl, data, root, month, state, client, channel, variant, icons_dir, deploy_plot)
     if len(tpl.variants) > 1:
         state["variant"] = variant
-    edited = bool(state.get("op_ts"))
-    op_ts = _post_op(tpl, data, month, client, state, body, plots, prev_url)
-    if edited:
-        save_state(path, state)
+    op_ts = state.get("op_ts")
+    if op_ts:
+        client.edit(op_ts, body)
         _err(f"digest: edited OP {op_ts} ({tpl.n_scans(data)} scans)")
     else:
+        op_ts = client.post(body, username=f"{cfg.title} — {month:%B %Y}", **cfg.op_sender()).id
         state["op_ts"] = op_ts
-        save_state(path, state)
         _err(f"digest: posted OP {op_ts}")
     if current and cfg.pin and pin_op(client, channel, state, op_ts, _prev_op(cfg, root, month, channel, variant)):
+        save_state(path, state)
+    if split and _split_reply(cfg, month, client, state, op_ts, split):
         save_state(path, state)
     if cfg.preview:
         _write_preview(cfg, preview_bundle(tpl, data, month, op=body, plot_url=plot_url, prev_url=prev_url, channel=channel,
@@ -1200,8 +1130,8 @@ def apply_slack(tpl: Template, root: str, month: dt.date, client, channel: str, 
     if op:
         if not state.get("op_ts"):
             raise SystemExit(f"digest: {month:%Y-%m} has no OP in {channel} yet (converge posts it)")
-        body, _, prev_url, plots = _op_render(tpl, data, root, month, state, client, channel, variant,
-                                             None if dry_run else icons_dir, None if dry_run else deploy_plot)
+        body, _, _, _ = _op_render(tpl, data, root, month, state, client, channel, variant,
+                                   None if dry_run else icons_dir, None if dry_run else deploy_plot)
         out.append(Change("op", state["op_ts"], body))
     want = set(days)
     posted = state.get("posted", {})
@@ -1215,10 +1145,7 @@ def apply_slack(tpl: Template, root: str, month: dt.date, client, channel: str, 
     if dry_run:
         return out
     for c in out:
-        if c.what == "op":
-            _post_op(tpl, data, month, client, state, c.body, plots, prev_url)
-        else:
-            client.edit(c.ts, c.body)
+        client.edit(c.ts, c.body)
         if c.what != "op" and isinstance(posted[c.what], dict):
             posted[c.what]["scan"] = units[c.what].scan
         _err(f"digest: edited {'OP' if c.what == 'op' else 'reply ' + c.what} {c.ts}")
