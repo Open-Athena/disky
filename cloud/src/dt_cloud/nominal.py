@@ -219,9 +219,26 @@ def counted(row: dict) -> bool:
     return not live(row) and not cancelled(row)
 
 
+#: Phase issues that leave a run clean: a `deferred` append (a compaction held the interval store; a later run's append
+#: takes the scan, and its step alerts once per episode when one doesn't: `scan_steps.interval_store`). The site's
+#: `scanRunsModel` `DEFERRED`.
+TOLERATED = ('deferred',)
+
+
+def issues(row: dict) -> list[dict]:
+    """A run's phase issues that count against it (not `TOLERATED`)."""
+    return [i for i in row['phase_issues'] if i.get('outcome') not in TOLERATED]
+
+
+def deferred(row: dict) -> str:
+    """A clean run's `TOLERATED` issues, as ` · deferred: <phases>` (else nothing), for its reply and its sender."""
+    phases = sorted({str(i.get('phase')) for i in row['phase_issues'] if i.get('outcome') in TOLERATED})
+    return f" · deferred: {', '.join(phases)}" if phases else ''
+
+
 def clean(row: dict) -> bool:
-    # A later recovery does not rewrite a historically partial run into a clean run.
-    return row['run']['status'] == 'succeeded' and row['run']['finished_ts'] is not None and not row['phase_issues']
+    # A later recovery does not rewrite a historically partial run into a clean run; a deferred append was never a failure.
+    return row['run']['status'] == 'succeeded' and row['run']['finished_ts'] is not None and not issues(row)
 
 
 def grade(row: dict) -> str:
@@ -232,7 +249,7 @@ def grade(row: dict) -> str:
     if cancelled(row):
         return 'cancelled'
     run = row['run']
-    return 'issues' if run['status'] == 'succeeded' and run['finished_ts'] is not None and row['phase_issues'] else 'failed'
+    return 'issues' if run['status'] == 'succeeded' and run['finished_ts'] is not None and issues(row) else 'failed'
 
 
 def streak(rows: list[dict]) -> tuple[list[dict], dict | None]:
@@ -251,8 +268,8 @@ def signature(row: dict) -> str:
     run = row['run']
     if run['status'] == 'failed':
         return f"failed:{run.get('failed_phase') or ''}"
-    if row['phase_issues']:
-        return 'issues:' + ','.join(sorted({str(i.get('phase')) for i in row['phase_issues']}))
+    if issues(row):
+        return 'issues:' + ','.join(sorted({str(i.get('phase')) for i in issues(row)}))
     return run['status']
 
 
@@ -288,8 +305,8 @@ def short(row: dict) -> str:
         return 'failed' + (f" in {run['failed_phase']}" if run.get('failed_phase') else '')
     if run['status'] == 'cancelled':
         return 'cancelled'
-    if row['phase_issues']:
-        return 'phase issues: ' + ', '.join(sorted({str(i.get('phase')) for i in row['phase_issues']}))
+    if issues(row):
+        return 'phase issues: ' + ', '.join(sorted({str(i.get('phase')) for i in issues(row)}))
     return str(run['status'])
 
 
@@ -345,7 +362,7 @@ def reply(cfg: Config, row: dict) -> str:
     emoji, by = starter(row)
     ok = clean(row)
     return (f"{cfg.mark(grade(row))} {emoji} [{stamp(row)}]({cfg.link(row['run'])}) · {duration}" + (f" · {by}" if by else "")
-            + ('' if ok else f" · {describe(row)}"))
+            + (deferred(row) if ok else f" · {describe(row)}"))
 
 
 def si(n: float, sign: bool = False) -> str:
@@ -416,7 +433,7 @@ def run_sender(cfg: Config, row: dict, live: bool = False) -> dict[str, str]:
     trigger as a corner badge where `badges` names images, else the outcome's icon alone (`avatar`)."""
     outcome = 'running' if live else grade(row)
     head = f"{stamp(row)} · " + ('' if live else f"{took(row)} · ")
-    what = 'running' if live else 'clean' if outcome == 'clean' else short(row)
+    what = 'running' if live else 'clean' + deferred(row) if outcome == 'clean' else short(row)
     if len(head + what) > USERNAME_MAX:
         what = what[:USERNAME_MAX - len(head) - 1] + '…'
     icon = ({'icon_url': cfg.badges.format(outcome=outcome, trigger=TRIGGERS[row['run']['trigger']])} if cfg.badges
@@ -455,12 +472,14 @@ def parent(
     stores: str = '',
     quiet: bool = False,
     bare: bool = False,
+    prev: str | None = None,
 ) -> str:
     """The thread's head: a clean thread's streak, or a failure thread's (`failed`), naming the runs going now, with
-    the latest run's outcome and the deployment's store lines (`stores_text`). `quiet`: its runs are listed in one
-    rolling reply (`trail`), not a reply each. `bare`: no leading emoji and title, which its sender says (`lead`)."""
+    the latest run's outcome, the deployment's store lines (`stores_text`) and the thread before it (`prev`, a
+    permalink: `previous`). `quiet`: its runs are listed in one rolling reply (`trail`), not a reply each. `bare`: no
+    leading emoji and title, which its sender says (`lead`)."""
     if good and not clean(good[0]):
-        return failed(cfg, good, boundary, live_rows, stores, bare)
+        return failed(cfg, good, boundary, live_rows, stores, bare, prev)
     window = good[:10]
     counts = {k: sum(r['run']['trigger'] == k for r in window) for k in ('schedule', 'manual', None)}
     mix = f"{counts['schedule']} scheduled / {counts['manual']} manual" + (f" / {counts[None]} unknown" if counts[None] else '')
@@ -468,7 +487,7 @@ def parent(
     qualifier = '' if boundary else 'at least '
     after = f" after [{boundary['run']['scan']}]({cfg.link(boundary['run'])})" if boundary else ' (available run history)'
     return (f"{lead(cfg, cfg.mark('clean'), bare)}{qualifier}{len(good)} consecutive clean run{'' if len(good) == 1 else 's'}**\n\n"
-            f"Since {since}{after}.\n\n"
+            f"Since {since}{after}{previous(prev)}.\n\n"
             f"Latest completed: [{stamp(good[0])}]({cfg.link(good[0]['run'])})" + (f" · {done}" if (done := outcome(good[0])) else '') + ".\n\n"
             f"{stores}"
             f"{running_now(cfg, live_rows)}"
@@ -494,6 +513,11 @@ def unclean(cfg: Config, runs: list[dict], qualifier: str = '') -> tuple[str, st
     return cfg.mark('failed'), f"{qualifier}{n} consecutive " + (f"run{s} failed or with phase issues" if 'issues' in grades else f"failed run{s}")
 
 
+def previous(prev: str | None) -> str:
+    """A head's link to the thread before it, after its "Since …"."""
+    return f" · [previous thread]({prev})" if prev else ''
+
+
 def lead(cfg: Config, mark: str, bare: bool) -> str:
     """A head's first line up to its words: its emoji and the title, or (`bare`: posted with a sender, which says them)
     only the bold's start."""
@@ -507,6 +531,7 @@ def failed(
     live_rows: list[dict] | None = None,
     stores: str = '',
     bare: bool = False,
+    prev: str | None = None,
 ) -> str:
     """A failure thread's head (`unclean`): how many runs in a row failed or had phase issues (under `signature`, the
     same way), since when and after which run (the last clean one, or the last that failed differently), and the newest
@@ -520,7 +545,7 @@ def failed(
     after = (f" after [{boundary['run']['scan']}]({cfg.link(boundary['run'])})" + (' (clean)' if clean(boundary) else f" ({describe(boundary)})")
              if boundary else ' (available run history)')
     return (f"{lead(cfg, mark, bare)}{words}{how}**\n\n"
-            f"Since {stamp(bad[-1])}{after}.\n\n"
+            f"Since {stamp(bad[-1])}{after}{previous(prev)}.\n\n"
             f"Latest: [{stamp(bad[0])}]({cfg.link(bad[0]['run'])}): {describe(bad[0])}.\n\n"
             f"{stores}"
             f"{running_now(cfg, live_rows)}"
@@ -557,6 +582,14 @@ def closed_head(
     return (f"{lead(cfg, mark, bare)}{words} (ended)**\n\n"
             f"Since {stamp(runs[-1])}{after}; last [{stamp(runs[0])}]({cfg.link(runs[0]['run'])}).\n\n"
             f"Ended by [{stamp(stop)}]({cfg.link(stop['run'])}): {reason}. [All scans]({cfg.scans}).")
+
+
+def next_thread(cfg: Config, body: str, url: str) -> str:
+    """A closed head (`closed_head`) whose "Ended by …" line links the thread after it (`url`, a permalink)."""
+    tail = f". [All scans]({cfg.scans})."
+    if not body.endswith(tail):
+        raise ValueError("nominal: a closed head without its All scans link")
+    return body[:-len(tail)] + f" · [next thread]({url})" + tail
 
 
 #: A folded alert's text starts with this; it is never folded again.
@@ -967,14 +1000,14 @@ def converge(
             newest = next((i for i, r in enumerate(rows) if r['run']['run_id'] in state.get('posted', {})), None)
             stop = rows[newest - 1] if newest else boundary or rows[0]
             if was == 'clean':
-                reason = 'phase issues' if stop['run']['status'] == 'succeeded' and stop['phase_issues'] else stop['run']['status']
+                reason = 'phase issues' if stop['run']['status'] == 'succeeded' and issues(stop) else stop['run']['status']
             else:
                 reason = 'clean' if clean(stop) else describe(stop)
             old = closed_runs(rows, stop, state.get('boundary'))
             body = closed_head(cfg, was, old, stop, reason, bare=bool(state.get('head_sender')))
             check()
             slack.edit(state['parent'], body)
-            state['closed'] = True
+            state.update(closed=True, closed_body=body)
             persist()
             if state.get('rolling'):
                 # A quiet thread's rolling reply ends as its runs and the one that ended it, with no runs going
@@ -986,8 +1019,12 @@ def converge(
                     persist()
         if good:
             kept = {k: state[k] for k in KEPT if k in state}
+            # The new head links the closed one (`previous_url`); once it is posted, the closed head's "Ended by" line
+            # links it back (`previous_body`: the closed head as last written, dropped once relinked)
+            prev = {'previous': state['parent'], 'previous_url': slack.permalink(state['parent']),
+                    **({'previous_body': state['closed_body']} if state.get('closed_body') else {})}
             state.clear()
-            state.update(namespace=cfg.namespace, boundary=boundary_id, posted={}, **kept)
+            state.update(namespace=cfg.namespace, boundary=boundary_id, posted={}, **kept, **prev)
             if head != 'clean':
                 state['key'] = head
             if cfg.senders:
@@ -1008,10 +1045,15 @@ def converge(
         quiet = cfg.quiet and head == 'clean'
         # A head posted with a sender drops what the sender says; one posted without (before senders) keeps it
         bare = bool(state.get('head_sender')) if state.get('parent') else cfg.senders
-        body = parent(cfg, good, boundary, live_rows, stores, quiet=quiet, bare=bare)
+        body = parent(cfg, good, boundary, live_rows, stores, quiet=quiet, bare=bare, prev=state.get('previous_url'))
         if not state.get('parent'):
             kind = 'clean' if head == 'clean' else 'issues' if grade(good[-1]) == 'issues' else 'failed'
             send('parent', body, None, scope, cfg.sender(kind))
+        if state.get('previous_body'):
+            check()
+            slack.edit(state['previous'], next_thread(cfg, state['previous_body'], slack.permalink(state['parent'])))
+            del state['previous_body']
+            persist()
         # New threads bootstrap ten; established threads append every missing run after the newest known one. A quiet
         # thread posts none: its runs are lines of one rolling reply, which each run's link (`link_threads`) names.
         posted = state.setdefault('posted', {})
