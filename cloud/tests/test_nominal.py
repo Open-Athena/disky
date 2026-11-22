@@ -949,3 +949,21 @@ def test_the_cancel_emoji_is_configurable_and_refuses_markup():
     for bad in [{'cancelled': '<!channel>'}, {'cancelled': 'stop'}, {'clean': '🎉'}]:
         with pytest.raises(ValueError, match='nominal.emoji: '):
             N.config(dict(state='unused', site='https://site.test', channel='C123', title='T', emoji=bad))
+
+
+def test_a_deferred_append_leaves_a_run_clean_and_says_so():
+    """#82: a compaction holding the interval store defers the scan's append (a later run's takes it); the run stays in
+    its clean thread, its reply naming what was deferred. Any other issue beside it still counts."""
+    from dataclasses import replace
+
+    cfg = replace(CFG, group='color')
+    d = {'phase': 'interval-store', 'outcome': 'deferred', 'recovery': None}
+    other = {'phase': 'warm-cache', 'outcome': 'failed', 'recovery': None}
+    assert [(N.clean(r), N.failure(r)) for r in [row(1, issues=[d]), row(1, issues=[d, other]), row(1, 'failed', issues=[d])]] == [
+        (True, False), (False, True), (False, True)]
+    assert N.thread_keys(cfg, [row(3), row(2, issues=[d]), row(1)]) == ['clean', 'clean', 'clean']
+    assert N.reply(cfg, row(2, issues=[d])) == (
+        '✅ :alarm_clock: [2026-11-03 08:00 UTC](https://site.test/scans/r2) · 1m 00s · deferred: interval-store')
+    assert N.reply(cfg, row(2, issues=[d, other])) == (
+        '❌ :alarm_clock: [2026-11-03 08:00 UTC](https://site.test/scans/r2) · 1m 00s · phase issues: warm-cache')
+    assert N.signature(row(2, issues=[d, other])) == 'issues:warm-cache'

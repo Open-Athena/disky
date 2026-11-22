@@ -125,9 +125,25 @@ def live(row: dict) -> bool:
     return row['run']['status'] == 'running' or row['run']['finished_ts'] is None
 
 
+#: Phase issues that leave a run clean: a `deferred` append (a compaction held the interval store; a later run's append
+#: takes the scan, and its step alerts once per episode when one doesn't: `scan_steps.interval_store`). The site's
+#: `scanRunsModel` `DEFERRED`.
+TOLERATED = ('deferred',)
+
+
+def issues(row: dict) -> list[dict]:
+    """A run's phase issues that count against it (not `TOLERATED`)."""
+    return [i for i in row['phase_issues'] if i.get('outcome') not in TOLERATED]
+
+
+def deferred(row: dict) -> list[str]:
+    """The phases a run's `TOLERATED` issues name, sorted."""
+    return sorted({str(i.get('phase')) for i in row['phase_issues'] if i.get('outcome') in TOLERATED})
+
+
 def clean(row: dict) -> bool:
-    # A later recovery does not rewrite a historically partial run into a clean run.
-    return row['run']['status'] == 'succeeded' and row['run']['finished_ts'] is not None and not row['phase_issues']
+    # A later recovery does not rewrite a historically partial run into a clean run; a deferred append was never a failure.
+    return row['run']['status'] == 'succeeded' and row['run']['finished_ts'] is not None and not issues(row)
 
 
 #: A failed run's error when it was stopped on purpose, before `scan_runs` had a `cancelled` status: Batch's CANCELLED,
@@ -142,7 +158,7 @@ def cancelled(row: dict) -> bool:
     streak (`thread_keys`). A run that failed first and was cancelled after is a failure."""
     run = row['run']
     return ((run['status'] == 'cancelled' or run['status'] == 'failed' and run.get('error') in CANCEL_ERRORS)
-            and not run.get('failed_phase') and not row['phase_issues'])
+            and not run.get('failed_phase') and not issues(row))
 
 
 def failure(row: dict) -> bool:
@@ -166,8 +182,8 @@ def signature(row: dict) -> str:
     run = row['run']
     if run['status'] == 'failed':
         return f"failed:{run.get('failed_phase') or ''}"
-    if row['phase_issues']:
-        return 'issues:' + ','.join(sorted({str(i.get('phase')) for i in row['phase_issues']}))
+    if issues(row):
+        return 'issues:' + ','.join(sorted({str(i.get('phase')) for i in issues(row)}))
     return run['status']
 
 
@@ -220,8 +236,8 @@ def describe(row: dict) -> str:
         error = ' '.join(str(run.get('error') or '').translate(_MARKUP).split())
         error = error if len(error) <= 160 else error[:159] + '…'
         return 'failed' + (f" in {run['failed_phase']}" if run.get('failed_phase') else '') + (f": {error}" if error else '')
-    if row['phase_issues']:
-        return 'phase issues: ' + ', '.join(sorted({str(i.get('phase')) for i in row['phase_issues']}))
+    if issues(row):
+        return 'phase issues: ' + ', '.join(sorted({str(i.get('phase')) for i in issues(row)}))
     return str(run['status'])
 
 
@@ -260,7 +276,7 @@ def reply(cfg: Config, row: dict) -> str:
     ok = clean(row)
     mark = '✅' if ok else cfg.mark('cancelled') if cancelled(row) else '❌'
     return (f"{mark} {emoji} [{stamp(row)}]({cfg.link(row['run'])}) · {duration}" + (f" · {by}" if by else "")
-            + ('' if ok else f" · {describe(row)}"))
+            + (f" · {describe(row)}" if not ok else f" · deferred: {', '.join(d)}" if (d := deferred(row)) else ''))
 
 
 def si(n: float, sign: bool = False) -> str:
@@ -367,7 +383,7 @@ def failed(cfg: Config, bad: list[dict], boundary: dict | None, live_rows: list[
     if cfg.group == 'signature':
         run = bad[0]['run']
         how = (f" in {run['failed_phase']}" if run['status'] == 'failed' and run.get('failed_phase') else
-               ' with phase issues' if run['status'] != 'failed' and bad[0]['phase_issues'] else '')
+               ' with phase issues' if run['status'] != 'failed' and issues(bad[0]) else '')
     after = (f" after [{boundary['run']['scan']}]({cfg.link(boundary['run'])})" + (' (clean)' if clean(boundary) else f" ({describe(boundary)})")
              if boundary else ' (available run history)')
     return (f"❌ **{cfg.title}: {qualifier}{len(bad)} consecutive failed run{'' if len(bad) == 1 else 's'}{how}**\n\n"
@@ -748,7 +764,7 @@ def converge(
             # (the oldest run after it that isn't a pure cancel: a cancel ends nothing)
             stop = next((r for r in reversed(rows[:newest]) if not cancelled(r)), rows[newest - 1]) if newest else boundary or rows[0]
             if was == 'clean':
-                reason = 'phase issues' if stop['run']['status'] == 'succeeded' and stop['phase_issues'] else stop['run']['status']
+                reason = 'phase issues' if stop['run']['status'] == 'succeeded' and issues(stop) else stop['run']['status']
             else:
                 reason = 'clean' if clean(stop) else describe(stop)
             body = closed_head(cfg, was, closed_runs(rows, stop, state.get('boundary')), stop, reason)
