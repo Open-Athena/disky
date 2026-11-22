@@ -36,7 +36,7 @@ pin: true
 # a quota at/over this percent: :red_circle: in the daily replies + one alert reply also sent to the channel (thrds
 # `post(broadcast=True)`), deleted once every quota is back under
 alert_pct: 90
-# each pool's mark, in config order: a white arrow on a square (`:pool-chip-N-D:`, `job/gen-pool-chips.py`). Its color is the
+# each pool's mark, in config order: a white arrow on a square (`:pool-chip-N-D:`, `dt-cloud emoji build -k pool`). Its color is the
 # runway, free ÷ the fastest net fill over the last 1/3/7 days; its arrow that fill as a share of what the pool holds. A pool
 # filling within 60 days adds `, +N Ti/d over Wd, ≈Nd to full`, W the window that fill came from (specs/digest-runway-marks.md)
 quota_marks: arrow-chip
