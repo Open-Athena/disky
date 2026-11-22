@@ -76,6 +76,17 @@ PATH_STORE = "intervals"
 AGE_STORE_PREFIX = "history/primary-age"
 # "Run a scan" on /scans (`/api/scan-runs/dispatch`): the daily scan's submitter, run as `GCP_SA_KEY`'s account
 SCAN_SUBMIT_JOB = "projects/oa-internal-450019/locations/us-central1/jobs/hf-usage-snapshot-submit"
+# `/admin/slack`'s digest re-apply (`/api/digest-reapply`): its own Batch job, submitted as `GCP_SA_KEY`'s account
+# (`infra/gcp` `SiteDispatcher(reapply=True)`) to run as the job account on the `:hf` scan image (the cron's), beside the
+# data bucket, whose mount takes the run's output and rewrite plan (`digest/reapply/`). It sources `job/hf-env.sh` and
+# carries only these secrets; the thread state and snapshots are on R2. No `SWEEP_IMAGE` / `SWEEP_S3_ENDPOINT`: hf
+# has no plan-sweep executor.
+GCP_PROJECT = "oa-internal-450019"
+BATCH_REGION = "us-central1"
+DATA_BUCKET = "oa-hf-usage-data"
+JOB_SA = "hf-usage-job@oa-internal-450019.iam.gserviceaccount.com"
+DISKY_LABELS = "app=disky,deployment=hf"  # cost labels on the re-apply job (specs/done/cost-labels.md)
+DIGEST_REAPPLY = '{"template":"quota","config":"job/digest.yml","root":"r2://oa-hf-usage-index/snapshots/hf","image":"us-central1-docker.pkg.dev/oa-internal-450019/hf-usage/scan:hf","env_script":"job/hf-env.sh","r2_bucket":"oa-hf-usage-index","secrets":{"SITE_TOKEN":"hf-usage-job-grant","SLACK_BOT_TOKEN":"hf-usage-slack-bot-token","CLOUDFLARE_API_TOKEN":"hf-usage-cf-pages-token","CLOUDFLARE_ACCOUNT_ID":"hf-usage-cf-account-id","R2_ENDPOINT":"hf-usage-r2-endpoint","R2_ACCESS_KEY_ID":"hf-usage-r2-access-key-id","R2_SECRET_ACCESS_KEY":"hf-usage-r2-secret-access-key"}}'
 # The "data behind this site" store at /meta (`src/stores/meta.ts`; job/profiles/hf-meta.yml scans it daily): the data
 # bucket (GCS) and this R2 bucket, its layer-2s under `meta-l2/`, its snapshots under `snapshots/meta/`, its own static
 # name index generation; read through the primary's R2 secrets. The /scans page links its outputs into it.

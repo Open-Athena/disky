@@ -158,6 +158,10 @@ def test_gcp_stack(monkeypatch: pytest.MonkeyPatch):
             *[("gcp:secretmanager/secretIamMember:SecretIamMember", f"{s}-accessor") for s in secrets],
             ("disky:gcp:JobAccount", "hf-usage-dispatch"),
             ("gcp:serviceaccount/account:Account", "hf-usage-dispatch"),
+            ("disky:gcp:SiteDispatcher", "hf-usage-dispatch"),
+            ("gcp:projects/iAMMember:IAMMember", "hf-usage-dispatch-batch-jobsEditor"),
+            ("gcp:serviceaccount/iAMMember:IAMMember", "hf-usage-dispatch-act-hf-usage-job"),
+            ("gcp:storage/bucketIAMMember:BucketIAMMember", "hf-usage-dispatch-reapply-reader"),
             ("disky:gcp:BatchSubmitCron", "hf-usage-snapshot"),
             ("gcp:cloudrunv2/job:Job", "hf-usage-snapshot-submit"),
             ("gcp:cloudrunv2/jobIamMember:JobIamMember", "hf-usage-snapshot-submit-invoker"),
@@ -232,6 +236,18 @@ def test_gcp_stack(monkeypatch: pytest.MonkeyPatch):
         dispatcher = f"hf-usage-dispatch@{project}.iam.gserviceaccount.com"
         assert {k: m.inputs("hf-usage-snapshot-submit-dispatch-hf-usage-dispatch")[k] for k in ("name", "role", "member")} == {
             "name": "hf-usage-snapshot-submit", "role": "roles/run.jobsExecutorWithOverrides", "member": f"serviceAccount:{dispatcher}",
+        }
+        # digest re-apply (`SiteDispatcher(reapply=True)`): its Batch job, run as the job account; its output and plans read
+        assert {k: m.inputs("hf-usage-dispatch-batch-jobsEditor")[k] for k in ("role", "member")} == {
+            "role": "roles/batch.jobsEditor", "member": f"serviceAccount:{dispatcher}",
+        }
+        assert {k: m.inputs("hf-usage-dispatch-act-hf-usage-job")[k] for k in ("role", "member")} == {
+            "role": "roles/iam.serviceAccountUser", "member": f"serviceAccount:{dispatcher}",
+        }
+        assert {k: m.inputs("hf-usage-dispatch-reapply-reader")[k] for k in ("bucket", "role", "member", "condition")} == {
+            "bucket": "oa-hf-usage-data", "role": "roles/storage.objectViewer", "member": f"serviceAccount:{dispatcher}",
+            "condition": {"title": "digest-reapply-runs", "description": "Only /admin/slack's digest re-apply output and rewrite plans",
+                          "expression": 'resource.name.startsWith("projects/_/buckets/oa-hf-usage-data/objects/digest/reapply/")'},
         }
         task = spec["taskGroups"][0]["taskSpec"]
         assert task["runnables"][0]["container"] == {
