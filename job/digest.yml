@@ -29,6 +29,8 @@ plot_base: https://plot.oa-r2-usage-icons.pages.dev
 # sender: the headline as the reply's sender name + a trend-arrow avatar. The scan runs once a day (07:15 UTC), so
 # the day's reply is its first scan from 00Z on, and there is no provisional reply
 variant: sender
+# the plot stays the OP's one image block; no second reply carrying it split in two
+split_reply: false
 reply_hour: 0
 provisional: false
 # decimal units, as the site renders sizes (288 T on the Map = 262 TiB) and as R2 bills (GB-month). No per-bucket quota
