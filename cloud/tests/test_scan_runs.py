@@ -282,9 +282,11 @@ def test_record_trigger():
     assert sql.split(" VALUES ")[0] == ("INSERT INTO scan_runs (run_id, scan, kind, status, source, store, parent, failed_phase, "
                                         "error, started_ts, finished_ts, job_name, region, machine, spot, tasks, image, cost_usd, "
                                         "gen, updated_ts)")
-    assert sql.endswith(", gen = COALESCE(excluded.gen, scan_runs.gen)")
+    assert sql.endswith(", gen = COALESCE(excluded.gen, scan_runs.gen), error = CASE WHEN scan_runs.status = 'cancelled' "
+                        "THEN scan_runs.error ELSE COALESCE(excluded.error, scan_runs.error) END")
     assert scan_runs.run_sql(scan_runs.Run("uid-3", "2026-10-08", "scan", "running", trigger="manual"), 500).endswith(
-        ", gen = COALESCE(excluded.gen, scan_runs.gen), trigger = COALESCE(excluded.trigger, scan_runs.trigger)")
+        ", gen = COALESCE(excluded.gen, scan_runs.gen), trigger = COALESCE(excluded.trigger, scan_runs.trigger), error = CASE "
+        "WHEN scan_runs.status = 'cancelled' THEN scan_runs.error ELSE COALESCE(excluded.error, scan_runs.error) END")
 
 
 def test_trigger_of():
@@ -369,15 +371,17 @@ def test_record_dry_run_prints_the_sql(capsys):
         "INSERT INTO scan_runs (run_id, scan, kind, status, source, store, parent, failed_phase, error, started_ts, "
         "finished_ts, job_name, region, machine, spot, tasks, image, cost_usd, gen, updated_ts) VALUES ('uid-4', "
         "'2026-10-08', 'scan', 'running', 'job', 'primary', NULL, NULL, NULL, 7, NULL, NULL, NULL, NULL, NULL, NULL, "
-        "NULL, NULL, NULL, 7) ON CONFLICT(run_id) DO UPDATE SET scan = excluded.scan, kind = excluded.kind, status = "
-        "excluded.status, store = excluded.store, updated_ts = excluded.updated_ts, parent = COALESCE(excluded.parent, "
-        "scan_runs.parent), failed_phase = COALESCE(excluded.failed_phase, scan_runs.failed_phase), error = "
-        "COALESCE(excluded.error, scan_runs.error), started_ts = COALESCE(excluded.started_ts, scan_runs.started_ts), "
-        "finished_ts = COALESCE(excluded.finished_ts, scan_runs.finished_ts), job_name = COALESCE(excluded.job_name, "
-        "scan_runs.job_name), region = COALESCE(excluded.region, scan_runs.region), machine = "
-        "COALESCE(excluded.machine, scan_runs.machine), spot = COALESCE(excluded.spot, scan_runs.spot), tasks = "
-        "COALESCE(excluded.tasks, scan_runs.tasks), image = COALESCE(excluded.image, scan_runs.image), cost_usd = "
-        "COALESCE(excluded.cost_usd, scan_runs.cost_usd), gen = COALESCE(excluded.gen, scan_runs.gen);",
+        "NULL, NULL, NULL, 7) ON CONFLICT(run_id) DO UPDATE SET scan = excluded.scan, kind = excluded.kind, store = "
+        "excluded.store, updated_ts = excluded.updated_ts, status = CASE WHEN scan_runs.status = 'cancelled' THEN "
+        "'cancelled' ELSE excluded.status END, parent = COALESCE(excluded.parent, scan_runs.parent), failed_phase = "
+        "COALESCE(excluded.failed_phase, scan_runs.failed_phase), started_ts = COALESCE(excluded.started_ts, "
+        "scan_runs.started_ts), finished_ts = COALESCE(excluded.finished_ts, scan_runs.finished_ts), job_name = "
+        "COALESCE(excluded.job_name, scan_runs.job_name), region = COALESCE(excluded.region, scan_runs.region), "
+        "machine = COALESCE(excluded.machine, scan_runs.machine), spot = COALESCE(excluded.spot, scan_runs.spot), "
+        "tasks = COALESCE(excluded.tasks, scan_runs.tasks), image = COALESCE(excluded.image, scan_runs.image), "
+        "cost_usd = COALESCE(excluded.cost_usd, scan_runs.cost_usd), gen = COALESCE(excluded.gen, scan_runs.gen), "
+        "error = CASE WHEN scan_runs.status = 'cancelled' THEN scan_runs.error ELSE COALESCE(excluded.error, "
+        "scan_runs.error) END;",
     ]
 
 
@@ -652,6 +656,16 @@ def test_batch_failure_reasons():
         'Job state is set from RUNNING to FAILED for job j.Job failed due to task failure. Specifically, task with index 0 failed due to the following task event: "Task state is updated from RUNNING to FAILED on zones/z/instances/1 due to task runs over the maximum runtime with exit code 50005."',
         "Job state is set from CANCELLATION_IN_PROGRESS to CANCELLED for job j.",
     )] == ["Batch: task failed (exit 137)", "Batch: over the maximum runtime (exit 50005)", "Batch: cancelled"]
+
+
+def test_exit_trap_after_a_cancel_keeps_it():
+    # a cancel is final: the head's exit trap after it (the SIGTERM a cancel sends) records no failure, nor its reason
+    s = sink()
+    record(s, PROFILE, "2026-10-08", "uid-7", 10, start=True)
+    s.execute(["UPDATE scan_runs SET status = 'cancelled', error = 'cancelled from /scans', finished_ts = 20 WHERE run_id = 'uid-7'"])
+    run = record(s, PROFILE, "2026-10-08", "uid-7", 21, exit_code=143, error="head terminated (signal; session s1)").run
+    assert (run.status, rows(s, "SELECT status, error, finished_ts FROM scan_runs")) == (
+        "cancelled", [("cancelled", "cancelled from /scans", 21)])
 
 
 def test_exit_trap_after_a_nop_keeps_it():
