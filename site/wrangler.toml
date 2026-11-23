@@ -65,7 +65,7 @@ DIGEST_CHANNEL = "C0C9J6CE8BD"
 JOB_SA = "oa-r2-usage-job@oa-internal-450019.iam.gserviceaccount.com"
 DATA_BUCKET = "oa-r2-usage-data"
 BATCH_REGION = "us-west1"
-DIGEST_REAPPLY = '{"template":"quota","config":"job/digest.yml","root":"r2://oa-r2-usage-index/snapshots/r2","env_script":"job/r2-env.sh","r2_bucket":"oa-r2-usage-index","image":"us-west1-docker.pkg.dev/oa-internal-450019/oa-r2-usage/scan:54b2ba0914c2","secrets":{"SITE_TOKEN":"oa-r2-site-grant","SLACK_BOT_TOKEN":"oa-r2-slack-bot-token","CLOUDFLARE_API_TOKEN":"oa-r2-cf-pages-token","R2_ACCESS_KEY_ID":"oa-r2-index-access-key-id","R2_SECRET_ACCESS_KEY":"oa-r2-index-secret-access-key"}}'
+DIGEST_REAPPLY = '{"template":"quota","config":"job/digest.yml","root":"r2://oa-r2-usage-index/snapshots/r2","env_script":"job/r2-env.sh","r2_bucket":"oa-r2-usage-index","image":"us-west1-docker.pkg.dev/oa-internal-450019/oa-r2-usage/scan:f5354d0cdc16","secrets":{"SITE_TOKEN":"oa-r2-site-grant","SLACK_BOT_TOKEN":"oa-r2-slack-bot-token","CLOUDFLARE_API_TOKEN":"oa-r2-cf-pages-token","R2_ACCESS_KEY_ID":"oa-r2-index-access-key-id","R2_SECRET_ACCESS_KEY":"oa-r2-index-secret-access-key"}}'
 REPO_URL = "https://github.com/Open-Athena/disky"
 SOURCE_REF = "r2"
 
