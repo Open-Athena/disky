@@ -20,8 +20,8 @@ import pulumi
 import pulumi_gcp as gcp
 import yaml
 
-from gcp_jobs import Adopt, BatchCron, BatchEvents, BatchSubmitCron, JobAccount, Secrets, cost_labels, grant_bucket, grant_secret, labeled_provider
-from cw_isolation import prepare_credentials, prepare_dispatcher, prepare_isolation
+from gcp_jobs import Adopt, BatchCron, BatchEvents, BatchSubmitCron, JobAccount, Secrets, SiteDispatcher, cost_labels, grant_bucket, grant_secret, labeled_provider
+from cw_isolation import prepare_credentials, prepare_isolation
 
 cfg = pulumi.Config()
 gcp_cfg = pulumi.Config("gcp")
@@ -49,7 +49,7 @@ dispatch = JobAccount(
     account_id="cw-s3-dispatch",
     display_name="cw-s3 sweep dispatch",
     description="Submits sweep-executor Batch jobs from the cw-s3 sweep console; Batch-submit + actAs cw-s3-job only",
-    roles=["roles/batch.jobsEditor"],
+    roles=[],
     acts_as_self=False,
     adopt=adopt,
 )
@@ -66,9 +66,26 @@ job = JobAccount(
         # `gcp-cost` (`dt-cloud cost`): the buckets' `total_bytes` from Cloud Monitoring
         "roles/monitoring.viewer",
     ],
-    actors=["cw-s3-dispatch@" + f"{project}.iam.gserviceaccount.com"],
-    actor_deps=[dispatch],
     adopt=adopt,
+)
+# What the site (`GCP_SA_KEY` = `cw-s3-dispatch`) may start: `/admin/slack`'s digest re-apply and the sweep console, whose
+# results it reads anywhere in the data bucket (`sweep_reads`). The grants predate the component: aliased, not replaced.
+URN = f"urn:pulumi:{STACK}::{pulumi.get_project()}::"
+site_dispatch = SiteDispatcher(
+    "cw-s3-dispatch",
+    project=project,
+    account=dispatch,
+    job=job,
+    data_bucket="oa-cw-s3-usage-data",
+    reapply=True,
+    sweeps=True,
+    sweep_reads=True,
+    aliases={
+        "jobs": [URN + "disky:gcp:JobAccount$gcp:projects/iAMMember:IAMMember::cw-s3-dispatch-batch.jobsEditor"],
+        "act": [URN + "disky:gcp:JobAccount$gcp:serviceaccount/iAMMember:IAMMember::cw-s3-job-actor-cw-s3-dispatch"],
+        "sweep-create": [URN + "gcp:storage/bucketIAMMember:BucketIAMMember::cw-isolation-data-dispatch-creator"],
+        "sweep-read": [URN + "gcp:storage/bucketIAMMember:BucketIAMMember::cw-isolation-data-dispatch-reader"],
+    },
 )
 
 CW_SECRETS = [
@@ -116,9 +133,8 @@ isolation_ready = []
 if cfg.get_bool("prepareIsolation"):
     isolation_ready.extend(prepare_isolation(project, job.member))
     isolation_ready.extend(prepare_credentials(project, job.member))
-    isolation_ready.extend(prepare_dispatcher(dispatch.member))
 
-ready = [job, secrets, *shared_ready, *isolation_ready]
+ready = [job, site_dispatch, secrets, *shared_ready, *isolation_ready]
 # The scan head's Batch state changes → `dt-cloud batch-events serve` (`BatchEvents`): a head that ended without
 # recording it (cancelled from /scans, a lost VM) is marked failed and the run thread in #cw-admin converged as it
 # happens, not at the next scan. Runs as the job account, with the scan profile's D1 and the head's CF + Slack secrets

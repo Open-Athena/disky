@@ -6,7 +6,7 @@ import sys
 import pulumi
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "gcp"))
-from cw_isolation import prepare_credentials, prepare_dispatcher, prepare_isolation
+from cw_isolation import prepare_credentials, prepare_isolation
 
 
 class Mocks(pulumi.runtime.Mocks):
@@ -101,26 +101,5 @@ def test_separate_publisher_secret_containers() -> pulumi.Output:
             }
         assert mocks.types == types
         assert mocks.resources == expected
-
-    return pulumi.Output.all(*[resource.id for resource in resources]).apply(check)
-
-
-@pulumi.runtime.test
-def test_dispatcher_gets_read_create_without_delete() -> pulumi.Output:
-    mocks = Mocks()
-    pulumi.runtime.set_mocks(mocks, project="fixture", stack="cw-s3", preview=False)
-    member = "serviceAccount:cw-s3-dispatch@fixture.iam.gserviceaccount.com"
-    resources = prepare_dispatcher(member)
-
-    def check(_: object) -> None:
-        assert mocks.types == {
-            f"cw-isolation-data-dispatch-{purpose}": "gcp:storage/bucketIAMMember:BucketIAMMember"
-            for purpose in ("reader", "creator")
-        }
-        assert mocks.resources == {
-            f"cw-isolation-data-dispatch-{purpose}": {
-                "bucket": "oa-cw-s3-usage-data", "role": f"roles/storage.object{role}", "member": member,
-            } for purpose, role in (("reader", "Viewer"), ("creator", "Creator"))
-        }
 
     return pulumi.Output.all(*[resource.id for resource in resources]).apply(check)

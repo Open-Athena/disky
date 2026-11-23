@@ -139,15 +139,3 @@ def prepare_credentials(
         )
         resources.extend([secret, accessor])
     return resources
-
-
-def prepare_dispatcher(
-    member: pulumi.Input[str],
-) -> list[pulumi.CustomResource]:
-    """The web dispatcher creates plans and reads run results, never deletes."""
-    return [gcp.storage.BucketIAMMember(
-        f"cw-isolation-data-dispatch-{purpose}",
-        bucket="oa-cw-s3-usage-data",
-        role=f"roles/storage.object{role}",
-        member=member,
-    ) for purpose, role in (("reader", "Viewer"), ("creator", "Creator"))]
