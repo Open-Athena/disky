@@ -3,7 +3,7 @@ import { describe, expect, it } from 'vitest'
 import type { FleetDeployment, FleetDoc, FleetRun } from './fleetTypes'
 import { fakeChannel } from '@open-athena/thrds/testing'
 import type { Env } from './env'
-import { CARD_NAME, DEFAULT_EMOJI, fleetMessage, KV_KEY, parseEmoji, publish, publishSplit, SECTION_MAX, SPLIT_KV_KEY, SPLIT_TEXT, splitName } from './slack'
+import { CARD_NAME, DEFAULT_EMOJI, fleetMessage, KV_KEY, parseEmoji, publish, publishSplit, runLine, SECTION_MAX, SPLIT_KV_KEY, SPLIT_TEXT, splitName, trailLines } from './slack'
 import { NOW } from './testFleet'
 
 const H = 3600
@@ -42,7 +42,7 @@ describe('the fleet\'s Slack post', () => {
       text: 'disky fleet: a 1 step issue open (dups), b unreachable (HTTP 503), c failed at index, d ok, e running, f no scans',
       blocks: [
         { type: 'section', text: { type: 'mrkdwn', text: '*disky fleet* · <https://fleet.test/fleet|details>' } },
-        { type: 'section', text: { type: 'mrkdwn', text: '*<https://a.test|a>*  :warning: (:bust_in_silhouette:)  <https://a.test/scans/r|2026-11-07> · 1 step issue open (dups) · 2.1h · $0.50 · <https://a.test/meta|/meta> 34.4 GB (+4.20 GB 7d) · <https://a.test/scans|scans> · <https://slack.test/archives/CA/p1|thread>' } },
+        { type: 'section', text: { type: 'mrkdwn', text: '*<https://a.test|a>*  :warning::bust_in_silhouette:  <https://a.test/scans/r|2026-11-07> · 1 step issue open (dups) · 2.1h · $0.50 · <https://a.test/meta|/meta> 34.4 GB (+4.20 GB 7d) · <https://a.test/scans|scans> · <https://slack.test/archives/CA/p1|thread>' } },
         { type: 'section', text: { type: 'mrkdwn', text: '*<https://b.test|b>*  :grey_question:  unreachable (HTTP 503) · <https://b.test/meta|/meta> n/a · <https://b.test/scans|scans>' } },
         { type: 'section', text: { type: 'mrkdwn', text: '*<https://c.test|c>*  :x:  <https://c.test/scans/r|2026-11-06> · failed at index · 1.0h · cost n/a · <https://c.test/meta|/meta> 884 MB · newest scan 2d old · <https://c.test/scans|scans>' } },
         { type: 'section', text: { type: 'mrkdwn', text: '*<https://d.test|d>*  :white_check_mark::warning::x::white_check_mark::white_check_mark::white_check_mark::white_check_mark::white_check_mark::white_check_mark::white_check_mark:  <https://d.test/scans/r|2026-11-07> · ok · 30m · $0.13 · <https://d.test/meta|/meta> 1.50 TB (−100 GB 7d) · <https://d.test/scans|scans> · <https://slack.test/archives/CD/p2|thread> · <#C0CDADMIN>' } },
@@ -55,7 +55,7 @@ describe('the fleet\'s Slack post', () => {
 })
 
 describe('a manual run\'s starter', () => {
-  it('shows after its run\'s status, in parentheses, as their own Slack emoji where the deployment answers one, else 👤', () => {
+  it('ends a group of consecutive runs they started, as their own Slack emoji where the deployment answers one, else 👤', () => {
     const lines = (ds: FleetDeployment[]) => (fleetMessage({ ...doc, deployments: ds }, 'https://fleet.test/fleet').blocks as { type: string; text?: { text: string } }[])
       .slice(1, -1).map(b => b.text!.text.split('  ').slice(0, 2).join('  '))
     const by = run({ trigger: 'manual', trigger_emoji: ':ryan:' })
@@ -64,10 +64,12 @@ describe('a manual run\'s starter', () => {
     expect(lines([
       dep('g', { last: by, runs: [by, failed] }), dep('h', { last: anon, runs: [anon] }),
       dep('i', { last: failed, runs: [failed, failed, by, anon, failed] }),
+      dep('j', { last: by, runs: [by, { ...by, status: 'failed', failed_at: 'index' }, by, failed, by, by] }),
     ])).toEqual([
-      '*<https://g.test|g>*  :white_check_mark: (:ryan:) :x:',
-      '*<https://h.test|h>*  :white_check_mark: (:bust_in_silhouette:)',
-      '*<https://i.test|i>*  :x::x: :white_check_mark: (:ryan:) :white_check_mark: (:bust_in_silhouette:) :x:',
+      '*<https://g.test|g>*  :white_check_mark::ryan: :x:',
+      '*<https://h.test|h>*  :white_check_mark::bust_in_silhouette:',
+      '*<https://i.test|i>*  :x::x: :white_check_mark::ryan: :white_check_mark::bust_in_silhouette: :x:',
+      '*<https://j.test|j>*  :white_check_mark::x::white_check_mark::ryan: :x: :white_check_mark::white_check_mark::ryan:',
     ])
   })
 
@@ -76,8 +78,8 @@ describe('a manual run\'s starter', () => {
     const lines = (have: Set<string>) => (fleetMessage({ ...doc, deployments: [dep('g', { last: by, runs: [by] })] }, 'https://fleet.test/fleet', DEFAULT_EMOJI, have).blocks as { type: string; text?: { text: string } }[])
       .slice(1, -1).map(b => b.text!.text.split('  ').slice(0, 2).join('  '))
     expect([lines(new Set(['ryan'])), lines(new Set(['someone-else']))]).toEqual([
-      ['*<https://g.test|g>*  :white_check_mark: (:ryan:)'],
-      ['*<https://g.test|g>*  :white_check_mark: (:bust_in_silhouette:)'],
+      ['*<https://g.test|g>*  :white_check_mark::ryan:'],
+      ['*<https://g.test|g>*  :white_check_mark::bust_in_silhouette:'],
     ])
   })
 })
@@ -194,5 +196,39 @@ describe('publishSplit: the card as an image per panel, in a reply under the pos
       [CARD_NAME, ...names.map(splitName)],
       { channel: 'C0FLEET', thread: '101.000000', ts: '102.000000', files: ['F106', 'F107', 'F108', 'F109'] },
     ])
+  })
+})
+
+describe('a deployment\'s runs, as its quiet run thread lists them', () => {
+  const d = { url: 'https://d.test' }
+  it('each run: its outcome, its trigger, its start linked to its record, then running, or its duration and why it isn\'t ok', () => {
+    const face = run({ run_id: 'm 1', trigger: 'manual', trigger_emoji: ':ryan:', secs: 7668.4 })
+    expect([
+      runLine(d, run({})),
+      runLine(d, run({ status: 'failed', failed_at: 'index', error: 'exit 1 & more' })),
+      runLine(d, run({ status: 'failed', failed_at: 'after list', trigger: null })),
+      runLine(d, run({ status: 'failed', failed_at: null, secs: null })),
+      runLine(d, run({ open_issues: ['probe', 'dups', 'probe'] })),
+      runLine(d, run({ status: 'cancelled', secs: 61 })),
+      runLine(d, run({ status: 'running', started: null })),
+      runLine(d, face),
+      runLine(d, face, DEFAULT_EMOJI, new Set(['someone-else'])),
+      runLine(d, run({}), parseEmoji('{"ok": ":large_green_circle:"}')),
+    ]).toEqual([
+      ':white_check_mark: :alarm_clock: <https://d.test/scans/r|11/07 07:00Z> · 30m 00s',
+      ':x: :alarm_clock: <https://d.test/scans/r|11/07 07:00Z> · 30m 00s · failed in index: exit 1 &amp; more',
+      ':x: :grey_question: <https://d.test/scans/r|11/07 07:00Z> · 30m 00s · failed after list',
+      ':x: :alarm_clock: <https://d.test/scans/r|11/07 07:00Z> · duration unknown · failed',
+      ':warning: :alarm_clock: <https://d.test/scans/r|11/07 07:00Z> · 30m 00s · phase issues: dups, probe',
+      ':no_entry_sign: :alarm_clock: <https://d.test/scans/r|11/07 07:00Z> · 1m 01s · cancelled',
+      ':hourglass_flowing_sand: :alarm_clock: <https://d.test/scans/r|2026-11-07> · running',
+      ':white_check_mark: :ryan: <https://d.test/scans/m%201|11/07 07:00Z> · 127m 48s',
+      ':white_check_mark: :bust_in_silhouette: <https://d.test/scans/m%201|11/07 07:00Z> · 127m 48s',
+      ':large_green_circle: :alarm_clock: <https://d.test/scans/r|11/07 07:00Z> · 30m 00s',
+    ])
+  })
+  it('the newest 10, oldest first', () => {
+    const runs = Array.from({ length: 12 }, (_, i) => run({ run_id: `r${i}`, started: NOW - (i + 1) * H }))
+    expect(trailLines(dep('d', { runs })).map(l => /scans\/(r\d+)\|/.exec(l)![1])).toEqual(['r9', 'r8', 'r7', 'r6', 'r5', 'r4', 'r3', 'r2', 'r1', 'r0'])
   })
 })
