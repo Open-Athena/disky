@@ -4,16 +4,14 @@
  * outcome (overlaps, long runs and gaps show); `costSvg`, each deployment's scan cost this month, cumulative, against
  * last month's. The card's frame, fonts and palette (`card.ts`), `CARD_W` wide; pure and DOM-free.
  */
-import { fmtSI, interWidth } from '@disk-tree/pages-kit/og/text'
-import { CARD_W, DAY, fmtHours, fmtUsd, labelColor, md, PAD, r1, stamp, text, type Theme, THEMES, WINDOW_DAYS } from './card.js'
+import { OUTCOME_COLOR } from '@disk-tree/pages-kit/og/frame'
+import { interWidth } from '@disk-tree/pages-kit/og/text'
+import { CARD_W, DAY, fmtUsd, labelColor, md, PAD, r1, stamp, text, type Theme, THEMES, WINDOW_DAYS } from './card.js'
 import type { FleetDeployment, FleetDoc, FleetRun } from './fleetTypes.js'
 import { type Outcome, runOutcome } from './runOutcome.js'
 
-/** Each outcome's colour, per theme: the page's `--ok` / `--warn` / `--bad` / `--accent`, and a grey for a cancel. */
-export const OUTCOME_COLOR: Record<Theme, Record<Outcome, string>> = {
-  dark: { ok: '#4ade80', issues: '#e3b341', failed: '#f26b6b', running: '#6ea2f5', cancelled: '#8b8a80' },
-  light: { ok: '#1f8a4c', issues: '#a86200', failed: '#c62828', running: '#2f6fd6', cancelled: '#8b8a80' },
-}
+/** Each outcome's colour, per theme (`@disk-tree/pages-kit/og/frame`, shared with the deployment status card). */
+export { OUTCOME_COLOR }
 const OUTCOME_LABEL: [Outcome, string][] = [['ok', 'ok'], ['issues', 'open issue'], ['failed', 'failed'], ['running', 'running'], ['cancelled', 'cancelled']]
 
 const frame = (theme: Theme, h: number, body: string[]): string => {
@@ -179,17 +177,3 @@ export function costSvg(doc: FleetDoc, theme: Theme): string {
 }
 
 const ordinal = (n: number): string => (n % 100 >= 11 && n % 100 <= 13 ? 'th' : ['th', 'st', 'nd', 'rd'][n % 10] ?? 'th')
-
-/** A one-line summary of a deployment's week, for its card's reply text: runs, how they went, time and cost. */
-export function weekLine(d: FleetDeployment, now: number): string {
-  const week = d.runs.filter(r => r.started !== null && r.started >= now - WINDOW_DAYS * DAY)
-  const by = (o: Outcome) => week.filter(r => runOutcome(r) === o).length
-  const done = week.filter(r => runOutcome(r) !== 'running')
-  const secs = done.reduce((s, r) => s + (r.secs ?? 0), 0)
-  const cost = done.reduce((s, r) => s + (r.cost_usd ?? 0), 0)
-  const parts = [`${week.length} run${week.length === 1 ? '' : 's'}`]
-  for (const [o, label] of OUTCOME_LABEL) if (o !== 'ok' && by(o)) parts.push(`${by(o)} ${o === 'issues' ? 'with issues' : label}`)
-  if (done.length) parts.push(`${fmtHours(secs)} scanning`, done.some(r => r.cost_usd !== null) ? fmtUsd(cost) : 'cost n/a')
-  if (d.meta?.now != null) parts.push(`/meta ${fmtSI(d.meta.now)}`)
-  return parts.join(' · ')
-}
