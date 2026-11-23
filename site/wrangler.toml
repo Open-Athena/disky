@@ -80,6 +80,10 @@ SWEEP_IMAGE = "us-central1-docker.pkg.dev/oa-internal-450019/cloud-run-source-de
 SWEEP_SITE_TOKEN_SECRET = "gcs-sheet-sync-token"   # a read-only service grant (`gcs-site-read`): sweep jobs' $SITE_TOKEN
 SWEEP_PACING = "guided"   # Feedback control within the cold-ramp envelope; adaptive after benchmark validation.
 CF_ACCOUNT_ID = "74981a43be0de7712369306c7b19133d"
+# `/admin/slack`'s digest re-apply (`api/digest-reapply.ts`): the scan image's live tag, gcs's `cost` digest over the
+# data bucket's root (gcs's snapshots subdir is ""), the scan's environment (`job/gcs-env.sh`), and the secrets the
+# digest step posts #gcs-usage with
+DIGEST_REAPPLY = '{"template":"cost","config":"job/digest.yml","root":"gs://oa-gcs-usage-dvx/","env_script":"job/gcs-env.sh","r2_bucket":"oa-gcs-usage-index","image":"us-central1-docker.pkg.dev/oa-internal-450019/cloud-run-source-deploy/gcs-usage-snapshot:latest","secrets":{"SITE_TOKEN":"gcs-snapshot-site-token","SLACK_BOT_TOKEN":"gcs-alert-slack-bot-token","CLOUDFLARE_API_TOKEN":"cf-pages-token","R2_ACCESS_KEY_ID":"gcs-static-index-r2-key-id","R2_SECRET_ACCESS_KEY":"gcs-static-index-r2-secret"}}'
 CF_PAGES_SCRIPT = "pages-worker--16777874"   # the project's Functions scripts in the analytics datasets: `<this>-production` / `-preview` (`dt-cloud cf-usage`; the Pages API's `production_script_name`)
 D1_DB_ID = "e52398b7-5538-4bc4-83db-3355a1b5ef9a"   # the `DB` binding's D1: executor jobs record their runs there
 D1_DB_NAME = "oa-gcs-usage-auth"
@@ -223,6 +227,10 @@ SWEEP_IMAGE = "us-central1-docker.pkg.dev/oa-internal-450019/cloud-run-source-de
 SWEEP_SITE_TOKEN_SECRET = "gcs-sheet-sync-token"   # a read-only service grant (`gcs-site-read`): sweep jobs' $SITE_TOKEN
 SWEEP_PACING = "guided"
 CF_ACCOUNT_ID = "74981a43be0de7712369306c7b19133d"
+# `/admin/slack`'s digest re-apply (`api/digest-reapply.ts`): the scan image's live tag, gcs's `cost` digest over the
+# data bucket's root (gcs's snapshots subdir is ""), the scan's environment (`job/gcs-env.sh`), and the secrets the
+# digest step posts #gcs-usage with
+DIGEST_REAPPLY = '{"template":"cost","config":"job/digest.yml","root":"gs://oa-gcs-usage-dvx/","env_script":"job/gcs-env.sh","r2_bucket":"oa-gcs-usage-index","image":"us-central1-docker.pkg.dev/oa-internal-450019/cloud-run-source-deploy/gcs-usage-snapshot:latest","secrets":{"SITE_TOKEN":"gcs-snapshot-site-token","SLACK_BOT_TOKEN":"gcs-alert-slack-bot-token","CLOUDFLARE_API_TOKEN":"cf-pages-token","R2_ACCESS_KEY_ID":"gcs-static-index-r2-key-id","R2_SECRET_ACCESS_KEY":"gcs-static-index-r2-secret"}}'
 D1_DB_ID = "e52398b7-5538-4bc4-83db-3355a1b5ef9a"   # the `DB` binding's D1: executor jobs record their runs there
 D1_DB_NAME = "oa-gcs-usage-auth"
 DISKY_LABELS = "app=disky,deployment=gcs"  # cost labels on executor jobs (specs/cost-labels.md)

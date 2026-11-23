@@ -293,7 +293,8 @@ gcp.storage.Bucket(
 grant_bucket(f"{DATA_BUCKET}-job", bucket=DATA_BUCKET, role="roles/storage.objectAdmin", member=job.member, member_email=job.email_literal, adopt=adopt, existing=True)
 grant_bucket(f"{DATA_BUCKET}-browse", bucket=DATA_BUCKET, role="roles/storage.objectViewer", member=browse.member, member_email=browse.email_literal, adopt=adopt, existing=True)
 # What the site's account may start: the sweep console's Batch submits as the job account, and each run's `plan.json`
-# dropped into `sweep/runs/<job>/` first (create-only). The grants were the account's and the job's own, and the
+# dropped into `sweep/runs/<job>/` first (create-only); `/admin/slack`'s digest re-apply jobs (`DIGEST_REAPPLY`), whose
+# output and rewrite plans it reads back (only under the re-apply prefix). The grants were the account's and the job's own, and the
 # bucket's: `aliases` adopt them in place.
 SiteDispatcher(
     "gcs-site-dispatch",
@@ -301,6 +302,7 @@ SiteDispatcher(
     account=dispatch,
     job=job,
     data_bucket=DATA_BUCKET,
+    reapply=True,
     sweeps=True,
     aliases={
         "jobs": [pulumi.Alias(name="gcs-usage-dispatch-batch.jobsEditor", parent=dispatch)],
