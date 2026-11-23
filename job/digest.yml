@@ -20,6 +20,9 @@ plot_project: gcs-usage-icons
 plot_branch: main
 plot_base: https://gcs-usage-icons.pages.dev
 variant: sender
+# each converge's preview bundle (the OP as posted + its rows), which `/admin/slack` shows and re-applies from: the site
+# reads it from its served R2 bucket (`DIGEST_REAPPLY.r2_bucket`), under `digest/preview/`
+preview: r2://oa-gcs-usage-index/digest/preview/{channel}/{variant}
 # US list $/GiB-month by GCS storage class id (1 Standard / 2 Nearline / 3 Coldline / 4 Archive)
 prices:
   "1": 0.02
