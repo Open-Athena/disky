@@ -49,9 +49,11 @@ READ = ("gcp:storage/bucketIAMMember:BucketIAMMember", {"bucket": "data", "role"
 @pulumi.runtime.test
 @pytest.mark.parametrize("flags, expected", [
     ({}, {}),
+    ({"scans": True}, {"dispatch-act-job": ACT}),
+    ({"scans": True, "reapply": True}, {"dispatch-batch-jobsEditor": JOBS, "dispatch-act-job": ACT, "dispatch-reapply-reader": REAPPLY}),
     ({"reapply": True}, {"dispatch-batch-jobsEditor": JOBS, "dispatch-act-job": ACT, "dispatch-reapply-reader": REAPPLY}),
     ({"sweeps": True}, {"dispatch-batch-jobsEditor": JOBS, "dispatch-act-job": ACT, "dispatch-sweep-creator": CREATE}),
-    ({"sweeps": True, "sweep_reads": True, "reapply": True}, {
+    ({"scans": True, "sweeps": True, "sweep_reads": True, "reapply": True}, {
         "dispatch-batch-jobsEditor": JOBS, "dispatch-act-job": ACT, "dispatch-reapply-reader": REAPPLY,
         "dispatch-sweep-creator": CREATE, "dispatch-sweep-reader": READ,
     }),

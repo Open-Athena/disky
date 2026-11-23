@@ -186,8 +186,9 @@ class SiteDispatcher(ComponentResource):
     acts_as_self=False)`); `job` is the job account whatever the site submits runs as; `data_bucket` the deployment's
     data bucket. No flag set: no grants.
 
-    - "Run a scan" (`/api/scan-runs/dispatch`) is not here: `BatchSubmitCron(dispatchers={name: account.member})`
-      grants `run.jobsExecutorWithOverrides` on the submitter job, whose env guard limits the overrides.
+    - `scans`: "Run a scan" (`/api/scan-runs/dispatch`) runs the submitter job, which runs as `job`: the act-as on `job`
+      (`serviceAccountUser`), nothing else here. `BatchSubmitCron(dispatchers={name: account.member})` grants
+      `run.jobsExecutorWithOverrides` on that one job, whose env guard limits the overrides.
     - `reapply`: `/admin/slack`'s digest re-apply (`/api/digest-reapply`): submits, reads and cancels its Batch job as
       `job` (`batch.jobsEditor`: Batch has no per-job IAM; `serviceAccountUser` on `job`), and reads the run's output
       and rewrite plan, only under `REAPPLY_PREFIX` (`objectViewer`, conditioned). The job writes them, as `job`.
@@ -208,6 +209,7 @@ class SiteDispatcher(ComponentResource):
         account: JobAccount,
         job: JobAccount,
         data_bucket: pulumi.Input[str],
+        scans: bool = False,
         reapply: bool = False,
         sweeps: bool = False,
         sweep_reads: bool = False,
@@ -228,6 +230,8 @@ class SiteDispatcher(ComponentResource):
         if reapply or sweeps:
             self.grants["jobs"] = gcp.projects.IAMMember(
                 f"{name}-batch-jobsEditor", project=project, role="roles/batch.jobsEditor", member=account.member, opts=child("jobs"))
+        if scans or reapply or sweeps:
+            # every capability starts something that runs as `job`: one act-as, whichever flags ask for it
             self.grants["act"] = gcp.serviceaccount.IAMMember(
                 f"{name}-act-{job.email_literal.split('@')[0]}", service_account_id=job.account.name,
                 role="roles/iam.serviceAccountUser", member=f"serviceAccount:{account.email_literal}", opts=child("act"))
