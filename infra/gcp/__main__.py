@@ -11,7 +11,7 @@ from pathlib import Path
 import pulumi
 import pulumi_gcp as gcp
 
-from gcp_jobs import Adopt, BatchCron, BatchEvents, BatchSubmitCron, CronAlerts, DeploymentImages, JobAccount, MonitoringRelay, RunJobCron, Secrets, StorageBatchDelete, cost_labels, grant_bucket, labeled_provider
+from gcp_jobs import Adopt, BatchCron, BatchEvents, BatchSubmitCron, CronAlerts, DeploymentImages, JobAccount, MonitoringRelay, RunJobCron, Secrets, SiteDispatcher, StorageBatchDelete, cost_labels, grant_bucket, labeled_provider
 from task_logs import TaskLogBucket, TaskLogView
 
 cfg = pulumi.Config()
@@ -29,17 +29,16 @@ if pulumi.get_stack() != STACK:
 # shell's `.envrc`) becomes every labelable resource's default labels.
 labeled_provider("gcs-labeled", project=project, region=region, labels=cost_labels())
 
-sa = lambda account_id: f"{account_id}@{project}.iam.gserviceaccount.com"  # noqa: E731
 
-# The site's sweep console submits sweep-executor Batch jobs as this account
-# (its key is the Pages secret `GCP_SA_KEY`; keys stay out of state).
+# The site's account (its key is the Pages secret `GCP_SA_KEY`; keys stay out of state): the sweep console's Batch
+# submits (`SiteDispatcher` below) and "Run a scan" (`BatchSubmitCron(dispatchers=…)`).
 dispatch = JobAccount(
     "gcs-usage-dispatch",
     project=project,
     account_id="gcs-usage-dispatch",
     display_name="gcs-usage sweep dispatch",
     description="Submits sweep-executor Batch jobs from the /sweep console, and runs the scan submitter from /scans; Batch-submit + actAs gcs-usage-job, run gcs-usage-snapshot-submit",
-    roles=["roles/batch.jobsEditor"],
+    roles=[],
     acts_as_self=False,
     adopt=adopt,
     existing=True,
@@ -72,7 +71,6 @@ job = JobAccount(
         "roles/monitoring.viewer",
         "roles/storage.bucketViewer",
     ],
-    actors=[sa("gcs-usage-dispatch")],
     adopt=adopt,
     existing=True,
 )
@@ -294,9 +292,22 @@ gcp.storage.Bucket(
 )
 grant_bucket(f"{DATA_BUCKET}-job", bucket=DATA_BUCKET, role="roles/storage.objectAdmin", member=job.member, member_email=job.email_literal, adopt=adopt, existing=True)
 grant_bucket(f"{DATA_BUCKET}-browse", bucket=DATA_BUCKET, role="roles/storage.objectViewer", member=browse.member, member_email=browse.email_literal, adopt=adopt, existing=True)
-# The site's dispatch drops each run's `plan.json` into `sweep/runs/<job>/` before
-# submitting the job (`_lib/sweepDispatch.ts`): create-only, no read/overwrite/delete.
-grant_bucket(f"{DATA_BUCKET}-dispatch", bucket=DATA_BUCKET, role="roles/storage.objectCreator", member=dispatch.member, member_email=dispatch.email_literal, adopt=adopt)
+# What the site's account may start: the sweep console's Batch submits as the job account, and each run's `plan.json`
+# dropped into `sweep/runs/<job>/` first (create-only). The grants were the account's and the job's own, and the
+# bucket's: `aliases` adopt them in place.
+SiteDispatcher(
+    "gcs-site-dispatch",
+    project=project,
+    account=dispatch,
+    job=job,
+    data_bucket=DATA_BUCKET,
+    sweeps=True,
+    aliases={
+        "jobs": [pulumi.Alias(name="gcs-usage-dispatch-batch.jobsEditor", parent=dispatch)],
+        "act": [pulumi.Alias(name="gcs-usage-job-actor-gcs-usage-dispatch", parent=job)],
+        "sweep-create": [pulumi.Alias(name=f"{DATA_BUCKET}-dispatch", parent=pulumi.ROOT_STACK_RESOURCE)],
+    },
+)
 
 # Pipeline intermediates (e.g. the static name-search shuffle): no soft delete,
 # so a deleted intermediate stops billing at once, and anything left behind is
