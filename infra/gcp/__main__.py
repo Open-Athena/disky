@@ -9,7 +9,7 @@ from subprocess import run
 import pulumi
 import pulumi_gcp as gcp
 
-from gcp_jobs import Adopt, BatchEvents, BatchSubmitCron, JobAccount, Secrets, labeled_provider
+from gcp_jobs import Adopt, BatchEvents, BatchSubmitCron, JobAccount, Secrets, SiteDispatcher, labeled_provider
 
 
 profile = loads((Path(__file__).resolve().parents[2] / "job/r2.json").read_text())
@@ -31,16 +31,15 @@ builder = JobAccount(
     adopt=Adopt(False),
 )
 # The site's GCP account (its key is the Pages secret `GCP_SA_KEY`, made by hand: keys stay out of state): "Run a scan"
-# on /scans (`/api/scan-runs/dispatch`) runs the primary head's submitter job as it, and `/admin/slack`'s digest
-# re-apply (`/api/digest-reapply`) submits, reads and cancels its Batch job as the job account (`batch.jobsEditor`; Batch
-# has no per-job IAM) and reads the run's output and rewrite plan under `digest/reapply/` (below)
+# on /scans (`/api/scan-runs/dispatch`) runs the primary head's submitter job as it; its other grants are
+# `SiteDispatcher`'s (below)
 dispatch = JobAccount(
     "r2-dispatch",
     project=project,
     account_id="oa-r2-usage-dispatch",
     display_name="OA R2 scan dispatch",
     description="Runs the OA R2 primary scan's submitter job from /scans, and /admin/slack's digest re-apply job",
-    roles=["roles/batch.jobsEditor"],
+    roles=[],
     acts_as_self=False,
     adopt=Adopt(False),
 )
@@ -55,9 +54,8 @@ job = JobAccount(
     # `gcp-cost` (`dt-cloud cost`): the buckets' `total_bytes` from Cloud Monitoring
     roles=["roles/batch.agentReporter", "roles/batch.jobsEditor", "roles/logging.logWriter", "roles/monitoring.viewer"],
     acts_as_self=True,
-    # the site's "Run a scan" account: runs the primary head's submitter (below), which submits as this account
-    actors=[f"oa-r2-usage-dispatch@{project}.iam.gserviceaccount.com"],
-    actor_deps=[dispatch.account],
+    # the site's account acts as this one through `SiteDispatcher` (below): "Run a scan" runs the primary head's
+    # submitter, which submits as this account, and digest re-apply's job runs as it
     adopt=Adopt(False),
 )
 resources = []
@@ -93,20 +91,6 @@ for component, name, days in (
         member=job.member,
     )
     resources.extend([bucket, grant, viewer])
-    if component == "data":
-        # the site's digest re-apply reads its runs' output and plans (`digest/reapply/<job>.{txt,plan.json}`), nothing else
-        reapply_reader = gcp.storage.BucketIAMMember(
-            "r2-data-dispatch-reapply",
-            bucket=bucket.name,
-            role="roles/storage.objectViewer",
-            member=dispatch.member,
-            condition={
-                "title": "digest-reapply-runs",
-                "description": "Only /admin/slack's digest re-apply output and rewrite plans",
-                "expression": f'resource.name.startsWith("projects/_/buckets/{name}/objects/digest/reapply/")',
-            },
-        )
-        resources.append(reapply_reader)
     build_grant = gcp.storage.BucketIAMMember(
         f"r2-{component}-builder",
         bucket=bucket.name,
@@ -114,6 +98,23 @@ for component, name, days in (
         member=builder.member,
     )
     resources.append(build_grant)
+# What the site's account may start on GCP: `/admin/slack`'s digest re-apply (Ryan's go, 2026-11-22). Its grants were made
+# by hand in 0ea935755 (and the act-as on the job account before it, for "Run a scan"), adopted here by alias. Re-apply's
+# act-as is also "Run a scan"'s: with `reapply` off, give the job account `actors` again.
+site = SiteDispatcher(
+    "r2-site",
+    project=project,
+    account=dispatch,
+    job=job,
+    data_bucket=profile["data_bucket"],
+    reapply=True,
+    aliases={
+        "jobs": ["urn:pulumi:r2::oa-r2-usage-gcp::disky:gcp:JobAccount$gcp:projects/iAMMember:IAMMember::r2-dispatch-batch.jobsEditor"],
+        "act": ["urn:pulumi:r2::oa-r2-usage-gcp::disky:gcp:JobAccount$gcp:serviceaccount/iAMMember:IAMMember::r2-job-actor-oa-r2-usage-dispatch"],
+        "reapply": ["urn:pulumi:r2::oa-r2-usage-gcp::gcp:storage/bucketIAMMember:BucketIAMMember::r2-data-dispatch-reapply"],
+    },
+    opts=pulumi.ResourceOptions(depends_on=resources),
+)
 repository = gcp.artifactregistry.Repository(
     "r2-images",
     project=project,
