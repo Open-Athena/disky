@@ -54,8 +54,7 @@ job = JobAccount(
     # `gcp-cost` (`dt-cloud cost`): the buckets' `total_bytes` from Cloud Monitoring
     roles=["roles/batch.agentReporter", "roles/batch.jobsEditor", "roles/logging.logWriter", "roles/monitoring.viewer"],
     acts_as_self=True,
-    # the site's account acts as this one through `SiteDispatcher` (below): "Run a scan" runs the primary head's
-    # submitter, which submits as this account, and digest re-apply's job runs as it
+    # the site's account acts as this one through `SiteDispatcher` (below): digest re-apply's job runs as it
     adopt=Adopt(False),
 )
 resources = []
@@ -99,8 +98,9 @@ for component, name, days in (
     )
     resources.append(build_grant)
 # What the site's account may start on GCP: `/admin/slack`'s digest re-apply (Ryan's go, 2026-11-22). Its grants were made
-# by hand in 0ea935755 (and the act-as on the job account before it, for "Run a scan"), adopted here by alias. Re-apply's
-# act-as is also "Run a scan"'s: with `reapply` off, give the job account `actors` again.
+# by hand in 0ea935755 (the act-as on the job account earlier, as the job account's `actors`), adopted here by alias.
+# "Run a scan" needs none of them: `runWithOverrides` (`BatchSubmitCron`'s `dispatchers`) runs the submitter as its own
+# account (hf's site dispatches with no act-as).
 site = SiteDispatcher(
     "r2-site",
     project=project,
