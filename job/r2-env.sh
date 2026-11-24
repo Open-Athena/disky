@@ -1,6 +1,8 @@
 # Sourced by `/admin/slack`'s digest re-apply task (`DIGEST_REAPPLY.env_script`, site/functions/api/digest-reapply.ts):
 # the digest step's environment (`job/profiles/r2.yml`) without the scan head. The thread state and snapshots are on
 # R2 (`r2://oa-r2-usage-index/…`), read through blobfs with R2's own credentials profile (`scan_steps.r2_profile`).
+# That writes the job's `buckets.yml` registry, so it runs on a Batch task; to source this anywhere else, point
+# `DISKY_ROOT` at a scratch dir first (`r2_profile` refuses to replace a machine's own `~/.config/disk-tree`).
 # xtrace off for the block: `${!n}` would print the values.
 { set +x; } 2>/dev/null
 # Secret Manager values can carry a trailing newline (`echo … | --data-file=-`): strip them before anything reads them.
