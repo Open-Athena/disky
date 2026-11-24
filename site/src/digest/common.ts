@@ -1,6 +1,7 @@
 /** The digest renderer's shared pieces: config and params, arrow degrees, the `?d=` link tokens and the OP window
  * (`cloud/src/dt_cloud/digest.py`'s, ported byte for byte: `./parity.test.ts`). Pure; DOM-free. */
 import type { ReplyMarks } from './quotaReply'
+import { scanTime } from '../scanSlug'
 import type { ArrowMark } from './pools'
 import type { TemplateName } from './templates'
 import { addDays, dayOf, fixed, grouped, md, MONTHS, pyRound } from './pyfmt'
@@ -63,8 +64,9 @@ export const DEFAULT_PARAMS: DigestParams = {
   windowDays: 30, todayAt: [0.7, 1], diff: 'window', headline: ['mtd', 'window'], weeks: 'window', quotas: 'off', plot: 'usage', alertAt: 90, layout: 'primary',
 }
 
-/** What the OP renders around its rows: the hosted plot's URL (null: no image line) and the previous thread's. */
-export interface OpLinks { plotUrl: string | null; prevUrl: string | null }
+/** What the OP renders around its rows: the hosted plot's URL (null: no image line), the previous month's thread's and
+ *  the next month's (a closed month's OP, edited once the next month's is posted; absent or null: none). */
+export interface OpLinks { plotUrl: string | null; prevUrl: string | null; nextUrl?: string | null }
 
 // Weekly-halving arrow buckets: |dpct| >= THRESH[i] -> deg (i+1)*10 (capped 80).
 const THRESH = [0.39, 0.78, 1.5, 3.1, 6.25, 12.5, 25, 50]
@@ -97,6 +99,13 @@ export function span(a: number, b: number): string {
   return (days ? `${days}d` : '') + (hours ? `${hours}h` : '') || '0h'
 }
 
+/** A diff link: the map at `scan` (its `?d=` slug) looking back to `since` (epoch ms; null: no look-back), under
+ *  `bucket`'s path (`''`: the root), showing only the named bucket group `g` (`?g=`) when given. */
+export function diffUrl(scan: string, slug: string, since: number | null, site: string, bucket = '', g?: string): string {
+  const s = since !== null ? `-${span(since, scanTime(scan))}` : ''
+  return `${site}/${bucket}?d=${slug}${s}${g ? `&g=${encodeURIComponent(g)}` : ''}#over-time`
+}
+
 /** The window's first day (epoch ms): the longer of `days` days to `today`, inclusive, and the month to date
  *  (`digest.window_start`). */
 export const windowStart = (month: number, today: number, days: number): number => Math.min(month, addDays(today, -(days - 1)))
@@ -108,9 +117,15 @@ export const weekOf = (t: number): number => addDays(t, -((new Date(t).getUTCDay
 export const windowLabel = (start: number, since: string, days: number): string =>
   dayOf(since) < start ? `last ${days}d` : `since ${md(dayOf(since))}`
 
-/** The OP's link to the previous month's thread (`digest.prev_month_link`), as lines. */
-export const prevMonthLink = (month: number, url: string | null): string[] =>
-  url ? [`[← ${MONTHS[(new Date(month).getUTCMonth() + 11) % 12]}](${url})`] : []
+/** The OP's links to the previous and next months' threads, as lines: `← October · December →`, either alone, or none. */
+export function monthLinks(month: number, links: OpLinks): string[] {
+  const m = new Date(month).getUTCMonth()
+  const parts = [
+    ...(links.prevUrl ? [`[← ${MONTHS[(m + 11) % 12]}](${links.prevUrl})`] : []),
+    ...(links.nextUrl ? [`[${MONTHS[(m + 1) % 12]} →](${links.nextUrl})`] : []),
+  ]
+  return parts.length ? ['', parts.join(' · ')] : []
+}
 
 /** A month id (`YYYY-MM`) as its 1st's UTC midnight. */
 export const monthOf = (m: string): number => dayOf(`${m}-01`)
