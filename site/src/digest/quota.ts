@@ -2,7 +2,7 @@ import { compactQuietLines } from './compact'
 /** The `quota` digest template's OP: its text and its plot's `/api/digest-image` request, from the month's scans
  * (the job sends them: `QuotaTemplate.rows_json`; goldens: `./parity.test.ts`). The replies: `./quotaReply.ts`. Pure; DOM-free. */
 import { encodeScan, scanTime } from '../scanSlug'
-import { type BucketCfg, deg, type DigestCfg, type DigestParams, type OpLinks, prevMonthLink, type Quota, span, tb, weekOf, windowLabel, windowStart } from './common'
+import { type BucketCfg, deg, diffUrl, type DigestCfg, type DigestParams, monthLinks, type OpLinks, type Quota, tb, weekOf, windowLabel, windowStart } from './common'
 import { type Pool, poolRows, pools, quotaLine, QUIET_PCT, used } from './pools'
 import { addDays, dayOf, fixed, grouped, hhmm, iso, md, mon3, monthYear, pyRound } from './pyfmt'
 import { code } from '@disk-tree/pages-kit/emoji'
@@ -45,15 +45,24 @@ export function scoped(total: number, classes: Record<string, number> | null, q:
 const quotas = (total: number, classes: Record<string, number> | null, qs: Quota[], cfg: DigestCfg): string =>
   qs.map(q => ` · ${fixed((scoped(total, classes, q) / (q.bytes / cfg.unit.bytes)) * 100, 1)}% of ${q.name}`).join('')
 
-export function diffUrl(scan: string, slug: string, since: number | null, site: string, bucket = ''): string {
-  const s = since !== null ? `-${span(since, scanTime(scan))}` : ''
-  return `${site}/${bucket}?d=${slug}${s}#over-time`
-}
-
-export function bucketLink(bucket: string, r: QuotaScan, since: number | null, cfg: DigestCfg): string {
+/** `bucket`'s name (or `text`) linking its diff at `r` since `since`. */
+export function bucketLink(bucket: string, r: QuotaScan, since: number | null, cfg: DigestCfg, text?: string): string {
   const b: BucketCfg | undefined = cfg.buckets[bucket]
   const path = b === undefined || b.path === null ? bucket : b.path
-  return `[${b?.label || bucket}](${diffUrl(r.scan, dlink(r), since, cfg.site_url, path)})`
+  return `[${text ?? (b?.label || bucket)}](${diffUrl(r.scan, dlink(r), since, cfg.site_url, path)})`
+}
+
+/** A zone's pool (`label`) linking the diff at `r` since `since` at the store root, showing the zone's bucket group
+ *  (a zone's name is its group's: `?g=`). */
+export function groupLink(zone: string, label: string, r: QuotaScan, since: number | null, cfg: DigestCfg): string {
+  return `[${label}](${diffUrl(r.scan, dlink(r), since, cfg.site_url, '', zone)})`
+}
+
+/** A pool's name linking its diff: a zone's as its bucket group (`groupLink`), a bucket's under its path
+ *  (`bucketLink`, its label unless `text`). */
+function poolLink(pl: Pool, r: QuotaScan, since: number | null, cfg: DigestCfg, text?: string): string {
+  const zone = pl.buckets.length > 1 ? cfg.buckets[pl.buckets[0]]?.zone : null
+  return zone ? groupLink(zone, pl.name, r, since, cfg) : bucketLink(pl.buckets[0], r, since, cfg, text)
 }
 
 export function dextra(cur: QuotaScan, prev: QuotaScan | null): Record<string, number | null> {
@@ -109,7 +118,7 @@ function poolsText(m: QuotaRows, month: number, cfg: DigestCfg, p: DigestParams,
   }
   const members = (pl: Pool): string =>
     pl.buckets.length > 1 ? `: ${pl.buckets.filter(b => sizeOf(b, last, cfg) !== undefined).map(b => `${bucketLink(b, last, mtdSince, cfg)} ${grouped(sizeOf(b, last, cfg)!, 0)}`).join(', ')}` : ''
-  const name = (pl: Pool): string => (pl.buckets.length > 1 ? pl.name : bucketLink(pl.buckets[0], last, mtdSince, cfg))
+  const name = (pl: Pool): string => poolLink(pl, last, mtdSince, cfg)
   const rows = p.quotas === 'off'
     ? poolRows(last, cfg, p.alertAt, 'runway', seen).map(r => ({ ...r, mark: '' }))
     : poolRows(last, cfg, p.alertAt, p.quotas, seen)
@@ -150,16 +159,17 @@ function poolsText(m: QuotaRows, month: number, cfg: DigestCfg, p: DigestParams,
     const partial = mon === lastMon && dayOf(date(end)) < addDays(mon, 6) ? ' _(partial)_' : ''
     const earlier = addDays(mon, 6) < month ? ` (${mon3(dayOf(date(end)))})` : ''
     const link = diffUrl(end.scan, dlink(end), ts(prevEnd), site)
+    // each pool's name links its own diff over the week (a zone's, its bucket group's)
     const movers = rows.flatMap(({ p: pl }) => {
       const d = moved(pl.buckets, prevEnd, end, cfg)
-      return Math.abs(d) >= WEEK_MOVER ? [`${pl.name} ${tb(d)}`] : []
+      return Math.abs(d) >= WEEK_MOVER ? [`${poolLink(pl, end, ts(prevEnd), cfg, pl.name)} ${tb(d)}`] : []
     })
     const first = all.filter(b => (sizeOf(b, end, cfg) ?? 0) >= WEEK_MOVER && sizeOf(b, prevEnd, cfg) === undefined)
-      .map(b => `new: ${cfg.buckets[b]?.label || b} ${grouped(sizeOf(b, end, cfg)!, 0)}`)
+      .map(b => `new: ${bucketLink(b, end, ts(prevEnd), cfg)} ${grouped(sizeOf(b, end, cfg)!, 0)}`)
     lines.push(`${code(`trend.${deg(wheld ? (wdtb / wheld) * 100 : 0)}`)} [wk of ${md(mon)}](${link})${earlier}${partial}: ${[`**${tb(wdtb)} ${u.name}**`, ...movers, ...first].join(' · ')}`)
     prevEnd = end
   }
-  if (links.prevUrl) lines.push('', ...prevMonthLink(month, links.prevUrl))
+  lines.push(...monthLinks(month, links))
   if (links.plotUrl !== null) lines.push('', `![${cfg.title} — ${monthYear(month)}](${links.plotUrl})`)
   return lines.join('\n')
 }
@@ -224,7 +234,7 @@ export function opText(m: QuotaRows, month: number, cfg: DigestCfg, p: DigestPar
     )
     prevEnd = end
   }
-  if (links.prevUrl) lines.push('', ...prevMonthLink(month, links.prevUrl))
+  lines.push(...monthLinks(month, links))
   if (links.plotUrl !== null) lines.push('', `![${cfg.title} — ${monthYear(month)}](${links.plotUrl})`)
   return lines.join('\n')
 }
