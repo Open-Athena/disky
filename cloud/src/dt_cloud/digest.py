@@ -529,6 +529,18 @@ def prior_month(month: dt.date) -> dt.date:
     return (month.replace(day=1) - dt.timedelta(days=1)).replace(day=1)
 
 
+def next_month(month: dt.date) -> dt.date:
+    """The 1st of the month after ``month``'s."""
+    return (month.replace(day=28) + dt.timedelta(days=4)).replace(day=1)
+
+
+def month_links(month: dt.date, prev_url: str | None, next_url: str | None) -> str:
+    """The OP's line linking the previous and next months' threads (the site's `monthLinks`): ``[← October](…) ·
+    [December →](…)``, either alone, or ``""``."""
+    return " · ".join([*([f"[← {prior_month(month):%B}]({prev_url})"] if prev_url else []),
+                       *([f"[{next_month(month):%B} →]({next_url})"] if next_url else [])])
+
+
 
 
 #: The quota alert reply's sender icon (`converge_slack`).
@@ -594,10 +606,12 @@ class Template(Protocol):
     variants: tuple[str, ...]
     edited_variants: tuple[str, ...]
     track_scan: bool
+    #: The last day whose scans `load` sees (`scans_as_of`); None: every scan.
+    as_of: dt.date | None
 
     def load(self, root: str, month: dt.date) -> Any | None: ...
     def n_scans(self, data: Any) -> int: ...
-    def op_body(self, data: Any, month: dt.date, plot_url: str | None, prev_url: str | None = None) -> str: ...
+    def op_body(self, data: Any, month: dt.date, plot_url: str | None, prev_url: str | None = None, next_url: str | None = None) -> str: ...
     def image_request(self, data: Any, month: dt.date) -> dict: ...
     def rows_json(self, data: Any) -> dict: ...
     def reply_json(self, data: Any) -> dict | None: ...
@@ -607,7 +621,8 @@ class Template(Protocol):
     def render_plot(self, data: Any, month: dt.date, out: Path, root: str | None = None) -> None: ...
 
 
-def template(cfg: DigestConfig) -> Template:
+def template(cfg: DigestConfig, as_of: dt.date | None = None) -> Template:
+    """``cfg``'s template; ``as_of``: it loads only the scans through that day (`scans_as_of`, a preview)."""
     if not cfg.site_url:
         from .deploy import site_url
 
@@ -615,11 +630,11 @@ def template(cfg: DigestConfig) -> Template:
     if cfg.template == "cost":
         from .digest_cost import CostTemplate
 
-        return CostTemplate(cfg)
+        return CostTemplate(cfg, as_of)
     if cfg.template == "quota":
         from .digest_quota import QuotaTemplate
 
-        return QuotaTemplate(cfg)
+        return QuotaTemplate(cfg, as_of)
     raise ValueError(f"unknown digest template {cfg.template!r} (cost | quota)")
 
 
@@ -641,6 +656,12 @@ def list_scans(root: str) -> list[str]:
         for p in blobfs.glob(blobfs.join(root.rstrip("/"), "*/meta.json"))
         if (m := META_PATH.search(p))
     )
+
+
+def scans_as_of(scans: list[str], as_of: dt.date | None) -> list[str]:
+    """``scans`` (sorted ids) as they stood at the end of ``as_of`` (UTC): those on or before it; all when None. A
+    digest rendered over them reads as it would have then (`digest -A`)."""
+    return scans if as_of is None else [s for s in scans if s[:10] <= as_of.isoformat()]
 
 
 def load_window(root: str, month: dt.date, scans: list[str] | None = None) -> tuple[list[tuple[str, dict]], list[tuple[str, dict]]] | None:
@@ -700,10 +721,11 @@ def cfg_json(cfg: DigestConfig) -> dict:
     }
 
 
-def site_render(cfg: DigestConfig, rows: dict, month: dt.date, plot_url: str | None = None, prev_url: str | None = None) -> dict:
+def site_render(cfg: DigestConfig, rows: dict, month: dt.date, plot_url: str | None = None, prev_url: str | None = None,
+                next_url: str | None = None) -> dict:
     """`POST /api/digest-op`: the month's OP ``text`` and plot ``image`` request, rendered by the site from ``rows``
-    (`Template.rows_json`) under ``cfg.params``, as the job (`$SITE_TOKEN`; required: the site is the OP's only
-    renderer)."""
+    (`Template.rows_json`) under ``cfg.params``, with the previous and next months' threads linked (`month_links`), as
+    the job (`$SITE_TOKEN`; required: the site is the OP's only renderer)."""
     from .deploy import site_token
     from .site import post_json
 
@@ -711,19 +733,20 @@ def site_render(cfg: DigestConfig, rows: dict, month: dt.date, plot_url: str | N
     if not token:
         raise SystemExit("digest: the OP is rendered by the site, which needs the site token ($SITE_TOKEN)")
     body = {"month": f"{month:%Y-%m}", "rows": rows, "cfg": cfg_json(cfg), "params": cfg.params,
-            "plot_url": plot_url, "prev_url": prev_url}
+            "plot_url": plot_url, "prev_url": prev_url, "next_url": next_url}
     return json.loads(post_json(cfg.site_url, token, "/api/digest-op", body))
 
 
 def preview_bundle(tpl: Template, data: Any, month: dt.date, *, op: str, plot_url: str | None, prev_url: str | None,
-                   channel: str, variant: str, op_ts: str | None = None, permalink: str | None = None) -> dict:
+                   channel: str, variant: str, op_ts: str | None = None, permalink: str | None = None,
+                   next_url: str | None = None) -> dict:
     """The month's OP as posted, with what it was rendered from (specs/slack-preview-page.md): the config's display
     fields, the window's rows (`Template.rows_json`), the OP text and the plot's `/api/digest-image` request, the
     replies (`replies_json`) and what they were rendered under (`Template.reply_json`), and the thread. The site re-renders the rows under other params beside it."""
     return {
         "version": PREVIEW_VERSION, "month": f"{month:%Y-%m}", "channel": channel, "variant": variant,
         "posted_at": dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-        "op_ts": op_ts, "permalink": permalink, "plot_url": plot_url, "prev_url": prev_url,
+        "op_ts": op_ts, "permalink": permalink, "plot_url": plot_url, "prev_url": prev_url, "next_url": next_url,
         "cfg": cfg_json(tpl.cfg), "rows": tpl.rows_json(data), "params": tpl.cfg.params, "op": op,
         "image": tpl.image_request(data, month), "replies": replies_json(tpl, data, variant), "reply": tpl.reply_json(data),
     }
@@ -856,7 +879,7 @@ def _ts(rec: str | dict) -> str:
 def _op_render(tpl: Template, data, root: str, month: dt.date, state: dict, client, channel: str, variant: str, icons_dir,
                deploy_plot) -> tuple[str, str, str | None, list[tuple[str, str]] | None]:
     """The OP's body, plot URL, previous-month link and the split reply's images (`_plot_parts`: ``(alt, url)`` for the
-    chart and the map, else None): renders + hosts the plot (``icons_dir``; ``deploy_plot(local, basename)`` publishes
+    chart and the map, else None), the next month's thread linked once the state records it (``next_url``, `relink`): renders + hosts the plot (``icons_dir``; ``deploy_plot(local, basename)`` publishes
     the directory and returns the host serving it, None → ``cfg.plot_base``), recording its name in
     ``state["plot_name"]``. Without ``icons_dir`` nothing is rendered: the URL names the state's plot on ``plot_base``,
     and there are no parts."""
@@ -888,7 +911,7 @@ def _op_render(tpl: Template, data, root: str, month: dt.date, state: dict, clie
     # the previous month's thread, linked from the OP
     prev_op = _prev_op(cfg, root, month, channel, variant)
     prev_url = client.permalink(prev_op) if prev_op else None
-    return tpl.op_body(data, month, plot_url, prev_url), plot_url, prev_url, split
+    return tpl.op_body(data, month, plot_url, prev_url, state.get("next_url")), plot_url, prev_url, split
 
 
 #: The plot's parts (`/api/digest-image` ``part``), in the split reply's order, and each one's alt-text suffix.
@@ -1003,6 +1026,143 @@ def pin_op(client, channel: str, state: dict, op_ts: str, prev_op: str | None) -
     return True
 
 
+#: A month link as Slack stores an OP's text (`month_links` through thrds's `to_slack`): `<url|← October>`, `<url|December →>`.
+_WIRE_MONTH = r"<[^|>\n]+\|(?:← [A-Z][a-z]+|[A-Z][a-z]+ →)>"
+#: The OP's month-link line: nothing but month links, ` · `-separated.
+_WIRE_MONTHS_LINE = re.compile(rf"{_WIRE_MONTH}(?: · {_WIRE_MONTH})*")
+#: The fields Slack adds to an image block when it stores one (thrds's `rewrite._IMAGE_ADDED`), left out of an edit.
+_IMAGE_ADDED = frozenset({"image_width", "image_height", "image_bytes", "fallback", "is_animated"})
+
+
+def relink_text(wire: str, line: str) -> str:
+    """``wire`` (an OP's text as Slack stores it) with its month-link line (its last) replaced by ``line`` (wire form;
+    ``""`` drops it and the blank line before it), else ``line`` appended after a blank line, where the OP renders it
+    (after the weekly lines; the plot line is lifted into an image block). Nothing else changes."""
+    lines = wire.split("\n")
+    at = [i for i, s in enumerate(lines) if _WIRE_MONTHS_LINE.fullmatch(s)]
+    if at:
+        i = at[-1]
+        if line:
+            lines[i] = line
+        else:
+            del lines[i]
+            if i and not lines[i - 1]:
+                del lines[i - 1]
+        return "\n".join(lines)
+    return f"{wire.rstrip(chr(10))}\n\n{line}" if line else wire
+
+
+def relink_desired(found: Any, line: str):
+    """A thrds rewrite ``Desired`` for an OP as read from Slack (``found``: `thrds.rewrite.Found`): its text, and its
+    first mrkdwn section's (the OP's text over its image blocks), relinked (`relink_text`); every other block as stored,
+    an image's Slack-added fields left out. An OP whose blocks are only Slack's own rendering of its text is text only."""
+    from thrds.rewrite import Desired
+
+    text = relink_text(found.text, line)
+    if not found.blocks or all(b.get("type") == "rich_text" for b in found.blocks):
+        return Desired(text)
+    blocks, done = [], False
+    for b in found.blocks:
+        t = b.get("text")
+        if not done and b.get("type") == "section" and isinstance(t, dict) and t.get("type") == "mrkdwn":
+            b, done = {**b, "text": {**t, "text": relink_text(t["text"], line)}}, True
+        elif b.get("type") == "image":
+            b = {k: v for k, v in b.items() if k not in _IMAGE_ADDED}
+        blocks.append(b)
+    return Desired(text, blocks=blocks)
+
+
+@dataclass(frozen=True)
+class Relink:
+    """One month's OP to relink: its state (at ``path``) and the ``prev_url`` / ``next_url`` its line should link."""
+    month: dt.date
+    path: str
+    state: dict
+    prev_url: str | None
+    next_url: str | None
+
+    @property
+    def line(self) -> str:
+        """The month-link line in Slack's wire form."""
+        from thrds.mrkdwn import to_slack
+
+        return to_slack(month_links(self.month, self.prev_url, self.next_url))
+
+
+def state_months(root: str, state_dir: str) -> list[dt.date]:
+    """Every month with a converge state under ``state_dir`` (`state_path`'s ``<YYYY-MM>.json``), sorted."""
+    from disk_tree import blobfs
+
+    base = state_path(root, dt.date(2000, 1, 1), state_dir).rsplit("/", 1)[0]
+    names = (p.rsplit("/", 1)[-1] for p in blobfs.glob(f"{base}/*.json"))
+    return sorted(dt.date.fromisoformat(f"{m.group(1)}-01") for n in names if (m := re.fullmatch(r"(\d{4}-\d{2})\.json", n)))
+
+
+def relinks(cfg: DigestConfig, root: str, months: Iterable[dt.date], client, channel: str, variant: str) -> list[Relink]:
+    """Of ``months``, those with an OP in ``channel`` (their converge state's ``op_ts``) whose state doesn't yet record
+    the month links it should carry: ``prev_url`` / ``next_url``, the permalinks of the previous and next months' OPs
+    (None: that month has none). A month whose state records both is done: no Slack read."""
+    fmt = cfg.state.format(channel=channel, variant=variant)
+
+    def url(m: dt.date) -> str | None:
+        ts = load_state(state_path(root, m, fmt)).get("op_ts")
+        return client.permalink(ts) if ts else None
+
+    out = []
+    for m in sorted(set(months)):
+        path = state_path(root, m, fmt)
+        state = load_state(path)
+        if not state.get("op_ts"):
+            continue
+        prev_url, next_url = url(prior_month(m)), url(next_month(m))
+        if "prev_url" in state and "next_url" in state and (state["prev_url"], state["next_url"]) == (prev_url, next_url):
+            continue
+        out.append(Relink(m, path, state, prev_url, next_url))
+    return out
+
+
+def relink(cfg: DigestConfig, root: str, months: Iterable[dt.date], client, channel: str, variant: str, *,
+           dry_run: bool = False) -> tuple[list[Relink], Any, Any]:
+    """Rewrite the month-link line (`month_links`: ``← October · December →``) of each of ``months``' OPs in
+    ``channel`` that doesn't carry its links yet (`relinks`), and only that line: each OP is read from Slack and its
+    stored text edited in place (`relink_desired`), never re-rendered, so a past month's figures stay as posted. A
+    thrds rewrite plan (`thrds.rewrite.plan`) over those OPs, applied unless ``dry_run``; each month whose edit lands
+    (or whose OP already shows it) records ``prev_url`` / ``next_url`` in its state, so a re-run reads and edits
+    nothing. Returns the months planned, the plan, and the apply report (None on a dry run or with nothing to do)."""
+    from thrds.rewrite import Kind, Plan, Status, apply, find_ids, plan
+
+    todo = relinks(cfg, root, months, client, channel, variant)
+    if not todo:
+        return [], Plan([]), None
+    by_ts = {r.state["op_ts"]: r for r in todo}
+    p = plan(find_ids(client, list(by_ts)), lambda f: relink_desired(f, by_ts[f.ts].line))
+    if dry_run:
+        return todo, p, None
+    report = apply(p, client, dry_run=False)
+    shown = {a.ts for a in p.actions if a.kind is Kind.NOOP} | {o.ts for o in report.outcomes if o.status in (Status.DONE, Status.ALREADY)}
+    for ts, r in by_ts.items():
+        if ts in shown:
+            r.state.update(prev_url=r.prev_url, next_url=r.next_url)
+            save_state(r.path, r.state)
+            _err(f"digest: relinked {r.month:%Y-%m}'s OP {ts}")
+            continue
+        why = [f"{a.kind.value}: {a.reason}" for a in p.actions if a.ts == ts and a.reason]
+        why += [o.status.value + (f" ({o.error})" if o.error else "") for o in report.outcomes if o.ts == ts]
+        _err(f"digest: WARN {r.month:%Y-%m}'s OP {ts} not relinked: {'; '.join(why) or 'not planned'}")
+    return todo, p, report
+
+
+def link_prev(cfg: DigestConfig, root: str, month: dt.date, client, channel: str, variant: str) -> None:
+    """The previous month's OP links forward to ``month``'s, once ``month``'s is posted (`relink`: its link line edited
+    in place). A convenience: any failure (a token that can't read history, Slack down) is one warning, and the next run
+    retries."""
+    prev = prior_month(month)
+    try:
+        relink(cfg, root, [prev], client, channel, variant)
+    except Exception as e:  # noqa: BLE001 — the thread is converged either way; `digest-relink` repairs it too
+        _err(f"digest: WARN could not link {prev:%Y-%m}'s OP to {month:%Y-%m}'s: {type(e).__name__}: {e} (retried next run)")
+
+
 def converge_slack(tpl: Template, root: str, month: dt.date, client, channel: str, variant: str | None = None, *, icons_dir=None, deploy_plot=None, reply_delay: float = 0.0, edit_replies: bool = False, current: bool = False) -> dict:
     """Converge the month's Slack thread: render+host the plot, post/edit the
     OP, then per reply unit post it if none exists — or, on an edited variant,
@@ -1049,13 +1209,17 @@ def converge_slack(tpl: Template, root: str, month: dt.date, client, channel: st
         _err(f"digest: posted OP {op_ts}")
     if current and cfg.pin and pin_op(client, channel, state, op_ts, _prev_op(cfg, root, month, channel, variant)):
         save_state(path, state)
+    if current:
+        save_state(path, state)  # the OP's ts, which `link_prev` reads back
+        link_prev(cfg, root, month, client, channel, variant)
     if split and _split_reply(cfg, month, client, state, op_ts, split):
         save_state(path, state)
     if not cfg.split_reply and _drop_split_reply(client, state):
         save_state(path, state)
     if cfg.preview:
         _write_preview(cfg, preview_bundle(tpl, data, month, op=body, plot_url=plot_url, prev_url=prev_url, channel=channel,
-                                           variant=variant, op_ts=op_ts, permalink=client.permalink(op_ts)))
+                                           variant=variant, op_ts=op_ts, permalink=client.permalink(op_ts),
+                                           next_url=state.get("next_url")))
 
     posted = state.setdefault("posted", {})
     new = 0

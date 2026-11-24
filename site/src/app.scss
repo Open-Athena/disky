@@ -2050,6 +2050,9 @@ input::placeholder, textarea::placeholder { color: var(--ink-3); opacity: 1; }
 }
 
 .children-tbl { margin-top: 10px; }
+// A row-selection table's container takes focus on a click inside (`TableFocus`, `tabIndex` -1, for its
+// count-prefixed keys): no ring for that, its rows and controls keep their own.
+.children-tbl:focus, .staged-batches:focus { outline: none; }
 // The diff map's table: status chips in the diff's polarity (added green,
 // removed red, first-scanned the site's blue, changed/unchanged neutral), Δ
 // columns inked the same way, dashes for the side a row doesn't exist on.
@@ -2986,6 +2989,8 @@ kbd { font: inherit; font-size: 11px; padding: 0 4px; border: 1px solid var(--li
     // A real delete: the danger red, filled once armed.
     &.danger { border-color: var(--danger); color: var(--danger); font-weight: 650; }
     &.danger.armed { background: var(--danger); color: #fff; }
+    // A run control's second click (`ArmedButton`): outlined until it's the danger kind, filled above.
+    &.armed:not(.danger) { border-color: var(--danger); color: var(--danger); font-weight: 650; }
   }
   // A run control shown but unavailable (`RunButton`: sized at an older scan): `aria-disabled`, so its tip still opens.
   .dispatch button[aria-disabled="true"] { opacity: 0.45; cursor: help; &:not(.danger):hover { border-color: var(--line); } }
