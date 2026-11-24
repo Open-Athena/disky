@@ -65,8 +65,9 @@ class Runner:
 @pytest.fixture
 def env(tmp_path, monkeypatch):
     monkeypatch.delenv("SCAN_RUNS_PROFILE", raising=False)
+    # a step runs as a Batch task, where `r2_profile` writes the job's registry
     return {"SNAP_ID": "2026-10-16T1200", "GEN": "G1", "DT_JOB_START": "1", "TMPDIR": str(tmp_path / "t"),
-            "HOME": str(tmp_path / "home")}
+            "HOME": str(tmp_path / "home"), "BATCH_TASK_INDEX": "0"}
 
 
 def ctx(tmp_path, env, runner=None, **kw) -> S.Ctx:
@@ -175,6 +176,29 @@ def test_serving_steps_commands(tmp_path, env):
         "buckets:\n  - uri: r2://r2b\n    endpoint_url: https://r2.example.org\n    profile: r2\n")
     assert (Path(env["AWS_SHARED_CREDENTIALS_FILE"]).read_text(), env["LAYER2_PREFIX"], env["SCAN_ID"]) == (
         "[r2]\naws_access_key_id = k\naws_secret_access_key = s\n", "l2/{scan}/", "2026-10-16T1200")
+
+
+R2_ENV = {"R2_ENDPOINT": "https://r2.example.org", "R2_BUCKET": "r2b", "R2_ACCESS_KEY_ID": "k", "R2_SECRET_ACCESS_KEY": "s"}
+
+
+def test_r2_profile_writes_only_a_job_registry(tmp_path):
+    """Off Batch, with no root but `~/.config/disk-tree` (a laptop sourcing `job/r2-env.sh`), it writes nothing; a
+    root of its own gets the registry and the key beside it."""
+    home = tmp_path / "home"
+    env = {**R2_ENV, "HOME": str(home), "TMPDIR": str(tmp_path / "t")}
+    refused = (f"r2_profile: not a Batch task ($BATCH_TASK_INDEX unset) and no disk-tree root but {home}/.config/disk-tree: "
+               "writing buckets.yml there would replace this machine's own registry; set DISKY_ROOT to a scratch dir")
+    for e in (dict(env), {**env, "DISKY_ROOT": str(home / ".config/disk-tree")}):
+        with pytest.raises(RuntimeError) as err:
+            S.r2_profile(e)
+        assert str(err.value) == refused
+    assert sorted(tmp_path.rglob("*")) == []
+    root = tmp_path / "root"
+    e = {**env, "DISKY_ROOT": str(root)}
+    S.r2_profile(e)
+    assert sorted(p.relative_to(tmp_path) for p in tmp_path.rglob("*")) == [Path("root"), Path("root/buckets.yml"), Path("root/r2-credentials")]
+    assert (e["AWS_SHARED_CREDENTIALS_FILE"], e["R2_ARCHIVE"], (root / "buckets.yml").read_text()) == (
+        str(root / "r2-credentials"), "r2://r2b", "buckets:\n  - uri: r2://r2b\n    endpoint_url: https://r2.example.org\n    profile: r2\n")
 
 
 def test_reproc_skips_side_effects(tmp_path, env):
