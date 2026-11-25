@@ -26,11 +26,14 @@ an item is in; an exact key ending in `/` is refused.
 """
 from __future__ import annotations
 
+import datetime as dt
 import json
 import os
 import re
 import sys
+import threading
 import time
+from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -352,9 +355,10 @@ def execute_plan(
     *,
     for_real: bool = False,
     client: "S3Client | None" = None,
-    delete_workers: int = 16,
+    delete_workers: int = 4,
     mtime_tol: int = 1,
     min_soft_delete_days: int = 0,
+    progress_every: float = 30.0,
 ) -> dict:
     """Execute the manifest under `run_dir` against CoreWeave S3 (boto3).
 
@@ -363,6 +367,12 @@ def execute_plan(
     — new keys since the scan are left alone (drift), changed ones skipped
     (overwritten), vanished ones noted (gone). A dry run touches nothing.
 
+    Deletes go `DELETE_BATCH` keys per `DeleteObjects` call, `delete_workers` calls in flight, each item carrying its reviewed
+    ETag as a precondition (CAIOS enforces it per item: specs/delete-preconditions.md). An item refused on it
+    (`PreconditionFailed`: rewritten since the listing) is `skipped_overwritten`; any other item error, an item the reply
+    doesn't answer, or a call that fails outright (after botocore's retries) is `delete_failed`. Nothing is ever retried
+    without its ETag.
+
     `min_soft_delete_days` (`/admin`'s minimum): above 0, a real run refuses a bucket retaining less, or one it can't read.
     At 0 nothing is required of the bucket and a real deletion may be permanent: a key that can't read its versioning still
     deletes, and the run records no retention. The summary carries both.
@@ -370,6 +380,11 @@ def execute_plan(
     Writes a decision-log parquet + `<deleted|would-delete>-summary.json` under
     `run_dir` and returns the summary. Does NOT write D1 — the Functions layer
     reflects this summary into `deletion_runs`/`deletion_bands`.
+
+    While it runs, every `progress_every` seconds (and once at the end, `done`), it writes
+    `progress/<bucket>.json` under `run_dir` and logs the same counts: gcs's executor's
+    snapshot (`sweep_exec.log_execution_progress`; roots listed, then decisions as deletes
+    are answered). The site mirrors the file into `deletion_progress` (`runReflect.ts`).
     """
     started = int(time.time())
     run = Path(run_dir)
@@ -417,6 +432,32 @@ def execute_plan(
     log_rows: list[tuple] = []
     to_delete: list[tuple[str, int, str]] = []
 
+    mode = "deleted" if for_real else "would-delete"
+    prog_lock = threading.Lock()
+    prog: dict = {"bucket": bucket, "mode": mode, "roots": len(roots), "roots_done": 0, "decisions": Counter(), "delete_bytes": 0,
+                  "started": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"), "updated": None, "done": False}
+
+    def write_progress(final: bool = False) -> None:
+        from .sweep_exec import log_execution_progress
+
+        with prog_lock:
+            snap = {**prog, "decisions": dict(prog["decisions"]), "updated": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"), "done": final}
+        log_execution_progress(snap)
+        try:
+            (run / "progress").mkdir(parents=True, exist_ok=True)
+            (run / "progress" / f"{bucket}.json").write_text(json.dumps(snap))
+        except OSError as e:  # progress is advisory; never the run's problem
+            print(f"WARN: progress write failed: {e}", file=sys.stderr)
+
+    prog_stop = threading.Event()
+
+    def progress_loop() -> None:
+        while not prog_stop.wait(progress_every):
+            write_progress()
+
+    write_progress()
+    threading.Thread(target=progress_loop, name="progress", daemon=True).start()
+
     for root in roots:
         token: str | None = None
         while True:
@@ -450,6 +491,8 @@ def execute_plan(
             token = resp.get("NextContinuationToken")
             if not resp.get("IsTruncated"):
                 break
+        with prog_lock:
+            prog["roots_done"] += 1
 
     for key, (size, mtime, _token) in manifest.items():
         if key not in seen:
@@ -458,18 +501,29 @@ def execute_plan(
             band_rec(band)["gone"] += 1
             log_rows.append((key, size, mtime, "skipped_gone", _dir_of(key), band))
 
-    def _apply(item: tuple[str, int, str]) -> tuple[tuple[str, int, str], str]:
-        key = item[0]
+    def _apply(chunk: list[tuple[str, int, str]]) -> list[tuple[tuple[str, int, str], str]]:
         try:
-            client.delete_object(Bucket=bucket, Key=key, IfMatch=manifest[key][2])
+            resp = client.delete_objects(Bucket=bucket, Delete={
+                "Objects": [{"Key": key, "ETag": manifest[key][2]} for key, _, _ in chunk], "Quiet": False,
+            })
         except ClientError as e:
-            code = e.response["Error"]["Code"]
-            return item, "skipped_overwritten" if code in ("PreconditionFailed", "412") else "delete_failed"
-        return item, "delete"
+            print(f"WARN: delete batch of {len(chunk)} failed: {e.response['Error'].get('Code')}", file=sys.stderr)
+            return [(item, "delete_failed") for item in chunk]
+        deleted = {d["Key"] for d in resp.get("Deleted", [])}
+        errors = {e["Key"]: str(e.get("Code", "")) for e in resp.get("Errors", [])}
+        return [(item, "skipped_overwritten" if errors.get(item[0]) in ("PreconditionFailed", "412")
+                 else "delete_failed" if item[0] in errors or item[0] not in deleted else "delete") for item in chunk]
+
+    with prog_lock:
+        prog["decisions"].update(skipped_gone=counters["skipped_gone"], skipped_overwritten=counters["skipped_overwritten"])
 
     if for_real and to_delete:
         with ThreadPoolExecutor(max_workers=delete_workers) as ex:
-            for (key, size, band), decision in ex.map(_apply, to_delete):
+            for (key, size, band), decision in (r for rs in ex.map(_apply, _chunks(to_delete, DELETE_BATCH)) for r in rs):
+                with prog_lock:
+                    prog["decisions"][decision] += 1
+                    if decision == "delete":
+                        prog["delete_bytes"] += size
                 if decision == "delete_failed":
                     failed_keys.add(key)
                     counters["delete_failed"] += 1
@@ -488,8 +542,10 @@ def execute_plan(
             counters["deleted_bytes"] += size
             band_rec(band)["objects"] += 1
             band_rec(band)["bytes"] += size
+        with prog_lock:
+            prog["decisions"]["delete"] += len(to_delete)
+            prog["delete_bytes"] += counters["deleted_bytes"]
 
-    mode = "deleted" if for_real else "would-delete"
     log_dir = run / mode / bucket
     log_dir.mkdir(parents=True, exist_ok=True)
     _write_log(log_dir / "part-00000.parquet", sorted(
@@ -513,6 +569,8 @@ def execute_plan(
         "log_dir": str(log_dir),
     }
     (run / f"{mode}-summary.json").write_text(json.dumps(out_summary, indent=2) + "\n")
+    prog_stop.set()
+    write_progress(final=True)
     return out_summary
 
 
