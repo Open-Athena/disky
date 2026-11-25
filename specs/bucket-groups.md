@@ -57,7 +57,9 @@ Branch `rw/bucket-groups`. Item 4 (digest links) is not built yet; see "Left for
   - `summary=1` answers with the totals and no rows.
   - `depth=1` answers with one row per member, built from its totals.
   - Otherwise, second pass: each member with bytes or objects on either side is diffed at `threshold · atten`.
-  - The rows come from `groupDiffRows`. Each member gets a depth-1 row with its totals, marked `expanded` when its own rows came too. Its rows follow as `<bucket>/<row>`, one level deeper, with its `(other)` becoming `<bucket>/(other)`. A member that drew no rows and didn't change is left out, as filler, the way an unchanged bucket is at the root.
+  - The rows come from `groupDiffRows`. Each member gets a depth-1 row with its totals, marked `expanded` when its own rows came too. Its rows follow as `<bucket>/<row>`, one level deeper, with its `(other)` becoming `<bucket>/(other)`.
+  - Every member a scan holds gets its depth-1 row, an unchanged one included (zero delta, drawn as any unchanged row is). A group is an explicit set of buckets and its totals count every member's bytes, so an unchanged member isn't dropped as filler the way an unchanged bucket is at the store root (cw, 2026-11-24: `rhoarnet-us-east-08a` was missing from `?g=08a&d=-7d`).
+  - A member empty on both sides isn't diffed again in the second pass; it keeps its totals and has no rows below. Under a scope (`lens`, `o`, `cl`, `q`), a member the scope leaves empty on both sides is absent, as in the group's subtree.
   - A member neither scan holds (its diff is a 404) is absent.
 - **`/api/series`** (`groupSeries`):
   - `split=roots` (what the map's root chart asks for): the store root's own `split=roots` read. Its per-bucket traces are the rows the root already reads per bucket. The members' traces are kept, and the points are their per-scan sums.
@@ -83,10 +85,12 @@ The group's merged answer is not cached itself, as a union root's isn't. Its mem
 ### Picker and crumbs (`site/src/App.tsx`)
 
 - `?g=` joins the map's `scopeQs`, so every subtree and diff request carries it (the server ignores it below the root) and the views' query keys differ per group. `SizeOverTime` takes `group` and sends `&g=` at the root.
-- Crumbs: `<root> › <group> / <bucket> / …`.
+- Crumbs:
   - The root crumb drops `g`, and shows the deployment's label, not the group root's.
-  - The group crumb returns to the group root, keeping `g`. Its tooltip lists the members.
-- At the root, a select (`Bucket group`) lists the store's groups from `/api/groups`, plus "all buckets". It is shown only when the store has groups.
+  - At the group root: `<root> › [Bucket group ▾]`. The select stands in for the group's crumb, so the group's label shows once (cw, 2026-11-24: `Marin CoreWeave › 08a zone` beside a select also reading `08a zone`). Its help text lists the members.
+  - Below the group root (in a member bucket): `<root> › <group> / <bucket> / …`. The group crumb returns to the group root, keeping `g`. Its tooltip lists the members.
+  - Without a group: `<root>`, then the select.
+- The select (`Bucket group`) lists the store's groups from `/api/groups`, plus "all buckets" (in a group) or "groups…" (outside one). Outside a group it is shown only when the store has groups; in one it is always shown at the group root, holding the group's own entry until the list loads.
 - The age chart (`/api/age-pyramid`) is not group-scoped. At a group root it still shows the whole store.
 
 ### Left for item 4
