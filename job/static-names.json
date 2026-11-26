@@ -40,5 +40,8 @@
   "anchors",
   "drill"
  ],
- "drill_checkpoint": "oa-cw-s3-usage-scratch"
+ "drill_checkpoint": "oa-cw-s3-usage-scratch",
+ "record_secrets": {
+  "CLOUDFLARE_API_TOKEN": "cw-s3-cf-pages-token"
+ }
 }
