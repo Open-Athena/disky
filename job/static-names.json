@@ -52,5 +52,6 @@
  "drill_checkpoint": "oa-gcs-usage-scratch",
  "record_secrets": {
   "CLOUDFLARE_API_TOKEN": "cf-pages-token"
- }
+ },
+ "events_topic": "projects/oa-internal-450019/topics/gcs-scan-events"
 }
