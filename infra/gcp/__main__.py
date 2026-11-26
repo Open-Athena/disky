@@ -65,8 +65,19 @@ job = JobAccount(
         "roles/logging.logWriter",
         # `gcp-cost` (`dt-cloud cost`): the buckets' `total_bytes` from Cloud Monitoring
         "roles/monitoring.viewer",
+        # the billing export's queries (the job's billed cost per run, specs/scan-cost-by-stage.md): run as this account
+        "roles/bigquery.jobUser",
     ],
     adopt=adopt,
+)
+# The billing export's rows (`billing_export`, the billing account's Cloud Billing export): read-only on that one dataset.
+# It holds every project's lines on the billing account; the job's queries select `labels.deployment = cw`.
+gcp.bigquery.DatasetIamMember(
+    "cw-s3-job-billing-export-reader",
+    project=project,
+    dataset_id="billing_export",
+    role="roles/bigquery.dataViewer",
+    member=job.member,
 )
 # What the site (`GCP_SA_KEY` = `cw-s3-dispatch`) may start: `/admin/slack`'s digest re-apply and the sweep console, whose
 # results it reads anywhere in the data bucket (`sweep_reads`). The grants predate the component: aliased, not replaced.
