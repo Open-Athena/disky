@@ -51,7 +51,13 @@ print(json.dumps({
             "runnables": [{"container": {"imageUri": os.environ["IMAGE"], "entrypoint": "bash", "commands": ["-c", cmd]}}],
             "maxRetryCount": 0,
             "maxRunDuration": f"{48 * 3600}s",
-            "environment": {"variables": {"DISKY_LABELS": "app=disky,deployment=cw"}},
+            # what its merge and compaction jobs need to record their runs on /scans (`maint_runs.PASS_ENV`;
+            # `append_runner.record_env`): unset, every deferred fold ran unrecorded (11-22 .. 11-26)
+            "environment": {"variables": {"DISKY_LABELS": "app=disky,deployment=cw", **{
+                k: os.environ.get(k) or v for k, v in (
+                    ("D1_DB_ID", "7f1e1326-b879-4ecd-8621-846621c24f36"),  # oa-cw-s3-usage-db (job/profiles/cw.yml)
+                    ("CLOUDFLARE_ACCOUNT_ID", "74981a43be0de7712369306c7b19133d"),
+                    ("SCAN_RUNS_PROFILE", "/app/job/scan-runs.json"))}}},
         },
     }],
     "allocationPolicy": {
