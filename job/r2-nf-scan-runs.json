@@ -19,6 +19,6 @@
     {"key": "snapshot", "uri": "gs://oa-r2-usage-data/snapshots/r2/{scan}/", "after": "publish"},
     {"key": "nf-dag", "uri": "gs://oa-r2-usage-data/nf/runs/{scan}/dag.mmd"}
   ],
-  "prices": {"e2-standard-2": 0.0767, "e2-standard-4": 0.1534, "e2-standard-8": 0.3068},
+  "prices": {"e2-standard-2": 0.0767, "e2-standard-4": 0.1534, "e2-standard-8": 0.3068, "e2-highmem-4": 0.1807},
   "log_days": 30
 }
