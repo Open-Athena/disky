@@ -43,5 +43,6 @@
  "drill_checkpoint": "oa-cw-s3-usage-scratch",
  "record_secrets": {
   "CLOUDFLARE_API_TOKEN": "cw-s3-cf-pages-token"
- }
+ },
+ "events_topic": "projects/oa-internal-450019/topics/cw-scan-events"
 }
