@@ -33,11 +33,12 @@ import { useRules } from './rules'
 import { useSectionSpy, withoutSection, type SectionMode } from 'use-prms/sections'
 import { decodeSection, encodeSection, LEGACY_ANCHORS, SECTION_IDS, SECTION_KEY } from './homeSections'
 import { useScrollSpyPref } from './prefs'
-import { useKeepInView } from './keepInView'
+import { sectionInView, useKeepInView } from './keepInView'
 import { SectionAnchor } from './SectionAnchor'
 import { barControls } from './pageBar'
 import { LifecycleFold } from './LifecycleFold'
 import { ClassMixTip, Tooltip } from './Tooltip'
+import { fmtSpan, spanUnits } from './windowSpan'
 import { indexingScans, searchOff } from './defaultScan'
 import { SearchOffNote, SearchOffTip } from './SearchCatchUp'
 import { scansHref, useScanRunOf } from './scanRunsUi'
@@ -743,6 +744,8 @@ function AppContent() {
   })
   // A drill from the diff keeps the diff where it was on screen (the spy scrolls a new path to the top).
   const holdDiff = useKeepInView('diff', location.key)
+  // A crumb holds the section being read where it is on screen, as the diff's drills hold the diff.
+  const holdView = () => holdDiff(sectionInView(SECTION_IDS, topbarH()))
   // Turned off: drop the section it last wrote, so a copied link doesn't open (or unfurl) at a section no longer in
   // view. After the spy has stopped writing: stripped in the same tick, the still-writing spy put it back.
   const spyWas = useRef(spy)
@@ -1031,7 +1034,9 @@ function AppContent() {
   // Diff model (built tree + movement totals + formatters), shared by the diff
   // header band and the diff map. Built here so the header stays mounted while a
   // diff is loading/errored (the map isn't rendered then).
-  const diffModel = useDiffModel(diff, !diffPath, scopeDesc)
+  // The window's length, between its two scans' times: stated beside the pickers, and each movement row's rate
+  const diffSpanMs = asof && diffPrev ? scanInstant(asof, times) - scanInstant(diffPrev, times) : undefined
+  const diffModel = useDiffModel(diff, !diffPath, scopeDesc, diffSpanMs)
   // Controlled treemap drill path, resolved against the (possibly filtered/
   // scoped) tree each render: `?p=` survives scope toggles, filters, and scan
   // switches by re-walking the new tree; a vanished path truncates to its
@@ -1325,7 +1330,7 @@ function AppContent() {
   const group = gP ? groups.find(x => x.name === gP) : undefined
   const groupLabel = gP ? (mapTree?.name ?? group?.label ?? gP) : undefined
   const groupMembers = group ? <>{group.buckets.length} buckets: {group.buckets.join(', ')}</> : <>bucket group <code>{gP}</code></>
-  const rootCrumb = <RootCrumb treeName={gP ? undefined : mapTree?.name} rootLabel={rootLabel} rootTitle={rootTitle} scopeWord={store.rootLabel} here={atRoot && !gP} onClick={() => navigate(groupLoc(undefined))} />
+  const rootCrumb = <RootCrumb treeName={gP ? undefined : mapTree?.name} rootLabel={rootLabel} rootTitle={rootTitle} scopeWord={store.rootLabel} here={atRoot && !gP} onClick={() => { holdView(); navigate(groupLoc(undefined)) }} />
   // The store's groups beside its buckets: a pick shows that group's root; "all" the store's. In a group it is shown
   // even before (or without) the groups list, holding the group's own entry.
   const groupPicker = (groups.length > 0 || gP) && (
@@ -1347,7 +1352,7 @@ function AppContent() {
       <span>
         <span className="sep">›</span>
         <Tooltip content={groupMembers}>
-          <button type="button" onClick={() => drillTo(storeRoot)}>{groupLabel}</button>
+          <button type="button" onClick={() => { holdView(); drillTo(storeRoot) }}>{groupLabel}</button>
         </Tooltip>
       </span>
     ))
@@ -1361,7 +1366,7 @@ function AppContent() {
           <span className="sep">/</span>
           {i === segs.length - 1
             ? <><PathPopover label={sg} fullPath={crumbFullPath} copy={crumbCopy} />{ext}</>
-            : <Tooltip content={<code>{pathText(pathScheme, segs.slice(0, i + 1))}</code>}><button type="button" onClick={() => drillTo(segs.slice(0, i + 1))}>{sg}</button></Tooltip>}
+            : <Tooltip content={<code>{pathText(pathScheme, segs.slice(0, i + 1))}</code>}><button type="button" onClick={() => { holdView(); drillTo(segs.slice(0, i + 1)) }}>{sg}</button></Tooltip>}
         </span>
       ))}
     </span>
@@ -1741,6 +1746,14 @@ function AppContent() {
                     fallback={<ScanCombobox value={asof} scans={scans} onChange={setDP} label="Diff to scan (the page's scan)" fmt={fmtS} />} />
                 : <ScanCombobox value={asof} scans={scans} onChange={setDP} label="Diff to scan (the page's scan)" fmt={fmtS} />}
             </>)}
+            {diffSpanMs !== undefined && diffSpanMs > 0 && (
+              <Tooltip content={<>
+                <div>{fmtS(diffPrev)} → {fmtS(asof)}</div>
+                {spanUnits(diffSpanMs).map(u => <div key={u}>{u}</div>)}
+              </>}>
+                <span className="d-span" tabIndex={0} aria-label={`diff window: ${fmtSpan(diffSpanMs)}`}>{fmtSpan(diffSpanMs)}</span>
+              </Tooltip>
+            )}
             <span className="d-modes">
               <span className="gran d-mode" role="radiogroup" aria-label="Diff start">
                 <span className="d-mode-lbl">start</span>
