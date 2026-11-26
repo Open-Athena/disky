@@ -39,7 +39,8 @@ skip: [bucket-check, over-time]
 # constant size (specs/lean-scans.md §2): each scan retires the per-scan files of the scans before the newest 2, and
 # collects the interval-store generations the current one superseded
 # `cf-usage`: the Cloudflare usage snapshots (`snapshots/usage/<date>.json`, `/admin/usage`), never fatal
-steps: [age-store, retire, store-gc, cf-usage]
+# `run-cost`: this run's compute by job (`snapshots/cost/runs/<scan>/<run>.json`, /scans' Cost section; specs/scan-cost-by-stage.md), never fatal
+steps: [age-store, retire, store-gc, cf-usage, run-cost]
 secrets:
   HF_TOKEN: hf-usage-hf-token
   CLOUDFLARE_API_TOKEN: hf-usage-cf-token
