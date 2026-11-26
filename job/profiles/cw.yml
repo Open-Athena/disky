@@ -120,6 +120,9 @@ options:
   digest: {template: quota, config: /app/job/digest.yml}
   # cw's own GCS buckets (the CoreWeave buckets and R2 bill elsewhere); compute: every Batch job `$DISKY_LABELS` selects
   gcp-cost: {buckets: [oa-cw-s3-usage-data, oa-cw-s3-usage-scratch]}
+  # each run's report by job; `billing`: the billing export, whose lines (a day late) each report of the last 7 days gets
+  # (`cw-s3-job` reads it: infra/gcp `bigquery.jobUser` + `dataViewer` on `billing_export`)
+  run-cost: {billing: oa-internal-450019.billing_export.gcp_billing_export_resource_v1_018322_7B6BBC_1763CC}
   # the Nextflow task's cwd isn't the image's `/app`
   cf-usage: {config: /app/site/wrangler.toml}
   # the data bucket, then the R2 copy: every scan but the newest 2, each verified against the interval store in this task
