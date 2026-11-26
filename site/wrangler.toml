@@ -100,10 +100,12 @@ VIEWER_DOMAINS = "coreweave.com"
 # The opt-in trash model (specs/staged-delete.md): any full viewer stages
 # deletions into the shared open plan (`stage_batches`, `site/schema.sql`).
 STAGING = "1"
-# Staged-plan review in Slack (specs/done/staged-slack.md): one thread per staged plan
-# in #cw-s3-admin; `EXECUTOR` = the Store's executor, which says the Slack
-# buttons may dispatch (plan-sweep). Secrets: SLACK_BOT_TOKEN, SLACK_SIGNING_SECRET.
+# Staged-plan review in Slack (specs/done/staged-slack.md): one thread per staged plan in #cw-usage (`SLACK_STAGED_CHANNEL`,
+# where the deployment's users read; Ryan 2026-11-26: #cw-s3-admin is mostly sessions' activity); service activity stays in
+# #cw-s3-admin. `EXECUTOR` = the Store's executor, which says the Slack buttons may dispatch (plan-sweep). Secrets:
+# SLACK_BOT_TOKEN, SLACK_SIGNING_SECRET.
 SLACK_ADMIN_CHANNEL = "C0C53CPM886"
+SLACK_STAGED_CHANNEL = "C0C1YR7D0KU"
 EXECUTOR = "plan-sweep"
 STAGED_CARD_GRANT = "2EjUTg692KMP"   # the job's grant (`cw-s3-job-grant`, its SITE_TOKEN): the scan's `staged-card` step re-renders the open plan's Slack card at the new scan (`/api/plans/staged/card`); prod only, dev names none
 # The Batch job account the sweep console dispatches as (`infra/gcp`: `cw-s3-job`;
@@ -255,10 +257,12 @@ VIEWER_DOMAINS = "coreweave.com"
 # The opt-in trash model (specs/staged-delete.md): any full viewer stages
 # deletions into the shared open plan (`stage_batches`, `site/schema.sql`).
 STAGING = "1"
-# Staged-plan review in Slack (specs/done/staged-slack.md): one thread per staged plan
-# in #cw-s3-admin; `EXECUTOR` = the Store's executor, which says the Slack
-# buttons may dispatch (plan-sweep). Secrets: SLACK_BOT_TOKEN, SLACK_SIGNING_SECRET.
+# Staged-plan review in Slack (specs/done/staged-slack.md): one thread per staged plan in #cw-usage (`SLACK_STAGED_CHANNEL`,
+# where the deployment's users read; Ryan 2026-11-26: #cw-s3-admin is mostly sessions' activity); service activity stays in
+# #cw-s3-admin. `EXECUTOR` = the Store's executor, which says the Slack buttons may dispatch (plan-sweep). Secrets:
+# SLACK_BOT_TOKEN, SLACK_SIGNING_SECRET.
 SLACK_ADMIN_CHANNEL = "C0C53CPM886"
+SLACK_STAGED_CHANNEL = "C0C1YR7D0KU"
 EXECUTOR = "plan-sweep"
 # The Batch job account the sweep console dispatches as (`infra/gcp`: `cw-s3-job`;
 # `GCP_SA_KEY` is the `cw-s3-dispatch` key that may act as it).
