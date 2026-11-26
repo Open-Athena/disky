@@ -1398,8 +1398,9 @@ def test_closing_last_months_thread_leaves_the_pin_alone(tmp_path: Path):
     _publish(root, [("2026-10-01T1200", _meta(716))])  # still over quota: September's alert is closed by October's run
     fake.calls.clear()
     oct_ = E.converge_slack_now(tpl, str(root), OCT, fake, "C1", "sender")
-    assert [c for c in fake.calls if c[0] in ("api", "delete")] == [
-        ("delete", "m4"),
+    # September's alert stays, struck through as resolved by the month's close (never deleted: quotes of it keep opening)
+    assert [c for c in fake.calls if c[0] in ("api", "delete") or c[:2] == ("edit", "m4")] == [
+        ("edit", "m4", f"~{sept['alert']['body']}~\n:white_check_mark: Resolved as of 9/2 12:00Z: the month closed; its next thread carries any alert."),
         ("api", "pins.add", {"channel": "C1", "timestamp": "m5"}),
         ("api", "pins.remove", {"channel": "C1", "timestamp": "m1"}),
     ]
