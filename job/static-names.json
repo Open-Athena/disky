@@ -24,7 +24,8 @@
   "drill": "n2-highmem-32"
  },
  "ssd_gbs": {
-  "compact": 3000
+  "compact": 3000,
+  "drill": 1500
  },
  "ssd_gb": 750,
  "spot": true,
