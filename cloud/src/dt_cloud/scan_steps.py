@@ -2266,7 +2266,7 @@ RUN_COST_PREFIX = "snapshots/cost/runs"
 
 
 @step("run-cost", core=False, soft=True, options={"days": int},
-      side=True, leaves="this run's cost report not written: the next run's rereads the unsettled ones, not this")
+      side=True, leaves="this run's cost report not written: `dt-cloud scan-run cost -s <scan> <run> -O …` writes it later")
 def run_cost(ctx: Ctx, arg: str | None) -> None:
     """This run's compute by job (`dt-cloud scan-run cost -s <scan> <run> -O`): its head, its tasks and every job they
     submitted (`scan_run`), priced at the profile's rates, with store upkeep (carries, folds) apart

@@ -739,6 +739,7 @@ def test_soft_steps_classification():
         "access-requesters": "side",
         "access-jobs": "side converges",
         "vm-pack": "side converges",
+        "run-cost": "side",
     }
 
 
