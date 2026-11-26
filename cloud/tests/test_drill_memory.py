@@ -108,6 +108,9 @@ def test_newly_heavy_rollups_match_monolithic_combine(monkeypatch):
         def __init__(self):
             self.ranges = []
 
+        def cache_stats(self):
+            return {}
+
         def tables(self, c, lo, hi):
             assert c == "member"
             self.ranges.append((c, lo, hi))
@@ -189,6 +192,9 @@ def test_newly_heavy_combine_survives_budget_that_rejects_global_group(tmp_path)
             GROUP BY h.q,h.dir,d.path,d.usr,d.vf""")
 
     class Reads:
+        def cache_stats(self):
+            return {}
+
         def tables(self, *args):
             raise AssertionError("New members already carry complete history in dr")
 
