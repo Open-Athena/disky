@@ -257,6 +257,19 @@ def _transient(e: BaseException) -> bool:
     return isinstance(e, (requests.ConnectionError, requests.Timeout, TransportError))
 
 
+def check_local_ssd(spec: Mapping, what: str = "Batch job") -> None:
+    """Refuse a spec whose instance policy asks for local SSD its machine can't take (`scan_profile.local_ssd_problem`:
+    not whole SSDs, or a count GCE refuses for that machine). GCE refuses one only when it schedules the job, after the
+    caller has waited on it (cw's drill: an n2-highmem-32 with 2 SSDs; `vm-pack`'s n2-highmem-16 with 1; 2026-11-26)."""
+    from .scan_profile import local_ssd_problem
+
+    for inst in (spec.get("allocationPolicy") or {}).get("instances") or []:
+        policy = inst.get("policy") or {}
+        gb = sum(int(d["newDisk"]["sizeGb"]) for d in policy.get("disks") or [] if (d.get("newDisk") or {}).get("type") == "local-ssd")
+        if gb and (why := local_ssd_problem(policy.get("machineType", ""), gb)):
+            raise ValueError(f"{what}: {why}")
+
+
 def submit_job(spec: dict, job_id: str | None = None, region: str | None = None, project: str | None = None, *,
                buckets: Sequence[str] = (), cross_region: bool | None = None, exists_ok: bool = False,
                retry_for: float = 0, sleep: Callable[[float], None] = time.sleep,
@@ -266,7 +279,7 @@ def submit_job(spec: dict, job_id: str | None = None, region: str | None = None,
 
     The one place dt-cloud creates a Batch job (`tests/test_cost_labels.py` greps for others), so the two refusals are
     here, before the POST: a spec missing a required cost label on the job or its allocation policy
-    (`cost_labels.check_spec`), and a job outside the region of the buckets it mounts or `buckets` names (`check_region`;
+    (`cost_labels.check_spec`), local SSD its machine can't take (`check_local_ssd`), and a job outside the region of the buckets it mounts or `buckets` names (`check_region`;
     its notes go to stderr) unless `cross_region` (default `$BATCH_CROSS_REGION`) says so.
 
     `exists_ok`: a job already named `job_id` (409) counts as submitted, and its name is returned. `retry_for` (seconds;
@@ -279,6 +292,7 @@ def submit_job(spec: dict, job_id: str | None = None, region: str | None = None,
     if retry_for and not (job_id and exists_ok):
         raise ValueError(f"{what}: a retried submit needs a job id and exists_ok: without them, a retry after a lost answer starts a second job")
     check_spec(spec, what)
+    check_local_ssd(spec, what)
     region = batch_region(region)
     if cross_region is None:
         cross_region = env(CROSS_REGION_ENV) == "1"
@@ -341,6 +355,13 @@ def live_labelled(jobs: Sequence[Mapping], labels: Mapping[str, str]) -> list[st
             and all(j.get("labels", {}).get(k) == v for k, v in labels.items())]
 
 
+def cancel_job(name: str, *, region: str | None = None, project: str | None = None) -> None:
+    """Delete (= cancel) the Batch job `name` in `region` (default `$BATCH_REGION`) / `project` (default `gcp_project()`)."""
+    region, project = batch_region(region), project or gcp_project()
+    r = session().delete(f"https://batch.googleapis.com/v1/projects/{project}/locations/{region}/jobs/{name}")
+    r.raise_for_status()
+
+
 def cancel_labelled(labels: Mapping[str, str], *, region: str | None = None, dry_run: bool = False, log=None) -> list[str]:
     """Delete (= cancel) every live Batch job in ``region`` (default ``$BATCH_REGION``) carrying all of ``labels``;
     returns their names. A driver killed mid-submit leaves jobs it never saw submitted: a run's own label finds them (a
@@ -353,6 +374,5 @@ def cancel_labelled(labels: Mapping[str, str], *, region: str | None = None, dry
         if log:
             log(f"{'would cancel' if dry_run else 'cancelling'} {n}")
         if not dry_run:
-            r = session().delete(f"https://batch.googleapis.com/v1/projects/{project}/locations/{region}/jobs/{n}")
-            r.raise_for_status()
+            cancel_job(n, region=region, project=project)
     return names
