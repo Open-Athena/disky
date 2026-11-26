@@ -70,9 +70,20 @@ job = JobAccount(
         # the `gcp-cost` step: buckets' bytes (Monitoring) and their soft-delete / lifecycle policies
         "roles/monitoring.viewer",
         "roles/storage.bucketViewer",
+        # the billing export's queries (the job's billed cost per run, specs/scan-cost-by-stage.md): run as this account
+        "roles/bigquery.jobUser",
     ],
     adopt=adopt,
     existing=True,
+)
+# The billing export's rows (`billing_export`, the billing account's Cloud Billing export): read-only on that one dataset.
+# It holds every project's lines on the billing account; the job's queries select `labels.deployment = gcs`.
+gcp.bigquery.DatasetIamMember(
+    "gcs-usage-job-billing-export-reader",
+    project=project,
+    dataset_id="billing_export",
+    role="roles/bigquery.dataViewer",
+    member=job.member,
 )
 # The site's `/v1/files` scan browser reads the buckets as this account (an
 # HMAC key, also out of state).
