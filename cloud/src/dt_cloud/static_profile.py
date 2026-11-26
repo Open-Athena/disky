@@ -116,9 +116,9 @@ class Profile:
     #: The interval store: a compaction carries the priced owner rows to its new generation (`owner_carry`; `compact -O`),
     #: which needs `record_secrets` and the submitter's D1 env. Off: nothing changes.
     owner_carry: bool = False
-    #: The interval store: a Pub/Sub topic (`projects/<p>/topics/<t>`) its compaction jobs publish their Batch state
-    #: changes to (`notifications`, `JOB_STATE_CHANGED`), for `dt-cloud batch-events serve`: the last job's success
-    #: submits the catch-up append, any job's failure or cancel alerts (`batch_events.compaction`). Unset: none.
+    #: A Pub/Sub topic (`projects/<p>/topics/<t>`) the compaction jobs publish their Batch state changes to
+    #: (`notifications`, `JOB_STATE_CHANGED`), for `dt-cloud batch-events serve` (`batch_events.compaction`): any job's
+    #: failure or cancel alerts; the interval store's last job's success also submits the catch-up append. Unset: none.
     events_topic: str | None = None
 
     def __post_init__(self):
@@ -130,6 +130,12 @@ class Profile:
             from .append_runner import parse_policy
 
             object.__setattr__(self, "compact", parse_policy("compact", self.compact))
+        from .scan_profile import local_ssd_problem
+
+        for stage in ("", *sorted({*self.machines, *self.ssd_gbs})):
+            if why := local_ssd_problem(self.machine_for(stage), self.ssd_for(stage)):
+                where = f"stage {stage} (machines / ssd_gbs)" if stage else "machine / ssd_gb"
+                raise SystemExit(f"static names profile: {where}: {why}")
 
     @property
     def policy(self) -> Policy:
