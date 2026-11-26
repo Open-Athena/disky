@@ -1764,7 +1764,7 @@ def test_a_section_messages_text_fallback_is_its_first_lines_under_chat_updates_
         '\n'.join(lines[:43]) + '\n…', wire[:3000], 'y' * 2998 + '\n…']
     calls = []
     slack = N.Slack.__new__(N.Slack)
-    slack.have = None
+    slack._have = None  # the workspace unknown: `have` reads it before asking Slack
     slack.client = SimpleNamespace(channel='C123', _request=lambda api, args: calls.append((api, args)) or {'ts': '9.0'})
     slack.edit_sections('2.0', wire)
     [(api, args)] = calls
