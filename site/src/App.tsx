@@ -796,6 +796,8 @@ function AppContent() {
   const ageBudget = Math.max(64, Math.min(1024, Math.round(canW / 2)))
   const ageQ = useQuery({
     queryKey: ['age', store.key, cutKey, drillPath, ageBudget],
+    // A drill keeps the last path's chart, dimmed under a spinner, until this one's lands (no collapse and reflow)
+    placeholderData: keepPreviousData,
     queryFn: async () => {
       const pf = perf.start('age', `${drillPath || '/'}@${asof}|b${ageBudget}`)
       const r = await pf.track(sfetch(`/api/age-pyramid?${cutQs}&path=${encodeURIComponent(drillPath)}&bin_budget=${ageBudget}`, { credentials: 'include', cache: 'no-cache' }))
@@ -812,7 +814,7 @@ function AppContent() {
   // A scan whose run hasn't finished has no age rows yet (its age tiers are listed by the run's last step,
   // `index-sync`, after search indexing). When the scan before it has rows here, the section says so and links it,
   // rather than vanishing; a deployment with no age index at all (both empty) still shows nothing.
-  const ageEmpty = !ageQ.isPending && !ageQ.isError && !(ageQ.data?.records.length) && !!asof
+  const ageEmpty = !ageQ.isPending && !ageQ.isPlaceholderData && !ageQ.isError && !(ageQ.data?.records.length) && !!asof
   const agePrevQ = useQuery({
     queryKey: ['age', store.key, prevScan, drillPath, ageBudget],
     queryFn: async () => {
@@ -833,6 +835,7 @@ function AppContent() {
   // (per-vintage grew/shrank). Only fetched when a diff window exists.
   const ageBaseQ = useQuery({
     queryKey: ['age', store.key, startAt ?? diffPrev, drillPath, ageBudget],
+    placeholderData: keepPreviousData,
     queryFn: async () => {
       const pf = perf.start('age', `${drillPath || '/'}@${diffPrev}|b${ageBudget}`)
       const r = await pf.track(sfetch(`/api/age-pyramid?${startAt ? `at=${startAt}` : `date=${diffPrev}`}&path=${encodeURIComponent(drillPath)}&bin_budget=${ageBudget}`, { credentials: 'include', cache: 'no-cache' }))
@@ -1073,10 +1076,11 @@ function AppContent() {
     const d = i < 0 ? undefined : (subtreeQs[i]?.data ?? coarseQs[i]?.data) as (MatchFields & { matchesCapped?: boolean; partialReason?: string; approximateReason?: string; rollup?: unknown }) | undefined
     return rowMatchesOf(d?.matched, matchedListOf(d))
   }, [fq, subStamp, tblPath, subtreePaths]) // eslint-disable-line react-hooks/exhaustive-deps
-  const onMapPath = (p: TreeNode[]) => drillTo(p.slice(1).map(n => n.name))
+  // Every in-page drill holds the section being read where it is on screen (`holdView`), as the crumbs do
+  const onMapPath = (p: TreeNode[]) => { holdView(); drillTo(p.slice(1).map(n => n.name)) }
   // Worklist rows / children table → drill the map to a prefix (the new path
   // starts at the top, where the map is).
-  const openPath = (segs: string[]) => drillTo(segs)
+  const openPath = (segs: string[]) => { holdView(); drillTo(segs) }
   // A server user-lens map is already just that user's bytes — nothing to dim.
   const effHl: Highlight | null = activeLens ? null : hl
 
@@ -1127,7 +1131,7 @@ function AppContent() {
       // Not Escape (that reads as "dismiss"; it stays for unpinning tips);
       // Backspace still pops the map too.
       defaultBindings: ['g u'],
-      handler: () => { const s = drillPath.split('/').filter(Boolean); if (s.length) drillTo(s.slice(0, -1)) },
+      handler: () => { const s = drillPath.split('/').filter(Boolean); if (s.length) { holdView(); drillTo(s.slice(0, -1)) } },
     },
     'owner:me': { label: 'Owner: my files', group: 'Scope', handler: () => setOP('me') },
     'owner:owned': { label: 'Owner: owned only', group: 'Scope', handler: () => setOP('owned') },
@@ -1619,7 +1623,7 @@ function AppContent() {
           {/* The map's own listing — this node's children, or (`?tm=`) the largest files / folders anywhere below it:
               the whole directory's, so not under a scope (lens, owner pool, class, name filter) it couldn't honor. */}
           {mapPath && (
-            <div id="tbl"><ChildrenTable
+            <div id="tbl" className={mapStale ? 'busy-host stale' : 'busy-host'}>{mapStale && <Busy top label={mapRetrying ?? 'loading view…'} />}<ChildrenTable
               node={mapPath[mapPath.length - 1]}
               segs={tblSegs}
               scheme={store.scheme}
@@ -1825,7 +1829,7 @@ function AppContent() {
               <DiffTreemap model={diffModel} onDrill={rel => { holdDiff(); drillTo([...diffSegs, ...rel]) }} onOpen={rel => openObject([...diffSegs, ...rel])} hrefs={{ drill: rel => cellHrefs.drill([...diffSegs, ...rel]), open: rel => cellHrefs.open([...diffSegs, ...rel]) }} />
               {/* The map's tabular twin: the same cells as rows, sortable; a
                   row's name drills like its cell. */}
-              <DiffTable model={diffModel} scheme={store.scheme} segs={diffSegs} onDrill={rel => { holdDiff(); openPath([...diffSegs, ...rel]) }} onOpen={rel => openObject([...diffSegs, ...rel])} />
+              <DiffTable model={diffModel} scheme={store.scheme} segs={diffSegs} onDrill={rel => { holdDiff(); drillTo([...diffSegs, ...rel]) }} onOpen={rel => openObject([...diffSegs, ...rel])} />
               {diffStaleOther || diffStale
                 ? <Busy label={`aligning ${fmtS(diffPrev)} → ${fmtS(asof)}…`} />
                 : diffRefining
@@ -1876,7 +1880,10 @@ function AppContent() {
           </p>
         )}
         {age.length > 0 && (
+          <div className={ageQ.isPlaceholderData || ageBaseQ.isPlaceholderData ? 'busy-host stale' : 'busy-host'}>
           <AgeChart rows={age} baseRows={diffPrev ? ageBase : undefined} diffLabels={diffPrev && asof ? { from: fmtS(diffPrev), to: fmtS(asof) } : undefined} catOrder={catOrder} mode={ageMode} mapMode={effMode} picked={ageModeP === ageMode} dateAxis={dateRange} onMode={m => setAgeModeP(m)} modes={ageModes} userIdx={userIdx} readRange={ageReadRange} readThrough={ageReadRange ? readThru : null} readTint={readTint} readUnlogged={readUnlogged} scheme={store.scheme} band={band} onBand={setBand} />
+          {(ageQ.isPlaceholderData || ageBaseQ.isPlaceholderData) && <Busy label="loading ages…" />}
+          </div>
         )}
       </section>
       )}

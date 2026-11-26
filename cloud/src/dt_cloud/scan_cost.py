@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import re
+import sys
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
 from datetime import datetime, timezone
@@ -188,6 +189,10 @@ def job_estimate(
         "association": association,
         "component": labels.get("component", "unknown"),
         "stage": labels.get("stage"),
+        # a Nextflow task's process (`base.config` `resourceLabels`): which pipeline step the task ran
+        "step": labels.get("step"),
+        # a carry or fold (`append_runner.UPKEEP_LABEL`): the generation's upkeep, serving every scan it merges
+        "upkeep": labels.get("upkeep"),
         "scan_id": labels.get("scan_id"),
         "state": job["status"]["state"],
         "machine": machine,
@@ -212,9 +217,13 @@ def report(
 ) -> dict:
     rows = [job_estimate(profile, job, tasks[job["uid"]], now, association) for job, association in jobs]
     components: dict[str, float] = defaultdict(float)
+    upkeep: dict[str, float] = defaultdict(float)
     for row in rows:
         if row["estimated_compute_usd"] is not None:
-            components[row["component"]] += row["estimated_compute_usd"]
+            if row["upkeep"]:
+                upkeep[row["upkeep"]] += row["estimated_compute_usd"]
+            else:
+                components[row["component"]] += row["estimated_compute_usd"]
     return {
         "scan": scan,
         "scan_run": labels_of(root).get("scan_run") or root["uid"],
@@ -227,6 +236,8 @@ def report(
         "unpriced_jobs": [r["job"] for r in rows if r["estimated_compute_usd"] is None],
         "estimated_compute_usd": round(sum(components.values()), 4),
         "components": {k: round(v, 4) for k, v in sorted(components.items())},
+        # carries and folds the run submitted: the generation's, not in the run's total (specs/scan-cost-by-stage.md)
+        "upkeep_usd": {k: round(v, 4) for k, v in sorted(upkeep.items())},
         "billing_filter": {"root_batch_job_uid": root["uid"], "child_scan_run": labels_of(root).get("scan_run") or root["uid"]},
         "jobs": rows,
     }
@@ -236,7 +247,7 @@ def render_report(doc: Mapping) -> str:
     lines = [f"{doc['scan']} · {doc['scan_run']}", "Observed compute estimate (not billed cost):"]
     for row in doc["jobs"]:
         amount = "unknown" if row["estimated_compute_usd"] is None else f"${row['estimated_compute_usd']:.4f}"
-        lines.append(f"  {row['component']}/{row['stage'] or '-'}  {row['state']}  {row['machine']}  {row['observed_vm_seconds'] / 3600:.3f} VM-h  {amount}  {row['job']}")
+        lines.append(f"  {row['component']}/{row['stage'] or '-'}{f' ({row["upkeep"]}, not in the total)' if row['upkeep'] else ''}  {row['state']}  {row['machine']}  {row['observed_vm_seconds'] / 3600:.3f} VM-h  {amount}  {row['job']}")
         lines.extend(f"    WARNING: {w}" for w in row["warnings"])
     lines.append(f"Total priced observed compute: ${doc['estimated_compute_usd']:.4f}")
     if doc["legacy_inference"]:
@@ -250,11 +261,55 @@ def render_report(doc: Mapping) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _now() -> float:
+    return datetime.now(timezone.utc).timestamp()
+
+
+def build_report(profile: Profile, jobs: Sequence[Mapping], run_id: str, scan: str, *, legacy: bool = False,
+                 now: float | None = None) -> dict:
+    """RUN_ID's (a root job's uid, name or short name, among `jobs`) report (`report`), its tasks fetched."""
+    from .gcp import batch_tasks
+
+    roots = [j for j in jobs if run_id in (j["uid"], j["name"], j["name"].rsplit("/", 1)[-1])]
+    if len(roots) != 1:
+        raise ValueError(f"expected one root job for {run_id!r}; found {len(roots)}")
+    root = roots[0]
+    selected = select_jobs(jobs, root, scan, legacy=legacy)
+    tasks = {j["uid"]: batch_tasks(j) for j, _ in selected}
+    return report(profile, root, scan, selected, tasks, _now() if now is None else now)
+
+
+def report_key(scan: str, root_uid: str) -> str:
+    """Where a run's saved report lives under a reports root: `<scan>/<root uid>.json`."""
+    return f"{check_scan_id(scan)}/{root_uid}.json"
+
+
+def unsettled(store, days: int, now: float) -> list[tuple[str, str]]:
+    """The saved reports (`(scan, root uid)`) of scans within `days` of `now` that still listed a job running (a run's
+    head, a detached carry or fold): reread once those end, so the saved one is the whole run's."""
+    from .scan_id import scan_time
+
+    out = []
+    for key in store.keys(""):
+        scan, _, name = key.partition("/")
+        if not name.endswith(".json") or "/" in name:
+            continue
+        try:
+            when = scan_time(scan).timestamp()
+        except ValueError:
+            continue
+        if now - when <= days * 86400 and store.read_json(key).get("ongoing_jobs"):
+            out.append((scan, name.removesuffix(".json")))
+    return sorted(out)
+
+
 @command("cost")
 @option("-c", "--profile", "profile_path", default=None, help=f"Scan-run profile (default ${PROFILE_ENV})")
 @option("-j", "--json", "as_json", is_flag=True, help="Structured resource/cost report")
 @option("-l", "--legacy", is_flag=True, help="Infer pre-label children by exact scan ID and dispatch window")
 @option("-o", "--out", type=Path, default=None, help="Save the report instead of printing it")
+@option("-O", "--save", "roots", multiple=True, help="Save the JSON report as <ROOT>/<scan>/<root uid>.json (a dir or URL; repeatable), and reread the saved reports of the last `-r` days' scans that still listed a job running")
+@option("-r", "--refresh-days", type=int, default=7, show_default=True, help="With -O: how far back unsettled saved reports are reread")
 @option("-s", "--scan", required=True, help="Exact scan ID, not a day prefix")
 @argument("run_id")
 def cost_cmd(
@@ -262,6 +317,8 @@ def cost_cmd(
     as_json: bool,
     legacy: bool,
     out: Path | None,
+    roots: tuple[str, ...],
+    refresh_days: int,
     scan: str,
     run_id: str,
 ) -> None:
@@ -270,18 +327,27 @@ def cost_cmd(
     Includes detached jobs carrying the root label. Rates are deployment config,
     not an invoice. Save JSON to retain the evidence before Batch expires jobs.
     """
-    from .gcp import batch_jobs, batch_tasks
+    from .blobstore import Store
+    from .gcp import batch_jobs
 
     profile = load_profile(profile_path)
     check_scan_id(scan)
     jobs = [j for region in profile.regions for j in batch_jobs(profile.project, region)]
-    roots = [j for j in jobs if run_id in (j["uid"], j["name"], j["name"].rsplit("/", 1)[-1])]
-    if len(roots) != 1:
-        raise ValueError(f"expected one root job for {run_id!r}; found {len(roots)}")
-    root = roots[0]
-    selected = select_jobs(jobs, root, scan, legacy=legacy)
-    tasks = {j["uid"]: batch_tasks(j) for j, _ in selected}
-    doc = report(profile, root, scan, selected, tasks, datetime.now(timezone.utc).timestamp())
+    now = _now()
+    doc = build_report(profile, jobs, run_id, scan, legacy=legacy, now=now)
+    if roots:
+        stores = [Store(r) for r in roots]
+        docs = {(scan, doc["root_uid"]): doc}
+        for s_, uid in unsettled(stores[0], refresh_days, now):
+            if (s_, uid) not in docs and any(j["uid"] == uid for j in jobs):
+                docs[(s_, uid)] = build_report(profile, jobs, uid, s_, legacy=legacy, now=now)
+        for (s_, uid), d in sorted(docs.items()):
+            data = (json.dumps(d, indent=2, sort_keys=True) + "\n").encode()
+            for st in stores:
+                st.write_bytes(report_key(s_, uid), data)
+            print(f"cost: {s_} {uid}: ${d['estimated_compute_usd']:.2f} (+ upkeep ${sum(d['upkeep_usd'].values()):.2f})"
+                  + (f", still running: {', '.join(d['ongoing_jobs'])}" if d["ongoing_jobs"] else ""), file=sys.stderr)
+        return
     text = json.dumps(doc, indent=2, sort_keys=True) + "\n" if as_json else render_report(doc)
     if out is None:
         print(text, end="")

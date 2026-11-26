@@ -116,7 +116,7 @@ def test_exact_job_estimate_and_report():
     got = job_estimate(PRICES, root, [hour_task()], NOW, "root")
     assert got == {
         "job": "root", "uid": "root-uid", "region": "us-east1", "association": "root", "component": "scan", "stage": None,
-        "scan_id": None, "state": "SUCCEEDED", "machine": "n2-highmem-16", "provisioning_model": "SPOT", "tasks": 1,
+        "step": None, "upkeep": None, "scan_id": None, "state": "SUCCEEDED", "machine": "n2-highmem-16", "provisioning_model": "SPOT", "tasks": 1,
         "attempts": 1, "task_seconds": 3600.0, "observed_vm_seconds": 3600.0, "observed_vms": 1,
         "configured_hourly_usd": 0.3, "estimated_compute_usd": 0.3,
         "disks_per_vm": [{"type": "pd-balanced", "size_gb": 100}], "warnings": [],
@@ -126,7 +126,7 @@ def test_exact_job_estimate_and_report():
         "scan": "2026-10-13T1300", "scan_run": "root-uid", "root_uid": "root-uid", "as_of": "2026-10-13T15:00:00+00:00",
         "estimate_basis": "union of observed task assignment intervals per VM, at configured profile rates",
         "legacy_inference": False, "ongoing_jobs": [], "unpriced_jobs": [], "estimated_compute_usd": 0.3,
-        "components": {"scan": 0.3}, "billing_filter": {"root_batch_job_uid": "root-uid", "child_scan_run": "root-uid"}, "jobs": [got],
+        "components": {"scan": 0.3}, "upkeep_usd": {}, "billing_filter": {"root_batch_job_uid": "root-uid", "child_scan_run": "root-uid"}, "jobs": [got],
     }
     assert render_report(doc).splitlines() == [
         "2026-10-13T1300 · root-uid", "Observed compute estimate (not billed cost):",
@@ -137,6 +137,21 @@ def test_exact_job_estimate_and_report():
         "Excluded: boot disks and local SSDs.",
         "Excluded: network transfers, storage operations, and persistent index storage.",
         "Excluded: billing credits, negotiated discounts, and actual Spot prices.",
+    ]
+
+
+def test_upkeep_is_listed_apart_from_the_runs_total():
+    """A carry or fold the run submitted (`upkeep` label) is priced and listed, but serves every scan it merges: it's in
+    `upkeep_usd`, not in the run's total or components."""
+    root = job()
+    fold = job("sn-compact", "fold-uid", {"scan_run": "root-uid", "component": "static-names", "stage": "compact", "upkeep": "fold"})
+    doc = report(PRICES, root, "2026-10-13T1300", [(root, "root"), (fold, "scan_run_label")],
+                 {"root-uid": [hour_task()], "fold-uid": [hour_task()]}, NOW)
+    assert (doc["estimated_compute_usd"], doc["components"], doc["upkeep_usd"]) == (0.3, {"scan": 0.3}, {"fold": 0.3})
+    assert render_report(doc).splitlines()[2:5] == [
+        "  scan/-  SUCCEEDED  n2-highmem-16  1.000 VM-h  $0.3000  root",
+        "  static-names/compact (fold, not in the total)  SUCCEEDED  n2-highmem-16  1.000 VM-h  $0.3000  sn-compact",
+        "Total priced observed compute: $0.3000",
     ]
 
 
@@ -163,3 +178,35 @@ def test_cli_json_saved_read_only(tmp_path, monkeypatch):
     assert (result.exit_code, result.output) == (0, "")
     saved = json.loads(out.read_text())
     assert (saved["estimated_compute_usd"], saved["components"], saved["ongoing_jobs"], saved["unpriced_jobs"]) == (0.3, {"scan": .3}, [], [])
+
+
+def test_cli_saves_the_run_and_rereads_unsettled_reports(tmp_path, monkeypatch):
+    """`-O ROOT`: the run's report as `<ROOT>/<scan>/<root uid>.json` in every root, and an earlier scan's saved report
+    that still listed a job running (its head, a detached fold) reread from the same listing, now settled, into every
+    root; a settled report, or one older than `-r` days, is left as saved."""
+    from dt_cloud import scan_cost
+
+    profile = tmp_path / "profile.json"
+    profile.write_text(json.dumps({"project": "p", "regions": ["us-east1"], "prices": {"n2-highmem-16": 1}, "spot_factor": .3}))
+    earlier = job("earlier", "earlier-uid", {"scan_id": "2026-10-13t0700"})
+    monkeypatch.setattr(gcp, "batch_jobs", lambda project, region: [job(), earlier])
+    monkeypatch.setattr(gcp, "batch_tasks", lambda j: [hour_task()])
+    monkeypatch.setattr(scan_cost, "_now", lambda: NOW)
+    a, b = tmp_path / "a", tmp_path / "b"
+    for name, doc in (("2026-10-13T0700/earlier-uid.json", {"ongoing_jobs": ["earlier"], "estimated_compute_usd": 0.1}),
+                      ("2026-10-13T0100/settled-uid.json", {"ongoing_jobs": [], "estimated_compute_usd": 0.2}),
+                      ("2026-10-01T0700/old-uid.json", {"ongoing_jobs": ["old"], "estimated_compute_usd": 0.4})):
+        (a / name).parent.mkdir(parents=True, exist_ok=True)
+        (a / name).write_text(json.dumps(doc))
+    result = CliRunner().invoke(main, ["scan-run", "cost", "-c", str(profile), "-s", "2026-10-13T1300", "-r", "7",
+                                       "-O", str(a), "-O", str(b), "root-uid"])
+    assert result.exit_code == 0, result.output
+
+    def saved(root):
+        return {p.relative_to(root).as_posix(): (json.loads(p.read_text())["estimated_compute_usd"], json.loads(p.read_text())["ongoing_jobs"])
+                for p in sorted(root.rglob("*.json"))}
+    assert (saved(a), saved(b)) == (
+        {"2026-10-01T0700/old-uid.json": (0.4, ["old"]), "2026-10-13T0100/settled-uid.json": (0.2, []),
+         "2026-10-13T0700/earlier-uid.json": (0.3, []), "2026-10-13T1300/root-uid.json": (0.3, [])},
+        {"2026-10-13T0700/earlier-uid.json": (0.3, []), "2026-10-13T1300/root-uid.json": (0.3, [])},
+    )
