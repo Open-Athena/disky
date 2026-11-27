@@ -26,9 +26,10 @@ op_icon: mark.png
 plot_project: oa-r2-usage-icons
 plot_branch: plot
 plot_base: https://plot.oa-r2-usage-icons.pages.dev
-# sender: the headline as the reply's sender name + a trend-arrow avatar. The scan runs once a day (07:15 UTC), so
-# the day's reply is its first scan from 00Z on, and there is no provisional reply
-variant: sender
+# weekly: a reply per ISO week (`wk of M/D`, the OP's icon), the week so far then a line per day, edited as each day
+# lands (Ryan's pick 2026-11-26, over `sender`'s reply a day). The scan runs once a day (07:15 UTC), so there is no
+# provisional reply. The thread state is per variant (`{variant}` above): weekly's was seeded from sender's
+variant: weekly
 # the plot stays the OP's one image block; no second reply carrying it split in two
 split_reply: false
 reply_hour: 0
