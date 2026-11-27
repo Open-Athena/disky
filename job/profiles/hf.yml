@@ -62,6 +62,7 @@ env:
   AWS_DEFAULT_REGION: auto                         # R2's region
   SLACK_CHANNEL: C0C9G547AP7                       # #hf-usage: the digest
   SLACK_ALERT_CHANNEL: C0C9J9VDPV5                 # #hf-admin: every alert
+  INTERVAL_STORE_MTIME: coarse                     # the interval store's change counters: hf's mtimes are commit / repo dates, not write times (specs/change-metrics.md §1.2)
 pass: [DT_RECORD, DT_ALERTS]
 labels: {deployment: hf}
 queue_size: 20
