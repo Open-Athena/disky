@@ -29,10 +29,10 @@ import { useStore } from './store'
 import { useMinSlug } from './scan'
 import {
   batchHref, isLost, isMaintenance, isScanProducer, liveness, logsHref, maintStore, mapHref, metaHref, type OutputDelta, phaseOrder, processingSecs, type PhaseSpan, type RunSummary, type ScanRun,
-  type ScanRunPhase, type PhaseIssue, type PhaseRecovery, BEHIND, DEFERRED, issueLeaves, issueState, issueWhat, overlappingFailures, phaseFill, phaseOutcome, runOutcome, runOutcomeLine, runTasks,
+  type ScanRunPhase, type PhaseIssue, type PhaseRecovery, BEHIND, DEFERRED, issueLeaves, issueState, issueWhat, jobTarget, overlappingFailures, phaseFill, phaseOutcome, runOutcome, runOutcomeLine, runTasks,
   type RunTask, STATUS_FILTERS, statusMatches, taskLogsHref, compactSpans, coveredSecs, phaseFamilies, phaseMatches, phaseOf,
 } from './scanRunsModel'
-import { agoLong, colorer, fmtDur, fmtRunTime, getJson, IssueStanding, type Links, PhaseBar, QUIET_TIP, runDay, RunWhen, scanRunsApi, scansHref, scansStore, Status, useScanRuns } from './scanRunsUi'
+import { agoLong, colorer, fmtDur, fmtRunTime, getJson, IssueStanding, type JobLinks, type Links, PhaseBar, QUIET_TIP, ReasonText, runDay, RunWhen, scanRunsApi, scansHref, scansStore, Status, useScanRuns } from './scanRunsUi'
 import { brushRole, dagNodes, processOf, type DagNode, type Hl, type RunDagRow } from './runDag'
 import { DEFAULT_SIZES, pageParam, Pager, usePaged } from './Pager'
 import { durationAxis, durationSegments } from './durationAxis'
@@ -77,9 +77,32 @@ function useScansStore(): { store: Store; scanHref: (id?: string) => string } {
 export function ScansRoute({ run }: { run?: boolean }) {
   const { search } = useLocation()
   const id = useParams()['*']
-  const legacy = new URLSearchParams(search).has('store') ? scansStore(search) : null
+  const params = new URLSearchParams(search)
+  const legacy = params.has('store') ? scansStore(search) : null
   if (legacy && legacy !== DEFAULT_STORE) return <Navigate to={scansHref(legacy, run ? id : undefined)} replace />
+  const job = run ? null : params.get('job')
+  if (job) return <JobRun job={job} region={params.get('region')} />
   return run ? <ScanRunPage /> : <ScansPage />
+}
+
+/** `/scans?job=<name>[&region=<region>]` (`dt_cloud.scan_runs.job_scans_url`: a Slack alert's link to the job holding a
+ *  store's lease): once the list loads, the run that job recorded (`jobTarget`), else its Batch console page. */
+function JobRun({ job, region }: { job: string; region: string | null }) {
+  const { store, scanHref } = useScansStore()
+  const q = useScanRuns(store)
+  useDocTitle(job, 'Scans')
+  const to = q.data ? jobTarget(job, region, q.data.runs.map(s => s.run), q.data.project) : null
+  const away = to && 'href' in to ? to.href : null
+  useEffect(() => { if (away) window.location.replace(away) }, [away])
+  if (to && 'run' in to) return <Navigate to={scanHref(to.run)} replace />
+  return <main className="staged-page scans-page">
+    <SiteNav />
+    <p className="sr-crumbs"><Link to={scanHref()}>Scan runs</Link></p>
+    {q.isLoading ? <p>Finding the run of job <code>{job}</code>…</p>
+      : q.error ? <p className="err">{q.error.message}</p>
+        : away ? <p>No run of job <code>{job}</code> is on record here: opening <a href={away}>its Batch job</a>…</p>
+          : <p>No run of job <code>{job}</code> is on record here{region ? ', and this deployment names no GCP project to find its Batch job in' : ', and the link names no region to find its Batch job in'}.</p>}
+  </main>
 }
 
 function useBytes(alwaysSuffix = false) {
@@ -468,6 +491,8 @@ export function ScansPage() {
   const now = Math.floor(Date.now() / 1000)
   const order = useMemo(() => phaseOrder(runs.flatMap(r => r.spans.map((s, i) => ({ phase: s.phase, seq: i })))), [runs])
   const color = colorer(order)
+  // where a busy skip's holder links (`ReasonText`): its recorded run among these, else its Batch job
+  const jobs = useMemo((): JobLinks => ({ runs: runs.map(s => s.run), project: q.data?.project ?? null }), [runs, q.data?.project])
   // the runs' kinds, and the URL's own when no run has it (a stale link shows what it filters by)
   const kinds = [...new Set([...runs.map(r => r.run.kind), ...runFilterKinds(kind)])].sort()
   useActions({
@@ -562,7 +587,7 @@ export function ScansPage() {
                       {r.trigger === 'manual' && <> <Tooltip content={r.trigger_by ? `Started by hand by ${r.trigger_by}, not by the schedule.` : 'Started by hand (a submit or a resume), not by the schedule.'}><span className="dim">manual</span></Tooltip></>}
                     </td>
                     <td className="nb"><span className={`sr-job-type ${kindClass(r.kind)}`}><KindLabel run={r} /></span>{s.downstream > 0 && <Tooltip content={`${s.downstream} downstream jobs (listing fan-out, etc.)`}><span className="dim"> +{s.downstream}</span></Tooltip>}</td>
-                    <td><Status cell run={r} failedAt={s.failed_at} issues={s.phase_issues} lost={live?.lost} runHref={scanHref} />{live && <Live live={live} />}</td>
+                    <td><Status cell run={r} failedAt={s.failed_at} issues={s.phase_issues} lost={live?.lost} runHref={scanHref} jobs={jobs} />{live && <Live live={live} />}</td>
                     <td className="num nb">{s.secs == null ? <span className="dim">—</span> : processing == null ? fmtDur(s.secs) : <>
                       <span>{fmtDur(processing)} processing</span>
                       <div className="sr-kind dim">{fmtDur(s.secs)} incl. wait</div>
@@ -793,11 +818,12 @@ const vmH = (h: number) => (h < 10 ? h.toFixed(2) : Math.round(h).toLocaleString
 
 /** A run's compute by stage → job (specs/scan-cost-by-stage.md), its store upkeep apart: an estimate at the profile's rates. */
 function RunCost({ report, project }: { report: RunCostReport; project: string | null }) {
-  const { stages, total, upkeep } = costStages(report)
+  const { stages, total, billed, upkeep } = costStages(report)
+  const anyBilled = report.billed_jobs != null
   const rows = (s: CostStage, apart = false) => s.jobs.length === 1 && s.jobs[0].label === s.stage ? [job(s.jobs[0].job, <b>{s.stage}</b>, 'sr-cost-stage')] : [
     <tr key={s.stage} className="sr-cost-stage">
       <td colSpan={2}><b>{s.stage}</b>{apart && <span className="dim"> (not in the run’s total)</span>}</td>
-      <td className="num nb">{vmH(s.vmHours)}</td><td className="num nb">{usd(s.usd)}</td><td />
+      <td className="num nb">{vmH(s.vmHours)}</td><td className="num nb">{usd(s.usd)}</td>{anyBilled && <td className="num nb">{usd(s.billed)}</td>}<td />
     </tr>,
     ...s.jobs.map(({ label, job: j }) => job(j, label)),
   ]
@@ -811,6 +837,7 @@ function RunCost({ report, project }: { report: RunCostReport; project: string |
           <td className="num nb">{job.estimated_compute_usd == null
             ? <Tooltip content={job.warnings.join('; ') || 'not priced'}><span className="dim">?</span></Tooltip>
             : usd(job.estimated_compute_usd)}</td>
+          {anyBilled && <td className="num nb">{job.billed_usd == null ? <span className="dim">—</span> : usd(job.billed_usd)}</td>}
           <td className="nb">{href ? <a href={href} target="_blank" rel="noreferrer"><code>{job.job}</code></a> : <code>{job.job}</code>}</td>
         </tr>
       )
@@ -823,10 +850,13 @@ function RunCost({ report, project }: { report: RunCostReport; project: string |
       {' '}(spot at its multiplier), as of {fmtRunTime(Math.floor(Date.parse(report.as_of) / 1000))}.
       {report.ongoing_jobs.length > 0 && <> Still running then: {report.ongoing_jobs.join(', ')}; the next run’s report rereads it.</>}
       {report.legacy_inference && <> Jobs before run labels were matched by scan and time.</>}
+      {anyBilled && (billed != null
+        ? <> Billed so far (the billing export, about a day late): {usd(billed)}{upkeep?.billed != null && <> + {usd(upkeep.billed)} upkeep</>}.</>
+        : <> Billed: no lines in the billing export yet (they arrive about a day after a job runs).</>)}
     </p>
     <div className="runs-wrap">
       <StickyTable className="runs sr-cost">
-        <thead><tr><th>stage · job</th><th>machine</th><th className="num">VM-h</th><th className="num">estimate</th><th>Batch job</th></tr></thead>
+        <thead><tr><th>stage · job</th><th>machine</th><th className="num">VM-h</th><th className="num">estimate</th>{anyBilled && <th className="num">billed</th>}<th>Batch job</th></tr></thead>
         <tbody>{[...stages.flatMap(s => rows(s)), ...(upkeep ? rows(upkeep, true) : [])]}</tbody>
       </StickyTable>
     </div>
@@ -933,6 +963,9 @@ export function ScanRunPage() {
   const { store, scanHref } = useScansStore()
   const q = useScanRun(id, store)
   const list = useScanRuns(store)
+  // where a busy skip's holder links (`ReasonText`): its recorded run in this store's list, else its Batch job
+  const jobs = useMemo((): JobLinks => ({ runs: (list.data?.runs ?? []).map(s => s.run), project: q.data?.project ?? list.data?.project ?? null }),
+    [list.data, q.data?.project])
   const slug = useMinSlug(store)
   useDocTitle(q.data ? q.data.run.scan : 'Scan', 'Scans')
   const order = useMemo(() => phaseOrder((list.data?.runs ?? []).flatMap(r => r.spans.map((s, i) => ({ phase: s.phase, seq: i })))), [list.data])
@@ -963,7 +996,7 @@ export function ScanRunPage() {
         {r.kind === 'access-ingest' && <p className="sub">An independent hourly access-log ingest. It updates the aggregates used by future scans; it does not publish a snapshot or change an existing scan’s recorded read data.</p>}
         {isMaintenance(r.kind) && <p className="sub">{r.kind === 'compact' ? 'A compaction' : r.kind === 'race' ? 'A race of a compaction (built beside it; published only if a compaction adopts it)' : 'A merge of deferred carries'} of <code>{r.gen ?? '?'}</code>, its own Batch job; <code>{r.scan}</code> is the newest scan it {r.kind === 'merge' ? 'carries' : 'folds'}{d.siblings.length > 0 && <> (<Link to={scanHref(d.siblings[d.siblings.length - 1].run_id)}>its scan run</Link>)</>}.</p>}
         <p className="sub">
-          <Status run={r} failedAt={d.failed_at} issues={d.phase_issues} lost={liveDetail?.lost} runHref={scanHref} />{liveDetail && <Live live={liveDetail} inline />}
+          <Status run={r} failedAt={d.failed_at} issues={d.phase_issues} lost={liveDetail?.lost} runHref={scanHref} jobs={jobs} />{liveDetail && <Live live={liveDetail} inline />}
           {latest && <> <Tooltip content={`The newest ${isScanProducer(r.kind) ? 'scan' : r.kind} run recorded here.`}><span className="sr-latest">latest</span></Tooltip></>}
           {' · '}<Tooltip content={<><div>started {fmtRunTime(r.started_ts)}</div><div>{r.finished_ts ? <>finished {fmtRunTime(r.finished_ts)}</> : 'still running'}</div></>}>
             <span className="sr-when">{r.finished_ts ? `${agoLong(r.finished_ts)} ago` : r.started_ts != null ? `started ${agoLong(r.started_ts)} ago` : 'start unknown'}</span>
@@ -985,7 +1018,7 @@ export function ScanRunPage() {
             ? <><b>{i.phase}: search doesn't cover this scan yet.</b> {sentence(i.reason ?? '')} The data is published.</>
             : i.outcome === DEFERRED
               ? <><b>{i.phase}: deferred.</b> {sentence(i.reason ?? '')} The data is published.</>
-              : <><b>{i.phase}</b> {stop(issueWhat(i))}{i.detail && <> {sentence(i.detail)}</>}{r.kind !== 'access-ingest' && issueLeaves(i) && <> {sentence(issueLeaves(i)!)}</>}</>}
+              : <><b>{i.phase}</b> <ReasonText text={stop(issueWhat(i))} jobs={jobs} runHref={scanHref} />{i.detail && <> {sentence(i.detail)}</>}{r.kind !== 'access-ingest' && issueLeaves(i) && <> {sentence(issueLeaves(i)!)}</>}</>}
           {' '}<IssueStanding issue={i} runHref={scanHref} />
         </div>)}
         {r.kind === 'phase-recovery' && r.parent && <p className="sub">Phase recovery for <Link to={scanHref(r.parent)}>the original scan run</Link>. This attempt has its own clock; it does not replace the original timings.</p>}

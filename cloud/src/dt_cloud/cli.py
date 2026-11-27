@@ -1777,8 +1777,9 @@ def plan_sweep_manifest(date: str, interval_store: str | None, l2_path: str | No
 @plan_sweep.command("execute")
 @option("-r", "--for-real", is_flag=True, help="Actually delete (may be permanent); default is a dry run")
 @option("-s", "--min-soft-delete-days", default=0, type=IntRange(0, 90), help="Refuse --for-real on a bucket retaining deleted data for less (versioning + a noncurrent rule); 0 requires nothing")
+@option("-w", "--delete-workers", default=None, type=IntRange(1, 128), help="DeleteObjects calls in flight (default `sweep.DELETE_WORKERS`)")
 @argument("run_dir")
-def plan_sweep_execute(for_real: bool, min_soft_delete_days: int, run_dir: str) -> None:
+def plan_sweep_execute(for_real: bool, min_soft_delete_days: int, delete_workers: int | None, run_dir: str) -> None:
     """Execute the manifest under RUN_DIR against an S3-style store (boto3).
 
     Default is a dry run (touches nothing). `--for-real` deletes reviewed keys
@@ -1788,7 +1789,8 @@ def plan_sweep_execute(for_real: bool, min_soft_delete_days: int, run_dir: str) 
 
     from .sweep import execute_plan
 
-    s = execute_plan(run_dir, for_real=for_real, min_soft_delete_days=min_soft_delete_days)
+    s = execute_plan(run_dir, for_real=for_real, min_soft_delete_days=min_soft_delete_days,
+                     **({"delete_workers": delete_workers} if delete_workers else {}))
     err(
         f"{'REAL' if for_real else 'DRY'}: {s['deleted_objects']} objs / {s['deleted_bytes']} bytes; "
         f"gone {s['skipped_gone']} overwritten {s['skipped_overwritten']} "
@@ -3507,7 +3509,7 @@ def _digest_options(template_default: str):
         option("-t", "--token", help="Slack bot token (default $SLACK_BOT_TOKEN)"),
         option("-T", "--template", type=Choice(["cost", "quota", "gcs", "cw"]), default=template_default, help=f"Post style + preset config (default {template_default}): cost = a reply per day, $/mo by storage class, class mosaic; quota = a reply per day, % of quota per bucket, quota sparkline + diff treemap (old names: gcs = cost, cw = quota)"),
         option("-u", "--url", "site_url", default=None, help="Site base for links (default the config's `site_url`, else $SITE_URL)"),
-        option("-V", "--variant", type=Choice(["sender", "body"]), default=None, help="Reply style (quota template): headline as the sender name, posted once from the day's morning scan (sender, default) or bold in the body, edited as the day's scans land (body)"),
+        option("-V", "--variant", type=Choice(["sender", "body", "weekly"]), default=None, help="Reply style: headline as the sender name, posted once from the day's morning scan (sender, default); quota template: bold in the body, edited as the day's scans land (body); a reply per week, `wk of M/D`, the week so far then a line per day, edited as each day lands (weekly)"),
         option("-y", "--replies", "reply_range", help="Re-apply only the already-posted replies of this inclusive day range (`A..B`, YYYY-MM-DD) to their current rendering, as -d/--reply"),
         option("-w", "--webhook", help="Discord webhook URL in the digest channel (default $<config discord_webhook_env>: gcs $DISCORD_GCS_USAGE_WEBHOOK, cw none; with -P discord)"),
         option("-W", "--preview-only", "preview_key", help="Write only the month's preview bundle under this channel key (a lowercase slug, listed in /admin/slack's thread selector): no Slack client, no plot hosted, nothing posted or edited"),

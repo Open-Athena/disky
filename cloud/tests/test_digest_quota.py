@@ -737,6 +737,41 @@ def test_reply_body_variant():
     )
 
 
+def test_weekly_variant_is_a_reply_per_week_edited_as_days_land():
+    # 9/1 and 9/2 share the ISO week of 8/31: the week so far (+10.0 on 705 over 48 h = 4.96%/wk → deg40), then each
+    # day's `body` line; sent as `wk of 8/31` with the OP's icon (a sender is fixed at post time); the newest day's scan
+    tpl = D.QuotaTemplate(CFG)
+    assert tpl.units(MONTH, "weekly") == [E.Unit("wk-2026-08-31", "2026-09-02T1200", E.Reply(
+        "wk of 8/31",
+        "\n".join([
+            ":arrow_deg40: *week:* **+10.0 TiB (1.4%)**",
+            f":arrow_deg50: [9/1]({SITE}/?d=26090112-1d#over-time) — **713 TiB (+8.0, 1.1%)** · "
+            f"[main]({SITE}/main-data?d=26090112-1d#over-time): 78.4% of 1P (197.0 Ti free)",
+            f":arrow_deg30: [9/2]({SITE}/?d=26090212-1d#over-time) — **715 TiB (+2.0, 0.3%)** · "
+            f"[main]({SITE}/main-data?d=26090212-1d#over-time): 78.6% of 1P (195.0 Ti free)",
+        ]),
+        icon_emoji=":calendar:",
+    ))]
+    assert tpl.edited_variants == ("body", "weekly")
+    # its days are the daily replies' (`sender`: each day's morning scan), not `body`'s (each day's last scan): a day
+    # whose 12:00 scan hasn't landed has no line yet, so no change is dated a day earlier than its daily reply dates it
+    half = D.Month(lead=MONTH.lead, rows=MONTH.rows[:3])
+    assert [u.reply.body for u in tpl.units(half, "weekly")] == [
+        f":arrow_deg50: [9/1]({SITE}/?d=26090112-1d#over-time) — **713 TiB (+8.0, 1.1%)** · "
+        f"[main]({SITE}/main-data?d=26090112-1d#over-time): 78.4% of 1P (197.0 Ti free)",
+    ]
+
+
+def test_weekly_units_split_by_iso_week():
+    # 11/1 (a Sunday) closes the week of 10/26; a one-day week has no summary line
+    lines = [E.DayLine(date(2026, 11, d), f"2026-11-0{d}T0700", f"day {d}") for d in (1, 2, 3)]
+    units = E.weekly_units(lines, lambda i, j: f"sum {i}..{j}", {"icon_emoji": ":calendar:"})
+    assert units == [
+        E.Unit("wk-2026-10-26", "2026-11-01T0700", E.Reply("wk of 10/26", "day 1", icon_emoji=":calendar:")),
+        E.Unit("wk-2026-11-02", "2026-11-03T0700", E.Reply("wk of 11/2", "sum 1..2\nday 2\nday 3", icon_emoji=":calendar:")),
+    ]
+
+
 def test_reply_first_day_ever():
     # no prior scan: zero delta, flat arrow, link without a look-back
     day = D.day_rows(D.Month(lead=[], rows=MONTH.rows[:2]), "sender", 12)[0]
@@ -1204,10 +1239,10 @@ def test_live_settings_override_the_file(monkeypatch):
     assert str(e.value) == "digest settings quota_marks: 'squares' is not one of ('warning', 'circles', 'runway', 'runway-hue', 'arrow-chip')"
 
 
-def test_quota_alert_is_broadcast_while_over_and_deleted_once_under(tmp_path: Path):
+def test_quota_alert_is_broadcast_while_over_and_struck_through_once_under(tmp_path: Path):
     """`alert_pct`: a quota at or over it marks the day's clause `:warning:`, and the thread gets one alert reply also
-    sent to the channel (`broadcast`); it is deleted once every quota is back under (Slack can't un-broadcast), and a
-    later crossing posts a new one. RNO2A, 2026-10-29: 98 of 100 Ti for two days, no quota shown, writes suspended."""
+    sent to the channel (`broadcast`); once every quota is back under it is struck through with when it resolved (Slack
+    can't un-broadcast, and deleting it broke every quote and forward of it), and a later crossing posts a new one. RNO2A, 2026-10-29: 98 of 100 Ti for two days, no quota shown, writes suspended."""
     tpl = E.template(replace(CFG, alert_pct=78.3))  # main: 78.0% → 78.35% → 78.24% → 78.6% of 1P
     root = tmp_path / "snapshots" / "cw"
     u = lambda d: f"{SITE}/main-data?d={d}#over-time"  # noqa: E731
@@ -1236,7 +1271,8 @@ def test_quota_alert_is_broadcast_while_over_and_deleted_once_under(tmp_path: Pa
     assert state["alert"] == {"ts": "m3", "body": over}
 
     state, calls = step(SEPT[2:3])
-    assert (calls[1:], "alert" in state) == ([("delete", "m3")], False)
+    # resolved: the alert stays (a quote or forward of it still opens), struck through, with the scan it resolved at
+    assert (calls[1:], "alert" in state) == ([("edit", "m3", f"~{over}~\n:white_check_mark: Resolved as of 9/2 00:00Z: every quota is back under 78.3%.")], False)
 
     state, calls = step(SEPT[3:4])
     over = alert("26090212", "78.6% of 1P (195.0 Ti free)", "9/2 12:00")
@@ -1250,7 +1286,7 @@ def test_quota_alert_is_broadcast_while_over_and_deleted_once_under(tmp_path: Pa
 
 def test_a_month_ending_over_quota_moves_its_alert_to_the_next_months_thread(tmp_path: Path):
     """A quota still over when the month ends: the scheduled converge (`converge_slack_now`) closes the old month,
-    whose alert counts as resolved there (deleted), and the new month's thread posts the one alert: never both."""
+    whose alert counts as resolved there (struck through), and the new month's thread posts the one alert: never both."""
     tpl = E.template(replace(CFG, alert_pct=78.3))
     root = tmp_path / "snapshots" / "cw"
     _publish(root, LEAD + SEPT)
@@ -1262,9 +1298,12 @@ def test_a_month_ending_over_quota_moves_its_alert_to_the_next_months_thread(tmp
     fake.calls.clear()
     oct_ = E.converge_slack_now(tpl, str(root), date(2026, 10, 1), fake, "C1", "sender")
     body = f":warning: **Quota alert**: [main]({SITE}/main-data?d=261001#over-time): 78.7% of 1P (194.0 Ti free) · _as of 10/1 12:00Z_"
-    # the alert calls alone: September's deleted, October's posted under October's OP (m5; its reply is m6)
-    assert [c for c in fake.calls if c[0] == "delete" or c[-1] == "broadcast"] == [
-        ("delete", "m4"), ("post", body, "m5", "S3 usage: quota alert", None, ":warning:", "broadcast")]
+    # the alert calls alone: September's struck through as resolved by the month's close, October's posted under
+    # October's OP (m5; its reply is m6)
+    sept_body = sept["alert"]["body"]
+    assert [c for c in fake.calls if c[:2] == ("edit", "m4") or c[-1] == "broadcast"] == [
+        ("edit", "m4", f"~{sept_body}~\n:white_check_mark: Resolved as of 9/2 12:00Z: the month closed; its next thread carries any alert."),
+        ("post", body, "m5", "S3 usage: quota alert", None, ":warning:", "broadcast")]
     assert ("alert" in E.load_state(E.state_path(str(root), SEP, CFG.state.format(channel="C1", variant="sender"))), oct_["alert"]) == (
         False, {"ts": "m7", "body": body})
 
@@ -1394,8 +1433,9 @@ def test_closing_last_months_thread_leaves_the_pin_alone(tmp_path: Path):
     _publish(root, [("2026-10-01T1200", _meta(716))])  # still over quota: September's alert is closed by October's run
     fake.calls.clear()
     oct_ = E.converge_slack_now(tpl, str(root), OCT, fake, "C1", "sender")
-    assert [c for c in fake.calls if c[0] in ("api", "delete")] == [
-        ("delete", "m4"),
+    # September's alert stays, struck through as resolved by the month's close (never deleted: quotes of it keep opening)
+    assert [c for c in fake.calls if c[0] in ("api", "delete") or c[:2] == ("edit", "m4")] == [
+        ("edit", "m4", f"~{sept['alert']['body']}~\n:white_check_mark: Resolved as of 9/2 12:00Z: the month closed; its next thread carries any alert."),
         ("api", "pins.add", {"channel": "C1", "timestamp": "m5"}),
         ("api", "pins.remove", {"channel": "C1", "timestamp": "m1"}),
     ]
@@ -1679,3 +1719,10 @@ def test_icons_dir_resolves_beside_the_config_from_a_task_work_dir(tmp_path, mon
     monkeypatch.chdir(work)
     assert (_icons_dir("job/icons-x", app / "job" / "digest.yml"), _icons_dir("/abs/icons", app / "job" / "digest.yml")) == (
         app / "job" / "icons-x", Path("/abs/icons"))
+
+
+def test_a_delta_that_rounds_to_zero_reads_plus_zero():
+    """`digest._tb`: `round(-0.04, 1)` is `-0.0`, which once rendered `+-0.0` (r2's weekly reply for 11/16); any delta that
+    rounds to zero reads `+0.0`, and the rest keep their sign."""
+    assert [E._tb(v) for v in (round(-0.04, 1), -0.04, 0.0, 0.04, 0.05, -0.06, 12.34, -12.34)] == [
+        "+0.0", "+0.0", "+0.0", "+0.0", "+0.1", f"{E.MINUS}0.1", "+12.3", f"{E.MINUS}12.3"]
