@@ -539,7 +539,7 @@ export async function stagedCardUrl(env: NotifyEnv & Env & { OG_CARDS?: string; 
   if (!tok) return null
   const version = await stagedImageVersion(env, digest)
   // a closed thread's card: its own window (`th`), not the plan's current thread
-  const view = thread ? { th: `${thread.since}-${thread.until}` } : {}
+  const view: Record<string, string> = thread ? { th: `${thread.since}-${thread.until}` } : {}
   return siteUrl + await imagePath(key, 'staged', imageParams(view, deleted ? `${version}.${deleted}` : version, { t: tok.token }), 'full', Math.min(expDay(now, IMAGE_TTL_DAYS), tok.day))
 }
 
