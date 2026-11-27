@@ -390,9 +390,9 @@ def test_tail_runway_fixed_order():
     more = f"[more-data]({u('more-data')}): 2 Ti"
     assert D._tail(day, cfg).split(" · ") == [
         f":large_green_circle: {main}",
-        f":red_circle: {zone}, +5.6 Ti/d over 7d, ≈3d to full",
+        f":red_circle: {zone}, +5.6 Ti/d [over 7d]({SITE}/?d=2609231201-7d&g=z8#over-time), ≈3d to full",
         more,
-        f":large_orange_circle: [cold]({u('cold-data')}): 12% of 100Ti, +10.0 Ti/d over 1d, ≈9d to full",
+        f":large_orange_circle: [cold]({u('cold-data')}): 12% of 100Ti, +10.0 Ti/d [over 1d]({SITE}/cold-data?d=2609231201-1d#over-time), ≈9d to full",
     ]
     over = replace(day, extra={**now, "cold-data": 101.3}, hist=hist[:-1] + (_hist_scan("2026-09-23T1201", 825.9, {**now, "cold-data": 101.3}),))
     assert D._tail(over, cfg).split(" · ")[3] == f":red_circle: [cold]({u('cold-data')}): 101.3% of 100Ti (1.3 Ti over)"
@@ -402,9 +402,9 @@ def test_tail_runway_fixed_order():
     # `runway-hue`: the same order, rate text and runways, each as its `:runway-N:` step
     assert D._tail(day, replace(cfg, quota_marks="runway-hue")).split(" · ") == [
         f":runway-8: {main}",
-        f":runway-2: {zone}, +5.6 Ti/d over 7d, ≈3d to full",
+        f":runway-2: {zone}, +5.6 Ti/d [over 7d]({SITE}/?d=2609231201-7d&g=z8#over-time), ≈3d to full",
         more,
-        f":runway-4: [cold]({u('cold-data')}): 12% of 100Ti, +10.0 Ti/d over 1d, ≈9d to full",
+        f":runway-4: [cold]({u('cold-data')}): 12% of 100Ti, +10.0 Ti/d [over 1d]({SITE}/cold-data?d=2609231201-1d#over-time), ≈9d to full",
     ]
     # `circles` is unchanged by the history: fullest first, by fill
     assert D._tail(day, replace(cfg, quota_marks="circles")).split(" · ") == [
@@ -431,7 +431,7 @@ def test_runway_reaches_before_the_month():
     links = lambda t: re.sub(r"\]\([^)]*\)", "](…)", t)  # noqa: E731
     day2 = D.day_rows(month, "sender", 12)[1]
     assert day2.date == "2026-11-02"
-    assert links(D._tail(day2, cfg).split(" · ")[1]) == ":red_circle: [hot](…) 82 + [side](…) 3 Ti: 85.0% of 100Ti (15.0 Ti free), +5.7 Ti/d over 7d, ≈3d to full"
+    assert links(D._tail(day2, cfg).split(" · ")[1]) == ":red_circle: [hot](…) 82 + [side](…) 3 Ti: 85.0% of 100Ti (15.0 Ti free), +5.7 Ti/d [over 7d](…), ≈3d to full"
     alone = D.day_rows(replace(month, pre=[]), "sender", 12)[1]
     assert links(D._tail(alone, cfg).split(" · ")[1]) == ":large_green_circle: [hot](…) 82 + [side](…) 3 Ti: 85.0% of 100Ti (15.0 Ti free)"
 
@@ -1281,7 +1281,7 @@ def test_quota_alert_is_broadcast_while_over_and_struck_through_once_under(tmp_p
     state, calls = step(SEPT[1:2])
     # the alert carries each pool's runway as the replies show it (here under `warning` marks, whose replies don't);
     # one filling too slowly to reach full within `RUNWAY_TEXT_D` days (9/2's) has none
-    over = alert("26090112", "78.4% of 1P (197.0 Ti free), +8.0 Ti/d over 1d, ≈25d to full", "9/1 12:00")
+    over = alert("26090112", f"78.4% of 1P (197.0 Ti free), +8.0 Ti/d [over 1d]({u('26090112-1d')}), ≈25d to full", "9/1 12:00")
     assert calls[1:] == [("post", f":warning: [main]({u('26090112-1d')}): 78.4% of 1P (197.0 Ti free)", "m1", "9/1 — 713 TiB (+8.0, 1.1%)",
                           f"{AV}50.png?v=4", None),
                          ("post", over, "m1", *sender)]

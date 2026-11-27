@@ -113,7 +113,7 @@ describe('quota pressure', () => {
     const m: QuotaRows = { template: 'quota', closed: false, pre: [s('2026-10-26T1201', 42)], lead: [s('2026-10-31T1201', 81.8)], rows: [s('2026-11-01T1201', 81.9), s('2026-11-02T1201', 82)] }
     const line = (rows: QuotaRows) => opText(rows, '2026-11' as typeof f.month, f.cfg, links, { ...DEFAULT_PARAMS, quotas: 'runway' }).split('\n')[1]
     // +0.1 Ti/d within November, but 42 → 82 over the week before: orange by the 7-day rate, 18 Ti free ≈ 3 days
-    expect(line(m)).toBe('*Quotas:* :large_green_circle: main 86.8% of 1P (120.0 Ti free) · :large_orange_circle: hot 82.0% of 100Ti (18.0 Ti free), +5.7 Ti/d over 7d, ≈3d to full')
+    expect(line(m)).toBe('*Quotas:* :large_green_circle: main 86.8% of 1P (120.0 Ti free) · :large_orange_circle: hot 82.0% of 100Ti (18.0 Ti free), +5.7 Ti/d [over 7d](https://cw.example.org/hot-data?d=2611021201-7d#over-time), ≈3d to full')
     // without the previous month's scans it would read calm
     expect(line({ ...m, pre: [] })).toBe('*Quotas:* :large_green_circle: main 86.8% of 1P (120.0 Ti free) · :large_green_circle: hot 82.0% of 100Ti (18.0 Ti free)')
   })
@@ -125,13 +125,13 @@ describe('quota pressure', () => {
     const last = seen[seen.length - 1]
     // main flat at 86.8%: never filling, green; hot +9.5 Ti over the last day with 0.5 Ti free: red, under a day
     expect(quotaLine(last, f.cfg, 90, 'runway', seen)).toBe(
-      '*Quotas:* :large_green_circle: main 86.8% of 1P (120.0 Ti free) · :red_circle: hot 99.5% of 100Ti (0.5 Ti free), +9.5 Ti/d over 1d, ≈<1d to full')
+      '*Quotas:* :large_green_circle: main 86.8% of 1P (120.0 Ti free) · :red_circle: hot 99.5% of 100Ti (0.5 Ti free), +9.5 Ti/d [over 1d](https://cw.example.org/hot-data?d=2609080001-1d#over-time), ≈<1d to full')
     // no history: nothing filling; hot ≥ 95% stays orange
     expect(quotaLine(last, f.cfg, 90, 'runway', [last])).toBe(
       '*Quotas:* :large_green_circle: main 86.8% of 1P (120.0 Ti free) · :large_orange_circle: hot 99.5% of 100Ti (0.5 Ti free)')
     // `runway-hue`: the same order and text, as `:runway-N:` steps
     expect(quotaLine(last, f.cfg, 90, 'runway-hue', seen)).toBe(
-      '*Quotas:* :runway-8: main 86.8% of 1P (120.0 Ti free) · :runway-1: hot 99.5% of 100Ti (0.5 Ti free), +9.5 Ti/d over 1d, ≈<1d to full')
+      '*Quotas:* :runway-8: main 86.8% of 1P (120.0 Ti free) · :runway-1: hot 99.5% of 100Ti (0.5 Ti free), +9.5 Ti/d [over 1d](https://cw.example.org/hot-data?d=2609080001-1d#over-time), ≈<1d to full')
     // `circles` ignores the history: most full first, by share
     expect(quotaLine(last, f.cfg, 90, 'circles', seen)).toBe(
       '*Quotas:* :red_circle: hot 99.5% of 100Ti (0.5 Ti free) · :large_orange_circle: main 86.8% of 1P (120.0 Ti free)')
