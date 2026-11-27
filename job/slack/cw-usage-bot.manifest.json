@@ -34,6 +34,9 @@
         "canvases:write",
         "files:write",
         "files:read"
+      ],
+      "user": [
+        "search:read"
       ]
     }
   },
