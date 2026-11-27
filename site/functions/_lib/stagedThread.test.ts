@@ -34,7 +34,7 @@ vi.mock('./identity.js', async orig => ({
   loadRegistry: async () => ({ 'ann-bee': { name: 'Ann Bee' }, kai: { u: 'kai', name: 'Kai', github: 'kai-gh' } }),
 }))
 
-const { announceFinished, missedRuns, notifyPlan, refreshStagedCard, refreshThread } = await import('./stagedSlack.js')
+const { announceFinished, missedRuns, notifyPlan, refreshStagedCard, refreshThread, threadStagers } = await import('./stagedSlack.js')
 const { onRequestPost: slackActions } = await import('../slack/actions.js')
 
 const SITE = 'https://site.example.org'
@@ -541,6 +541,22 @@ describe('D1', () => {
         [{ id: 1, stager: 'a', open: null }, { id: 3, stager: 'b', open: 1 }, { id: 4, stager: 'a', open: 1 }],
         'FOREIGN KEY constraint failed',
       ])
+    })
+  })
+
+  describe('`threadStagers`', () => {
+    it('a batch counts where its reply was posted: the opening batch (created before the parent) in, the next thread\'s opener (created before it ended) out; one with no reply by its time', async () => {
+      const { db, raw } = await planDb({ seed: false })
+      const NEXT = '200.000001'
+      for (const [id, thread] of [[1, PARENT], [2, NEXT]] as const) {
+        raw.prepare("INSERT INTO stage_replies (id, plan_id, stager, channel, thread_ts, open, created_ts, updated_ts) VALUES (?, 1, ?, ?, ?, NULL, 1, 1)").run(id, `s${id}`, CH, thread)
+      }
+      await stage(db, 1, ['gs://b/a/'], { by: 'ann', ts: 99 })
+      await stage(db, 2, ['gs://b/b/'], { by: 'bo', ts: 199 })
+      await stage(db, 3, ['gs://b/c/'], { by: 'cy', ts: 150 })
+      await stage(db, 4, ['gs://b/d/'], { by: 'di', ts: 210 })
+      raw.exec('UPDATE stage_batches SET reply_id = 1 WHERE id = 1; UPDATE stage_batches SET reply_id = 2 WHERE id = 2')
+      expect([(await threadStagers(db, 1, PARENT, 100, 200)).sort(), (await threadStagers(db, 1, NEXT, 200)).sort()]).toEqual([['ann', 'cy'], ['bo', 'di']])
     })
   })
 

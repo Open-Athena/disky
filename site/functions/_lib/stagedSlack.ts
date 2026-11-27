@@ -669,7 +669,7 @@ async function loadView(db: D1Database, planId: number, siteUrl: string, actions
   const since = plan.slack_ts ? Math.floor(Number(plan.slack_ts)) : null
   const done = since == null ? undefined : await threadDeleted(db, planId, since) ?? undefined
   const stagedBy = since == null ? undefined : [...new Set([
-    ...(await db.prepare('SELECT DISTINCT created_by FROM stage_batches WHERE plan_id = ? AND created_ts >= ?').bind(planId, since).all<{ created_by: string }>()).results.map(r => r.created_by),
+    ...await threadStagers(db, planId, plan.slack_ts!, since),
     ...live.map(i => i.added_by),
   ])].sort()
   return {
@@ -1100,6 +1100,16 @@ export async function refreshThread(env: NotifyEnv, db: D1Database, planId: numb
   return { ...out, ...await updateReplies(env, db, planId, siteUrl, { legacy: replies }) }
 }
 
+/** Who staged in the thread whose parent is `threadTs`: each batch whose reply was posted in it. A thread's opening batch
+ *  is created just before its parent is posted (and the next thread's just before that one), so a batch's time places it
+ *  only when it has no reply: then, created in `[since, until)`. */
+export async function threadStagers(db: D1Database, planId: number, threadTs: string, since: number, until: number | null = null): Promise<string[]> {
+  const { results } = await db.prepare(`SELECT DISTINCT b.created_by FROM stage_batches b LEFT JOIN stage_replies r ON r.id = b.reply_id
+    WHERE b.plan_id = ?1 AND (r.thread_ts = ?2 OR (r.id IS NULL AND b.created_ts >= ?3 AND (?4 IS NULL OR b.created_ts < ?4)))`)
+    .bind(planId, threadTs, since, until).all<{ created_by: string }>()
+  return results.map(r => r.created_by)
+}
+
 /** Re-render a closed thread's parent in place (`closedParent`: its summary and its window's card), e.g. after the format
  *  changes: `ts` its parent, `until` the next thread's parent (when it ended), both Slack ts, in `channel` (default the
  *  staged channel). Its summary is what that window held: what its real runs deleted, and what it staged that is still
@@ -1117,8 +1127,7 @@ export async function refreshClosed(env: NotifyEnv, db: D1Database, planId: numb
   const live = items.filter(i => !deleted.has(i.prefix))
   const at = await stagedStats(full, live.map(i => i.prefix), db).catch(() => null)
   const left = countedItems(live, deleted, at?.stats ?? null)
-  const batches = (await db.prepare('SELECT DISTINCT created_by FROM stage_batches WHERE plan_id = ? AND created_ts >= ? AND created_ts < ?').bind(planId, since, end).all<{ created_by: string }>()).results
-  const stagers = [...new Set([...batches.map(r => r.created_by), ...left.map(i => i.added_by)])].sort()
+  const stagers = [...new Set([...await threadStagers(db, planId, ts, since, end), ...left.map(i => i.added_by)])].sort()
   const actors = done?.actors ?? []
   const [people, faces, reg] = await Promise.all([
     slackPeople(env, [...stagers, ...actors]),
