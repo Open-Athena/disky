@@ -13,8 +13,21 @@ state: digest/hf/{channel}/{variant}
 # bucket (its `INDEX_R2`), under `digest/preview/`
 preview: r2://oa-hf-usage-index/digest/preview/{channel}/{variant}
 # the OP's text and plot request are rendered by the site (`POST /api/digest-op`, the renderer `/admin/slack` previews
-# with; specs/slack-preview-page.md phase 2), under the default params (`""`)
-params: ""
+# with; specs/slack-preview-page.md phase 2), under `params` (its codec string, `site/src/digest/codec.ts`; "" = the
+# defaults): `qs` = the quota line's marks are arrow chips, `pp` = the plot as % of each pool's quota, `lp` = each pool
+# (public, private) on its own line under a key to them; as cw's
+params: qs,pp,lp
+# a quota at/over this percent: :red_circle: in the daily replies + one alert reply also sent to the channel, deleted
+# once every quota is back under
+alert_pct: 90
+# each pool's mark: a white arrow on a square (`:pool-chip-N-D:`, installed in the workspace). Its color is the runway,
+# free ÷ the fastest net fill over the last 1/3/7 days; its arrow that fill as a share of what the pool holds. A pool
+# filling within `runway_text_days` adds `, +N TB/d over Wd, ≈Nd to full`, W the window that fill came from
+# (specs/digest-runway-marks.md). hf grows in jumps (a checkpoint upload), so the day after one reads short
+quota_marks: arrow-chip
+runway_text_days: 60
+# a reply's pools (public, private) each on their own line, not ` · `-joined
+reply_lines: true
 discord_state: digest/discord/{webhook}
 discord_webhook_env: null
 # the reply avatars (`arrows/av_deg<N>.png`) are the icons project's production deployment of `job/icons-hf/`
