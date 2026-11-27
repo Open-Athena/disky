@@ -754,7 +754,7 @@ def deferring_job(tmp_path, group, monkeypatch, env=None):
     job.profile, job.recording, job.dry_run, job.env, job.run_id = profile, True, False, env or {}, 'r9'
     job.key, job.dir = 'k', tmp_path / 'dt-scan-run'
     job.redact = lambda s: s
-    job.post_alert = lambda level, message: posted.append((level, message))
+    job.post_alert = lambda level, message, links=(): posted.append((level, message))
     return job, posted
 
 
