@@ -4,7 +4,7 @@
 // writes, and the stores' maintenance jobs (compactions, merges: `dt_cloud.maint_runs`)
 // in the same table. DIY SVG: a duration strip over all runs, a phase bar per row,
 // and a phase timeline per run.
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent, type ReactNode, type RefObject } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent, type ReactNode } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { Link, Navigate, useLocation, useNavigate, useParams } from 'react-router-dom'
 import { stringParam, useUrlState } from 'use-prms'
@@ -25,6 +25,8 @@ import { useIsAdmin, useStores } from './auth'
 import { HistoryAdmin, useHistoryConfigured } from './HistoryAdmin'
 import { retentionLabel, retentionRunSelectable, retentionScans, retentionSpanScans, toggleRetentionScan, type RetentionPlan, type RetentionScan, type RetentionSource } from './scanRetention'
 import { DEFAULT_STORE, type Store } from './stores'
+import { upkeepAnchor } from './healthModel'
+import { ScansUpkeepStrip } from './UpkeepStrip'
 import { useStore } from './store'
 import { useMinSlug } from './scan'
 import {
@@ -36,8 +38,9 @@ import { agoLong, colorer, fmtDur, fmtRunTime, getJson, IssueStanding, type JobL
 import { brushRole, dagNodes, processOf, type DagNode, type Hl, type RunDagRow } from './runDag'
 import { DEFAULT_SIZES, pageParam, Pager, usePaged } from './Pager'
 import { durationAxis, durationSegments } from './durationAxis'
+import { useWidth } from './useWidth'
 import { XRangeControls } from './XRangeControls'
-import { brushDomain, fitToWindow, fmtXr, inXDomain, parseXr, resolveXDomain, spanDomain, type XDomain } from './xDomain'
+import { autoScans, brushDomain, fitToWindow, fmtXr, inXDomain, parseXr, resolveXDomain, spanDomain, type XDomain } from './xDomain'
 import { scanTime } from './scanSlug'
 import { StickyTable } from './stickyHead'
 import { costStages, type CostStage, type RunCostReport } from './runCost'
@@ -126,23 +129,6 @@ function useSvgTip() {
   })
   const el = tip && <div className="sr-svgtip tooltip-content" style={{ left: tip.x, top: tip.y }}>{tip.content}</div>
   return { on, el }
-}
-
-/** The wrapper's width in CSS px, so a chart draws at 1:1 (text stays legible
- * on a phone instead of scaling down with a fixed viewBox). Measured before
- * observing: a hidden tab never gets the first ResizeObserver callback. */
-function useWidth<T extends HTMLElement>(fallback = 720): [RefObject<T | null>, number] {
-  const ref = useRef<T>(null)
-  const [w, setW] = useState(fallback)
-  useLayoutEffect(() => {
-    const el = ref.current
-    if (!el) return
-    setW(el.clientWidth || fallback)
-    const ro = new ResizeObserver(() => setW(el.clientWidth || fallback))
-    ro.observe(el)
-    return () => ro.disconnect()
-  }, [fallback])
-  return [ref, w]
 }
 
 const usd = (x: number | null | undefined) => (x == null ? '—' : `$${x < 10 ? x.toFixed(2) : Math.round(x).toLocaleString('en-US')}`)
@@ -339,11 +325,13 @@ export function ScanDurationChart(props: DurationProps) {
   const setDomain = (d: XDomain) => setXr(fmtXr(d))
   const points = props.runs.filter(r => r.run.started_ts != null && r.secs != null).map(r => ({ x: runX(r.run.started_ts!) * 1000, y: r.secs! }))
   const xs = [...new Set(points.map(p => p.x))]
-  const range = resolveXDomain(domain, xs, scanTime)
   const window = props.win ? [props.win[0] * 1000, props.win[1] * 1000] as const : undefined
+  // the default range: the newest runs the plot's width holds, keeping the selected runs in view
+  const [headRef, headW] = useWidth<HTMLDivElement>()
+  const range = resolveXDomain(domain, xs, scanTime, { n: autoScans(headW - TS_PAD.left - TS_PAD.right), win: window })
   const fit = window ? { onClick: () => setDomain(spanDomain(fitToWindow(window, xs), rangeId)), label: 'zoom to selected runs', description: 'Zoom to the selected runs, with one run of context on each side' } : undefined
   return <>
-    <div className="sr-chart-head">
+    <div className="sr-chart-head" ref={headRef}>
       <h3>End-to-end duration by run</h3>
       <XRangeControls domain={domain} set={setDomain} fit={fit} />
       <span className="gran" role="group" aria-label="Y-axis scale">
@@ -497,6 +485,7 @@ export function ScansPage() {
   const kinds = [...new Set([...runs.map(r => r.run.kind), ...runFilterKinds(kind)])].sort()
   useActions({
     'runs:all-types': { label: 'Show all job types', group: 'Job types', keywords: ['scans', 'AL', 'access logs', 'filter'], handler: () => setKind('') },
+    'runs:upkeep': { label: 'Show only upkeep (folds and carries)', group: 'Job types', keywords: ['filter', 'compact', 'merge', 'race', 'maintenance', 'upkeep'], handler: () => setKind('upkeep') },
     ...Object.fromEntries(kinds.flatMap(k => [
       [`runs:only:${k}`, { label: `Show only ${runKindLabel(k)}`, group: 'Job types', keywords: ['filter', k], handler: () => setKind(k) }],
       [`runs:include:${k}`, { label: `Include ${runKindLabel(k)}`, group: 'Job types', keywords: ['show', 'filter', k], handler: () => setKind(includeRunKind(kind, k, true)) }],
@@ -519,6 +508,7 @@ export function ScansPage() {
         <RunScanButton block={q.data?.dispatch} runs={runs} queryKey={['scan-runs', store.key]} />
       </div>
       <p className="sub">Scans, access-log ingests and maintenance jobs: timing, status and compute estimates. Output size measures the generated scan files (listings, indexes, snapshots); its change compares those files with earlier scans. The stores they append to are on <Link to="/health">Health</Link>.</p>
+      {store.key === DEFAULT_STORE.key && <ScansUpkeepStrip />}
       {canRetention && <div className="sr-retention-toggle"><button type="button" aria-expanded={retentionOpen} aria-controls="history" onClick={() => retentionOpen ? closeRetention() : setRetentionOpen(true)}>{retentionOpen ? 'Close retention controls' : 'Manage retained scans'}</button><span className="dim">{retentionOpen ? 'Review a proposal or choose scans on the existing chart and table.' : 'Preview policies and build new history versions.'}</span></div>}
       {retentionOn && <HistoryAdmin onPlanChange={onPlanChange} manualScans={manualScans} onManualScansChange={setManualScans}
         spanScans={spanScans} onHoverScan={setHoverScan} onSelectionModeChange={setSelectionMode} onSourceChange={onSourceChange} jobsTarget={jobsTarget} />}
@@ -528,6 +518,7 @@ export function ScansPage() {
         <div className="run-filters">
           <fieldset className="sr-type-filters"><legend>Job types</legend>
             <button type="button" className="sr-all-types" disabled={!kind} onClick={() => setKind('')}>All</button>
+            <Tooltip content="The stores' upkeep jobs: compactions (folds), their races, and merges (carries)."><button type="button" className="sr-all-types" disabled={kind === 'upkeep'} onClick={() => setKind('upkeep')}>Upkeep</button></Tooltip>
             {kinds.map(k => <span key={k} className={`sr-type-filter ${kindClass(k)}${runKindMatches(kind, k) ? '' : ' excluded'}`}>
               <label><input type="checkbox" checked={runKindMatches(kind, k)} onChange={e => setKind(includeRunKind(kind, k, e.target.checked))} />{runKindLabel(k)} <span className="dim">{runs.filter(r => r.run.kind === k).length}</span></label>
               <Tooltip content={`Show only ${runKindLabel(k)}`}><button type="button" aria-label={`Show only ${runKindLabel(k)}`} onClick={() => setKind(k)}>only</button></Tooltip>
@@ -994,7 +985,7 @@ export function ScanRunPage() {
       {q.isLoading ? <p>Loading run…</p> : q.error ? <p className="err">{q.error.message}</p> : d && r && <>
         <h1><code>{r.scan}</code>{(kinds.size > 1 || !isScanProducer(r.kind)) && <> <span className="dim"><KindLabel run={r} /></span></>}</h1>
         {r.kind === 'access-ingest' && <p className="sub">An independent hourly access-log ingest. It updates the aggregates used by future scans; it does not publish a snapshot or change an existing scan’s recorded read data.</p>}
-        {isMaintenance(r.kind) && <p className="sub">{r.kind === 'compact' ? 'A compaction' : r.kind === 'race' ? 'A race of a compaction (built beside it; published only if a compaction adopts it)' : 'A merge of deferred carries'} of <code>{r.gen ?? '?'}</code>, its own Batch job; <code>{r.scan}</code> is the newest scan it {r.kind === 'merge' ? 'carries' : 'folds'}{d.siblings.length > 0 && <> (<Link to={scanHref(d.siblings[d.siblings.length - 1].run_id)}>its scan run</Link>)</>}.</p>}
+        {isMaintenance(r.kind) && <p className="sub">{r.kind === 'compact' ? 'A compaction' : r.kind === 'race' ? 'A race of a compaction (built beside it; published only if a compaction adopts it)' : 'A merge of deferred carries'} of <code>{r.gen ?? '?'}</code>, its own Batch job; <code>{r.scan}</code> is the newest scan it {r.kind === 'merge' ? 'carries' : 'folds'}{d.siblings.length > 0 && <> (<Link to={scanHref(d.siblings[d.siblings.length - 1].run_id)}>its scan run</Link>)</>}.{store.key === DEFAULT_STORE.key && upkeepAnchor(r.gen) && <> Its store's upkeep is on <Link to={`/health#${upkeepAnchor(r.gen)}`}>Health</Link>.</>}</p>}
         <p className="sub">
           <Status run={r} failedAt={d.failed_at} issues={d.phase_issues} lost={liveDetail?.lost} runHref={scanHref} jobs={jobs} />{liveDetail && <Live live={liveDetail} inline />}
           {latest && <> <Tooltip content={`The newest ${isScanProducer(r.kind) ? 'scan' : r.kind} run recorded here.`}><span className="sr-latest">latest</span></Tooltip></>}
