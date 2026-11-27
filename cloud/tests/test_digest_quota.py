@@ -170,6 +170,15 @@ def test_class_scoped_quotas():
         E.Reply("10/1 — 16 TB (+1.0, 6.7%)", f"6.1% of 253T public (237.5 T free), 9.8% of 5.1T private (4.6 T free) [↗︎]({SITE}/?d=261001-1d#over-time)",
                 icon_url="https://icons.example.org/arrows/av_deg70.png?v=4"),
     ]
+    # under runway marks each quota is its own pool: its chip, brief clause and runway (the filling one's linked over its
+    # look-back), each on its own line under `reply_lines`, ` · `-joined without
+    link = f"{SITE}/?d=261001-1d#over-time"
+    priv = f":pool-chip-4-80: 10% of 5.1T private, +0.5 T/d [over 1d]({link}), ≈10d to full"
+    assert [D.reply(d, "sender", replace(cfg, quota_marks="arrow-chip", reply_lines=lines)).body
+            for lines in (True, False) for d in D.day_rows(month, "sender", 0)] == [
+        f":pool-chip-8-60: 6% of 253T public\n{priv} [↗︎]({link})",
+        f":pool-chip-8-60: 6% of 253T public · {priv} [↗︎]({link})",
+    ]
     # a class-scoped quota over a meta without `class_bytes` refuses rather than counting every byte
     bare = D.rows_from_meta([("2026-10-01T0800", {"total_bytes": TB, "total_objects": 1})], "org", unit=TB)
     with pytest.raises(ValueError) as e:
@@ -1747,3 +1756,16 @@ def test_a_delta_that_rounds_to_zero_reads_plus_zero():
     rounds to zero reads `+0.0`, and the rest keep their sign."""
     assert [E._tb(v) for v in (round(-0.04, 1), -0.04, 0.0, 0.04, 0.05, -0.06, 12.34, -12.34)] == [
         "+0.0", "+0.0", "+0.0", "+0.0", "+0.1", f"{E.MINUS}0.1", "+12.3", f"{E.MINUS}12.3"]
+
+
+def test_change_counters_from_the_site_series():
+    """The primary's change counters (specs/change-metrics.md §4.5): each counted point's `(added, deleted, modified)`
+    from `/api/series` (an uncounted point has none), and a reply's breakdown text."""
+    body = {"path": "main-data", "points": [
+        {"date": "2026-11-01T0601", "bytes": 1, "objects": 1},
+        {"date": "2026-11-01T1201", "bytes": 1, "objects": 2, "added": 3, "deleted": 2, "modified": 1, "added_bytes": 9, "deleted_bytes": 4, "modified_bytes": 1},
+        {"date": "2026-11-02T0601", "bytes": 1, "objects": 2, "added": 0, "deleted": 0, "modified": 0, "added_bytes": 0, "deleted_bytes": 0, "modified_bytes": 0,
+         "since": "2026-11-01T0601"},
+    ]}
+    assert D.changes_from_series(body) == {"2026-11-01T1201": (3, 2, 1), "2026-11-02T0601": (0, 0, 0)}
+    assert [D.changes_text(c) for c in ((12_410, 88_201, 3_120), (0, 0, 0))] == ["+12,410 −88,201 ~3,120 objects", "+0 −0 ~0 objects"]
