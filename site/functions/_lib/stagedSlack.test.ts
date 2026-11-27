@@ -455,7 +455,7 @@ describe('D1', () => {
       expect([off, local, on?.replace(/t=[a-z0-9]{12}&/, 't=<token>&').replace(/sig=\w+$/, 'sig=<sig>'), rows.map(r => ({ ...r, token: r.token.length }))]).toEqual([
         null,
         null,
-        'https://site.example.org/og/staged.png?t=<token>&v=abcdef01&sig=<sig>',
+        'https://site.example.org/og/staged.png?t=<token>&v=abcdef01c2&sig=<sig>',
         [{ token: 12, kind: 'staged', view: '', page: '/staged', minted_by: 'slack:staged', minted_ts: 1790000000, exp_day: 293 }],
       ])
       expect(on).toContain(`t=${rows[0].token}&`)
