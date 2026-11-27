@@ -2,23 +2,28 @@
  * `digest-settings`): what `/admin/slack` picks, and what the job renders under over its config file's values
  * (`digest.live_settings`).
  *
- *   GET /api/digest-settings?template=quota → {settings: {template, params, quota_marks, updated_by, updated_at} | null}
- *   PUT /api/digest-settings {template, params, quota_marks} → {settings}                                        admin
+ *   GET /api/digest-settings?template=quota → {settings: {template, params, quota_marks, variant, updated_by, updated_at} | null}
+ *   PUT /api/digest-settings {template, params, quota_marks, variant?} → {settings}                              admin
  *
  * GET is viewer-gated (the job reads it with its grant; settings hold no secrets). `params` is the OP's
  * `src/digest/codec` string, read strictly (`parseParams`); `quota_marks` the replies' marks. Each PUT logs its old
  * and new row to `admin_edits`. A D1 without the table reads as no row (the job keeps its file's values). A template's
- * old name (`cw`, `gcs`: `TEMPLATE_ALIASES`) reads and writes its name's row. */
+ * old name (`cw`, `gcs`: `TEMPLATE_ALIASES`) reads and writes its name's row. `variant` is the deployment default for
+ * a new month's thread (null: the config file's); it never changes a thread that exists (specs/digest-thread-variant.md:
+ * that's a switch, `/api/digest-threads`). Before the `digest-thread-variant` recipe it reads as null, and a PUT setting
+ * one is a 503. */
 import type { D1Database } from '@cloudflare/workers-types'
 import { type Ctx, json, requireAdmin, requireViewer } from '../_lib/auth.js'
 import { parseParams } from '../../src/digest/codec.js'
-import { canonicalTemplate, TEMPLATE_ALIASES, TEMPLATES } from '../../src/digest/templates.js'
+import { canonicalTemplate, TEMPLATE_ALIASES, TEMPLATES, VARIANTS } from '../../src/digest/templates.js'
+import { hasThreadVariant, recipeMissing } from '../_lib/digestRecipe.js'
 
 export const TABLE = 'digest_settings'
 /** `digest.QUOTA_MARKS`: keep identical. */
 export const QUOTA_MARKS = ['warning', 'circles', 'runway', 'runway-hue', 'arrow-chip']
 
-export interface DigestSettings { template: string; params: string; quota_marks: string; updated_by: string; updated_at: number }
+export interface DigestSettings { template: string; params: string; quota_marks: string; variant: string | null; updated_by: string; updated_at: number }
+type SettingsReq = { template: string; params: string; quota_marks: string; variant: string | null }
 
 const missingTable = (e: unknown): boolean => /no such table/.test(String((e as Error)?.message))
 
@@ -30,7 +35,8 @@ const aliasOf = (template: string): string => Object.keys(TEMPLATE_ALIASES).find
  *  half once every deployment's D1 has the recipe. */
 export async function getSettings(db: D1Database, template: string): Promise<DigestSettings | null> {
   try {
-    const row = await db.prepare(`SELECT template, params, quota_marks, updated_by, updated_at FROM ${TABLE} WHERE template IN (?, ?)
+    const variant = await hasThreadVariant(db) ? 'variant' : 'NULL AS variant'
+    const row = await db.prepare(`SELECT template, params, quota_marks, ${variant}, updated_by, updated_at FROM ${TABLE} WHERE template IN (?, ?)
                                   ORDER BY updated_at DESC, template = ? DESC LIMIT 1`)
       .bind(template, aliasOf(template), template).first<DigestSettings>()
     return row && { ...row, template }
@@ -41,9 +47,9 @@ export async function getSettings(db: D1Database, template: string): Promise<Dig
 }
 
 /** The PUT body, or why it's refused. */
-export function parseSettings(b: unknown): { template: string; params: string; quota_marks: string } | string {
+export function parseSettings(b: unknown): SettingsReq | string {
   if (typeof b !== 'object' || b === null || Array.isArray(b)) return 'body: a JSON object'
-  const { params, quota_marks } = b as Record<string, unknown>
+  const { params, quota_marks, variant } = b as Record<string, unknown>
   const template = canonicalTemplate((b as Record<string, unknown>).template)
   if (!template) return `template: ${TEMPLATES.join(' | ')}`
   if (typeof quota_marks !== 'string' || !QUOTA_MARKS.includes(quota_marks)) return `quota_marks: ${QUOTA_MARKS.join(' | ')}`
@@ -53,16 +59,25 @@ export function parseSettings(b: unknown): { template: string; params: string; q
   } catch (e) {
     return `params: ${(e as Error).message}`
   }
-  return { template, params, quota_marks }
+  if (variant !== undefined && variant !== null && (typeof variant !== 'string' || !VARIANTS[template].includes(variant))) {
+    return `variant: ${VARIANTS[template].join(' | ')} | null`
+  }
+  return { template, params, quota_marks, variant: (variant as string | null | undefined) ?? null }
 }
 
-export async function putSettings(db: D1Database, s: { template: string; params: string; quota_marks: string }, who: string, ts: number): Promise<DigestSettings> {
+export async function putSettings(db: D1Database, s: SettingsReq, who: string, ts: number): Promise<DigestSettings> {
   const old = await getSettings(db, s.template)
   const row: DigestSettings = { ...s, updated_by: who, updated_at: ts }
+  // before the recipe (only a null variant gets here: `onRequestPut`), the row as it was
+  const v = await hasThreadVariant(db)
   await db.batch([
     // the transition write: the row lands under the name, and its old name's row (read in its place until now) goes
     db.prepare(`DELETE FROM ${TABLE} WHERE template = ? AND template != ?`).bind(aliasOf(row.template), row.template),
-    db.prepare(`INSERT INTO ${TABLE} (template, params, quota_marks, updated_by, updated_at) VALUES (?, ?, ?, ?, ?)
+    v ? db.prepare(`INSERT INTO ${TABLE} (template, params, quota_marks, variant, updated_by, updated_at) VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT (template) DO UPDATE SET params = excluded.params, quota_marks = excluded.quota_marks,
+                  variant = excluded.variant, updated_by = excluded.updated_by, updated_at = excluded.updated_at`)
+      .bind(row.template, row.params, row.quota_marks, row.variant, row.updated_by, row.updated_at)
+      : db.prepare(`INSERT INTO ${TABLE} (template, params, quota_marks, updated_by, updated_at) VALUES (?, ?, ?, ?, ?)
                 ON CONFLICT (template) DO UPDATE SET params = excluded.params, quota_marks = excluded.quota_marks,
                   updated_by = excluded.updated_by, updated_at = excluded.updated_at`)
       .bind(row.template, row.params, row.quota_marks, row.updated_by, row.updated_at),
@@ -87,6 +102,7 @@ export const onRequestPut = async (ctx: Ctx): Promise<Response> => {
   const s = parseSettings(await ctx.request.json().catch(() => null))
   if (typeof s === 'string') return json({ error: s }, 400)
   if (!ctx.env.DB) return json({ error: 'not configured (no D1 binding)' }, 503)
+  if (s.variant !== null && !(await hasThreadVariant(ctx.env.DB))) return recipeMissing()
   const who = id.email ?? id.name ?? 'admin'
   return json({ settings: await putSettings(ctx.env.DB, s, who, Math.floor(Date.now() / 1000)) }, 200, { 'cache-control': 'no-store' })
 }
