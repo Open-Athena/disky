@@ -302,7 +302,7 @@ def test_scan_profile_matches_the_site_and_the_stack():
     assert p.opts("age-store")["store"] == f"r2://{w['vars']['STORE_BUCKET']}/{w['vars']['AGE_STORE_PREFIX']}"
     block = re.search(r"^HF_SECRETS = \[\n(.*?)^\]", (INFRA / "gcp" / "__main__.py").read_text(), re.M | re.S).group(1)
     stack_secrets = re.findall(r'^    "([a-z0-9-]+)",', block, re.M)
-    assert len(stack_secrets) == 11
+    assert len(stack_secrets) == 12
     source_secrets = {k: v for s in p.sources for k, v in s.secrets.items()}
     assert source_secrets == {"HF_LFS_TOKEN": "hf-usage-hf-lfs-token"}
     assert set(p.secrets.values()) | set(source_secrets.values()) <= set(stack_secrets)

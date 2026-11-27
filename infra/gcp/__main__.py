@@ -171,6 +171,7 @@ HF_SECRETS = [
     "hf-usage-slack-bot-token",       # SLACK_BOT_TOKEN: the HF Usage Bot (job/slack/): the digest + failure alerts
     "hf-usage-job-grant",             # SITE_TOKEN: a read-only grant on hf.oa.dev (minted from /admin), for warm-up + probe
     "hf-usage-cf-analytics-token",    # CF_ANALYTICS_TOKEN: Account Analytics: Read, the `cf-usage` step's (account-owned)
+    "hf-usage-slack-search-token",    # SLACK_SEARCH_TOKEN: the HF Usage Bot's user token (`search:read`): a digest re-apply's thread switch checks links
 ]
 secrets = Secrets(
     "hf-secrets",
