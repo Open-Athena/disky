@@ -37,7 +37,7 @@ Deleting a whole repo (`DELETE /api/repos/delete`) is out of scope until someone
 ### 0. Each file's hash through the listing and the interval store
 
 The executor checks a file against the hash it was reviewed at, so staging has to record that hash.
-- `bulk_hf.py` writes the `version` column: the LFS sha256 or git blob oid for repo files, `xetHash` for bucket files. It already reads all three.
+- `bulk_hf.py` writes the `version` column: each object's content id, the LFS oid, else `xetHash`, else the git blob oid. Done on cloud (change metrics, #100, 2026-11-27); it reaches hf's interval store only once a generation carries `version`.
 - hf's interval store adopts the string `object_version` (`interval-store migrate-object-version` into a new generation). Historical rows stay NULL. Verify the new generation, then move `CURRENT`, dev first.
 - A row with no `version` can't be deleted. The executor refuses the manifest, as cw's does, and the stager re-stages after a fresh scan.
 
