@@ -61,6 +61,9 @@ interface DayRow {
   dextra: Record<string, number | null>
   provisional: boolean
   hist: QuotaScan[]
+  /** The primary's objects (added, deleted, modified) since the prior reply scan, every scan between summed; null
+   *  where one wasn't counted (or there's no prior). */
+  changes: [number, number, number] | null
 }
 
 const dateOf = (r: QuotaScan): string => r.scan.slice(0, 10)
@@ -68,7 +71,9 @@ const dateOf = (r: QuotaScan): string => r.scan.slice(0, 10)
 function row(date: string, s: QuotaScan, prev: QuotaScan | null, seen: QuotaScan[], provisional = false): DayRow {
   const t = scanTime(s.scan)
   const reach = t - (Math.max(...RUNWAY_WINDOWS_D) + 1) * DAY_MS
+  const span = prev ? seen.filter(x => prev.scan < x.scan && x.scan <= s.scan) : []
   return {
+    changes: span.length && span.every(x => x.changes) ? [0, 1, 2].map(i => span.reduce((a, x) => a + x.changes![i], 0)) as [number, number, number] : null,
     date, s, provisional,
     dtb: prev ? pyRound(s.tb - prev.tb, 1) : null,
     hours: prev ? (t - scanTime(prev.scan)) / 3600_000 : null,
@@ -147,16 +152,20 @@ function groupUsed(g: string[], s: QuotaScan, q: Quota, cfg: DigestCfg): number 
   return g[0] === cfg.primary ? scoped(s.tb, s.classes, q) : size(g[0])
 }
 
+/** Group `g`'s runway against one quota `q` (`_quota_runway`), with what `q` counts at the day's scan. */
+function quotaRunway(g: string[], day: DayRow, q: Quota, cfg: DigestCfg): { r: Runway; v: number } {
+  const v = groupUsed(g, day.s, q, cfg)
+  const hist = day.hist.filter(x => x.scan < day.s.scan).map(x => [scanTime(x.scan), groupUsed(g, x, q, cfg)] as [number, number])
+  return { r: runway(q.bytes / cfg.unit.bytes - v, growth(hist, scanTime(day.s.scan), v)), v }
+}
+
 /** The group's shortest runway over its quotas (`_group_runway`), with what that quota counts at the day's scan. */
 function groupRunway(g: string[], day: DayRow, cfg: DigestCfg): { r: Runway; v: number } | null {
   const qs = g.length > 1 ? cfg.buckets[g[0]].quotas.slice(0, 1) : cfg.buckets[g[0]]?.quotas ?? []
   if (!qs.length) return null
-  const t = scanTime(day.s.scan)
   let best: { r: Runway; v: number } | null = null
   for (const q of qs) {
-    const v = groupUsed(g, day.s, q, cfg)
-    const hist = day.hist.filter(x => x.scan < day.s.scan).map(x => [scanTime(x.scan), groupUsed(g, x, q, cfg)] as [number, number])
-    const r = runway(q.bytes / cfg.unit.bytes - v, growth(hist, t, v))
+    const { r, v } = quotaRunway(g, day, q, cfg)
     if (!best || r.days < best.r.days) best = { r, v }
   }
   return best
@@ -185,6 +194,16 @@ function tail(day: DayRow, cfg: DigestCfg, rc: ReplyCfg, marks: ReplyMarks, sep:
     const b = cfg.buckets[cfg.primary!]
     const qs = b?.quotas ?? []
     const link = diffUrl(day.s.scan, dlink(day.s), day.since, cfg.site_url, !b || b.path === null ? cfg.primary! : b.path)
+    if (qs.length && b && RUNWAY_MARKS.includes(marks)) {
+      // under runway marks each quota is a pool of its own (hf: public, private): its mark, brief clause and runway
+      const rows = qs.map(q => {
+        const { r, v } = quotaRunway([cfg.primary!], day, q, cfg)
+        const f = (v / (q.bytes / cfg.unit.bytes)) * 100
+        const t = runwayText(r, cfg, r.since != null ? poolUrl([cfg.primary!], day.s, r.since, cfg) : undefined)
+        return { text: `${poolMark(marks as PoolMark, r, f, v, b.shape ?? 'circle')}${quotaClause(v, q, cfg, true)}${t}`, quiet: f < QUIET_PCT && !t }
+      })
+      return `${(sep === '\n' ? compactQuietLines(rows) : rows.map(x => x.text)).join(sep)} [${LINK_ARROW}](${link})`
+    }
     const body = qs.length ? qs.map(q => quotaClause(scoped(day.s.tb, day.s.classes, q), q, cfg)).join(', ') : `${grouped(day.s.tb, 0)} ${cfg.unit.short}`
     return `${body} [${LINK_ARROW}](${link})`
   }
@@ -216,6 +235,9 @@ function cells(day: DayRow, cfg: DigestCfg): ReplyCell[] {
   })
 }
 
+/** A reply's change breakdown: `+812 −40 ~113 objects` (`digest_quota.changes_text`). */
+export const changesText = ([a, d, m]: [number, number, number]): string => `+${grouped(a, 0)} −${grouped(d, 0)} ~${grouped(m, 0)} objects`
+
 function headline(day: DayRow, total: boolean): [number, number] {
   if (!total) return [day.s.tb, day.dtb ?? 0]
   const sum = (xs: (number | null)[]) => xs.reduce<number>((a, x) => (x === null ? a : a + x), 0)
@@ -228,7 +250,8 @@ function reply(day: DayRow, variant: string, cfg: DigestCfg, rc: ReplyCfg, marks
   const d = deg(prev ? (dv / prev) * 100 : 0, day.hours ? HOURS_PER_WEEK / day.hours : 7)
   const size = `${grouped(v, 0)} ${cfg.unit.name} (${signed(dv)}, ${pct(dv, v)}%)`
   const sep = lines ? '\n' : ' · '
-  const t = tail(day, cfg, rc, marks, sep)
+  // the primary's objects added, deleted and modified since the prior reply, where the store counted them
+  const t = tail(day, cfg, rc, marks, sep) + (day.changes ? `${sep}${changesText(day.changes)}` : '')
   const when = md(dayOf(day.date))
   const url = diffUrl(day.s.scan, dlink(day.s), day.since, cfg.site_url)
   const base = { key: day.date, scan: day.s.scan }

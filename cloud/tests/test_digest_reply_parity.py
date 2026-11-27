@@ -26,6 +26,9 @@ CFG = replace(CW_EXAMPLE, provisional=True, alert_pct=90, op_icon="mark.png", bu
     "z-b": E.Bucket("zb", ZONE, "z8", shape="star"),
 })
 SOLO = replace(CW_EXAMPLE, buckets={"main-data": E.Bucket("main", E.Quota(910 * TIB, "1 PB", "1P"))})
+#: One bucket, a quota per storage class (hf: public 1, private 5; 6 in neither), each its own pool under runway marks
+CLASSES = replace(CW_EXAMPLE, quota_marks="arrow-chip", reply_lines=True, buckets={"main-data": E.Bucket(
+    "main", E.Quota(910 * TIB, "910 TiB public", "910Ti public", (1,)), more=(E.Quota(50 * TIB, "50 TiB private", "50Ti private", (5,)),))})
 #: A scan a day at 00, 06, 12 and 18Z from 10/28 to 11/5's 06Z: November's reply scans, its open day's provisional one;
 #: 11/2's 12Z is by hand, so its 18Z replies; 11/3 has no scan past 06Z, which stands in; `new-data` joins on 11/4.
 SCANS = [f"{d}T{h}01" for d in (f"2026-{m}" for m in ("10-28", "10-29", "10-30", "10-31", "11-01", "11-02", "11-03", "11-04"))
@@ -41,9 +44,21 @@ def _meta(i: int, scan: str) -> dict:
             "buckets": {b: {"total_bytes": round(v * TIB), "total_objects": 1} for b, v in sizes.items()}}
 
 
-def _month(primary: str, solo: bool = False, closed: bool = False) -> DC.Month:
-    metas = [(s, {"total_bytes": round((700 + 2.5 * i) * TIB), "total_objects": 1} if solo else _meta(i, s)) for i, s in enumerate(SCANS)]
-    rows = DC.rows_from_meta(metas, primary, now=dt.datetime(2026, 11, 5, 7, tzinfo=dt.timezone.utc), triggers=TRIGGERS)
+#: The primary's change counters (added, deleted, modified) per scan, from 10/30 on, but for 11/03's 06Z scan (a scan the
+#: store didn't count): every reply whose span covers it has no breakdown.
+CHANGES = {s: (1_000 * i + 7, 40 * (i % 3), 3 * (i % 5)) for i, s in enumerate(SCANS) if s >= "2026-10-30" and s != "2026-11-03T0601"}
+
+
+def _classes(i: int) -> dict:
+    """The private pool fills fast enough to show its runway; the public one doesn't."""
+    cb = {"1": round((600 + 0.5 * i) * TIB), "5": round((20 + 0.75 * i) * TIB), "6": TIB}
+    return {"total_bytes": sum(cb.values()), "total_objects": 1, "class_bytes": cb}
+
+
+def _month(primary: str, solo: bool = False, closed: bool = False, classes: bool = False, changes: dict | None = None) -> DC.Month:
+    metas = [(s, _classes(i) if classes else {"total_bytes": round((700 + 2.5 * i) * TIB), "total_objects": 1} if solo else _meta(i, s))
+             for i, s in enumerate(SCANS)]
+    rows = DC.rows_from_meta(metas, primary, now=dt.datetime(2026, 11, 5, 7, tzinfo=dt.timezone.utc), triggers=TRIGGERS, changes=changes)
     pre = [r for r in rows if r.date < "2026-10-31"]
     lead = [r for r in rows if r.date == "2026-10-31"]
     return DC.Month(lead=lead, rows=[r for r in rows if r.date >= "2026-11-01"], closed=closed, pre=pre)
@@ -55,12 +70,18 @@ CASES = {
     "runway-closed-sender": (replace(CFG, quota_marks="runway"), "sender", True),
     "warning-body": (CFG, "body", False),
     "solo-sender": (SOLO, "sender", False),
+    "classes-chip-sender": (CLASSES, "sender", False),
+    # the store's change counters: each reply's breakdown after its tail (specs/change-metrics.md §4.5)
+    "changes-sender": (replace(CFG, quota_marks="runway"), "sender", False),
+    "changes-body": (CFG, "body", False),
 }
+#: The cases whose rows carry the change counters.
+COUNTED = {"changes-sender", "changes-body"}
 
 
 def golden(name: str) -> dict:
     cfg, variant, closed = CASES[name]
-    data = _month(cfg.primary, solo=cfg is SOLO, closed=closed)
+    data = _month(cfg.primary, solo=cfg is SOLO, closed=closed, classes=cfg is CLASSES, changes=CHANGES if name in COUNTED else None)
     tpl = E.template(cfg)
     return json.loads(json.dumps({"cfg": E.cfg_json(cfg), "rows": tpl.rows_json(data), "reply": tpl.reply_json(data), "variant": variant,
                                   "replies": E.replies_json(tpl, data, variant)}))
