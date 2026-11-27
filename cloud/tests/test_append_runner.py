@@ -519,6 +519,89 @@ def test_a_renewed_lease_stays_held_and_a_stale_one_is_taken_over(tmp_path):
     assert json.loads((tmp_path / "l.json").read_text())["owner"] == b.owner
 
 
+def _ended_lease(path, clock: Clock, holder: str, ended, logs: list[str]) -> ar.CoordinatorLease:
+    return ar.CoordinatorLease(ar.LocalLeaseFile(path), holder=holder, now=clock, ended=ended, log=logs.append)
+
+
+def test_a_lease_whose_holder_ended_is_taken_at_once(tmp_path):
+    """A held lease whose holder's job has ended (cancelled, failed) is taken without waiting out its TTL, logged."""
+    clock, logs, asked = Clock(), [], []
+    _lease(tmp_path / "l.json", clock, "job-a").take()
+
+    def ended(job):
+        asked.append(job)
+        return f"{job} CANCELLED"
+    b = _ended_lease(tmp_path / "l.json", clock, "job-b", ended, logs)
+    b.take()
+    assert (asked, logs, json.loads((tmp_path / "l.json").read_text())["owner"]) == (
+        ["job-a"], ["coordinator lease: its holder ended (job-a CANCELLED): taking it"], b.owner)
+
+
+def test_a_lease_whose_holder_runs_stays_held(tmp_path):
+    clock, logs = Clock(), []
+    _lease(tmp_path / "l.json", clock, "job-a").take()
+    with pytest.raises(ar.Busy) as e:
+        _ended_lease(tmp_path / "l.json", clock, "job-b", lambda job: None, logs).take()
+    assert (str(e.value), logs) == ("the coordinator lease is held by job-a (since 2026-10-22T12:00:00+00:00)", [])
+
+
+def test_an_unreadable_holder_state_falls_back_to_the_ttl(tmp_path):
+    """A failed state read never takes a lease: the TTL decides, and the failure is logged."""
+    clock, logs = Clock(), []
+    _lease(tmp_path / "l.json", clock, "job-a").take()
+
+    def ended(job):
+        raise RuntimeError("403 forbidden")
+    b = _ended_lease(tmp_path / "l.json", clock, "job-b", ended, logs)
+    with pytest.raises(ar.Busy):
+        b.take()
+    clock.tick(ar.COORD_TTL_S + 1)
+    b.take()
+    # read once: past the TTL, the holder's state isn't asked
+    assert logs == ["coordinator lease: holder job-a's state unreadable (RuntimeError: 403 forbidden); its TTL decides"]
+
+
+def test_a_holder_that_is_no_job_name_is_never_looked_up(tmp_path):
+    clock, asked = Clock(), []
+    _lease(tmp_path / "l.json", clock, "host:123").take()
+    with pytest.raises(ar.Busy):
+        _ended_lease(tmp_path / "l.json", clock, "job-b", lambda job: asked.append(job), []).take()
+    assert asked == []
+
+
+@pytest.mark.parametrize("state, want", [("CANCELLED", "j CANCELLED"), ("SUCCEEDED", "j SUCCEEDED"), ("FAILED", "j FAILED"),
+                                         ("RUNNING", None), ("QUEUED", None)])
+def test_job_ended_names_a_terminal_state(monkeypatch, state, want):
+    from dt_cloud import job_backend as jb
+
+    class Backend:
+        def status(self, job):
+            return jb.JobStatus(state, "")
+    monkeypatch.setattr(jb, "resolve", lambda **kw: Backend())
+    assert ar.job_ended("r", "p")("j") == want
+
+
+def test_job_ended_reads_a_missing_job_as_gone_and_raises_other_errors(monkeypatch):
+    from dt_cloud import job_backend as jb
+
+    class HTTPError(Exception):
+        def __init__(self, code):
+            super().__init__(f"HTTP {code}")
+            self.response = type("R", (), {"status_code": code})()
+
+    class Backend:
+        def __init__(self, code):
+            self.code = code
+
+        def status(self, job):
+            raise HTTPError(self.code)
+    monkeypatch.setattr(jb, "resolve", lambda **kw: Backend(404))
+    assert ar.job_ended()("j") == "j gone"
+    monkeypatch.setattr(jb, "resolve", lambda **kw: Backend(500))
+    with pytest.raises(HTTPError):
+        ar.job_ended()("j")
+
+
 def test_release_removes_only_its_own_lease(tmp_path):
     clock = Clock()
     a = _lease(tmp_path / "l.json", clock, "job-a")

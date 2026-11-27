@@ -95,6 +95,20 @@ def test_compact_stage_writes_the_lease_for_its_job_before_submitting_it(tmp_pat
         IvFake(["2026-08-05"]).runner(compacting=lambda: ar.LocalLeaseFile(lease)).run("2026-08-05")
 
 
+def test_compact_stage_takes_a_lease_whose_holder_ended(tmp_path):
+    """A lease left by a compaction job that ended (cancelled by hand, its renewals stopped) is taken at once, not after
+    its TTL: the next compaction is submitted."""
+    lease = tmp_path / "compacting.lease.json"
+    f = IvFake(["2026-08-03"], compact_level=1)
+    _one_scan(f)
+    _write(lease, "iv-compact-other", "g0", NOW)
+    r = f.runner(compacting=lambda: ar.LocalLeaseFile(lease), merge_wait=None, job_ended=lambda job: f"{job} CANCELLED")
+    r.compact_now = True
+    r.carries()
+    assert ([s for s, _ in f.calls()], [m for m in f.log if m.startswith("compaction lease:")], _record(lease)["holder"]) == (
+        ["compact"], ["compaction lease: its holder ended (iv-compact-other CANCELLED): taking it"], f.jobs[0][0])
+
+
 def test_compact_stage_submits_nothing_while_another_compaction_holds_the_lease(tmp_path):
     lease = tmp_path / "compacting.lease.json"
     f = IvFake(["2026-08-03"], compact_level=1)
