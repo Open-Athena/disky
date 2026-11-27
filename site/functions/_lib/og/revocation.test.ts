@@ -79,8 +79,8 @@ describe('D1', () => {
         rows.map(r => ({ ...r, token: '…' })),
         await served(env, key, a),
       ]).toEqual([
-        `${ORIGIN}/og/staged.png?t=${tok}&v=abcdef01&sig=…`,
-        `${ORIGIN}/og/staged.png?t=${tok}&v=01234567&sig=…`,
+        `${ORIGIN}/og/staged.png?t=${tok}&v=abcdef01c2&sig=…`,
+        `${ORIGIN}/og/staged.png?t=${tok}&v=01234567c2&sig=…`,
         [{ token: '…', kind: 'staged', view: '', page: '/staged', minted_by: 'slack:staged' }],
         'full',
       ])
