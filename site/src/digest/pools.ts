@@ -70,7 +70,7 @@ export const QUIET_PCT = 25
  *  the latest scan at or before it. */
 export const RUNWAY_WINDOWS_D = [1, 3, 7]
 /** 🔴 under `RUNWAY_RED_D` days to full (or over quota), 🟠 under `RUNWAY_ORANGE_D` (or at least `RUNWAY_FULL_PCT`
- *  full), 🟡 under `RUNWAY_YELLOW_D`, 🟢 otherwise; a clause under `RUNWAY_TEXT_D` days also shows its rate and runway. */
+ *  full), 🟡 under `RUNWAY_YELLOW_D`, 🟢 otherwise; a clause under `DigestCfg.runway_text_days` (default `RUNWAY_TEXT_D`) days also shows its rate and runway. */
 export const RUNWAY_RED_D = 3
 export const RUNWAY_ORANGE_D = 14
 export const RUNWAY_YELLOW_D = 30
@@ -146,7 +146,7 @@ export function poolMark(mode: PoolMark, r: Runway, pct: number, v: number, shap
 }
 
 export function runwayText(r: Runway, cfg: DigestCfg): string {
-  if (!(r.days > 0 && r.days < RUNWAY_TEXT_D) || r.growth == null) return ''
+  if (!(r.days > 0 && r.days < (cfg.runway_text_days ?? RUNWAY_TEXT_D)) || r.growth == null) return ''
   const days = r.days < 1 ? '<1d' : `${fixed(r.days, 0)}d`
   const over = r.windowD != null ? ` over ${r.windowD}d` : ''
   return `, +${fixed(r.growth, 1)} ${cfg.unit.short}/d${over}, ≈${days} to full`
