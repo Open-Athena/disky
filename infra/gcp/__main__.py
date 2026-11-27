@@ -131,6 +131,17 @@ static_secrets = Secrets(
     adopt=adopt,
 )
 
+# A Slack user token with `search:read` from gcs's own app (the digest bot's), for a digest thread switch's link check
+# (`DIGEST_REAPPLY.secrets` `SLACK_SEARCH_TOKEN`, specs/digest-thread-variant.md); its value is set by hand.
+search_secret = Secrets(
+    "gcs-slack-search-secret",
+    project=project,
+    secrets={"gcs-slack-search-token": {"app": "gcs-usage", "role": "slack-search"}},
+    accessor=job.member,
+    accessor_email=job.email_literal,
+    adopt=adopt,
+)
+
 # Cloudflare Account Analytics: Read (OA account), for `dt-cloud cf-usage` (specs/usage-metrics.md): the daily usage
 # step's billed units and Analytics Engine attribution.
 analytics_secret = Secrets(
