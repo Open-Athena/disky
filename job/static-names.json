@@ -38,6 +38,7 @@
  "src": [],
  "hex_runs": "16,8",
  "compact_level": 5,
+ "compact": "none",
  "standard_stages": [
   "anchors",
   "drill"
