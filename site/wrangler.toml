@@ -116,6 +116,8 @@ DUPS = "1"   # the duplicate-candidate report: `/api/dups` + `/dups`, over the `
 # SLACK_SIGNING_SECRET (unset = `/slack/actions` 503s).
 EXECUTOR = "sweep"
 SLACK_ADMIN_CHANNEL = "C0C579HNRFB"
+# staged-plan threads post to #gcs-usage, the users' channel (2026-11-27, going forward; earlier threads stay in #gcs-admin)
+SLACK_STAGED_CHANNEL = "C0BNWAASXFW"
 # Static name search (2026-10-09): the map's filter and /names read the static
 # name index on R2 (INDEX_R2, below), built daily by `job/static-daily.sh`.
 # FILTER_STATIC_HEAVY stays dev-only for now (heavy literals on per-scan runs need each run's `drill/`).
@@ -250,6 +252,8 @@ DUPS = "1"   # the duplicate-candidate report: `/api/dups` + `/dups`, over the `
 # SLACK_SIGNING_SECRET (unset = `/slack/actions` 503s).
 EXECUTOR = "sweep"
 SLACK_ADMIN_CHANNEL = "C0C579HNRFB"
+# staged-plan threads post to #gcs-usage, the users' channel (2026-11-27, going forward; earlier threads stay in #gcs-admin)
+SLACK_STAGED_CHANNEL = "C0BNWAASXFW"
 
 # The KV tier for the dev stack: same namespace as production (a shared global
 # cache is correct — same keys, same data; `CACHE_V` versions the entries).
