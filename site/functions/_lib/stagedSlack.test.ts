@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { RunOutcome } from '../../src/runs.js'
 import { closedParent, closedSummary, countedItems, PLAN_SENDER, QUEUE_EMPTIED, queueWasEmpty, queuedOf, fmtBytes, personSender, renderParent, runEvent, runUrl, sendParent, shortPath, sizeOf, stageReply, stagedCardUrl, threadDeleted, topFolders, type RunRow } from './stagedSlack.js'
 import { RUN_DIR, sqliteD1 } from './testD1.js'
+import type { PrefixStat } from './prefixes.js'
 
 const run = (o: Partial<RunRow>): RunRow => ({
   run_id: 'cw-sweep-dry-1', mode: 'dry', scan: '2026-09-28T1201', actor: 'ann@staff.example.test', started_ts: 100,
@@ -77,8 +78,8 @@ describe('renderParent', () => {
       head({}),
       head({ queued: { items: 1, batches: 1, stagers: ['bo@viewer.example.test'] } }),
     ]).toEqual([
-      '*Staged for deletion* · plan #7: *3 prefixes*\nstaged by ann, bo',
-      '*Staged for deletion* · plan #7: *1 prefix*\nstaged by bo',
+      '*Staged for deletion* · plan #7 · staged by ann, bo\n*3 prefixes*',
+      '*Staged for deletion* · plan #7 · staged by bo\n*1 prefix*',
     ])
   })
 })
@@ -249,56 +250,67 @@ describe('names and sizes (plain text, never a mention)', () => {
     const lines = (z: typeof size) => (renderParent({ ...v, size: z }).blocks[0] as { text: { text: string } }).text.text.split('\n')
     expect([lines(size), lines({ ...size, empty: 0, o: 999, b: 40 * 2 ** 40 })]).toEqual([
       [
-        '*Staged for deletion* · plan #7: *3 prefixes · 51.0 TiB · 179.3M objects* at scan 2026-10-02',
+        '*Staged for deletion* · plan #7 · staged by Ann Bee, c.d',
+        '*3 prefixes · 51.0 TiB · 179.3M objects* at scan 2026-10-02',
         '+5 staged prefixes empty at scan, not counted',
-        'staged by Ann Bee, c.d',
       ],
       [
-        '*Staged for deletion* · plan #7: *3 prefixes · 40.0 TiB · 999 objects* at scan 2026-10-02',
+        '*Staged for deletion* · plan #7 · staged by Ann Bee, c.d',
+        '*3 prefixes · 40.0 TiB · 999 objects* at scan 2026-10-02',
         'owners: Grace Hopper 16.0 TiB, hedy-lamarr 6.0 TiB',
-        'staged by Ann Bee, c.d',
       ],
     ])
   })
-  it('once a real run in the thread deleted some of it: staged (deleted + left), deleted (its runs, by whom), left; every stager of the thread', () => {
+  it('once a real run in the thread deleted some of it: what it deleted (its runs, by whom), then what is left; every stager of the thread', () => {
     const v = { ...base, stagers: ['c.d@example.org'], names: { 'a.b@example.org': 'Ann Bee' }, queued: { items: 3, batches: 1, stagers: ['c.d@example.org'] } }
     const done = { prefixes: 26, b: 61 * 2 ** 40, o: 235715, runs: 1, actors: ['a.b@example.org'] }
     const lines = (o: Partial<Parameters<typeof renderParent>[0]>) => (renderParent({ ...v, ...o }).blocks[0] as { text: { text: string } }).text.text.split('\n')
     expect([lines({ size, done, stagedBy: ['a.b@example.org', 'c.d@example.org'] }), lines({ done, stagedBy: ['a.b@example.org'] }), lines({ size, stagedBy: ['a.b@example.org'] })]).toEqual([
       [
-        '*Staged for deletion* · plan #7',
-        'staged in this thread: 29 prefixes · 112.0 TiB · 179.6M objects',
-        'deleted: 26 prefixes · 61.0 TiB · 235,715 objects (1 real run: Ann Bee)',
+        '*Staged for deletion* · plan #7 · staged by Ann Bee, c.d',
+        ':white_check_mark: deleted *61.0 TiB* · 26 prefixes · 235,715 objects (1 real run: Ann Bee)',
         'left: *3 prefixes · 51.0 TiB · 179.3M objects* at scan 2026-10-02',
         '+5 staged prefixes empty at scan, not counted',
-        'staged by Ann Bee, c.d',
       ],
       [
-        '*Staged for deletion* · plan #7',
-        'staged in this thread: 29 prefixes',
-        'deleted: 26 prefixes · 61.0 TiB · 235,715 objects (1 real run: Ann Bee)',
+        '*Staged for deletion* · plan #7 · staged by Ann Bee',
+        ':white_check_mark: deleted *61.0 TiB* · 26 prefixes · 235,715 objects (1 real run: Ann Bee)',
         'left: *3 prefixes*',
-        'staged by Ann Bee',
       ],
-      // Nothing deleted: the total beside the title, and the queue's stagers.
+      // Nothing deleted: the queue's total, and the queue's stagers.
       [
-        '*Staged for deletion* · plan #7: *3 prefixes · 51.0 TiB · 179.3M objects* at scan 2026-10-02',
+        '*Staged for deletion* · plan #7 · staged by c.d',
+        '*3 prefixes · 51.0 TiB · 179.3M objects* at scan 2026-10-02',
         '+5 staged prefixes empty at scan, not counted',
-        'staged by c.d',
       ],
     ])
   })
-  it('closedSummary: a closing thread\'s counts, as its parent showed them without the title', () => {
+  it('all of it deleted: one line saying so; faces before names; the paths it staged, deleted ones sized by what was deleted', () => {
+    const T = 2 ** 40
+    const done = { prefixes: 3, b: 30 * T, o: 191670, runs: 1, actors: ['a.b@example.org'] }
+    const paths = { prefixes: ['s3://b/grug/hero-1/ckpt/a/', 's3://b/grug/hero-1/ckpt/b/', 's3://b/grug/hero-2/ckpt/'], stats: {
+      's3://b/grug/hero-1/ckpt/a/': { bytes: 10 * T, objects: 1 }, 's3://b/grug/hero-1/ckpt/b/': { bytes: 8 * T, objects: 1 }, 's3://b/grug/hero-2/ckpt/': { bytes: 12 * T, objects: 1 },
+    } as Record<string, PrefixStat> }
+    const v = { ...base, items: 1, names: { 'a.b@example.org': 'Ann Bee' }, faces: { 'a.b@example.org': ':ann:' }, done, stagedBy: ['a.b@example.org'], queued: { items: 0, batches: 0, stagers: [] }, paths, size: { ...size, b: 0, o: 0, empty: 1, owners: [] } }
+    const m = renderParent(v)
+    expect([(m.blocks[0] as { text: { text: string } }).text.text.split('\n'), (m.blocks as { type: string }[]).map(b => b.type)]).toEqual([[
+      '*Staged for deletion* · plan #7 · staged by :ann: Ann Bee',
+      ':white_check_mark: *all deleted*: *30.0 TiB* · 3 prefixes · 191,670 objects (1 real run: :ann: Ann Bee)',
+      'in `b/grug/`: `hero-2/ckpt/` 12.0 TiB, `hero-1/ckpt/a/` 10.0 TiB, `hero-1/ckpt/b/` 8.0 TiB',
+      '+1 staged prefix empty at scan, not counted',
+    ], ['section', 'actions']])
+    // the card stays once everything is deleted: it maps what the thread staged
+    expect(renderParent({ ...v, items: 0, image: 'https://s/og/staged.png' }).blocks.map(b => (b as { type: string }).type)).toEqual(['section', 'actions', 'image'])
+  })
+  it('closedSummary: a closing thread\'s lines, as its parent showed them under the title (who staged, then the counts)', () => {
     const done = { prefixes: 2, b: 2 * 2 ** 40, o: 10, runs: 2, actors: ['a.b@example.org', 'c.d@example.org'] }
     expect([closedSummary(0, ['a.b@example.org'], { done, size: { ...size, b: 0, o: 0, empty: 1, owners: [] }, names: { 'a.b@example.org': 'Ann Bee' } }), closedSummary(1, [], {})]).toEqual([
       [
-        'staged in this thread: 2 prefixes · 2.0 TiB · 10 objects',
-        'deleted: 2 prefixes · 2.0 TiB · 10 objects (2 real runs: Ann Bee, c.d)',
-        'left: *0 prefixes · 0 B · 0 objects* at scan 2026-10-02',
-        '+1 staged prefix empty at scan, not counted',
         'staged by Ann Bee',
+        ':white_check_mark: *all deleted*: *2.0 TiB* · 2 prefixes · 10 objects (2 real runs: Ann Bee, c.d)',
+        '+1 staged prefix empty at scan, not counted',
       ],
-      ['*1 prefix*', 'nothing staged'],
+      ['nothing staged', '*1 prefix*'],
     ])
   })
   it('sizeOf: totals over every prefix, absent or no bytes and no objects = empty (zero-byte objects are not), owners by attributed bytes', () => {
@@ -393,6 +405,8 @@ describe('stage replies: compact, phone-width', () => {
       ['*Staged plan #4* · this thread is done; continued in <https://ws.slack.com/archives/C/p1|a new thread>.'],
       ['*Staged plan #4* · this thread is done; continued in a new thread.', 'deleted: 2 prefixes · 2.0 TiB · 10 objects (1 real run: ann)', 'staged by ann'],
     ])
+    // with its card (that thread's window): an image block after the buttons
+    expect(closedParent(4, 'https://s', null, [], 'https://s/og/staged.png?th=1-2').blocks.map(b => (b as { type: string }).type)).toEqual(['section', 'actions', 'image'])
   })
 })
 

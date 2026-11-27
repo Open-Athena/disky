@@ -23,7 +23,7 @@ import { type Ctx, type Env as AuthEnv, json, requireAdmin, requireStager, requi
 import { audit, canonicalPrefix, mergeBatches, NO_SHAPE, openPlanId, planDetail, type PlanRow, type PrefixShape, prefixShape, runDetail, stageItems } from "../../_lib/plans.js"
 import { pathScans, storeReady, withPathStore } from "../../_lib/index.js"
 import { MAX_PREFIXES, prefixesAt } from "../../_lib/prefixes.js"
-import { notifyPlan, refreshStagedCard, refreshThread, type NotifyEnv } from "../../_lib/stagedSlack.js"
+import { notifyPlan, refreshClosed, refreshStagedCard, refreshThread, type NotifyEnv } from "../../_lib/stagedSlack.js"
 import { batchConfig, type BatchEnv } from "../../_lib/batchConfig.js"
 import { gcpToken } from "../../_lib/gcp.js"
 import { readRunJson } from "../../_lib/runReflect.js"
@@ -253,7 +253,8 @@ export const onRequest = async (ctx0: Ctx & { env: Env; waitUntil?: Bg }): Promi
 
   // /api/plans/:id/slack — admin: re-render the plan's Slack thread (parent,
   // every coalesced stage reply, and the pre-coalescing stage-batch replies
-  // named by `{ replies: { <batch_id>: <ts> } }`),
+  // named by `{ replies: { <batch_id>: <ts> } }`), and the closed threads named by
+  // `{ closed: [{ ts, until, channel? }] }` (each a done thread's parent and the next thread's, `refreshClosed`),
   // e.g. after the message format changes. Edits don't notify anyone.
   if (segs.length === 2 && segs[1] === "slack" && method === "POST") {
     const gated = await requireAdmin(ctx)
@@ -261,7 +262,14 @@ export const onRequest = async (ctx0: Ctx & { env: Env; waitUntil?: Bg }): Promi
     const body = await readBody(ctx.request)
     const replies = (body.replies && typeof body.replies === "object" ? body.replies : {}) as Record<string, unknown>
     const ok = Object.entries(replies).filter((e): e is [string, string] => /^\d+$/.test(e[0]) && typeof e[1] === "string" && /^\d+\.\d+$/.test(e[1]))
-    return json(await refreshThread(ctx.env as NotifyEnv, db, id, new URL(ctx.request.url).origin, Object.fromEntries(ok.map(([b, t]) => [Number(b), t]))))
+    const origin = new URL(ctx.request.url).origin
+    const TS = /^\d+\.\d+$/
+    const closed = (Array.isArray(body.closed) ? body.closed : []).filter((c): c is { ts: string; until: string; channel?: string } =>
+      !!c && typeof c === "object" && TS.test(String((c as { ts?: unknown }).ts)) && TS.test(String((c as { until?: unknown }).until))
+      && ((c as { channel?: unknown }).channel === undefined || /^[A-Z0-9]{8,12}$/.test(String((c as { channel?: unknown }).channel))))
+    const closedOut: Record<string, boolean> = {}
+    for (const c of closed) closedOut[c.ts] = await refreshClosed(ctx.env as NotifyEnv, db, id, origin, c.ts, c.until, c.channel)
+    return json({ ...await refreshThread(ctx.env as NotifyEnv, db, id, origin, Object.fromEntries(ok.map(([b, t]) => [Number(b), t]))), closed: closedOut })
   }
 
   // /api/plans/:id/items — admins curate; on a staging deployment a stager
