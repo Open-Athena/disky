@@ -87,8 +87,11 @@ function show(c: Call): string {
 /** The calls other than the parent's routine re-render. */
 const events = (calls: Call[]): string[] => calls.filter(c => !(c.method === 'chat.update' && c.body.ts === PARENT && !String(sectionText(c.body.blocks)).startsWith('*Staged plan'))).map(show)
 
-const PARENT_TEXT = (paths: number, size: string, objects: string, empty = '') =>
-  `*Staged for deletion* · plan #1: *${paths.toLocaleString('en-US')} prefixes · ${size} · ${objects} objects* at scan ${SCAN}\nowners: Ann Bee ${size}\n${empty}staged by Ann Bee`
+/** The parent: who staged, the queue's total, its largest paths (`topFolders`), owners, and the empty ones apart. */
+const PARENT_TEXT = (paths: number, size: string, objects: string, folders: string, empty = '') =>
+  [`*Staged for deletion* · plan #1 · staged by Ann Bee`, `*${paths.toLocaleString('en-US')} prefixes · ${size} · ${objects} objects* at scan ${SCAN}`, folders, `owners: Ann Bee ${size}`, ...(empty ? [empty] : [])].join('\n')
+/** The paths lines of the queues these tests build (every prefix 1 TiB). */
+const KEEP_X = '`b/keep/` 1.0 TiB, `b/x/` 1.0 TiB'
 
 describe('D1', () => {
   /** Plan 1, its thread already posted; `seed`: an older batch (#100, one
@@ -119,7 +122,7 @@ describe('D1', () => {
       await notifyPlan(env, db, 1, SITE, undefined, { now: 1000 })
       expect([lookups, calls.map(c => [c.method, c.body.ts, sectionText(c.body.blocks)])]).toEqual([
         [1000, 1000, 501],
-        [['chat.update', PARENT, PARENT_TEXT(2500, '2.4 PiB', '25,000', '+1 staged prefix empty at scan, not counted\n')]],
+        [['chat.update', PARENT, PARENT_TEXT(2500, '2.4 PiB', '25,000', 'in `b/ckpt/`: `run-0/` (50) 50.0 TiB, `run-1/` (50) 50.0 TiB, `run-10/` (50) 50.0 TiB, +47 more', '+1 staged prefix empty at scan, not counted')]],
       ])
     })
   })
@@ -264,8 +267,8 @@ describe('D1', () => {
       await notifyPlan(env, db, 1, SITE, undefined, { now: 1000 })
       return calls.map(show)
     }
-    const EMPTY = `update ${PARENT}: *Staged for deletion* · plan #1: *1 prefix · 1.0 TiB · 10 objects* at scan ${SCAN}\nowners: Ann Bee 1.0 TiB\n+1 staged prefix empty at scan, not counted\nstaged by Ann Bee`
-    const LIVE = `update ${PARENT}: ${PARENT_TEXT(2, '2.0 TiB', '20')}`
+    const EMPTY = `update ${PARENT}: *Staged for deletion* · plan #1 · staged by Ann Bee\n*1 prefix · 1.0 TiB · 10 objects* at scan ${SCAN}\n\`b/keep/\` 1.0 TiB\nowners: Ann Bee 1.0 TiB\n+1 staged prefix empty at scan, not counted`
+    const LIVE = `update ${PARENT}: ${PARENT_TEXT(2, '2.0 TiB', '20', KEEP_X)}`
     it('is empty, not live, until a later scan', async () => {
       expect(await card(SCAN)).toEqual([EMPTY])
     })
@@ -292,7 +295,7 @@ describe('D1', () => {
       const { db } = await planDb()
       await stage(db, 1, ['gs://b/x/', 'gs://b/empty/x/'], { ts: Math.floor(Date.now() / 1000) })
       expect(await refreshStagedCard(env, db, SITE)).toBe(true)
-      expect(calls.map(show)).toEqual([`update ${PARENT}: ${PARENT_TEXT(2, '2.0 TiB', '20', '+1 staged prefix empty at scan, not counted\n')}`])
+      expect(calls.map(show)).toEqual([`update ${PARENT}: ${PARENT_TEXT(2, '2.0 TiB', '20', KEEP_X, '+1 staged prefix empty at scan, not counted')}`])
     })
     it('a plan with no thread is not given one', async () => {
       const calls = fakeSlack()
@@ -370,8 +373,7 @@ describe('D1', () => {
       const BO = 'bo@example.org'
       await notifyPlan(env, db, 1, SITE, await stage(db, 1, ['gs://b/ckpt/run-1/step-0/', 'gs://b/empty/a/']), { now: 1000 })
       await notifyPlan(env, db, 1, SITE, await stage(db, 2, ['gs://b/empty/b/', 'gs://b/empty/c/'], { by: BO }), { now: 1100 })
-      const parent = (empty: number) => PARENT_TEXT(2, '2.0 TiB', '20', `+${empty} staged ${empty === 1 ? 'prefix' : 'prefixes'} empty at scan, not counted
-`)
+      const parent = (empty: number) => PARENT_TEXT(2, '2.0 TiB', '20', '`b/ckpt/run-1/step-0/` 1.0 TiB, `b/keep/` 1.0 TiB', `+${empty} staged ${empty === 1 ? 'prefix' : 'prefixes'} empty at scan, not counted`)
       expect([
         calls.filter(c => c.method !== 'conversations.replies').map(c => [show(c), c.body.text]),
       ]).toEqual([[
@@ -442,10 +444,10 @@ describe('D1', () => {
       await notifyPlan(env, db, 1, SITE, await stage(db, 2, ['gs://b/ckpt/run-1/']), { now: 1060 })
       const upd = calls.filter(c => c.method === 'chat.update').at(-1)!.body
       expect([
-        calls.filter(c => c.method === 'chat.update' && c.body.ts === PARENT).map(c => sectionText(c.body.blocks).split('\n')[0]),
+        calls.filter(c => c.method === 'chat.update' && c.body.ts === PARENT).map(c => sectionText(c.body.blocks).split('\n')[1]),
         [sectionText(upd.blocks), (upd.blocks as { elements?: { text: { text: string } }[] }[])[1].elements!.map(e => e.text.text)],
       ]).toEqual([
-        [`*Staged for deletion* · plan #1: *3 prefixes · 3.0 TiB · 30 objects* at scan ${SCAN}`, `*Staged for deletion* · plan #1: *2 prefixes · 2.0 TiB · 20 objects* at scan ${SCAN}`],
+        [`*3 prefixes · 3.0 TiB · 30 objects* at scan ${SCAN}`, `*2 prefixes · 2.0 TiB · 20 objects* at scan ${SCAN}`],
         [':wastebasket: *Ann Bee* staged 1 path · *1.0 TiB* · 10 objects\n`b/ckpt/run-1/` 1.0 TiB', ['Reject batch', 'View in www']],
       ])
     })
@@ -553,14 +555,14 @@ describe('D1', () => {
       const link = `<https://ws.slack.com/archives/${CH}/p200000001|a new thread>`
       expect(events(calls)).toEqual([
         `reactions? ${PARENT}`,
-        `post parent: ${PARENT_TEXT(4, '4.0 TiB', '40')}`,
+        `post parent: ${PARENT_TEXT(4, '4.0 TiB', '40', '`b/ckpt/run-1/` (2) 2.0 TiB, `b/keep/` 1.0 TiB, `b/ckpt/run-2/step-0/` 1.0 TiB')}`,
         `permalink ${NEW}`,
         `post in ${PARENT}: :white_check_mark: Marked done. Continued in ${link}.`,
         // The old parent keeps its thread's counts as it ended: the seed and batch 1, not batch 2 (it opened the new thread).
-        `update ${PARENT}: *Staged plan #1* · this thread is done; continued in ${link}.\n*3 prefixes · 3.0 TiB · 30 objects* at scan ${SCAN}\nowners: Ann Bee 3.0 TiB\nstaged by Ann Bee`,
+        `update ${PARENT}: *Staged plan #1* · this thread is done; continued in ${link}.\nstaged by Ann Bee\n*3 prefixes · 3.0 TiB · 30 objects* at scan ${SCAN}\n\`b/ckpt/run-1/step-0/\` 1.0 TiB, \`b/ckpt/run-1/step-1/\` 1.0 TiB, \`b/keep/\` 1.0 TiB\nowners: Ann Bee 3.0 TiB`,
         `post in ${NEW}: :wastebasket: *Ann Bee* staged 1 path · *1.0 TiB* · 10 objects\n\`b/ckpt/run-2/step-0/\` 1.0 TiB`,
         `reactions? ${NEW}`,
-        `update ${NEW}: ${PARENT_TEXT(5, '5.0 TiB', '50')}`,
+        `update ${NEW}: ${PARENT_TEXT(5, '5.0 TiB', '50', '`b/ckpt/run-1/` (2) 2.0 TiB, `b/keep/` 1.0 TiB, `b/ckpt/run-2/step-0/` 1.0 TiB, +1 more')}`,
         `update 200.000003: :wastebasket: *Ann Bee* staged 2 paths in 2 batches · *2.0 TiB* · 20 objects\nin \`b/ckpt/\`: \`run-2/step-0/\` 1.0 TiB, \`run-3/step-0/\` 1.0 TiB`,
       ])
       expect(raw.prepare('SELECT slack_channel, slack_ts FROM plans').all()).toEqual([{ slack_channel: CH, slack_ts: NEW }])
@@ -575,7 +577,7 @@ describe('D1', () => {
       await notifyPlan(env, db, 1, SITE, await stage(db, 2, run(2, 1)), { now: 1060 })
       expect(calls.filter(c => c.method === 'chat.postMessage').map(show)).toEqual([
         `post in ${PARENT}: :wastebasket: *Ann Bee* staged 1 path · *1.0 TiB* · 10 objects\n\`b/ckpt/run-1/step-0/\` 1.0 TiB`,
-        `post parent: ${PARENT_TEXT(3, '3.0 TiB', '30')}`,
+        `post parent: ${PARENT_TEXT(3, '3.0 TiB', '30', '`b/ckpt/run-1/step-0/` 1.0 TiB, `b/ckpt/run-2/step-0/` 1.0 TiB, `b/keep/` 1.0 TiB')}`,
         `post in ${PARENT}: :white_check_mark: Marked done. Continued in <https://ws.slack.com/archives/${CH}/p200000002|a new thread>.`,
         `post in 200.000002: :wastebasket: *Ann Bee* staged 1 path · *1.0 TiB* · 10 objects\n\`b/ckpt/run-2/step-0/\` 1.0 TiB`,
       ])
