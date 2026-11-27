@@ -182,12 +182,25 @@ def _tail(day: DayRow, cfg: DigestConfig) -> str:
     a linked `% of quota (free)` clause, joined by `_tail_sep`. Buckets sharing a
     ``zone`` collapse into one clause at the first one's position. A store of
     one configured bucket (hf: the whole org) drops the label, which would only
-    repeat the store: its clause, then a trailing `[↗︎]` over-time link (`LINK_ARROW`)."""
+    repeat the store: its clause, then a trailing `[↗︎]` over-time link (`LINK_ARROW`). Under `RUNWAY_MARKS` each of
+    its quotas is a pool of its own (hf: public, private): its mark, brief clause and runway, joined by `_tail_sep`."""
     if len(cfg.buckets) <= 1 and not day.extra:
         b = cfg.buckets.get(cfg.primary)
         qs = b.quotas if b else ()
         link = _diff_url(day.scan, day.since, cfg.site_url, cfg.primary if b is None or b.path is None else b.path, day.slug)
-        body = ", ".join(_quota_clause(_scoped(day.tb, day.classes, q), q, cfg.unit) for q in qs) if qs else f"{day.tb:,.0f} {cfg.unit.short}"
+        if qs and b is not None and cfg.quota_marks in RUNWAY_MARKS:
+            rows = []
+            for q in qs:
+                v = _scoped(day.tb, day.classes, q)
+                r = _quota_runway([cfg.primary], day, q, cfg)
+                fill = v / (q.bytes / cfg.unit.bytes) * 100
+                url = _pool_url([cfg.primary], day.scan, r.since, cfg, day.slug) if r.since else None
+                tail = _runway_text(r, cfg, url)
+                rows.append((f"{_pool_mark(r, fill, b.shape, cfg)} {_quota_clause(v, q, cfg.unit, brief=True)}{tail}",
+                             fill < QUIET_PCT and not tail))
+            body = _tail_sep(cfg).join(_compact_quiet_lines(rows) if cfg.reply_lines else [text for text, _ in rows])
+        else:
+            body = ", ".join(_quota_clause(_scoped(day.tb, day.classes, q), q, cfg.unit) for q in qs) if qs else f"{day.tb:,.0f} {cfg.unit.short}"
         return f"{body} [{LINK_ARROW}]({link})"
     cs = list(zip(_clauses(day, cfg), _groups(day, cfg)))
     if cfg.quota_marks == "circles":
@@ -232,8 +245,9 @@ def _mark(fill: float | None, over: bool, cfg: DigestConfig) -> str | None:
 #: growth is the fastest net fill over these look-backs (days), each from the latest scan at or before it.
 RUNWAY_WINDOWS_D = (1, 3, 7)
 #: 🔴 under `RUNWAY_RED_D` days to full (or over quota), 🟠 under `RUNWAY_ORANGE_D` (or at least `RUNWAY_FULL_PCT` full),
-#: 🟡 under `RUNWAY_YELLOW_D`, 🟢 otherwise; a clause under `RUNWAY_TEXT_D` days also shows its rate and runway.
-RUNWAY_RED_D, RUNWAY_ORANGE_D, RUNWAY_YELLOW_D, RUNWAY_TEXT_D = 3, 14, 30, 60
+#: 🟡 under `RUNWAY_YELLOW_D`, 🟢 otherwise; a clause under `DigestConfig.runway_text_days` (default 60) also shows its
+#: rate and runway.
+RUNWAY_RED_D, RUNWAY_ORANGE_D, RUNWAY_YELLOW_D = 3, 14, 30
 RUNWAY_FULL_PCT = 95
 
 
@@ -317,11 +331,11 @@ def _pool_mark(r: Runway, fill: float, shape: str, cfg: DigestConfig) -> str:
 
 
 def _runway_text(r: Runway, cfg: DigestConfig, url: str | None = None) -> str:
-    """`, +4.1 Ti/d over 3d, ≈8d to full` for a pool filling within `RUNWAY_TEXT_D` days: its rate, the look-back
+    """`, +4.1 Ti/d over 3d, ≈8d to full` for a pool filling within ``cfg.runway_text_days`` days: its rate, the look-back
     window that rate came from (`Runway.window_d`; `[over 3d](url)` with the pool's ``url`` over that look-back), and
     its runway (commas: ` · ` separates the pools); `''` otherwise (flat, shrinking, far off, or already over: its
     clause says so)."""
-    if not 0 < r.days < RUNWAY_TEXT_D or r.growth is None:
+    if not 0 < r.days < cfg.runway_text_days or r.growth is None:
         return ""
     days = "<1d" if r.days < 1 else f"{r.days:.0f}d"
     over = "" if r.window_d is None else f" [over {r.window_d}d]({url})" if url else f" over {r.window_d}d"
@@ -344,13 +358,14 @@ def _group_runway(g: list[str], day: DayRow, cfg: DigestConfig) -> Runway | None
     qs = tuple(q for q in qs if q is not None)
     if not qs:
         return None
-    t = scan_ts(day.scan)
-    out = []
-    for q in qs:
-        v = _group_used(g, day, q, cfg)
-        hist = [(scan_ts(x.scan), _group_used(g, x, q, cfg)) for x in day.hist if x.scan < day.scan]
-        out.append(replace(_runway(q.bytes / cfg.unit.bytes - v, _growth(hist, t, v)), used=v))
-    return min(out, key=lambda r: r.days)
+    return min((_quota_runway(g, day, q, cfg) for q in qs), key=lambda r: r.days)
+
+
+def _quota_runway(g: list[str], day: DayRow, q: Quota, cfg: DigestConfig) -> Runway:
+    """Group ``g``'s runway against one quota ``q``, from ``day.hist``."""
+    v = _group_used(g, day, q, cfg)
+    hist = [(scan_ts(x.scan), _group_used(g, x, q, cfg)) for x in day.hist if x.scan < day.scan]
+    return replace(_runway(q.bytes / cfg.unit.bytes - v, _growth(hist, scan_ts(day.scan), v)), used=v)
 
 
 def _groups(day: DayRow, cfg: DigestConfig) -> list[list[tuple[str, float]]]:

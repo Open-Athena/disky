@@ -170,6 +170,15 @@ def test_class_scoped_quotas():
         E.Reply("10/1 — 16 TB (+1.0, 6.7%)", f"6.1% of 253T public (237.5 T free), 9.8% of 5.1T private (4.6 T free) [↗︎]({SITE}/?d=261001-1d#over-time)",
                 icon_url="https://icons.example.org/arrows/av_deg70.png?v=4"),
     ]
+    # under runway marks each quota is its own pool: its chip, brief clause and runway (the filling one's linked over its
+    # look-back), each on its own line under `reply_lines`, ` · `-joined without
+    link = f"{SITE}/?d=261001-1d#over-time"
+    priv = f":pool-chip-4-80: 10% of 5.1T private, +0.5 T/d [over 1d]({link}), ≈10d to full"
+    assert [D.reply(d, "sender", replace(cfg, quota_marks="arrow-chip", reply_lines=lines)).body
+            for lines in (True, False) for d in D.day_rows(month, "sender", 0)] == [
+        f":pool-chip-8-60: 6% of 253T public\n{priv} [↗︎]({link})",
+        f":pool-chip-8-60: 6% of 253T public · {priv} [↗︎]({link})",
+    ]
     # a class-scoped quota over a meta without `class_bytes` refuses rather than counting every byte
     bare = D.rows_from_meta([("2026-10-01T0800", {"total_bytes": TB, "total_objects": 1})], "org", unit=TB)
     with pytest.raises(ValueError) as e:
@@ -268,6 +277,10 @@ def test_runway_rules():
         D.Runway(8.2, 4.1), D.Runway(60.0, 1.0, window_d=7), D.Runway(D.math.inf, 0.0, window_d=1), D.Runway(0.0, 4.0, window_d=1)]]
     assert texts == [", +4.1 Ti/d over 3d, ≈8d to full", ", +30.0 Ti/d over 1d, ≈<1d to full", ", +1.0 Ti/d over 7d, ≈60d to full",
                      ", +4.1 Ti/d, ≈8d to full", "", "", ""]
+    # `runway_text_days` moves the cutoff: under 30 days, the 59.9-day pool's text goes; at 90, the 60-day one's comes
+    near, far = replace(CFG, runway_text_days=30), replace(CFG, runway_text_days=90)
+    assert [D._runway_text(D.Runway(d, 1.0, window_d=7), c) for d, c in [(29.9, near), (59.9, near), (60.0, far), (90.0, far)]] == [
+        ", +1.0 Ti/d over 7d, ≈30d to full", "", ", +1.0 Ti/d over 7d, ≈60d to full", ""]
     # given the pool's url over the look-back, `over Nd` links it
     url = "https://x.test/?d=0914-3d&g=z#over-time"
     assert D._runway_text(D.Runway(8.2, 4.1, window_d=3), CFG, url) == f", +4.1 Ti/d [over 3d]({url}), ≈8d to full"
@@ -1280,7 +1293,7 @@ def test_quota_alert_is_broadcast_while_over_and_struck_through_once_under(tmp_p
 
     state, calls = step(SEPT[1:2])
     # the alert carries each pool's runway as the replies show it (here under `warning` marks, whose replies don't);
-    # one filling too slowly to reach full within `RUNWAY_TEXT_D` days (9/2's) has none
+    # one filling too slowly to reach full within `runway_text_days` (9/2's) has none
     over = alert("26090112", f"78.4% of 1P (197.0 Ti free), +8.0 Ti/d [over 1d]({u('26090112-1d')}), ≈25d to full", "9/1 12:00")
     assert calls[1:] == [("post", f":warning: [main]({u('26090112-1d')}): 78.4% of 1P (197.0 Ti free)", "m1", "9/1 — 713 TiB (+8.0, 1.1%)",
                           f"{AV}50.png?v=4", None),
