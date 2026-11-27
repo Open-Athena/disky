@@ -37,7 +37,8 @@ import re
 import secrets
 import sys
 import time
-from collections.abc import Collection, Iterable
+from collections import OrderedDict
+from collections.abc import Callable, Collection, Iterable
 from dataclasses import dataclass, field, fields, replace
 from pathlib import Path
 from typing import Any, Protocol
@@ -140,8 +141,8 @@ class DigestConfig:
     day's reply scan lands (see `digest_quota`). ``alert_pct`` (quota): a quota at
     or over this percent gets a `:warning:` in the daily replies, and the
     month's thread one alert reply also sent to the channel (Slack
-    `reply_broadcast`), edited as its numbers move and deleted once every quota
-    is back under; None: neither. ``quota_marks`` (quota replies): `warning` (the default) keeps the
+    `reply_broadcast`), edited as its numbers move and struck through once every
+    quota is back under (`resolved_alert`: it stays, so a quote or forward of it still opens); None: neither. ``quota_marks`` (quota replies): `warning` (the default) keeps the
     clauses in config order, `:warning:` on those at or over ``alert_pct``; `circles` sorts them fullest first and
     marks each `:red_circle:` at or over ``mark_pct`` (``alert_pct``, else 90), `:large_orange_circle:` within 10
     points below, `:large_yellow_circle:` within 40, `:large_green_circle:` under that (specs/digest-quota-pressure.md);
@@ -568,6 +569,31 @@ class Unit:
     reply: Reply
 
 
+@dataclass(frozen=True)
+class DayLine:
+    """One day's line in a weekly reply (`weekly_units`): its UTC ``date``, the ``scan`` it renders, the line."""
+
+    date: dt.date
+    scan: str
+    line: str
+
+
+def weekly_units(lines: list[DayLine], summary: Callable[[int, int], str], sender: dict[str, str]) -> list[Unit]:
+    """The ``weekly`` variant's replies: one per ISO week (`week_of`; a week split by the month's ends is the part in
+    the month), keyed ``wk-<its Monday>``, sent as ``wk of <M/D>`` with ``sender``'s icon. Slack edits only a reply's
+    body, never its sender name or icon, so all that changes is in the body: the week so far (``summary(i, j)`` over
+    ``lines[i..j]``, from its second day), then each day's line, oldest first. Its ``scan`` is the newest day's, so a
+    converge edits it as each day lands."""
+    weeks: OrderedDict[dt.date, list[int]] = OrderedDict()
+    for i, line in enumerate(lines):
+        weeks.setdefault(week_of(line.date), []).append(i)
+    out = []
+    for wk, idx in weeks.items():
+        body = "\n".join([*([summary(idx[0], idx[-1])] if len(idx) > 1 else []), *(lines[i].line for i in idx)])
+        out.append(Unit(f"wk-{wk:%Y-%m-%d}", lines[idx[-1]].scan, Reply(f"wk of {wk.month}/{wk.day}", body, **sender)))
+    return out
+
+
 def emoji_name(d: int) -> str:
     """Discord application-emoji name for a signed arrow degree (`emoji_vocab`'s ``trend.<d>``). Discord emoji names
     are ``[A-Za-z0-9_]`` only (no ``-``), so a negative reads ``arrow_degm30`` where the Slack custom emoji is
@@ -618,6 +644,7 @@ class Template(Protocol):
     def units(self, data: Any, variant: str, platform: str = "slack") -> list[Unit]: ...
     def provisional(self, data: Any, variant: str) -> Unit | None: ...
     def alert(self, data: Any) -> str | None: ...
+    def alert_resolved(self, data: Any) -> str: ...
     def render_plot(self, data: Any, month: dt.date, out: Path, root: str | None = None) -> None: ...
 
 
@@ -868,8 +895,9 @@ def pages_deploy(icons_dir: Path, project: str, branch: str) -> str | None:
     return m.group(0) if m else None
 
 
-def _record(tpl: Template, ts: str, scan: str) -> str | dict:
-    return {"ts": ts, "scan": scan} if tpl.track_scan else ts
+def _record(tpl: Template, ts: str, scan: str, variant: str | None = None) -> str | dict:
+    """A posted reply's state: ``{ts, scan}`` when the template tracks scans or edits this variant's replies, else the ts."""
+    return {"ts": ts, "scan": scan} if tpl.track_scan or variant in tpl.edited_variants else ts
 
 
 def _ts(rec: str | dict) -> str:
@@ -1173,6 +1201,13 @@ def link_prev(cfg: DigestConfig, root: str, month: dt.date, client, channel: str
         _err(f"digest: WARN could not link {prev:%Y-%m}'s OP to {month:%Y-%m}'s: {type(e).__name__}: {e} (retried next run)")
 
 
+def resolved_alert(body: str, note: str) -> str:
+    """A resolved quota alert's text: its last body struck through (Slack's `~…~`, a line at a time: a strike can't span
+    lines), then `note` (when it resolved)."""
+    struck = "\n".join(f"~{ln}~" if ln.strip() else ln for ln in body.split("\n"))
+    return f"{struck}\n{note}"
+
+
 def converge_slack(tpl: Template, root: str, month: dt.date, client, channel: str, variant: str | None = None, *, icons_dir=None, deploy_plot=None, reply_delay: float = 0.0, edit_replies: bool = False, current: bool = False) -> dict:
     """Converge the month's Slack thread: render+host the plot, post/edit the
     OP, then per reply unit post it if none exists — or, on an edited variant,
@@ -1240,11 +1275,11 @@ def converge_slack(tpl: Template, root: str, month: dt.date, client, channel: st
             if new and reply_delay:
                 time.sleep(reply_delay)
             rm = client.post(r.body, thread_id=op_ts, username=r.username, icon_url=r.icon_url, icon_emoji=r.icon_emoji)
-            posted[u.key] = _record(tpl, rm.id, u.scan)
+            posted[u.key] = _record(tpl, rm.id, u.scan, variant)
             new += 1
             save_state(path, state)   # persist after each → a spaced backfill is resumable
             _err(f"digest: reply {u.key} ({u.scan}) -> {rm.id}")
-        elif edit_replies or (variant in tpl.edited_variants and have["scan"] != u.scan):
+        elif edit_replies or (variant in tpl.edited_variants and (have.get("scan") if isinstance(have, dict) else None) != u.scan):
             client.edit(_ts(have), r.body)
             if isinstance(have, dict):
                 have["scan"] = u.scan
@@ -1278,18 +1313,20 @@ def converge_slack(tpl: Template, root: str, month: dt.date, client, channel: st
     if not provs:
         state.pop("provisional")
 
-    # The quota alert: one reply, also in the channel, while any quota is at or over `alert_pct`; Slack can't take a
-    # reply back out of the channel, so a resolved alert is deleted (its days' replies keep their `:warning:`s)
+    # The quota alert: one reply, also in the channel, while any quota is at or over `alert_pct`. Slack can't take a
+    # reply back out of the channel, and a deleted one breaks every quote and forward of it ("This link opens a message
+    # … that's been deleted"), so a resolved alert stays, struck through, with when it resolved (`resolved_alert`); a
+    # later alert is a new reply.
     text, have = tpl.alert(data), state.get("alert")
     if text is None and have is not None:
         try:
-            client.delete(have["ts"], orphans_ok=True)
+            client.edit(have["ts"], resolved_alert(have["body"], tpl.alert_resolved(data)))
         except Exception as e:  # noqa: BLE001 — the next run retries; a lingering alert names its scan
-            _err(f"digest: WARN could not delete the quota alert: {e}")
+            _err(f"digest: WARN could not mark the quota alert resolved: {e}")
         else:
             del state["alert"]
             save_state(path, state)
-            _err("digest: deleted the quota alert (every quota back under, or its month closed)")
+            _err("digest: marked the quota alert resolved (every quota back under, or its month closed)")
     elif text is not None and have is None:
         rm = client.post(text, thread_id=op_ts, broadcast=True, username=f"{cfg.title}: quota alert", icon_emoji=ALERT_ICON)
         state["alert"] = {"ts": rm.id, "body": text}
