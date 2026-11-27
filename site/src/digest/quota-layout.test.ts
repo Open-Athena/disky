@@ -80,7 +80,7 @@ describe("the OP's per-pool layout", () => {
     const m: QuotaRows = { template: 'quota', closed: false, pre: [], lead: [at('2026-08-31T1200', 15, 4)], rows: [at('2026-09-07T1200', 55, 4), at('2026-09-14T1200', 55, 3)] }
     const lines = opText(m, '2026-09', byClass, { plotUrl: null, prevUrl: null }, { ...DEFAULT_PARAMS, layout: 'pools', quotas: 'off' })
       .replace(/\]\([^)]*\)/g, ']').split('\n')
-    expect(lines.slice(4, 6)).toEqual(['[org] 55 TiB (+40.0) · 55.0% of 100Ti (45.0 Ti free)', '[org] 3 TiB (−1.0) · 3% of 100Ti'])
+    expect(lines.slice(4, 6)).toEqual(['[org] 55 TiB (+40.0) · 55.0% of pub (45.0 Ti free)', '[org] 3 TiB (−1.0) · 3% of priv'])
     // each week names the pools that moved by their own classes, not the bucket's whole change
     expect(lines.slice(lines.indexOf('*Weekly changes*') + 1).map(l => l.slice(l.indexOf(' ') + 1))).toEqual([
       '[wk of 9/7]: **+40.0 TiB** · [org (pub)] +40.0',
