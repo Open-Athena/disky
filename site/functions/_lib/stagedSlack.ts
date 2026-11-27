@@ -550,8 +550,12 @@ export async function stagedCardUrl(env: NotifyEnv & Env & { OG_CARDS?: string; 
 export async function stagedImageVersion(env: Env, digest: string): Promise<string> {
   const scans = storeReady(env) ? (await pathScans(env, true).catch(() => null))?.results ?? [] : []
   const scan = scans[scans.length - 1]?.date
-  return scan ? `${digest.slice(0, 8)}.${scan}` : digest.slice(0, 8)
+  const v = `${digest.slice(0, 8)}${STAGED_CARD_V}`
+  return scan ? `${v}.${scan}` : v
 }
+/** The staged card's renderer, in its URL's version: Slack keeps an image by its URL, so a change to how the card looks
+ *  (`og/pages.ts` `stagedCard`) bumps this and every re-render carries the new card. */
+const STAGED_CARD_V = 'c2'
 
 /** A stage batch, announced (with its stager's other recent batches) in one reply. */
 export interface StageArgs { stage: { planId: number; batchId: number; by: string; prefixes: string[]; covered: number; note: string | null; siteUrl: string } }
