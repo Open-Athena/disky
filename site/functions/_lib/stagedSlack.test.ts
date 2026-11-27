@@ -437,11 +437,11 @@ describe('D1', () => {
   describe('the plan card', () => {
     const base = { planId: 7, siteUrl: 'https://site.example.org', items: 3, batches: 2, stagers: [] as string[], digest: 'D1', actions: true, closed: false, runs: [] as RunRow[] }
     const types = (blocks: unknown[]) => blocks.map(b => (b as { type: string }).type)
-    it('an image block last, only with an image and items', () => {
+    it('an image block last, only with an image and items (or something the thread deleted)', () => {
       const v = { ...base, image: 'https://site.example.org/og/staged.png?v=abc&sig=x' }
       expect([types(renderParent(v).blocks), renderParent(v).blocks[2], types(renderParent({ ...v, items: 0 }).blocks), types(renderParent(base).blocks)]).toEqual([
         ['section', 'actions', 'image'],
-        { type: 'image', image_url: 'https://site.example.org/og/staged.png?v=abc&sig=x', alt_text: 'Plan #7: the staged prefixes as a treemap, coloured by owner' },
+        { type: 'image', image_url: 'https://site.example.org/og/staged.png?v=abc&sig=x', alt_text: 'Plan #7: what its thread staged, as a treemap' },
         ['section', 'actions'],
         ['section', 'actions'],
       ])

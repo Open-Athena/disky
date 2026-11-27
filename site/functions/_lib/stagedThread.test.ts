@@ -343,7 +343,8 @@ describe('D1', () => {
       dbRef.db = db
       await notifyPlan(env, db, 1, SITE, await stage(db, 1, ['gs://b/first/'], { ts: 1000 }), { now: 1000 })
       const firstLine = (c: Call) => sectionText(c.body.blocks).split('\n')[0]
-      const prefixes = (c: Call) => Number(/(\d+) prefix/.exec(firstLine(c))![1])
+      // the parent's counts are its second line (the first is the title and who staged)
+      const prefixes = (c: Call) => Number(/(\d+) prefix/.exec(sectionText(c.body.blocks).split('\n')[1])![1])
       const replies = calls.filter(c => c.body.thread_ts === PARENT || (c.method === 'chat.update' && c.body.ts !== PARENT))
       expect({
         parent: calls.filter(c => c.method === 'chat.update' && c.body.ts === PARENT).map(prefixes),
