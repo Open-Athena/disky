@@ -118,6 +118,8 @@ interface Item { prefix: string; addedBy: string; stat?: PrefixStat; owner: stri
 
 /** A deleted prefix's colour, and every still-staged one's once the thread has deleted some (the card then shows state). */
 export const DELETED_COLOR = '#8e3b36'
+/** At most this many tiles from one bucket's groups (`stagedCard`); more, and the bucket stays one tile. */
+const MAX_GROUPS = 6
 export const STAGED_COLOR = '#c9922e'
 
 /** `/staged` (+ `q`): what the open plan's thread staged, a tile per bucket holding its items. Before any real run deleted
@@ -183,16 +185,32 @@ export async function stagedCard(env: Env, site: Site, title: string, params: Re
     const bucket = it.prefix.replace(/^[a-z0-9]+:\/\//, '').split('/')[0]
     byBucket.set(bucket, [...(byBucket.get(bucket) ?? []), it])
   }
-  const tiles: CardTile[] = [...byBucket].map(([bucket, its]) => {
-    // each item named within its bucket, less the dirs every item shares, which the tile names after the bucket
-    const rel = its.map(i => i.prefix.replace(/^[a-z0-9]+:\/\//, '').slice(bucket.length).replace(/^\//, ''))
+  /** A tile: `its` (named within their bucket by `rel`) less the dirs they all share, which `name` (the bucket, and the
+   *  dirs above `at` elided as `…`) carries. */
+  const tileOf = (bucket: string, its: Item[], rel: string[], at = ''): CardTile => {
     const shared = sharedDirs(rel)
     const kids = its.map((i, k) => ({ name: rel[k].slice(shared.length), b: i.stat?.bytes ?? 0, color: color(i) }))
     const b = kids.reduce((s, k) => s + k.b, 0)
     const top = [...its].sort((x, y) => (y.stat?.bytes ?? 0) - (x.stat?.bytes ?? 0))[0]
     const tile = byState ? (its.every(i => i.deleted) ? DELETED_COLOR : its.every(i => !i.deleted) ? STAGED_COLOR : UNOWNED_COLOR)
       : anyOwner ? owners(top?.owner ?? null) : UNOWNED_COLOR
-    return { name: shared ? `${bucket}/${shared.replace(/\/$/, '')}` : bucket, b, color: tile, kids }
+    const dirs = shared.slice(at.length).replace(/\/$/, '')
+    return { name: [bucket, ...(at ? ['…'] : []), ...(dirs ? [dirs] : [])].join('/'), b, color: tile, kids }
+  }
+  const tiles: CardTile[] = [...byBucket].flatMap(([bucket, its]) => {
+    // each item named within its bucket, less the dirs every item shares, which the tile names after the bucket
+    const rel = its.map(i => i.prefix.replace(/^[a-z0-9]+:\/\//, '').slice(bucket.length).replace(/^\//, ''))
+    // A few groups under the first dir they part at (one holding several items): a tile each, so the long dirs each group
+    // shares head its tile, not every item's label (where the card would cut what tells them apart).
+    const shared = sharedDirs(rel)
+    const groups = new Map<string, number[]>()
+    rel.forEach((r, k) => {
+      const seg = r.slice(shared.length).split('/')[0]
+      groups.set(seg, [...(groups.get(seg) ?? []), k])
+    })
+    const split = groups.size >= 2 && groups.size <= MAX_GROUPS && [...groups.values()].some(g => g.length > 1)
+    if (!split) return [tileOf(bucket, its, rel)]
+    return [...groups.values()].map(g => tileOf(bucket, g.map(k => its[k]), g.map(k => rel[k]), shared))
   })
   const sum = (its: Item[], k: 'bytes' | 'objects') => its.reduce((s, i) => s + (i.stat?.[k] ?? 0), 0)
   const b = sum(items, 'bytes')

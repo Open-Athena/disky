@@ -67,6 +67,19 @@ describe('stagedCard', () => {
     ])
   })
 
+  it('a bucket whose items part into a few groups (one holding several): a tile each, its shared dirs heading it after `…`, so each item keeps the name that tells it apart', async () => {
+    const { db } = await sqliteD1()
+    await db.prepare("INSERT INTO plans (id, name, state, created_by, created_ts) VALUES (1, 'Staged', 'open', 'ann', 1)").run()
+    for (const p of ['gs://b/runs/r1/ckpt/s1/', 'gs://b/runs/r1/ckpt/s2/', 'gs://b/runs/r2/ckpt/s1/']) {
+      await db.prepare("INSERT INTO plan_items (plan_id, prefix, added_by, added_ts) VALUES (1, ?, 'ann', 1)").bind(p).run()
+    }
+    const card = await stagedCard({ DB: db } as never, { name: 'gcs', scheme: 'gs' }, 'Staged', {}, 'full')
+    expect(card.tiles.map(t => [t.name, t.b, t.kids?.map(k => k.name)]).sort()).toEqual([
+      ['b/…/r1/ckpt', 2 * TiB, ['s1/', 's2/']],
+      ['b/…/r2/ckpt', TiB, ['s1/']],
+    ])
+  })
+
   it('unowned items (no attribution): each its own colour and label inside its bucket, and no owner legend; their shared dirs join the bucket\'s label', async () => {
     const { db } = await sqliteD1()
     await db.prepare("INSERT INTO plans (id, name, state, created_by, created_ts) VALUES (1, 'Staged', 'open', 'ann', 1)").run()
