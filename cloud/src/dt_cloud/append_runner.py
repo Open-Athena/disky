@@ -146,6 +146,8 @@ MERGE_STATUS = "merging.json"
 HEARTBEAT_S = 300
 #: The merge job's env var naming its Batch job (`Runner.carries`): the status record's `holder`.
 JOB_NAME_VAR = "DT_JOB_NAME"
+#: The Batch region a job runs in (its submitter sets it, `Runner.record_env`): a lease record's `region`.
+JOB_REGION_VAR = "DT_JOB_REGION"
 
 
 class NotNext(Exception):
@@ -651,26 +653,32 @@ class CoordinatorLease:
 
     `extra`: more fields in the record (the compaction lease's `gen`). `adopt`: `take` a record whose `holder` is this
     one's, live or not (the compaction lease its submitter wrote for the job, `Runner.compact_stage`). `tolerate_errors`:
-    a renewal that raises is retried at the next beat instead of losing the lease (its TTL spans three beats). `ended`:
-    given a holder that names a job (`JOB_NAME`), why it has ended (`<job> <STATE>`, `job_ended`) or None while it runs;
-    a held lease whose holder ended is taken at once, not after its TTL (a cancelled fold's lease held the next
-    coordinator off for 15 min, cw 2026-11-27). A failed read falls back to the TTL, never to a take."""
+    a renewal that raises is retried at the next beat instead of losing the lease (its TTL spans three beats).
+
+    `region`: the holder's Batch region, kept in the record (default `$DT_JOB_REGION`; an adopted record's when unset).
+    `ended`: given a holder that names a job (`JOB_NAME`) and the region its record says it runs in, why it has ended
+    (`<job> <STATE>`, `job_ended`) or None while it runs; a held lease whose holder ended is taken at once, not after its
+    TTL (a cancelled fold's lease held the next coordinator off for 15 min, cw 2026-11-27). Only a record that names its
+    region is looked up (`fallback_region` stands in for one that doesn't, where the taker submitted the holder itself):
+    a lookup in another region 404s, which must never read as "gone" for a live holder. A failed read falls back to the
+    TTL, never to a take."""
 
     def __init__(self, file: LeaseFile, *, holder: str, now: Callable[[], datetime], ttl_s: int = COORD_TTL_S, extra: dict | None = None,
                  adopt: bool = False, tolerate_errors: bool = False, what: str = "coordinator lease", log: Callable[[str], None] = err,
-                 ended: Callable[[str], str | None] | None = None):
+                 region: str | None = None, ended: Callable[[str, str], str | None] | None = None, fallback_region: str | None = None):
         from uuid import uuid4
 
         self.file, self.holder, self.now, self.ttl_s = file, holder, now, ttl_s
         self.extra, self.adopt, self.tolerate_errors, self.what, self.log = extra or {}, adopt, tolerate_errors, what, log
-        self.ended = ended
+        self.region = region or os.environ.get(JOB_REGION_VAR) or None
+        self.ended, self.fallback_region = ended, fallback_region
         self.owner, self.token, self.lost = uuid4().hex, None, None
         #: When its holder took it (`take`; an adopted record's own): the record's `since`, kept across renewals (`at`).
         self.since: str | None = None
 
     def record(self) -> str:
         return json.dumps({"owner": self.owner, "holder": self.holder, "at": self.now().isoformat(), "since": self.since, "ttl_s": self.ttl_s,
-                           **self.extra}) + "\n"
+                           **({"region": self.region} if self.region else {}), **self.extra}) + "\n"
 
     def take(self) -> None:
         self.since = self.now().isoformat()
@@ -683,6 +691,7 @@ class CoordinatorLease:
             held, token = cur
             if self.adopt and held.get("holder") == self.holder:
                 self.since = held.get("since") or self.since
+                self.region = self.region or held.get("region")
                 if (new := self.file.replace(self.record(), token)) is not None:
                     self.token = new
                     return
@@ -719,13 +728,13 @@ class CoordinatorLease:
             self.file.delete(self.token)
 
     def _holder_ended(self, held: dict) -> bool:
-        """Whether `held`'s holder is a job that has ended (`ended`), logged; False when it isn't a job name, it runs,
-        or its state can't be read (the TTL decides then)."""
-        holder = held.get("holder") or ""
-        if self.ended is None or not JOB_NAME.fullmatch(holder):
+        """Whether `held`'s holder is a job that has ended (`ended`, in the record's region), logged; False when it isn't
+        a job name, its region is unknown, it runs, or its state can't be read (the TTL decides then)."""
+        holder, region = held.get("holder") or "", held.get("region") or self.fallback_region
+        if self.ended is None or not region or not JOB_NAME.fullmatch(holder):
             return False
         try:
-            why = self.ended(holder)
+            why = self.ended(holder, region)
         except Exception as e:  # noqa: BLE001 — an unreadable state never takes a lease: the TTL decides
             self.log(f"{self.what}: holder {holder}'s state unreadable ({type(e).__name__}: {e}); its TTL decides")
             return False
@@ -738,12 +747,13 @@ class CoordinatorLease:
 JOB_NAME = re.compile(r"[a-z]([a-z0-9-]{0,61}[a-z0-9])?")
 
 
-def job_ended(region: str | None = None, project: str | None = None) -> Callable[[str], str | None]:
-    """`CoordinatorLease`'s `ended` over the deployment's job backend (`job_backend.resolve`): `<job> <STATE>` once the
-    job is terminal, `<job> gone` when the backend has no such job (404), None while it runs; other errors raise."""
+def job_ended(project: str | None = None) -> Callable[[str, str], str | None]:
+    """`CoordinatorLease`'s `ended` over the deployment's job backend (`job_backend.resolve`) in `project`: `<job>
+    <STATE>` once the job is terminal in the region asked, `<job> gone` when the backend has no such job there (404),
+    None while it runs; other errors raise."""
     from .job_backend import TERMINAL, resolve
 
-    def ended(job: str) -> str | None:
+    def ended(job: str, region: str) -> str | None:
         try:
             state = resolve(region=region, project=project).status(job).state
         except Exception as e:
@@ -757,7 +767,7 @@ def job_ended(region: str | None = None, project: str | None = None) -> Callable
 @contextmanager
 def coordinator_lease(file: LeaseFile, *, holder: str | None = None, now: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
                       ttl_s: int = COORD_TTL_S, heartbeat_s: float = HEARTBEAT_S,
-                      ended: Callable[[str], str | None] | None = None) -> Iterator[Callable[[], None]]:
+                      ended: Callable[[str, str], str | None] | None = None) -> Iterator[Callable[[], None]]:
     """Hold the coordinator lease on `file` (`holder`: `$DT_JOB_NAME`, else host:pid), renewed every `heartbeat_s` on a
     thread; yields its `check`. Raises `Busy` when another holds it (a holder whose job `ended` doesn't: `CoordinatorLease`).
     Released on the way out, unless it was lost."""
@@ -1830,8 +1840,8 @@ class Runner:
     #: generation, and `compact_stage` writes it for its job. None: no lease (dry runs, tests).
     compacting: Callable[[], LeaseFile] | None = None
     #: Whether a lease holder's job has ended (`CoordinatorLease`'s `ended`); None: the deployment's job backend in the
-    #: profile's region (`job_ended`).
-    job_ended: Callable[[str], str | None] | None = None
+    #: profile's project (`job_ended`).
+    job_ended: Callable[[str, str], str | None] | None = None
 
     store_prefix: ClassVar[str]
     job_prefix: ClassVar[str]
@@ -2089,7 +2099,8 @@ class Runner:
             jobs[0] = (jobs[0][0], self.record_env(*jobs[0]))
             if self.compacting is not None and not self.dry_run and not self.candidate:
                 lease = CoordinatorLease(self.compacting(), holder=jobs[0][0], now=self.now, ttl_s=COMPACT_START_S, extra={"gen": self.p.gen},
-                                         what="compaction lease", log=self.log, ended=self.job_ended or job_ended(self.p.region, self.p.project))
+                                         what="compaction lease", log=self.log, region=self.p.region,
+                                         ended=self.job_ended or job_ended(self.p.project), fallback_region=self.p.region)
                 try:
                     lease.take()
                 except Busy as e:
