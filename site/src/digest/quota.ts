@@ -17,6 +17,11 @@ export interface QuotaScan {
   extra: Record<string, number>
   /** The primary's per-storage-class sizes (unrounded); null: the meta has none. */
   classes: Record<string, number> | null
+  /** The primary's object count (every class); absent in bundles before 2026-11-27. */
+  objs?: number
+  /** The primary's objects added, deleted and modified since the store's scan before it (its change counters,
+   *  `digest_quota.site_changes`); absent where the store didn't count the scan. */
+  changes?: [number, number, number]
 }
 
 /** A pool's label on the plot: a zone's bare name (`08a`, not the text line's `08a zone`: the card has no per-bucket lines
@@ -265,7 +270,11 @@ export function imageRequest(m: QuotaRows, month: number, cfg: DigestCfg, p: Dig
     note: [cfg.host, ...(scope && Object.keys(last.extra).length ? [scope] : []), u.name].join(' · '),
     month: iso(month).slice(0, 7),
     from: iso(start),
-    points: scans.map(r => ({ scan: r.scan, bytes: pyRound((q ? scoped(r.tb, r.classes, q) : r.tb) * u.bytes) })),
+    // each scan's object count too, when every one has it: the card draws it under the bytes (specs/change-metrics.md §10.1)
+    points: scans.map(r => ({
+      scan: r.scan, bytes: pyRound((q ? scoped(r.tb, r.classes, q) : r.tb) * u.bytes),
+      ...(scans.every(x => x.objs !== undefined) ? { objects: r.objs } : {}),
+    })),
     units: u.name,
   }
   if (q) body.quota = { bytes: q.bytes, name: q.name }
