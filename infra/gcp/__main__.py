@@ -107,6 +107,7 @@ CW_SECRETS = [
     "cw-s3-r2-access-key-id",
     "cw-s3-r2-secret-access-key",
     "cw-s3-r2-endpoint",
+    "cw-s3-slack-search-token",
 ]
 secrets = Secrets(
     "cw-secrets",
