@@ -189,8 +189,8 @@ def same_disk(a: Path, b: Path) -> bool:
 
 def local_tier(tier: sd.Tier, kind: str, dst: Path, *, threads: int = 16) -> sd.Tier:
     """`tier`, with what `kind`'s roots group file reads (`meta.json`, `aliases.parquet`, the roots index and its top, the
-    roots files) copied to `dst` on the work disk, as a `Tier` there; `tier` itself when it is on the work disk already or
-    the disk lacks room (`LOCAL_TIER_HEADROOM`, logged). The compaction's base tier is its generation's mount (gcsfuse):
+    roots files) copied to `dst` on the work disk, as a `Tier` there; `tier` itself when it has no mount (`GcsTier`), is on
+    the work disk already, or the disk lacks room (`LOCAL_TIER_HEADROOM`, logged). The compaction's base tier is its generation's mount (gcsfuse):
     `base_counts_parallel`'s workers decoding its groups in place there sat at ~10 of 48 CPUs for hours (cw 2026-11-27's
     level-5 fold, 2.0B floor crossers); a sequential copy is minutes."""
     from concurrent.futures import ThreadPoolExecutor
@@ -198,7 +198,7 @@ def local_tier(tier: sd.Tier, kind: str, dst: Path, *, threads: int = 16) -> sd.
     from .heartbeat import Progress
 
     dst.mkdir(parents=True, exist_ok=True)
-    if same_disk(tier.root, dst):
+    if isinstance(tier, sd.GcsTier) or same_disk(tier.root, dst):
         return tier
     rels = [r for r in ("meta.json", "aliases.parquet", f"{kind}-roots-index.parquet", f"{kind}-roots-index.top.parquet") if tier.exists(r)]
     rels += tier.listdir(f"{kind}/roots") if tier.exists(f"{kind}/roots") else []
