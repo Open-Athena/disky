@@ -89,7 +89,7 @@ def test_compact_stage_writes_the_lease_for_its_job_before_submitting_it(tmp_pat
     r.compact_now = True
     r.carries()
     name = f.jobs[0][0]
-    want = {"owner": "<owner>", "holder": name, "at": NOW.isoformat(), "ttl_s": ar.COMPACT_START_S, "gen": "g1"}
+    want = {"owner": "<owner>", "holder": name, "at": NOW.isoformat(), "since": NOW.isoformat(), "ttl_s": ar.COMPACT_START_S, "gen": "g1"}
     assert ([s for s, _ in f.calls()], seen, _record(lease)) == (["compact"], [want], want)
     with pytest.raises(ar.Busy):
         IvFake(["2026-08-05"]).runner(compacting=lambda: ar.LocalLeaseFile(lease)).run("2026-08-05")
@@ -115,7 +115,8 @@ def test_the_job_adopts_its_submitters_record_and_refuses_another_live_one(tmp_p
     clock = Clock()
     _write(lease, "job-c", "g", clock(), ttl_s=ar.COMPACT_START_S)
     with ar.compaction_lease(ar.LocalLeaseFile(lease), "g", holder="job-c", now=clock) as held:
-        assert _record(lease) == {"owner": "<owner>", "holder": "job-c", "at": clock().isoformat(), "ttl_s": ar.COORD_TTL_S, "gen": "g"}
+        assert _record(lease) == {"owner": "<owner>", "holder": "job-c", "at": clock().isoformat(), "since": clock().isoformat(),
+                                  "ttl_s": ar.COORD_TTL_S, "gen": "g"}
         with pytest.raises(ar.Busy) as e:
             with ar.compaction_lease(ar.LocalLeaseFile(lease), "g", holder="job-d", now=clock):
                 pass
@@ -168,7 +169,7 @@ def test_run_compaction_holds_the_lease_through_the_fold(tmp_path, monkeypatch):
     during = []
 
     def fold(*a, **kw):
-        during.append({k: v for k, v in _record(lease).items() if k != "at"})
+        during.append({k: v for k, v in _record(lease).items() if k not in ("at", "since")})
         return c.fold(*a, **kw)
 
     kw = dict(threads=2, mem="1GB", log=lambda m: None, now=0.0, force=True, policy=ar.NEVER)
@@ -211,14 +212,14 @@ def _poll(monkeypatch, outcomes: list) -> tuple[list, list]:
 
 def test_batch_runner_retries_a_transient_poll_error(monkeypatch):
     sleeps, logs = _poll(monkeypatch, ["RUNNING", ConnectionResetError(54, "Connection reset by peer"), HTTPError(503), "RUNNING", "SUCCEEDED"])
-    ar.BatchRunner(ar.Profile(region="r", project="p"), logs.append)("j", {})
+    ar.BatchRunner(ar.Profile(region="r", project="p"), logs.append, clock=lambda: 0.0)("j", {})
     assert (sleeps, logs) == ([10, 10, 20, 20], [
         "submitted j",
-        "j RUNNING ",
+        "j RUNNING for 0s",
         "j: polling failed (ConnectionResetError: [Errno 54] Connection reset by peer): retry 1/5 in 10s",
         "j: polling failed (HTTPError: 503 error): retry 2/5 in 20s",
-        "j RUNNING ",
-        "j SUCCEEDED ",
+        "j RUNNING for 0s",
+        "j SUCCEEDED after 0s",
     ])
 
 

@@ -161,7 +161,7 @@ class _FakeStore:
 
     def __init__(self, objects: dict[str, tuple[int, int]], versioning: str | None = "Enabled",
                  page: int = 2, fail_keys: set[str] | None = None, raced: set[str] | None = None,
-                 fail_requests: bool = False) -> None:
+                 fail_requests: bool = False, slow: dict[str, int] | None = None) -> None:
         # objects: key -> (size, mtime_epoch); `raced`: keys rewritten between the listing and the delete
         self.objects = dict(objects)
         self._versioning = versioning
@@ -169,6 +169,8 @@ class _FakeStore:
         self._fail = fail_keys or set()
         self._raced = raced or set()
         self._fail_requests = fail_requests
+        # `slow`: key -> how many delete attempts the store refuses with `SlowDown` (inside a 200 reply) before taking it
+        self._slow = dict(slow or {})
         self.delete_calls = 0
         self.batches: list[list[str]] = []
 
@@ -205,7 +207,10 @@ class _FakeStore:
         deleted, errors = [], []
         for o in Delete["Objects"]:
             k = o["Key"]
-            if k in self._fail:
+            if self._slow.get(k, 0) > 0:
+                self._slow[k] -= 1
+                errors.append({"Key": k, "Code": "SlowDown"})
+            elif k in self._fail:
                 errors.append({"Key": k, "Code": "AccessDenied"})
             elif k in self._raced or o["ETag"] != f'"{k}"':
                 errors.append({"Key": k, "Code": "PreconditionFailed"})
@@ -333,6 +338,21 @@ def test_execute_deletes_in_batches_with_each_reviewed_etag(tmp_path: Path, monk
     assert duckdb.connect().execute(
         f"SELECT name, decision FROM read_parquet('{s['log_dir']}/part-00000.parquet') ORDER BY name"
     ).fetchall() == [(f"marin/ckpt/k{i}", "skipped_overwritten" if i == 3 else "delete") for i in range(5)]
+
+
+def test_a_throttled_item_is_sent_again_alone_until_taken_or_out_of_tries(tmp_path: Path, monkeypatch) -> None:
+    """An item a `DeleteObjects` reply refuses with `SlowDown` (in a 200 reply, no exception) is sent again with only
+    the other refused ones, its ETag still on it, up to `ITEM_RETRIES` more times; past that it is `delete_failed`."""
+    monkeypatch.setattr("dt_cloud.sweep.ITEM_BACKOFF_S", 0)
+    l2 = tmp_path / "l2.parquet"
+    _write_l2(l2, [(f"marin/ckpt/k{i}", 10, 111, "file") for i in range(3)])
+    run = tmp_path / "run"
+    build_manifest(str(l2), Plan(name="p", bucket=BUCKET, sweep=["marin/ckpt/"], plan_id=3), str(run))
+    store = _FakeStore({f"marin/ckpt/k{i}": (10, 111) for i in range(3)}, slow={"marin/ckpt/k1": 2, "marin/ckpt/k2": 9})
+    s = execute_plan(str(run), for_real=True, client=store)
+    assert store.batches == [["marin/ckpt/k0", "marin/ckpt/k1", "marin/ckpt/k2"], ["marin/ckpt/k1", "marin/ckpt/k2"],
+                             ["marin/ckpt/k1", "marin/ckpt/k2"], ["marin/ckpt/k2"]]
+    assert (store.objects, s["deleted_objects"], s["delete_failed"]) == ({"marin/ckpt/k2": (10, 111)}, 2, 1)
 
 
 def test_execute_counts_a_failed_batch_call_as_failed(tmp_path: Path) -> None:
@@ -611,7 +631,7 @@ def test_execute_cli_needs_no_versioning_permission(tmp_path: Path, monkeypatch)
 
     run = _run_with_manifest(tmp_path)
     store = _NoVersioningPermission(_LIVE)
-    monkeypatch.setattr("dt_cloud.sweep.s3_client", lambda: store)
+    monkeypatch.setattr("dt_cloud.sweep.s3_client", lambda **_: store)
     result = CliRunner().invoke(main, ["plan-sweep", "execute", "--for-real", str(run)])
     assert result.exit_code == 0, result.output
     summary = json.loads(result.stdout)
@@ -628,7 +648,7 @@ def test_execute_cli_fails_on_per_object_delete_errors(tmp_path: Path, monkeypat
 
     run = _run_with_manifest(tmp_path)
     store = _FakeStore(_LIVE, fail_keys={"marin/ckpt/a"})
-    monkeypatch.setattr("dt_cloud.sweep.s3_client", lambda: store)
+    monkeypatch.setattr("dt_cloud.sweep.s3_client", lambda **_: store)
     result = CliRunner().invoke(main, ["plan-sweep", "execute", "--for-real", str(run)])
     assert result.exit_code == 1, result.output
     summary = json.loads(result.stdout)
@@ -637,3 +657,16 @@ def test_execute_cli_fails_on_per_object_delete_errors(tmp_path: Path, monkeypat
     }
     assert json.loads((run / "deleted-summary.json").read_text()) == summary
     assert store.objects == _LIVE
+
+
+def test_deletes_run_many_small_calls_at_once() -> None:
+    """CAIOS checks a `DeleteObjects` call's ETags one after another (cw's 2026-11-26 run: 1000-key calls, 4 at once, 95
+    objects/s): calls carry `DELETE_BATCH` keys, `DELETE_WORKERS` in flight, and the client's pool holds a connection for
+    each (botocore's default 10 would queue the rest) with a read timeout a slow call stays under."""
+    import inspect
+
+    from dt_cloud import sweep
+
+    cfg = sweep.s3_client("https://example.invalid", pool=sweep.DELETE_WORKERS + 4).meta.config
+    assert (sweep.DELETE_BATCH, sweep.DELETE_WORKERS, inspect.signature(sweep.execute_plan).parameters["delete_workers"].default,
+            cfg.max_pool_connections, cfg.read_timeout) == (250, 32, 32, 36, 120)
