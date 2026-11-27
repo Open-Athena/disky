@@ -248,15 +248,16 @@ def test_runway_rules():
     the rate text only under 60 days. The site's `digest/pools.ts` mirrors these (its own spec, same numbers)."""
     t = dt.datetime(2026, 9, 23, 12, tzinfo=UTC)
     flat_then_jump = [(t - dt.timedelta(days=d), 80.0) for d in (7, 3, 1)]
-    # the rate with the window (days) it came from; a tie names the longest
-    assert D._growth(flat_then_jump, t, 90.0) == (10.0, 1)
-    assert D._growth([(t - dt.timedelta(days=7), 46.0), (t - dt.timedelta(days=3), 77.0), (t - dt.timedelta(days=1), 83.0)], t, 85.0) == (39 / 7, 7)
-    assert D._growth([(t - dt.timedelta(days=d), 90.0 - 2 * d) for d in (7, 3, 1)], t, 90.0) == (2.0, 7)
+    # the rate with the window (days) it came from and the point it was measured from; a tie names the longest
+    days = [t - dt.timedelta(days=d) for d in (7, 3, 1)]
+    assert D._growth(flat_then_jump, t, 90.0) == (10.0, 1, days[2])
+    assert D._growth(list(zip(days, (46.0, 77.0, 83.0))), t, 85.0) == (39 / 7, 7, days[0])
+    assert D._growth([(t - dt.timedelta(days=d), 90.0 - 2 * d) for d in (7, 3, 1)], t, 90.0) == (2.0, 7, days[0])
     assert D._growth([(t - dt.timedelta(hours=12), 80.0)], t, 90.0) is None  # nothing a whole day back
-    assert [D._runway(15.0, (5.0, 3)), D._runway(15.0, (0.0, 1)), D._runway(15.0, (-2.0, 7)), D._runway(15.0, None),
-            D._runway(-1.3, (4.0, 1))] == [
-        D.Runway(3.0, 5.0, window_d=3), D.Runway(D.math.inf, 0.0, window_d=1), D.Runway(D.math.inf, -2.0, window_d=7),
-        D.Runway(D.math.inf, None), D.Runway(0.0, 4.0, window_d=1)]
+    assert [D._runway(15.0, (5.0, 3, t)), D._runway(15.0, (0.0, 1, t)), D._runway(15.0, (-2.0, 7, t)), D._runway(15.0, None),
+            D._runway(-1.3, (4.0, 1, t))] == [
+        D.Runway(3.0, 5.0, window_d=3, since=t), D.Runway(D.math.inf, 0.0, window_d=1, since=t),
+        D.Runway(D.math.inf, -2.0, window_d=7, since=t), D.Runway(D.math.inf, None), D.Runway(0.0, 4.0, window_d=1, since=t)]
     R, O, Y, G = D.RED_MARK, D.ORANGE_MARK, D.YELLOW_MARK, D.GREEN_MARK
     marks = [D._runway_mark(D.Runway(d, 1.0), fill) for d, fill in [
         (0.0, 101.0), (2.9, 50.0), (3.0, 50.0), (13.9, 50.0), (14.0, 50.0), (14.0, 95.0), (29.9, 50.0), (30.0, 50.0),
@@ -267,6 +268,22 @@ def test_runway_rules():
         D.Runway(8.2, 4.1), D.Runway(60.0, 1.0, window_d=7), D.Runway(D.math.inf, 0.0, window_d=1), D.Runway(0.0, 4.0, window_d=1)]]
     assert texts == [", +4.1 Ti/d over 3d, ≈8d to full", ", +30.0 Ti/d over 1d, ≈<1d to full", ", +1.0 Ti/d over 7d, ≈60d to full",
                      ", +4.1 Ti/d, ≈8d to full", "", "", ""]
+    # given the pool's url over the look-back, `over Nd` links it
+    url = "https://x.test/?d=0914-3d&g=z#over-time"
+    assert D._runway_text(D.Runway(8.2, 4.1, window_d=3), CFG, url) == f", +4.1 Ti/d [over 3d]({url}), ≈8d to full"
+
+
+def test_pool_url_zone_is_its_bucket_group():
+    """A runway's `over Nd` link (`_pool_url`): a zone's pool at the root as its bucket group (`?g=`, the site's
+    `diffUrl`), a lone bucket's at its path, each looking back to the scan the rate was measured from."""
+    z8 = E.Quota(100 * TIB, "100 TiB", "100Ti")
+    cfg = replace(CFG, buckets={**CFG.buckets, "hot-data": E.Bucket("hot", z8, "z8"), "side-data": E.Bucket("side", z8, "z8")})
+    scan, since = "2026-09-23T1201", dt.datetime(2026, 9, 20, 12, 1, tzinfo=UTC)
+    assert [D._pool_url(g, scan, since, cfg) for g in (["hot-data", "side-data"], ["hot-data"], ["main-data"])] == [
+        f"{SITE}/?d=2609231201-3d&g=z8#over-time",
+        f"{SITE}/hot-data?d=2609231201-3d#over-time",
+        f"{SITE}/main-data?d=2609231201-3d#over-time",
+    ]
 
 
 def test_runway_hue_steps():

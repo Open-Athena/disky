@@ -53,14 +53,15 @@ describe('quota pressure', () => {
     const f = await load()
     const D = 86400_000
     const t = Date.UTC(2026, 8, 23, 12)
-    // the rate with the window (days) it came from; a tie names the longest
-    expect(growth([[t - 7 * D, 80], [t - 3 * D, 80], [t - D, 80]], t, 90)).toEqual([10, 1])
-    expect(growth([[t - 7 * D, 46], [t - 3 * D, 77], [t - D, 83]], t, 85)).toEqual([39 / 7, 7])
-    expect(growth([[t - 7 * D, 76], [t - 3 * D, 84], [t - D, 88]], t, 90)).toEqual([2, 7])
+    // the rate with the window (days) it came from and the point it was measured from; a tie names the longest
+    expect(growth([[t - 7 * D, 80], [t - 3 * D, 80], [t - D, 80]], t, 90)).toEqual([10, 1, t - D])
+    expect(growth([[t - 7 * D, 46], [t - 3 * D, 77], [t - D, 83]], t, 85)).toEqual([39 / 7, 7, t - 7 * D])
+    expect(growth([[t - 7 * D, 76], [t - 3 * D, 84], [t - D, 88]], t, 90)).toEqual([2, 7, t - 7 * D])
     expect(growth([[t - D / 2, 80]], t, 90)).toBe(null)
-    expect([runway(15, [5, 3]), runway(15, [0, 1]), runway(15, [-2, 7]), runway(15, null), runway(-1.3, [4, 1])]).toEqual([
-      { days: 3, growth: 5, windowD: 3 }, { days: Infinity, growth: 0, windowD: 1 }, { days: Infinity, growth: -2, windowD: 7 },
-      { days: Infinity, growth: null, windowD: null }, { days: 0, growth: 4, windowD: 1 },
+    expect([runway(15, [5, 3, t]), runway(15, [0, 1, t]), runway(15, [-2, 7, t]), runway(15, null), runway(-1.3, [4, 1, t])]).toEqual([
+      { days: 3, growth: 5, windowD: 3, since: t }, { days: Infinity, growth: 0, windowD: 1, since: t },
+      { days: Infinity, growth: -2, windowD: 7, since: t }, { days: Infinity, growth: null, windowD: null, since: null },
+      { days: 0, growth: 4, windowD: 1, since: t },
     ])
     const [R, O, Y, G] = [':red_circle: ', ':large_orange_circle: ', ':large_yellow_circle: ', ':large_green_circle: ']
     const marks = ([[0, 101], [2.9, 50], [3, 50], [13.9, 50], [14, 50], [14, 95], [29.9, 50], [30, 50], [Infinity, 88.5], [Infinity, 96]] as [number, number][])
@@ -70,6 +71,9 @@ describe('quota pressure', () => {
       { days: 8.2, growth: 4.1 }, { days: 60, growth: 1, windowD: 7 }, { days: Infinity, growth: 0, windowD: 1 }, { days: 0, growth: 4, windowD: 1 }]
       .map(r => runwayText(r, f.cfg))).toEqual([', +4.1 Ti/d over 3d, ≈8d to full', ', +30.0 Ti/d over 1d, ≈<1d to full',
       ', +1.0 Ti/d over 7d, ≈60d to full', ', +4.1 Ti/d, ≈8d to full', '', '', ''])
+    // given the pool's url over the look-back, `over Nd` links it
+    expect(runwayText({ days: 8.2, growth: 4.1, windowD: 3 }, f.cfg, 'https://x.test/?d=0914-3d&g=z#over-time'))
+      .toEqual(', +4.1 Ti/d [over 3d](https://x.test/?d=0914-3d&g=z#over-time), ≈8d to full')
   })
 
   it('runway-hue: :runway-N: one more than the cut points reached; ≥ 95% never calmer than 3 (digest_quota._runway_hue)', () => {
