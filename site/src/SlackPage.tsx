@@ -536,6 +536,57 @@ function Bundle({ b, cands, setCands }: { b: PreviewBundle; cands: string[]; set
   </>
 }
 
+interface AuditLine { what: string; ts: string; same: boolean; live?: string; want?: string }
+interface SlackJob {
+  id: string; kind: string; key: string; args: { month: string; current: boolean }; state: string; shadow: boolean; done: boolean
+  report: { month: string; variant: string; op_ts?: string | null; audit?: AuditLine[]; writes?: { method: string; ts: string | null; text?: string }[] } | null
+  retry_at: number | null; calls: number; steps: number; error: string | null; created_by: string; updated_at: number
+}
+
+/** The site's own converges (specs/slack-in-workers.md, `/api/slack-jobs`): each job's state and, for a shadow (a dev
+ *  stack's), its audit: every message of the thread as Slack holds it against what the site renders for it. A stack
+ *  without the feature (or the recipe) answers an error, and the section stays away. */
+function SlackJobs() {
+  const qc = useQueryClient()
+  const jobs = useQuery({ queryKey: ['slack-jobs'], queryFn: () => getJson<{ jobs: SlackJob[] }>('/api/slack-jobs'), retry: false })
+  const step = useMutation({
+    mutationFn: async (id: string) => {
+      const r = await fetch(`/api/slack-jobs/${id}/step`, { method: 'POST', credentials: 'same-origin' })
+      if (!r.ok) throw new Error(`HTTP ${r.status}: ${await r.text()}`)
+    },
+    onSettled: () => qc.invalidateQueries({ queryKey: ['slack-jobs'] }),
+  })
+  if (jobs.error || !jobs.data?.jobs.length) return null
+  return (
+    <section className="slack-act">
+      <h2>Site converges</h2>
+      <p className="dim">The digest converged by the site itself, a step at a time. A <b>shadow</b> (the dev stack) writes nothing: it renders the thread and compares each message with Slack's copy, the gate for moving a deployment's converge into the site.</p>
+      {jobs.data.jobs.map(j => {
+        const audit = j.report?.audit ?? []
+        const bad = audit.filter(a => !a.same)
+        return (
+          <details key={j.id} open={!j.done || bad.length > 0}>
+            <summary>
+              {j.args.month} · {j.shadow ? 'shadow' : 'live'} · <b className={j.state === 'failed' ? 'err' : undefined}>{j.state}</b> · {j.steps} step{j.steps === 1 ? '' : 's'}, {j.calls} Slack calls · {new Date(j.updated_at).toISOString().slice(0, 16).replace('T', ' ')}Z
+              {j.shadow && j.state === 'done' && <> · {audit.length - bad.length}/{audit.length} as rendered</>}
+              {!j.done && <> <button disabled={step.isPending} onClick={e => { e.preventDefault(); step.mutate(j.id) }}>resume</button></>}
+            </summary>
+            {j.error && <p className={j.state === 'failed' ? 'err' : 'dim'}>{j.error}</p>}
+            {bad.map(a => (
+              <div key={a.ts}>
+                <p><code>{a.what}</code> <code>{a.ts}</code> differs</p>
+                <pre>live: {a.live}{'\n'}want: {a.want}</pre>
+              </div>
+            ))}
+            {j.report?.writes?.length ? <p className="dim">{j.report.writes.length} write{j.report.writes.length === 1 ? '' : 's'} it would make: {j.report.writes.map(w => w.method).join(', ')}</p> : null}
+          </details>
+        )
+      })}
+      {step.error && <p className="err">{step.error.message}</p>}
+    </section>
+  )
+}
+
 export function SlackPage() {
   useDocTitle('Slack digest', 'Admin')
   const [k, setK] = useUrlState('dk', stringParam())
@@ -566,6 +617,7 @@ export function SlackPage() {
       {b.error && <p className="err">{b.error.message}</p>}
       {b.isLoading && key && <p className="loading">Loading…</p>}
       {b.data && <Bundle b={b.data} cands={cands} setCands={x => setC(x.map(y => y || '.').join(';'))} />}
+      <SlackJobs />
     </div>
   )
 }

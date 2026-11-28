@@ -83,24 +83,27 @@ With `DIGEST_CFN` unset, nothing changes: the routes answer 503, the switch keep
 
 ## Phase 1: the digest, r2 first
 
-1. **Spec + D1 recipe** `slack-jobs` (`slack_jobs` + thrds receipts' table, if not already present from the reapply's apply).
-2. **`loadMonth` in TS**, over `SnapshotStore` (R2), with goldens against Python's `rows_json` for a sender, a body and a weekly month (a month boundary and a quiet day among them).
-3. **The converge in TS** (`site/functions/_lib/digestConverge.ts`), a port of `converge_slack` + `link_prev` + `pin_op` + the alert: the plan as a list of calls, executed in chunks. Tests against a fake Slack (thrds's `testing.ts`): a new month (OP, pin, previous OP relinked), a day landing (weekly: the week's reply edited), the alert's post and resolve, a resumed job, and a lost answer recovered by its receipt.
-4. **The switch in TS**, a port of `digest_switch.converge_thread`: post the new style, retire, delete only the row's `deletes`, edit only its `edits`. A switch's PUT creates the job, and the page drives it right away.
-5. **The reapply dry run in TS**: the rewrite plan (thrds `plan`) and the switch plan, in the formats the page already reads (`switch.json`'s `PLAN_VERSION` 1), stored where the apply reads them.
-6. **Routes:**
-   - `POST /api/digest/converge {month?}` (the job's grant; admin);
-   - `POST /api/slack-jobs/<id>/step`;
-   - `GET /api/slack-jobs[/<id>]` (admin);
-   - `/admin/slack`: jobs, progress, Resume.
+Built so far (2026-11-28, `[cloud]` commits on r2):
 
-   Each needs a row in `functions/gates.test.ts`.
-7. **`dt-cloud digest-cfn`** + the `digest` step's `cfn` option: POST, then step until done, with exit codes as today's step (soft).
-8. **r2 rollout:**
-   1. Dev stack in shadow for a few scans, diffed body for body against the Batch posts.
-   2. With Ryan's go, prod: `DIGEST_CFN` on and the profile's `cfn: true` in one ship. The Batch digest's tokens (`CF_PAGES_TOKEN` in the digest step) then come out of r2's profile.
-   3. The switch and reapply move with it.
-   4. hf next (its state is on GCS: `SnapshotStore` GCS first), then cw, then gcs.
+1. **D1 recipe `slack-jobs`**: `slack_jobs`, one live row per `key` (a partial unique index). Receipts aren't needed for a converge: its state is written after each post, as the job's is, so a post whose answer was lost is the only gap, the same one the job has.
+2. **`loadMonth` in TS** (`src/digest/load.ts`, `functions/_lib/digestStore.ts`): goldens from Python's `load_month` → `rows_json` over a fixture listing (`cloud/tests/fixtures/digest/load/months.json`: date-only ids sharing a day, a gap, `as_of`, a first month, another primary, TB and TiB). `SnapshotStore` has R2 (a binding, `onlyIf` etag CAS) and GCS (the JSON API under `GCP_SA_KEY`, `ifGenerationMatch`) from the start; `load_month` took a `now`, so its slugs are fixed.
+3. **The `weekly` replies in TS** (`quotaReply.ts`): `replies()` had only `sender` and `body`, and r2 is `weekly`. Goldens added to the replies' set. `tb()` read a delta rounding to zero from below as `−0.0`; it's `+0.0`, as Python's `_tb` reads it.
+4. **The payloads as thrds sends them** (`functions/_lib/digestWire.ts`): thrds TS has no markdown → mrkdwn converter, so the locked thrds's (`uv.lock`: `b3a1690`) `to_slack`, trailing-image lifting, `{bust}`, the 4,000-character refusal and an edit's `blocks: []` are ported, with goldens captured from it for every OP and reply fixture (`fixtures/digest/wire/payloads.json`).
+5. **The converge** (`functions/_lib/digestConverge.ts`): `converge_slack` (OP, pin, `link_prev` through thrds TS's rewrite `plan`/`apply`, the dropped split reply, the preview bundle, replies), the thread states and lease keys, `desired_variant`, shadow writes, a per-job `memo` (the OP isn't edited twice in one job). The plot is drawn in-process (`/api/digest-image`'s `renderDigestImage`), stored in `public_avatars` and served at `/a/<sha256>.png`; one over 1.4 MB (a D1 row, as base64) is refused, never cut.
+6. **The job runner and routes** (`functions/_lib/slackJobs.ts`): `POST /api/digest/converge` (the grant `DIGEST_CFN_GRANT` names: the scan job's), `GET /api/slack-jobs[/<id>]`, `POST /api/slack-jobs` and `/<id>/step` (admin). A step takes the job's own lease (one step at a time), then the thread lease the job's converge takes (`digest_switch.thread_lease`'s record, at its key: a Worker and a job never converge one thread at once), stops at `SLACK_STEP_CALLS` (40) calls or 20 s, and turns a `Retry-After` past 10 s into `retry_at`. A shadow (`DIGEST_CFN = "shadow"`) audits every message the thread's state names against what it renders, wire text to wire text; `/admin/slack` lists the jobs with their audits ("Site converges").
+7. **`dt-cloud digest-config`** (the `DIGEST_CONFIG` var's line) and **`dt-cloud digest-cfn`** (steps the job, prints a shadow's audit); the `digest` step's `cfn` (drive the site's converge instead of posting) and `shadow: <dev URL>` (a shadow after the job's own converge).
+
+Found on the way: `digest._op_render` asked only the run's own style for the previous month's OP, so r2's December thread (`weekly`, after November's `sender`) would have lost its `← November` link. Fixed in the job too (`[cloud]` 2334998a2, before December 1).
+
+Still refused by name (the job keeps converging these): a switch, a retiring style, provisional replies, the quota alert, the split reply, Discord, the `cost` template. Next:
+
+8. **The switch in TS**, a port of `digest_switch.converge_thread`: post the new style, retire, delete only the row's `deletes`, edit only its `edits`. A switch's PUT creates the job, and the page drives it right away.
+9. **The reapply dry run in TS**: the rewrite plan (thrds `plan`) and the switch plan, in the formats the page already reads (`switch.json`'s `PLAN_VERSION` 1), stored where the apply reads them.
+10. **r2 rollout:**
+    1. Dev stack in shadow (`DIGEST_CFN = "shadow"`, `DIGEST_CONFIG`, `SLACK_DIGEST_CHANNEL`, `DIGEST_CFN_GRANT` = the job's grant; the profile's `digest.shadow: https://dev.r2.oa.dev`) for a few scans: each audit all `same`.
+    2. With Ryan's go, prod: `DIGEST_CFN = "1"` and the profile's `cfn: true` in one ship. The Batch digest's tokens (`CF_PAGES_TOKEN` in the digest step) then come out of r2's profile.
+    3. The switch and reapply move with it.
+    4. hf next (its state is on GCS), then cw, then gcs.
 
 ## Phase 2
 
