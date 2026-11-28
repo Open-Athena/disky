@@ -17,9 +17,11 @@ on:
 
 # A land pushes one tested sha to `rw/land-*`, then `cloud` and `dev`: three runs of it, and a queue of lands stacks
 # them. On `cloud` and `dev` only the newest sha matters (each was gated on its `rw/land-*` run, and `deploy-r2.yml`
-# deploys the newest green one), so a newer push cancels the run in progress there. Other branches keep every run.
+# deploys the newest green one), so a newer push cancels the run in progress there. Every other branch keeps every
+# run: its group is the sha's, since a group holds one pending run and a newer push cancels it (cw 2026-11-28: three
+# pushes in an hour left two shas with no run).
 concurrency:
-  group: ci-${{ github.ref }}-${{ github.event_name }}
+  group: ci-${{ github.ref }}-${{ github.event_name }}${{ !(github.event_name == 'push' && (github.ref == 'refs/heads/cloud' || github.ref == 'refs/heads/dev')) && format('-{0}', github.sha) || '' }}
   cancel-in-progress: ${{ github.event_name == 'push' && (github.ref == 'refs/heads/cloud' || github.ref == 'refs/heads/dev') }}
 
 jobs:
