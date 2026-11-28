@@ -1,0 +1,1522 @@
+{
+ "bust": "29747712",
+ "cases": {
+  "op:cw-first": {
+   "body": ":arrow_deg20: **+1.0 TiB** [month-to-date](https://cw.example.org/?d=260901-1d#over-time) · **+30.0 TiB** [last 30d](https://cw.example.org/?d=260901-30d#over-time) · 736 TiB · 80.9% of 1 PB · [dashboard](https://cw.example.org/)\n_as of 9/1 08:00Z_\n\n*Weekly summaries*\n:arrow_deg20: [wk of 8/3](https://cw.example.org/?d=260809-7d#over-time) (Aug): **+7.0 TiB** → 713 TiB · 78.4% of 1 PB\n:arrow_deg20: [wk of 8/10](https://cw.example.org/?d=260816-7d#over-time) (Aug): **+7.0 TiB** → 720 TiB · 79.1% of 1 PB\n:arrow_deg20: [wk of 8/17](https://cw.example.org/?d=260823-7d#over-time) (Aug): **+7.0 TiB** → 727 TiB · 79.9% of 1 PB\n:arrow_deg20: [wk of 8/24](https://cw.example.org/?d=260830-7d#over-time) (Aug): **+7.0 TiB** → 734 TiB · 80.7% of 1 PB\n:arrow_deg0: [wk of 8/31](https://cw.example.org/?d=260901-2d#over-time) _(partial)_: **+2.0 TiB** → 736 TiB · 80.9% of 1 PB\n\n[← August](<prev-thread>)\n\n![S3 usage — September 2026](<plot-url>)",
+   "post": {
+    "channel": "C0TEST",
+    "text": ":arrow_deg20: *+1.0 TiB* <https://cw.example.org/?d=260901-1d#over-time|month-to-date> · *+30.0 TiB* <https://cw.example.org/?d=260901-30d#over-time|last 30d> · 736 TiB · 80.9% of 1 PB · <https://cw.example.org/|dashboard>\n_as of 9/1 08:00Z_\n\n_Weekly summaries_\n:arrow_deg20: <https://cw.example.org/?d=260809-7d#over-time|wk of 8/3> (Aug): *+7.0 TiB* → 713 TiB · 78.4% of 1 PB\n:arrow_deg20: <https://cw.example.org/?d=260816-7d#over-time|wk of 8/10> (Aug): *+7.0 TiB* → 720 TiB · 79.1% of 1 PB\n:arrow_deg20: <https://cw.example.org/?d=260823-7d#over-time|wk of 8/17> (Aug): *+7.0 TiB* → 727 TiB · 79.9% of 1 PB\n:arrow_deg20: <https://cw.example.org/?d=260830-7d#over-time|wk of 8/24> (Aug): *+7.0 TiB* → 734 TiB · 80.7% of 1 PB\n:arrow_deg0: <https://cw.example.org/?d=260901-2d#over-time|wk of 8/31> _(partial)_: *+2.0 TiB* → 736 TiB · 80.9% of 1 PB\n\n<<prev-thread>|← August>",
+    "unfurl_links": false,
+    "unfurl_media": false,
+    "username": "wk of 11/2",
+    "icon_url": "https://i.example/mark.png",
+    "blocks": [
+     {
+      "type": "section",
+      "text": {
+       "type": "mrkdwn",
+       "text": ":arrow_deg20: *+1.0 TiB* <https://cw.example.org/?d=260901-1d#over-time|month-to-date> · *+30.0 TiB* <https://cw.example.org/?d=260901-30d#over-time|last 30d> · 736 TiB · 80.9% of 1 PB · <https://cw.example.org/|dashboard>\n_as of 9/1 08:00Z_\n\n_Weekly summaries_\n:arrow_deg20: <https://cw.example.org/?d=260809-7d#over-time|wk of 8/3> (Aug): *+7.0 TiB* → 713 TiB · 78.4% of 1 PB\n:arrow_deg20: <https://cw.example.org/?d=260816-7d#over-time|wk of 8/10> (Aug): *+7.0 TiB* → 720 TiB · 79.1% of 1 PB\n:arrow_deg20: <https://cw.example.org/?d=260823-7d#over-time|wk of 8/17> (Aug): *+7.0 TiB* → 727 TiB · 79.9% of 1 PB\n:arrow_deg20: <https://cw.example.org/?d=260830-7d#over-time|wk of 8/24> (Aug): *+7.0 TiB* → 734 TiB · 80.7% of 1 PB\n:arrow_deg0: <https://cw.example.org/?d=260901-2d#over-time|wk of 8/31> _(partial)_: *+2.0 TiB* → 736 TiB · 80.9% of 1 PB\n\n<<prev-thread>|← August>"
+      }
+     },
+     {
+      "type": "image",
+      "image_url": "<plot-url>",
+      "alt_text": "S3 usage — September 2026"
+     }
+    ],
+    "thread_ts": "1.000000"
+   },
+   "edit": {
+    "channel": "C0TEST",
+    "ts": "1.000002",
+    "text": ":arrow_deg20: *+1.0 TiB* <https://cw.example.org/?d=260901-1d#over-time|month-to-date> · *+30.0 TiB* <https://cw.example.org/?d=260901-30d#over-time|last 30d> · 736 TiB · 80.9% of 1 PB · <https://cw.example.org/|dashboard>\n_as of 9/1 08:00Z_\n\n_Weekly summaries_\n:arrow_deg20: <https://cw.example.org/?d=260809-7d#over-time|wk of 8/3> (Aug): *+7.0 TiB* → 713 TiB · 78.4% of 1 PB\n:arrow_deg20: <https://cw.example.org/?d=260816-7d#over-time|wk of 8/10> (Aug): *+7.0 TiB* → 720 TiB · 79.1% of 1 PB\n:arrow_deg20: <https://cw.example.org/?d=260823-7d#over-time|wk of 8/17> (Aug): *+7.0 TiB* → 727 TiB · 79.9% of 1 PB\n:arrow_deg20: <https://cw.example.org/?d=260830-7d#over-time|wk of 8/24> (Aug): *+7.0 TiB* → 734 TiB · 80.7% of 1 PB\n:arrow_deg0: <https://cw.example.org/?d=260901-2d#over-time|wk of 8/31> _(partial)_: *+2.0 TiB* → 736 TiB · 80.9% of 1 PB\n\n<<prev-thread>|← August>",
+    "unfurl_links": false,
+    "unfurl_media": false,
+    "blocks": [
+     {
+      "type": "section",
+      "text": {
+       "type": "mrkdwn",
+       "text": ":arrow_deg20: *+1.0 TiB* <https://cw.example.org/?d=260901-1d#over-time|month-to-date> · *+30.0 TiB* <https://cw.example.org/?d=260901-30d#over-time|last 30d> · 736 TiB · 80.9% of 1 PB · <https://cw.example.org/|dashboard>\n_as of 9/1 08:00Z_\n\n_Weekly summaries_\n:arrow_deg20: <https://cw.example.org/?d=260809-7d#over-time|wk of 8/3> (Aug): *+7.0 TiB* → 713 TiB · 78.4% of 1 PB\n:arrow_deg20: <https://cw.example.org/?d=260816-7d#over-time|wk of 8/10> (Aug): *+7.0 TiB* → 720 TiB · 79.1% of 1 PB\n:arrow_deg20: <https://cw.example.org/?d=260823-7d#over-time|wk of 8/17> (Aug): *+7.0 TiB* → 727 TiB · 79.9% of 1 PB\n:arrow_deg20: <https://cw.example.org/?d=260830-7d#over-time|wk of 8/24> (Aug): *+7.0 TiB* → 734 TiB · 80.7% of 1 PB\n:arrow_deg0: <https://cw.example.org/?d=260901-2d#over-time|wk of 8/31> _(partial)_: *+2.0 TiB* → 736 TiB · 80.9% of 1 PB\n\n<<prev-thread>|← August>"
+      }
+     },
+     {
+      "type": "image",
+      "image_url": "<plot-url>",
+      "alt_text": "S3 usage — September 2026"
+     }
+    ]
+   }
+  },
+  "op:cw-noquota": {
+   "body": ":arrow_deg40: **+10.0 TiB** [month-to-date](https://cw.example.org/?d=26090212-2d#over-time) · **+15.0 TiB** [since 8/31](https://cw.example.org/?d=26090212-2d12h#over-time) · 715 TiB · [dashboard](https://cw.example.org/)\n_as of 9/2 12:00Z_\n\n*Weekly summaries*\n:arrow_deg30: [wk of 8/31](https://cw.example.org/?d=26090212-2d12h#over-time) _(partial)_: **+15.0 TiB** → 715 TiB\n\n![S3 usage — September 2026](<plot-url>)",
+   "post": {
+    "channel": "C0TEST",
+    "text": ":arrow_deg40: *+10.0 TiB* <https://cw.example.org/?d=26090212-2d#over-time|month-to-date> · *+15.0 TiB* <https://cw.example.org/?d=26090212-2d12h#over-time|since 8/31> · 715 TiB · <https://cw.example.org/|dashboard>\n_as of 9/2 12:00Z_\n\n_Weekly summaries_\n:arrow_deg30: <https://cw.example.org/?d=26090212-2d12h#over-time|wk of 8/31> _(partial)_: *+15.0 TiB* → 715 TiB",
+    "unfurl_links": false,
+    "unfurl_media": false,
+    "username": "wk of 11/2",
+    "icon_url": "https://i.example/mark.png",
+    "blocks": [
+     {
+      "type": "section",
+      "text": {
+       "type": "mrkdwn",
+       "text": ":arrow_deg40: *+10.0 TiB* <https://cw.example.org/?d=26090212-2d#over-time|month-to-date> · *+15.0 TiB* <https://cw.example.org/?d=26090212-2d12h#over-time|since 8/31> · 715 TiB · <https://cw.example.org/|dashboard>\n_as of 9/2 12:00Z_\n\n_Weekly summaries_\n:arrow_deg30: <https://cw.example.org/?d=26090212-2d12h#over-time|wk of 8/31> _(partial)_: *+15.0 TiB* → 715 TiB"
+      }
+     },
+     {
+      "type": "image",
+      "image_url": "<plot-url>",
+      "alt_text": "S3 usage — September 2026"
+     }
+    ],
+    "thread_ts": "1.000000"
+   },
+   "edit": {
+    "channel": "C0TEST",
+    "ts": "1.000002",
+    "text": ":arrow_deg40: *+10.0 TiB* <https://cw.example.org/?d=26090212-2d#over-time|month-to-date> · *+15.0 TiB* <https://cw.example.org/?d=26090212-2d12h#over-time|since 8/31> · 715 TiB · <https://cw.example.org/|dashboard>\n_as of 9/2 12:00Z_\n\n_Weekly summaries_\n:arrow_deg30: <https://cw.example.org/?d=26090212-2d12h#over-time|wk of 8/31> _(partial)_: *+15.0 TiB* → 715 TiB",
+    "unfurl_links": false,
+    "unfurl_media": false,
+    "blocks": [
+     {
+      "type": "section",
+      "text": {
+       "type": "mrkdwn",
+       "text": ":arrow_deg40: *+10.0 TiB* <https://cw.example.org/?d=26090212-2d#over-time|month-to-date> · *+15.0 TiB* <https://cw.example.org/?d=26090212-2d12h#over-time|since 8/31> · 715 TiB · <https://cw.example.org/|dashboard>\n_as of 9/2 12:00Z_\n\n_Weekly summaries_\n:arrow_deg30: <https://cw.example.org/?d=26090212-2d12h#over-time|wk of 8/31> _(partial)_: *+15.0 TiB* → 715 TiB"
+      }
+     },
+     {
+      "type": "image",
+      "image_url": "<plot-url>",
+      "alt_text": "S3 usage — September 2026"
+     }
+    ]
+   }
+  },
+  "op:cw-sep": {
+   "body": ":arrow_deg50: **+84.6 TiB** [month-to-date](https://cw.example.org/?d=260908-7d12h#over-time) · **+100.0 TiB** [since 8/30](https://cw.example.org/?d=260908-8d12h#over-time) · [main](https://cw.example.org/main-data?d=260908-7d12h#over-time) 790 TiB · 86.8% of 1 PB · [hot](https://cw.example.org/hot-data?d=260908-7d12h#over-time) 100 TiB (+11.5) · [more-data](https://cw.example.org/more-data?d=260908-7d12h#over-time) 2 TiB · [dashboard](https://cw.example.org/)\n_as of 9/8 00:01Z_\n\n*Weekly summaries*\n:arrow_deg30: [wk of 8/31](https://cw.example.org/?d=26090412-5d#over-time): **+11.0 TiB** → 701 TiB · 77.0% of 1 PB\n:arrow_deg60: [wk of 9/7](https://cw.example.org/?d=260908-3d12h#over-time) _(partial)_: **+89.0 TiB** → 790 TiB · 86.8% of 1 PB\n\n[← August](<prev-thread>)\n\n![S3 usage — September 2026](<plot-url>)",
+   "post": {
+    "channel": "C0TEST",
+    "text": ":arrow_deg50: *+84.6 TiB* <https://cw.example.org/?d=260908-7d12h#over-time|month-to-date> · *+100.0 TiB* <https://cw.example.org/?d=260908-8d12h#over-time|since 8/30> · <https://cw.example.org/main-data?d=260908-7d12h#over-time|main> 790 TiB · 86.8% of 1 PB · <https://cw.example.org/hot-data?d=260908-7d12h#over-time|hot> 100 TiB (+11.5) · <https://cw.example.org/more-data?d=260908-7d12h#over-time|more-data> 2 TiB · <https://cw.example.org/|dashboard>\n_as of 9/8 00:01Z_\n\n_Weekly summaries_\n:arrow_deg30: <https://cw.example.org/?d=26090412-5d#over-time|wk of 8/31>: *+11.0 TiB* → 701 TiB · 77.0% of 1 PB\n:arrow_deg60: <https://cw.example.org/?d=260908-3d12h#over-time|wk of 9/7> _(partial)_: *+89.0 TiB* → 790 TiB · 86.8% of 1 PB\n\n<<prev-thread>|← August>",
+    "unfurl_links": false,
+    "unfurl_media": false,
+    "username": "wk of 11/2",
+    "icon_url": "https://i.example/mark.png",
+    "blocks": [
+     {
+      "type": "section",
+      "text": {
+       "type": "mrkdwn",
+       "text": ":arrow_deg50: *+84.6 TiB* <https://cw.example.org/?d=260908-7d12h#over-time|month-to-date> · *+100.0 TiB* <https://cw.example.org/?d=260908-8d12h#over-time|since 8/30> · <https://cw.example.org/main-data?d=260908-7d12h#over-time|main> 790 TiB · 86.8% of 1 PB · <https://cw.example.org/hot-data?d=260908-7d12h#over-time|hot> 100 TiB (+11.5) · <https://cw.example.org/more-data?d=260908-7d12h#over-time|more-data> 2 TiB · <https://cw.example.org/|dashboard>\n_as of 9/8 00:01Z_\n\n_Weekly summaries_\n:arrow_deg30: <https://cw.example.org/?d=26090412-5d#over-time|wk of 8/31>: *+11.0 TiB* → 701 TiB · 77.0% of 1 PB\n:arrow_deg60: <https://cw.example.org/?d=260908-3d12h#over-time|wk of 9/7> _(partial)_: *+89.0 TiB* → 790 TiB · 86.8% of 1 PB\n\n<<prev-thread>|← August>"
+      }
+     },
+     {
+      "type": "image",
+      "image_url": "<plot-url>",
+      "alt_text": "S3 usage — September 2026"
+     }
+    ],
+    "thread_ts": "1.000000"
+   },
+   "edit": {
+    "channel": "C0TEST",
+    "ts": "1.000002",
+    "text": ":arrow_deg50: *+84.6 TiB* <https://cw.example.org/?d=260908-7d12h#over-time|month-to-date> · *+100.0 TiB* <https://cw.example.org/?d=260908-8d12h#over-time|since 8/30> · <https://cw.example.org/main-data?d=260908-7d12h#over-time|main> 790 TiB · 86.8% of 1 PB · <https://cw.example.org/hot-data?d=260908-7d12h#over-time|hot> 100 TiB (+11.5) · <https://cw.example.org/more-data?d=260908-7d12h#over-time|more-data> 2 TiB · <https://cw.example.org/|dashboard>\n_as of 9/8 00:01Z_\n\n_Weekly summaries_\n:arrow_deg30: <https://cw.example.org/?d=26090412-5d#over-time|wk of 8/31>: *+11.0 TiB* → 701 TiB · 77.0% of 1 PB\n:arrow_deg60: <https://cw.example.org/?d=260908-3d12h#over-time|wk of 9/7> _(partial)_: *+89.0 TiB* → 790 TiB · 86.8% of 1 PB\n\n<<prev-thread>|← August>",
+    "unfurl_links": false,
+    "unfurl_media": false,
+    "blocks": [
+     {
+      "type": "section",
+      "text": {
+       "type": "mrkdwn",
+       "text": ":arrow_deg50: *+84.6 TiB* <https://cw.example.org/?d=260908-7d12h#over-time|month-to-date> · *+100.0 TiB* <https://cw.example.org/?d=260908-8d12h#over-time|since 8/30> · <https://cw.example.org/main-data?d=260908-7d12h#over-time|main> 790 TiB · 86.8% of 1 PB · <https://cw.example.org/hot-data?d=260908-7d12h#over-time|hot> 100 TiB (+11.5) · <https://cw.example.org/more-data?d=260908-7d12h#over-time|more-data> 2 TiB · <https://cw.example.org/|dashboard>\n_as of 9/8 00:01Z_\n\n_Weekly summaries_\n:arrow_deg30: <https://cw.example.org/?d=26090412-5d#over-time|wk of 8/31>: *+11.0 TiB* → 701 TiB · 77.0% of 1 PB\n:arrow_deg60: <https://cw.example.org/?d=260908-3d12h#over-time|wk of 9/7> _(partial)_: *+89.0 TiB* → 790 TiB · 86.8% of 1 PB\n\n<<prev-thread>|← August>"
+      }
+     },
+     {
+      "type": "image",
+      "image_url": "<plot-url>",
+      "alt_text": "S3 usage — September 2026"
+     }
+    ]
+   }
+  },
+  "op:cw-tb": {
+   "body": ":arrow_deg50: **+1.9 TB** [month-to-date](https://cw.example.org/?d=261009-9d#over-time) · **+4.0 TB** [since 9/20](https://cw.example.org/?d=261009-19d#over-time) · 21 TB · 7.0% of 253 TB public · 35.1% of 5.1 TB private · [dashboard](https://cw.example.org/)\n_as of 10/9 08:00Z_\n\n*Weekly summaries*\n:arrow_deg50: [wk of 9/21](https://cw.example.org/?d=260927-7d#over-time) (Sep): **+1.5 TB** → 18 TB · 6.3% of 253 TB public · 17.9% of 5.1 TB private\n:arrow_deg50: [wk of 9/28](https://cw.example.org/?d=261004-7d#over-time): **+1.4 TB** → 20 TB · 6.7% of 253 TB public · 27.9% of 5.1 TB private\n:arrow_deg40: [wk of 10/5](https://cw.example.org/?d=261009-5d#over-time) _(partial)_: **+1.1 TB** → 21 TB · 7.0% of 253 TB public · 35.1% of 5.1 TB private\n\n[← September](<prev-thread>)\n\n![HF usage — October 2026](<plot-url>)",
+   "post": {
+    "channel": "C0TEST",
+    "text": ":arrow_deg50: *+1.9 TB* <https://cw.example.org/?d=261009-9d#over-time|month-to-date> · *+4.0 TB* <https://cw.example.org/?d=261009-19d#over-time|since 9/20> · 21 TB · 7.0% of 253 TB public · 35.1% of 5.1 TB private · <https://cw.example.org/|dashboard>\n_as of 10/9 08:00Z_\n\n_Weekly summaries_\n:arrow_deg50: <https://cw.example.org/?d=260927-7d#over-time|wk of 9/21> (Sep): *+1.5 TB* → 18 TB · 6.3% of 253 TB public · 17.9% of 5.1 TB private\n:arrow_deg50: <https://cw.example.org/?d=261004-7d#over-time|wk of 9/28>: *+1.4 TB* → 20 TB · 6.7% of 253 TB public · 27.9% of 5.1 TB private\n:arrow_deg40: <https://cw.example.org/?d=261009-5d#over-time|wk of 10/5> _(partial)_: *+1.1 TB* → 21 TB · 7.0% of 253 TB public · 35.1% of 5.1 TB private\n\n<<prev-thread>|← September>",
+    "unfurl_links": false,
+    "unfurl_media": false,
+    "username": "wk of 11/2",
+    "icon_url": "https://i.example/mark.png",
+    "blocks": [
+     {
+      "type": "section",
+      "text": {
+       "type": "mrkdwn",
+       "text": ":arrow_deg50: *+1.9 TB* <https://cw.example.org/?d=261009-9d#over-time|month-to-date> · *+4.0 TB* <https://cw.example.org/?d=261009-19d#over-time|since 9/20> · 21 TB · 7.0% of 253 TB public · 35.1% of 5.1 TB private · <https://cw.example.org/|dashboard>\n_as of 10/9 08:00Z_\n\n_Weekly summaries_\n:arrow_deg50: <https://cw.example.org/?d=260927-7d#over-time|wk of 9/21> (Sep): *+1.5 TB* → 18 TB · 6.3% of 253 TB public · 17.9% of 5.1 TB private\n:arrow_deg50: <https://cw.example.org/?d=261004-7d#over-time|wk of 9/28>: *+1.4 TB* → 20 TB · 6.7% of 253 TB public · 27.9% of 5.1 TB private\n:arrow_deg40: <https://cw.example.org/?d=261009-5d#over-time|wk of 10/5> _(partial)_: *+1.1 TB* → 21 TB · 7.0% of 253 TB public · 35.1% of 5.1 TB private\n\n<<prev-thread>|← September>"
+      }
+     },
+     {
+      "type": "image",
+      "image_url": "<plot-url>",
+      "alt_text": "HF usage — October 2026"
+     }
+    ],
+    "thread_ts": "1.000000"
+   },
+   "edit": {
+    "channel": "C0TEST",
+    "ts": "1.000002",
+    "text": ":arrow_deg50: *+1.9 TB* <https://cw.example.org/?d=261009-9d#over-time|month-to-date> · *+4.0 TB* <https://cw.example.org/?d=261009-19d#over-time|since 9/20> · 21 TB · 7.0% of 253 TB public · 35.1% of 5.1 TB private · <https://cw.example.org/|dashboard>\n_as of 10/9 08:00Z_\n\n_Weekly summaries_\n:arrow_deg50: <https://cw.example.org/?d=260927-7d#over-time|wk of 9/21> (Sep): *+1.5 TB* → 18 TB · 6.3% of 253 TB public · 17.9% of 5.1 TB private\n:arrow_deg50: <https://cw.example.org/?d=261004-7d#over-time|wk of 9/28>: *+1.4 TB* → 20 TB · 6.7% of 253 TB public · 27.9% of 5.1 TB private\n:arrow_deg40: <https://cw.example.org/?d=261009-5d#over-time|wk of 10/5> _(partial)_: *+1.1 TB* → 21 TB · 7.0% of 253 TB public · 35.1% of 5.1 TB private\n\n<<prev-thread>|← September>",
+    "unfurl_links": false,
+    "unfurl_media": false,
+    "blocks": [
+     {
+      "type": "section",
+      "text": {
+       "type": "mrkdwn",
+       "text": ":arrow_deg50: *+1.9 TB* <https://cw.example.org/?d=261009-9d#over-time|month-to-date> · *+4.0 TB* <https://cw.example.org/?d=261009-19d#over-time|since 9/20> · 21 TB · 7.0% of 253 TB public · 35.1% of 5.1 TB private · <https://cw.example.org/|dashboard>\n_as of 10/9 08:00Z_\n\n_Weekly summaries_\n:arrow_deg50: <https://cw.example.org/?d=260927-7d#over-time|wk of 9/21> (Sep): *+1.5 TB* → 18 TB · 6.3% of 253 TB public · 17.9% of 5.1 TB private\n:arrow_deg50: <https://cw.example.org/?d=261004-7d#over-time|wk of 9/28>: *+1.4 TB* → 20 TB · 6.7% of 253 TB public · 27.9% of 5.1 TB private\n:arrow_deg40: <https://cw.example.org/?d=261009-5d#over-time|wk of 10/5> _(partial)_: *+1.1 TB* → 21 TB · 7.0% of 253 TB public · 35.1% of 5.1 TB private\n\n<<prev-thread>|← September>"
+      }
+     },
+     {
+      "type": "image",
+      "image_url": "<plot-url>",
+      "alt_text": "HF usage — October 2026"
+     }
+    ]
+   }
+  },
+  "op:cw-two-weeks": {
+   "body": ":arrow_deg20: **+9.0 TiB** [month-to-date](https://cw.example.org/?d=26090712-7d#over-time) · **+14.0 TiB** [since 8/31](https://cw.example.org/?d=26090712-7d12h#over-time) · 714 TiB · 78.5% of 1 PB · [dashboard](https://cw.example.org/)\n_as of 9/7 12:00Z_\n\n*Weekly summaries*\n:arrow_deg30: [wk of 8/31](https://cw.example.org/?d=26090612-6d12h#over-time): **+12.0 TiB** → 712 TiB · 78.2% of 1 PB\n:arrow_deg0: [wk of 9/7](https://cw.example.org/?d=26090712-1d#over-time) _(partial)_: **+2.0 TiB** → 714 TiB · 78.5% of 1 PB",
+   "post": {
+    "channel": "C0TEST",
+    "text": ":arrow_deg20: *+9.0 TiB* <https://cw.example.org/?d=26090712-7d#over-time|month-to-date> · *+14.0 TiB* <https://cw.example.org/?d=26090712-7d12h#over-time|since 8/31> · 714 TiB · 78.5% of 1 PB · <https://cw.example.org/|dashboard>\n_as of 9/7 12:00Z_\n\n_Weekly summaries_\n:arrow_deg30: <https://cw.example.org/?d=26090612-6d12h#over-time|wk of 8/31>: *+12.0 TiB* → 712 TiB · 78.2% of 1 PB\n:arrow_deg0: <https://cw.example.org/?d=26090712-1d#over-time|wk of 9/7> _(partial)_: *+2.0 TiB* → 714 TiB · 78.5% of 1 PB",
+    "unfurl_links": false,
+    "unfurl_media": false,
+    "username": "wk of 11/2",
+    "icon_url": "https://i.example/mark.png",
+    "thread_ts": "1.000000"
+   },
+   "edit": {
+    "channel": "C0TEST",
+    "ts": "1.000002",
+    "text": ":arrow_deg20: *+9.0 TiB* <https://cw.example.org/?d=26090712-7d#over-time|month-to-date> · *+14.0 TiB* <https://cw.example.org/?d=26090712-7d12h#over-time|since 8/31> · 714 TiB · 78.5% of 1 PB · <https://cw.example.org/|dashboard>\n_as of 9/7 12:00Z_\n\n_Weekly summaries_\n:arrow_deg30: <https://cw.example.org/?d=26090612-6d12h#over-time|wk of 8/31>: *+12.0 TiB* → 712 TiB · 78.2% of 1 PB\n:arrow_deg0: <https://cw.example.org/?d=26090712-1d#over-time|wk of 9/7> _(partial)_: *+2.0 TiB* → 714 TiB · 78.5% of 1 PB",
+    "unfurl_links": false,
+    "unfurl_media": false,
+    "blocks": []
+   }
+  },
+  "op:cw6-oct": {
+   "body": ":arrow_deg60: **+57.0 TiB** [month-to-date](https://cw.example.org/?d=26100212-2d6h#over-time) · **+62.0 TiB** [since 9/29](https://cw.example.org/?d=26100212-3d#over-time) · [main](https://cw.example.org/main-data?d=26100212-2d6h#over-time) 862 TiB · 94.7% of 1 PB · [hot](https://cw.example.org/hot-data?d=26100212-2d6h#over-time) 43 TiB (+2.0) · [dashboard](https://cw.example.org/)\n_as of 10/2 12:01Z_\n\n*Weekly summaries*\n:arrow_deg50: [wk of 9/28](https://cw.example.org/?d=26100212-3d#over-time) _(partial)_: **+62.0 TiB** → 862 TiB · 94.7% of 1 PB\n\n![S3 usage — October 2026](<plot-url>)",
+   "post": {
+    "channel": "C0TEST",
+    "text": ":arrow_deg60: *+57.0 TiB* <https://cw.example.org/?d=26100212-2d6h#over-time|month-to-date> · *+62.0 TiB* <https://cw.example.org/?d=26100212-3d#over-time|since 9/29> · <https://cw.example.org/main-data?d=26100212-2d6h#over-time|main> 862 TiB · 94.7% of 1 PB · <https://cw.example.org/hot-data?d=26100212-2d6h#over-time|hot> 43 TiB (+2.0) · <https://cw.example.org/|dashboard>\n_as of 10/2 12:01Z_\n\n_Weekly summaries_\n:arrow_deg50: <https://cw.example.org/?d=26100212-3d#over-time|wk of 9/28> _(partial)_: *+62.0 TiB* → 862 TiB · 94.7% of 1 PB",
+    "unfurl_links": false,
+    "unfurl_media": false,
+    "username": "wk of 11/2",
+    "icon_url": "https://i.example/mark.png",
+    "blocks": [
+     {
+      "type": "section",
+      "text": {
+       "type": "mrkdwn",
+       "text": ":arrow_deg60: *+57.0 TiB* <https://cw.example.org/?d=26100212-2d6h#over-time|month-to-date> · *+62.0 TiB* <https://cw.example.org/?d=26100212-3d#over-time|since 9/29> · <https://cw.example.org/main-data?d=26100212-2d6h#over-time|main> 862 TiB · 94.7% of 1 PB · <https://cw.example.org/hot-data?d=26100212-2d6h#over-time|hot> 43 TiB (+2.0) · <https://cw.example.org/|dashboard>\n_as of 10/2 12:01Z_\n\n_Weekly summaries_\n:arrow_deg50: <https://cw.example.org/?d=26100212-3d#over-time|wk of 9/28> _(partial)_: *+62.0 TiB* → 862 TiB · 94.7% of 1 PB"
+      }
+     },
+     {
+      "type": "image",
+      "image_url": "<plot-url>",
+      "alt_text": "S3 usage — October 2026"
+     }
+    ],
+    "thread_ts": "1.000000"
+   },
+   "edit": {
+    "channel": "C0TEST",
+    "ts": "1.000002",
+    "text": ":arrow_deg60: *+57.0 TiB* <https://cw.example.org/?d=26100212-2d6h#over-time|month-to-date> · *+62.0 TiB* <https://cw.example.org/?d=26100212-3d#over-time|since 9/29> · <https://cw.example.org/main-data?d=26100212-2d6h#over-time|main> 862 TiB · 94.7% of 1 PB · <https://cw.example.org/hot-data?d=26100212-2d6h#over-time|hot> 43 TiB (+2.0) · <https://cw.example.org/|dashboard>\n_as of 10/2 12:01Z_\n\n_Weekly summaries_\n:arrow_deg50: <https://cw.example.org/?d=26100212-3d#over-time|wk of 9/28> _(partial)_: *+62.0 TiB* → 862 TiB · 94.7% of 1 PB",
+    "unfurl_links": false,
+    "unfurl_media": false,
+    "blocks": [
+     {
+      "type": "section",
+      "text": {
+       "type": "mrkdwn",
+       "text": ":arrow_deg60: *+57.0 TiB* <https://cw.example.org/?d=26100212-2d6h#over-time|month-to-date> · *+62.0 TiB* <https://cw.example.org/?d=26100212-3d#over-time|since 9/29> · <https://cw.example.org/main-data?d=26100212-2d6h#over-time|main> 862 TiB · 94.7% of 1 PB · <https://cw.example.org/hot-data?d=26100212-2d6h#over-time|hot> 43 TiB (+2.0) · <https://cw.example.org/|dashboard>\n_as of 10/2 12:01Z_\n\n_Weekly summaries_\n:arrow_deg50: <https://cw.example.org/?d=26100212-3d#over-time|wk of 9/28> _(partial)_: *+62.0 TiB* → 862 TiB · 94.7% of 1 PB"
+      }
+     },
+     {
+      "type": "image",
+      "image_url": "<plot-url>",
+      "alt_text": "S3 usage — October 2026"
+     }
+    ]
+   }
+  },
+  "op:gcs-aug-discord": {
+   "body": ":arrow_deg40: **+149.0 TiB** [month-to-date](https://site.example.org/?d=260811-11d#over-time) · [dashboard](https://site.example.org/)\n\n*Weekly summaries*\n:arrow_deg0: [wk of 7/27](https://site.example.org/?d=260802-2d#over-time) — **3,010 TiB** (+10.0, 0.3%) · $19,272/mo (+$103)\n:arrow_deg30: [wk of 8/3](https://site.example.org/?d=260809-7d#over-time) — **3,100 TiB** (+90.0, 3.0%) · $20,951/mo (+$1,679)\n:arrow_deg30: [wk of 8/10](https://site.example.org/?d=260811-2d#over-time) _(partial)_ — **3,149 TiB** (+49.0, 1.6%) · $20,372/mo (−$579)",
+   "post": {
+    "channel": "C0TEST",
+    "text": ":arrow_deg40: *+149.0 TiB* <https://site.example.org/?d=260811-11d#over-time|month-to-date> · <https://site.example.org/|dashboard>\n\n_Weekly summaries_\n:arrow_deg0: <https://site.example.org/?d=260802-2d#over-time|wk of 7/27> — *3,010 TiB* (+10.0, 0.3%) · $19,272/mo (+$103)\n:arrow_deg30: <https://site.example.org/?d=260809-7d#over-time|wk of 8/3> — *3,100 TiB* (+90.0, 3.0%) · $20,951/mo (+$1,679)\n:arrow_deg30: <https://site.example.org/?d=260811-2d#over-time|wk of 8/10> _(partial)_ — *3,149 TiB* (+49.0, 1.6%) · $20,372/mo (−$579)",
+    "unfurl_links": false,
+    "unfurl_media": false,
+    "username": "wk of 11/2",
+    "icon_url": "https://i.example/mark.png",
+    "thread_ts": "1.000000"
+   },
+   "edit": {
+    "channel": "C0TEST",
+    "ts": "1.000002",
+    "text": ":arrow_deg40: *+149.0 TiB* <https://site.example.org/?d=260811-11d#over-time|month-to-date> · <https://site.example.org/|dashboard>\n\n_Weekly summaries_\n:arrow_deg0: <https://site.example.org/?d=260802-2d#over-time|wk of 7/27> — *3,010 TiB* (+10.0, 0.3%) · $19,272/mo (+$103)\n:arrow_deg30: <https://site.example.org/?d=260809-7d#over-time|wk of 8/3> — *3,100 TiB* (+90.0, 3.0%) · $20,951/mo (+$1,679)\n:arrow_deg30: <https://site.example.org/?d=260811-2d#over-time|wk of 8/10> _(partial)_ — *3,149 TiB* (+49.0, 1.6%) · $20,372/mo (−$579)",
+    "unfurl_links": false,
+    "unfurl_media": false,
+    "blocks": []
+   }
+  },
+  "op:gcs-aug": {
+   "body": ":arrow_deg40: **+149.0 TiB** [month-to-date](https://site.example.org/?d=260811-11d#over-time) · [dashboard](https://site.example.org/)\n\n*Weekly summaries*\n:arrow_deg0: [wk of 7/27](https://site.example.org/?d=260802-2d#over-time) — **3,010 TiB** (+10.0, 0.3%) · $19,272/mo (+$103)\n:arrow_deg30: [wk of 8/3](https://site.example.org/?d=260809-7d#over-time) — **3,100 TiB** (+90.0, 3.0%) · $20,951/mo (+$1,679)\n:arrow_deg30: [wk of 8/10](https://site.example.org/?d=260811-2d#over-time) _(partial)_ — **3,149 TiB** (+49.0, 1.6%) · $20,372/mo (−$579)\n\n[← July](<prev-thread>)\n\n![GCS usage — August 2026](<plot-url>)",
+   "post": {
+    "channel": "C0TEST",
+    "text": ":arrow_deg40: *+149.0 TiB* <https://site.example.org/?d=260811-11d#over-time|month-to-date> · <https://site.example.org/|dashboard>\n\n_Weekly summaries_\n:arrow_deg0: <https://site.example.org/?d=260802-2d#over-time|wk of 7/27> — *3,010 TiB* (+10.0, 0.3%) · $19,272/mo (+$103)\n:arrow_deg30: <https://site.example.org/?d=260809-7d#over-time|wk of 8/3> — *3,100 TiB* (+90.0, 3.0%) · $20,951/mo (+$1,679)\n:arrow_deg30: <https://site.example.org/?d=260811-2d#over-time|wk of 8/10> _(partial)_ — *3,149 TiB* (+49.0, 1.6%) · $20,372/mo (−$579)\n\n<<prev-thread>|← July>",
+    "unfurl_links": false,
+    "unfurl_media": false,
+    "username": "wk of 11/2",
+    "icon_url": "https://i.example/mark.png",
+    "blocks": [
+     {
+      "type": "section",
+      "text": {
+       "type": "mrkdwn",
+       "text": ":arrow_deg40: *+149.0 TiB* <https://site.example.org/?d=260811-11d#over-time|month-to-date> · <https://site.example.org/|dashboard>\n\n_Weekly summaries_\n:arrow_deg0: <https://site.example.org/?d=260802-2d#over-time|wk of 7/27> — *3,010 TiB* (+10.0, 0.3%) · $19,272/mo (+$103)\n:arrow_deg30: <https://site.example.org/?d=260809-7d#over-time|wk of 8/3> — *3,100 TiB* (+90.0, 3.0%) · $20,951/mo (+$1,679)\n:arrow_deg30: <https://site.example.org/?d=260811-2d#over-time|wk of 8/10> _(partial)_ — *3,149 TiB* (+49.0, 1.6%) · $20,372/mo (−$579)\n\n<<prev-thread>|← July>"
+      }
+     },
+     {
+      "type": "image",
+      "image_url": "<plot-url>",
+      "alt_text": "GCS usage — August 2026"
+     }
+    ],
+    "thread_ts": "1.000000"
+   },
+   "edit": {
+    "channel": "C0TEST",
+    "ts": "1.000002",
+    "text": ":arrow_deg40: *+149.0 TiB* <https://site.example.org/?d=260811-11d#over-time|month-to-date> · <https://site.example.org/|dashboard>\n\n_Weekly summaries_\n:arrow_deg0: <https://site.example.org/?d=260802-2d#over-time|wk of 7/27> — *3,010 TiB* (+10.0, 0.3%) · $19,272/mo (+$103)\n:arrow_deg30: <https://site.example.org/?d=260809-7d#over-time|wk of 8/3> — *3,100 TiB* (+90.0, 3.0%) · $20,951/mo (+$1,679)\n:arrow_deg30: <https://site.example.org/?d=260811-2d#over-time|wk of 8/10> _(partial)_ — *3,149 TiB* (+49.0, 1.6%) · $20,372/mo (−$579)\n\n<<prev-thread>|← July>",
+    "unfurl_links": false,
+    "unfurl_media": false,
+    "blocks": [
+     {
+      "type": "section",
+      "text": {
+       "type": "mrkdwn",
+       "text": ":arrow_deg40: *+149.0 TiB* <https://site.example.org/?d=260811-11d#over-time|month-to-date> · <https://site.example.org/|dashboard>\n\n_Weekly summaries_\n:arrow_deg0: <https://site.example.org/?d=260802-2d#over-time|wk of 7/27> — *3,010 TiB* (+10.0, 0.3%) · $19,272/mo (+$103)\n:arrow_deg30: <https://site.example.org/?d=260809-7d#over-time|wk of 8/3> — *3,100 TiB* (+90.0, 3.0%) · $20,951/mo (+$1,679)\n:arrow_deg30: <https://site.example.org/?d=260811-2d#over-time|wk of 8/10> _(partial)_ — *3,149 TiB* (+49.0, 1.6%) · $20,372/mo (−$579)\n\n<<prev-thread>|← July>"
+      }
+     },
+     {
+      "type": "image",
+      "image_url": "<plot-url>",
+      "alt_text": "GCS usage — August 2026"
+     }
+    ]
+   }
+  },
+  "op:gcs-first": {
+   "body": ":arrow_deg10: **+2.0 TiB** [month-to-date](https://site.example.org/?d=260901-1d#over-time) · **+60.0 TiB** [last 30d](https://site.example.org/?d=260901-30d#over-time) · [dashboard](https://site.example.org/)\n\n*Weekly summaries*\n:arrow_deg10: [wk of 8/3](https://site.example.org/?d=260809-7d#over-time) (Aug) — **3,026 TiB** (+14.0, 0.5%) · $19,702/mo (+$287)\n:arrow_deg10: [wk of 8/10](https://site.example.org/?d=260816-7d#over-time) (Aug) — **3,040 TiB** (+14.0, 0.5%) · $19,988/mo (+$286)\n:arrow_deg10: [wk of 8/17](https://site.example.org/?d=260823-7d#over-time) (Aug) — **3,054 TiB** (+14.0, 0.5%) · $20,275/mo (+$287)\n:arrow_deg10: [wk of 8/24](https://site.example.org/?d=260830-7d#over-time) (Aug) — **3,068 TiB** (+14.0, 0.5%) · $20,562/mo (+$287)\n:arrow_deg0: [wk of 8/31](https://site.example.org/?d=260901-2d#over-time) _(partial)_ — **3,072 TiB** (+4.0, 0.1%) · $20,644/mo (+$82)\n\n[← August](<prev-thread>)\n\n![GCS usage — September 2026](<plot-url>)",
+   "post": {
+    "channel": "C0TEST",
+    "text": ":arrow_deg10: *+2.0 TiB* <https://site.example.org/?d=260901-1d#over-time|month-to-date> · *+60.0 TiB* <https://site.example.org/?d=260901-30d#over-time|last 30d> · <https://site.example.org/|dashboard>\n\n_Weekly summaries_\n:arrow_deg10: <https://site.example.org/?d=260809-7d#over-time|wk of 8/3> (Aug) — *3,026 TiB* (+14.0, 0.5%) · $19,702/mo (+$287)\n:arrow_deg10: <https://site.example.org/?d=260816-7d#over-time|wk of 8/10> (Aug) — *3,040 TiB* (+14.0, 0.5%) · $19,988/mo (+$286)\n:arrow_deg10: <https://site.example.org/?d=260823-7d#over-time|wk of 8/17> (Aug) — *3,054 TiB* (+14.0, 0.5%) · $20,275/mo (+$287)\n:arrow_deg10: <https://site.example.org/?d=260830-7d#over-time|wk of 8/24> (Aug) — *3,068 TiB* (+14.0, 0.5%) · $20,562/mo (+$287)\n:arrow_deg0: <https://site.example.org/?d=260901-2d#over-time|wk of 8/31> _(partial)_ — *3,072 TiB* (+4.0, 0.1%) · $20,644/mo (+$82)\n\n<<prev-thread>|← August>",
+    "unfurl_links": false,
+    "unfurl_media": false,
+    "username": "wk of 11/2",
+    "icon_url": "https://i.example/mark.png",
+    "blocks": [
+     {
+      "type": "section",
+      "text": {
+       "type": "mrkdwn",
+       "text": ":arrow_deg10: *+2.0 TiB* <https://site.example.org/?d=260901-1d#over-time|month-to-date> · *+60.0 TiB* <https://site.example.org/?d=260901-30d#over-time|last 30d> · <https://site.example.org/|dashboard>\n\n_Weekly summaries_\n:arrow_deg10: <https://site.example.org/?d=260809-7d#over-time|wk of 8/3> (Aug) — *3,026 TiB* (+14.0, 0.5%) · $19,702/mo (+$287)\n:arrow_deg10: <https://site.example.org/?d=260816-7d#over-time|wk of 8/10> (Aug) — *3,040 TiB* (+14.0, 0.5%) · $19,988/mo (+$286)\n:arrow_deg10: <https://site.example.org/?d=260823-7d#over-time|wk of 8/17> (Aug) — *3,054 TiB* (+14.0, 0.5%) · $20,275/mo (+$287)\n:arrow_deg10: <https://site.example.org/?d=260830-7d#over-time|wk of 8/24> (Aug) — *3,068 TiB* (+14.0, 0.5%) · $20,562/mo (+$287)\n:arrow_deg0: <https://site.example.org/?d=260901-2d#over-time|wk of 8/31> _(partial)_ — *3,072 TiB* (+4.0, 0.1%) · $20,644/mo (+$82)\n\n<<prev-thread>|← August>"
+      }
+     },
+     {
+      "type": "image",
+      "image_url": "<plot-url>",
+      "alt_text": "GCS usage — September 2026"
+     }
+    ],
+    "thread_ts": "1.000000"
+   },
+   "edit": {
+    "channel": "C0TEST",
+    "ts": "1.000002",
+    "text": ":arrow_deg10: *+2.0 TiB* <https://site.example.org/?d=260901-1d#over-time|month-to-date> · *+60.0 TiB* <https://site.example.org/?d=260901-30d#over-time|last 30d> · <https://site.example.org/|dashboard>\n\n_Weekly summaries_\n:arrow_deg10: <https://site.example.org/?d=260809-7d#over-time|wk of 8/3> (Aug) — *3,026 TiB* (+14.0, 0.5%) · $19,702/mo (+$287)\n:arrow_deg10: <https://site.example.org/?d=260816-7d#over-time|wk of 8/10> (Aug) — *3,040 TiB* (+14.0, 0.5%) · $19,988/mo (+$286)\n:arrow_deg10: <https://site.example.org/?d=260823-7d#over-time|wk of 8/17> (Aug) — *3,054 TiB* (+14.0, 0.5%) · $20,275/mo (+$287)\n:arrow_deg10: <https://site.example.org/?d=260830-7d#over-time|wk of 8/24> (Aug) — *3,068 TiB* (+14.0, 0.5%) · $20,562/mo (+$287)\n:arrow_deg0: <https://site.example.org/?d=260901-2d#over-time|wk of 8/31> _(partial)_ — *3,072 TiB* (+4.0, 0.1%) · $20,644/mo (+$82)\n\n<<prev-thread>|← August>",
+    "unfurl_links": false,
+    "unfurl_media": false,
+    "blocks": [
+     {
+      "type": "section",
+      "text": {
+       "type": "mrkdwn",
+       "text": ":arrow_deg10: *+2.0 TiB* <https://site.example.org/?d=260901-1d#over-time|month-to-date> · *+60.0 TiB* <https://site.example.org/?d=260901-30d#over-time|last 30d> · <https://site.example.org/|dashboard>\n\n_Weekly summaries_\n:arrow_deg10: <https://site.example.org/?d=260809-7d#over-time|wk of 8/3> (Aug) — *3,026 TiB* (+14.0, 0.5%) · $19,702/mo (+$287)\n:arrow_deg10: <https://site.example.org/?d=260816-7d#over-time|wk of 8/10> (Aug) — *3,040 TiB* (+14.0, 0.5%) · $19,988/mo (+$286)\n:arrow_deg10: <https://site.example.org/?d=260823-7d#over-time|wk of 8/17> (Aug) — *3,054 TiB* (+14.0, 0.5%) · $20,275/mo (+$287)\n:arrow_deg10: <https://site.example.org/?d=260830-7d#over-time|wk of 8/24> (Aug) — *3,068 TiB* (+14.0, 0.5%) · $20,562/mo (+$287)\n:arrow_deg0: <https://site.example.org/?d=260901-2d#over-time|wk of 8/31> _(partial)_ — *3,072 TiB* (+4.0, 0.1%) · $20,644/mo (+$82)\n\n<<prev-thread>|← August>"
+      }
+     },
+     {
+      "type": "image",
+      "image_url": "<plot-url>",
+      "alt_text": "GCS usage — September 2026"
+     }
+    ]
+   }
+  },
+  "reply:circles-sender:2026-11-05": {
+   "body": ":arrow_deg50: **778 TiB (+7.5, 1.0%)** · [as of 06:01Z](https://cw.example.org/?d=26110506-18h#over-time) · :red_circle: [hot](https://cw.example.org/hot-data?d=26110506-18h#over-time): 99.6% of 100Ti (0.4 Ti free) · :large_orange_circle: [main](https://cw.example.org/main-data?d=26110506-18h#over-time): 85.4% of 1P (132.5 Ti free) · :large_green_circle: [za](https://cw.example.org/z-a?d=26110506-18h#over-time) 0 + [zb](https://cw.example.org/z-b?d=26110506-18h#over-time) 50 Ti: 49.5% of 100Ti (50.5 Ti free) · [new-data](https://cw.example.org/new-data?d=26110506-18h#over-time): 4 Ti",
+   "post": {
+    "channel": "C0TEST",
+    "text": ":arrow_deg50: *778 TiB (+7.5, 1.0%)* · <https://cw.example.org/?d=26110506-18h#over-time|as of 06:01Z> · :red_circle: <https://cw.example.org/hot-data?d=26110506-18h#over-time|hot>: 99.6% of 100Ti (0.4 Ti free) · :large_orange_circle: <https://cw.example.org/main-data?d=26110506-18h#over-time|main>: 85.4% of 1P (132.5 Ti free) · :large_green_circle: <https://cw.example.org/z-a?d=26110506-18h#over-time|za> 0 + <https://cw.example.org/z-b?d=26110506-18h#over-time|zb> 50 Ti: 49.5% of 100Ti (50.5 Ti free) · <https://cw.example.org/new-data?d=26110506-18h#over-time|new-data>: 4 Ti",
+    "unfurl_links": false,
+    "unfurl_media": false,
+    "username": "wk of 11/2",
+    "icon_url": "https://i.example/mark.png",
+    "thread_ts": "1.000000"
+   },
+   "edit": {
+    "channel": "C0TEST",
+    "ts": "1.000002",
+    "text": ":arrow_deg50: *778 TiB (+7.5, 1.0%)* · <https://cw.example.org/?d=26110506-18h#over-time|as of 06:01Z> · :red_circle: <https://cw.example.org/hot-data?d=26110506-18h#over-time|hot>: 99.6% of 100Ti (0.4 Ti free) · :large_orange_circle: <https://cw.example.org/main-data?d=26110506-18h#over-time|main>: 85.4% of 1P (132.5 Ti free) · :large_green_circle: <https://cw.example.org/z-a?d=26110506-18h#over-time|za> 0 + <https://cw.example.org/z-b?d=26110506-18h#over-time|zb> 50 Ti: 49.5% of 100Ti (50.5 Ti free) · <https://cw.example.org/new-data?d=26110506-18h#over-time|new-data>: 4 Ti",
+    "unfurl_links": false,
+    "unfurl_media": false,
+    "blocks": []
+   }
+  },
+  "reply:circles-sender:2026-11-04": {
+   "body": ":red_circle: [hot](https://cw.example.org/hot-data?d=26110412-1d6h#over-time): 99.3% of 100Ti (0.7 Ti free) · :large_orange_circle: [main](https://cw.example.org/main-data?d=26110412-1d6h#over-time): 84.6% of 1P (140.0 Ti free) · :large_green_circle: [za](https://cw.example.org/z-a?d=26110412-1d6h#over-time) 0 + [zb](https://cw.example.org/z-b?d=26110412-1d6h#over-time) 45 Ti: 45.0% of 100Ti (55.0 Ti free) · [new-data](https://cw.example.org/new-data?d=26110412-1d6h#over-time): 4 Ti",
+   "post": {
+    "channel": "C0TEST",
+    "text": ":red_circle: <https://cw.example.org/hot-data?d=26110412-1d6h#over-time|hot>: 99.3% of 100Ti (0.7 Ti free) · :large_orange_circle: <https://cw.example.org/main-data?d=26110412-1d6h#over-time|main>: 84.6% of 1P (140.0 Ti free) · :large_green_circle: <https://cw.example.org/z-a?d=26110412-1d6h#over-time|za> 0 + <https://cw.example.org/z-b?d=26110412-1d6h#over-time|zb> 45 Ti: 45.0% of 100Ti (55.0 Ti free) · <https://cw.example.org/new-data?d=26110412-1d6h#over-time|new-data>: 4 Ti",
+    "unfurl_links": false,
+    "unfurl_media": false,
+    "username": "wk of 11/2",
+    "icon_url": "https://i.example/mark.png",
+    "thread_ts": "1.000000"
+   },
+   "edit": {
+    "channel": "C0TEST",
+    "ts": "1.000002",
+    "text": ":red_circle: <https://cw.example.org/hot-data?d=26110412-1d6h#over-time|hot>: 99.3% of 100Ti (0.7 Ti free) · :large_orange_circle: <https://cw.example.org/main-data?d=26110412-1d6h#over-time|main>: 84.6% of 1P (140.0 Ti free) · :large_green_circle: <https://cw.example.org/z-a?d=26110412-1d6h#over-time|za> 0 + <https://cw.example.org/z-b?d=26110412-1d6h#over-time|zb> 45 Ti: 45.0% of 100Ti (55.0 Ti free) · <https://cw.example.org/new-data?d=26110412-1d6h#over-time|new-data>: 4 Ti",
+    "unfurl_links": false,
+    "unfurl_media": false,
+    "blocks": []
+   }
+  },
+  "reply:circles-sender:2026-11-03": {
+   "body": ":red_circle: [hot](https://cw.example.org/hot-data?d=26110306-12h#over-time): 99.9% of 100Ti (0.1 Ti free) · :large_orange_circle: [main](https://cw.example.org/main-data?d=26110306-12h#over-time): 83.8% of 1P (147.5 Ti free) · :large_green_circle: [za](https://cw.example.org/z-a?d=26110306-12h#over-time) 4 + [zb](https://cw.example.org/z-b?d=26110306-12h#over-time) 40 Ti: 44.3% of 100Ti (55.7 Ti free)",
+   "post": {
+    "channel": "C0TEST",
+    "text": ":red_circle: <https://cw.example.org/hot-data?d=26110306-12h#over-time|hot>: 99.9% of 100Ti (0.1 Ti free) · :large_orange_circle: <https://cw.example.org/main-data?d=26110306-12h#over-time|main>: 83.8% of 1P (147.5 Ti free) · :large_green_circle: <https://cw.example.org/z-a?d=26110306-12h#over-time|za> 4 + <https://cw.example.org/z-b?d=26110306-12h#over-time|zb> 40 Ti: 44.3% of 100Ti (55.7 Ti free)",
+    "unfurl_links": false,
+    "unfurl_media": false,
+    "username": "wk of 11/2",
+    "icon_url": "https://i.example/mark.png",
+    "thread_ts": "1.000000"
+   },
+   "edit": {
+    "channel": "C0TEST",
+    "ts": "1.000002",
+    "text": ":red_circle: <https://cw.example.org/hot-data?d=26110306-12h#over-time|hot>: 99.9% of 100Ti (0.1 Ti free) · :large_orange_circle: <https://cw.example.org/main-data?d=26110306-12h#over-time|main>: 83.8% of 1P (147.5 Ti free) · :large_green_circle: <https://cw.example.org/z-a?d=26110306-12h#over-time|za> 4 + <https://cw.example.org/z-b?d=26110306-12h#over-time|zb> 40 Ti: 44.3% of 100Ti (55.7 Ti free)",
+    "unfurl_links": false,
+    "unfurl_media": false,
+    "blocks": []
+   }
+  },
+  "reply:circles-sender:2026-11-02": {
+   "body": ":red_circle: [hot](https://cw.example.org/hot-data?d=26110218-1d6h#over-time): 99.7% of 100Ti (0.3 Ti free) · :large_orange_circle: [main](https://cw.example.org/main-data?d=26110218-1d6h#over-time): 83.2% of 1P (152.5 Ti free) · :large_green_circle: [za](https://cw.example.org/z-a?d=26110218-1d6h#over-time) 8 + [zb](https://cw.example.org/z-b?d=26110218-1d6h#over-time) 38 Ti: 45.7% of 100Ti (54.3 Ti free)",
+   "post": {
+    "channel": "C0TEST",
+    "text": ":red_circle: <https://cw.example.org/hot-data?d=26110218-1d6h#over-time|hot>: 99.7% of 100Ti (0.3 Ti free) · :large_orange_circle: <https://cw.example.org/main-data?d=26110218-1d6h#over-time|main>: 83.2% of 1P (152.5 Ti free) · :large_green_circle: <https://cw.example.org/z-a?d=26110218-1d6h#over-time|za> 8 + <https://cw.example.org/z-b?d=26110218-1d6h#over-time|zb> 38 Ti: 45.7% of 100Ti (54.3 Ti free)",
+    "unfurl_links": false,
+    "unfurl_media": false,
+    "username": "wk of 11/2",
+    "icon_url": "https://i.example/mark.png",
+    "thread_ts": "1.000000"
+   },
+   "edit": {
+    "channel": "C0TEST",
+    "ts": "1.000002",
+    "text": ":red_circle: <https://cw.example.org/hot-data?d=26110218-1d6h#over-time|hot>: 99.7% of 100Ti (0.3 Ti free) · :large_orange_circle: <https://cw.example.org/main-data?d=26110218-1d6h#over-time|main>: 83.2% of 1P (152.5 Ti free) · :large_green_circle: <https://cw.example.org/z-a?d=26110218-1d6h#over-time|za> 8 + <https://cw.example.org/z-b?d=26110218-1d6h#over-time|zb> 38 Ti: 45.7% of 100Ti (54.3 Ti free)",
+    "unfurl_links": false,
+    "unfurl_media": false,
+    "blocks": []
+   }
+  },
+  "reply:circles-sender:2026-11-01": {
+   "body": ":red_circle: [hot](https://cw.example.org/hot-data?d=26110112-1d#over-time): 99.2% of 100Ti (0.8 Ti free) · :large_orange_circle: [main](https://cw.example.org/main-data?d=26110112-1d#over-time): 81.9% of 1P (165.0 Ti free) · :large_green_circle: [za](https://cw.example.org/z-a?d=26110112-1d#over-time) 20 + [zb](https://cw.example.org/z-b?d=26110112-1d#over-time) 30 Ti: 49.5% of 100Ti (50.5 Ti free)",
+   "post": {
+    "channel": "C0TEST",
+    "text": ":red_circle: <https://cw.example.org/hot-data?d=26110112-1d#over-time|hot>: 99.2% of 100Ti (0.8 Ti free) · :large_orange_circle: <https://cw.example.org/main-data?d=26110112-1d#over-time|main>: 81.9% of 1P (165.0 Ti free) · :large_green_circle: <https://cw.example.org/z-a?d=26110112-1d#over-time|za> 20 + <https://cw.example.org/z-b?d=26110112-1d#over-time|zb> 30 Ti: 49.5% of 100Ti (50.5 Ti free)",
+    "unfurl_links": false,
+    "unfurl_media": false,
+    "username": "wk of 11/2",
+    "icon_url": "https://i.example/mark.png",
+    "thread_ts": "1.000000"
+   },
+   "edit": {
+    "channel": "C0TEST",
+    "ts": "1.000002",
+    "text": ":red_circle: <https://cw.example.org/hot-data?d=26110112-1d#over-time|hot>: 99.2% of 100Ti (0.8 Ti free) · :large_orange_circle: <https://cw.example.org/main-data?d=26110112-1d#over-time|main>: 81.9% of 1P (165.0 Ti free) · :large_green_circle: <https://cw.example.org/z-a?d=26110112-1d#over-time|za> 20 + <https://cw.example.org/z-b?d=26110112-1d#over-time|zb> 30 Ti: 49.5% of 100Ti (50.5 Ti free)",
+    "unfurl_links": false,
+    "unfurl_media": false,
+    "blocks": []
+   }
+  },
+  "reply:classes-chip-sender:2026-11-04": {
+   "body": ":pool-chip-8-30: 67.5% of 910Ti public (296.0 Ti free)\n:pool-chip-3-70: 82.0% of 50Ti private (9.0 Ti free), +2.8 Ti/d [over 7d](https://cw.example.org/main-data?d=26110412-7d#over-time), ≈3d to full [↗︎](https://cw.example.org/main-data?d=26110412-1d6h#over-time)",
+   "post": {
+    "channel": "C0TEST",
+    "text": ":pool-chip-8-30: 67.5% of 910Ti public (296.0 Ti free)\n:pool-chip-3-70: 82.0% of 50Ti private (9.0 Ti free), +2.8 Ti/d <https://cw.example.org/main-data?d=26110412-7d#over-time|over 7d>, ≈3d to full <https://cw.example.org/main-data?d=26110412-1d6h#over-time|↗︎>",
+    "unfurl_links": false,
+    "unfurl_media": false,
+    "username": "wk of 11/2",
+    "icon_url": "https://i.example/mark.png",
+    "thread_ts": "1.000000"
+   },
+   "edit": {
+    "channel": "C0TEST",
+    "ts": "1.000002",
+    "text": ":pool-chip-8-30: 67.5% of 910Ti public (296.0 Ti free)\n:pool-chip-3-70: 82.0% of 50Ti private (9.0 Ti free), +2.8 Ti/d <https://cw.example.org/main-data?d=26110412-7d#over-time|over 7d>, ≈3d to full <https://cw.example.org/main-data?d=26110412-1d6h#over-time|↗︎>",
+    "unfurl_links": false,
+    "unfurl_media": false,
+    "blocks": []
+   }
+  },
+  "reply:classes-chip-sender:2026-11-03": {
+   "body": ":pool-chip-8-30: 67.3% of 910Ti public (297.5 Ti free)\n:pool-chip-3-80: 77.5% of 50Ti private (11.2 Ti free), +3.0 Ti/d [over 3d](https://cw.example.org/main-data?d=26110306-3d#over-time), ≈4d to full [↗︎](https://cw.example.org/main-data?d=26110306-12h#over-time)",
+   "post": {
+    "channel": "C0TEST",
+    "text": ":pool-chip-8-30: 67.3% of 910Ti public (297.5 Ti free)\n:pool-chip-3-80: 77.5% of 50Ti private (11.2 Ti free), +3.0 Ti/d <https://cw.example.org/main-data?d=26110306-3d#over-time|over 3d>, ≈4d to full <https://cw.example.org/main-data?d=26110306-12h#over-time|↗︎>",
+    "unfurl_links": false,
+    "unfurl_media": false,
+    "username": "wk of 11/2",
+    "icon_url": "https://i.example/mark.png",
+    "thread_ts": "1.000000"
+   },
+   "edit": {
+    "channel": "C0TEST",
+    "ts": "1.000002",
+    "text": ":pool-chip-8-30: 67.3% of 910Ti public (297.5 Ti free)\n:pool-chip-3-80: 77.5% of 50Ti private (11.2 Ti free), +3.0 Ti/d <https://cw.example.org/main-data?d=26110306-3d#over-time|over 3d>, ≈4d to full <https://cw.example.org/main-data?d=26110306-12h#over-time|↗︎>",
+    "unfurl_links": false,
+    "unfurl_media": false,
+    "blocks": []
+   }
+  },
+  "reply:classes-chip-sender:2026-11-02": {
+   "body": ":pool-chip-8-30: 67.2% of 910Ti public (298.5 Ti free)\n:pool-chip-3-80: 74.5% of 50Ti private (12.8 Ti free), +3.0 Ti/d [over 3d](https://cw.example.org/main-data?d=26110218-3d#over-time), ≈4d to full [↗︎](https://cw.example.org/main-data?d=26110218-1d6h#over-time)",
+   "post": {
+    "channel": "C0TEST",
+    "text": ":pool-chip-8-30: 67.2% of 910Ti public (298.5 Ti free)\n:pool-chip-3-80: 74.5% of 50Ti private (12.8 Ti free), +3.0 Ti/d <https://cw.example.org/main-data?d=26110218-3d#over-time|over 3d>, ≈4d to full <https://cw.example.org/main-data?d=26110218-1d6h#over-time|↗︎>",
+    "unfurl_links": false,
+    "unfurl_media": false,
+    "username": "wk of 11/2",
+    "icon_url": "https://i.example/mark.png",
+    "thread_ts": "1.000000"
+   },
+   "edit": {
+    "channel": "C0TEST",
+    "ts": "1.000002",
+    "text": ":pool-chip-8-30: 67.2% of 910Ti public (298.5 Ti free)\n:pool-chip-3-80: 74.5% of 50Ti private (12.8 Ti free), +3.0 Ti/d <https://cw.example.org/main-data?d=26110218-3d#over-time|over 3d>, ≈4d to full <https://cw.example.org/main-data?d=26110218-1d6h#over-time|↗︎>",
+    "unfurl_links": false,
+    "unfurl_media": false,
+    "blocks": []
+   }
+  },
+  "reply:classes-chip-sender:2026-11-01": {
+   "body": ":pool-chip-8-30: 66.9% of 910Ti public (301.0 Ti free)\n:pool-chip-3-80: 67.0% of 50Ti private (16.5 Ti free), +3.0 Ti/d [over 3d](https://cw.example.org/main-data?d=26110112-3d#over-time), ≈6d to full [↗︎](https://cw.example.org/main-data?d=26110112-1d#over-time)",
+   "post": {
+    "channel": "C0TEST",
+    "text": ":pool-chip-8-30: 66.9% of 910Ti public (301.0 Ti free)\n:pool-chip-3-80: 67.0% of 50Ti private (16.5 Ti free), +3.0 Ti/d <https://cw.example.org/main-data?d=26110112-3d#over-time|over 3d>, ≈6d to full <https://cw.example.org/main-data?d=26110112-1d#over-time|↗︎>",
+    "unfurl_links": false,
+    "unfurl_media": false,
+    "username": "wk of 11/2",
+    "icon_url": "https://i.example/mark.png",
+    "thread_ts": "1.000000"
+   },
+   "edit": {
+    "channel": "C0TEST",
+    "ts": "1.000002",
+    "text": ":pool-chip-8-30: 66.9% of 910Ti public (301.0 Ti free)\n:pool-chip-3-80: 67.0% of 50Ti private (16.5 Ti free), +3.0 Ti/d <https://cw.example.org/main-data?d=26110112-3d#over-time|over 3d>, ≈6d to full <https://cw.example.org/main-data?d=26110112-1d#over-time|↗︎>",
+    "unfurl_links": false,
+    "unfurl_media": false,
+    "blocks": []
+   }
+  },
+  "reply:runway-closed-sender:2026-11-05": {
+   "body": ":large_orange_circle: [main](https://cw.example.org/main-data?d=26110506-18h#over-time): 85.4% of 1P (132.5 Ti free), +10.0 Ti/d [over 1d](https://cw.example.org/main-data?d=26110506-1d#over-time), ≈13d to full · :red_circle: [hot](https://cw.example.org/hot-data?d=26110506-18h#over-time): 99.6% of 100Ti (0.4 Ti free), +0.4 Ti/d [over 1d](https://cw.example.org/hot-data?d=26110506-1d#over-time), ≈1d to full · :large_orange_circle: [za](https://cw.example.org/z-a?d=26110506-18h#over-time) 0 + [zb](https://cw.example.org/z-b?d=26110506-18h#over-time) 50 Ti: 49.5% of 100Ti (50.5 Ti free), +6.0 Ti/d [over 1d](https://cw.example.org/?d=26110506-1d&g=z8#over-time), ≈8d to full · [new-data](https://cw.example.org/new-data?d=26110506-18h#over-time): 4 Ti",
+   "post": {
+    "channel": "C0TEST",
+    "text": ":large_orange_circle: <https://cw.example.org/main-data?d=26110506-18h#over-time|main>: 85.4% of 1P (132.5 Ti free), +10.0 Ti/d <https://cw.example.org/main-data?d=26110506-1d#over-time|over 1d>, ≈13d to full · :red_circle: <https://cw.example.org/hot-data?d=26110506-18h#over-time|hot>: 99.6% of 100Ti (0.4 Ti free), +0.4 Ti/d <https://cw.example.org/hot-data?d=26110506-1d#over-time|over 1d>, ≈1d to full · :large_orange_circle: <https://cw.example.org/z-a?d=26110506-18h#over-time|za> 0 + <https://cw.example.org/z-b?d=26110506-18h#over-time|zb> 50 Ti: 49.5% of 100Ti (50.5 Ti free), +6.0 Ti/d <https://cw.example.org/?d=26110506-1d&g=z8#over-time|over 1d>, ≈8d to full · <https://cw.example.org/new-data?d=26110506-18h#over-time|new-data>: 4 Ti",
+    "unfurl_links": false,
+    "unfurl_media": false,
+    "username": "wk of 11/2",
+    "icon_url": "https://i.example/mark.png",
+    "thread_ts": "1.000000"
+   },
+   "edit": {
+    "channel": "C0TEST",
+    "ts": "1.000002",
+    "text": ":large_orange_circle: <https://cw.example.org/main-data?d=26110506-18h#over-time|main>: 85.4% of 1P (132.5 Ti free), +10.0 Ti/d <https://cw.example.org/main-data?d=26110506-1d#over-time|over 1d>, ≈13d to full · :red_circle: <https://cw.example.org/hot-data?d=26110506-18h#over-time|hot>: 99.6% of 100Ti (0.4 Ti free), +0.4 Ti/d <https://cw.example.org/hot-data?d=26110506-1d#over-time|over 1d>, ≈1d to full · :large_orange_circle: <https://cw.example.org/z-a?d=26110506-18h#over-time|za> 0 + <https://cw.example.org/z-b?d=26110506-18h#over-time|zb> 50 Ti: 49.5% of 100Ti (50.5 Ti free), +6.0 Ti/d <https://cw.example.org/?d=26110506-1d&g=z8#over-time|over 1d>, ≈8d to full · <https://cw.example.org/new-data?d=26110506-18h#over-time|new-data>: 4 Ti",
+    "unfurl_links": false,
+    "unfurl_media": false,
+    "blocks": []
+   }
+  },
+  "reply:runway-closed-sender:2026-11-04": {
+   "body": ":large_yellow_circle: [main](https://cw.example.org/main-data?d=26110412-1d6h#over-time): 84.6% of 1P (140.0 Ti free), +9.3 Ti/d [over 7d](https://cw.example.org/main-data?d=26110412-7d#over-time), ≈15d to full · :large_orange_circle: [hot](https://cw.example.org/hot-data?d=26110412-1d6h#over-time): 99.3% of 100Ti (0.7 Ti free), +0.0 Ti/d [over 3d](https://cw.example.org/hot-data?d=26110412-3d#over-time), ≈21d to full · :large_green_circle: [za](https://cw.example.org/z-a?d=26110412-1d6h#over-time) 0 + [zb](https://cw.example.org/z-b?d=26110412-1d6h#over-time) 45 Ti: 45.0% of 100Ti (55.0 Ti free) · [new-data](https://cw.example.org/new-data?d=26110412-1d6h#over-time): 4 Ti",
+   "post": {
+    "channel": "C0TEST",
+    "text": ":large_yellow_circle: <https://cw.example.org/main-data?d=26110412-1d6h#over-time|main>: 84.6% of 1P (140.0 Ti free), +9.3 Ti/d <https://cw.example.org/main-data?d=26110412-7d#over-time|over 7d>, ≈15d to full · :large_orange_circle: <https://cw.example.org/hot-data?d=26110412-1d6h#over-time|hot>: 99.3% of 100Ti (0.7 Ti free), +0.0 Ti/d <https://cw.example.org/hot-data?d=26110412-3d#over-time|over 3d>, ≈21d to full · :large_green_circle: <https://cw.example.org/z-a?d=26110412-1d6h#over-time|za> 0 + <https://cw.example.org/z-b?d=26110412-1d6h#over-time|zb> 45 Ti: 45.0% of 100Ti (55.0 Ti free) · <https://cw.example.org/new-data?d=26110412-1d6h#over-time|new-data>: 4 Ti",
+    "unfurl_links": false,
+    "unfurl_media": false,
+    "username": "wk of 11/2",
+    "icon_url": "https://i.example/mark.png",
+    "thread_ts": "1.000000"
+   },
+   "edit": {
+    "channel": "C0TEST",
+    "ts": "1.000002",
+    "text": ":large_yellow_circle: <https://cw.example.org/main-data?d=26110412-1d6h#over-time|main>: 84.6% of 1P (140.0 Ti free), +9.3 Ti/d <https://cw.example.org/main-data?d=26110412-7d#over-time|over 7d>, ≈15d to full · :large_orange_circle: <https://cw.example.org/hot-data?d=26110412-1d6h#over-time|hot>: 99.3% of 100Ti (0.7 Ti free), +0.0 Ti/d <https://cw.example.org/hot-data?d=26110412-3d#over-time|over 3d>, ≈21d to full · :large_green_circle: <https://cw.example.org/z-a?d=26110412-1d6h#over-time|za> 0 + <https://cw.example.org/z-b?d=26110412-1d6h#over-time|zb> 45 Ti: 45.0% of 100Ti (55.0 Ti free) · <https://cw.example.org/new-data?d=26110412-1d6h#over-time|new-data>: 4 Ti",
+    "unfurl_links": false,
+    "unfurl_media": false,
+    "blocks": []
+   }
+  },
+  "reply:runway-closed-sender:2026-11-03": {
+   "body": ":large_yellow_circle: [main](https://cw.example.org/main-data?d=26110306-12h#over-time): 83.8% of 1P (147.5 Ti free), +10.0 Ti/d [over 3d](https://cw.example.org/main-data?d=26110306-3d#over-time), ≈15d to full · :red_circle: [hot](https://cw.example.org/hot-data?d=26110306-12h#over-time): 99.9% of 100Ti (0.1 Ti free), +0.4 Ti/d [over 1d](https://cw.example.org/hot-data?d=26110306-1d#over-time), ≈<1d to full · :large_green_circle: [za](https://cw.example.org/z-a?d=26110306-12h#over-time) 4 + [zb](https://cw.example.org/z-b?d=26110306-12h#over-time) 40 Ti: 44.3% of 100Ti (55.7 Ti free)",
+   "post": {
+    "channel": "C0TEST",
+    "text": ":large_yellow_circle: <https://cw.example.org/main-data?d=26110306-12h#over-time|main>: 83.8% of 1P (147.5 Ti free), +10.0 Ti/d <https://cw.example.org/main-data?d=26110306-3d#over-time|over 3d>, ≈15d to full · :red_circle: <https://cw.example.org/hot-data?d=26110306-12h#over-time|hot>: 99.9% of 100Ti (0.1 Ti free), +0.4 Ti/d <https://cw.example.org/hot-data?d=26110306-1d#over-time|over 1d>, ≈<1d to full · :large_green_circle: <https://cw.example.org/z-a?d=26110306-12h#over-time|za> 4 + <https://cw.example.org/z-b?d=26110306-12h#over-time|zb> 40 Ti: 44.3% of 100Ti (55.7 Ti free)",
+    "unfurl_links": false,
+    "unfurl_media": false,
+    "username": "wk of 11/2",
+    "icon_url": "https://i.example/mark.png",
+    "thread_ts": "1.000000"
+   },
+   "edit": {
+    "channel": "C0TEST",
+    "ts": "1.000002",
+    "text": ":large_yellow_circle: <https://cw.example.org/main-data?d=26110306-12h#over-time|main>: 83.8% of 1P (147.5 Ti free), +10.0 Ti/d <https://cw.example.org/main-data?d=26110306-3d#over-time|over 3d>, ≈15d to full · :red_circle: <https://cw.example.org/hot-data?d=26110306-12h#over-time|hot>: 99.9% of 100Ti (0.1 Ti free), +0.4 Ti/d <https://cw.example.org/hot-data?d=26110306-1d#over-time|over 1d>, ≈<1d to full · :large_green_circle: <https://cw.example.org/z-a?d=26110306-12h#over-time|za> 4 + <https://cw.example.org/z-b?d=26110306-12h#over-time|zb> 40 Ti: 44.3% of 100Ti (55.7 Ti free)",
+    "unfurl_links": false,
+    "unfurl_media": false,
+    "blocks": []
+   }
+  },
+  "reply:runway-closed-sender:2026-11-02": {
+   "body": ":large_yellow_circle: [main](https://cw.example.org/main-data?d=26110218-1d6h#over-time): 83.2% of 1P (152.5 Ti free), +10.0 Ti/d [over 3d](https://cw.example.org/main-data?d=26110218-3d#over-time), ≈15d to full · :red_circle: [hot](https://cw.example.org/hot-data?d=26110218-1d6h#over-time): 99.7% of 100Ti (0.3 Ti free), +0.4 Ti/d [over 1d](https://cw.example.org/hot-data?d=26110218-1d#over-time), ≈<1d to full · :large_green_circle: [za](https://cw.example.org/z-a?d=26110218-1d6h#over-time) 8 + [zb](https://cw.example.org/z-b?d=26110218-1d6h#over-time) 38 Ti: 45.7% of 100Ti (54.3 Ti free)",
+   "post": {
+    "channel": "C0TEST",
+    "text": ":large_yellow_circle: <https://cw.example.org/main-data?d=26110218-1d6h#over-time|main>: 83.2% of 1P (152.5 Ti free), +10.0 Ti/d <https://cw.example.org/main-data?d=26110218-3d#over-time|over 3d>, ≈15d to full · :red_circle: <https://cw.example.org/hot-data?d=26110218-1d6h#over-time|hot>: 99.7% of 100Ti (0.3 Ti free), +0.4 Ti/d <https://cw.example.org/hot-data?d=26110218-1d#over-time|over 1d>, ≈<1d to full · :large_green_circle: <https://cw.example.org/z-a?d=26110218-1d6h#over-time|za> 8 + <https://cw.example.org/z-b?d=26110218-1d6h#over-time|zb> 38 Ti: 45.7% of 100Ti (54.3 Ti free)",
+    "unfurl_links": false,
+    "unfurl_media": false,
+    "username": "wk of 11/2",
+    "icon_url": "https://i.example/mark.png",
+    "thread_ts": "1.000000"
+   },
+   "edit": {
+    "channel": "C0TEST",
+    "ts": "1.000002",
+    "text": ":large_yellow_circle: <https://cw.example.org/main-data?d=26110218-1d6h#over-time|main>: 83.2% of 1P (152.5 Ti free), +10.0 Ti/d <https://cw.example.org/main-data?d=26110218-3d#over-time|over 3d>, ≈15d to full · :red_circle: <https://cw.example.org/hot-data?d=26110218-1d6h#over-time|hot>: 99.7% of 100Ti (0.3 Ti free), +0.4 Ti/d <https://cw.example.org/hot-data?d=26110218-1d#over-time|over 1d>, ≈<1d to full · :large_green_circle: <https://cw.example.org/z-a?d=26110218-1d6h#over-time|za> 8 + <https://cw.example.org/z-b?d=26110218-1d6h#over-time|zb> 38 Ti: 45.7% of 100Ti (54.3 Ti free)",
+    "unfurl_links": false,
+    "unfurl_media": false,
+    "blocks": []
+   }
+  },
+  "reply:runway-closed-sender:2026-11-01": {
+   "body": ":large_yellow_circle: [main](https://cw.example.org/main-data?d=26110112-1d#over-time): 81.9% of 1P (165.0 Ti free), +10.0 Ti/d [over 3d](https://cw.example.org/main-data?d=26110112-3d#over-time), ≈16d to full · :large_orange_circle: [hot](https://cw.example.org/hot-data?d=26110112-1d#over-time): 99.2% of 100Ti (0.8 Ti free) · :large_green_circle: [za](https://cw.example.org/z-a?d=26110112-1d#over-time) 20 + [zb](https://cw.example.org/z-b?d=26110112-1d#over-time) 30 Ti: 49.5% of 100Ti (50.5 Ti free)",
+   "post": {
+    "channel": "C0TEST",
+    "text": ":large_yellow_circle: <https://cw.example.org/main-data?d=26110112-1d#over-time|main>: 81.9% of 1P (165.0 Ti free), +10.0 Ti/d <https://cw.example.org/main-data?d=26110112-3d#over-time|over 3d>, ≈16d to full · :large_orange_circle: <https://cw.example.org/hot-data?d=26110112-1d#over-time|hot>: 99.2% of 100Ti (0.8 Ti free) · :large_green_circle: <https://cw.example.org/z-a?d=26110112-1d#over-time|za> 20 + <https://cw.example.org/z-b?d=26110112-1d#over-time|zb> 30 Ti: 49.5% of 100Ti (50.5 Ti free)",
+    "unfurl_links": false,
+    "unfurl_media": false,
+    "username": "wk of 11/2",
+    "icon_url": "https://i.example/mark.png",
+    "thread_ts": "1.000000"
+   },
+   "edit": {
+    "channel": "C0TEST",
+    "ts": "1.000002",
+    "text": ":large_yellow_circle: <https://cw.example.org/main-data?d=26110112-1d#over-time|main>: 81.9% of 1P (165.0 Ti free), +10.0 Ti/d <https://cw.example.org/main-data?d=26110112-3d#over-time|over 3d>, ≈16d to full · :large_orange_circle: <https://cw.example.org/hot-data?d=26110112-1d#over-time|hot>: 99.2% of 100Ti (0.8 Ti free) · :large_green_circle: <https://cw.example.org/z-a?d=26110112-1d#over-time|za> 20 + <https://cw.example.org/z-b?d=26110112-1d#over-time|zb> 30 Ti: 49.5% of 100Ti (50.5 Ti free)",
+    "unfurl_links": false,
+    "unfurl_media": false,
+    "blocks": []
+   }
+  },
+  "reply:runway-hue-sender:2026-11-05": {
+   "body": ":arrow_deg50: **778 TiB (+7.5, 1.0%)** · [as of 06:01Z](https://cw.example.org/?d=26110506-18h#over-time) · :runway-5: [main](https://cw.example.org/main-data?d=26110506-18h#over-time): 85.4% of 1P (132.5 Ti free), +10.0 Ti/d [over 1d](https://cw.example.org/main-data?d=26110506-1d#over-time), ≈13d to full · :runway-square-1: [hot](https://cw.example.org/hot-data?d=26110506-18h#over-time): 99.6% of 100Ti (0.4 Ti free), +0.4 Ti/d [over 1d](https://cw.example.org/hot-data?d=26110506-1d#over-time), ≈1d to full · :runway-star-4: [za](https://cw.example.org/z-a?d=26110506-18h#over-time) 0 + [zb](https://cw.example.org/z-b?d=26110506-18h#over-time) 50 Ti: 49.5% of 100Ti (50.5 Ti free), +6.0 Ti/d [over 1d](https://cw.example.org/?d=26110506-1d&g=z8#over-time), ≈8d to full · [new-data](https://cw.example.org/new-data?d=26110506-18h#over-time): 4 Ti",
+   "post": {
+    "channel": "C0TEST",
+    "text": ":arrow_deg50: *778 TiB (+7.5, 1.0%)* · <https://cw.example.org/?d=26110506-18h#over-time|as of 06:01Z> · :runway-5: <https://cw.example.org/main-data?d=26110506-18h#over-time|main>: 85.4% of 1P (132.5 Ti free), +10.0 Ti/d <https://cw.example.org/main-data?d=26110506-1d#over-time|over 1d>, ≈13d to full · :runway-square-1: <https://cw.example.org/hot-data?d=26110506-18h#over-time|hot>: 99.6% of 100Ti (0.4 Ti free), +0.4 Ti/d <https://cw.example.org/hot-data?d=26110506-1d#over-time|over 1d>, ≈1d to full · :runway-star-4: <https://cw.example.org/z-a?d=26110506-18h#over-time|za> 0 + <https://cw.example.org/z-b?d=26110506-18h#over-time|zb> 50 Ti: 49.5% of 100Ti (50.5 Ti free), +6.0 Ti/d <https://cw.example.org/?d=26110506-1d&g=z8#over-time|over 1d>, ≈8d to full · <https://cw.example.org/new-data?d=26110506-18h#over-time|new-data>: 4 Ti",
+    "unfurl_links": false,
+    "unfurl_media": false,
+    "username": "wk of 11/2",
+    "icon_url": "https://i.example/mark.png",
+    "thread_ts": "1.000000"
+   },
+   "edit": {
+    "channel": "C0TEST",
+    "ts": "1.000002",
+    "text": ":arrow_deg50: *778 TiB (+7.5, 1.0%)* · <https://cw.example.org/?d=26110506-18h#over-time|as of 06:01Z> · :runway-5: <https://cw.example.org/main-data?d=26110506-18h#over-time|main>: 85.4% of 1P (132.5 Ti free), +10.0 Ti/d <https://cw.example.org/main-data?d=26110506-1d#over-time|over 1d>, ≈13d to full · :runway-square-1: <https://cw.example.org/hot-data?d=26110506-18h#over-time|hot>: 99.6% of 100Ti (0.4 Ti free), +0.4 Ti/d <https://cw.example.org/hot-data?d=26110506-1d#over-time|over 1d>, ≈1d to full · :runway-star-4: <https://cw.example.org/z-a?d=26110506-18h#over-time|za> 0 + <https://cw.example.org/z-b?d=26110506-18h#over-time|zb> 50 Ti: 49.5% of 100Ti (50.5 Ti free), +6.0 Ti/d <https://cw.example.org/?d=26110506-1d&g=z8#over-time|over 1d>, ≈8d to full · <https://cw.example.org/new-data?d=26110506-18h#over-time|new-data>: 4 Ti",
+    "unfurl_links": false,
+    "unfurl_media": false,
+    "blocks": []
+   }
+  },
+  "reply:runway-hue-sender:2026-11-04": {
+   "body": ":runway-5: [main](https://cw.example.org/main-data?d=26110412-1d6h#over-time): 84.6% of 1P (140.0 Ti free), +9.3 Ti/d [over 7d](https://cw.example.org/main-data?d=26110412-7d#over-time), ≈15d to full · :runway-square-3: [hot](https://cw.example.org/hot-data?d=26110412-1d6h#over-time): 99.3% of 100Ti (0.7 Ti free), +0.0 Ti/d [over 3d](https://cw.example.org/hot-data?d=26110412-3d#over-time), ≈21d to full · :runway-star-8: [za](https://cw.example.org/z-a?d=26110412-1d6h#over-time) 0 + [zb](https://cw.example.org/z-b?d=26110412-1d6h#over-time) 45 Ti: 45.0% of 100Ti (55.0 Ti free) · [new-data](https://cw.example.org/new-data?d=26110412-1d6h#over-time): 4 Ti",
+   "post": {
+    "channel": "C0TEST",
+    "text": ":runway-5: <https://cw.example.org/main-data?d=26110412-1d6h#over-time|main>: 84.6% of 1P (140.0 Ti free), +9.3 Ti/d <https://cw.example.org/main-data?d=26110412-7d#over-time|over 7d>, ≈15d to full · :runway-square-3: <https://cw.example.org/hot-data?d=26110412-1d6h#over-time|hot>: 99.3% of 100Ti (0.7 Ti free), +0.0 Ti/d <https://cw.example.org/hot-data?d=26110412-3d#over-time|over 3d>, ≈21d to full · :runway-star-8: <https://cw.example.org/z-a?d=26110412-1d6h#over-time|za> 0 + <https://cw.example.org/z-b?d=26110412-1d6h#over-time|zb> 45 Ti: 45.0% of 100Ti (55.0 Ti free) · <https://cw.example.org/new-data?d=26110412-1d6h#over-time|new-data>: 4 Ti",
+    "unfurl_links": false,
+    "unfurl_media": false,
+    "username": "wk of 11/2",
+    "icon_url": "https://i.example/mark.png",
+    "thread_ts": "1.000000"
+   },
+   "edit": {
+    "channel": "C0TEST",
+    "ts": "1.000002",
+    "text": ":runway-5: <https://cw.example.org/main-data?d=26110412-1d6h#over-time|main>: 84.6% of 1P (140.0 Ti free), +9.3 Ti/d <https://cw.example.org/main-data?d=26110412-7d#over-time|over 7d>, ≈15d to full · :runway-square-3: <https://cw.example.org/hot-data?d=26110412-1d6h#over-time|hot>: 99.3% of 100Ti (0.7 Ti free), +0.0 Ti/d <https://cw.example.org/hot-data?d=26110412-3d#over-time|over 3d>, ≈21d to full · :runway-star-8: <https://cw.example.org/z-a?d=26110412-1d6h#over-time|za> 0 + <https://cw.example.org/z-b?d=26110412-1d6h#over-time|zb> 45 Ti: 45.0% of 100Ti (55.0 Ti free) · <https://cw.example.org/new-data?d=26110412-1d6h#over-time|new-data>: 4 Ti",
+    "unfurl_links": false,
+    "unfurl_media": false,
+    "blocks": []
+   }
+  },
+  "reply:runway-hue-sender:2026-11-03": {
+   "body": ":runway-5: [main](https://cw.example.org/main-data?d=26110306-12h#over-time): 83.8% of 1P (147.5 Ti free), +10.0 Ti/d [over 3d](https://cw.example.org/main-data?d=26110306-3d#over-time), ≈15d to full · :runway-square-1: [hot](https://cw.example.org/hot-data?d=26110306-12h#over-time): 99.9% of 100Ti (0.1 Ti free), +0.4 Ti/d [over 1d](https://cw.example.org/hot-data?d=26110306-1d#over-time), ≈<1d to full · :runway-star-8: [za](https://cw.example.org/z-a?d=26110306-12h#over-time) 4 + [zb](https://cw.example.org/z-b?d=26110306-12h#over-time) 40 Ti: 44.3% of 100Ti (55.7 Ti free)",
+   "post": {
+    "channel": "C0TEST",
+    "text": ":runway-5: <https://cw.example.org/main-data?d=26110306-12h#over-time|main>: 83.8% of 1P (147.5 Ti free), +10.0 Ti/d <https://cw.example.org/main-data?d=26110306-3d#over-time|over 3d>, ≈15d to full · :runway-square-1: <https://cw.example.org/hot-data?d=26110306-12h#over-time|hot>: 99.9% of 100Ti (0.1 Ti free), +0.4 Ti/d <https://cw.example.org/hot-data?d=26110306-1d#over-time|over 1d>, ≈<1d to full · :runway-star-8: <https://cw.example.org/z-a?d=26110306-12h#over-time|za> 4 + <https://cw.example.org/z-b?d=26110306-12h#over-time|zb> 40 Ti: 44.3% of 100Ti (55.7 Ti free)",
+    "unfurl_links": false,
+    "unfurl_media": false,
+    "username": "wk of 11/2",
+    "icon_url": "https://i.example/mark.png",
+    "thread_ts": "1.000000"
+   },
+   "edit": {
+    "channel": "C0TEST",
+    "ts": "1.000002",
+    "text": ":runway-5: <https://cw.example.org/main-data?d=26110306-12h#over-time|main>: 83.8% of 1P (147.5 Ti free), +10.0 Ti/d <https://cw.example.org/main-data?d=26110306-3d#over-time|over 3d>, ≈15d to full · :runway-square-1: <https://cw.example.org/hot-data?d=26110306-12h#over-time|hot>: 99.9% of 100Ti (0.1 Ti free), +0.4 Ti/d <https://cw.example.org/hot-data?d=26110306-1d#over-time|over 1d>, ≈<1d to full · :runway-star-8: <https://cw.example.org/z-a?d=26110306-12h#over-time|za> 4 + <https://cw.example.org/z-b?d=26110306-12h#over-time|zb> 40 Ti: 44.3% of 100Ti (55.7 Ti free)",
+    "unfurl_links": false,
+    "unfurl_media": false,
+    "blocks": []
+   }
+  },
+  "reply:runway-hue-sender:2026-11-02": {
+   "body": ":runway-5: [main](https://cw.example.org/main-data?d=26110218-1d6h#over-time): 83.2% of 1P (152.5 Ti free), +10.0 Ti/d [over 3d](https://cw.example.org/main-data?d=26110218-3d#over-time), ≈15d to full · :runway-square-1: [hot](https://cw.example.org/hot-data?d=26110218-1d6h#over-time): 99.7% of 100Ti (0.3 Ti free), +0.4 Ti/d [over 1d](https://cw.example.org/hot-data?d=26110218-1d#over-time), ≈<1d to full · :runway-star-8: [za](https://cw.example.org/z-a?d=26110218-1d6h#over-time) 8 + [zb](https://cw.example.org/z-b?d=26110218-1d6h#over-time) 38 Ti: 45.7% of 100Ti (54.3 Ti free)",
+   "post": {
+    "channel": "C0TEST",
+    "text": ":runway-5: <https://cw.example.org/main-data?d=26110218-1d6h#over-time|main>: 83.2% of 1P (152.5 Ti free), +10.0 Ti/d <https://cw.example.org/main-data?d=26110218-3d#over-time|over 3d>, ≈15d to full · :runway-square-1: <https://cw.example.org/hot-data?d=26110218-1d6h#over-time|hot>: 99.7% of 100Ti (0.3 Ti free), +0.4 Ti/d <https://cw.example.org/hot-data?d=26110218-1d#over-time|over 1d>, ≈<1d to full · :runway-star-8: <https://cw.example.org/z-a?d=26110218-1d6h#over-time|za> 8 + <https://cw.example.org/z-b?d=26110218-1d6h#over-time|zb> 38 Ti: 45.7% of 100Ti (54.3 Ti free)",
+    "unfurl_links": false,
+    "unfurl_media": false,
+    "username": "wk of 11/2",
+    "icon_url": "https://i.example/mark.png",
+    "thread_ts": "1.000000"
+   },
+   "edit": {
+    "channel": "C0TEST",
+    "ts": "1.000002",
+    "text": ":runway-5: <https://cw.example.org/main-data?d=26110218-1d6h#over-time|main>: 83.2% of 1P (152.5 Ti free), +10.0 Ti/d <https://cw.example.org/main-data?d=26110218-3d#over-time|over 3d>, ≈15d to full · :runway-square-1: <https://cw.example.org/hot-data?d=26110218-1d6h#over-time|hot>: 99.7% of 100Ti (0.3 Ti free), +0.4 Ti/d <https://cw.example.org/hot-data?d=26110218-1d#over-time|over 1d>, ≈<1d to full · :runway-star-8: <https://cw.example.org/z-a?d=26110218-1d6h#over-time|za> 8 + <https://cw.example.org/z-b?d=26110218-1d6h#over-time|zb> 38 Ti: 45.7% of 100Ti (54.3 Ti free)",
+    "unfurl_links": false,
+    "unfurl_media": false,
+    "blocks": []
+   }
+  },
+  "reply:runway-hue-sender:2026-11-01": {
+   "body": ":runway-5: [main](https://cw.example.org/main-data?d=26110112-1d#over-time): 81.9% of 1P (165.0 Ti free), +10.0 Ti/d [over 3d](https://cw.example.org/main-data?d=26110112-3d#over-time), ≈16d to full · :runway-square-3: [hot](https://cw.example.org/hot-data?d=26110112-1d#over-time): 99.2% of 100Ti (0.8 Ti free) · :runway-star-8: [za](https://cw.example.org/z-a?d=26110112-1d#over-time) 20 + [zb](https://cw.example.org/z-b?d=26110112-1d#over-time) 30 Ti: 49.5% of 100Ti (50.5 Ti free)",
+   "post": {
+    "channel": "C0TEST",
+    "text": ":runway-5: <https://cw.example.org/main-data?d=26110112-1d#over-time|main>: 81.9% of 1P (165.0 Ti free), +10.0 Ti/d <https://cw.example.org/main-data?d=26110112-3d#over-time|over 3d>, ≈16d to full · :runway-square-3: <https://cw.example.org/hot-data?d=26110112-1d#over-time|hot>: 99.2% of 100Ti (0.8 Ti free) · :runway-star-8: <https://cw.example.org/z-a?d=26110112-1d#over-time|za> 20 + <https://cw.example.org/z-b?d=26110112-1d#over-time|zb> 30 Ti: 49.5% of 100Ti (50.5 Ti free)",
+    "unfurl_links": false,
+    "unfurl_media": false,
+    "username": "wk of 11/2",
+    "icon_url": "https://i.example/mark.png",
+    "thread_ts": "1.000000"
+   },
+   "edit": {
+    "channel": "C0TEST",
+    "ts": "1.000002",
+    "text": ":runway-5: <https://cw.example.org/main-data?d=26110112-1d#over-time|main>: 81.9% of 1P (165.0 Ti free), +10.0 Ti/d <https://cw.example.org/main-data?d=26110112-3d#over-time|over 3d>, ≈16d to full · :runway-square-3: <https://cw.example.org/hot-data?d=26110112-1d#over-time|hot>: 99.2% of 100Ti (0.8 Ti free) · :runway-star-8: <https://cw.example.org/z-a?d=26110112-1d#over-time|za> 20 + <https://cw.example.org/z-b?d=26110112-1d#over-time|zb> 30 Ti: 49.5% of 100Ti (50.5 Ti free)",
+    "unfurl_links": false,
+    "unfurl_media": false,
+    "blocks": []
+   }
+  },
+  "reply:runway-sender:2026-11-05": {
+   "body": ":arrow_deg50: **778 TiB (+7.5, 1.0%)** · [as of 06:01Z](https://cw.example.org/?d=26110506-18h#over-time) · :large_orange_circle: [main](https://cw.example.org/main-data?d=26110506-18h#over-time): 85.4% of 1P (132.5 Ti free), +10.0 Ti/d [over 1d](https://cw.example.org/main-data?d=26110506-1d#over-time), ≈13d to full · :red_circle: [hot](https://cw.example.org/hot-data?d=26110506-18h#over-time): 99.6% of 100Ti (0.4 Ti free), +0.4 Ti/d [over 1d](https://cw.example.org/hot-data?d=26110506-1d#over-time), ≈1d to full · :large_orange_circle: [za](https://cw.example.org/z-a?d=26110506-18h#over-time) 0 + [zb](https://cw.example.org/z-b?d=26110506-18h#over-time) 50 Ti: 49.5% of 100Ti (50.5 Ti free), +6.0 Ti/d [over 1d](https://cw.example.org/?d=26110506-1d&g=z8#over-time), ≈8d to full · [new-data](https://cw.example.org/new-data?d=26110506-18h#over-time): 4 Ti",
+   "post": {
+    "channel": "C0TEST",
+    "text": ":arrow_deg50: *778 TiB (+7.5, 1.0%)* · <https://cw.example.org/?d=26110506-18h#over-time|as of 06:01Z> · :large_orange_circle: <https://cw.example.org/main-data?d=26110506-18h#over-time|main>: 85.4% of 1P (132.5 Ti free), +10.0 Ti/d <https://cw.example.org/main-data?d=26110506-1d#over-time|over 1d>, ≈13d to full · :red_circle: <https://cw.example.org/hot-data?d=26110506-18h#over-time|hot>: 99.6% of 100Ti (0.4 Ti free), +0.4 Ti/d <https://cw.example.org/hot-data?d=26110506-1d#over-time|over 1d>, ≈1d to full · :large_orange_circle: <https://cw.example.org/z-a?d=26110506-18h#over-time|za> 0 + <https://cw.example.org/z-b?d=26110506-18h#over-time|zb> 50 Ti: 49.5% of 100Ti (50.5 Ti free), +6.0 Ti/d <https://cw.example.org/?d=26110506-1d&g=z8#over-time|over 1d>, ≈8d to full · <https://cw.example.org/new-data?d=26110506-18h#over-time|new-data>: 4 Ti",
+    "unfurl_links": false,
+    "unfurl_media": false,
+    "username": "wk of 11/2",
+    "icon_url": "https://i.example/mark.png",
+    "thread_ts": "1.000000"
+   },
+   "edit": {
+    "channel": "C0TEST",
+    "ts": "1.000002",
+    "text": ":arrow_deg50: *778 TiB (+7.5, 1.0%)* · <https://cw.example.org/?d=26110506-18h#over-time|as of 06:01Z> · :large_orange_circle: <https://cw.example.org/main-data?d=26110506-18h#over-time|main>: 85.4% of 1P (132.5 Ti free), +10.0 Ti/d <https://cw.example.org/main-data?d=26110506-1d#over-time|over 1d>, ≈13d to full · :red_circle: <https://cw.example.org/hot-data?d=26110506-18h#over-time|hot>: 99.6% of 100Ti (0.4 Ti free), +0.4 Ti/d <https://cw.example.org/hot-data?d=26110506-1d#over-time|over 1d>, ≈1d to full · :large_orange_circle: <https://cw.example.org/z-a?d=26110506-18h#over-time|za> 0 + <https://cw.example.org/z-b?d=26110506-18h#over-time|zb> 50 Ti: 49.5% of 100Ti (50.5 Ti free), +6.0 Ti/d <https://cw.example.org/?d=26110506-1d&g=z8#over-time|over 1d>, ≈8d to full · <https://cw.example.org/new-data?d=26110506-18h#over-time|new-data>: 4 Ti",
+    "unfurl_links": false,
+    "unfurl_media": false,
+    "blocks": []
+   }
+  },
+  "reply:runway-sender:2026-11-04": {
+   "body": ":large_yellow_circle: [main](https://cw.example.org/main-data?d=26110412-1d6h#over-time): 84.6% of 1P (140.0 Ti free), +9.3 Ti/d [over 7d](https://cw.example.org/main-data?d=26110412-7d#over-time), ≈15d to full · :large_orange_circle: [hot](https://cw.example.org/hot-data?d=26110412-1d6h#over-time): 99.3% of 100Ti (0.7 Ti free), +0.0 Ti/d [over 3d](https://cw.example.org/hot-data?d=26110412-3d#over-time), ≈21d to full · :large_green_circle: [za](https://cw.example.org/z-a?d=26110412-1d6h#over-time) 0 + [zb](https://cw.example.org/z-b?d=26110412-1d6h#over-time) 45 Ti: 45.0% of 100Ti (55.0 Ti free) · [new-data](https://cw.example.org/new-data?d=26110412-1d6h#over-time): 4 Ti",
+   "post": {
+    "channel": "C0TEST",
+    "text": ":large_yellow_circle: <https://cw.example.org/main-data?d=26110412-1d6h#over-time|main>: 84.6% of 1P (140.0 Ti free), +9.3 Ti/d <https://cw.example.org/main-data?d=26110412-7d#over-time|over 7d>, ≈15d to full · :large_orange_circle: <https://cw.example.org/hot-data?d=26110412-1d6h#over-time|hot>: 99.3% of 100Ti (0.7 Ti free), +0.0 Ti/d <https://cw.example.org/hot-data?d=26110412-3d#over-time|over 3d>, ≈21d to full · :large_green_circle: <https://cw.example.org/z-a?d=26110412-1d6h#over-time|za> 0 + <https://cw.example.org/z-b?d=26110412-1d6h#over-time|zb> 45 Ti: 45.0% of 100Ti (55.0 Ti free) · <https://cw.example.org/new-data?d=26110412-1d6h#over-time|new-data>: 4 Ti",
+    "unfurl_links": false,
+    "unfurl_media": false,
+    "username": "wk of 11/2",
+    "icon_url": "https://i.example/mark.png",
+    "thread_ts": "1.000000"
+   },
+   "edit": {
+    "channel": "C0TEST",
+    "ts": "1.000002",
+    "text": ":large_yellow_circle: <https://cw.example.org/main-data?d=26110412-1d6h#over-time|main>: 84.6% of 1P (140.0 Ti free), +9.3 Ti/d <https://cw.example.org/main-data?d=26110412-7d#over-time|over 7d>, ≈15d to full · :large_orange_circle: <https://cw.example.org/hot-data?d=26110412-1d6h#over-time|hot>: 99.3% of 100Ti (0.7 Ti free), +0.0 Ti/d <https://cw.example.org/hot-data?d=26110412-3d#over-time|over 3d>, ≈21d to full · :large_green_circle: <https://cw.example.org/z-a?d=26110412-1d6h#over-time|za> 0 + <https://cw.example.org/z-b?d=26110412-1d6h#over-time|zb> 45 Ti: 45.0% of 100Ti (55.0 Ti free) · <https://cw.example.org/new-data?d=26110412-1d6h#over-time|new-data>: 4 Ti",
+    "unfurl_links": false,
+    "unfurl_media": false,
+    "blocks": []
+   }
+  },
+  "reply:runway-sender:2026-11-03": {
+   "body": ":large_yellow_circle: [main](https://cw.example.org/main-data?d=26110306-12h#over-time): 83.8% of 1P (147.5 Ti free), +10.0 Ti/d [over 3d](https://cw.example.org/main-data?d=26110306-3d#over-time), ≈15d to full · :red_circle: [hot](https://cw.example.org/hot-data?d=26110306-12h#over-time): 99.9% of 100Ti (0.1 Ti free), +0.4 Ti/d [over 1d](https://cw.example.org/hot-data?d=26110306-1d#over-time), ≈<1d to full · :large_green_circle: [za](https://cw.example.org/z-a?d=26110306-12h#over-time) 4 + [zb](https://cw.example.org/z-b?d=26110306-12h#over-time) 40 Ti: 44.3% of 100Ti (55.7 Ti free)",
+   "post": {
+    "channel": "C0TEST",
+    "text": ":large_yellow_circle: <https://cw.example.org/main-data?d=26110306-12h#over-time|main>: 83.8% of 1P (147.5 Ti free), +10.0 Ti/d <https://cw.example.org/main-data?d=26110306-3d#over-time|over 3d>, ≈15d to full · :red_circle: <https://cw.example.org/hot-data?d=26110306-12h#over-time|hot>: 99.9% of 100Ti (0.1 Ti free), +0.4 Ti/d <https://cw.example.org/hot-data?d=26110306-1d#over-time|over 1d>, ≈<1d to full · :large_green_circle: <https://cw.example.org/z-a?d=26110306-12h#over-time|za> 4 + <https://cw.example.org/z-b?d=26110306-12h#over-time|zb> 40 Ti: 44.3% of 100Ti (55.7 Ti free)",
+    "unfurl_links": false,
+    "unfurl_media": false,
+    "username": "wk of 11/2",
+    "icon_url": "https://i.example/mark.png",
+    "thread_ts": "1.000000"
+   },
+   "edit": {
+    "channel": "C0TEST",
+    "ts": "1.000002",
+    "text": ":large_yellow_circle: <https://cw.example.org/main-data?d=26110306-12h#over-time|main>: 83.8% of 1P (147.5 Ti free), +10.0 Ti/d <https://cw.example.org/main-data?d=26110306-3d#over-time|over 3d>, ≈15d to full · :red_circle: <https://cw.example.org/hot-data?d=26110306-12h#over-time|hot>: 99.9% of 100Ti (0.1 Ti free), +0.4 Ti/d <https://cw.example.org/hot-data?d=26110306-1d#over-time|over 1d>, ≈<1d to full · :large_green_circle: <https://cw.example.org/z-a?d=26110306-12h#over-time|za> 4 + <https://cw.example.org/z-b?d=26110306-12h#over-time|zb> 40 Ti: 44.3% of 100Ti (55.7 Ti free)",
+    "unfurl_links": false,
+    "unfurl_media": false,
+    "blocks": []
+   }
+  },
+  "reply:runway-sender:2026-11-02": {
+   "body": ":large_yellow_circle: [main](https://cw.example.org/main-data?d=26110218-1d6h#over-time): 83.2% of 1P (152.5 Ti free), +10.0 Ti/d [over 3d](https://cw.example.org/main-data?d=26110218-3d#over-time), ≈15d to full · :red_circle: [hot](https://cw.example.org/hot-data?d=26110218-1d6h#over-time): 99.7% of 100Ti (0.3 Ti free), +0.4 Ti/d [over 1d](https://cw.example.org/hot-data?d=26110218-1d#over-time), ≈<1d to full · :large_green_circle: [za](https://cw.example.org/z-a?d=26110218-1d6h#over-time) 8 + [zb](https://cw.example.org/z-b?d=26110218-1d6h#over-time) 38 Ti: 45.7% of 100Ti (54.3 Ti free)",
+   "post": {
+    "channel": "C0TEST",
+    "text": ":large_yellow_circle: <https://cw.example.org/main-data?d=26110218-1d6h#over-time|main>: 83.2% of 1P (152.5 Ti free), +10.0 Ti/d <https://cw.example.org/main-data?d=26110218-3d#over-time|over 3d>, ≈15d to full · :red_circle: <https://cw.example.org/hot-data?d=26110218-1d6h#over-time|hot>: 99.7% of 100Ti (0.3 Ti free), +0.4 Ti/d <https://cw.example.org/hot-data?d=26110218-1d#over-time|over 1d>, ≈<1d to full · :large_green_circle: <https://cw.example.org/z-a?d=26110218-1d6h#over-time|za> 8 + <https://cw.example.org/z-b?d=26110218-1d6h#over-time|zb> 38 Ti: 45.7% of 100Ti (54.3 Ti free)",
+    "unfurl_links": false,
+    "unfurl_media": false,
+    "username": "wk of 11/2",
+    "icon_url": "https://i.example/mark.png",
+    "thread_ts": "1.000000"
+   },
+   "edit": {
+    "channel": "C0TEST",
+    "ts": "1.000002",
+    "text": ":large_yellow_circle: <https://cw.example.org/main-data?d=26110218-1d6h#over-time|main>: 83.2% of 1P (152.5 Ti free), +10.0 Ti/d <https://cw.example.org/main-data?d=26110218-3d#over-time|over 3d>, ≈15d to full · :red_circle: <https://cw.example.org/hot-data?d=26110218-1d6h#over-time|hot>: 99.7% of 100Ti (0.3 Ti free), +0.4 Ti/d <https://cw.example.org/hot-data?d=26110218-1d#over-time|over 1d>, ≈<1d to full · :large_green_circle: <https://cw.example.org/z-a?d=26110218-1d6h#over-time|za> 8 + <https://cw.example.org/z-b?d=26110218-1d6h#over-time|zb> 38 Ti: 45.7% of 100Ti (54.3 Ti free)",
+    "unfurl_links": false,
+    "unfurl_media": false,
+    "blocks": []
+   }
+  },
+  "reply:runway-sender:2026-11-01": {
+   "body": ":large_yellow_circle: [main](https://cw.example.org/main-data?d=26110112-1d#over-time): 81.9% of 1P (165.0 Ti free), +10.0 Ti/d [over 3d](https://cw.example.org/main-data?d=26110112-3d#over-time), ≈16d to full · :large_orange_circle: [hot](https://cw.example.org/hot-data?d=26110112-1d#over-time): 99.2% of 100Ti (0.8 Ti free) · :large_green_circle: [za](https://cw.example.org/z-a?d=26110112-1d#over-time) 20 + [zb](https://cw.example.org/z-b?d=26110112-1d#over-time) 30 Ti: 49.5% of 100Ti (50.5 Ti free)",
+   "post": {
+    "channel": "C0TEST",
+    "text": ":large_yellow_circle: <https://cw.example.org/main-data?d=26110112-1d#over-time|main>: 81.9% of 1P (165.0 Ti free), +10.0 Ti/d <https://cw.example.org/main-data?d=26110112-3d#over-time|over 3d>, ≈16d to full · :large_orange_circle: <https://cw.example.org/hot-data?d=26110112-1d#over-time|hot>: 99.2% of 100Ti (0.8 Ti free) · :large_green_circle: <https://cw.example.org/z-a?d=26110112-1d#over-time|za> 20 + <https://cw.example.org/z-b?d=26110112-1d#over-time|zb> 30 Ti: 49.5% of 100Ti (50.5 Ti free)",
+    "unfurl_links": false,
+    "unfurl_media": false,
+    "username": "wk of 11/2",
+    "icon_url": "https://i.example/mark.png",
+    "thread_ts": "1.000000"
+   },
+   "edit": {
+    "channel": "C0TEST",
+    "ts": "1.000002",
+    "text": ":large_yellow_circle: <https://cw.example.org/main-data?d=26110112-1d#over-time|main>: 81.9% of 1P (165.0 Ti free), +10.0 Ti/d <https://cw.example.org/main-data?d=26110112-3d#over-time|over 3d>, ≈16d to full · :large_orange_circle: <https://cw.example.org/hot-data?d=26110112-1d#over-time|hot>: 99.2% of 100Ti (0.8 Ti free) · :large_green_circle: <https://cw.example.org/z-a?d=26110112-1d#over-time|za> 20 + <https://cw.example.org/z-b?d=26110112-1d#over-time|zb> 30 Ti: 49.5% of 100Ti (50.5 Ti free)",
+    "unfurl_links": false,
+    "unfurl_media": false,
+    "blocks": []
+   }
+  },
+  "reply:runway-total-sender:2026-11-05": {
+   "body": ":arrow_deg50: **931 TiB (+12.3, 1.3%)** · [as of 06:01Z](https://cw.example.org/?d=26110506-18h#over-time) · :large_orange_circle: [main](https://cw.example.org/main-data?d=26110506-18h#over-time): 85.4% of 1P (132.5 Ti free), +10.0 Ti/d [over 1d](https://cw.example.org/main-data?d=26110506-1d#over-time), ≈13d to full · :red_circle: [hot](https://cw.example.org/hot-data?d=26110506-18h#over-time): 99.6% of 100Ti (0.4 Ti free), +0.4 Ti/d [over 1d](https://cw.example.org/hot-data?d=26110506-1d#over-time), ≈1d to full · :large_orange_circle: [za](https://cw.example.org/z-a?d=26110506-18h#over-time) 0 + [zb](https://cw.example.org/z-b?d=26110506-18h#over-time) 50 Ti: 49.5% of 100Ti (50.5 Ti free), +6.0 Ti/d [over 1d](https://cw.example.org/?d=26110506-1d&g=z8#over-time), ≈8d to full · [new-data](https://cw.example.org/new-data?d=26110506-18h#over-time): 4 Ti",
+   "post": {
+    "channel": "C0TEST",
+    "text": ":arrow_deg50: *931 TiB (+12.3, 1.3%)* · <https://cw.example.org/?d=26110506-18h#over-time|as of 06:01Z> · :large_orange_circle: <https://cw.example.org/main-data?d=26110506-18h#over-time|main>: 85.4% of 1P (132.5 Ti free), +10.0 Ti/d <https://cw.example.org/main-data?d=26110506-1d#over-time|over 1d>, ≈13d to full · :red_circle: <https://cw.example.org/hot-data?d=26110506-18h#over-time|hot>: 99.6% of 100Ti (0.4 Ti free), +0.4 Ti/d <https://cw.example.org/hot-data?d=26110506-1d#over-time|over 1d>, ≈1d to full · :large_orange_circle: <https://cw.example.org/z-a?d=26110506-18h#over-time|za> 0 + <https://cw.example.org/z-b?d=26110506-18h#over-time|zb> 50 Ti: 49.5% of 100Ti (50.5 Ti free), +6.0 Ti/d <https://cw.example.org/?d=26110506-1d&g=z8#over-time|over 1d>, ≈8d to full · <https://cw.example.org/new-data?d=26110506-18h#over-time|new-data>: 4 Ti",
+    "unfurl_links": false,
+    "unfurl_media": false,
+    "username": "wk of 11/2",
+    "icon_url": "https://i.example/mark.png",
+    "thread_ts": "1.000000"
+   },
+   "edit": {
+    "channel": "C0TEST",
+    "ts": "1.000002",
+    "text": ":arrow_deg50: *931 TiB (+12.3, 1.3%)* · <https://cw.example.org/?d=26110506-18h#over-time|as of 06:01Z> · :large_orange_circle: <https://cw.example.org/main-data?d=26110506-18h#over-time|main>: 85.4% of 1P (132.5 Ti free), +10.0 Ti/d <https://cw.example.org/main-data?d=26110506-1d#over-time|over 1d>, ≈13d to full · :red_circle: <https://cw.example.org/hot-data?d=26110506-18h#over-time|hot>: 99.6% of 100Ti (0.4 Ti free), +0.4 Ti/d <https://cw.example.org/hot-data?d=26110506-1d#over-time|over 1d>, ≈1d to full · :large_orange_circle: <https://cw.example.org/z-a?d=26110506-18h#over-time|za> 0 + <https://cw.example.org/z-b?d=26110506-18h#over-time|zb> 50 Ti: 49.5% of 100Ti (50.5 Ti free), +6.0 Ti/d <https://cw.example.org/?d=26110506-1d&g=z8#over-time|over 1d>, ≈8d to full · <https://cw.example.org/new-data?d=26110506-18h#over-time|new-data>: 4 Ti",
+    "unfurl_links": false,
+    "unfurl_media": false,
+    "blocks": []
+   }
+  },
+  "reply:runway-total-sender:2026-11-04": {
+   "body": ":large_yellow_circle: [main](https://cw.example.org/main-data?d=26110412-1d6h#over-time): 84.6% of 1P (140.0 Ti free), +9.3 Ti/d [over 7d](https://cw.example.org/main-data?d=26110412-7d#over-time), ≈15d to full · :large_orange_circle: [hot](https://cw.example.org/hot-data?d=26110412-1d6h#over-time): 99.3% of 100Ti (0.7 Ti free), +0.0 Ti/d [over 3d](https://cw.example.org/hot-data?d=26110412-3d#over-time), ≈21d to full · :large_green_circle: [za](https://cw.example.org/z-a?d=26110412-1d6h#over-time) 0 + [zb](https://cw.example.org/z-b?d=26110412-1d6h#over-time) 45 Ti: 45.0% of 100Ti (55.0 Ti free) · [new-data](https://cw.example.org/new-data?d=26110412-1d6h#over-time): 4 Ti",
+   "post": {
+    "channel": "C0TEST",
+    "text": ":large_yellow_circle: <https://cw.example.org/main-data?d=26110412-1d6h#over-time|main>: 84.6% of 1P (140.0 Ti free), +9.3 Ti/d <https://cw.example.org/main-data?d=26110412-7d#over-time|over 7d>, ≈15d to full · :large_orange_circle: <https://cw.example.org/hot-data?d=26110412-1d6h#over-time|hot>: 99.3% of 100Ti (0.7 Ti free), +0.0 Ti/d <https://cw.example.org/hot-data?d=26110412-3d#over-time|over 3d>, ≈21d to full · :large_green_circle: <https://cw.example.org/z-a?d=26110412-1d6h#over-time|za> 0 + <https://cw.example.org/z-b?d=26110412-1d6h#over-time|zb> 45 Ti: 45.0% of 100Ti (55.0 Ti free) · <https://cw.example.org/new-data?d=26110412-1d6h#over-time|new-data>: 4 Ti",
+    "unfurl_links": false,
+    "unfurl_media": false,
+    "username": "wk of 11/2",
+    "icon_url": "https://i.example/mark.png",
+    "thread_ts": "1.000000"
+   },
+   "edit": {
+    "channel": "C0TEST",
+    "ts": "1.000002",
+    "text": ":large_yellow_circle: <https://cw.example.org/main-data?d=26110412-1d6h#over-time|main>: 84.6% of 1P (140.0 Ti free), +9.3 Ti/d <https://cw.example.org/main-data?d=26110412-7d#over-time|over 7d>, ≈15d to full · :large_orange_circle: <https://cw.example.org/hot-data?d=26110412-1d6h#over-time|hot>: 99.3% of 100Ti (0.7 Ti free), +0.0 Ti/d <https://cw.example.org/hot-data?d=26110412-3d#over-time|over 3d>, ≈21d to full · :large_green_circle: <https://cw.example.org/z-a?d=26110412-1d6h#over-time|za> 0 + <https://cw.example.org/z-b?d=26110412-1d6h#over-time|zb> 45 Ti: 45.0% of 100Ti (55.0 Ti free) · <https://cw.example.org/new-data?d=26110412-1d6h#over-time|new-data>: 4 Ti",
+    "unfurl_links": false,
+    "unfurl_media": false,
+    "blocks": []
+   }
+  },
+  "reply:runway-total-sender:2026-11-03": {
+   "body": ":large_yellow_circle: [main](https://cw.example.org/main-data?d=26110306-12h#over-time): 83.8% of 1P (147.5 Ti free), +10.0 Ti/d [over 3d](https://cw.example.org/main-data?d=26110306-3d#over-time), ≈15d to full · :red_circle: [hot](https://cw.example.org/hot-data?d=26110306-12h#over-time): 99.9% of 100Ti (0.1 Ti free), +0.4 Ti/d [over 1d](https://cw.example.org/hot-data?d=26110306-1d#over-time), ≈<1d to full · :large_green_circle: [za](https://cw.example.org/z-a?d=26110306-12h#over-time) 4 + [zb](https://cw.example.org/z-b?d=26110306-12h#over-time) 40 Ti: 44.3% of 100Ti (55.7 Ti free)",
+   "post": {
+    "channel": "C0TEST",
+    "text": ":large_yellow_circle: <https://cw.example.org/main-data?d=26110306-12h#over-time|main>: 83.8% of 1P (147.5 Ti free), +10.0 Ti/d <https://cw.example.org/main-data?d=26110306-3d#over-time|over 3d>, ≈15d to full · :red_circle: <https://cw.example.org/hot-data?d=26110306-12h#over-time|hot>: 99.9% of 100Ti (0.1 Ti free), +0.4 Ti/d <https://cw.example.org/hot-data?d=26110306-1d#over-time|over 1d>, ≈<1d to full · :large_green_circle: <https://cw.example.org/z-a?d=26110306-12h#over-time|za> 4 + <https://cw.example.org/z-b?d=26110306-12h#over-time|zb> 40 Ti: 44.3% of 100Ti (55.7 Ti free)",
+    "unfurl_links": false,
+    "unfurl_media": false,
+    "username": "wk of 11/2",
+    "icon_url": "https://i.example/mark.png",
+    "thread_ts": "1.000000"
+   },
+   "edit": {
+    "channel": "C0TEST",
+    "ts": "1.000002",
+    "text": ":large_yellow_circle: <https://cw.example.org/main-data?d=26110306-12h#over-time|main>: 83.8% of 1P (147.5 Ti free), +10.0 Ti/d <https://cw.example.org/main-data?d=26110306-3d#over-time|over 3d>, ≈15d to full · :red_circle: <https://cw.example.org/hot-data?d=26110306-12h#over-time|hot>: 99.9% of 100Ti (0.1 Ti free), +0.4 Ti/d <https://cw.example.org/hot-data?d=26110306-1d#over-time|over 1d>, ≈<1d to full · :large_green_circle: <https://cw.example.org/z-a?d=26110306-12h#over-time|za> 4 + <https://cw.example.org/z-b?d=26110306-12h#over-time|zb> 40 Ti: 44.3% of 100Ti (55.7 Ti free)",
+    "unfurl_links": false,
+    "unfurl_media": false,
+    "blocks": []
+   }
+  },
+  "reply:runway-total-sender:2026-11-02": {
+   "body": ":large_yellow_circle: [main](https://cw.example.org/main-data?d=26110218-1d6h#over-time): 83.2% of 1P (152.5 Ti free), +10.0 Ti/d [over 3d](https://cw.example.org/main-data?d=26110218-3d#over-time), ≈15d to full · :red_circle: [hot](https://cw.example.org/hot-data?d=26110218-1d6h#over-time): 99.7% of 100Ti (0.3 Ti free), +0.4 Ti/d [over 1d](https://cw.example.org/hot-data?d=26110218-1d#over-time), ≈<1d to full · :large_green_circle: [za](https://cw.example.org/z-a?d=26110218-1d6h#over-time) 8 + [zb](https://cw.example.org/z-b?d=26110218-1d6h#over-time) 38 Ti: 45.7% of 100Ti (54.3 Ti free)",
+   "post": {
+    "channel": "C0TEST",
+    "text": ":large_yellow_circle: <https://cw.example.org/main-data?d=26110218-1d6h#over-time|main>: 83.2% of 1P (152.5 Ti free), +10.0 Ti/d <https://cw.example.org/main-data?d=26110218-3d#over-time|over 3d>, ≈15d to full · :red_circle: <https://cw.example.org/hot-data?d=26110218-1d6h#over-time|hot>: 99.7% of 100Ti (0.3 Ti free), +0.4 Ti/d <https://cw.example.org/hot-data?d=26110218-1d#over-time|over 1d>, ≈<1d to full · :large_green_circle: <https://cw.example.org/z-a?d=26110218-1d6h#over-time|za> 8 + <https://cw.example.org/z-b?d=26110218-1d6h#over-time|zb> 38 Ti: 45.7% of 100Ti (54.3 Ti free)",
+    "unfurl_links": false,
+    "unfurl_media": false,
+    "username": "wk of 11/2",
+    "icon_url": "https://i.example/mark.png",
+    "thread_ts": "1.000000"
+   },
+   "edit": {
+    "channel": "C0TEST",
+    "ts": "1.000002",
+    "text": ":large_yellow_circle: <https://cw.example.org/main-data?d=26110218-1d6h#over-time|main>: 83.2% of 1P (152.5 Ti free), +10.0 Ti/d <https://cw.example.org/main-data?d=26110218-3d#over-time|over 3d>, ≈15d to full · :red_circle: <https://cw.example.org/hot-data?d=26110218-1d6h#over-time|hot>: 99.7% of 100Ti (0.3 Ti free), +0.4 Ti/d <https://cw.example.org/hot-data?d=26110218-1d#over-time|over 1d>, ≈<1d to full · :large_green_circle: <https://cw.example.org/z-a?d=26110218-1d6h#over-time|za> 8 + <https://cw.example.org/z-b?d=26110218-1d6h#over-time|zb> 38 Ti: 45.7% of 100Ti (54.3 Ti free)",
+    "unfurl_links": false,
+    "unfurl_media": false,
+    "blocks": []
+   }
+  },
+  "reply:runway-total-sender:2026-11-01": {
+   "body": ":large_yellow_circle: [main](https://cw.example.org/main-data?d=26110112-1d#over-time): 81.9% of 1P (165.0 Ti free), +10.0 Ti/d [over 3d](https://cw.example.org/main-data?d=26110112-3d#over-time), ≈16d to full · :large_orange_circle: [hot](https://cw.example.org/hot-data?d=26110112-1d#over-time): 99.2% of 100Ti (0.8 Ti free) · :large_green_circle: [za](https://cw.example.org/z-a?d=26110112-1d#over-time) 20 + [zb](https://cw.example.org/z-b?d=26110112-1d#over-time) 30 Ti: 49.5% of 100Ti (50.5 Ti free)",
+   "post": {
+    "channel": "C0TEST",
+    "text": ":large_yellow_circle: <https://cw.example.org/main-data?d=26110112-1d#over-time|main>: 81.9% of 1P (165.0 Ti free), +10.0 Ti/d <https://cw.example.org/main-data?d=26110112-3d#over-time|over 3d>, ≈16d to full · :large_orange_circle: <https://cw.example.org/hot-data?d=26110112-1d#over-time|hot>: 99.2% of 100Ti (0.8 Ti free) · :large_green_circle: <https://cw.example.org/z-a?d=26110112-1d#over-time|za> 20 + <https://cw.example.org/z-b?d=26110112-1d#over-time|zb> 30 Ti: 49.5% of 100Ti (50.5 Ti free)",
+    "unfurl_links": false,
+    "unfurl_media": false,
+    "username": "wk of 11/2",
+    "icon_url": "https://i.example/mark.png",
+    "thread_ts": "1.000000"
+   },
+   "edit": {
+    "channel": "C0TEST",
+    "ts": "1.000002",
+    "text": ":large_yellow_circle: <https://cw.example.org/main-data?d=26110112-1d#over-time|main>: 81.9% of 1P (165.0 Ti free), +10.0 Ti/d <https://cw.example.org/main-data?d=26110112-3d#over-time|over 3d>, ≈16d to full · :large_orange_circle: <https://cw.example.org/hot-data?d=26110112-1d#over-time|hot>: 99.2% of 100Ti (0.8 Ti free) · :large_green_circle: <https://cw.example.org/z-a?d=26110112-1d#over-time|za> 20 + <https://cw.example.org/z-b?d=26110112-1d#over-time|zb> 30 Ti: 49.5% of 100Ti (50.5 Ti free)",
+    "unfurl_links": false,
+    "unfurl_media": false,
+    "blocks": []
+   }
+  },
+  "reply:runway-total-weekly:wk-2026-11-02": {
+   "body": ":arrow_deg50: *week:* **+32.9 TiB (3.7%)**\n:arrow_deg40: [11/2](https://cw.example.org/?d=26110218-1d6h#over-time) — **903 TiB (+9.2, 1.0%)** · :large_yellow_circle: [main](https://cw.example.org/main-data?d=26110218-1d6h#over-time): 83.2% of 1P (152.5 Ti free), +10.0 Ti/d [over 3d](https://cw.example.org/main-data?d=26110218-3d#over-time), ≈15d to full · :red_circle: [hot](https://cw.example.org/hot-data?d=26110218-1d6h#over-time): 99.7% of 100Ti (0.3 Ti free), +0.4 Ti/d [over 1d](https://cw.example.org/hot-data?d=26110218-1d#over-time), ≈<1d to full · :large_green_circle: [za](https://cw.example.org/z-a?d=26110218-1d6h#over-time) 8 + [zb](https://cw.example.org/z-b?d=26110218-1d6h#over-time) 38 Ti: 45.7% of 100Ti (54.3 Ti free)\n:arrow_deg40: [11/3](https://cw.example.org/?d=26110306-12h#over-time) — **907 TiB (+3.8, 0.4%)** · :large_yellow_circle: [main](https://cw.example.org/main-data?d=26110306-12h#over-time): 83.8% of 1P (147.5 Ti free), +10.0 Ti/d [over 3d](https://cw.example.org/main-data?d=26110306-3d#over-time), ≈15d to full · :red_circle: [hot](https://cw.example.org/hot-data?d=26110306-12h#over-time): 99.9% of 100Ti (0.1 Ti free), +0.4 Ti/d [over 1d](https://cw.example.org/hot-data?d=26110306-1d#over-time), ≈<1d to full · :large_green_circle: [za](https://cw.example.org/z-a?d=26110306-12h#over-time) 4 + [zb](https://cw.example.org/z-b?d=26110306-12h#over-time) 40 Ti: 44.3% of 100Ti (55.7 Ti free)\n:arrow_deg40: [11/4](https://cw.example.org/?d=26110412-1d6h#over-time) — **918 TiB (+7.6, 0.8%)** · :large_yellow_circle: [main](https://cw.example.org/main-data?d=26110412-1d6h#over-time): 84.6% of 1P (140.0 Ti free), +9.3 Ti/d [over 7d](https://cw.example.org/main-data?d=26110412-7d#over-time), ≈15d to full · :large_orange_circle: [hot](https://cw.example.org/hot-data?d=26110412-1d6h#over-time): 99.3% of 100Ti (0.7 Ti free), +0.0 Ti/d [over 3d](https://cw.example.org/hot-data?d=26110412-3d#over-time), ≈21d to full · :large_green_circle: [za](https://cw.example.org/z-a?d=26110412-1d6h#over-time) 0 + [zb](https://cw.example.org/z-b?d=26110412-1d6h#over-time) 45 Ti: 45.0% of 100Ti (55.0 Ti free) · [new-data](https://cw.example.org/new-data?d=26110412-1d6h#over-time): 4 Ti\n:arrow_deg50: [11/5](https://cw.example.org/?d=26110506-18h#over-time) — **931 TiB (+12.3, 1.3%)** · :large_orange_circle: [main](https://cw.example.org/main-data?d=26110506-18h#over-time): 85.4% of 1P (132.5 Ti free), +10.0 Ti/d [over 1d](https://cw.example.org/main-data?d=26110506-1d#over-time), ≈13d to full · :red_circle: [hot](https://cw.example.org/hot-data?d=26110506-18h#over-time): 99.6% of 100Ti (0.4 Ti free), +0.4 Ti/d [over 1d](https://cw.example.org/hot-data?d=26110506-1d#over-time), ≈1d to full · :large_orange_circle: [za](https://cw.example.org/z-a?d=26110506-18h#over-time) 0 + [zb](https://cw.example.org/z-b?d=26110506-18h#over-time) 50 Ti: 49.5% of 100Ti (50.5 Ti free), +6.0 Ti/d [over 1d](https://cw.example.org/?d=26110506-1d&g=z8#over-time), ≈8d to full · [new-data](https://cw.example.org/new-data?d=26110506-18h#over-time): 4 Ti",
+   "post": {
+    "channel": "C0TEST",
+    "text": ":arrow_deg50: _week:_ *+32.9 TiB (3.7%)*\n:arrow_deg40: <https://cw.example.org/?d=26110218-1d6h#over-time|11/2> — *903 TiB (+9.2, 1.0%)* · :large_yellow_circle: <https://cw.example.org/main-data?d=26110218-1d6h#over-time|main>: 83.2% of 1P (152.5 Ti free), +10.0 Ti/d <https://cw.example.org/main-data?d=26110218-3d#over-time|over 3d>, ≈15d to full · :red_circle: <https://cw.example.org/hot-data?d=26110218-1d6h#over-time|hot>: 99.7% of 100Ti (0.3 Ti free), +0.4 Ti/d <https://cw.example.org/hot-data?d=26110218-1d#over-time|over 1d>, ≈<1d to full · :large_green_circle: <https://cw.example.org/z-a?d=26110218-1d6h#over-time|za> 8 + <https://cw.example.org/z-b?d=26110218-1d6h#over-time|zb> 38 Ti: 45.7% of 100Ti (54.3 Ti free)\n:arrow_deg40: <https://cw.example.org/?d=26110306-12h#over-time|11/3> — *907 TiB (+3.8, 0.4%)* · :large_yellow_circle: <https://cw.example.org/main-data?d=26110306-12h#over-time|main>: 83.8% of 1P (147.5 Ti free), +10.0 Ti/d <https://cw.example.org/main-data?d=26110306-3d#over-time|over 3d>, ≈15d to full · :red_circle: <https://cw.example.org/hot-data?d=26110306-12h#over-time|hot>: 99.9% of 100Ti (0.1 Ti free), +0.4 Ti/d <https://cw.example.org/hot-data?d=26110306-1d#over-time|over 1d>, ≈<1d to full · :large_green_circle: <https://cw.example.org/z-a?d=26110306-12h#over-time|za> 4 + <https://cw.example.org/z-b?d=26110306-12h#over-time|zb> 40 Ti: 44.3% of 100Ti (55.7 Ti free)\n:arrow_deg40: <https://cw.example.org/?d=26110412-1d6h#over-time|11/4> — *918 TiB (+7.6, 0.8%)* · :large_yellow_circle: <https://cw.example.org/main-data?d=26110412-1d6h#over-time|main>: 84.6% of 1P (140.0 Ti free), +9.3 Ti/d <https://cw.example.org/main-data?d=26110412-7d#over-time|over 7d>, ≈15d to full · :large_orange_circle: <https://cw.example.org/hot-data?d=26110412-1d6h#over-time|hot>: 99.3% of 100Ti (0.7 Ti free), +0.0 Ti/d <https://cw.example.org/hot-data?d=26110412-3d#over-time|over 3d>, ≈21d to full · :large_green_circle: <https://cw.example.org/z-a?d=26110412-1d6h#over-time|za> 0 + <https://cw.example.org/z-b?d=26110412-1d6h#over-time|zb> 45 Ti: 45.0% of 100Ti (55.0 Ti free) · <https://cw.example.org/new-data?d=26110412-1d6h#over-time|new-data>: 4 Ti\n:arrow_deg50: <https://cw.example.org/?d=26110506-18h#over-time|11/5> — *931 TiB (+12.3, 1.3%)* · :large_orange_circle: <https://cw.example.org/main-data?d=26110506-18h#over-time|main>: 85.4% of 1P (132.5 Ti free), +10.0 Ti/d <https://cw.example.org/main-data?d=26110506-1d#over-time|over 1d>, ≈13d to full · :red_circle: <https://cw.example.org/hot-data?d=26110506-18h#over-time|hot>: 99.6% of 100Ti (0.4 Ti free), +0.4 Ti/d <https://cw.example.org/hot-data?d=26110506-1d#over-time|over 1d>, ≈1d to full · :large_orange_circle: <https://cw.example.org/z-a?d=26110506-18h#over-time|za> 0 + <https://cw.example.org/z-b?d=26110506-18h#over-time|zb> 50 Ti: 49.5% of 100Ti (50.5 Ti free), +6.0 Ti/d <https://cw.example.org/?d=26110506-1d&g=z8#over-time|over 1d>, ≈8d to full · <https://cw.example.org/new-data?d=26110506-18h#over-time|new-data>: 4 Ti",
+    "unfurl_links": false,
+    "unfurl_media": false,
+    "username": "wk of 11/2",
+    "icon_url": "https://i.example/mark.png",
+    "thread_ts": "1.000000"
+   },
+   "edit": {
+    "channel": "C0TEST",
+    "ts": "1.000002",
+    "text": ":arrow_deg50: _week:_ *+32.9 TiB (3.7%)*\n:arrow_deg40: <https://cw.example.org/?d=26110218-1d6h#over-time|11/2> — *903 TiB (+9.2, 1.0%)* · :large_yellow_circle: <https://cw.example.org/main-data?d=26110218-1d6h#over-time|main>: 83.2% of 1P (152.5 Ti free), +10.0 Ti/d <https://cw.example.org/main-data?d=26110218-3d#over-time|over 3d>, ≈15d to full · :red_circle: <https://cw.example.org/hot-data?d=26110218-1d6h#over-time|hot>: 99.7% of 100Ti (0.3 Ti free), +0.4 Ti/d <https://cw.example.org/hot-data?d=26110218-1d#over-time|over 1d>, ≈<1d to full · :large_green_circle: <https://cw.example.org/z-a?d=26110218-1d6h#over-time|za> 8 + <https://cw.example.org/z-b?d=26110218-1d6h#over-time|zb> 38 Ti: 45.7% of 100Ti (54.3 Ti free)\n:arrow_deg40: <https://cw.example.org/?d=26110306-12h#over-time|11/3> — *907 TiB (+3.8, 0.4%)* · :large_yellow_circle: <https://cw.example.org/main-data?d=26110306-12h#over-time|main>: 83.8% of 1P (147.5 Ti free), +10.0 Ti/d <https://cw.example.org/main-data?d=26110306-3d#over-time|over 3d>, ≈15d to full · :red_circle: <https://cw.example.org/hot-data?d=26110306-12h#over-time|hot>: 99.9% of 100Ti (0.1 Ti free), +0.4 Ti/d <https://cw.example.org/hot-data?d=26110306-1d#over-time|over 1d>, ≈<1d to full · :large_green_circle: <https://cw.example.org/z-a?d=26110306-12h#over-time|za> 4 + <https://cw.example.org/z-b?d=26110306-12h#over-time|zb> 40 Ti: 44.3% of 100Ti (55.7 Ti free)\n:arrow_deg40: <https://cw.example.org/?d=26110412-1d6h#over-time|11/4> — *918 TiB (+7.6, 0.8%)* · :large_yellow_circle: <https://cw.example.org/main-data?d=26110412-1d6h#over-time|main>: 84.6% of 1P (140.0 Ti free), +9.3 Ti/d <https://cw.example.org/main-data?d=26110412-7d#over-time|over 7d>, ≈15d to full · :large_orange_circle: <https://cw.example.org/hot-data?d=26110412-1d6h#over-time|hot>: 99.3% of 100Ti (0.7 Ti free), +0.0 Ti/d <https://cw.example.org/hot-data?d=26110412-3d#over-time|over 3d>, ≈21d to full · :large_green_circle: <https://cw.example.org/z-a?d=26110412-1d6h#over-time|za> 0 + <https://cw.example.org/z-b?d=26110412-1d6h#over-time|zb> 45 Ti: 45.0% of 100Ti (55.0 Ti free) · <https://cw.example.org/new-data?d=26110412-1d6h#over-time|new-data>: 4 Ti\n:arrow_deg50: <https://cw.example.org/?d=26110506-18h#over-time|11/5> — *931 TiB (+12.3, 1.3%)* · :large_orange_circle: <https://cw.example.org/main-data?d=26110506-18h#over-time|main>: 85.4% of 1P (132.5 Ti free), +10.0 Ti/d <https://cw.example.org/main-data?d=26110506-1d#over-time|over 1d>, ≈13d to full · :red_circle: <https://cw.example.org/hot-data?d=26110506-18h#over-time|hot>: 99.6% of 100Ti (0.4 Ti free), +0.4 Ti/d <https://cw.example.org/hot-data?d=26110506-1d#over-time|over 1d>, ≈1d to full · :large_orange_circle: <https://cw.example.org/z-a?d=26110506-18h#over-time|za> 0 + <https://cw.example.org/z-b?d=26110506-18h#over-time|zb> 50 Ti: 49.5% of 100Ti (50.5 Ti free), +6.0 Ti/d <https://cw.example.org/?d=26110506-1d&g=z8#over-time|over 1d>, ≈8d to full · <https://cw.example.org/new-data?d=26110506-18h#over-time|new-data>: 4 Ti",
+    "unfurl_links": false,
+    "unfurl_media": false,
+    "blocks": []
+   }
+  },
+  "reply:runway-total-weekly:wk-2026-10-26": {
+   "body": ":arrow_deg40: [11/1](https://cw.example.org/?d=26110112-1d#over-time) — **894 TiB (+6.5, 0.7%)** · :large_yellow_circle: [main](https://cw.example.org/main-data?d=26110112-1d#over-time): 81.9% of 1P (165.0 Ti free), +10.0 Ti/d [over 3d](https://cw.example.org/main-data?d=26110112-3d#over-time), ≈16d to full · :large_orange_circle: [hot](https://cw.example.org/hot-data?d=26110112-1d#over-time): 99.2% of 100Ti (0.8 Ti free) · :large_green_circle: [za](https://cw.example.org/z-a?d=26110112-1d#over-time) 20 + [zb](https://cw.example.org/z-b?d=26110112-1d#over-time) 30 Ti: 49.5% of 100Ti (50.5 Ti free)",
+   "post": {
+    "channel": "C0TEST",
+    "text": ":arrow_deg40: <https://cw.example.org/?d=26110112-1d#over-time|11/1> — *894 TiB (+6.5, 0.7%)* · :large_yellow_circle: <https://cw.example.org/main-data?d=26110112-1d#over-time|main>: 81.9% of 1P (165.0 Ti free), +10.0 Ti/d <https://cw.example.org/main-data?d=26110112-3d#over-time|over 3d>, ≈16d to full · :large_orange_circle: <https://cw.example.org/hot-data?d=26110112-1d#over-time|hot>: 99.2% of 100Ti (0.8 Ti free) · :large_green_circle: <https://cw.example.org/z-a?d=26110112-1d#over-time|za> 20 + <https://cw.example.org/z-b?d=26110112-1d#over-time|zb> 30 Ti: 49.5% of 100Ti (50.5 Ti free)",
+    "unfurl_links": false,
+    "unfurl_media": false,
+    "username": "wk of 11/2",
+    "icon_url": "https://i.example/mark.png",
+    "thread_ts": "1.000000"
+   },
+   "edit": {
+    "channel": "C0TEST",
+    "ts": "1.000002",
+    "text": ":arrow_deg40: <https://cw.example.org/?d=26110112-1d#over-time|11/1> — *894 TiB (+6.5, 0.7%)* · :large_yellow_circle: <https://cw.example.org/main-data?d=26110112-1d#over-time|main>: 81.9% of 1P (165.0 Ti free), +10.0 Ti/d <https://cw.example.org/main-data?d=26110112-3d#over-time|over 3d>, ≈16d to full · :large_orange_circle: <https://cw.example.org/hot-data?d=26110112-1d#over-time|hot>: 99.2% of 100Ti (0.8 Ti free) · :large_green_circle: <https://cw.example.org/z-a?d=26110112-1d#over-time|za> 20 + <https://cw.example.org/z-b?d=26110112-1d#over-time|zb> 30 Ti: 49.5% of 100Ti (50.5 Ti free)",
+    "unfurl_links": false,
+    "unfurl_media": false,
+    "blocks": []
+   }
+  },
+  "reply:solo-sender:2026-11-04": {
+   "body": "84.6% of 1P (140.0 Ti free) [↗︎](https://cw.example.org/main-data?d=26110412-1d6h#over-time)",
+   "post": {
+    "channel": "C0TEST",
+    "text": "84.6% of 1P (140.0 Ti free) <https://cw.example.org/main-data?d=26110412-1d6h#over-time|↗︎>",
+    "unfurl_links": false,
+    "unfurl_media": false,
+    "username": "wk of 11/2",
+    "icon_url": "https://i.example/mark.png",
+    "thread_ts": "1.000000"
+   },
+   "edit": {
+    "channel": "C0TEST",
+    "ts": "1.000002",
+    "text": "84.6% of 1P (140.0 Ti free) <https://cw.example.org/main-data?d=26110412-1d6h#over-time|↗︎>",
+    "unfurl_links": false,
+    "unfurl_media": false,
+    "blocks": []
+   }
+  },
+  "reply:solo-sender:2026-11-03": {
+   "body": "83.8% of 1P (147.5 Ti free) [↗︎](https://cw.example.org/main-data?d=26110306-12h#over-time)",
+   "post": {
+    "channel": "C0TEST",
+    "text": "83.8% of 1P (147.5 Ti free) <https://cw.example.org/main-data?d=26110306-12h#over-time|↗︎>",
+    "unfurl_links": false,
+    "unfurl_media": false,
+    "username": "wk of 11/2",
+    "icon_url": "https://i.example/mark.png",
+    "thread_ts": "1.000000"
+   },
+   "edit": {
+    "channel": "C0TEST",
+    "ts": "1.000002",
+    "text": "83.8% of 1P (147.5 Ti free) <https://cw.example.org/main-data?d=26110306-12h#over-time|↗︎>",
+    "unfurl_links": false,
+    "unfurl_media": false,
+    "blocks": []
+   }
+  },
+  "reply:solo-sender:2026-11-02": {
+   "body": "83.2% of 1P (152.5 Ti free) [↗︎](https://cw.example.org/main-data?d=26110218-1d6h#over-time)",
+   "post": {
+    "channel": "C0TEST",
+    "text": "83.2% of 1P (152.5 Ti free) <https://cw.example.org/main-data?d=26110218-1d6h#over-time|↗︎>",
+    "unfurl_links": false,
+    "unfurl_media": false,
+    "username": "wk of 11/2",
+    "icon_url": "https://i.example/mark.png",
+    "thread_ts": "1.000000"
+   },
+   "edit": {
+    "channel": "C0TEST",
+    "ts": "1.000002",
+    "text": "83.2% of 1P (152.5 Ti free) <https://cw.example.org/main-data?d=26110218-1d6h#over-time|↗︎>",
+    "unfurl_links": false,
+    "unfurl_media": false,
+    "blocks": []
+   }
+  },
+  "reply:solo-sender:2026-11-01": {
+   "body": "81.9% of 1P (165.0 Ti free) [↗︎](https://cw.example.org/main-data?d=26110112-1d#over-time)",
+   "post": {
+    "channel": "C0TEST",
+    "text": "81.9% of 1P (165.0 Ti free) <https://cw.example.org/main-data?d=26110112-1d#over-time|↗︎>",
+    "unfurl_links": false,
+    "unfurl_media": false,
+    "username": "wk of 11/2",
+    "icon_url": "https://i.example/mark.png",
+    "thread_ts": "1.000000"
+   },
+   "edit": {
+    "channel": "C0TEST",
+    "ts": "1.000002",
+    "text": "81.9% of 1P (165.0 Ti free) <https://cw.example.org/main-data?d=26110112-1d#over-time|↗︎>",
+    "unfurl_links": false,
+    "unfurl_media": false,
+    "blocks": []
+   }
+  },
+  "reply:solo-weekly:wk-2026-11-02": {
+   "body": ":arrow_deg50: *week:* **+25.0 TiB (3.4%)**\n:arrow_deg50: [11/2](https://cw.example.org/?d=26110218-1d6h#over-time) — **758 TiB (+12.5, 1.7%)** · 83.2% of 1P (152.5 Ti free) [↗︎](https://cw.example.org/main-data?d=26110218-1d6h#over-time)\n:arrow_deg50: [11/3](https://cw.example.org/?d=26110306-12h#over-time) — **762 TiB (+5.0, 0.7%)** · 83.8% of 1P (147.5 Ti free) [↗︎](https://cw.example.org/main-data?d=26110306-12h#over-time)\n:arrow_deg40: [11/4](https://cw.example.org/?d=26110412-1d6h#over-time) — **770 TiB (+7.5, 1.0%)** · 84.6% of 1P (140.0 Ti free) [↗︎](https://cw.example.org/main-data?d=26110412-1d6h#over-time)",
+   "post": {
+    "channel": "C0TEST",
+    "text": ":arrow_deg50: _week:_ *+25.0 TiB (3.4%)*\n:arrow_deg50: <https://cw.example.org/?d=26110218-1d6h#over-time|11/2> — *758 TiB (+12.5, 1.7%)* · 83.2% of 1P (152.5 Ti free) <https://cw.example.org/main-data?d=26110218-1d6h#over-time|↗︎>\n:arrow_deg50: <https://cw.example.org/?d=26110306-12h#over-time|11/3> — *762 TiB (+5.0, 0.7%)* · 83.8% of 1P (147.5 Ti free) <https://cw.example.org/main-data?d=26110306-12h#over-time|↗︎>\n:arrow_deg40: <https://cw.example.org/?d=26110412-1d6h#over-time|11/4> — *770 TiB (+7.5, 1.0%)* · 84.6% of 1P (140.0 Ti free) <https://cw.example.org/main-data?d=26110412-1d6h#over-time|↗︎>",
+    "unfurl_links": false,
+    "unfurl_media": false,
+    "username": "wk of 11/2",
+    "icon_url": "https://i.example/mark.png",
+    "thread_ts": "1.000000"
+   },
+   "edit": {
+    "channel": "C0TEST",
+    "ts": "1.000002",
+    "text": ":arrow_deg50: _week:_ *+25.0 TiB (3.4%)*\n:arrow_deg50: <https://cw.example.org/?d=26110218-1d6h#over-time|11/2> — *758 TiB (+12.5, 1.7%)* · 83.2% of 1P (152.5 Ti free) <https://cw.example.org/main-data?d=26110218-1d6h#over-time|↗︎>\n:arrow_deg50: <https://cw.example.org/?d=26110306-12h#over-time|11/3> — *762 TiB (+5.0, 0.7%)* · 83.8% of 1P (147.5 Ti free) <https://cw.example.org/main-data?d=26110306-12h#over-time|↗︎>\n:arrow_deg40: <https://cw.example.org/?d=26110412-1d6h#over-time|11/4> — *770 TiB (+7.5, 1.0%)* · 84.6% of 1P (140.0 Ti free) <https://cw.example.org/main-data?d=26110412-1d6h#over-time|↗︎>",
+    "unfurl_links": false,
+    "unfurl_media": false,
+    "blocks": []
+   }
+  },
+  "reply:solo-weekly:wk-2026-10-26": {
+   "body": ":arrow_deg50: [11/1](https://cw.example.org/?d=26110112-1d#over-time) — **745 TiB (+10.0, 1.4%)** · 81.9% of 1P (165.0 Ti free) [↗︎](https://cw.example.org/main-data?d=26110112-1d#over-time)",
+   "post": {
+    "channel": "C0TEST",
+    "text": ":arrow_deg50: <https://cw.example.org/?d=26110112-1d#over-time|11/1> — *745 TiB (+10.0, 1.4%)* · 81.9% of 1P (165.0 Ti free) <https://cw.example.org/main-data?d=26110112-1d#over-time|↗︎>",
+    "unfurl_links": false,
+    "unfurl_media": false,
+    "username": "wk of 11/2",
+    "icon_url": "https://i.example/mark.png",
+    "thread_ts": "1.000000"
+   },
+   "edit": {
+    "channel": "C0TEST",
+    "ts": "1.000002",
+    "text": ":arrow_deg50: <https://cw.example.org/?d=26110112-1d#over-time|11/1> — *745 TiB (+10.0, 1.4%)* · 81.9% of 1P (165.0 Ti free) <https://cw.example.org/main-data?d=26110112-1d#over-time|↗︎>",
+    "unfurl_links": false,
+    "unfurl_media": false,
+    "blocks": []
+   }
+  },
+  "reply:warning-body:2026-11-05": {
+   "body": ":arrow_deg50: [11/5](https://cw.example.org/?d=26110506-12h#over-time) — **778 TiB (+5.0, 0.6%)** · [main](https://cw.example.org/main-data?d=26110506-12h#over-time): 85.4% of 1P (132.5 Ti free) · :warning: [hot](https://cw.example.org/hot-data?d=26110506-12h#over-time): 99.6% of 100Ti (0.4 Ti free) · [za](https://cw.example.org/z-a?d=26110506-12h#over-time) 0 + [zb](https://cw.example.org/z-b?d=26110506-12h#over-time) 50 Ti: 49.5% of 100Ti (50.5 Ti free) · [new-data](https://cw.example.org/new-data?d=26110506-12h#over-time): 4 Ti",
+   "post": {
+    "channel": "C0TEST",
+    "text": ":arrow_deg50: <https://cw.example.org/?d=26110506-12h#over-time|11/5> — *778 TiB (+5.0, 0.6%)* · <https://cw.example.org/main-data?d=26110506-12h#over-time|main>: 85.4% of 1P (132.5 Ti free) · :warning: <https://cw.example.org/hot-data?d=26110506-12h#over-time|hot>: 99.6% of 100Ti (0.4 Ti free) · <https://cw.example.org/z-a?d=26110506-12h#over-time|za> 0 + <https://cw.example.org/z-b?d=26110506-12h#over-time|zb> 50 Ti: 49.5% of 100Ti (50.5 Ti free) · <https://cw.example.org/new-data?d=26110506-12h#over-time|new-data>: 4 Ti",
+    "unfurl_links": false,
+    "unfurl_media": false,
+    "username": "wk of 11/2",
+    "icon_url": "https://i.example/mark.png",
+    "thread_ts": "1.000000"
+   },
+   "edit": {
+    "channel": "C0TEST",
+    "ts": "1.000002",
+    "text": ":arrow_deg50: <https://cw.example.org/?d=26110506-12h#over-time|11/5> — *778 TiB (+5.0, 0.6%)* · <https://cw.example.org/main-data?d=26110506-12h#over-time|main>: 85.4% of 1P (132.5 Ti free) · :warning: <https://cw.example.org/hot-data?d=26110506-12h#over-time|hot>: 99.6% of 100Ti (0.4 Ti free) · <https://cw.example.org/z-a?d=26110506-12h#over-time|za> 0 + <https://cw.example.org/z-b?d=26110506-12h#over-time|zb> 50 Ti: 49.5% of 100Ti (50.5 Ti free) · <https://cw.example.org/new-data?d=26110506-12h#over-time|new-data>: 4 Ti",
+    "unfurl_links": false,
+    "unfurl_media": false,
+    "blocks": []
+   }
+  },
+  "reply:warning-body:2026-11-04": {
+   "body": ":arrow_deg40: [11/4](https://cw.example.org/?d=26110418-1d12h#over-time) — **772 TiB (+10.0, 1.3%)** · [main](https://cw.example.org/main-data?d=26110418-1d12h#over-time): 84.9% of 1P (137.5 Ti free) · :warning: [hot](https://cw.example.org/hot-data?d=26110418-1d12h#over-time): 99.4% of 100Ti (0.6 Ti free) · [za](https://cw.example.org/z-a?d=26110418-1d12h#over-time) 0 + [zb](https://cw.example.org/z-b?d=26110418-1d12h#over-time) 46 Ti: 46.5% of 100Ti (53.5 Ti free) · [new-data](https://cw.example.org/new-data?d=26110418-1d12h#over-time): 4 Ti",
+   "post": {
+    "channel": "C0TEST",
+    "text": ":arrow_deg40: <https://cw.example.org/?d=26110418-1d12h#over-time|11/4> — *772 TiB (+10.0, 1.3%)* · <https://cw.example.org/main-data?d=26110418-1d12h#over-time|main>: 84.9% of 1P (137.5 Ti free) · :warning: <https://cw.example.org/hot-data?d=26110418-1d12h#over-time|hot>: 99.4% of 100Ti (0.6 Ti free) · <https://cw.example.org/z-a?d=26110418-1d12h#over-time|za> 0 + <https://cw.example.org/z-b?d=26110418-1d12h#over-time|zb> 46 Ti: 46.5% of 100Ti (53.5 Ti free) · <https://cw.example.org/new-data?d=26110418-1d12h#over-time|new-data>: 4 Ti",
+    "unfurl_links": false,
+    "unfurl_media": false,
+    "username": "wk of 11/2",
+    "icon_url": "https://i.example/mark.png",
+    "thread_ts": "1.000000"
+   },
+   "edit": {
+    "channel": "C0TEST",
+    "ts": "1.000002",
+    "text": ":arrow_deg40: <https://cw.example.org/?d=26110418-1d12h#over-time|11/4> — *772 TiB (+10.0, 1.3%)* · <https://cw.example.org/main-data?d=26110418-1d12h#over-time|main>: 84.9% of 1P (137.5 Ti free) · :warning: <https://cw.example.org/hot-data?d=26110418-1d12h#over-time|hot>: 99.4% of 100Ti (0.6 Ti free) · <https://cw.example.org/z-a?d=26110418-1d12h#over-time|za> 0 + <https://cw.example.org/z-b?d=26110418-1d12h#over-time|zb> 46 Ti: 46.5% of 100Ti (53.5 Ti free) · <https://cw.example.org/new-data?d=26110418-1d12h#over-time|new-data>: 4 Ti",
+    "unfurl_links": false,
+    "unfurl_media": false,
+    "blocks": []
+   }
+  },
+  "reply:warning-body:2026-11-03": {
+   "body": ":arrow_deg50: [11/3](https://cw.example.org/?d=26110306-12h#over-time) — **762 TiB (+5.0, 0.7%)** · [main](https://cw.example.org/main-data?d=26110306-12h#over-time): 83.8% of 1P (147.5 Ti free) · :warning: [hot](https://cw.example.org/hot-data?d=26110306-12h#over-time): 99.9% of 100Ti (0.1 Ti free) · [za](https://cw.example.org/z-a?d=26110306-12h#over-time) 4 + [zb](https://cw.example.org/z-b?d=26110306-12h#over-time) 40 Ti: 44.3% of 100Ti (55.7 Ti free)",
+   "post": {
+    "channel": "C0TEST",
+    "text": ":arrow_deg50: <https://cw.example.org/?d=26110306-12h#over-time|11/3> — *762 TiB (+5.0, 0.7%)* · <https://cw.example.org/main-data?d=26110306-12h#over-time|main>: 83.8% of 1P (147.5 Ti free) · :warning: <https://cw.example.org/hot-data?d=26110306-12h#over-time|hot>: 99.9% of 100Ti (0.1 Ti free) · <https://cw.example.org/z-a?d=26110306-12h#over-time|za> 4 + <https://cw.example.org/z-b?d=26110306-12h#over-time|zb> 40 Ti: 44.3% of 100Ti (55.7 Ti free)",
+    "unfurl_links": false,
+    "unfurl_media": false,
+    "username": "wk of 11/2",
+    "icon_url": "https://i.example/mark.png",
+    "thread_ts": "1.000000"
+   },
+   "edit": {
+    "channel": "C0TEST",
+    "ts": "1.000002",
+    "text": ":arrow_deg50: <https://cw.example.org/?d=26110306-12h#over-time|11/3> — *762 TiB (+5.0, 0.7%)* · <https://cw.example.org/main-data?d=26110306-12h#over-time|main>: 83.8% of 1P (147.5 Ti free) · :warning: <https://cw.example.org/hot-data?d=26110306-12h#over-time|hot>: 99.9% of 100Ti (0.1 Ti free) · <https://cw.example.org/z-a?d=26110306-12h#over-time|za> 4 + <https://cw.example.org/z-b?d=26110306-12h#over-time|zb> 40 Ti: 44.3% of 100Ti (55.7 Ti free)",
+    "unfurl_links": false,
+    "unfurl_media": false,
+    "blocks": []
+   }
+  },
+  "reply:warning-body:2026-11-02": {
+   "body": ":arrow_deg50: [11/2](https://cw.example.org/?d=26110218-1d#over-time) — **758 TiB (+10.0, 1.3%)** · [main](https://cw.example.org/main-data?d=26110218-1d#over-time): 83.2% of 1P (152.5 Ti free) · :warning: [hot](https://cw.example.org/hot-data?d=26110218-1d#over-time): 99.7% of 100Ti (0.3 Ti free) · [za](https://cw.example.org/z-a?d=26110218-1d#over-time) 8 + [zb](https://cw.example.org/z-b?d=26110218-1d#over-time) 38 Ti: 45.7% of 100Ti (54.3 Ti free)",
+   "post": {
+    "channel": "C0TEST",
+    "text": ":arrow_deg50: <https://cw.example.org/?d=26110218-1d#over-time|11/2> — *758 TiB (+10.0, 1.3%)* · <https://cw.example.org/main-data?d=26110218-1d#over-time|main>: 83.2% of 1P (152.5 Ti free) · :warning: <https://cw.example.org/hot-data?d=26110218-1d#over-time|hot>: 99.7% of 100Ti (0.3 Ti free) · <https://cw.example.org/z-a?d=26110218-1d#over-time|za> 8 + <https://cw.example.org/z-b?d=26110218-1d#over-time|zb> 38 Ti: 45.7% of 100Ti (54.3 Ti free)",
+    "unfurl_links": false,
+    "unfurl_media": false,
+    "username": "wk of 11/2",
+    "icon_url": "https://i.example/mark.png",
+    "thread_ts": "1.000000"
+   },
+   "edit": {
+    "channel": "C0TEST",
+    "ts": "1.000002",
+    "text": ":arrow_deg50: <https://cw.example.org/?d=26110218-1d#over-time|11/2> — *758 TiB (+10.0, 1.3%)* · <https://cw.example.org/main-data?d=26110218-1d#over-time|main>: 83.2% of 1P (152.5 Ti free) · :warning: <https://cw.example.org/hot-data?d=26110218-1d#over-time|hot>: 99.7% of 100Ti (0.3 Ti free) · <https://cw.example.org/z-a?d=26110218-1d#over-time|za> 8 + <https://cw.example.org/z-b?d=26110218-1d#over-time|zb> 38 Ti: 45.7% of 100Ti (54.3 Ti free)",
+    "unfurl_links": false,
+    "unfurl_media": false,
+    "blocks": []
+   }
+  },
+  "reply:warning-body:2026-11-01": {
+   "body": ":arrow_deg50: [11/1](https://cw.example.org/?d=26110118-1d#over-time) — **748 TiB (+10.0, 1.4%)** · [main](https://cw.example.org/main-data?d=26110118-1d#over-time): 82.1% of 1P (162.5 Ti free) · :warning: [hot](https://cw.example.org/hot-data?d=26110118-1d#over-time): 99.3% of 100Ti (0.7 Ti free) · [za](https://cw.example.org/z-a?d=26110118-1d#over-time) 17 + [zb](https://cw.example.org/z-b?d=26110118-1d#over-time) 32 Ti: 48.7% of 100Ti (51.3 Ti free)",
+   "post": {
+    "channel": "C0TEST",
+    "text": ":arrow_deg50: <https://cw.example.org/?d=26110118-1d#over-time|11/1> — *748 TiB (+10.0, 1.4%)* · <https://cw.example.org/main-data?d=26110118-1d#over-time|main>: 82.1% of 1P (162.5 Ti free) · :warning: <https://cw.example.org/hot-data?d=26110118-1d#over-time|hot>: 99.3% of 100Ti (0.7 Ti free) · <https://cw.example.org/z-a?d=26110118-1d#over-time|za> 17 + <https://cw.example.org/z-b?d=26110118-1d#over-time|zb> 32 Ti: 48.7% of 100Ti (51.3 Ti free)",
+    "unfurl_links": false,
+    "unfurl_media": false,
+    "username": "wk of 11/2",
+    "icon_url": "https://i.example/mark.png",
+    "thread_ts": "1.000000"
+   },
+   "edit": {
+    "channel": "C0TEST",
+    "ts": "1.000002",
+    "text": ":arrow_deg50: <https://cw.example.org/?d=26110118-1d#over-time|11/1> — *748 TiB (+10.0, 1.4%)* · <https://cw.example.org/main-data?d=26110118-1d#over-time|main>: 82.1% of 1P (162.5 Ti free) · :warning: <https://cw.example.org/hot-data?d=26110118-1d#over-time|hot>: 99.3% of 100Ti (0.7 Ti free) · <https://cw.example.org/z-a?d=26110118-1d#over-time|za> 17 + <https://cw.example.org/z-b?d=26110118-1d#over-time|zb> 32 Ti: 48.7% of 100Ti (51.3 Ti free)",
+    "unfurl_links": false,
+    "unfurl_media": false,
+    "blocks": []
+   }
+  },
+  "reply:warning-sender:2026-11-05": {
+   "body": ":arrow_deg50: **778 TiB (+7.5, 1.0%)** · [as of 06:01Z](https://cw.example.org/?d=26110506-18h#over-time) · [main](https://cw.example.org/main-data?d=26110506-18h#over-time): 85.4% of 1P (132.5 Ti free) · :warning: [hot](https://cw.example.org/hot-data?d=26110506-18h#over-time): 99.6% of 100Ti (0.4 Ti free) · [za](https://cw.example.org/z-a?d=26110506-18h#over-time) 0 + [zb](https://cw.example.org/z-b?d=26110506-18h#over-time) 50 Ti: 49.5% of 100Ti (50.5 Ti free) · [new-data](https://cw.example.org/new-data?d=26110506-18h#over-time): 4 Ti",
+   "post": {
+    "channel": "C0TEST",
+    "text": ":arrow_deg50: *778 TiB (+7.5, 1.0%)* · <https://cw.example.org/?d=26110506-18h#over-time|as of 06:01Z> · <https://cw.example.org/main-data?d=26110506-18h#over-time|main>: 85.4% of 1P (132.5 Ti free) · :warning: <https://cw.example.org/hot-data?d=26110506-18h#over-time|hot>: 99.6% of 100Ti (0.4 Ti free) · <https://cw.example.org/z-a?d=26110506-18h#over-time|za> 0 + <https://cw.example.org/z-b?d=26110506-18h#over-time|zb> 50 Ti: 49.5% of 100Ti (50.5 Ti free) · <https://cw.example.org/new-data?d=26110506-18h#over-time|new-data>: 4 Ti",
+    "unfurl_links": false,
+    "unfurl_media": false,
+    "username": "wk of 11/2",
+    "icon_url": "https://i.example/mark.png",
+    "thread_ts": "1.000000"
+   },
+   "edit": {
+    "channel": "C0TEST",
+    "ts": "1.000002",
+    "text": ":arrow_deg50: *778 TiB (+7.5, 1.0%)* · <https://cw.example.org/?d=26110506-18h#over-time|as of 06:01Z> · <https://cw.example.org/main-data?d=26110506-18h#over-time|main>: 85.4% of 1P (132.5 Ti free) · :warning: <https://cw.example.org/hot-data?d=26110506-18h#over-time|hot>: 99.6% of 100Ti (0.4 Ti free) · <https://cw.example.org/z-a?d=26110506-18h#over-time|za> 0 + <https://cw.example.org/z-b?d=26110506-18h#over-time|zb> 50 Ti: 49.5% of 100Ti (50.5 Ti free) · <https://cw.example.org/new-data?d=26110506-18h#over-time|new-data>: 4 Ti",
+    "unfurl_links": false,
+    "unfurl_media": false,
+    "blocks": []
+   }
+  },
+  "reply:warning-sender:2026-11-04": {
+   "body": "[main](https://cw.example.org/main-data?d=26110412-1d6h#over-time): 84.6% of 1P (140.0 Ti free) · :warning: [hot](https://cw.example.org/hot-data?d=26110412-1d6h#over-time): 99.3% of 100Ti (0.7 Ti free) · [za](https://cw.example.org/z-a?d=26110412-1d6h#over-time) 0 + [zb](https://cw.example.org/z-b?d=26110412-1d6h#over-time) 45 Ti: 45.0% of 100Ti (55.0 Ti free) · [new-data](https://cw.example.org/new-data?d=26110412-1d6h#over-time): 4 Ti",
+   "post": {
+    "channel": "C0TEST",
+    "text": "<https://cw.example.org/main-data?d=26110412-1d6h#over-time|main>: 84.6% of 1P (140.0 Ti free) · :warning: <https://cw.example.org/hot-data?d=26110412-1d6h#over-time|hot>: 99.3% of 100Ti (0.7 Ti free) · <https://cw.example.org/z-a?d=26110412-1d6h#over-time|za> 0 + <https://cw.example.org/z-b?d=26110412-1d6h#over-time|zb> 45 Ti: 45.0% of 100Ti (55.0 Ti free) · <https://cw.example.org/new-data?d=26110412-1d6h#over-time|new-data>: 4 Ti",
+    "unfurl_links": false,
+    "unfurl_media": false,
+    "username": "wk of 11/2",
+    "icon_url": "https://i.example/mark.png",
+    "thread_ts": "1.000000"
+   },
+   "edit": {
+    "channel": "C0TEST",
+    "ts": "1.000002",
+    "text": "<https://cw.example.org/main-data?d=26110412-1d6h#over-time|main>: 84.6% of 1P (140.0 Ti free) · :warning: <https://cw.example.org/hot-data?d=26110412-1d6h#over-time|hot>: 99.3% of 100Ti (0.7 Ti free) · <https://cw.example.org/z-a?d=26110412-1d6h#over-time|za> 0 + <https://cw.example.org/z-b?d=26110412-1d6h#over-time|zb> 45 Ti: 45.0% of 100Ti (55.0 Ti free) · <https://cw.example.org/new-data?d=26110412-1d6h#over-time|new-data>: 4 Ti",
+    "unfurl_links": false,
+    "unfurl_media": false,
+    "blocks": []
+   }
+  },
+  "reply:warning-sender:2026-11-03": {
+   "body": "[main](https://cw.example.org/main-data?d=26110306-12h#over-time): 83.8% of 1P (147.5 Ti free) · :warning: [hot](https://cw.example.org/hot-data?d=26110306-12h#over-time): 99.9% of 100Ti (0.1 Ti free) · [za](https://cw.example.org/z-a?d=26110306-12h#over-time) 4 + [zb](https://cw.example.org/z-b?d=26110306-12h#over-time) 40 Ti: 44.3% of 100Ti (55.7 Ti free)",
+   "post": {
+    "channel": "C0TEST",
+    "text": "<https://cw.example.org/main-data?d=26110306-12h#over-time|main>: 83.8% of 1P (147.5 Ti free) · :warning: <https://cw.example.org/hot-data?d=26110306-12h#over-time|hot>: 99.9% of 100Ti (0.1 Ti free) · <https://cw.example.org/z-a?d=26110306-12h#over-time|za> 4 + <https://cw.example.org/z-b?d=26110306-12h#over-time|zb> 40 Ti: 44.3% of 100Ti (55.7 Ti free)",
+    "unfurl_links": false,
+    "unfurl_media": false,
+    "username": "wk of 11/2",
+    "icon_url": "https://i.example/mark.png",
+    "thread_ts": "1.000000"
+   },
+   "edit": {
+    "channel": "C0TEST",
+    "ts": "1.000002",
+    "text": "<https://cw.example.org/main-data?d=26110306-12h#over-time|main>: 83.8% of 1P (147.5 Ti free) · :warning: <https://cw.example.org/hot-data?d=26110306-12h#over-time|hot>: 99.9% of 100Ti (0.1 Ti free) · <https://cw.example.org/z-a?d=26110306-12h#over-time|za> 4 + <https://cw.example.org/z-b?d=26110306-12h#over-time|zb> 40 Ti: 44.3% of 100Ti (55.7 Ti free)",
+    "unfurl_links": false,
+    "unfurl_media": false,
+    "blocks": []
+   }
+  },
+  "reply:warning-sender:2026-11-02": {
+   "body": "[main](https://cw.example.org/main-data?d=26110218-1d6h#over-time): 83.2% of 1P (152.5 Ti free) · :warning: [hot](https://cw.example.org/hot-data?d=26110218-1d6h#over-time): 99.7% of 100Ti (0.3 Ti free) · [za](https://cw.example.org/z-a?d=26110218-1d6h#over-time) 8 + [zb](https://cw.example.org/z-b?d=26110218-1d6h#over-time) 38 Ti: 45.7% of 100Ti (54.3 Ti free)",
+   "post": {
+    "channel": "C0TEST",
+    "text": "<https://cw.example.org/main-data?d=26110218-1d6h#over-time|main>: 83.2% of 1P (152.5 Ti free) · :warning: <https://cw.example.org/hot-data?d=26110218-1d6h#over-time|hot>: 99.7% of 100Ti (0.3 Ti free) · <https://cw.example.org/z-a?d=26110218-1d6h#over-time|za> 8 + <https://cw.example.org/z-b?d=26110218-1d6h#over-time|zb> 38 Ti: 45.7% of 100Ti (54.3 Ti free)",
+    "unfurl_links": false,
+    "unfurl_media": false,
+    "username": "wk of 11/2",
+    "icon_url": "https://i.example/mark.png",
+    "thread_ts": "1.000000"
+   },
+   "edit": {
+    "channel": "C0TEST",
+    "ts": "1.000002",
+    "text": "<https://cw.example.org/main-data?d=26110218-1d6h#over-time|main>: 83.2% of 1P (152.5 Ti free) · :warning: <https://cw.example.org/hot-data?d=26110218-1d6h#over-time|hot>: 99.7% of 100Ti (0.3 Ti free) · <https://cw.example.org/z-a?d=26110218-1d6h#over-time|za> 8 + <https://cw.example.org/z-b?d=26110218-1d6h#over-time|zb> 38 Ti: 45.7% of 100Ti (54.3 Ti free)",
+    "unfurl_links": false,
+    "unfurl_media": false,
+    "blocks": []
+   }
+  },
+  "reply:warning-sender:2026-11-01": {
+   "body": "[main](https://cw.example.org/main-data?d=26110112-1d#over-time): 81.9% of 1P (165.0 Ti free) · :warning: [hot](https://cw.example.org/hot-data?d=26110112-1d#over-time): 99.2% of 100Ti (0.8 Ti free) · [za](https://cw.example.org/z-a?d=26110112-1d#over-time) 20 + [zb](https://cw.example.org/z-b?d=26110112-1d#over-time) 30 Ti: 49.5% of 100Ti (50.5 Ti free)",
+   "post": {
+    "channel": "C0TEST",
+    "text": "<https://cw.example.org/main-data?d=26110112-1d#over-time|main>: 81.9% of 1P (165.0 Ti free) · :warning: <https://cw.example.org/hot-data?d=26110112-1d#over-time|hot>: 99.2% of 100Ti (0.8 Ti free) · <https://cw.example.org/z-a?d=26110112-1d#over-time|za> 20 + <https://cw.example.org/z-b?d=26110112-1d#over-time|zb> 30 Ti: 49.5% of 100Ti (50.5 Ti free)",
+    "unfurl_links": false,
+    "unfurl_media": false,
+    "username": "wk of 11/2",
+    "icon_url": "https://i.example/mark.png",
+    "thread_ts": "1.000000"
+   },
+   "edit": {
+    "channel": "C0TEST",
+    "ts": "1.000002",
+    "text": "<https://cw.example.org/main-data?d=26110112-1d#over-time|main>: 81.9% of 1P (165.0 Ti free) · :warning: <https://cw.example.org/hot-data?d=26110112-1d#over-time|hot>: 99.2% of 100Ti (0.8 Ti free) · <https://cw.example.org/z-a?d=26110112-1d#over-time|za> 20 + <https://cw.example.org/z-b?d=26110112-1d#over-time|zb> 30 Ti: 49.5% of 100Ti (50.5 Ti free)",
+    "unfurl_links": false,
+    "unfurl_media": false,
+    "blocks": []
+   }
+  },
+  "reply:warning-weekly:wk-2026-11-02": {
+   "body": ":arrow_deg50: *week:* **+25.0 TiB (3.4%)**\n:arrow_deg50: [11/2](https://cw.example.org/?d=26110218-1d6h#over-time) — **758 TiB (+12.5, 1.7%)** · [main](https://cw.example.org/main-data?d=26110218-1d6h#over-time): 83.2% of 1P (152.5 Ti free) · :warning: [hot](https://cw.example.org/hot-data?d=26110218-1d6h#over-time): 99.7% of 100Ti (0.3 Ti free) · [za](https://cw.example.org/z-a?d=26110218-1d6h#over-time) 8 + [zb](https://cw.example.org/z-b?d=26110218-1d6h#over-time) 38 Ti: 45.7% of 100Ti (54.3 Ti free)\n:arrow_deg50: [11/3](https://cw.example.org/?d=26110306-12h#over-time) — **762 TiB (+5.0, 0.7%)** · [main](https://cw.example.org/main-data?d=26110306-12h#over-time): 83.8% of 1P (147.5 Ti free) · :warning: [hot](https://cw.example.org/hot-data?d=26110306-12h#over-time): 99.9% of 100Ti (0.1 Ti free) · [za](https://cw.example.org/z-a?d=26110306-12h#over-time) 4 + [zb](https://cw.example.org/z-b?d=26110306-12h#over-time) 40 Ti: 44.3% of 100Ti (55.7 Ti free)\n:arrow_deg40: [11/4](https://cw.example.org/?d=26110412-1d6h#over-time) — **770 TiB (+7.5, 1.0%)** · [main](https://cw.example.org/main-data?d=26110412-1d6h#over-time): 84.6% of 1P (140.0 Ti free) · :warning: [hot](https://cw.example.org/hot-data?d=26110412-1d6h#over-time): 99.3% of 100Ti (0.7 Ti free) · [za](https://cw.example.org/z-a?d=26110412-1d6h#over-time) 0 + [zb](https://cw.example.org/z-b?d=26110412-1d6h#over-time) 45 Ti: 45.0% of 100Ti (55.0 Ti free) · [new-data](https://cw.example.org/new-data?d=26110412-1d6h#over-time): 4 Ti",
+   "post": {
+    "channel": "C0TEST",
+    "text": ":arrow_deg50: _week:_ *+25.0 TiB (3.4%)*\n:arrow_deg50: <https://cw.example.org/?d=26110218-1d6h#over-time|11/2> — *758 TiB (+12.5, 1.7%)* · <https://cw.example.org/main-data?d=26110218-1d6h#over-time|main>: 83.2% of 1P (152.5 Ti free) · :warning: <https://cw.example.org/hot-data?d=26110218-1d6h#over-time|hot>: 99.7% of 100Ti (0.3 Ti free) · <https://cw.example.org/z-a?d=26110218-1d6h#over-time|za> 8 + <https://cw.example.org/z-b?d=26110218-1d6h#over-time|zb> 38 Ti: 45.7% of 100Ti (54.3 Ti free)\n:arrow_deg50: <https://cw.example.org/?d=26110306-12h#over-time|11/3> — *762 TiB (+5.0, 0.7%)* · <https://cw.example.org/main-data?d=26110306-12h#over-time|main>: 83.8% of 1P (147.5 Ti free) · :warning: <https://cw.example.org/hot-data?d=26110306-12h#over-time|hot>: 99.9% of 100Ti (0.1 Ti free) · <https://cw.example.org/z-a?d=26110306-12h#over-time|za> 4 + <https://cw.example.org/z-b?d=26110306-12h#over-time|zb> 40 Ti: 44.3% of 100Ti (55.7 Ti free)\n:arrow_deg40: <https://cw.example.org/?d=26110412-1d6h#over-time|11/4> — *770 TiB (+7.5, 1.0%)* · <https://cw.example.org/main-data?d=26110412-1d6h#over-time|main>: 84.6% of 1P (140.0 Ti free) · :warning: <https://cw.example.org/hot-data?d=26110412-1d6h#over-time|hot>: 99.3% of 100Ti (0.7 Ti free) · <https://cw.example.org/z-a?d=26110412-1d6h#over-time|za> 0 + <https://cw.example.org/z-b?d=26110412-1d6h#over-time|zb> 45 Ti: 45.0% of 100Ti (55.0 Ti free) · <https://cw.example.org/new-data?d=26110412-1d6h#over-time|new-data>: 4 Ti",
+    "unfurl_links": false,
+    "unfurl_media": false,
+    "username": "wk of 11/2",
+    "icon_url": "https://i.example/mark.png",
+    "thread_ts": "1.000000"
+   },
+   "edit": {
+    "channel": "C0TEST",
+    "ts": "1.000002",
+    "text": ":arrow_deg50: _week:_ *+25.0 TiB (3.4%)*\n:arrow_deg50: <https://cw.example.org/?d=26110218-1d6h#over-time|11/2> — *758 TiB (+12.5, 1.7%)* · <https://cw.example.org/main-data?d=26110218-1d6h#over-time|main>: 83.2% of 1P (152.5 Ti free) · :warning: <https://cw.example.org/hot-data?d=26110218-1d6h#over-time|hot>: 99.7% of 100Ti (0.3 Ti free) · <https://cw.example.org/z-a?d=26110218-1d6h#over-time|za> 8 + <https://cw.example.org/z-b?d=26110218-1d6h#over-time|zb> 38 Ti: 45.7% of 100Ti (54.3 Ti free)\n:arrow_deg50: <https://cw.example.org/?d=26110306-12h#over-time|11/3> — *762 TiB (+5.0, 0.7%)* · <https://cw.example.org/main-data?d=26110306-12h#over-time|main>: 83.8% of 1P (147.5 Ti free) · :warning: <https://cw.example.org/hot-data?d=26110306-12h#over-time|hot>: 99.9% of 100Ti (0.1 Ti free) · <https://cw.example.org/z-a?d=26110306-12h#over-time|za> 4 + <https://cw.example.org/z-b?d=26110306-12h#over-time|zb> 40 Ti: 44.3% of 100Ti (55.7 Ti free)\n:arrow_deg40: <https://cw.example.org/?d=26110412-1d6h#over-time|11/4> — *770 TiB (+7.5, 1.0%)* · <https://cw.example.org/main-data?d=26110412-1d6h#over-time|main>: 84.6% of 1P (140.0 Ti free) · :warning: <https://cw.example.org/hot-data?d=26110412-1d6h#over-time|hot>: 99.3% of 100Ti (0.7 Ti free) · <https://cw.example.org/z-a?d=26110412-1d6h#over-time|za> 0 + <https://cw.example.org/z-b?d=26110412-1d6h#over-time|zb> 45 Ti: 45.0% of 100Ti (55.0 Ti free) · <https://cw.example.org/new-data?d=26110412-1d6h#over-time|new-data>: 4 Ti",
+    "unfurl_links": false,
+    "unfurl_media": false,
+    "blocks": []
+   }
+  },
+  "reply:warning-weekly:wk-2026-10-26": {
+   "body": ":arrow_deg50: [11/1](https://cw.example.org/?d=26110112-1d#over-time) — **745 TiB (+10.0, 1.4%)** · [main](https://cw.example.org/main-data?d=26110112-1d#over-time): 81.9% of 1P (165.0 Ti free) · :warning: [hot](https://cw.example.org/hot-data?d=26110112-1d#over-time): 99.2% of 100Ti (0.8 Ti free) · [za](https://cw.example.org/z-a?d=26110112-1d#over-time) 20 + [zb](https://cw.example.org/z-b?d=26110112-1d#over-time) 30 Ti: 49.5% of 100Ti (50.5 Ti free)",
+   "post": {
+    "channel": "C0TEST",
+    "text": ":arrow_deg50: <https://cw.example.org/?d=26110112-1d#over-time|11/1> — *745 TiB (+10.0, 1.4%)* · <https://cw.example.org/main-data?d=26110112-1d#over-time|main>: 81.9% of 1P (165.0 Ti free) · :warning: <https://cw.example.org/hot-data?d=26110112-1d#over-time|hot>: 99.2% of 100Ti (0.8 Ti free) · <https://cw.example.org/z-a?d=26110112-1d#over-time|za> 20 + <https://cw.example.org/z-b?d=26110112-1d#over-time|zb> 30 Ti: 49.5% of 100Ti (50.5 Ti free)",
+    "unfurl_links": false,
+    "unfurl_media": false,
+    "username": "wk of 11/2",
+    "icon_url": "https://i.example/mark.png",
+    "thread_ts": "1.000000"
+   },
+   "edit": {
+    "channel": "C0TEST",
+    "ts": "1.000002",
+    "text": ":arrow_deg50: <https://cw.example.org/?d=26110112-1d#over-time|11/1> — *745 TiB (+10.0, 1.4%)* · <https://cw.example.org/main-data?d=26110112-1d#over-time|main>: 81.9% of 1P (165.0 Ti free) · :warning: <https://cw.example.org/hot-data?d=26110112-1d#over-time|hot>: 99.2% of 100Ti (0.8 Ti free) · <https://cw.example.org/z-a?d=26110112-1d#over-time|za> 20 + <https://cw.example.org/z-b?d=26110112-1d#over-time|zb> 30 Ti: 49.5% of 100Ti (50.5 Ti free)",
+    "unfurl_links": false,
+    "unfurl_media": false,
+    "blocks": []
+   }
+  },
+  "extra:bust-image": {
+   "body": "**R2 — November**\nline *one* · [link](https://x.example/a?b=1)\n\n![plot](https://p.example/plot.png?v=3){bust}",
+   "post": {
+    "channel": "C0TEST",
+    "text": "*R2 — November*\nline _one_ · <https://x.example/a?b=1|link>",
+    "unfurl_links": false,
+    "unfurl_media": false,
+    "username": "wk of 11/2",
+    "icon_url": "https://i.example/mark.png",
+    "blocks": [
+     {
+      "type": "section",
+      "text": {
+       "type": "mrkdwn",
+       "text": "*R2 — November*\nline _one_ · <https://x.example/a?b=1|link>"
+      }
+     },
+     {
+      "type": "image",
+      "image_url": "https://p.example/plot.png?v=3&thrds_bust=29747712",
+      "alt_text": "plot"
+     }
+    ],
+    "thread_ts": "1.000000"
+   },
+   "edit": {
+    "channel": "C0TEST",
+    "ts": "1.000002",
+    "text": "*R2 — November*\nline _one_ · <https://x.example/a?b=1|link>",
+    "unfurl_links": false,
+    "unfurl_media": false,
+    "blocks": [
+     {
+      "type": "section",
+      "text": {
+       "type": "mrkdwn",
+       "text": "*R2 — November*\nline _one_ · <https://x.example/a?b=1|link>"
+      }
+     },
+     {
+      "type": "image",
+      "image_url": "https://p.example/plot.png?v=3&thrds_bust=29747712",
+      "alt_text": "plot"
+     }
+    ]
+   }
+  },
+  "extra:mid-image": {
+   "body": "head\n![not lifted](https://p.example/a.png)\ntail",
+   "post": {
+    "channel": "C0TEST",
+    "text": "head\n!<https://p.example/a.png|not lifted>\ntail",
+    "unfurl_links": false,
+    "unfurl_media": false,
+    "username": "wk of 11/2",
+    "icon_url": "https://i.example/mark.png",
+    "thread_ts": "1.000000"
+   },
+   "edit": {
+    "channel": "C0TEST",
+    "ts": "1.000002",
+    "text": "head\n!<https://p.example/a.png|not lifted>\ntail",
+    "unfurl_links": false,
+    "unfurl_media": false,
+    "blocks": []
+   }
+  },
+  "extra:emoji-image": {
+   "body": "a ![:arrow_deg30:](arrow_deg30.png) b",
+   "post": {
+    "channel": "C0TEST",
+    "text": "a :arrow_deg30: b",
+    "unfurl_links": false,
+    "unfurl_media": false,
+    "username": "wk of 11/2",
+    "icon_url": "https://i.example/mark.png",
+    "thread_ts": "1.000000"
+   },
+   "edit": {
+    "channel": "C0TEST",
+    "ts": "1.000002",
+    "text": "a :arrow_deg30: b",
+    "unfurl_links": false,
+    "unfurl_media": false,
+    "blocks": []
+   }
+  },
+  "extra:long-over-image": {
+   "body": "para 0 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n\npara 1 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n\npara 2 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n\npara 3 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n\npara 4 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n\npara 5 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n\npara 6 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n\npara 7 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n\n![plot](https://p.example/p.png)",
+   "post": {
+    "channel": "C0TEST",
+    "text": "para 0 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n\npara 1 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n\npara 2 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n\npara 3 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n\npara 4 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n\npara 5 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n\npara 6 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n\npara 7 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+    "unfurl_links": false,
+    "unfurl_media": false,
+    "username": "wk of 11/2",
+    "icon_url": "https://i.example/mark.png",
+    "blocks": [
+     {
+      "type": "section",
+      "text": {
+       "type": "mrkdwn",
+       "text": "para 0 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n\npara 1 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n\npara 2 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n\npara 3 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+      }
+     },
+     {
+      "type": "section",
+      "text": {
+       "type": "mrkdwn",
+       "text": "para 4 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n\npara 5 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n\npara 6 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n\npara 7 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+      }
+     },
+     {
+      "type": "image",
+      "image_url": "https://p.example/p.png",
+      "alt_text": "plot"
+     }
+    ],
+    "thread_ts": "1.000000"
+   },
+   "edit": {
+    "channel": "C0TEST",
+    "ts": "1.000002",
+    "text": "para 0 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n\npara 1 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n\npara 2 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n\npara 3 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n\npara 4 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n\npara 5 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n\npara 6 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n\npara 7 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+    "unfurl_links": false,
+    "unfurl_media": false,
+    "blocks": [
+     {
+      "type": "section",
+      "text": {
+       "type": "mrkdwn",
+       "text": "para 0 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n\npara 1 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n\npara 2 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n\npara 3 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+      }
+     },
+     {
+      "type": "section",
+      "text": {
+       "type": "mrkdwn",
+       "text": "para 4 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n\npara 5 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n\npara 6 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n\npara 7 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+      }
+     },
+     {
+      "type": "image",
+      "image_url": "https://p.example/p.png",
+      "alt_text": "plot"
+     }
+    ]
+   }
+  },
+  "extra:struck-alert": {
+   "body": "~:warning: quota over~\n~line two~\nresolved 11/3",
+   "post": {
+    "channel": "C0TEST",
+    "text": "~:warning: quota over~\n~line two~\nresolved 11/3",
+    "unfurl_links": false,
+    "unfurl_media": false,
+    "username": "wk of 11/2",
+    "icon_url": "https://i.example/mark.png",
+    "thread_ts": "1.000000"
+   },
+   "edit": {
+    "channel": "C0TEST",
+    "ts": "1.000002",
+    "text": "~:warning: quota over~\n~line two~\nresolved 11/3",
+    "unfurl_links": false,
+    "unfurl_media": false,
+    "blocks": []
+   }
+  }
+ }
+}
