@@ -760,16 +760,41 @@ def site_render(cfg: DigestConfig, rows: dict, month: dt.date, plot_url: str | N
                 next_url: str | None = None) -> dict:
     """`POST /api/digest-op`: the month's OP ``text`` and plot ``image`` request, rendered by the site from ``rows``
     (`Template.rows_json`) under ``cfg.params``, with the previous and next months' threads linked (`month_links`), as
-    the job (`$SITE_TOKEN`; required: the site is the OP's only renderer)."""
+    the job (`$SITE_TOKEN`). Without the token (a checkout's dry run), the same renderer runs here (`local_op`)."""
     from .deploy import site_token
     from .site import post_json
 
-    token = site_token()
-    if not token:
-        raise SystemExit("digest: the OP is rendered by the site, which needs the site token ($SITE_TOKEN)")
     body = {"month": f"{month:%Y-%m}", "rows": rows, "cfg": cfg_json(cfg), "params": cfg.params,
             "plot_url": plot_url, "prev_url": prev_url, "next_url": next_url}
-    return json.loads(post_json(cfg.site_url, token, "/api/digest-op", body))
+    if token := site_token():
+        return json.loads(post_json(cfg.site_url, token, "/api/digest-op", body))
+    if (site := checkout_site()) is None:
+        raise SystemExit("digest: the OP is rendered by the site, which needs the site token ($SITE_TOKEN), or a checkout's "
+                         "site/ with its node_modules to render it here")
+    _err("digest: no site token: the OP rendered here (site/scripts/digest-op.ts)")
+    return local_op(site, body)
+
+
+def checkout_site() -> Path | None:
+    """This checkout's `site/`, when its `node_modules` has the esbuild `local_op` bundles with; None in an image."""
+    site = Path(__file__).resolve().parents[3] / "site"
+    return site if (site / "node_modules" / ".bin" / "esbuild").exists() else None
+
+
+def local_op(site: Path, body: dict) -> dict:
+    """`site_render`'s request run by `site/scripts/digest-op.ts` (`src/digest/op`, the renderer `/api/digest-op` runs),
+    bundled by ``site``'s esbuild, under node: ``{text, image}``. A refused request or a failed bundle exits."""
+    import subprocess
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as d:
+        js = Path(d) / "digest-op.mjs"
+        subprocess.run([str(site / "node_modules" / ".bin" / "esbuild"), str(site / "scripts" / "digest-op.ts"), "--bundle",
+                        "--platform=node", "--format=esm", f"--outfile={js}", "--log-level=warning"], check=True)
+        r = subprocess.run(["node", str(js)], input=json.dumps(body), capture_output=True, text=True)
+    if r.returncode:
+        raise SystemExit(f"digest: the local OP renderer failed (exit {r.returncode}): {r.stderr.strip()}")
+    return json.loads(r.stdout)
 
 
 def preview_bundle(tpl: Template, data: Any, month: dt.date, *, op: str, plot_url: str | None, prev_url: str | None,

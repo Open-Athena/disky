@@ -226,9 +226,17 @@ def test_site_renderer_posts_the_rows_and_uses_the_answer(name: str, tmp_path: P
         (cfg.site_url, "tok", "/api/digest-op", {**req, "plot_url": None, "prev_url": None, "next_url": None}),
     ]
     monkeypatch.delenv("SITE_TOKEN")
+    monkeypatch.setattr(E, "checkout_site", lambda: None)
     with pytest.raises(SystemExit) as e:
         tpl.op_body(data, month, plot_url, prev_url)
-    assert str(e.value) == "digest: the OP is rendered by the site, which needs the site token ($SITE_TOKEN)"
+    assert str(e.value) == ("digest: the OP is rendered by the site, which needs the site token ($SITE_TOKEN), or a checkout's "
+                            "site/ with its node_modules to render it here")
+    # no token, in a checkout: the same request, to the site's renderer run here (`local_op`)
+    local: list = []
+    monkeypatch.setattr(E, "checkout_site", lambda: Path("site"))
+    monkeypatch.setattr(E, "local_op", lambda s, b: local.append((s, json.loads(json.dumps(b)))) or {"text": fx["op"], "image": fx["image"]})
+    assert tpl.op_body(data, month, plot_url, prev_url) == fx["op"]
+    assert local == [(Path("site"), {**req, "plot_url": plot_url, "prev_url": prev_url, "next_url": None})]
 
 
 def test_params_config():
