@@ -137,6 +137,9 @@ CF_ACCOUNT_ID = "74981a43be0de7712369306c7b19133d"
 CF_PAGES_SCRIPT = "pages-worker--21097822"
 AGE_STORE_PREFIX = "history/primary-age"
 DIFF_DESCENT = "1"
+# VM mode (specs/vm-pilot.md "Serving beside the indexes"): `vmd` through the pilot box's tunnel, as tenant `oa-r2`; on with the preview secret `VM_KEY`. `VM_SHARE` unset: only `?be=vm` pins a session `vm`
+VMD_URL = "https://vmd-pilot.oa.dev"
+VM_TENANT = "oa-r2"
 
 [[env.preview.kv_namespaces]]
 binding = "CACHE_KV"
