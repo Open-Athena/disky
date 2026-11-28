@@ -53,9 +53,9 @@ task_logs = TaskLogView(
     reader=dispatch.member,
 )
 pulumi.export("task_log_view", task_logs.path)
-# Every Batch task's logs in the project (`log_id("batch_task_logs")`), kept 90 days beside `_Default`'s 30: Nextflow
-# task jobs are named `nf-…`, so no deployment prefix tells them apart, and the project's one copy lives in this stack
-task_log_bucket = TaskLogBucket("batch-task-logs", project=project, location="global", bucket_id="batch-task-logs", retention_days=90)
+# The project's former shared copy of every deployment's Batch task logs (90 days): each deployment now keeps its own
+# (`<d>-task-logs`), so its sink takes only gcs's, and the other deployments' older entries age out; then it goes
+task_log_bucket = TaskLogBucket("batch-task-logs", project=project, location="global", bucket_id="batch-task-logs", retention_days=90, deployment="gcs")
 pulumi.export("task_log_bucket", task_log_bucket.path)
 job = JobAccount(
     "gcs-usage-job",
@@ -76,6 +76,20 @@ job = JobAccount(
     adopt=adopt,
     existing=True,
 )
+# gcs's own Batch task logs (specs/per-deployment-task-logs.md): its jobs' `deployment` label, 365 days, and a view its job
+# account reads (`$DT_TASK_LOG_VIEW`).
+gcs_task_logs = TaskLogBucket("gcs-task-logs", project=project, location="global", bucket_id="gcs-task-logs", retention_days=365, deployment="gcs")
+gcs_task_log_view = TaskLogView(
+    "gcs-task-log-view",
+    project=project,
+    location="global",
+    bucket="gcs-task-logs",
+    view_id="gcs",
+    reader=job.member,
+    deployment="gcs",
+    opts=pulumi.ResourceOptions(depends_on=[gcs_task_logs]),
+)
+pulumi.export("gcs_task_log_view", gcs_task_log_view.path)
 # The billing export's rows (`billing_export`, the billing account's Cloud Billing export): read-only on that one dataset.
 # It holds every project's lines on the billing account; the job's queries select `labels.deployment = gcs`.
 gcp.bigquery.DatasetIamMember(
