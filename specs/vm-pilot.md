@@ -1,6 +1,6 @@
 # VM pilot: r2 + hf served and scanned from one small always-on VM
 
-Status: draft (2026-11-26, the cw session, from Ryan's ask: "get this working for r2+hf, on one small/cheap VM, where we'd nonetheless build out all the mechanisms"). For the root session to own (`cloud`, r2, hf). Builds on [vm-mode.md] (`vmd`, packs, tenants, the cell rule, parity: built and measured), [serverless-tiers.md] (the Worker ↔ VM hand-off, §5) and [full-scan-serving-bench.md]. Nothing here is approved for infra yet: the VM, its tunnel, secrets and Pulumi are each Ryan's go.
+Status: draft (2026-11-26, the cw session, from Ryan's ask: "get this working for r2+hf, on one small/cheap VM, where we'd nonetheless build out all the mechanisms"). For the root session to own (`cloud`, r2, hf). Builds on [vm-mode.md] (`vmd`, packs, tenants, the cell rule, parity: built and measured), [serverless-tiers.md] (the Worker ↔ VM hand-off, §5) and [full-scan-serving-bench.md]. Ryan's go on the box's infra (2026-11-27, high priority): one e2-standard-4 + a 50 GB pd-balanced disk in `oa-internal-450019`, labelled `app=disky`, `deployment=shared`, `component=vm-pilot`; a Cloudflare Tunnel; per-tenant HMAC secrets for `vmd`; a service account for the box. Per-deployment isolation (Ryan, 2026-11-27): the box's account holds nothing of a tenant's but `iam.serviceAccountTokenCreator` on its job account; a job runs as its spec's account, as on Batch. VM mode bakes beside prod (each session pinned `idx` or `vm`). The IaC and the box's bootstrap are built, not applied: see "Runbook".
 
 ## Why
 
@@ -53,9 +53,10 @@ A spec stays a Batch job's JSON (what every submitter builds today), so each bac
 
 ### `Local` (this host)
 
-- **Translation** (`container_runs`): each task (`taskCount`, run in turn, not `parallelism` at once) × each runnable becomes `<engine> run --rm --name disky-<job>-<task>-<runnable> --cgroup-parent=<slice> -e K=V… -v HOST:CTR… [--entrypoint E] IMAGE COMMANDS…`, with `$BATCH_TASK_INDEX` / `$BATCH_TASK_COUNT` as Batch sets them. Env is the task's then the runnable's `environment.variables`, sorted. A disk task volume (`deviceName`: the local-SSD `stage`, a new disk) becomes a host dir (`$DISKY_LOCAL_WORK/<job>/<device>`, default `<root>/<job>/disks/<device>`), created before the first run and removed after the last (as Batch's VM teardown removes the SSD); a container volume whose host path is under a task volume's `mountPath` is mounted from that dir. `maxRunDuration` is enforced per task (the container is stopped, `FAILED`).
-- **Refused** (`Unsupported`, before anything is written): gcsfuse and NFS volumes, a container volume outside every task volume, `secretVariables` / `encryptedVariables`, non-container runnables (script, barrier), `background` / `ignoreExitStatus` / `alwaysRun`, a container's registry credentials or raw `options`, more than one task group. A spec missing its cost labels is refused as on Batch (`cost_labels.check_spec`), since `deployment` is the tenant.
-- **Not applied:** `computeResource` and `allocationPolicy` (the slice is the budget), `maxRetryCount` (no spot here), the spec's service account (a job runs with the host's credentials: on GCE, the VM's), `logsPolicy`.
+- **Translation** (`container_runs`): each task (`taskCount`, run in turn, not `parallelism` at once) × each runnable becomes `<engine> run --rm --name disky-<job>-<task>-<runnable> --cgroup-parent=<slice> -e K=V… -v HOST:CTR… [--entrypoint E] IMAGE COMMANDS…`, with `$BATCH_TASK_INDEX` / `$BATCH_TASK_COUNT` as Batch sets them. Env is the task's then the runnable's `environment.variables`, sorted; their `secretVariables`, `$GOOGLE_OAUTH_ACCESS_TOKEN` (below, "Identity") and, unless set, `$GOOGLE_CLOUD_PROJECT` (the account's project) join them, a secret or the token as `-e NAME` alone. A disk task volume (`deviceName`: the local-SSD `stage`, a new disk) becomes a host dir (`$DISKY_LOCAL_WORK/<job>/<device>`, default `<root>/<job>/disks/<device>`), created before the first run and removed after the last (as Batch's VM teardown removes the SSD); a container volume whose host path is under a task volume's `mountPath` is mounted from that dir. `maxRunDuration` is enforced per task (the container is stopped, `FAILED`).
+- **Refused** (`Unsupported`, before anything is written): a spec without `allocationPolicy.serviceAccount.email`, gcsfuse and NFS volumes, a container volume outside every task volume, `encryptedVariables` (and a `secretVariables` ref that isn't a `projects/…/secrets/…/versions/…` name), non-container runnables (script, barrier), `background` / `ignoreExitStatus` / `alwaysRun`, a container's registry credentials or raw `options`, more than one task group. A spec missing its cost labels is refused as on Batch (`cost_labels.check_spec`), since `deployment` is the tenant.
+- **Identity** (built 2026-11-27): a job runs as its spec's service account, never as the host. Before each container run the supervisor mints a short-lived access token for that account (IAM Credentials `generateAccessToken`, under the host's credentials, which hold `iam.serviceAccountTokenCreator` on it; lifetime `$DISKY_LOCAL_TOKEN_LIFETIME_S` at submit, default 3600 s, IAM's maximum unless the org policy `iam.allowServiceAccountCredentialLifetimeExtension` lists the account, up to 12 h) and reads each of the run's `secretVariables` with that token (Secret Manager `:access`; payloads verbatim, as Batch injects them). Token and values go into the engine's environment only (`Host.run(env=)`; argv carries `-e NAME`), so `job.json` holds the secrets' names, never a value or a token. In the container `dt_cloud.job_identity` (at `dt_cloud`'s import) makes `$GOOGLE_OAUTH_ACCESS_TOKEN` every Google client's credentials (`google.auth.default`: gcsfs, `google-cloud-storage`, `gcp.session`); the box's Docker reads it for the tenant's image pull (`docker-credential-disky`), and job containers can't reach the metadata server (`docker-no-metadata.conf`), so the box's own token, and through it another tenant's, is out of their reach. A token isn't refreshed inside a run: a container outliving it sees its calls refused. Tests: `cloud/tests/test_job_backend.py` (the token minted per run for the spec's account, secrets read with it, nothing written), `test_job_identity.py`.
+- **Not applied:** `computeResource` and the rest of `allocationPolicy` (the slice is the budget), `maxRetryCount` (no spot here), `logsPolicy`.
 - **State** under `$DISKY_LOCAL_JOBS/<job_id>/`: `spec.json`, `job.json` (tenant, submit order, the translated runs), `status.json`, `supervisor.json` (`{pid, boot, at}`), `log` (every run's output), `exit`, `cancel` (a cancel's marker). Every read is from disk, so `status` / `logs` / `cancel` work from any process.
 - **Supervisor:** `submit` spawns `python -m dt_cloud.job_backend supervise ROOT ID`, by default as its own transient unit (`systemd-run --collect --unit=disky-job-<id> --slice=<slice>`, so it outlives a submitter that is itself a systemd unit; `$DISKY_LOCAL_SPAWN=direct` for a detached process on a dev box). It waits its turn, runs the job's containers in order, and records the end.
 - **One job at a time per tenant** (the spec's `deployment` label): under a per-tenant `flock`, a job starts only when it is the tenant's oldest queued job and none of the tenant's is running; other tenants run beside it (all inside `scan.slice`'s budget).
@@ -81,11 +82,116 @@ Still on raw Batch (known gaps):
 
 ### For review
 
-- **Secrets.** `Local` refuses `secretVariables`. A clean seam exists: the supervisor could resolve each ref with `secrets.access` under the host's credentials and pass it as `-e NAME` (no value: the engine copies it from the supervisor's own environment), so a value never reaches argv, `job.json` or disk. That needs the box's service account to hold `secretAccessor` on those secrets, an infra decision, so it isn't built.
+- **Secrets.** Resolved (2026-11-27): through the job's own impersonated account ("Identity" above), not the host's.
 - **gcsfuse volumes.** Refused. The pilot's jobs that mount buckets (the interval-store and static-names stages) either read through the API instead, or the box mounts gcsfuse itself (`gcsfuse` on the host, a host-path volume); the second keeps specs unchanged but puts a FUSE daemon in `scan.slice`.
 - **Logs.** A local job's output is its `log` file, not Cloud Logging, so `dt-cloud job logs` (Batch only) doesn't see it and nothing ships it off the box. Options: the store (copy `log` beside the scan's records at the end), or Docker's `gcplogs` driver (the spec's "logs to Cloud Logging"), which ties the box to GCP.
-- **Identity.** A local job runs with the host's credentials, not the spec's `serviceAccount`; the box's account needs the union of the pilot's jobs' grants.
+- **Identity.** Resolved (2026-11-27): impersonation of the spec's `serviceAccount`. Open: a token is good for an hour by default, and hf's listing step runs for hours; either the org policy extends the job accounts' token lifetime (to 12 h), or a refresher (a per-job metadata endpoint serving fresh tokens) replaces the one-shot token.
 - **Restart semantics.** A lost job fails rather than resumes; the scan steps already resume from their outputs on a resubmit.
+
+## Runbook (the box's infra)
+
+Built 2026-11-27 (`[cloud]`), not applied. Everything is shared infra owned by the root session.
+
+### Where it lives
+
+| what | where |
+|---|---|
+| The box as a component: account + grants, its own VPC (no ingress but IAP SSH), Cloud NAT, data disk, instance | [`infra/gcp/vm_box.py`] (`VmBox`) |
+| The `shared` GCP stack: project `disky-shared-gcp`, stack `shared`, config `vmPilot` | [`infra/gcp/shared/`] |
+| The `shared` Cloudflare stack: project `disky-shared-cf`, stack `shared`, the tunnel, its route, `vmd-pilot.oa.dev` | [`infra/cf/shared/`] |
+| The startup script, the units, `with-secrets`, `pack-sync`, `vmd-status`, the Ops Agent config | [`deploy/vm-pilot/`] |
+| The pack sync's pull | `dt-cloud vm-pack pull` ([`cloud/src/dt_cloud/vm_pack.py`]) |
+| Tests (Pulumi mocks, from the committed `Pulumi.shared.yaml`s; in CI's infra job) | `infra/tests/test_vm_pilot_stack.py` |
+
+Why there: a `shared` stack per provider, each its own Pulumi project in its own directory. `infra/gcp/` and `infra/cf/` on a deployment branch hold that deployment's `Pulumi.yaml` and `__main__.py`; a shared stack there would collide with each of them on the next merge of `cloud`. State is in `gs://oa-pulumi` beside the deployments' stacks (keyed by project/stack, so no collision), with the same KMS secrets provider (`ops/pulumi`). `infra/cf/r2-access/` is the precedent for a project of its own under a provider directory.
+
+### What it makes
+
+- **GCP** (22 resources, `pulumi preview`): the account `disky-vm-pilot@oa-internal-450019.iam.gserviceaccount.com` with `logging.logWriter`, `secretAccessor` on its own three containers (below), and `iam.serviceAccountTokenCreator` on exactly `oa-r2-usage-job@oa-internal-450019.iam.gserviceaccount.com` and `hf-usage-job@oa-internal-450019.iam.gserviceaccount.com`: nothing else. Everything the box does for a tenant (its jobs, its images, its pack sync's store credentials) it does as that tenant's job account, which already holds its deployment's secrets, data bucket and images; no grant is needed for the box as itself (the pack sync's R2 reads use the tenant's R2 keys, read as its job account). The VPC `disky-vm-pilot` (subnet 10.64.0.0/24 in us-west1, Private Google Access) with one firewall rule, IAP's 35.235.240.0/20 to TCP 22, so the default network's `0.0.0.0/0` rules never apply; a Cloud NAT for egress (no external address). The instance `disky-vm-pilot` (e2-standard-4, us-west1-b, Debian 12, 20 GB pd-balanced boot disk, shielded, OS Login) and its 50 GB pd-balanced data disk `disky-vm-pilot-data`. Labels: `app=disky`, `deployment=shared` (the provider's defaults) and `component=vm-pilot` on the instance, both disks and the secrets; networks, firewall rules, routers, NAT and IAM members take no labels in GCP.
+- **Cloudflare** (3 resources): the remotely managed tunnel `disky-vm-pilot`; its config, one route `vmd-pilot.oa.dev` → `http://localhost:7340` and a 404 for anything else; a proxied CNAME `vmd-pilot.oa.dev` → `<tunnel id>.cfargotunnel.com`. No page links to the hostname; `vmd` answers `/healthz` unsigned and every `/v1/*` only under a tenant's HMAC.
+- **Cost:** ~$98/month for the e2-standard-4 (on demand, us-west1), ~$7 for 70 GB of pd-balanced, ~$1 for the NAT plus $0.045/GB through it (packs, the Hub, R2; Google APIs bypass it). The tunnel is free.
+
+### The box (`bootstrap.sh`, at every boot)
+
+From the instance's non-secret metadata (`disky-repo`, `disky-ref`, `disky-tenants`, `disky-registries`, `disky-tunnel-secret`, the slices' budgets): formats and mounts the data disk at `/var/lib/disky`; installs Docker, git, jq, the Ops Agent (the journal to Cloud Logging, no metrics), cloudflared 2026.11.0 and uv 0.13.8 (both checksummed); checks out `disky-ref` from `disky-repo`; installs the slices plus a `budget.conf` drop-in each (`serveMemoryMin`, `scanMemoryMax`); moves Docker's data root to the data disk and configures the Artifact Registry hosts; builds `vmd` + `fsb` once per `bench/full-scan` tree in `job/Dockerfile`'s Rust image, in `scan.slice`; syncs `dt-cloud` into a venv per checkout (`uv sync --frozen --no-dev --no-editable --package dt-cloud`); writes `/etc/disky/job.env` (`DISKY_JOB_BACKEND=local`, `DISKY_LOCAL_JOBS`, …, also in login shells); then starts:
+
+- `vmd.service` (`serve.slice`, a dynamic user, loopback only) under `with-secrets -f /etc/disky/vmd.secrets` (`VMD_KEY_OA_R2`, `VMD_KEY_HF` from their secrets into its environment), serving `/etc/disky/vmd.json`.
+- `disky-tunnel.service` (`serve.slice`, a dynamic user): `cloudflared tunnel run` with `TUNNEL_TOKEN` from `vm-pilot-tunnel-token`, the same way.
+- `disky-pack-sync.timer` (every 10 minutes, `scan.slice`): `dt-cloud vm-pack pull` per tenant with its store's credentials, then `vmd.json` rewritten to list the tenants that have a pack (`vmd` re-reads it; a tenant without one isn't listed, so its status is `404 unknown-tenant`).
+
+Secrets reach a process only through `with-secrets`: read from Secret Manager into that process's environment, never a file, argv, metadata or output, as the box's account for its own (`vmd`'s keys, the tunnel token) and as the tenant's job account (`-i`, impersonated) for a tenant's (the pack sync's store keys). `/etc/disky/*.secrets` and `tenants.json` hold names only. Docker: the tenants' registry hosts go through `docker-credential-disky` (the job's minted token, from the environment), and a drop-in rejects job containers' traffic to the metadata server.
+
+### Apply
+
+0. Land the commits on `cloud` and push `o/cloud`: the box checks out its code from `https://github.com/Open-Athena/disky.git`.
+1. The GCP stack (as Ryan's gcloud account; read-only first):
+
+   ```bash
+   cd infra/gcp/shared
+   pulumi stack init shared --secrets-provider gcpkms://projects/oa-internal-450019/locations/global/keyRings/ops/cryptoKeys/pulumi
+   pulumi config set --path vmPilot.ref <landed cloud sha>   # commit the two changed lines of Pulumi.shared.yaml
+   pulumi preview -s shared    # 22 creates, nothing else
+   pulumi up -s shared
+   ```
+
+   The instance boots at once; `vmd` and the tunnel retry every 5 s until their secrets have values (step 2), then start on their own.
+2. The `vmd` keys (one per tenant; the same value later becomes that site's `VM_KEY` Pages secret, when the serving half lands):
+
+   ```bash
+   openssl rand -hex 32 | tr -d '\n' | gcloud secrets versions add vm-pilot-vmd-key-oa-r2 --project oa-internal-450019 --data-file=-
+   openssl rand -hex 32 | tr -d '\n' | gcloud secrets versions add vm-pilot-vmd-key-hf --project oa-internal-450019 --data-file=-
+   ```
+3. The Cloudflare stack, as an IaC token on OA's account with **Account › Cloudflare Tunnel: Edit** and **Zone › DNS: Edit** on `oa.dev` (in `$CF_IAC_TOKEN`; `$CLOUDFLARE_ACCOUNT_ID` and `$CF_ZONE_ID` set, as in hf's worktree), then the tunnel's token into Secret Manager without printing it:
+
+   ```bash
+   export CF_PULUMI_DIR=shared
+   infra/cf/run stack init shared --secrets-provider gcpkms://projects/oa-internal-450019/locations/global/keyRings/ops/cryptoKeys/pulumi
+   infra/cf/run preview -s shared   # 3 creates
+   infra/cf/run up -s shared
+   infra/cf/run stack output -s shared tunnel_token --show-secrets \
+     | gcloud secrets versions add vm-pilot-tunnel-token --project oa-internal-450019 --data-file=-
+   ```
+
+To change the checkout or the budgets later: `pulumi config set --path vmPilot.ref <sha>` (or `scanMemoryMax` / `serveMemoryMin`), `pulumi up` (metadata changes in place), then `sudo google_metadata_script_runner startup` on the box (or reboot).
+
+### Check
+
+```bash
+gcloud compute ssh disky-vm-pilot --project oa-internal-450019 --zone us-west1-b --tunnel-through-iap
+sudo journalctl -b -u google-startup-scripts | grep disky-bootstrap   # ends "done: <sha>; vmd active, tunnel active"
+systemctl show -p MemoryMin serve.slice; systemctl show -p MemoryMax scan.slice   # the budgets
+systemctl is-active vmd disky-tunnel disky-pack-sync.timer docker
+systemd-cgls -u serve.slice                                        # vmd + cloudflared, nothing else
+curl -s localhost:7340/healthz                                     # "ok"
+sudo /usr/local/lib/disky/with-secrets VMD_KEY=vm-pilot-vmd-key-oa-r2 -- /usr/local/lib/disky/vmd-status oa-r2
+sudo journalctl -u disky-pack-sync -n 20                           # per tenant: pulled | current | none
+```
+
+From anywhere, through the tunnel: `curl -s https://vmd-pilot.oa.dev/healthz` (`ok`), and with the key from Secret Manager, `DISKY_SECRETS_PROJECT=oa-internal-450019 deploy/vm-pilot/with-secrets VMD_KEY=vm-pilot-vmd-key-oa-r2 -- deploy/vm-pilot/vmd-status oa-r2 https://vmd-pilot.oa.dev` (the request and the reply's signature both checked). The tunnel's connectors show as healthy on the Zero Trust dashboard (Networks › Tunnels › `disky-vm-pilot`). Logs: Cloud Logging, `resource.labels.instance_id` of `disky-vm-pilot`.
+
+`vmd-status` answers `200` for a tenant only once it has a pack: none is published for r2 or hf yet. Either their scans turn on the `vm-pack` step (`FSB=build` in the image, `options.vm-pack`, specs/vm-mode.md §6; the deployment's call), or a first pack is built on the box, which has `fsb`, reading the tenant's store credentials as its job account (it writes `vm-pack/` into the tenant's index bucket):
+
+```bash
+sudo systemd-run --wait --pipe --slice=scan.slice /usr/local/lib/disky/with-secrets \
+  -i oa-r2-usage-job@oa-internal-450019.iam.gserviceaccount.com \
+  AWS_ACCESS_KEY_ID=oa-r2-index-access-key-id AWS_SECRET_ACCESS_KEY=oa-r2-index-secret-access-key -- \
+  env DISKY_R2_ENDPOINT_URL=<r2's endpoint> AWS_DEFAULT_REGION=auto \
+  dt-cloud vm-pack build -o r2://oa-r2-usage-index -w /var/lib/disky/work/vm-pack
+```
+
+### Teardown
+
+1. GCP first (it stops the tunnel's connector): the account and the three secret containers are `protect`ed (the components' convention), so `pulumi state unprotect --all -s shared`, then `pulumi destroy -s shared` in `infra/gcp/shared`. The tenants' job accounts are untouched (only this stack's token-creator members on them go).
+2. Cloudflare: `CF_PULUMI_DIR=shared infra/cf/run destroy -s shared`. The provider warns that a tunnel's config "cannot be destroyed"; deleting the tunnel removes it.
+3. Any site's `VM_KEY` Pages secret, if set by then.
+
+### Open choices
+
+- **Identity: decided** (Ryan, 2026-11-27: per-deployment isolation). The box impersonates each tenant's job account; it holds no tenant's secrets, buckets or images itself. Still open: long steps against the token's hour (above, "For review").
+- **The tunnel's front door.** HMAC alone authorizes (as specs/vm-mode.md §4.3 says); an Access application with a service token on `vmd-pilot.oa.dev` would also stop unauthenticated traffic at Cloudflare's edge, at the cost of two more site secrets. Later, if `vmd`'s exposure (its HTTP parser, `/healthz`) worries anyone.
+- **Egress.** Cloud NAT (no external address at all) over an external IP with no ingress rules ($3.65/month, no NAT): equivalent exposure, NAT chosen so the box has no public address.
+- **Region.** us-west1 (r2's Batch region and data bucket) over us-central1 (hf's): r2 is the first tenant scanned end to end; hf's data bucket is read cross-region (cents a month).
+- **Tenant names.** `oa-r2` (r2.oa.dev's `deployment` label, so the local backend's per-tenant queue and `vmd`'s tenant agree) and `hf`. The "r2 demo" (r2.rbw.sh) is a different deployment, on another Cloudflare account, and not a tenant.
 
 ## Scheduling
 
@@ -113,3 +219,8 @@ Still on raw Batch (known gaps):
 [`deploy/vm-pilot/serve.slice`]: ../deploy/vm-pilot/serve.slice
 [`deploy/vm-pilot/scan.slice`]: ../deploy/vm-pilot/scan.slice
 [`cloud/src/dt_cloud/job_backend.py`]: ../cloud/src/dt_cloud/job_backend.py
+[`infra/gcp/vm_box.py`]: ../infra/gcp/vm_box.py
+[`infra/gcp/shared/`]: ../infra/gcp/shared
+[`infra/cf/shared/`]: ../infra/cf/shared
+[`deploy/vm-pilot/`]: ../deploy/vm-pilot
+[`cloud/src/dt_cloud/vm_pack.py`]: ../cloud/src/dt_cloud/vm_pack.py
