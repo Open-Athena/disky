@@ -1,4 +1,4 @@
-"""hf's Cloudflare entrypoint: the shared `stack/` program, plus the two tokens only this deployment mints.
+"""hf's Cloudflare entrypoint: the shared `stack/` program, plus the tokens only this deployment mints.
 
 - **Ids from the environment.** The account and zone ids stay out of `Pulumi.hf.yaml` (the repo is public): unless
   the stack config sets them, they come from `$CLOUDFLARE_ACCOUNT_ID` and `$CF_ZONE_ID` (the worktree's `.envrc`).
@@ -6,6 +6,8 @@
   the R2 index bucket and its read/write token (`r2_s3_*` outputs: the job's publisher keys).
 - **The site's reader** (`site_r2_*`): R2 item read on the index bucket only, for the site's `STORE_*` seam, so the
   public-facing deployment holds no write key.
+- **The VM pilot's reader** (`vm_r2_*`): the same read-only scope, its own key, for the shared VM box's pack sync
+  (`dt-cloud vm-pack pull`, as `hf-usage-vm`; specs/vm-pilot.md), so the box holds no write key either.
 - **The job's D1 token** (`job_d1_token`): D1 read + write on the account, for `index-sync` and the scan-run records.
   D1 tokens can't be scoped to one database.
 - **The digest's icons** (`oa-hf-usage-icons`): a Pages project serving the Slack digest's reply avatars (its
@@ -89,6 +91,13 @@ reader = token(
     groups=group_ids(account_id, (READ,)),
     resources={f"com.cloudflare.edge.r2.bucket.{account_id}_default_{bucket}": "*"},
 )
+vm_reader = token(
+    "hf-vm-r2-reader",
+    account_id=account_id,
+    title=f"{project} r2 read (vm pilot)",
+    groups=group_ids(account_id, (READ,)),
+    resources={f"com.cloudflare.edge.r2.bucket.{account_id}_default_{bucket}": "*"},
+)
 d1 = token(
     "hf-job-d1",
     account_id=account_id,
@@ -99,6 +108,8 @@ d1 = token(
 pulumi.export("site_r2_access_key_id", pulumi.Output.secret(reader.id))
 # R2's S3 secret is the SHA-256 of the token value.
 pulumi.export("site_r2_secret_access_key", pulumi.Output.secret(reader.value.apply(lambda v: hashlib.sha256(v.encode()).hexdigest())))
+pulumi.export("vm_r2_access_key_id", pulumi.Output.secret(vm_reader.id))
+pulumi.export("vm_r2_secret_access_key", pulumi.Output.secret(vm_reader.value.apply(lambda v: hashlib.sha256(v.encode()).hexdigest())))
 pulumi.export("job_d1_token", pulumi.Output.secret(d1.value))
 icons = cloudflare.PagesProject(
     "hf-icons",

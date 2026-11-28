@@ -17,7 +17,7 @@ import pulumi
 import pulumi_gcp as gcp
 import yaml
 
-from gcp_jobs import Adopt, BatchCron, BatchEvents, BatchSubmitCron, JobAccount, Secrets, SiteDispatcher, cost_labels, labeled_provider
+from gcp_jobs import Adopt, BatchCron, BatchEvents, BatchSubmitCron, JobAccount, Secrets, SiteDispatcher, cost_labels, grant_secret, labeled_provider
 from task_logs import TaskLogBucket, TaskLogView
 
 cfg = pulumi.Config()
@@ -246,6 +246,36 @@ meta = BatchCron(
     adopt=adopt,
     depends_on=[job, secrets, images_reader, submit_grant, data_admin],
 )
+
+# The VM pilot's account for hf (specs/vm-pilot.md): the shared box impersonates it (`serviceAccountTokenCreator`, granted
+# in the shared stack) to sync hf's pack from R2, never `hf-usage-job`. It reads a read-only R2 key of its own (the CF
+# stack's `vm_r2_*`) and the endpoint, and nothing else: no Hub, D1, Pages or Slack token, no project role.
+VM_SECRETS = [
+    "hf-usage-vm-r2-access-key-id",      # R2_ACCESS_KEY_ID: the `vm_r2_access_key_id` CF output (R2 read, the index bucket only)
+    "hf-usage-vm-r2-secret-access-key",  # R2_SECRET_ACCESS_KEY: the `vm_r2_secret_access_key` CF output
+]
+vm = JobAccount(
+    "hf-usage-vm",
+    project=project,
+    account_id="hf-usage-vm",
+    display_name="hf VM pilot tenant",
+    description="The VM pilot box acts as this to read hf.oa.dev's pack from R2 (read-only); it holds no other hf secret",
+    roles=[],
+    acts_as_self=False,
+    adopt=adopt,
+)
+vm_secrets = Secrets(
+    "hf-vm-secrets",
+    project=project,
+    secrets={sid: {"component": "secret"} for sid in VM_SECRETS},
+    accessor=vm.member,
+    accessor_email=vm.email_literal,
+    adopt=adopt,
+)
+grant_secret("hf-usage-r2-endpoint-vm", project=project, secret_id="hf-usage-r2-endpoint", member=vm.member,
+             member_email=vm.email_literal, adopt=adopt, depends_on=[secrets])
+pulumi.export("vm_account", vm.email)
+pulumi.export("vm_secrets", VM_SECRETS)
 
 # hf's own Batch task logs (specs/per-deployment-task-logs.md): every hf job's, by its `deployment` label, kept a year
 # beside `_Default`'s 30 days; the job account reads them (its helpers') through the view (`$DT_TASK_LOG_VIEW`)

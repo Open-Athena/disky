@@ -73,6 +73,7 @@ def test_cf_stack(monkeypatch: pytest.MonkeyPatch):
             ("cloudflare:index/r2Bucket:R2Bucket", "hf-r2"),
             ("cloudflare:index/accountToken:AccountToken", "hf-r2-token"),
             ("cloudflare:index/accountToken:AccountToken", "hf-site-r2-reader"),
+            ("cloudflare:index/accountToken:AccountToken", "hf-vm-r2-reader"),
             ("cloudflare:index/accountToken:AccountToken", "hf-job-d1"),
             ("cloudflare:index/pagesProject:PagesProject", "hf-icons"),
             ("cloudflare:index/accountToken:AccountToken", "hf-job-pages"),
@@ -94,6 +95,7 @@ def test_cf_stack(monkeypatch: pytest.MonkeyPatch):
         bucket = {"com.cloudflare.edge.r2.bucket.acct_default_oa-hf-usage-index": "*"}
         for name, title, groups, scope in (
             ("hf-site-r2-reader", "oa-hf-usage r2 read (site)", ["Workers R2 Storage Bucket Item Read"], bucket),
+            ("hf-vm-r2-reader", "oa-hf-usage r2 read (vm pilot)", ["Workers R2 Storage Bucket Item Read"], bucket),
             ("hf-job-d1", "oa-hf-usage d1 (job)", ["D1 Read", "D1 Write"], {"com.cloudflare.api.account.acct": "*"}),
             ("hf-job-pages", "oa-hf-usage pages (job: digest plot)", ["Pages Write"], {"com.cloudflare.api.account.acct": "*"}),
         ):
@@ -111,7 +113,7 @@ def test_cf_stack(monkeypatch: pytest.MonkeyPatch):
     dash = g["program"]["dash"]
     every = [
         dash.pages, dash.domain, dash.cname, dash.d1, dash.kv, dash.r2, dash.r2_token,
-        *dash.branch_cnames.values(), *dash.branch_domains.values(), g["reader"], g["d1"], g["icons"], g["pages"],
+        *dash.branch_cnames.values(), *dash.branch_domains.values(), g["reader"], g["vm_reader"], g["d1"], g["icons"], g["pages"],
     ]
     return pulumi.Output.all(*[r.id for r in every]).apply(check)
 
@@ -179,6 +181,12 @@ def test_gcp_stack(monkeypatch: pytest.MonkeyPatch):
             ("gcp:cloudrunv2/serviceIamMember:ServiceIamMember", "hf-scan-events-invoker"),
             ("gcp:serviceaccount/iAMMember:IAMMember", "hf-scan-events-pubsub-token"),
             ("gcp:pubsub/subscription:Subscription", "hf-scan-events"),
+            ("disky:gcp:JobAccount", "hf-usage-vm"),
+            ("gcp:serviceaccount/account:Account", "hf-usage-vm"),
+            ("disky:gcp:Secrets", "hf-vm-secrets"),
+            *[("gcp:secretmanager/secret:Secret", s) for s in g["VM_SECRETS"]],
+            *[("gcp:secretmanager/secretIamMember:SecretIamMember", f"{s}-accessor") for s in g["VM_SECRETS"]],
+            ("gcp:secretmanager/secretIamMember:SecretIamMember", "hf-usage-r2-endpoint-vm"),
             ("disky:gcp:TaskLogBucket", "hf-task-logs"),
             ("gcp:logging/projectBucketConfig:ProjectBucketConfig", "hf-task-logs-bucket"),
             ("gcp:logging/projectSink:ProjectSink", "hf-task-logs-sink"),
@@ -186,6 +194,13 @@ def test_gcp_stack(monkeypatch: pytest.MonkeyPatch):
             ("gcp:logging/logView:LogView", "hf-task-log-view-view"),
             ("gcp:logging/logViewIamMember:LogViewIamMember", "hf-task-log-view-reader"),
         ])
+        # The VM pilot's account: no project role, and secretAccessor on its own read-only R2 key + the endpoint only
+        vm_sa = f"hf-usage-vm@{project}.iam.gserviceaccount.com"
+        assert g["VM_SECRETS"] == ["hf-usage-vm-r2-access-key-id", "hf-usage-vm-r2-secret-access-key"]
+        assert sorted(v["secretId"] for (t, _), v in m.resources.items()
+                      if t == "gcp:secretmanager/secretIamMember:SecretIamMember" and v["member"] == f"serviceAccount:{vm_sa}") == [
+            "hf-usage-r2-endpoint", "hf-usage-vm-r2-access-key-id", "hf-usage-vm-r2-secret-access-key"]
+        assert [v for (t, _), v in m.resources.items() if t.startswith("gcp:projects/iAMMember") and v["member"] == f"serviceAccount:{vm_sa}"] == []
         # hf's task logs: its own bucket (a year), fed by its label; the job account reads them through the view
         logs_filter = 'log_id("batch_task_logs") AND labels.deployment = "hf"'
         assert (m.inputs("hf-task-logs-bucket")["retentionDays"], m.inputs("hf-task-logs-sink")["filter"]) == (365, logs_filter)
