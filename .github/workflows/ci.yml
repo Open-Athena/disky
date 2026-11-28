@@ -370,7 +370,7 @@ jobs:
       - uses: astral-sh/setup-uv@v4
       - run: uv python install '${{ matrix.python-version }}'
       - run: uv sync --frozen --all-packages --all-extras --all-groups
-      - run: uv tool install py-spy
+      - run: uv tool install py-spy && (command -v gdb || sudo apt-get install -y -q gdb)
       - name: Run, dumping every Python process's stack once the log stops moving
         working-directory: cloud
         env:
@@ -388,6 +388,12 @@ jobs:
             if [ "$idle" -ge 240 ]; then
               echo "no output for ${idle}s; last lines:"; tail -15 ../pytest.log
               ps -eo pid,ppid,etime,stat,args --forest | grep -v ' \[' | cut -c1-220
+              for p in $(pgrep -f spawn_main); do
+                echo "::group::gdb $p"
+                sudo gdb -p "$p" -batch -ex 'info threads' -ex 'thread apply all bt 40' 2>&1 | grep -v '^\[New LWP' | head -400 || true
+                sudo cat /proc/$p/status | grep -E 'State|Threads' || true
+                echo "::endgroup::"
+              done
               for p in $(pgrep -f python); do
                 echo "::group::pid $p $(tr '\0' ' ' < /proc/$p/cmdline | cut -c1-160)"
                 sudo "$spy" dump --native --locals --pid "$p" || true
