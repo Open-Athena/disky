@@ -155,11 +155,21 @@ put "$BIN/vmd" /usr/local/bin/vmd 0755 || vmd_changed=0
 put "$BIN/fsb" /usr/local/bin/fsb 0755 || true
 
 # 7. dt-cloud (the local job backend's supervisor, `vm-pack pull`), one venv per checkout: a running job keeps its own.
+# `--reinstall-package`: uv caches a non-editable path package's built wheel by its pyproject.toml alone, so without it a
+# checkout whose code changed but whose pyproject didn't installs the previous build (2026-11-28: venv/6ee5a54c1 held an
+# older dt_cloud without `scan_box`). The check after compares the installed packages with the checkout's sources.
 VENV=$DATA/venv/$SHA
-if [ ! -x "$VENV/bin/dt-cloud" ]; then
+venv_matches() {
+  local site; site=$(echo "$VENV"/lib/python3*/site-packages)
+  diff -rq -x __pycache__ "$SRC/cloud/src/dt_cloud" "$site/dt_cloud" >/dev/null 2>&1 &&
+    diff -rq -x __pycache__ "$SRC/src/disk_tree" "$site/disk_tree" >/dev/null 2>&1
+}
+if [ ! -x "$VENV/bin/dt-cloud" ] || ! venv_matches; then
   log "dt-cloud venv for $SHA"
   (cd "$SRC" && UV_PROJECT_ENVIRONMENT="$VENV" UV_CACHE_DIR="$DATA/uv" UV_PYTHON_INSTALL_DIR="$DATA/uv/python" \
-    uv sync -q --frozen --no-dev --no-editable --package dt-cloud --python "$PYTHON")
+    uv sync -q --frozen --no-dev --no-editable --package dt-cloud --reinstall-package dt-cloud --reinstall-package disk-tree \
+      --python "$PYTHON")
+  venv_matches || { log "dt-cloud venv for $SHA doesn't match the checkout's sources"; exit 1; }
 fi
 ln -sfn "$VENV" "$DATA/venv/current"
 ln -sfn "$DATA/venv/current/bin/dt-cloud" /usr/local/bin/dt-cloud
