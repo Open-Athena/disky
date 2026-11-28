@@ -195,6 +195,16 @@ def test_the_next_month_links_to_a_switched_thread(tmp_path: Path):
     assert E._prev_op(CFG, str(root), OCT, "C1", "sender") is None
 
 
+def test_a_month_in_another_style_links_back(tmp_path: Path):
+    # September posted as `sender` (OP m1); October starts `weekly` (r2's new default): its OP still links September's
+    root, fake = _sender_thread(tmp_path)
+    _publish(root, [("2026-10-01T1200", {"total_bytes": 720 * 1024**4, "total_objects": 1}),
+                    ("2026-10-02T1200", {"total_bytes": 722 * 1024**4, "total_objects": 1})])
+    E.converge_slack(_tpl(), str(root), OCT, fake, "C1", "weekly")
+    op = fake.calls[0]
+    assert (op[0], op[2], op[1].split("\n")[-4:-1]) == ("post", None, ["", "[← September](https://slack.example.org/archives/C1/pm1)", ""])
+
+
 def test_switch_plan(tmp_path: Path):
     root, fake = _sender_thread(tmp_path)
     fake._react("m2", "eyes", 2)

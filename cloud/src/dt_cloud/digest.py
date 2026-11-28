@@ -989,8 +989,9 @@ def _op_render(tpl: Template, data, root: str, month: dt.date, state: dict, clie
     if icons_dir is not None and deploy_plot is not None:
         for url in [plot_url, *(u for _, u in split or [])]:
             _wait_reachable(url)
-    # the previous month's thread, linked from the OP
-    prev_op = _prev_op(cfg, root, month, channel, variant)
+    # the previous month's thread, linked from the OP: its live state in any variant, so a month that changed style
+    # (r2's November `sender`, December `weekly`) still links back, as its pin does
+    prev_op = _prev_op(cfg, root, month, channel, variant, tpl.variants)
     prev_url = client.permalink(prev_op) if prev_op else None
     return tpl.op_body(data, month, plot_url, prev_url, state.get("next_url")), plot_url, prev_url, split
 
