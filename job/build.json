@@ -6,7 +6,8 @@
   "hf"
  ],
  "build_args": {
-  "UV_SYNC_ARGS": "--extra s3"
+  "UV_SYNC_ARGS": "--extra s3",
+  "FSB": "build"
  },
  "context": [
   "pyproject.toml",
@@ -16,7 +17,10 @@
   "cloud/pyproject.toml",
   "cloud/src",
   "job",
-  "site/wrangler.toml"
+  "site/wrangler.toml",
+  "bench/full-scan/Cargo.toml",
+  "bench/full-scan/Cargo.lock",
+  "bench/full-scan/src"
  ],
  "repoint": {
   "region": "us-central1",

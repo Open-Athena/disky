@@ -40,7 +40,9 @@ skip: [bucket-check, over-time]
 # collects the interval-store generations the current one superseded
 # `cf-usage`: the Cloudflare usage snapshots (`snapshots/usage/<date>.json`, `/admin/usage`), never fatal
 # `run-cost`: this run's compute by job (`snapshots/cost/runs/<scan>/<run>.json`, /scans' Cost section; specs/scan-cost-by-stage.md), never fatal
-steps: [age-store, retire, store-gc, cf-usage, run-cost]
+# `vm-pack`: VM mode's pack of the interval store (`vm-pack/<gen>/<manifest>.fsb` + `vm-pack/CURRENT.json` on R2), built
+# in the post task (hf's store is small: no Batch job of its own), which the VM pilot's box syncs (specs/vm-pilot.md)
+steps: [age-store, retire, store-gc, cf-usage, run-cost, vm-pack]
 secrets:
   HF_TOKEN: hf-usage-hf-token
   CLOUDFLARE_API_TOKEN: hf-usage-cf-token
