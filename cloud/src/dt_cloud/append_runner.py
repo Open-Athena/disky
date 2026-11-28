@@ -85,7 +85,7 @@ class Level(ParamType):
 LEVEL_HELP = f"Compaction level: no carry reaches it; `none`: unbounded (default {COMPACT_LEVEL})"
 
 
-POLICY_FORMS = "`L` / `level:L` (an integer ≥ 1), `every:<N>d` / `every:<N>s` (days, scans), `geometric:<r>` (r > 0) or `none`"
+POLICY_FORMS = "`L` / `level:L` (an integer ≥ 1), `every:<N>d` / `every:<N>s` (days, scans), `geometric:<r>` / `bytes:<r>` (r > 0) or `none`"
 
 
 class PolicyType(ParamType):
@@ -335,7 +335,7 @@ def plan_carries(runs: list[dict], drilled: Collection[str] = frozenset(), max_l
 
 
 #: A policy's rules (`Policy.rule`).
-RULES = ("level", "every", "geometric", "none")
+RULES = ("level", "every", "geometric", "bytes", "none")
 
 
 @dataclass(frozen=True)
@@ -349,6 +349,10 @@ class Policy:
       (`s`). Carries are unbounded below the trigger.
     - `geometric` r: once the scans past the base number at least r × the base's own (r = 1: at 2, 4, 8, … × the first
       base's). Each compaction rewrites the whole base, so this keeps its cost per scan constant. Carries unbounded.
+    - `bytes` r: once the runs' bytes reach r × the base's (`split_sizes`: each listed run's files, against the
+      generation's others). A fold rewrites about the base and the runs, so each byte of change is rewritten ≈ (1 + r) / r
+      times, and a query reads at most ≈ (1 + r) × a just-folded generation; it tracks the churn, where `level` and
+      `every` count scans (cw's c004 folded 5 runs holding 8.6B counted rows). Carries unbounded.
     - `none`: never; carries unbounded."""
     rule: str
     level: int | None = None
@@ -360,6 +364,7 @@ class Policy:
         ok = {"level": isinstance(self.level, int) and not isinstance(self.level, bool) and self.level >= 1,
               "every": isinstance(self.every, int) and not isinstance(self.every, bool) and self.every >= 1 and self.unit in ("d", "s"),
               "geometric": isinstance(self.ratio, (int, float)) and not isinstance(self.ratio, bool) and self.ratio > 0,
+              "bytes": isinstance(self.ratio, (int, float)) and not isinstance(self.ratio, bool) and self.ratio > 0,
               "none": True}
         if self.rule not in ok or not ok[self.rule]:
             raise ValueError(f"not a compaction policy: {self!r}")
@@ -369,8 +374,8 @@ class Policy:
             return f"level:{self.level}"
         if self.rule == "every":
             return f"every:{self.every}{self.unit}"
-        if self.rule == "geometric":
-            return f"geometric:{self.ratio:g}"
+        if self.rule in ("geometric", "bytes"):
+            return f"{self.rule}:{self.ratio:g}"
         return "none"
 
     @property
@@ -379,13 +384,13 @@ class Policy:
         return self.level if self.rule == "level" else None
 
     def to_json(self) -> dict | str:
-        """As a profile's `compact` field: `{"level": L}`, `{"every": "7d"}`, `{"geometric": r}`, or `"none"`."""
+        """As a profile's `compact` field: `{"level": L}`, `{"every": "7d"}`, `{"geometric": r}`, `{"bytes": r}`, or `"none"`."""
         if self.rule == "level":
             return {"level": self.level}
         if self.rule == "every":
             return {"every": f"{self.every}{self.unit}"}
-        if self.rule == "geometric":
-            return {"geometric": self.ratio}
+        if self.rule in ("geometric", "bytes"):
+            return {self.rule: self.ratio}
         return "none"
 
 
@@ -398,8 +403,9 @@ def level_policy(level: int | None) -> Policy:
 
 
 def parse_policy(var: str, raw: Any) -> Policy:
-    """A profile's `compact` value (JSON: `{"level": 5}`, `{"every": "7d"}`, `{"geometric": 1}`, `"none"`, or a bare
-    level), or an env var's / option's text (`5`, `level:5`, `every:7d`, `every:30s`, `geometric:1.5`, `none`), as a
+    """A profile's `compact` value (JSON: `{"level": 5}`, `{"every": "7d"}`, `{"geometric": 1}`, `{"bytes": 0.5}`, `"none"`,
+    or a bare level), or an env var's / option's text (`5`, `level:5`, `every:7d`, `every:30s`, `geometric:1.5`, `bytes:0.5`,
+    `none`), as a
     `Policy`; `var` names the source in the error (`SystemExit`)."""
     bad = SystemExit(f"{var}: {raw!r} is not a compaction policy ({POLICY_FORMS})")
     if isinstance(raw, Policy):
@@ -420,9 +426,9 @@ def parse_policy(var: str, raw: Any) -> Policy:
             return Policy("level", level=int(arg))
         if rule == "every" and arg[-1:] in ("d", "s"):
             return Policy("every", every=int(arg[:-1]), unit=arg[-1])
-        if rule == "geometric":
+        if rule in ("geometric", "bytes"):
             r = float(arg)
-            return Policy("geometric", ratio=int(r) if r.is_integer() else r)
+            return Policy(rule, ratio=int(r) if r.is_integer() else r)
     except ValueError:
         pass
     raise bad
@@ -434,10 +440,11 @@ def as_policy(p: Policy | int | None) -> Policy:
 
 
 def compaction_why(runs: list[dict], policy: Policy | int | None, drilled: Collection[str] = frozenset(), *,
-                   base: Collection[str] = ()) -> str | None:
+                   base: Collection[str] = (), sizes: tuple[int, int] | None = None) -> str | None:
     """Why the generation whose newest manifest lists `runs` (oldest first) is due a compaction under `policy` (a
     `Policy`, or a compaction level: None unbounded), or None when it isn't; the reason names the rule that fired.
-    `base`: the base generation's scan ids, oldest first (`every …d` and `geometric` read them). Never without runs."""
+    `base`: the base generation's scan ids, oldest first (`every …d` and `geometric` read them). `sizes`: the runs' bytes
+    and the base's (`split_sizes`; `bytes` reads them). Never without runs."""
     policy = as_policy(policy)
     if not runs or policy.rule == "none":
         return None
@@ -450,6 +457,14 @@ def compaction_why(runs: list[dict], policy: Policy | int | None, drilled: Colle
     past = sum(len(r["scans"]) for r in runs)
     if policy.rule == "every" and policy.unit == "s":
         return f"every {policy.every}s: {past} scans past the base" if past >= (policy.every or 0) else None
+    if policy.rule == "bytes":
+        from .heartbeat import fmt_bytes
+
+        if sizes is None:
+            raise ValueError(f"compaction policy {policy}: the runs' and the base's sizes are needed")
+        ran, based = sizes
+        return (f"bytes {policy.ratio:g}: the runs' {fmt_bytes(ran)} ≥ {policy.ratio:g} × the base's {fmt_bytes(based)}"
+                if ran >= (policy.ratio or 0) * based else None)
     base = list(base)
     if not base:
         raise ValueError(f"compaction policy {policy}: the base's scans are needed")
@@ -464,12 +479,23 @@ def compaction_why(runs: list[dict], policy: Policy | int | None, drilled: Colle
             if past >= ratio * len(base) else None)
 
 
-def compaction_due(runs: list[dict], policy: Policy | int | None, drilled: Collection[str] = frozenset(), *, base: Collection[str] = ()) -> bool:
+def compaction_due(runs: list[dict], policy: Policy | int | None, drilled: Collection[str] = frozenset(), *, base: Collection[str] = (),
+                   sizes: tuple[int, int] | None = None) -> bool:
     """Whether `runs` (a manifest's, oldest first) are due to fold with the base into a new base generation under
     `policy` (`compaction_why`). Under a level L (an int, or `Policy` `level`): once their due carries are made
     (`plan_carries`), two runs at level L − 1 — the carry between them would reach the compaction level (every 2^L scans
     past the base). Never when unbounded (None, `none`)."""
-    return compaction_why(runs, policy, drilled, base=base) is not None
+    return compaction_why(runs, policy, drilled, base=base, sizes=sizes) is not None
+
+
+def split_sizes(listing: Mapping[str, int], runs: list[dict]) -> tuple[int, int]:
+    """The runs' bytes and the base's, from ``listing`` (``{key under the generation: bytes}``): a run's are its key's
+    files; the base's every other file but `manifests/` and the runs' parent dirs (a superseded run awaiting its prune
+    counts as neither)."""
+    keys = [r["key"].rstrip("/") + "/" for r in runs]
+    tops = {k.split("/", 1)[0] for k in keys} | {"manifests"}
+    return (sum(n for k, n in listing.items() if any(k.startswith(p) for p in keys)),
+            sum(n for k, n in listing.items() if k.split("/", 1)[0] not in tops))
 
 
 def rebase(runs: list[dict], inputs: list[str], out: dict) -> list[dict] | None:
@@ -1918,6 +1944,9 @@ class Runner:
     prepare: Callable[[str], None]
     prune: Callable[[str], None]
     list_keys: Callable[[str], list[str]] = lambda prefix: []
+    #: `{key: bytes}` under a prefix (the data bucket): what the `bytes` compaction rule measures (`sizes`). None: this
+    #: store lists no sizes, and a `bytes` policy is refused rather than read as zero.
+    list_sizes: Callable[[str], dict[str, int]] | None = None
     log: Callable[[str], None] = err
     dry_run: bool = False
     now: Callable[[], datetime] = lambda: datetime.now(timezone.utc)
@@ -1967,6 +1996,13 @@ class Runner:
     @property
     def root(self) -> str:
         return f"{self.store_prefix}/{self.p.gen}"
+
+    def sizes(self, runs: list[dict]) -> tuple[int, int]:
+        """The runs' bytes and the base's in this generation (`split_sizes` over `list_sizes`)."""
+        if self.list_sizes is None:
+            raise ValueError(f"{type(self).__name__}: the `bytes` compaction rule needs the store's sizes (`list_sizes`)")
+        top = f"{self.root}/"
+        return split_sizes({k[len(top):]: n for k, n in self.list_sizes(top).items() if k.startswith(top)}, runs)
 
     def manifests(self) -> list[str]:
         """The manifests' keys, oldest first: by scan, then revision (`manifest_keys`)."""
@@ -2352,7 +2388,8 @@ class Runner:
             _, merges = plan_carries(m["runs"], drilled, policy.carry_level)
             needs_base = policy.rule == "geometric" or (policy.rule == "every" and policy.unit == "d")
             base = [s["id"] for s in self.base()["scans"]] if needs_base and m["runs"] else []
-            self.compaction = why = compaction_why(m["runs"], policy, drilled, base=base)
+            sizes = self.sizes(m["runs"]) if policy.rule == "bytes" and m["runs"] else None
+            self.compaction = why = compaction_why(m["runs"], policy, drilled, base=base, sizes=sizes)
             compact = why is not None
             if compact and policy.rule == "level":
                 self.log(f"merge: level {policy.level} is due: compact into a new base generation (carries stop below it)")
@@ -2609,7 +2646,10 @@ def due_in(gen_dir: Path, policy: Policy | int | None, drilled: Collection[str] 
     if not runs:
         return None
     base = [s["id"] for s in json.loads((gen_dir / "scans.json").read_text())["scans"]]
-    return compaction_why(runs, policy, drilled, base=base)
+    sizes = None
+    if as_policy(policy).rule == "bytes":
+        sizes = split_sizes({f.relative_to(gen_dir).as_posix(): f.stat().st_size for f in gen_dir.rglob("*") if f.is_file()}, runs)
+    return compaction_why(runs, policy, drilled, base=base, sizes=sizes)
 
 
 def forced(gen_dir: Path, why: str = "forced (-K)") -> str | None:

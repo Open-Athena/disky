@@ -44,6 +44,8 @@ def _merged(scans: list[str], level: int) -> dict:
     (" Every:2S ", Policy("every", every=2, unit="s"), "every:2s", {"every": "2s"}),
     ("geometric:1", Policy("geometric", ratio=1), "geometric:1", {"geometric": 1}),
     ({"geometric": 1.5}, Policy("geometric", ratio=1.5), "geometric:1.5", {"geometric": 1.5}),
+    ("bytes:0.5", Policy("bytes", ratio=0.5), "bytes:0.5", {"bytes": 0.5}),
+    ({"bytes": 1}, Policy("bytes", ratio=1), "bytes:1", {"bytes": 1}),
     ("none", ar.NEVER, "none", "none"),
     ("NONE", ar.NEVER, "none", "none"),
 ])
@@ -53,7 +55,7 @@ def test_parse_policy(raw, want, text, js):
 
 
 @pytest.mark.parametrize("raw", ["0", "level:0", "every:7", "every:0d", "every:7w", "every:d", "geometric:0", "geometric:-1", "geometric:x",
-                                 "none:3", "", "level:", {"level": 2, "every": "1d"}, True, 2.5, None])
+                                 "bytes:0", "bytes:-1", "bytes:x", "none:3", "", "level:", {"level": 2, "every": "1d"}, True, 2.5, None])
 def test_parse_policy_refuses(raw):
     with pytest.raises(SystemExit) as e:
         parse_policy("STATIC_NAMES_COMPACT", raw)
@@ -62,7 +64,7 @@ def test_parse_policy_refuses(raw):
 
 def test_carry_level():
     """Carries stop below L under a level; every other rule leaves them unbounded below its trigger."""
-    assert [parse_policy("x", r).carry_level for r in ("4", "every:7d", "every:9s", "geometric:1", "none")] == [4, None, None, None, None]
+    assert [parse_policy("x", r).carry_level for r in ("4", "every:7d", "every:9s", "geometric:1", "bytes:1", "none")] == [4, None, None, None, None, None]
 
 
 # ── Which rule fires ───────────────────────────────────────────────────────
@@ -96,13 +98,47 @@ def test_compaction_why(policy, runs, want):
 
 
 def test_no_runs_never_due():
-    assert [compaction_why([], parse_policy("x", r), base=BASE) for r in ("1", "every:1s", "every:1d", "geometric:0.1")] == [None] * 4
+    assert [compaction_why([], parse_policy("x", r), base=BASE) for r in ("1", "every:1s", "every:1d", "geometric:0.1", "bytes:0.1")] == [None] * 5
 
 
 def test_levels_stand_for_their_policy():
     """A bare level (or None) is its `level` policy (`none` unbounded): `compaction_due`'s old callers keep working."""
     runs = [_run(d) for d in DAYS[:4]]
     assert [compaction_why(runs, x) for x in (2, None)] == [compaction_why(runs, Policy("level", level=2)), None]
+
+
+def test_bytes_reads_the_runs_bytes_against_the_bases():
+    """`bytes` r: due once the runs' bytes reach r × the base's (`sizes`); refused without them."""
+    runs = [_run(d) for d in DAYS[:2]]
+    p = parse_policy("x", "bytes:0.5")
+    assert [compaction_why(runs, p, sizes=s) for s in ((49 << 20, 100 << 20), (50 << 20, 100 << 20))] == [
+        None, "bytes 0.5: the runs' 50.0 MiB ≥ 0.5 × the base's 100.0 MiB"]
+    with pytest.raises(ValueError) as e:
+        compaction_why(runs, p)
+    assert str(e.value) == "compaction policy bytes:0.5: the runs' and the base's sizes are needed"
+
+
+def test_split_sizes():
+    """A run's bytes are its key's files; the base's every other file but `manifests/` and a superseded run (under the
+    runs' parent dir, listed by no run)."""
+    runs = [_merged(DAYS[:2], 1), _run(DAYS[2])]
+    listing = {"catalog/a.parquet": 100, "drill/b.parquet": 20, "scans.json": 1, "manifests/x.json": 5,
+               f"{runs[0]['key']}/s.parquet": 30, f"{runs[1]['key']}/s.parquet": 7, f"deltas/{DAYS[0]}/s.parquet": 9}
+    assert ar.split_sizes(listing, runs) == (37, 121)
+
+
+def test_due_in_sizes_a_local_generation(tmp_path):
+    """`due_in` under `bytes` sizes the generation's own files (`split_sizes`)."""
+    g = tmp_path / "g"
+    (g / "manifests").mkdir(parents=True)
+    (g / "manifests" / f"{DAYS[0]}.json").write_text(json.dumps({"date": DAYS[0], "runs": [_run(DAYS[0])]}))
+    (g / "scans.json").write_text(json.dumps({"scans": [{"id": s} for s in BASE]}))
+    (g / "base.parquet").write_bytes(b"x" * 100)
+    (g / "deltas" / DAYS[0]).mkdir(parents=True)
+    (g / "deltas" / DAYS[0] / "a.parquet").write_bytes(b"x" * 200)
+    base = 100 + (g / "scans.json").stat().st_size
+    assert [ar.due_in(g, parse_policy("x", r)) for r in ("bytes:0.5", "bytes:2")] == [
+        f"bytes 0.5: the runs' 200 B ≥ 0.5 × the base's {base} B", None]
 
 
 def test_rules_reading_the_base_need_it():
@@ -172,6 +208,30 @@ def test_runner_merge_stage_names_the_rule(compact, log):
         assert f.stack("2026-08-07.m001.json") == [("deltas/2026-08-04_2026-08-07", 2)]
     assert ([m for m in f.log if m.startswith("merge: compaction")], r.compaction) == (
         ([log], log.split(" (", 1)[1].rsplit("): compact", 1)[0]) if log else ([], None))
+
+
+@pytest.mark.parametrize("run_bytes, log", [
+    (60, "merge: compaction due under bytes:0.5 (bytes 0.5: the runs' 60 B ≥ 0.5 × the base's 100 B): compact into a new base generation"),
+    (40, None),
+])
+def test_runner_merge_stage_measures_the_runs_bytes(run_bytes, log):
+    """Under `bytes` the merge stage lists the generation's sizes (`list_sizes`): the runs' files against the base's,
+    the manifests counting as neither."""
+    f = IvFake(["2026-08-03"], compact={"bytes": 0.5})
+    runs = [_merged(["2026-08-04", "2026-08-05"], 1), _merged(["2026-08-06", "2026-08-07"], 1)]
+    f.keys[f"{G1}/manifests/2026-08-07.json"] = {"date": "2026-08-07", "runs": runs}
+    sizes = {f"{G1}/ranges/r0.parquet": 100, f"{G1}/manifests/2026-08-07.json": 3,
+             f"{G1}/{runs[0]['key']}/a.parquet": run_bytes // 2, f"{G1}/{runs[1]['key']}/a.parquet": run_bytes - run_bytes // 2}
+    r = f.runner(merge_wait=None, list_sizes=lambda prefix: {k: n for k, n in sizes.items() if k.startswith(prefix)})
+    r.carries()
+    assert [m for m in f.log if m.startswith("merge: compaction")] == ([log] if log else [])
+
+
+def test_a_store_listing_no_sizes_refuses_bytes():
+    """A runner given no `list_sizes` refuses the `bytes` rule rather than read the sizes as zero (always due)."""
+    with pytest.raises(ValueError) as e:
+        IvFake(["2026-08-03"], compact={"bytes": 0.5}).runner().sizes([])
+    assert str(e.value) == "Runner: the `bytes` compaction rule needs the store's sizes (`list_sizes`)"
 
 
 # ── `interval-store add -C every:…` / `-K` ─────────────────────────────────

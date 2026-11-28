@@ -1187,6 +1187,7 @@ def store_runner(cfg: Config, *, dry_run: bool = False, merge: bool = True, merg
         count=lambda prefix, suffix: sum(1 for k in store.keys(prefix) if k.endswith(suffix)),
         read_json=store.read_json,
         list_keys=store.keys,
+        list_sizes=store.listing,
         published=published,
         run_job=ar.BatchRunner(p, err),
         prepare=prepare,

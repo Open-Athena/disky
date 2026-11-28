@@ -495,6 +495,7 @@ def gcs_runner(cfg: Profile, *, dry_run: bool = False, verify_terms: str | None 
         merge=merge,
         merge_wait=merge_wait,
         list_keys=lambda prefix: [x.name for x in client.list_blobs(cfg.bucket, prefix=prefix)],
+        list_sizes=lambda prefix: {x.name: x.size for x in client.list_blobs(cfg.bucket, prefix=prefix)},
         coordination=None if dry_run else lambda: ar.gcs_coordinator_lease(cfg.scratch, ar.coordinator_prefix(Store(f"gs://{cfg.bucket}"), PREFIX, runner.cfg.gen),
                                                                            client),
         compacting=None if dry_run or not cfg.scratch else lambda: ar.gcs_compaction_lease_file(cfg.scratch, PREFIX, client),
