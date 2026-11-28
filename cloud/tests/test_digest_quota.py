@@ -1421,6 +1421,26 @@ class _StoredSlack(_FakeSlack):
         return super()._request(api, args, **kw)
 
 
+class _RefusingSlack(_FakeSlack):
+    """Slack refusing every edit, as it did cw's OP over 4,000 chars."""
+
+    def edit(self, ts, content):
+        raise RuntimeError("Slack API error: msg_too_long")
+
+
+def test_an_op_slack_refuses_is_kept_beside_the_state(tmp_path: Path):
+    """The OP edit refused: the body it was sent is written beside the month's state (`failed_op_path`), and the
+    converge still fails with Slack's error."""
+    root = tmp_path / "snapshots" / "cw"
+    _publish(root, LEAD + SEPT)
+    tpl = _tpl()
+    E.converge_slack(tpl, str(root), SEP, _FakeSlack(), "C1", "sender")
+    with pytest.raises(RuntimeError, match="^Slack API error: msg_too_long$"):
+        E.converge_slack(tpl, str(root), SEP, _RefusingSlack(), "C1", "sender")
+    state = E.state_path(str(root), SEP, tpl.cfg.state.format(channel="C1", variant="sender"))
+    assert Path(E.failed_op_path(state)).read_text() == "<site OP: quota 2026-09, 4 scans to 2026-09-02T1200, params ->"
+
+
 def test_a_new_months_op_links_last_months_forward_once(tmp_path: Path, monkeypatch):
     """When the scheduled converge posts a month's OP, last month's OP gains its forward link: the link line of the text
     Slack stores edited in place (`relink`), never re-rendered, exactly once; a re-run edits it no more."""

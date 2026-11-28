@@ -850,6 +850,22 @@ def save_state(path: str, state: dict) -> None:
     blobfs.write_text(path, json.dumps(state, indent=2))
 
 
+def failed_op_path(state_path: str) -> str:
+    """Where the OP Slack last refused is kept: beside the month's state, ``<YYYY-MM>.failed-op.md``."""
+    return state_path.removesuffix(".json") + ".failed-op.md"
+
+
+def keep_refused(path: str, body: str, e: Exception) -> None:
+    """The OP ``body`` Slack refused (``e``) written to ``path`` and named on stderr with its length, so whoever reads
+    the failure has what was sent, not a re-render of it (cw 2026-11-28: `msg_too_long`, a 4,022-char text)."""
+    from disk_tree import blobfs
+
+    if not blobfs.is_url(path):
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
+    blobfs.write_text(path, body)
+    _err(f"digest: Slack refused the OP ({type(e).__name__}: {e}); the {len(body):,}-char body it was sent → {path}")
+
+
 # ---- a thread's per-variant states (specs/digest-thread-variant.md) ----------------
 
 
@@ -1302,13 +1318,17 @@ def converge_slack(tpl: Template, root: str, month: dt.date, client, channel: st
     if len(tpl.variants) > 1:
         state["variant"] = variant
     op_ts = state.get("op_ts")
-    if op_ts:
-        client.edit(op_ts, body)
-        _err(f"digest: edited OP {op_ts} ({tpl.n_scans(data)} scans)")
-    else:
-        op_ts = client.post(body, username=f"{cfg.title} — {month:%B %Y}", **cfg.op_sender()).id
-        state["op_ts"] = op_ts
-        _err(f"digest: posted OP {op_ts}")
+    try:
+        if op_ts:
+            client.edit(op_ts, body)
+            _err(f"digest: edited OP {op_ts} ({tpl.n_scans(data)} scans)")
+        else:
+            op_ts = client.post(body, username=f"{cfg.title} — {month:%B %Y}", **cfg.op_sender()).id
+            state["op_ts"] = op_ts
+            _err(f"digest: posted OP {op_ts}")
+    except Exception as e:
+        keep_refused(failed_op_path(path), body, e)
+        raise
     if current and cfg.pin and pin_op(client, channel, state, op_ts, _prev_op(cfg, root, month, channel, variant, tpl.variants)):
         save_state(path, state)
     if current:
