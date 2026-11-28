@@ -24,6 +24,8 @@ import os
 import shutil
 import tempfile
 from bisect import bisect_left
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from time import monotonic
 
@@ -138,8 +140,15 @@ def _union(parts: list[str], empty: str) -> str:
     return " UNION ALL ".join(parts) if parts else f"SELECT * FROM ({empty}) WHERE false"
 
 
+#: The runs' counts (`im_d`) and the floor crossers (`im_c`) are built in hash parts of about this many input rows
+#: (`measure_kind`; their files' row counts), each aggregated alone in memory, at most `AGG_PARTS_MAX` of them: one
+#: aggregate over cw's 8.6B counts (2026-11-27) spilled and finished on ~6 of 48 CPUs for 16 of its 23 min.
+AGG_PART_ROWS = 200_000_000
+AGG_PARTS_MAX = 256
 #: At least this many floor crossers are counted on worker processes (`base_counts_parallel`); fewer, here.
 PARALLEL_MIN = 200_000
+#: `base_counts_parallel`'s shares: at least this many crossers each (and at most 8 per process).
+SHARE_ROWS_MIN = 10_000
 #: Decoded groups each worker keeps (`CachedGroupFile.cap_groups`): its share is sorted, so neighbors share groups and a few
 #: suffice; the default (`static_drill.GROUP_CACHE`, 2048) on 48 workers took a highmem-48 past its RAM (cw, 2026-11-07).
 WORKER_GROUPS = 16
@@ -242,25 +251,39 @@ def base_counts_parallel(con, tier: sd.Tier, kind: str, src: str, into: str, n: 
     processes: `src` cut in sorted shares (parquet under `work`), each counted against the tier's own group files, copied to
     the work disk first (`local_tier`). Nothing of `src` is held in Python here: a compaction's crossers ran to 191M (cw,
     2026-11-06), 2.0B (2026-11-27). Logs its progress by share (`heartbeat.Progress`: done, crossers counted, ETA)."""
-    from concurrent.futures import ProcessPoolExecutor, as_completed
-    from multiprocessing import get_context
+    from concurrent.futures import as_completed
+    from disk_tree.spawned import spawn_pool
 
-    from .heartbeat import Progress
+    from .heartbeat import Progress, set_stage
 
-    parts = max(1, min(jobs * 8, n // 10_000))
+    parts = max(1, min(jobs * 8, n // SHARE_ROWS_MIN))
     cut = work / "cands"
+    # every crosser sorted (9 min of cw's 2026-11-27 fold, 2.0B): `(c, dir)` ranges cut at sampled keys cost as much in a
+    # synthetic trial (60M rows: their comparisons 6.5 s, the whole sorted cut 6.1 s)
+    set_stage(f"base counts {kind}: {n:,} floor crossers sorted into {parts} shares")
     con.execute(f"""COPY (SELECT c, dir, ((row_number() OVER (ORDER BY c, dir) - 1) * {parts} // {n})::INTEGER AS part FROM {src})
         TO {q(str(cut))} (FORMAT parquet, PARTITION_BY (part))""")
     shares = sorted((int(d.name.split("=", 1)[1]), sorted(str(f) for f in d.glob("*.parquet"))) for d in cut.glob("part=*"))
     err(f"base counts {kind}: {n:,} floor crossers in {len(shares)} shares on {jobs} processes")
     tier = local_tier(tier, kind, work / "tier")
     prog = Progress(f"base counts {kind}", len(shares), total_rows=n, unit="shares")
-    with ProcessPoolExecutor(jobs, mp_context=get_context("spawn"), initializer=_bc_init,
-                             initargs=(str(tier.root), tier.name, kind)) as pool:
+    with spawn_pool(jobs, _bc_init, (str(tier.root), tier.name, kind)) as pool:
         for f in as_completed([pool.submit(_bc_part, fs, str(work / f"out-{i:05d}.parquet")) for i, fs in shares]):
             prog.tick(rows=f.result())
     prog.done()
     con.execute(f"INSERT INTO {into} SELECT c, dir, rows FROM read_parquet({q(str(work / 'out-*.parquet'))})")
+
+
+@contextmanager
+def open_partitions(con, n: int) -> Iterator[None]:
+    """DuckDB keeps a file per partition open at once while a `COPY … PARTITION_BY` of `n` partitions writes (its default
+    100 would close and reopen them, cutting each into many files)."""
+    opened = con.execute("SELECT current_setting('partitioned_write_max_open_files')").fetchone()[0]
+    con.execute(f"SET partitioned_write_max_open_files = {max(int(opened), n + 1)}")
+    try:
+        yield
+    finally:
+        con.execute(f"SET partitioned_write_max_open_files = {opened}")
 
 
 def measure_kind(con, tiers: list[sd.Tier], meas: Path, kind: str, out: Path, *, floor: int, members: str | None = None,
@@ -299,18 +322,54 @@ def measure_kind(con, tiers: list[sd.Tier], meas: Path, kind: str, out: Path, *,
 
     heads = [keyed(i, f"""SELECT q, dir, b AS rows, {i} AS tier FROM read_parquet({_files(fs)})
         WHERE kind IN ({sd.KIND_FULL}, {sd.KIND_DELTA})""") for i, t in runs if (fs := t.files(kind, "rollups"))]
-    dcs = [keyed(i, f"SELECT q, dir, rows FROM read_parquet({q(f)})") for i, t in runs if (f := t.dcount(kind))]
+    dfiles = [(i, f) for i, t in runs if (f := t.dcount(kind))]
+    # each count keyed by its member (long) or literal (short), with what its floor crossing is counted under (`c0`: the
+    # member's base canonical; the literal itself)
+    dcs = [(f"SELECT mt.q, mt.c0, s.dir, s.rows FROM read_parquet({q(f)}) AS s JOIN im_mt AS mt ON mt.c{i} = s.q" if long else
+            f"SELECT q, q AS c0, dir, rows FROM read_parquet({q(f)})") for i, f in dfiles]
     build("im_h", f"the {len(heads)} runs' rollup heads", f"""SELECT q, dir, arg_max(rows, tier) AS rows
         FROM ({_union(heads, "SELECT NULL::VARCHAR AS q, NULL::VARCHAR AS dir, NULL::BIGINT AS rows, NULL::INTEGER AS tier")}) GROUP BY q, dir""")
-    build("im_d", f"the {len(dcs)} runs' counts", f"""SELECT q, dir, sum(rows)::BIGINT AS rows
-        FROM ({_union(dcs, "SELECT NULL::VARCHAR AS q, NULL::VARCHAR AS dir, NULL::BIGINT AS rows")}) GROUP BY q, dir""")
     top = sorted(str(p) for p in (meas / "short" / "top").glob("*.parquet")) if not long else []
     base = sd.meas_sql(kind, sorted(str(p) for p in (meas / SUBS[kind]).glob("*.parquet")), top)
     build("im_b", "the base measurement", f"SELECT b.q, b.dir, b.rows FROM ({base}) AS b" + (" SEMI JOIN im_mt USING (q)" if long else ""))
+    counts = _union(dcs, "SELECT NULL::VARCHAR AS q, NULL::VARCHAR AS c0, NULL::VARCHAR AS dir, NULL::BIGINT AS rows")
     # touched below the base's floor, no header: the base's rows there are counted (per base canonical)
     c0, mt = ("mt.c0", "JOIN im_mt AS mt USING (q) WHERE mt.base") if long else ("d.q", "")
-    build("im_c", "floor crossers", f"""SELECT DISTINCT {c0} AS c, d.dir
-        FROM im_d AS d ANTI JOIN im_h USING (q, dir) ANTI JOIN im_b USING (q, dir) {mt}""")
+    crossers = f"SELECT DISTINCT {c0} AS c, d.dir FROM {{d}} AS d ANTI JOIN im_h USING (q, dir) ANTI JOIN im_b USING (q, dir) {mt}"
+    rows_in = con.execute(f"SELECT coalesce(sum(num_rows), 0) FROM parquet_file_metadata({_files([f for _, f in dfiles])})").fetchone()[0] if dfiles else 0
+    nparts = min(AGG_PARTS_MAX, max(1, -(-rows_in // AGG_PART_ROWS)))
+    if nparts == 1:
+        build("im_d", f"the {len(dcs)} runs' counts", f"SELECT q, dir, sum(rows)::BIGINT AS rows FROM ({counts}) GROUP BY q, dir")
+        build("im_c", "floor crossers", crossers.format(d="im_d"))
+    else:
+        # In hash parts by `c0` (each `(q, dir)` key's rows, and each crosser `(c0, dir)`, fall in exactly one): one streaming
+        # pass writes them, then each part is summed and its crossers found alone, in memory, on every core
+        out.parent.mkdir(parents=True, exist_ok=True)
+        split_d = Path(tempfile.mkdtemp(prefix=f"counts-{kind}-", dir=out.parent))
+        try:
+            set_stage(f"measure {kind}: the {len(dcs)} runs' counts ({rows_in:,} rows) cut into {nparts} hash parts")
+            t = monotonic()
+            with open_partitions(con, nparts):
+                con.execute(f"COPY (SELECT q, dir, rows, hash(c0) % {nparts} AS h FROM ({counts})) TO {q(str(split_d))} (FORMAT parquet, PARTITION_BY (h))")
+            cut_s = monotonic() - t
+            con.execute("CREATE OR REPLACE TEMP TABLE im_d (q VARCHAR, dir VARCHAR, rows BIGINT)")
+            con.execute("CREATE OR REPLACE TEMP TABLE im_c (c VARCHAR, dir VARCHAR)")
+            prog = Progress(f"measure {kind}: counts and crossers", nparts, unit="hash parts")
+            for h in range(nparts):
+                set_stage(f"measure {kind}: counts and crossers, hash part {h + 1}/{nparts}")
+                if files := sorted(str(f) for f in (split_d / f"h={h}").glob("*.parquet")):
+                    con.execute(f"""CREATE OR REPLACE TEMP TABLE im_dh AS SELECT q, dir, sum(rows)::BIGINT AS rows
+                        FROM read_parquet({_files(files)}, hive_partitioning = false) GROUP BY q, dir""")
+                    con.execute("INSERT INTO im_d SELECT * FROM im_dh")
+                    con.execute(f"INSERT INTO im_c {crossers.format(d='im_dh')}")
+                prog.tick()
+            prog.done()
+            con.execute("DROP TABLE IF EXISTS im_dh")
+        finally:
+            shutil.rmtree(split_d, ignore_errors=True)
+        nd, nc = (con.execute(f"SELECT count(*) FROM {x}").fetchone()[0] for x in ("im_d", "im_c"))
+        err(f"measure {kind}: the {len(dcs)} runs' counts (im_d) and floor crossers (im_c) in {nparts} hash parts: {nd:,} and {nc:,} rows in "
+            f"{fmt_secs(monotonic() - t)} (the cut {fmt_secs(cut_s)})")
     n = con.execute("SELECT count(*) FROM im_c").fetchone()[0]
     con.execute("CREATE OR REPLACE TEMP TABLE im_bx (c VARCHAR, dir VARCHAR, rows BIGINT)")
     t0 = monotonic()
@@ -346,17 +405,12 @@ def measure_kind(con, tiers: list[sd.Tier], meas: Path, kind: str, out: Path, *,
             cuts["im_bx"] = f"SELECT bx.*, cr.r FROM im_bx AS bx JOIN (SELECT DISTINCT c0 AS c, {rix} AS r FROM im_mt) AS cr USING (c)"
         else:
             cuts["im_bx"] = f"SELECT *, {range_index_sql('c', bounds)} AS r FROM im_bx"
-        # a file per range open at once (the default 100 would close and reopen them, cutting each range into many files)
-        opened = con.execute("SELECT current_setting('partitioned_write_max_open_files')").fetchone()[0]
-        con.execute(f"SET partitioned_write_max_open_files = {max(int(opened), len(ranges) + 1)}")
-        try:
+        with open_partitions(con, len(ranges)):
             for t, sql in cuts.items():
                 set_stage(f"measure {kind}: {t} cut into {len(ranges)} q ranges")
                 t1 = monotonic()
                 con.execute(f"COPY ({sql}) TO {q(str(split / t))} (FORMAT parquet, PARTITION_BY (r))")
                 err(f"measure {kind}: {t} cut into {len(ranges)} q ranges in {fmt_secs(monotonic() - t1)}")
-        finally:
-            con.execute(f"SET partitioned_write_max_open_files = {opened}")
 
     def part(i: int, lo: str | None, hi: str | None, uncut: bool = False) -> str:
         def of(t: str, col: str = "q") -> str:
