@@ -47,6 +47,8 @@ pin = bool(os.environ.get("PIN"))
 g = (lambda k, d="": d) if pin else os.environ.get
 v = {
     **({"DISKY_LABELS": os.environ["DISKY_LABELS"]} if os.environ.get("DISKY_LABELS") else {}),
+    # hf's own Batch task logs (infra/gcp `hf-task-logs`): the scan's jobs read their helpers' through it
+    "DT_TASK_LOG_VIEW": "projects/oa-internal-450019/locations/global/buckets/hf-task-logs/views/hf",
     "HF_URI": g("HF_URI", "hf://open-athena"),
     "R2_BUCKET": g("R2_BUCKET", "oa-hf-usage-index"),
     "WORK_DIR": g("WORK_DIR", "/work"),
