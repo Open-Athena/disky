@@ -105,9 +105,7 @@ STAGING = "1"
 # #cw-s3-admin. `EXECUTOR` = the Store's executor, which says the Slack buttons may dispatch (plan-sweep). Secrets:
 # SLACK_BOT_TOKEN, SLACK_SIGNING_SECRET.
 SLACK_ADMIN_CHANNEL = "C0C53CPM886"
-# Held until Ryan has reviewed the redesigned plan card on plan #2's thread in #cw-s3-admin (2026-11-26): set, an admin
-# re-render (`POST /api/plans/:id/slack`) would move that thread to #cw-usage instead of editing it in place.
-# SLACK_STAGED_CHANNEL = "C0C1YR7D0KU"
+SLACK_STAGED_CHANNEL = "C0C1YR7D0KU"
 EXECUTOR = "plan-sweep"
 STAGED_CARD_GRANT = "2EjUTg692KMP"   # the job's grant (`cw-s3-job-grant`, its SITE_TOKEN): the scan's `staged-card` step re-renders the open plan's Slack card at the new scan (`/api/plans/staged/card`); prod only, dev names none
 # The Batch job account the sweep console dispatches as (`infra/gcp`: `cw-s3-job`;
@@ -264,9 +262,7 @@ STAGING = "1"
 # #cw-s3-admin. `EXECUTOR` = the Store's executor, which says the Slack buttons may dispatch (plan-sweep). Secrets:
 # SLACK_BOT_TOKEN, SLACK_SIGNING_SECRET.
 SLACK_ADMIN_CHANNEL = "C0C53CPM886"
-# Held until Ryan has reviewed the redesigned plan card on plan #2's thread in #cw-s3-admin (2026-11-26): set, an admin
-# re-render (`POST /api/plans/:id/slack`) would move that thread to #cw-usage instead of editing it in place.
-# SLACK_STAGED_CHANNEL = "C0C1YR7D0KU"
+SLACK_STAGED_CHANNEL = "C0C1YR7D0KU"
 EXECUTOR = "plan-sweep"
 # The Batch job account the sweep console dispatches as (`infra/gcp`: `cw-s3-job`;
 # `GCP_SA_KEY` is the `cw-s3-dispatch` key that may act as it).
