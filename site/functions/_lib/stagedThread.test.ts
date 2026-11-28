@@ -304,20 +304,17 @@ describe('D1', () => {
       expect(await refreshStagedCard(env, db, SITE)).toBe(false)
       expect(calls).toEqual([])
     })
-    it('a thread in another channel is left there', async () => {
+    it('a thread in another channel is edited there', async () => {
       const calls = fakeSlack()
       const { db, raw } = await planDb()
       raw.exec("UPDATE plans SET slack_channel = 'COTHER'")
-      expect(await refreshStagedCard(env, db, SITE)).toBe(false)
-      expect(calls).toEqual([])
+      expect([await refreshStagedCard(env, db, SITE), calls.map(c => [c.method, c.body.channel, c.body.ts])]).toEqual([true, [['chat.update', 'COTHER', PARENT]]])
     })
-    it('`SLACK_STAGED_CHANNEL` moves the threads: one still in the admin channel is left there, one in the staged channel edited', async () => {
+    it('`SLACK_STAGED_CHANNEL` takes the threads that start after it: one already in the admin channel is edited there', async () => {
       const calls = fakeSlack()
-      const { db, raw } = await planDb()
+      const { db } = await planDb()
       const moved = { ...env, SLACK_STAGED_CHANNEL: 'CUSAGE' }
-      expect([await refreshStagedCard(moved, db, SITE), calls.length]).toEqual([false, 0])
-      raw.exec("UPDATE plans SET slack_channel = 'CUSAGE'")
-      expect(await refreshStagedCard(moved, db, SITE)).toBe(true)
+      expect([await refreshStagedCard(moved, db, SITE), calls.map(c => [c.method, c.body.channel, c.body.ts])]).toEqual([true, [['chat.update', CH, PARENT]]])
     })
     it('no open plan: nothing', async () => {
       const calls = fakeSlack()
@@ -600,13 +597,25 @@ describe('D1', () => {
       ])
     })
 
-    it('a thread in another channel than `SLACK_ADMIN_CHANNEL` is left alone: a new one starts there', async () => {
+    it('a thread in another channel than the staged one stays there: its parent edited and the stage replied in it', async () => {
       const calls = fakeSlack()
       const { db, raw } = await planDb()
-      await notifyPlan({ ...env, SLACK_ADMIN_CHANNEL: 'COTHER' }, db, 1, SITE, await stage(db, 1, run(1, 1)), { now: 1000 })
-      expect([calls.map(c => [c.method, c.body.channel, c.body.thread_ts ?? null]), raw.prepare('SELECT slack_channel, slack_ts FROM plans').all()]).toEqual([
-        [['chat.postMessage', 'COTHER', null], ['chat.postMessage', 'COTHER', '200.000001']],
-        [{ slack_channel: 'COTHER', slack_ts: '200.000001' }],
+      await notifyPlan({ ...env, SLACK_STAGED_CHANNEL: 'CUSAGE' }, db, 1, SITE, await stage(db, 1, run(1, 1)), { now: 1000 })
+      expect([calls.map(c => [c.method, c.body.channel, c.body.thread_ts ?? c.body.ts ?? null]), raw.prepare('SELECT slack_channel, slack_ts FROM plans').all()]).toEqual([
+        [['conversations.replies', CH, PARENT], ['chat.update', CH, PARENT], ['chat.postMessage', CH, PARENT]],
+        [{ slack_channel: CH, slack_ts: PARENT }],
+      ])
+    })
+
+    it('a thread in another channel that ends continues in the staged channel: its pointer and closed parent stay in it', async () => {
+      const calls = fakeSlack({ reactions: { [PARENT]: ['white_check_mark'] } })
+      const { db, raw } = await planDb()
+      await notifyPlan({ ...env, SLACK_STAGED_CHANNEL: 'CUSAGE' }, db, 1, SITE, await stage(db, 1, run(1, 1)), { now: 1000 })
+      const NEW = '200.000001'
+      expect([calls.map(c => [c.method, c.body.channel, c.body.thread_ts ?? c.body.ts ?? c.body.message_ts ?? null]), raw.prepare('SELECT slack_channel, slack_ts FROM plans').all()]).toEqual([
+        [['conversations.replies', CH, PARENT], ['chat.postMessage', 'CUSAGE', null], ['chat.getPermalink', 'CUSAGE', NEW],
+         ['chat.postMessage', CH, PARENT], ['chat.update', CH, PARENT], ['chat.postMessage', 'CUSAGE', NEW]],
+        [{ slack_channel: 'CUSAGE', slack_ts: NEW }],
       ])
     })
   })
