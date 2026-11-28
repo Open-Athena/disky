@@ -10,6 +10,7 @@ import pulumi
 import pulumi_gcp as gcp
 
 from gcp_jobs import Adopt, BatchEvents, BatchSubmitCron, JobAccount, Secrets, SiteDispatcher, labeled_provider
+from task_logs import TaskLogBucket, TaskLogView
 
 
 profile = loads((Path(__file__).resolve().parents[2] / "job/r2.json").read_text())
@@ -57,6 +58,14 @@ job = JobAccount(
     # the site's account acts as this one through `SiteDispatcher` (below): digest re-apply's job runs as it
     adopt=Adopt(False),
 )
+# r2's Batch task logs (specs/per-deployment-task-logs.md): its own bucket, kept 365 days, fed by a sink on its
+# `deployment` label, and a view on it its job account reads (`$DT_TASK_LOG_VIEW`)
+task_log_bucket = TaskLogBucket("oa-r2-task-logs", project=project, location="global", bucket_id="oa-r2-task-logs", retention_days=365,
+                                deployment=labels["deployment"])
+task_log_view = TaskLogView("oa-r2-task-log-view", project=project, location="global", bucket="oa-r2-task-logs", view_id="oa-r2",
+                            reader=job.member, deployment=labels["deployment"],
+                            opts=pulumi.ResourceOptions(depends_on=[task_log_bucket]))
+pulumi.export("task_log_view", task_log_view.path)
 resources = []
 for component, name, days in (
     ("data", profile["data_bucket"], None),
@@ -162,6 +171,46 @@ fleet_secrets = Secrets(
     adopt=Adopt(False),
     grant_only=set(),
 )
+# The VM pilot's r2 account (specs/vm-pilot.md; Ryan, 2026-11-27: a narrow account per deployment, not the job's): the
+# shared stack's box holds only `serviceAccountTokenCreator` on it, and runs r2's scans as it. It reads exactly what a
+# scan reads (`job/profiles/r2.yml`'s secrets, the listing's source keys), never the Slack search token, the digest's
+# Pages token (its plot upload stays on Batch), the fleet grant or the sign-in clients; no Batch (the box's local
+# backend runs the steps).
+vm = JobAccount(
+    "r2-vm",
+    project=project,
+    account_id="oa-r2-usage-vm",
+    display_name="OA R2 VM pilot",
+    description="Runs OA R2 scans on the shared VM pilot box (impersonated by its account); a scan's secrets and buckets only",
+    # `gcp-cost`: the buckets' `total_bytes` from Cloud Monitoring, as the job's
+    roles=["roles/logging.logWriter", "roles/monitoring.viewer"],
+    acts_as_self=False,
+    adopt=Adopt(False),
+)
+VM_SECRETS = [*profile["secrets"].values(), *(profile["optional_secrets"][k] for k in ("SLACK_BOT_TOKEN", "SITE_TOKEN", "CF_ANALYTICS_TOKEN"))]
+for name in VM_SECRETS:
+    gcp.secretmanager.SecretIamMember(
+        f"r2-vm-secret-{name}",
+        project=project,
+        secret_id=name,
+        role="roles/secretmanager.secretAccessor",
+        member=vm.member,
+        opts=pulumi.ResourceOptions(depends_on=[secrets]),
+    )
+gcp.storage.BucketIAMMember("r2-data-vm", bucket=profile["data_bucket"], role="roles/storage.objectAdmin", member=vm.member,
+                            opts=pulumi.ResourceOptions(depends_on=resources))
+for component in ("data", "scratch"):
+    gcp.storage.BucketIAMMember(f"r2-{component}-vm-viewer", bucket=profile[f"{component}_bucket"], role="roles/storage.bucketViewer",
+                                member=vm.member, opts=pulumi.ResourceOptions(depends_on=resources))
+gcp.artifactregistry.RepositoryIamMember(
+    "r2-images-vm",
+    project=project,
+    location=repository.location,
+    repository=repository.repository_id,
+    role="roles/artifactregistry.reader",
+    member=vm.member,
+)
+pulumi.export("vm_account", vm.email)
 pulumi.export("job_account", job.email)
 pulumi.export("builder_account", builder.email)
 pulumi.export("data_bucket", profile["data_bucket"])
