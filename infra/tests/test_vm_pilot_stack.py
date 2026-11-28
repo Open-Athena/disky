@@ -23,8 +23,8 @@ CF = INFRA / "cf" / "shared"
 PROJECT = "oa-internal-450019"
 EMAIL = f"disky-vm-pilot@{PROJECT}.iam.gserviceaccount.com"
 MEMBER = f"serviceAccount:{EMAIL}"
-R2_JOB = f"oa-r2-usage-job@{PROJECT}.iam.gserviceaccount.com"
-HF_JOB = f"hf-usage-job@{PROJECT}.iam.gserviceaccount.com"
+R2_JOB = f"oa-r2-usage-vm@{PROJECT}.iam.gserviceaccount.com"
+HF_JOB = f"hf-usage-vm@{PROJECT}.iam.gserviceaccount.com"
 OWN = ["vm-pilot-tunnel-token", "vm-pilot-vmd-key-oa-r2", "vm-pilot-vmd-key-hf"]
 
 
@@ -75,7 +75,7 @@ def test_gcp_box(monkeypatch):
             "disky:gcp:VmBox": ["vm-pilot"],
             "disky:gcp:JobAccount": ["vm-pilot"],
             "gcp:serviceaccount/account:Account": ["vm-pilot"],
-            "gcp:projects/iAMMember:IAMMember": ["vm-pilot-logging.logWriter"],
+            "gcp:projects/iAMMember:IAMMember": ["vm-pilot-logging.logWriter", "vm-pilot-monitoring.metricWriter"],
             "disky:gcp:Secrets": ["vm-pilot-secrets"],
             "gcp:secretmanager/secret:Secret": sorted(OWN),
             "gcp:secretmanager/secretIamMember:SecretIamMember": sorted(f"{s}-accessor" for s in OWN),
@@ -91,6 +91,8 @@ def test_gcp_box(monkeypatch):
         r = mocks.resources
         assert r[("gcp:projects/iAMMember:IAMMember", "vm-pilot-logging.logWriter")] == {
             "project": PROJECT, "role": "roles/logging.logWriter", "member": MEMBER}
+        assert r[("gcp:projects/iAMMember:IAMMember", "vm-pilot-monitoring.metricWriter")] == {
+            "project": PROJECT, "role": "roles/monitoring.metricWriter", "member": MEMBER}
         # Per-deployment isolation: `secretAccessor` on the box's own three secrets only, and of each tenant's, only
         # the right to mint its job account's tokens.
         grants = [v for (t, _), v in r.items() if t == "gcp:secretmanager/secretIamMember:SecretIamMember"]
@@ -131,7 +133,8 @@ def test_gcp_box(monkeypatch):
             "enable-oslogin": "TRUE",
             "block-project-ssh-keys": "TRUE",
             "disky-repo": "https://github.com/Open-Athena/disky.git",
-            "disky-ref": "cloud",
+            # the checkout the box runs: whatever the committed config pins (`vmPilot.ref`)
+            "disky-ref": yaml.safe_load((INFRA / "gcp/shared/Pulumi.shared.yaml").read_text())["config"]["disky-shared-gcp:vmPilot"]["ref"],
             "disky-tunnel-secret": "vm-pilot-tunnel-token",
             "disky-registries": "us-central1-docker.pkg.dev,us-west1-docker.pkg.dev",
             "disky-scan-memory-max": "8G",
@@ -145,8 +148,8 @@ def test_gcp_box(monkeypatch):
                               "AWS_SECRET_ACCESS_KEY": "oa-r2-index-secret-access-key"}},
             {"name": "hf", "job_account": HF_JOB, "vmd_key_secret": "vm-pilot-vmd-key-hf", "store": "r2://oa-hf-usage-index",
              "pack_env": {"AWS_DEFAULT_REGION": "auto"},
-             "pack_secrets": {"AWS_ACCESS_KEY_ID": "hf-usage-r2-access-key-id",
-                              "AWS_SECRET_ACCESS_KEY": "hf-usage-r2-secret-access-key",
+             "pack_secrets": {"AWS_ACCESS_KEY_ID": "hf-usage-vm-r2-access-key-id",
+                              "AWS_SECRET_ACCESS_KEY": "hf-usage-vm-r2-secret-access-key",
                               "DISKY_R2_ENDPOINT_URL": "hf-usage-r2-endpoint"}},
         ]
 
