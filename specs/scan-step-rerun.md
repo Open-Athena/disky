@@ -1,6 +1,6 @@
 # Re-running a scan's failed step
 
-Status: proposed (cw session, 2026-11-28). Ryan, on cw's two "partial · digest" scans: "something we should have a proper CLI for … could be a subset of resuming the failed scan (digest step only?)".
+Status: phase 1 built (`scan_dag.only`, `scan head --only`, unrecorded: `$DT_RECORD=off`); phase 2 (recording into the scan's run, `scan-run rerun`) proposed (cw session, 2026-11-28). Ryan, on cw's two "partial · digest" scans: "something we should have a proper CLI for … could be a subset of resuming the failed scan (digest step only?)".
 
 ## Why
 

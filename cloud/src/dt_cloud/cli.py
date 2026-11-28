@@ -4252,10 +4252,12 @@ def _scan_steps() -> None:
 @option("-F", "--fresh", is_flag=True, help="Run every task with Nextflow's cache off (each step still skips what its own outputs say is done): after a cached task's output was lost")
 @option("-n", "--dry-run", is_flag=True, help="Write the params, executor config and history line; print the Nextflow command; run nothing")
 @option("-N", "--nf-dir", type=Path, default=None, help="Where `scan.nf` + `base.config` are (default `$DT_NF_DIR`, else `job/nf`)")
+@option("-o", "--only", multiple=True, help="Run only this step's calls (repeatable; `scan steps` names the steps): the DAG cut to them, their deps taken as done. A failed step re-run once its cause is fixed, for the scan `$SNAP_ID` / `$GEN` / `$DT_JOB_START` name; unrecorded (specs/scan-step-rerun.md)")
 @option("-R", "--reproc", is_flag=True, help="Re-aggregate from the archived listings / layer-2s: skip `list`, run from `index` (REPROC=1: unrecorded, no serving side effects)")
 @option("-w", "--launch-dir", type=Path, default=None, help="Nextflow's launch dir (default: the profile's `work` for the local executor, else `$TMPDIR/nf-<scan>`)")
 @argument("profile_path", type=Path)
-def _scan_head(fresh: bool, dry_run: bool, nf_dir: Path | None, reproc: bool, launch_dir: Path | None, profile_path: Path) -> None:
+def _scan_head(fresh: bool, dry_run: bool, nf_dir: Path | None, only: tuple[str, ...], reproc: bool, launch_dir: Path | None,
+               profile_path: Path) -> None:
     """Run one scan of the deployment PROFILE_PATH describes (`job/profiles/<deployment>.yml`) through
     `job/nf/scan.nf`: `$SNAP_ID` / `$GEN` / `$DT_JOB_START` when set (resuming that scan's session), else stamped now."""
     from .image_sha import log_job_stamp
@@ -4263,7 +4265,7 @@ def _scan_head(fresh: bool, dry_run: bool, nf_dir: Path | None, reproc: bool, la
 
     log_job_stamp("scan head")
     nf = nf_dir or Path(os.environ.get("DT_NF_DIR") or "job/nf")
-    sys.exit(head(profile_path, nf.absolute(), launch_dir, reproc=reproc, fresh=fresh, dry_run=dry_run))
+    sys.exit(head(profile_path, nf.absolute(), launch_dir, reproc=reproc, fresh=fresh, dry_run=dry_run, only=only))
 
 
 from .scan_retire import retire_cmd as _scan_retire  # noqa: E402

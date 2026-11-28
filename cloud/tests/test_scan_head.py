@@ -689,7 +689,7 @@ class FakeBackend(Backend):
         return run.launch / "fake.dag"
 
 
-def _drive(tmp_path, monkeypatch, fake: FakeBackend) -> tuple[int, list[tuple[str, list[str]]]]:
+def _drive(tmp_path, monkeypatch, fake: FakeBackend, **kw) -> tuple[int, list[tuple[str, list[str]]]]:
     """`scan head` over `fake` on a one-source profile: its exit code and what it recorded."""
     prof = tmp_path / "p.yml"
     prof.write_text(f"deployment: fix\nexecutor: {{kind: local}}\nwork: {tmp_path}/nf\ndata: {tmp_path}/data\n"
@@ -700,7 +700,7 @@ def _drive(tmp_path, monkeypatch, fake: FakeBackend) -> tuple[int, list[tuple[st
     monkeypatch.setattr(H, "_record", lambda cmd, args: records.append((cmd.name, args)))
     env = {**LABELS, "DT_RUN_ID": "run-1", "SNAP_ID": "2026-10-16T1200", "GEN": "G1", "DT_JOB_START": "1",
            "SCAN_RUNS_PROFILE": str(tmp_path / "scan-runs.json"), "DT_SUPERVISE": "1"}
-    return H.head(prof, NF, tmp_path / "launch", env=env), records
+    return H.head(prof, NF, tmp_path / "launch", env=env, **kw), records
 
 
 @pytest.mark.parametrize("rc, term, calls, finish", [
@@ -718,6 +718,23 @@ def test_head_drives_its_backend(tmp_path, monkeypatch, rc, term, calls, finish)
     session = H.session_id("fix", "2026-10-16T1200")
     assert fake.calls == [("prepare", "2026-10-16T1200", session, "list_source"), ("store_preview",), ("start",), *calls]
     assert [(n, a) for n, a in records if n != "start"] == [("finish", finish)]
+
+
+class CapturingBackend(FakeBackend):
+    """`FakeBackend` keeping the run it prepares."""
+
+    def prepare(self, run):
+        self.run = run
+        return super().prepare(run)
+
+
+def test_only_runs_the_cut_dag_unrecorded(tmp_path, monkeypatch):
+    """`scan head --only index-rows` (specs/scan-step-rerun.md): the backend gets the DAG cut to that step's call
+    (`scan_dag.only`), and the run's env records nothing (`$DT_RECORD=off`, as `--reproc`'s)."""
+    fake = CapturingBackend(0)
+    assert _drive(tmp_path, monkeypatch, fake, only=("index-rows",))[0] == 0
+    assert ([(n.name, n.deps, [str(c) for c in n.calls]) for n in fake.run.dag.nodes], fake.run.env["DT_RECORD"]) == (
+        [("index_rows", (), ["index-rows"])], "off")
 
 
 class CountingBackend(FakeBackend):

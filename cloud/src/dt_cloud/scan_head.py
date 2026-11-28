@@ -659,7 +659,7 @@ def backend_for(profile: ScanProfile, nf_dir: Path) -> Backend:
 
 
 def head(profile_path: Path, nf_dir: Path, launch: Path | None, *, reproc: bool = False, fresh: bool = False,
-         dry_run: bool = False, env: dict[str, str] | None = None) -> int:
+         dry_run: bool = False, env: dict[str, str] | None = None, only: tuple[str, ...] = ()) -> int:
     from . import scan_profile
     from .scan_runs import PROFILE_ENV, TRIGGER_ENV, dag_cmd, finish_cmd, phase_begin_cmd, phase_end_cmd, start_cmd, trigger_of
 
@@ -679,6 +679,10 @@ def head(profile_path: Path, nf_dir: Path, launch: Path | None, *, reproc: bool 
     deployment_labels(dict(env))
     if reproc:
         env.update(REPROC="1", DT_RECORD="off")
+    if only:
+        # a re-run of the scan's steps (specs/scan-step-rerun.md): unrecorded, as `--reproc` is, until the scan's own
+        # run can take their phases
+        env["DT_RECORD"] = "off"
     batch = bool(env.get("BATCH_JOB_UID"))
     if not run_id and env.get(PROFILE_ENV) and env.get("DT_RECORD") != "off":
         run_id = env["DT_RUN_ID"] = local_run_id(profile, scan)
@@ -693,7 +697,8 @@ def head(profile_path: Path, nf_dir: Path, launch: Path | None, *, reproc: bool 
         env[PIN_ENV] = pin
         err(f"scan head: the run's jobs run {pin}")
     backend = backend_for(profile, nf_dir)
-    run = Run(profile, profile_json, scan_dag.build(profile, reproc=reproc), scan, gen, job_start, run_id, session, launch,
+    dag = scan_dag.build(profile, reproc=reproc)
+    run = Run(profile, profile_json, scan_dag.only(dag, only) if only else dag, scan, gen, job_start, run_id, session, launch,
               dict(env), now, reproc=reproc, fresh=fresh, image=image, run_id_source=run_id_source)
     argv = backend.prepare(run)
     err(f"scan head: {profile.deployment}{'' if profile.primary else f' [{profile.store}]'} scan {scan} gen {gen} session {session} "

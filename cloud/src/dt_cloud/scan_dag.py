@@ -180,6 +180,22 @@ def build(profile: ScanProfile, *, reproc: bool = False) -> ScanDag:
     return ScanDag(tuple(nodes))
 
 
+def only(dag: ScanDag, steps: tuple[str, ...]) -> ScanDag:
+    """``dag`` cut to the calls of ``steps`` (`scan head --only`, specs/scan-step-rerun.md): each node keeps those of its
+    tasks' calls (a task left with none is dropped, then a node left with no task), and a dep on a dropped node is taken
+    as done: a re-run's scan got past it. A step no node calls is refused."""
+    want = set(steps)
+    if missing := sorted(want - {c.step for n in dag.nodes for c in n.calls}):
+        raise ValueError(f"scan DAG: no node runs {', '.join(missing)}")
+    kept: list[Node] = []
+    for n in dag.nodes:
+        tasks = tuple(t for t in (replace(t, calls=tuple(c for c in t.calls if c.step in want)) for t in n.tasks) if t.calls)
+        if tasks:
+            names = {k.name for k in kept}
+            kept.append(replace(n, tasks=tasks, deps=tuple(d for d in n.deps if d in names)))
+    return ScanDag(tuple(kept))
+
+
 def resources(profile: ScanProfile, node: Node, task: Task | None = None) -> Machine:
     """What one of `node`'s tasks runs on, engine-neutral: a list task's from its source (falling back to
     `machines.list`), any other's from its label's `machines` entry (empty: the executor's default); the node's own

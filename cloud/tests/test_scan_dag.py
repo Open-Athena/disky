@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from dt_cloud.scan_dag import Call, Node, ScanDag, Task, build, resources
+from dt_cloud.scan_dag import Call, Node, ScanDag, Task, build, only, resources
 from dt_cloud.scan_dag_nf import body, render
 from dt_cloud.scan_profile import Disk, Machine, load, parse
 
@@ -57,6 +57,22 @@ def test_cw():
     }
     assert d["static_names"].time == "6h"
     assert (d["list_source"].fanout, d["list_source"].retries) == ("sources", 1)
+
+
+def test_only_cuts_the_dag_to_those_steps_calls():
+    """`scan head --only` (specs/scan-step-rerun.md): each node keeps the named steps' calls, a node with none is dropped,
+    a dep on a dropped node is taken as done; a fan-out keeps its tasks (bucket-check leaves the first list task). A step
+    no node runs is refused."""
+    d = build(load(FIX / "cw-s3.yml"))
+    assert shape(only(d, ("digest",))) == [("post", "post", (), ["digest"])]
+    assert shape(only(d, ("index-rows", "digest"))) == [("index_rows", "small", (), ["index-rows"]),
+                                                         ("post", "post", ("index_rows",), ["digest"])]
+    assert shape(only(d, ("list",))) == [
+        ("list_source", "list", (), [("s3://bucket-big", ["list s3://bucket-big"]), ("s3://bucket-b", ["list s3://bucket-b"]),
+                                     ("s3://bucket-c", ["list s3://bucket-c"])])]
+    with pytest.raises(ValueError) as e:
+        only(d, ("digest", "nope"))
+    assert str(e.value) == "scan DAG: no node runs nope"
 
 
 def test_cw_rendered_golden():
