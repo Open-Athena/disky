@@ -5,8 +5,9 @@ buckets) authenticates as the job's account, with tokens refreshed for as long a
 
 The local job backend (`job_backend.Local`) starts one per job, bound to the gateway of the job's own Docker network,
 and points the job's containers at it (`$GCE_METADATA_HOST`, `$GCE_METADATA_IP`, `$GCE_METADATA_ROOT`: the variables
-Python's, Go's and C++'s clients read). It answers only requests from that network's subnet (the host's own connections
-to the gateway come from the gateway's address, inside it) carrying `Metadata-Flavor: Google`, so another job's
+Python's, Go's and C++'s clients read). It answers only requests from that network's subnet and from the host's own
+address toward it (`host_source`: the kernel's source address for the gateway, which is the host's primary address, not
+the gateway's, while the bridge has no container; on the box, 2026-11-28, gcsfuse's first token request came from it) carrying `Metadata-Flavor: Google`, so another job's
 containers, on networks of their own, get 403. The host's real metadata server stays closed to every container
 (`deploy/vm-pilot/docker-no-metadata.conf`).
 
@@ -20,7 +21,7 @@ import json
 import sys
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Sequence, Callable
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlsplit
 
@@ -39,11 +40,12 @@ class MetadataServer:
 
     `mint(lifetime_s)` returns a fresh access token for the account, good for `lifetime_s`."""
 
-    def __init__(self, account: str, project: str, mint: Callable[[int], str], *, bind: str, allow: str,
+    def __init__(self, account: str, project: str, mint: Callable[[int], str], *, bind: str, allow: str | Sequence[str],
                  port: int = 0, lifetime_s: int = 3600, refresh_s: float = REFRESH_S,
                  clock: Callable[[], float] = time.time, log: Callable[[str], None] | None = None):
         self.account, self.project, self.mint = account, project, mint
-        self.bind, self.port, self.allow = bind, port, ipaddress.ip_network(allow, strict=False)
+        self.bind, self.port = bind, port
+        self.allow = [ipaddress.ip_network(a, strict=False) for a in ([allow] if isinstance(allow, str) else allow)]
         self.lifetime_s, self.refresh_s, self.clock = lifetime_s, refresh_s, clock
         self.log = log or (lambda s: print(s, file=sys.stderr, flush=True))
         self._lock = threading.Lock()
@@ -89,8 +91,8 @@ class MetadataServer:
 
     def answer(self, client: str, path: str, headers: dict[str, str]) -> tuple[int, str, str]:
         """`(status, content type, body)` for a GET of `path` (with its query) from `client`."""
-        if ipaddress.ip_address(client) not in self.allow:
-            self.log(f"job metadata: refused {client} (not in {self.allow}): {urlsplit(path).path}")
+        if not any(ipaddress.ip_address(client) in a for a in self.allow):
+            self.log(f"job metadata: refused {client} (not in {', '.join(map(str, self.allow))}): {urlsplit(path).path}")
             return 403, "text/plain", "forbidden\n"
         if headers.get(FLAVOR[0].lower()) != FLAVOR[1]:
             return 403, "text/plain", "Missing Metadata-Flavor:Google header.\n"
@@ -152,3 +154,16 @@ def _handler(server: MetadataServer) -> type[BaseHTTPRequestHandler]:
             pass  # each request is routine; refusals and failures are logged by `answer`
 
     return Handler
+
+
+def host_source(gateway: str) -> str | None:
+    """The address this host's own connections to `gateway` come from (a UDP `connect` picks the route; nothing is sent),
+    or None when there is no route. With the job's bridge still empty, that is the host's primary address."""
+    import socket
+
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            s.connect((gateway, 9))
+            return s.getsockname()[0]
+    except OSError:
+        return None

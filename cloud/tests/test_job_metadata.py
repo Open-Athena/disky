@@ -23,7 +23,7 @@ class Clock:
         return self.t
 
 
-def server(clock: Clock | None = None, allow: str = "10.1.0.0/16", fail: bool = False) -> tuple[MetadataServer, list[int]]:
+def server(clock: Clock | None = None, allow: str | list[str] = "10.1.0.0/16", fail: bool = False) -> tuple[MetadataServer, list[int]]:
     minted: list[int] = []
 
     def mint(lifetime: int) -> str:
@@ -60,6 +60,22 @@ def test_it_refuses_other_networks_and_requests_without_the_flavor_header():
     path = "/computeMetadata/v1/instance/service-accounts/default/token"
     assert (s.answer("10.2.0.5", path, FLAVOR), s.answer("10.1.0.5", path, {}), minted) == (
         (403, "text/plain", "forbidden\n"), (403, "text/plain", "Missing Metadata-Flavor:Google header.\n"), [])
+
+
+def test_it_also_answers_the_hosts_own_address():
+    """The job's subnet and the host's own source address toward the gateway (gcsfuse on the box asked from the VM's
+    primary address, 2026-11-28); another job's subnet is still refused."""
+    s, minted = server(allow=["172.18.0.0/16", "10.64.0.2/32"])
+    path = "/computeMetadata/v1/instance/service-accounts/default/token"
+    answers = [s.answer(c, path, FLAVOR)[0] for c in ("172.18.0.3", "10.64.0.2", "172.19.0.2", "10.64.0.3")]
+    assert (answers, len(minted)) == ([200, 200, 403, 403], 1)
+
+
+def test_host_source_is_the_local_address_toward_a_gateway():
+    """A UDP connect's source is a local address (no packet sent); no route at all reads None."""
+    from dt_cloud.job_metadata import host_source
+
+    assert host_source("127.0.0.1") == "127.0.0.1"
 
 
 def test_a_token_is_reused_until_it_nears_its_expiry():
