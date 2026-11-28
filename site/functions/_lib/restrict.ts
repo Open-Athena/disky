@@ -31,12 +31,13 @@ export const isPathScope = (scope: string): boolean => /^[a-z0-9-]+:hide:/.test(
  *  bucket bytes, D1-held path lists, and answers naming paths that no route
  *  filters (name search summaries and covers, the static-index bench, the
  *  append stores' health, scan-run outputs, the digest's image: a drawn diff
- *  of whatever path its caller names; whole-bucket non-live sums). */
+ *  of whatever path its caller names; whole-bucket non-live sums; the digest's
+ *  converge and Slack jobs, which name its channel and message ids). */
 export const RESTRICTED_BLOCKED = [
   '/api/path-index', '/v1', '/api/plans', '/api/actions', '/api/db', '/api/owners',
   '/api/estate', '/api/assignments', '/api/sweep', '/api/plan-sweep', '/api/og',
   '/api/name-summary', '/api/name-summary-registry', '/api/static-bench', '/api/filter-cover', '/api/name-matches', '/api/health', '/api/scan-runs',
-  '/api/digest-image', '/api/digest-threads', '/api/non-live',
+  '/api/digest-image', '/api/digest-threads', '/api/non-live', '/api/digest/converge', '/api/slack-jobs',
 ]
 
 export const blockedForRestricted = (pathname: string): boolean =>

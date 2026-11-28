@@ -205,6 +205,11 @@ const SHARED_ROUTES: Record<string, Case[]> = {
   ],
   'api/digest-settings.ts': [get('/api/digest-settings', 'viewer'), put('/api/digest-settings', 'admin')],
   'api/digest-threads.ts': [get('/api/digest-threads?channel=C0C9J6CE8BD&month=2026-11', 'viewer'), put('/api/digest-threads', 'admin')],
+  // The scan job's converge (specs/slack-in-workers.md): one grant, by id; without `DIGEST_CFN` or a grant, no such route.
+  'api/digest/converge.ts': [
+    post('/api/digest/converge', 'named-grant', w => ({ DIGEST_CFN: '1', DIGEST_CFN_GRANT: w.readOnlyGrant })),
+    post('/api/digest/converge', 'unconfigured'),
+  ],
   'api/dups.ts': [get(`/api/dups?${AT}`, 'viewer', { DUPS: '1' }), get(`/api/dups?${AT}`, 'unconfigured')],
   'api/estate.ts': [get(`/api/estate?${AT}`, 'viewer')],
   // Deployment config only.
@@ -229,6 +234,12 @@ const SHARED_ROUTES: Record<string, Case[]> = {
   'api/plan-sweep/purge.ts': [post('/api/plan-sweep/purge', 'admin')],
   'api/plan-sweep/stop.ts': [post('/api/plan-sweep/stop', 'admin')],
   'api/plan-sweep/undo.ts': [post('/api/plan-sweep/undo', 'admin')],
+  'api/slack-jobs/[[path]].ts': [
+    get('/api/slack-jobs', 'admin'),
+    get('/api/slack-jobs/digest-converge-20261128t160000123z-0a1b2c3d', 'admin'),
+    post('/api/slack-jobs', 'admin', { DIGEST_CFN: 'shadow' }),
+    post('/api/slack-jobs/digest-converge-20261128t160000123z-0a1b2c3d/step', 'admin', { DIGEST_CFN: 'shadow' }),
+  ],
   'api/plans/[[path]].ts': [
     get('/api/plans', 'viewer'),
     post('/api/plans', 'admin'),
@@ -420,6 +431,8 @@ const SHARED_RESTRICTED: Record<string, Restricted> = {
   'GET /api/plans': 'blocked',
   'GET /api/plans/staged': 'blocked',
   'POST /api/plans/staged/card': 'blocked',
+  // names the digest's channel and message ids
+  'POST /api/digest/converge': 'blocked',
   'POST /api/plans/stage': 'blocked',
   'GET /api/plans/run': 'blocked',
   'GET /api/plans/run-analytics': 'blocked',

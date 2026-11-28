@@ -3773,6 +3773,49 @@ def digest_config(config_path: Path | None, root: str | None, template: str) -> 
     print(json.dumps(dg.converge_config(dg.template(cfg), root or cfg.root), separators=(",", ":")))
 
 
+@main.command("digest-cfn")
+@option("-m", "--month", help="The month to converge (YYYY-MM; default the current UTC one, the scheduled run's)")
+@option("-n", "--max-steps", type=int, default=100, help="Give up after this many steps (default 100)")
+@option("-u", "--url", help="The site (default $SITE_URL); a dev stack in shadow mode converges without writing")
+@option("-w", "--max-wait", type=float, default=120, help="Longest wait for a step Slack asked to come back later (seconds, default 120)")
+def digest_cfn(month: str | None, max_steps: int, url: str | None, max_wait: float) -> None:
+    """Drive the site's digest converge (specs/slack-in-workers.md): `POST /api/digest/converge` as the job's grant
+    (`$SITE_TOKEN`, named by the site's `DIGEST_CFN_GRANT`), one step a request, until its job is done. Exit 0 when done,
+    1 when it failed (its error printed) or ran out of steps. A shadow job's report (its audit) is printed."""
+    import json
+    import time
+
+    from .deploy import site_token
+    from .site import SiteError, post_json
+
+    base = url or os.environ.get("SITE_URL")
+    token = site_token()
+    if not (base and token):
+        raise SystemExit("digest-cfn: need $SITE_URL (or -u) and $SITE_TOKEN")
+    body = {"month": month} if month else {}
+    for i in range(max_steps):
+        try:
+            job = json.loads(post_json(base, token, "/api/digest/converge", body))["job"]
+        except SiteError as e:
+            raise SystemExit(f"digest-cfn: {e}") from e
+        err(f"digest-cfn: {job['id']} step {job['steps']}: {job['state']} ({job['calls']} Slack calls){': ' + job['error'] if job.get('error') else ''}")
+        if job["state"] == "done":
+            if job["shadow"]:
+                report = job.get("report") or {}
+                audit = report.get("audit", [])
+                bad = [a for a in audit if not a["same"]]
+                print(f"shadow {report.get('month')} ({report.get('variant')}): {len(audit) - len(bad)}/{len(audit)} messages as rendered; "
+                      f"{len(report.get('writes', []))} writes it would make")
+                for a in bad:
+                    print(f"  differs: {a['what']} {a['ts']}\n    live: {a.get('live')!r}\n    want: {a.get('want')!r}")
+            return
+        if job["state"] == "failed":
+            raise SystemExit(f"digest-cfn: {job['id']} failed: {job.get('error')}")
+        if job.get("retry_at"):
+            time.sleep(min(max_wait, max(0.0, job["retry_at"] / 1000 - time.time())))
+    raise SystemExit(f"digest-cfn: not done after {max_steps} steps")
+
+
 @main.command("digest-relink")
 @option("-c", "--channel", help="Slack channel id (default $SLACK_CHANNEL)")
 @option("-C", "--config", "config_path", type=Path, help="The deployment's digest config (as `digest -C`): where the threads' states live")

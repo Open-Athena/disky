@@ -1902,7 +1902,8 @@ def staged_card(ctx: Ctx, arg: str | None) -> None:
         ctx.sh(["dt-cloud", "staged-card"], fatal=False, warn=f"staged card refresh failed for {ctx.scan} (it stays at the scan before)")
 
 
-@step("digest", soft=True, options={"template": str, "config": str, "args": list, "platforms": list, "root": str}, requires=_digest_check,
+@step("digest", soft=True, options={"template": str, "config": str, "args": list, "platforms": list, "root": str, "cfn": bool, "shadow": str},
+      requires=_digest_check,
       side=True, converges=True, leaves="usage digest not posted")
 def digest(ctx: Ctx, arg: str | None) -> None:
     """Converge the usage-digest thread on each platform (`dt-cloud digest -T <template> -C <config> -P <platform>`;
@@ -1910,12 +1911,21 @@ def digest(ctx: Ctx, arg: str | None) -> None:
     (`wrangler pages deploy`) authenticates with `CLOUDFLARE_API_TOKEN`: `$CF_PAGES_TOKEN` when set, for a deployment
     whose D1 token can't deploy Pages. `options.digest.root` (`{snapshots}` filled): the snapshots root the digest reads
     and keeps its thread state beside (`<root>/digest/…`), when that isn't the data store's (`<data>/<snapshots>`), e.g.
-    a deployment whose live state and earlier snapshots are on R2: a wrong root finds no state and posts a second OP."""
+    a deployment whose live state and earlier snapshots are on R2: a wrong root finds no state and posts a second OP.
+    `options.digest.cfn`: the site converges the Slack thread instead (`dt-cloud digest-cfn`, specs/slack-in-workers.md;
+    the site's `DIGEST_CFN = "1"`); `options.digest.shadow`: a dev stack's URL whose shadow converge (`DIGEST_CFN =
+    "shadow"`) runs after, writing nothing, its audit of the thread in the run's log."""
     if ctx.reproc:
         err("REPROC: skipping the usage digest")
         return
     with ctx.phase("digest"):
-        for platform in ctx.opt("digest", "platforms", ["slack"]):
+        if ctx.opt("digest", "cfn", False):
+            # the site converges the thread (specs/slack-in-workers.md): this run only drives its job
+            if ctx.has("SITE_TOKEN", "SITE_URL"):
+                ctx.sh(["dt-cloud", "digest-cfn"], fatal=False, warn="the site's digest converge failed")
+            else:
+                err("no SITE_TOKEN/SITE_URL: skipping the site's digest converge")
+        for platform in [] if ctx.opt("digest", "cfn", False) else ctx.opt("digest", "platforms", ["slack"]):
             if not ctx.has(*DIGEST_TRANSPORTS[platform]):
                 err(f"no {platform} transport ({'+'.join(DIGEST_TRANSPORTS[platform])}): skipping its digest")
                 continue
@@ -1923,6 +1933,9 @@ def digest(ctx: Ctx, arg: str | None) -> None:
                     *ctx.opt("digest", "args", []), "-r", _digest_root(ctx)], fatal=False,
                    warn=f"{platform} usage-digest step failed",
                    env={"CLOUDFLARE_API_TOKEN": ctx.env["CF_PAGES_TOKEN"]} if ctx.has("CF_PAGES_TOKEN") else None)
+        if (shadow := ctx.opt("digest", "shadow", None)) and ctx.has("SITE_TOKEN"):
+            # a dev stack's shadow converge of the same thread: it writes nothing, and audits what it would render
+            ctx.sh(["dt-cloud", "digest-cfn", "-u", shadow], fatal=False, warn=f"the shadow digest converge at {shadow} failed")
 
 
 def _digest_root(ctx: Ctx) -> str:

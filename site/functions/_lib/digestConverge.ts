@@ -180,6 +180,8 @@ const benign = (e: unknown, ...codes: string[]): boolean => e instanceof SlackAp
 /** The thread converger: one per step. */
 export class Converger {
   private shadowTs = 0
+  /** What the last `converge` rendered: the OP's body, each reply's by key (a shadow's audit compares them). */
+  rendered: { op?: string; replies: Record<string, string> } = { replies: {} }
   constructor(readonly c: ConvergeConfig, readonly d: ConvergeDeps) {}
 
   private async write(method: string, body: Record<string, unknown>): Promise<Record<string, unknown>> {
@@ -325,6 +327,7 @@ export class Converger {
     const prevOp = await this.prevOp(month)
     const prevUrl = prevOp ? await this.permalink(prevOp) : null
     const body = opText(data, month, c.cfg, { plotUrl, prevUrl, nextUrl: s.next_url ?? null }, decode(params))
+    this.rendered.op = body
     if (c.variants.length > 1) s.variant = variant
     if (s.op_ts) {
       if (this.d.memo.op !== body) {
@@ -354,6 +357,7 @@ export class Converger {
       await this.save(key, st)
     }
     const units = replies(data, c.cfg, rc, variant).reverse()
+    this.rendered.replies = Object.fromEntries(units.map(u => [u.key, u.body]))
     if (c.preview && !this.d.memo.preview) {
       await this.writePreview(month, variant, { data, params, rc, body, plotUrl, prevUrl, opTs, nextUrl: s.next_url ?? null, units })
       this.d.memo.preview = true
