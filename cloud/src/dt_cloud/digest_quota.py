@@ -702,18 +702,19 @@ def site_triggers(cfg: DigestConfig) -> dict[str, str]:
 
 
 def load_month(root: str, month: dt.date, primary: str, unit: int = TIB, triggers: Mapping[str, str] | None = None,
-               as_of: dt.date | None = None) -> Month | None:
+               as_of: dt.date | None = None, now: dt.datetime | None = None) -> Month | None:
     """The month's scans from ``root`` (``gs://<bucket>/snapshots/cw``), sizes in ``unit`` bytes, each with its trigger
     (``triggers``), with ``lead`` = every scan of the last calendar day before it, ``pre`` = the OP window's scans
     before that (`window_scans`), ``closed`` once a later month's scan exists; ``as_of``: only the scans through that
-    day (`scans_as_of`). None if the month has no scans."""
+    day (`scans_as_of`); ``now``: the slugs' clock (`scan_slugs`; default the current time). None if the month has no
+    scans."""
     scans = scans_as_of(list_scans(root), as_of)
     w = load_window(root, month, scans)
     if w is None:
         return None
     lead, in_month = w
     pre = read_metas(root, window_scans(scans, month, (lead or in_month)[0][0]))
-    rows = rows_from_meta(pre + lead + in_month, primary, unit=unit, triggers=triggers)
+    rows = rows_from_meta(pre + lead + in_month, primary, now=now, unit=unit, triggers=triggers)
     n, k = len(pre), len(pre) + len(lead)
     return Month(lead=rows[n:k], rows=rows[k:], closed=scans[-1] > in_month[-1][0], pre=rows[:n])
 
