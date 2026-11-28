@@ -3,9 +3,9 @@
 //! (`tests/golden/slim-packs.json`; the header's one timing, `stats.build_s`, left out). The digests are the loader's
 //! from before class columns came from the store (`classes.rs`; it knew `c2`..`c4` and gcs's names for them), taken in
 //! CI on the commit that added this test. Each fixture as committed (class columns `c2`..`c4`, read off the store or
-//! named by `-C`) and as a copy under gcs's names with gcs's `-C` (`2=nearline_bytes,3=coldline_bytes,4=archive_bytes`,
-//! what `dt-cloud vm-pack build` passes there) gives exactly those bytes: gcs's slots, their order and its packs are
-//! unchanged.
+//! named by `-C`; on gcs's branch, its own names with its `-C`) and as a copy under gcs's names with gcs's `-C`
+//! (`2=nearline_bytes,3=coldline_bytes,4=archive_bytes`, what `dt-cloud vm-pack build` passes there) gives exactly
+//! those bytes: gcs's slots, their order and its packs are unchanged.
 
 use std::collections::BTreeMap;
 use std::fs::File;
@@ -97,6 +97,13 @@ fn digest(pack: &Path) -> String {
     hex::encode(d.finalize())
 }
 
+/// Whether a fixture generation's class columns are already gcs's names: gcs's branch cuts its fixtures under its
+/// `CLASS_COLS`, `cloud`'s are `c2`..`c4`. Either way its packs are the same bytes.
+fn gcs_named(gen: &Path) -> bool {
+    let b = ParquetRecordBatchReaderBuilder::try_new(File::open(gen.join("served/path.parquet")).unwrap()).unwrap();
+    b.schema().field_with_name(GCS_NAMES[0].1).is_ok()
+}
+
 /// `gen`'s slim pack (`-C`: `named`), written to `out`: its digest.
 fn slim_pack(gen: &Path, named: Option<&str>, out: &Path) -> String {
     let cs = named.map(|s| classes::parse(s).unwrap());
@@ -111,8 +118,11 @@ fn fixture_slim_packs() {
     let mut got: BTreeMap<String, String> = BTreeMap::new();
     for g in fixtures() {
         let n = g.file_name().unwrap().to_string_lossy().into_owned();
-        let plain = slim_pack(&g, None, &tmp.join(format!("{n}.fsb")));
-        assert_eq!(slim_pack(&g, Some("2=c2,3=c3,4=c4"), &tmp.join(format!("{n}-named.fsb"))), plain, "{n}: its class columns named");
+        let named = gcs_named(&g);
+        let plain = slim_pack(&g, named.then_some(GCS), &tmp.join(format!("{n}.fsb")));
+        if !named {
+            assert_eq!(slim_pack(&g, Some("2=c2,3=c3,4=c4"), &tmp.join(format!("{n}-named.fsb"))), plain, "{n}: its class columns named");
+        }
         let gcs = tmp.join(format!("{n}-gcs"));
         renamed_copy(&g, &gcs, &GCS_NAMES);
         assert_eq!(slim_pack(&gcs, Some(GCS), &tmp.join(format!("{n}-gcs.fsb"))), plain, "{n}: under gcs's class column names");
