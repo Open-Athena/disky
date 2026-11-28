@@ -20,7 +20,7 @@ config:
     # local job backend and the pack sync). Pin it to the landed `cloud` sha before `up`:
     # `pulumi config set --path vmPilot.ref <sha>`.
     repo: https://github.com/Open-Athena/disky.git
-    ref: 761dce2aef1ebffc146aef7fe494cbe8d85c1c58
+    ref: a60b782df9cb85a1efbbf392e9cc117d2da26abb
     tunnelSecret: vm-pilot-tunnel-token
     # The tenants' image hosts: pulled with the job's own token (deploy/vm-pilot/docker-credential-disky)
     registries: [us-west1-docker.pkg.dev, us-central1-docker.pkg.dev]
