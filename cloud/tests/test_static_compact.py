@@ -164,12 +164,13 @@ def test_incremental_measure_is_the_rebuilds(world, tmp_path, store, gen):
 
 def test_the_floor_crossers_counted_on_worker_processes_measure_the_same(world, tmp_path, monkeypatch):
     """`base_counts_parallel` (crossers cut in sorted shares, counted on spawned processes against the tier's own files) writes
-    the measurement the in-process count does, md5 for md5."""
+    the measurement the in-process count does, md5 for md5, in as many shares as the processes take (`SHARE_ROWS_MIN` 1)."""
     root = world["a_store"]
     rec = json.loads((root / "g.c001" / ar.COMPACTION).read_text())
     base = root / rec["from"]
     tiers = [sd.Tier(base / "drill", "base"), *(sd.Tier(base / k / "drill", k) for k in rec["runs"])]
     docs = {}
+    monkeypatch.setattr(sme, "SHARE_ROWS_MIN", 1)
     for name, least, local in (("here", 10**9, False), ("procs", 1, False), ("copied", 1, True)):
         monkeypatch.setattr(sme, "PARALLEL_MIN", least)
         # `copied`: the base tier as if on another filesystem (the fold's mount), so the workers count a work-disk copy
@@ -203,6 +204,24 @@ def test_the_measurement_joined_in_q_ranges_is_one_joins(world, tmp_path, monkey
     assert cuts[:2] == [1, 1]
     assert max(cuts[2:]) > 1
     assert _md5s(tmp_path / "ranges") == _md5s(tmp_path / "one")
+
+
+def test_the_counts_and_crossers_built_in_hash_parts_measure_the_same(world, tmp_path, monkeypatch):
+    """`measure_kind` building the runs' counts (`im_d`) and the floor crossers (`im_c`) in hash parts (`AGG_PART_ROWS` 7: a
+    part per ~7 counts) writes the measurement one aggregate does, md5 for md5, and counts as many of each."""
+    root = world["a_store"]
+    rec = json.loads((root / "g.c001" / ar.COMPACTION).read_text())
+    base = root / rec["from"]
+    tiers = [sd.Tier(base / "drill", "base"), *(sd.Tier(base / k / "drill", k) for k in rec["runs"])]
+    docs = {}
+    for name, rows in (("one", 10**9), ("parts", 7)):
+        monkeypatch.setattr(sme, "AGG_PART_ROWS", rows)
+        con = sn.connect(2, "1GB", tmp_path / f"duckdb-{name}")
+        docs[name] = sme.incremental_measure(con, tiers, base / "roots-measure", str(root / "g.c001" / "catalog" / "members.parquet"),
+                                             tmp_path / name, floor=tiers[0].meta.get("floor", sl.FLOOR), log=lambda s: None)
+    assert [{k: d[k] for k in ("dcount", "base_counted")} for d in docs["parts"].values()] == [
+        {k: d[k] for k in ("dcount", "base_counted")} for d in docs["one"].values()]
+    assert _md5s(tmp_path / "parts") == _md5s(tmp_path / "one")
 
 
 @pytest.mark.parametrize("n", [0, 5, 2_100_003])

@@ -1,6 +1,6 @@
 # VM pilot: r2 + hf served and scanned from one small always-on VM
 
-Status: draft (2026-11-26, the cw session, from Ryan's ask: "get this working for r2+hf, on one small/cheap VM, where we'd nonetheless build out all the mechanisms"). For the root session to own (`cloud`, r2, hf). Builds on [vm-mode.md] (`vmd`, packs, tenants, the cell rule, parity: built and measured), [serverless-tiers.md] (the Worker ↔ VM hand-off, §5) and [full-scan-serving-bench.md]. Ryan's go on the box's infra (2026-11-27, high priority): one e2-standard-4 + a 50 GB pd-balanced disk in `oa-internal-450019`, labelled `app=disky`, `deployment=shared`, `component=vm-pilot`; a Cloudflare Tunnel; per-tenant HMAC secrets for `vmd`; a service account for the box. Per-deployment isolation (Ryan, 2026-11-27): the box's account holds nothing of a tenant's but `iam.serviceAccountTokenCreator` on its job account; a job runs as its spec's account, as on Batch. VM mode bakes beside prod (each session pinned `idx` or `vm`). The IaC and the box's bootstrap are built, not applied: see "Runbook".
+Status: draft (2026-11-26, the cw session, from Ryan's ask: "get this working for r2+hf, on one small/cheap VM, where we'd nonetheless build out all the mechanisms"). For the root session to own (`cloud`, r2, hf). Builds on [vm-mode.md] (`vmd`, packs, tenants, the cell rule, parity: built and measured), [serverless-tiers.md] (the Worker ↔ VM hand-off, §5) and [full-scan-serving-bench.md]. Ryan's go on the box's infra (2026-11-27, high priority): one e2-standard-4 + a 50 GB pd-balanced disk in `oa-internal-450019`, labelled `app=disky`, `deployment=shared`, `component=vm-pilot`; a Cloudflare Tunnel; per-tenant HMAC secrets for `vmd`; a service account for the box. Per-deployment isolation (Ryan, 2026-11-27): the box's account holds nothing of a tenant's but `iam.serviceAccountTokenCreator` on its job account; a job runs as its spec's account, as on Batch. VM mode bakes beside prod (each session pinned `idx` or `vm`). The IaC and the box's bootstrap are built, not applied: see "Runbook". The site's half of step 4 (each session pinned `idx` or `vm`) is built, off on every deployment until it sets the config: see "Serving beside the indexes (step 4)".
 
 ## Why
 
@@ -30,7 +30,7 @@ The pilot proves the shape on the two smallest deployments, where nothing has to
 1. **A job backend interface.** Today `batch.submit_job` is the one GCP seam for most jobs; the static-names runners, Nextflow's executor and the site's REST submits bypass it. Define `JobBackend` (`submit(spec) → id`, `status(id)`, `logs(id)`, `cancel(id)`) with three implementations: GCP Batch (today's), `local` (a process in `scan.slice`, state on disk, logs to Cloud Logging or the store), Kubernetes Job (later, cw's CoreWeave nodes). The scan profile names its backend; every step's job goes through it.
 2. **Bounded scan steps.** Each step the pilot runs takes its memory from the slice budget: listing (already streaming), `import -e stream` / `path-index` (DuckDB `-M`), the interval-store append (`-M`, `-B` sub-ranges). Measure each at the budget on r2 and hf; fix any that doesn't fit by spilling, not by more memory.
 3. **Incremental pack updates.** Today `vm-pack build` rewrites the whole pack, loading every version row (117 GB peak on gcs). Instead the interval-store append's output (the scan's opened versions and close records) is folded into the tenant's pack: a delta file `vmd` maps beside the base pack, compacted into a new base on the interval store's own compaction. Memory then scales with a scan's changes, not with history.
-4. **Serving wiring, beside today's** ([serverless-tiers.md] §5, [vm-mode.md] §7): `vmAdapter.ts` called by `/api/subtree`, `/api/diff`, `/api/series`, search; the Worker reaches `vmd` through a Cloudflare Tunnel (HMAC per tenant, already built); `vmd`'s `/v1/status` copied to the store so the Worker knows the box's state. Both backends serve prod side by side (Ryan, 2026-11-27): each session is pinned to one, `idx` (today's indexes) or `vm` (`vmd`), and a URL parameter (`?be=vm` / `?be=idx`) overrides and re-pins it. The pin is a cookie the middleware reads; responses say which backend answered (`Server-Timing` and a small badge), and the pin passes through links the page builds. The default pin stays `idx` while VM mode bakes; an admin setting moves a share of new sessions to `vm`. When the box is down or loading, a `vm` session is answered by `idx` and says so (no silent partial answer).
+4. **Serving wiring, beside today's** ([serverless-tiers.md] §5, [vm-mode.md] §7): `vmAdapter.ts` called by `/api/subtree`, `/api/diff`, `/api/series`, search; the Worker reaches `vmd` through a Cloudflare Tunnel (HMAC per tenant, already built); `vmd`'s `/v1/status` copied to the store so the Worker knows the box's state. Both backends serve prod side by side (Ryan, 2026-11-27): each session is pinned to one, `idx` (today's indexes) or `vm` (`vmd`), and a URL parameter (`?be=vm` / `?be=idx`) overrides and re-pins it. The pin is a cookie the middleware reads; responses say which backend answered (`Server-Timing` and a small badge), and the pin passes through links the page builds. The default pin stays `idx` while VM mode bakes; an admin setting moves a share of new sessions to `vm`. When the box is down or loading, a `vm` session is answered by `idx` and says so (no silent partial answer). Built 2026-11-28 (the share is a var, `VM_SHARE`, not yet an `/admin` setting): "Serving beside the indexes (step 4)".
 5. **Retiring per-scan indexing is out of the pilot** (Ryan, 2026-11-27): prod keeps indexing and serving as today while VM mode bakes beside it. Turning off static-names and the served sorts for a tenant (the site's `FILTER_STATIC*` flags replaced by `vmd`) comes only after a long bake, as its own call; then the last built generation stays frozen, dated, as the `idx` fallback.
 6. **Cost per step on /scans**, from the same budget: the box's cost is fixed, so a step's share is its CPU-seconds × the box's $/CPU-s; Batch steps keep their billed cost (see the cw session's per-step cost proposal).
 
@@ -53,15 +53,21 @@ A spec stays a Batch job's JSON (what every submitter builds today), so each bac
 
 ### `Local` (this host)
 
-- **Translation** (`container_runs`): each task (`taskCount`, run in turn, not `parallelism` at once) × each runnable becomes `<engine> run --rm --name disky-<job>-<task>-<runnable> --cgroup-parent=<slice> -e K=V… -v HOST:CTR… [--entrypoint E] IMAGE COMMANDS…`, with `$BATCH_TASK_INDEX` / `$BATCH_TASK_COUNT` as Batch sets them. Env is the task's then the runnable's `environment.variables`, sorted; their `secretVariables`, `$GOOGLE_OAUTH_ACCESS_TOKEN` (below, "Identity") and, unless set, `$GOOGLE_CLOUD_PROJECT` (the account's project) join them, a secret or the token as `-e NAME` alone. A disk task volume (`deviceName`: the local-SSD `stage`, a new disk) becomes a host dir (`$DISKY_LOCAL_WORK/<job>/<device>`, default `<root>/<job>/disks/<device>`), created before the first run and removed after the last (as Batch's VM teardown removes the SSD); a container volume whose host path is under a task volume's `mountPath` is mounted from that dir. `maxRunDuration` is enforced per task (the container is stopped, `FAILED`).
-- **Refused** (`Unsupported`, before anything is written): a spec without `allocationPolicy.serviceAccount.email`, gcsfuse and NFS volumes, a container volume outside every task volume, `encryptedVariables` (and a `secretVariables` ref that isn't a `projects/…/secrets/…/versions/…` name), non-container runnables (script, barrier), `background` / `ignoreExitStatus` / `alwaysRun`, a container's registry credentials or raw `options`, more than one task group. A spec missing its cost labels is refused as on Batch (`cost_labels.check_spec`), since `deployment` is the tenant.
-- **Identity** (built 2026-11-27): a job runs as its spec's service account, never as the host. Before each container run the supervisor mints a short-lived access token for that account (IAM Credentials `generateAccessToken`, under the host's credentials, which hold `iam.serviceAccountTokenCreator` on it; lifetime `$DISKY_LOCAL_TOKEN_LIFETIME_S` at submit, default 3600 s, IAM's maximum unless the org policy `iam.allowServiceAccountCredentialLifetimeExtension` lists the account, up to 12 h) and reads each of the run's `secretVariables` with that token (Secret Manager `:access`; payloads verbatim, as Batch injects them). Token and values go into the engine's environment only (`Host.run(env=)`; argv carries `-e NAME`), so `job.json` holds the secrets' names, never a value or a token. In the container `dt_cloud.job_identity` (at `dt_cloud`'s import) makes `$GOOGLE_OAUTH_ACCESS_TOKEN` every Google client's credentials (`google.auth.default`: gcsfs, `google-cloud-storage`, `gcp.session`); the box's Docker reads it for the tenant's image pull (`docker-credential-disky`), and job containers can't reach the metadata server (`docker-no-metadata.conf`), so the box's own token, and through it another tenant's, is out of their reach. A token isn't refreshed inside a run: a container outliving it sees its calls refused. Tests: `cloud/tests/test_job_backend.py` (the token minted per run for the spec's account, secrets read with it, nothing written), `test_job_identity.py`.
-- **Not applied:** `computeResource` and the rest of `allocationPolicy` (the slice is the budget), `maxRetryCount` (no spot here), `logsPolicy`.
-- **State** under `$DISKY_LOCAL_JOBS/<job_id>/`: `spec.json`, `job.json` (tenant, submit order, the translated runs), `status.json`, `supervisor.json` (`{pid, boot, at}`), `log` (every run's output), `exit`, `cancel` (a cancel's marker). Every read is from disk, so `status` / `logs` / `cancel` work from any process.
-- **Supervisor:** `submit` spawns `python -m dt_cloud.job_backend supervise ROOT ID`, by default as its own transient unit (`systemd-run --collect --unit=disky-job-<id> --slice=<slice>`, so it outlives a submitter that is itself a systemd unit; `$DISKY_LOCAL_SPAWN=direct` for a detached process on a dev box). It waits its turn, runs the job's containers in order, and records the end.
+- **Translation** (`container_runs`): each task (`taskCount`, run in turn, not `parallelism` at once) × each runnable becomes `<engine> run --rm --name disky-<job>-<task>-<runnable> --cgroup-parent=<slice> --network disky-<job> -e K=V… -v HOST:CTR… [--entrypoint E] IMAGE COMMANDS…`, with `$BATCH_TASK_INDEX` / `$BATCH_TASK_COUNT` as Batch sets them. Env is the task's then the runnable's `environment.variables`, sorted; their `secretVariables`, the job's metadata server's address (`$GCE_METADATA_HOST`, `$GCE_METADATA_IP`, `$GCE_METADATA_ROOT`: below, "Identity"; a spec's own values for these are dropped) and, unless set, `$GOOGLE_CLOUD_PROJECT` (the account's project) join them, a secret or the address as `-e NAME` alone. Task volumes:
+  - a new disk (`deviceName`: the local-SSD `stage`, a `newDisk`) becomes a host dir (`$DISKY_LOCAL_WORK/<job>/<device>`, default `<root>/<job>/disks/<device>`), created before the first run and removed after the last (as Batch's VM teardown removes the SSD), never while anything is mounted under it;
+  - an existing disk (the device's `allocationPolicy.instances[].policy.disks[].existingDisk`) becomes `$DISKY_LOCAL_WORK/_disks/<disk name>` (default under `<root>`), created when missing and never removed: it outlives the job, as the disk outlives a Batch job's VM;
+  - a gcsfuse volume (`gcs.remotePath` `bucket[/dir]`; its `mountOptions` as gcsfuse argv, `-implicit-dirs` given its second dash) is mounted on the host at `<root>/<job>/gcs/<i>` for the job's runs, by `gcsfuse --foreground` as the supervisor's child (so in its unit, in the slice: the FUSE daemon's memory is the scan budget's), as the job's account through the job's metadata server; unmounted after the last run (`umount`, then `umount -l`); a mount point that won't go is left, said, and never removed under.
+
+  A container volume whose host path is under a task volume's `mountPath` (the innermost) is mounted from that dir. `maxRunDuration` is enforced per task (the container is stopped, `FAILED`).
+- **Refused** (`Unsupported`, before anything is written): a spec without `allocationPolicy.serviceAccount.email`, NFS volumes, a container volume outside every task volume, `encryptedVariables` (and a `secretVariables` ref that isn't a `projects/…/secrets/…/versions/…` name), non-container runnables (script, barrier), `background` / `ignoreExitStatus` / `alwaysRun`, a container's registry credentials or raw `options`, more than one task group. A spec missing its cost labels is refused as on Batch (`cost_labels.check_spec`), since `deployment` is the tenant.
+- **Identity** (2026-11-27; a metadata server per job since 2026-11-28): a job runs as its spec's service account, never as the host. The supervisor creates the job's own Docker network (`disky-<job>`) and serves a GCE metadata server on its gateway ([`cloud/src/dt_cloud/job_metadata.py`]: project id, the account's email, scopes, aliases, universe domain, `token`), answering only that network's subnet and only with `Metadata-Flavor: Google`. Every container of the job gets its address, so every Google client in it takes the GCE path to it: Python's google-auth (gcsfs, `google-cloud-storage`, `gcp.session`, and the `disk-tree` CLI, which never imports `dt_cloud`), Go's, Java's, C++'s. Its tokens are minted for the job's account (IAM Credentials `generateAccessToken`, under the host's credentials, which hold `iam.serviceAccountTokenCreator` on it; lifetime `$DISKY_LOCAL_TOKEN_LIFETIME_S` at submit, default 3600 s) and reminted once under 5 minutes are left, so a job runs as long as it needs. That replaced the one-shot `$GOOGLE_OAUTH_ACCESS_TOKEN` in each container (`dt_cloud.job_identity`, removed), which lasted an hour and reached only processes importing `dt_cloud`: a scan's `disk-tree bulk-list` writes its listing to `gs://` with no credentials at all. Each run's `secretVariables` are read with the current token (Secret Manager `:access`; payloads verbatim, as Batch injects them) into the engine's environment only (argv carries `-e NAME`), beside the token itself for the engine's registry helper (`docker-credential-disky`: the image is pulled as the job's account), never a container's: `job.json` holds the secrets' names, never a value or a token. Job containers can't reach the host's metadata server (`docker-no-metadata.conf`), and another job's containers, on networks of their own, get 403 from this one; host processes reach it (their connections to the gateway come from inside its subnet), as the box's own services. Tests: `cloud/tests/test_job_backend.py`, `test_job_metadata.py` (each answer; the refusals; a token reused until it nears expiry; google-auth in a fresh interpreter finding the server and refreshing through it).
+- **Usage:** each container run's cgroup (from its first process's `/proc/<pid>/cgroup`: `scan.slice/docker-<id>.scope`) is sampled every 2 s by the supervisor ([`cloud/src/dt_cloud/job_usage.py`]): `memory.current`, `memory.stat`'s `anon` / `file`, `memory.peak` and the slice's `memory.current` into `usage.tsv`, and at the run's end its summary into `usage.jsonl`: wall time, exit, `memory.peak` (its last reading: the run's high-water mark to within an interval, since the cgroup goes with the container), the sampled maxima, `memory.events`' `oom_kill`, `cpu.stat`'s CPU seconds. `memory.peak` counts page cache, which a cgroup fills to its limit whenever it reads or writes more than that and reclaims before an OOM kill: `anon` is what a run can't give back.
+- **Not applied:** `computeResource` and the rest of `allocationPolicy` (the slice is the budget; only its existing disks are read), `maxRetryCount` (no spot here), `logsPolicy`.
+- **State** under `$DISKY_LOCAL_JOBS/<job_id>/`: `spec.json`, `job.json` (tenant, submit order, the translated runs, the disks' dirs, gcsfuse volumes, network), `status.json`, `supervisor.json` (`{pid, boot, at}`), `log` (every run's output), `exit`, `cancel` (a cancel's marker), `usage.tsv` / `usage.jsonl`, `gcs/<i>` and `gcsfuse-<i>.log`. Every read is from disk, so `status` / `logs` / `cancel` work from any process: `dt-cloud local-job status [JOB]` (with each run's usage), `local-job logs [-n N] JOB`, `local-job cancel JOB`.
+- **Supervisor:** `submit` spawns `python -m dt_cloud.job_backend supervise ROOT ID`, by default as its own transient unit (`systemd-run --collect --unit=disky-job-<id> --slice=<slice> --property=KillMode=mixed --property=TimeoutStopSec=180`, so it outlives a submitter that is itself a systemd unit; `$DISKY_LOCAL_SPAWN=direct` for a detached process on a dev box). It waits its turn, sets the job up (dirs, network, metadata server, gcsfuse mounts), runs the job's containers in order, records the end and takes the setup down. Its TERM (`systemctl stop disky-job-<id>`: `KillMode=mixed` sends it to the supervisor alone) is a cancel: it stops the running container, which has 60 s to end, then tears down as after any end.
 - **One job at a time per tenant** (the spec's `deployment` label): under a per-tenant `flock`, a job starts only when it is the tenant's oldest queued job and none of the tenant's is running; other tenants run beside it (all inside `scan.slice`'s budget).
 - **Restarts:** a queued or running job whose supervisor is gone (its pid dead, a different boot id, or never started within `START_GRACE_S`) is `FAILED`, "supervisor lost", the next time anyone asks. A reboot doesn't resume jobs; the caller resubmits (a new id).
-- **Cancel:** a queued job is `CANCELLED` at once; a running one's current container is stopped (`<engine> stop`) and its supervisor records `CANCELLED` and starts nothing more.
+- **Cancel:** a queued job is `CANCELLED` at once; a running one's current container is stopped (`<engine> stop -t 60`) and its supervisor records `CANCELLED` and starts nothing more.
 
 ### Selection
 
@@ -70,12 +76,13 @@ A spec stays a Batch job's JSON (what every submitter builds today), so each bac
 ### Callers
 
 Through `JobBackend`:
-- `append_runner.BatchRunner`, i.e. every `Runner.run_job`: the interval store's `run` (`interval_append`), the static-names runner (`static_runner`) and its merge helpers (`static_merge`), with the `StillRunning` / `wait` polling and transient-error retries unchanged. Its specs mount gcsfuse buckets and R2 secrets today, so under `local` they are refused (by design, until the two gaps below close).
+- `append_runner.BatchRunner`, i.e. every `Runner.run_job`: the interval store's `run` (`interval_append`), the static-names runner (`static_runner`) and its merge helpers (`static_merge`), with the `StillRunning` / `wait` polling and transient-error retries unchanged. Their specs mount gcsfuse buckets, which `local` now mounts (above); none has run locally yet.
+- `dt-cloud scan box submit` ("A scan on the box", below): a deployment's whole scan head as one local job.
 - `vm_pack.submit` and `access_jobs.submit` (submit only, not waited on). `vm-pack`'s spec runs locally as is unless it names `secrets` (a non-GCS store's credentials).
 
 Still on raw Batch (known gaps):
 - `scan_tasks` (`scan-run task`): it clones its worker's spec from its own controller's Batch job (`$BATCH_JOB_UID`) and checks an existing worker against Batch's stored job; it only exists inside a Batch controller.
-- Nextflow's `google-batch` executor (`scan_head`), the Fray backend (`scan_backend_fray`).
+- Nextflow's `google-batch` executor (`scan_head`), the Fray backend (`scan_backend_fray`). A scan on the box doesn't use either: its head runs Nextflow's local executor inside a local job of its own.
 - `batch_events.submit` (a compaction submitted from Batch's own state-change events).
 - The shell's `dt-cloud batch submit`, `job submit-listing` (the listing fan-out, `wait_jobs`), `job submit-reviewed`; `job status|logs|watch|metrics` and `batch-cancel` (`cancel_labelled`) read Batch only.
 - The site's REST submits (`_lib/sweepDispatch.ts`, `_lib/cwBatch.ts`) and `BatchCron` bodies (Cloud Scheduler posts them).
@@ -83,10 +90,149 @@ Still on raw Batch (known gaps):
 ### For review
 
 - **Secrets.** Resolved (2026-11-27): through the job's own impersonated account ("Identity" above), not the host's.
-- **gcsfuse volumes.** Refused. The pilot's jobs that mount buckets (the interval-store and static-names stages) either read through the API instead, or the box mounts gcsfuse itself (`gcsfuse` on the host, a host-path volume); the second keeps specs unchanged but puts a FUSE daemon in `scan.slice`.
-- **Logs.** A local job's output is its `log` file, not Cloud Logging, so `dt-cloud job logs` (Batch only) doesn't see it and nothing ships it off the box. Options: the store (copy `log` beside the scan's records at the end), or Docker's `gcplogs` driver (the spec's "logs to Cloud Logging"), which ties the box to GCP.
-- **Identity.** Resolved (2026-11-27): impersonation of the spec's `serviceAccount`. Open: a token is good for an hour by default, and hf's listing step runs for hours; either the org policy extends the job accounts' token lifetime (to 12 h), or a refresher (a per-job metadata endpoint serving fresh tokens) replaces the one-shot token.
+- **gcsfuse volumes.** Resolved (2026-11-28): the box mounts gcsfuse itself (3.13.1, pinned in `bootstrap.sh`), per job, as the job's account ("Translation" above): specs stay unchanged, and the FUSE daemon's memory is in `scan.slice`.
+- **Logs.** A local job's output is its `log` file (`dt-cloud local-job logs`), not Cloud Logging: `dt-cloud job logs` (Batch only) doesn't see it, and nothing ships it off the box. Options: the store (copy `log` beside the scan's records at the end), or Docker's `gcplogs` driver (the spec's "logs to Cloud Logging"), which ties the box to GCP.
+- **Identity.** Resolved (2026-11-27): impersonation of the spec's `serviceAccount`; since 2026-11-28 through the job's own metadata server, which remints its tokens ("Identity" above), so hf's hours-long listing needs no org-policy change.
 - **Restart semantics.** A lost job fails rather than resumes; the scan steps already resume from their outputs on a resubmit.
+
+## Serving beside the indexes (step 4)
+
+Built 2026-11-28 (`[cloud]`): the site answers a session from `vmd` or from today's indexes, by the session's pin. Off on every deployment until its config names a `vmd` (below); with it off, no response changes. Code: [`site/functions/_lib/vmServe.ts`] (config, pin, `vmd` client, fallback, caching), its hooks in `api/subtree.ts` and `api/diff.ts`, the cookie in `_middleware.ts`; the page's side in [`site/src/backend.ts`] and `BackendBadge.tsx`. `vmAdapter.ts` (specs/vm-mode.md §7) builds the requests and bodies.
+
+### Config
+
+| key | kind | what |
+|---|---|---|
+| `VMD_URL` | var | `vmd`'s base URL, through the box's tunnel: `https://vmd-pilot.oa.dev` |
+| `VM_TENANT` | var | the deployment's tenant on it (its `x-disky-tenant`): `oa-r2`, `hf` |
+| `VM_KEY` | secret | the tenant's HMAC key: Secret Manager's `vm-pilot-vmd-key-<tenant>`, which `vmd` reads as `VMD_KEY_<TENANT>` |
+| `VM_SHARE` | var, optional | the share (0–1) of new browser sessions pinned `vm`; unset: none |
+
+Any of the first three unset: VM mode is off. No response carries a `be` timing entry (so the page shows no badge), and a `?be=vm` is ignored with a note (`x-disky-be-note: VM mode is off on this deployment …`; the page logs it once to the console).
+
+### The pin
+
+- **Cookie** `disky_be` = `vm` | `idx`: `Path=/`, 30 days, `SameSite=Lax`, `Secure` on https. Not `HttpOnly`: the page reads it, and it grants nothing (any viewer may pick either backend).
+- **Per request** (`pinOf`): `?be=vm|idx`, else the cookie, else `idx`.
+- **Written by the middleware** (`pinCookie`): a `?be=` other than the cookie's re-pins, on any response. A page view (an HTML `GET`) with neither gets a pin, `vm` with probability `VM_SHARE`, else `idx`. An API request with neither (an agent's token, `curl`) is `idx` and assigned nothing, so a client without a cookie jar never flips between backends. With VM mode off, a page view clears a leftover cookie.
+- **Links** (`src/backend.ts`): a `vm` pin rides in the page's own URL (`be=vm`, added at load before the router reads the URL), so the links the page builds from it keep it: a drill (use-prms keeps the parameters it doesn't own), the prod/dev toggle (`g d`), a copied or shared link (which then pins its opener `vm` too). An `idx` pin is the default and rides nowhere. A peer deployment's link drops `be` (`hosts.ts` `LOCAL_PARAMS`): its VM mode is its own tenant. The page also adds `be=vm` to each same-origin `/api/` request (as `ps` rides, `pathStoreParam.ts`), so the browser's copy of one backend's answer (`private, max-age=300`) is never read for the other's.
+
+### What answers
+
+Per request, after the gate, the scan checks and the restriction checks, so a `vm` answer is gated exactly as an `idx` one:
+
+| request | a `vm` session's answer |
+|---|---|
+| `/api/subtree`: the map, a drill, `depth=`, `cl=` (classes) | `vmd` |
+| `/api/diff`: `dm=max`, `summary=1`, `depth=`, `cl=`; `dm=delta` where `DIFF_DESCENT` is off (it reads as `max` there) | `vmd` (rows cut to `top` as the index reader's: `capDiffRows`) |
+| a union or group root (r2.oa.dev's main map is the union of `primary` and `meta`) | each member as its own request: the primary's from `vmd` under the composite's one byte floor (`cell.floor_bytes`), a store without a tenant (`meta`) from the indexes |
+| `/api/diff` `dm=delta` under `DIFF_DESCENT = "1"` (r2.oa.dev's default diff) | `idx`: `vmd` draws by max(before, after), the descent by change |
+| `q=` on either | `idx`: `vmd`'s answer has no match lists (`matched`, `matchCount`) yet (specs/vm-mode.md §7.2) |
+| `lens=`, `o=`, `by=` | `idx`: `vmd` doesn't fold the live ledger yet (§2.1) |
+| a path-restricted link | `idx`: never sent to `vmd` (§4.3) |
+| `/api/series`, `/api/name-summary` | `idx`: `vmd` has neither yet |
+
+A `vm` subtree's nodes carry no `mtime`, `last_read`, `owners`, `class_bytes` or `provenance` (§7.2), and its answer's note says so: the map's tree color is unaffected, the written / read / owner colors have nothing to draw. A `vm` body is `vmAdapter`'s (`tier: "vm"`, `index: "vm:<gen>/<manifest>"`) plus `vm: {tenant, pins, ms}`.
+
+**Fallback.** A `vm` session's request goes to the indexes, saying why, when `vmd`: is unreachable or its status unsigned (the reason cached per isolate for 10 s, so a down box costs one 3 s timeout per isolate per window, not one per request); has no pack for the tenant, or is loading its first one; holds no scan as new as the request's; answers anything but `200` (a `400` for a class its pack doesn't hold, a `503` mid-swap, a `504` past the 6 s deadline; the fetch itself is given up at 8 s); or signs its answer with another key. A `409 pins` (a new pack swapped in since the status was read) is asked once more at the pins `vmd` names. Never a partial answer: `vmd` answers whole or not at all.
+
+### What a response says
+
+- `Server-Timing: be;desc="vm"` / `"idx"` / `"idx-fallback"` (a `vm` session answered by the indexes), on every `/api/subtree`, `/api/diff`, `/api/series` and `/api/name-summary` response while VM mode is on. A union or group root says its members' composite: any fallback makes it `idx-fallback`, else any `vm` part makes it `vm`; a store with no tenant is `idx` and named in the note, not a fallback.
+- `x-disky-be-note`: why it fell back, or what a `vm` answer leaves out (ASCII, at most 300 characters).
+- Timing entries on a `vm` answer: `vm-status` (the status read: ~0 when cached), `vmd` (the round trip), `vmd-pass` / `vmd-total` (`vmd`'s own timing), beside the usual `auth`, `pre`, `match`, `total`.
+- **The badge** (`BackendBadge`, in the top bar beside the avatar): `vm` (blue), `idx` (grey) or `idx*` (red: a fallback), for the newest map or diff answer; its tooltip names the session's pin, each request kind's latest backend with its note, and a link re-pinning the session to the other backend. No badge until an answer names a backend, so none with VM mode off.
+
+### Caching
+
+A `vm` answer is kept (colo + KV, as any answer) under the index reader's key for the same request plus `&be=vm&vv=<VM_RESPONSE_V>&vp=<gen>/<manifest>` (`vmKey`): an `idx` session never computes that key, so it never reads a `vm` answer, and a new pack's pins never hit an old pack's entry. An answer is stored under the pins it came back with. No index reader's body or key changed, so neither `CACHE_V` nor the static filter's `RESPONSE_V` moved; `VM_RESPONSE_V` (1) versions the `vm` bodies alone.
+
+### Tests
+
+`functions/_lib/vmServe.test.ts` (the pin, the cookie, the share, the stamps and composites, which kinds go to `vmd`; the client against a fake `vmd`: status caching, a down box, a newer scan, the `409` retry, unsigned replies, a member read's floor; the diff body), `functions/api/vmServing.test.ts` (the routes over two fixture scans and a fake `vmd`, `_lib/testVmd.ts`: a `vm` session's map and diff from `vmd`, an `idx` session never served a `vm` entry from the shared cache, a fallback with its reason, VM mode off, a union root's composite), `src/backend.test.ts` (the page's pin, the URL and `/api/` carrying, the badge's state).
+
+### Turning it on: r2's dev stack (dev.r2.oa.dev)
+
+The `vmd` key is the tenant's: `oa-r2`'s is Secret Manager's `vm-pilot-vmd-key-oa-r2` (project `oa-internal-450019`). The secret goes first: a Pages secret reaches the next deployment, and the vars' commit is that deployment.
+
+1. The secret, on the Pages project's **preview** environment only (the dev stack), piped so the value is never printed or written to disk (in `wt/r2`, with its Cloudflare token):
+
+   ```bash
+   gcloud secrets versions access latest --secret vm-pilot-vmd-key-oa-r2 --project oa-internal-450019 \
+     | wrangler pages secret put VM_KEY --project-name oa-r2-usage --env preview
+   ```
+2. The vars, in `site/wrangler.toml`'s `[env.preview.vars]` on `r2` (a `[r2]` commit; `VM_SHARE` stays unset, so only `?be=vm` pins a session `vm`):
+
+   ```toml
+   VMD_URL = "https://vmd-pilot.oa.dev"
+   VM_TENANT = "oa-r2"
+   ```
+3. Merge `cloud` into `r2` and push `r2`: CI, then the dev deploy. Prod is unchanged (no `[vars]` entry, no production secret).
+4. Check, signed in on dev:
+   - `https://dev.r2.oa.dev/` (a new session): badge `idx`; DevTools' Server-Timing on `/api/subtree`: `be;desc="idx"`.
+   - `https://dev.r2.oa.dev/?be=vm`: the URL keeps `be=vm`, badge `vm`; `/api/subtree?…&be=vm` carries `be;desc="vm"`, `vm-status`, `vmd`, `vmd-total`, and its note names `meta` (no tenant). Drill into a bucket: still `vm`, `tier: "vm"` in the body.
+   - On that `vm` session: the over-time chart (`/api/series`) shows `idx-fallback` (`size over time: vmd has no series yet`) in the badge's tooltip; a diff (`dm=delta` by default, under `DIFF_DESCENT`) `idx*`, and with `&dm=max` `vm`; a `q=` search `idx*`.
+   - `https://dev.r2.oa.dev/?be=idx`: re-pinned, badge `idx`.
+   - With the box down (or `VMD_URL` pointed elsewhere), a `vm` session's map answers `idx*` with `vmd unreachable: …` in the tip.
+
+hf likewise (tenant `hf`, secret `vm-pilot-vmd-key-hf`, project `oa-hf-usage`, dev.hf.oa.dev): its pack holds classes 1, 5 and 6, and a `cl=` scope reaches `vmd` with hf's own ids. Prod, for either, later: the same two vars in `[vars]` and `wrangler pages secret put VM_KEY --project-name <project>` without `--env`; `VM_SHARE` only after a bake.
+
+Not built (open): `VM_SHARE` as an `/admin` setting (a D1 row the middleware reads) rather than a var; the status object copied to the store (step 4's first form; the Worker reads `/v1/status` itself, cached per isolate); `vmd` answering search with match lists, owner scopes with the live ledger's regions (§2.1), a Δ cell rule for `dm=delta`, series and the name summary; per-node `mtime` / owners in the pack (§7.2).
+## A scan on the box (Order step 1)
+
+Built 2026-11-28 (`[cloud]`), not yet run: [`cloud/src/dt_cloud/scan_box.py`] (`dt-cloud scan box submit|report`), on the local backend's gcsfuse volumes, existing disks, per-job metadata server and usage sampling ("`Local`" above); `bootstrap.sh` installs gcsfuse.
+
+### The gap, and the way through it
+
+A deployment's scan is a Nextflow head whose tasks go to Batch through nf-google, past `JobBackend`. Two ways onto the box:
+- **(a) the head on the box, under Nextflow's local executor: chosen.** The head is one local job (the deployment's pinned image, `dt-cloud scan head` over its own profile rewritten for the box), and every task is a process of the local executor inside that container. The whole scan is then in `scan.slice`, every process authenticates through the job's metadata server, and nothing gets a Docker socket: Nextflow's Docker integration run from a container would need the host's socket, root on the box and, through its metadata server, every tenant's account; run on the host instead, it would need a JVM and Nextflow there and a per-task token mechanism of its own. Tasks run one at a time (`queue_size: 1`), so the head container's cgroup samples while a task runs are that task's (plus the head's constant share), beside the trace's own per-task peak RSS.
+- **(b) the head on Batch, its tasks on the box: worse.** nf-google posts each task as a Batch job itself; routing them to the box needs an executor of our own, and the head stays a billed Batch VM watching the box.
+
+### What `submit` does
+
+`dt-cloud scan box submit -a ACCOUNT -i IMAGE PROFILE` (PROFILE: the deployment's profile's path in the image):
+1. Pulls IMAGE as ACCOUNT (a minted token for the registry helper) and reads PROFILE from it (`docker run --network none --entrypoint cat`): the profile the deployment's scheduler runs, byte for byte.
+2. Rewrites it for the box (`box_profile`): the local executor; `work` = `/mnt/disks/nf` (an existing disk, below); `queue_size` 1 (`-q`); machines reduced to their `time` (the local executor refuses a task asking for more memory than the host has: r2's `static` asks 30 GB); sources' machines dropped, `procs` / `threads` at most the box's CPUs; every `options.<step>.mem` and `$DUCKDB_MEM` at most the DuckDB cap, every `threads` and `$DUCKDB_THREADS` at most the CPUs; `$DT_MEM` the steps' share of the budget (what `{mem}` sizes from); `$DT_DATA_MOUNT=/mnt/disks`; `$GCP_PROJECT` the executor's project (the steps' `secrets exec`); `$DT_LIVENESS_PID` empty (each step logs its own liveness line, as a Batch task does). `-x ENV` drops a secret binding the account can't read; `-S STEP` leaves a step out. Refused: a data store that isn't `gs://`, and a step left on that submits Batch jobs (`options.static-names.profile` / `compact_cmd`, `options.interval-store.profile`, `options.vm-pack.batch`, `access-jobs`): the box's job accounts have no Batch.
+3. The budget: `-B` (default `scan.slice`'s `memory.max`, 8 GiB) less 1.5 GiB for the head (Nextflow's JVM at `-Xmx768m`, the head's Python, the bucket's gcsfuse) is `$DT_MEM` (6.5 GiB); 60 % of that is the DuckDB cap (3 GB; `-m` overrides).
+4. Writes the box profile and `box.json` (the budgets) to the head's disk (`/var/lib/disky/work/_disks/<tenant>-nf/profiles/<job>.{yml,box.json}`) and submits the head (`head_spec`) as local job `<tenant>-box-<YYYYMMDD-HHMMSS>`: entrypoint `dt-cloud scan head /mnt/disks/nf/profiles/<job>.yml`; the data bucket as a gcsfuse volume at `/mnt/disks/<bucket>` (nf-google's mount point and options); the existing disk `<tenant>-nf` at `/mnt/disks/nf` (Nextflow's launch and work dir: its `-resume` cache and the run's reports stay on the box); the head's own secrets (the D1 token, the Slack bot) when its profile records the run; `$DT_RUN_ID` = the job id, `$DT_TRIGGER=manual`, `$DT_TRIGGER_BY` (`-b`), `$DT_RUN_MACHINE` (`-l`, default `vm-pilot`: not a priced type, the box's cost is fixed), `$DT_RUN_REGION` (`-r`); 6 h limit. `-s SCAN -g GEN` resumes a box scan (its Nextflow session, from the disk's cache). `-n` prints the box profile, the spec and the DAG, and writes nothing. `-c` submits the same job (`<tenant>-box-check-<…>`: its mounts, identity and secrets) running a check instead of the head (`CHECK`): the data bucket's mount listed, a plain google-auth client (no `dt_cloud`) authenticated through the job's metadata server, one of the profile's secrets read by `secrets exec`, and `scan head -n` over the box profile in the image's own code (it renders `scan.nf` and the params into the launch dir, runs and records nothing); its log ends `BOX-CHECK {…}`.
+
+Kept from Batch: the run record and every step's phases on /scans, the alerts and the run thread (`nominal`), every data-store output at its key (through the gcsfuse mount: `listing/<scan>/`, the index, the snapshots, `access/`), the interval store's and the static name index's one-machine appends (each appends every scan after its generation's newest: scan-id order), the R2 publish, `index-sync`, the digest, `vm-pack`. Not kept: Nextflow's reports go to the box's disk (`runs/<scan>/` there), not `<work>/runs/<scan>/` on GCS (the scan-runs profile's `nf-dag` output isn't measured); the run has no Batch jobs, so `finish` prices nothing; the base config's 30 s poll leaves up to 30 s between tasks.
+
+What r2's VM account can't do (its grants in r2's `infra/gcp/__main__.py`): read `oa-r2-cf-pages-token`, the digest's Pages token (so `-x CF_PAGES_TOKEN`, else the digest's `secrets exec` fails; without it the plot's `wrangler pages deploy` runs on the D1 token and likely fails, and the digest step with it: a soft step, which the next Batch scan converges, unless r2 grants that secret), and anything of Batch (`gcp-cost`'s compute half, `run-cost`: `-S` both, or they fail softly).
+
+### Measuring a run
+
+`dt-cloud scan box report JOB`: per traced task, its wall time and peak RSS (Nextflow's trace) and the maxima of the head container's cgroup samples while it ran (`anon`, `current`, the slice's `current`); then the container run's `memory.peak`, max `anon`, OOM kills and CPU seconds. Written beside the run's trace (`runs/<scan>/usage.{json,tsv}` on the head's disk). `dt-cloud local-job status JOB` prints the run's summary.
+
+Expected, from r2's Batch traces (2026-11-28T0716, T0838; Batch's own machines):
+
+| task | wall | peak RSS | at the box's budget (8 GiB slice, DuckDB ≤ 3 GB) |
+|---|---|---|---|
+| `list_source (r2://marin-na)` | 7m17s–7m24s | 3.1 GB | fits (4 procs × 4 threads on 4 vCPUs) |
+| the other three sources | 14–24 s | 0.35–1.4 GB | fits |
+| `pre` (`access-r2`, DuckDB 2 GB) | 1m30s | 2.6 GB | fits |
+| `index` (path-index, DuckDB 12 GB) | 51–54 s | 3.6 GB | fits at 3 GB, slower |
+| `index_rows`, `publish_r2` | 13–18 s | ≤ 0.46 GB | fits |
+| `interval_store` (DuckDB 12 GB) | 2m05s–2m10s | 2.8 GB (PSS 2.6 GiB, DuckDB 1.3 GiB) | fits |
+| `static_names` (DuckDB 12 GB) | 9m–14m28s | 6.3–12.6 GB | **at risk**: the append's catalog refold reached 12.1 GiB RSS; at 3 GB DuckDB must spill, and any part not bounded by `-M` is an OOM kill in the slice. It also mirrors the 14.1 GiB generation to `/tmp` (the container's layer on the data disk) |
+| `post` (digest, warm-up, probe, retire, age store, `vm-pack`, …) | 13m24s–13m57s | 2.5–2.7 GB | fits (22–25 % CPU: mostly waiting) |
+
+One at a time that's ~45–75 min, plus the first image pull. Every task shares the slice with the head's ~1–1.5 GiB and gcsfuse; `memory.peak` will read near 8 GiB for any task moving more bytes than that through the page cache (the listings, the 14 GiB mirror), so `anon` and the trace's RSS are the numbers to read.
+
+### Running it
+
+On the box (root; `/etc/disky/job.env`), with the deployment's scheduled scans and canaries held for the run:
+
+```bash
+box() { sudo bash -c "set -a; . /etc/disky/job.env; set +a; $*"; }
+ARGS="-a oa-r2-usage-vm@oa-internal-450019.iam.gserviceaccount.com -i <r2 scan image, by digest> -x CF_PAGES_TOKEN -S gcp-cost -S run-cost"
+box dt-cloud scan box submit -c $ARGS /app/job/profiles/r2.yml      # first: the setup's check (no scan); its log ends BOX-CHECK {…}
+box dt-cloud scan box submit $ARGS -b <who> -r us-west1 /app/job/profiles/r2.yml
+box dt-cloud local-job status <job>; box dt-cloud local-job logs -n 60 <job>
+box dt-cloud scan box report <job>                                    # after it ends
+```
+
+Abort: `dt-cloud local-job cancel <job>` (or `systemctl stop disky-job-<job>`): the head gets its TERM, has 60 s to finish its run record, and the job's mount, network and metadata server go with it.
 
 ## Runbook (the box's infra)
 
@@ -113,7 +259,7 @@ Why there: a `shared` stack per provider, each its own Pulumi project in its own
 
 ### The box (`bootstrap.sh`, at every boot)
 
-From the instance's non-secret metadata (`disky-repo`, `disky-ref`, `disky-tenants`, `disky-registries`, `disky-tunnel-secret`, the slices' budgets): formats and mounts the data disk at `/var/lib/disky`; installs Docker, git, jq, the Ops Agent (the journal to Cloud Logging, no metrics), cloudflared 2026.11.0 and uv 0.13.8 (both checksummed); checks out `disky-ref` from `disky-repo`; installs the slices plus a `budget.conf` drop-in each (`serveMemoryMin`, `scanMemoryMax`); moves Docker's data root to the data disk and configures the Artifact Registry hosts; builds `vmd` + `fsb` once per `bench/full-scan` tree in `job/Dockerfile`'s Rust image, in `scan.slice`; syncs `dt-cloud` into a venv per checkout (`uv sync --frozen --no-dev --no-editable --package dt-cloud`); writes `/etc/disky/job.env` (`DISKY_JOB_BACKEND=local`, `DISKY_LOCAL_JOBS`, …, also in login shells); then starts:
+From the instance's non-secret metadata (`disky-repo`, `disky-ref`, `disky-tenants`, `disky-registries`, `disky-tunnel-secret`, the slices' budgets): formats and mounts the data disk at `/var/lib/disky`; installs Docker, git, jq, the Ops Agent (the journal to Cloud Logging, no metrics), cloudflared 2026.11.0, uv 0.13.8 and gcsfuse 3.13.1 (with `fuse`; each checksummed); checks out `disky-ref` from `disky-repo`; installs the slices plus a `budget.conf` drop-in each (`serveMemoryMin`, `scanMemoryMax`); moves Docker's data root to the data disk and configures the Artifact Registry hosts; builds `vmd` + `fsb` once per `bench/full-scan` tree in `job/Dockerfile`'s Rust image, in `scan.slice`; syncs `dt-cloud` into a venv per checkout (`uv sync --frozen --no-dev --no-editable --package dt-cloud`); writes `/etc/disky/job.env` (`DISKY_JOB_BACKEND=local`, `DISKY_LOCAL_JOBS`, …, also in login shells); then starts:
 
 - `vmd.service` (`serve.slice`, a dynamic user, loopback only) under `with-secrets -f /etc/disky/vmd.secrets` (`VMD_KEY_OA_R2`, `VMD_KEY_HF` from their secrets into its environment), serving `/etc/disky/vmd.json`.
 - `disky-tunnel.service` (`serve.slice`, a dynamic user): `cloudflared tunnel run` with `TUNNEL_TOKEN` from `vm-pilot-tunnel-token`, the same way.
@@ -161,6 +307,7 @@ gcloud compute ssh disky-vm-pilot --project oa-internal-450019 --zone us-west1-b
 sudo journalctl -b -u google-startup-scripts | grep disky-bootstrap   # ends "done: <sha>; vmd active, tunnel active"
 systemctl show -p MemoryMin serve.slice; systemctl show -p MemoryMax scan.slice   # the budgets
 systemctl is-active vmd disky-tunnel disky-pack-sync.timer docker
+gcsfuse --version                                                  # 3.13.1: the local backend's gcsfuse volumes
 systemd-cgls -u serve.slice                                        # vmd + cloudflared, nothing else
 curl -s localhost:7340/healthz                                     # "ok"
 sudo /usr/local/lib/disky/with-secrets VMD_KEY=vm-pilot-vmd-key-oa-r2 -- /usr/local/lib/disky/vmd-status oa-r2
@@ -202,7 +349,7 @@ The box's checkout is `cloud`'s, so `vm-pack build` names the store's class colu
 
 ## Order
 
-1. `JobBackend` + `local`, the slices (code: built, see "JobBackend (step 1)"), one r2 scan end to end on the box (`vmd` not yet serving): its wall time and peak memory per step at the budget.
+1. `JobBackend` + `local`, the slices (code: built, see "JobBackend (step 1)"), one r2 scan end to end on the box (`vmd` not yet serving): its wall time and peak memory per step at the budget. The scan's code is built ("A scan on the box"); the run is pending, by the root session with r2's crons and canaries held.
 2. `vmd` on the box with r2 + hf packs (full rewrite per scan, as today); the Worker wiring on r2's dev stack; parity on live requests.
 3. Incremental pack updates.
 4. r2 prod serves from the box for sessions pinned `vm` (`?be=vm`), beside `idx`; then hf. Bake; compare answers and latency per request kind on live traffic. Retiring indexing is a later call, not this pilot's.
@@ -226,3 +373,8 @@ The box's checkout is `cloud`'s, so `vm-pack build` names the store's class colu
 [`infra/cf/shared/`]: ../infra/cf/shared
 [`deploy/vm-pilot/`]: ../deploy/vm-pilot
 [`cloud/src/dt_cloud/vm_pack.py`]: ../cloud/src/dt_cloud/vm_pack.py
+[`site/functions/_lib/vmServe.ts`]: ../site/functions/_lib/vmServe.ts
+[`site/src/backend.ts`]: ../site/src/backend.ts
+[`cloud/src/dt_cloud/job_metadata.py`]: ../cloud/src/dt_cloud/job_metadata.py
+[`cloud/src/dt_cloud/job_usage.py`]: ../cloud/src/dt_cloud/job_usage.py
+[`cloud/src/dt_cloud/scan_box.py`]: ../cloud/src/dt_cloud/scan_box.py

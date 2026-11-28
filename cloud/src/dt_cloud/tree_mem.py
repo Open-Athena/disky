@@ -164,10 +164,9 @@ def _spawned_private() -> int:
 def spawned_bytes() -> int:
     """A spawned cut worker's private bytes once its modules are imported (`worker_init`'d, as `write_served`'s pool
     spawns them), measured once per process in a worker of its own."""
-    from concurrent.futures import ProcessPoolExecutor
-    from multiprocessing import get_context
+    from disk_tree.spawned import spawn_pool
 
-    with ProcessPoolExecutor(1, mp_context=get_context("spawn"), initializer=worker_init) as ex:
+    with spawn_pool(1, worker_init) as ex:
         return ex.submit(_spawned_private).result()
 
 
