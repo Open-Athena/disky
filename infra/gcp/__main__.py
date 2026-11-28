@@ -54,9 +54,19 @@ task_logs = TaskLogView(
 )
 pulumi.export("task_log_view", task_logs.path)
 # The project's former shared copy of every deployment's Batch task logs (90 days): each deployment now keeps its own
-# (`<d>-task-logs`), so its sink takes only gcs's, and the other deployments' older entries age out; then it goes
-task_log_bucket = TaskLogBucket("batch-task-logs", project=project, location="global", bucket_id="batch-task-logs", retention_days=90, deployment="gcs")
-pulumi.export("task_log_bucket", task_log_bucket.path)
+# (`<d>-task-logs`), so its sink is gone and its entries age out; then the bucket goes too. Its `TaskLogBucket`
+# component, re-parented here (`aliases`), keeps the same bucket.
+task_log_bucket = gcp.logging.ProjectBucketConfig(
+    "batch-task-logs-bucket",
+    project=project,
+    location="global",
+    bucket_id="batch-task-logs",
+    retention_days=90,
+    description="Batch task logs (container stdout/stderr), 90 days",
+    opts=pulumi.ResourceOptions(
+        aliases=[f"urn:pulumi:{pulumi.get_stack()}::{pulumi.get_project()}::disky:gcp:TaskLogBucket$gcp:logging/projectBucketConfig:ProjectBucketConfig::batch-task-logs-bucket"],
+    ),
+)
 job = JobAccount(
     "gcs-usage-job",
     project=project,
