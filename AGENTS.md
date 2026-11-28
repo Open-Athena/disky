@@ -201,8 +201,10 @@ dt-cloud interval-store level-sim GEN REQUESTS  # `readLevel`'s two waves priced
 dt-cloud history run -i JOB_ID -r SERVING_STORE -w WORK  # One `/api/admin/history` job (`history_jobs.py`, spec `scan-thinning.md`): a
                           # thinning preview (scores, protections, the removal sequence) or a candidate build (fresh interval + static
                           # generations over the retained scans, verified, an immutable `history/versions/<id>.json`). Never moves a CURRENT
-dt-cloud vm-pack build -o STORE [-w WORK] [-f FSB] [-k N]  # VM mode's pack (specs/vm-mode.md §6): the store's current
-                          # interval-store generation + newest manifest mirrored, `fsb pack-slim`ed (bench/full-scan), published
+dt-cloud vm-pack build -o STORE [-w WORK] [-f FSB] [-k N] [-C K=COL,…]  # VM mode's pack (specs/vm-mode.md §6): the store's
+                          # current interval-store generation + newest manifest mirrored, `fsb pack-slim -C`ed (bench/full-scan;
+                          # `-C`: the store's class columns by class id, default this checkout's `interval_store.CLASS_COLS`, at
+                          # most 3, class 1 the rest of `size`; the pack records each slot's class, `vmd` maps requests through it), published
                           # as `vm-pack/<gen>/<manifest>.fsb`, then `vm-pack/CURRENT.json`; a no-op when the pointer names them;
                           # older packs past `-k` deleted; a newer manifest landing meanwhile leaves the pointer alone.
                           # `vm-pack submit -o STORE …`: that build as its own Batch job (default spot n2-highmem-16, local SSD;
@@ -211,7 +213,8 @@ dt-cloud vm-pack build -o STORE [-w WORK] [-f FSB] [-k N]  # VM mode's pack (spe
                           # `options.vm-pack.batch` (its keys = submit's options) it submits; without, builds in the task. `fsb`
                           # in the image: `job/Dockerfile` build arg `FSB=build` (default `none`). The
                           # server is `bench/full-scan`'s `vmd -c CONF` (tenants' packs mapped; `/v1/view`, `/v1/shard`, `/v1/merge`,
-                          # `/v1/status`, HMAC per tenant); `fsb shard PACK -n N` cuts physical shard packs.
+                          # `/v1/status`, HMAC per tenant); `fsb shard PACK -n N` cuts physical shard packs. CI's `full-scan`
+                          # job runs the crate's `cargo test` and the release `fsb` / `vmd` build (the Dockerfile's Rust).
                           # `vm-pack pull -o STORE -d DIR`: the serving side's (the VM pilot's pack sync): the pointer's pack
                           # to `DIR/current.fsb` (sha256-checked, renamed into place) + `DIR/current.json`; `state` pulled |
                           # current (no-op) | none (nothing published)
