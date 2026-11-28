@@ -83,7 +83,10 @@ export function deg(pct: number, mult = 1): number {
 }
 
 /** A signed size change: `+1.5`, `−0.3` (`digest._tb`). */
-export const tb = (v: number): string => (v >= 0 ? `+${fixed(v, 1)}` : `${MINUS}${fixed(Math.abs(v), 1)}`)
+export const tb = (v: number): string => {
+  const s = fixed(Math.abs(v), 1)
+  return v < 0 && s !== '0.0' ? `${MINUS}${s}` : `+${s}`
+}
 
 /** A change's percent of its baseline, unsigned (`digest._pct`). */
 export function pct(dtb: number, total: number): string {

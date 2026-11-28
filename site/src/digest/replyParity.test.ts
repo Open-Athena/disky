@@ -21,7 +21,7 @@ describe('digest reply goldens', () => {
   it('covers every fixture', async () => {
     expect((await fixtures()).map(([n]) => n)).toEqual([
       'circles-sender.json', 'classes-chip-sender.json', 'runway-closed-sender.json', 'runway-hue-sender.json', 'runway-sender.json', 'runway-total-sender.json',
-      'solo-sender.json', 'warning-body.json', 'warning-sender.json',
+      'runway-total-weekly.json', 'solo-sender.json', 'solo-weekly.json', 'warning-body.json', 'warning-sender.json', 'warning-weekly.json',
     ])
   })
   it('renders each fixture\'s replies byte for byte', async () => {

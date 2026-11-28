@@ -3,10 +3,10 @@ import { compactQuietLines } from './compact'
  * `./replyParity.test.ts`), so `/admin/slack` can show a candidate's replies. The job still renders what it posts in
  * Python. `ArrowMark`s exist only here: a preview of marks with no emoji uploaded. Pure; DOM-free. */
 import { scanTime } from '../scanSlug'
-import { type DigestCfg, deg, diffUrl, pct, tb as signed, type Quota } from './common'
+import { type DigestCfg, deg, diffUrl, pct, tb as signed, type Quota, weekOf } from './common'
 import { bucketLink, type QuotaRows, type QuotaScan, dextra, dlink, scoped } from './quota'
 import { growth, hueStep, mark, poolMark, type PoolMark, poolUrl, QUIET_PCT, runway, type Runway, RUNWAY_WINDOWS_D, runwayText, weeklyDeg } from './pools'
-import { dayOf, fixed, grouped, hhmm, md, pyRound } from './pyfmt'
+import { dayOf, fixed, grouped, hhmm, iso, md, pyRound } from './pyfmt'
 import { code } from '@disk-tree/pages-kit/emoji'
 
 export type ReplyMarks = 'warning' | 'circles' | PoolMark
@@ -256,10 +256,44 @@ function reply(day: DayRow, variant: string, cfg: DigestCfg, rc: ReplyCfg, marks
   return { ...base, username: cfg.title, body: `${code(`trend.${d}`)} [${when}](${url}) — **${size}**${sep}${t}`, icon_url: rc.op_sender.icon_url ?? null, icon_emoji: rc.op_sender.icon_emoji ?? null }
 }
 
+/** A weekly reply's first line: the week so far over ``days``, its arrow at the week's rate (`week_summary`). */
+function weekSummary(days: DayRow[], cfg: DigestCfg, total: boolean): string {
+  const v = headline(days[days.length - 1], total)[0]
+  const dv = pyRound(days.reduce((a, d) => a + headline(d, total)[1], 0), 1)
+  const hours = days.reduce((a, d) => a + (d.hours || 24), 0)
+  const prev = v - dv
+  const d = deg(prev ? (dv / prev) * 100 : 0, HOURS_PER_WEEK / hours)
+  return `${code(`trend.${d}`)} *week:* **${signed(dv)} ${cfg.unit.name} (${pct(dv, v)}%)**`
+}
+
+/** The `weekly` style's replies (`digest.weekly_units` over `day_line` / `week_summary`), newest first: one per ISO
+ *  week (a week split by the month's ends is the part in it), keyed `wk-<its Monday>`, sent as `wk of <M/D>` under the
+ *  OP's sender, its body the week so far (from its second day) then each day's `body`-style line over the `sender`
+ *  style's day (its morning scan). Its scan is its newest day's, so a converge edits it as each day lands. */
+function weekly(rows: QuotaRows, cfg: DigestCfg, rc: ReplyCfg, marks: ReplyMarks, total: boolean, lines: boolean): RenderedReply[] {
+  const days = dayRows(rows, 'sender', rc)
+  const weeks = new Map<number, number[]>()
+  days.forEach((d, i) => {
+    const wk = weekOf(dayOf(d.date))
+    weeks.set(wk, [...(weeks.get(wk) ?? []), i])
+  })
+  const out: RenderedReply[] = []
+  for (const [wk, idx] of weeks) {
+    const first = idx[0], last = idx[idx.length - 1]
+    const body = [
+      ...(idx.length > 1 ? [weekSummary(days.slice(first, last + 1), cfg, total)] : []),
+      ...idx.map(i => reply(days[i], 'body', cfg, rc, marks, total, lines, false).body),
+    ].join('\n')
+    out.push({ key: `wk-${iso(wk)}`, scan: days[last].s.scan, username: `wk of ${md(wk)}`, body, icon_url: rc.op_sender.icon_url ?? null, icon_emoji: rc.op_sender.icon_emoji ?? null })
+  }
+  return out.reverse()
+}
+
 /** The month's replies as the converge posts them, newest first (`digest.replies_json`). */
 export function replies(rows: QuotaRows, cfg: DigestCfg, rc: ReplyCfg, variant: string, over: ReplyOverrides = {}): RenderedReply[] {
   const marks = over.marks ?? rc.quota_marks
   const total = over.total ?? rc.total_headline
+  if (variant === 'weekly') return weekly(rows, cfg, rc, marks, total, over.lines ?? rc.reply_lines ?? false)
   const days = dayRows(rows, variant, rc)
   if (rc.provisional && variant === 'sender') {
     const open = dayRows(rows, variant, rc, true).at(-1)

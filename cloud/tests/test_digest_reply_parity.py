@@ -66,6 +66,10 @@ CASES = {
     "warning-body": (CFG, "body", False),
     "solo-sender": (SOLO, "sender", False),
     "classes-chip-sender": (CLASSES, "sender", False),
+    # the weekly style (r2's): a reply a week under the OP's sender, each day's `body` line over the `sender` day
+    "warning-weekly": (CFG, "weekly", False),
+    "runway-total-weekly": (replace(CFG, quota_marks="runway", total_headline=True), "weekly", True),
+    "solo-weekly": (SOLO, "weekly", False),
 }
 
 
