@@ -3,7 +3,8 @@
  "repository": "us-west1-docker.pkg.dev/oa-internal-450019/oa-r2-usage/scan",
  "build_args": {
   "UV_SYNC_ARGS": "--extra s3 --extra overtime",
-  "ENTRYPOINT": "dt-cloud scan-run supervise -- python job/r2-scan run"
+  "ENTRYPOINT": "dt-cloud scan-run supervise -- python job/r2-scan run",
+  "FSB": "build"
  },
  "context": [
   "pyproject.toml",
@@ -13,14 +14,17 @@
   "cloud/pyproject.toml",
   "cloud/src",
   "job",
-  "site/wrangler.toml"
+  "site/wrangler.toml",
+  "bench/full-scan/Cargo.toml",
+  "bench/full-scan/Cargo.lock",
+  "bench/full-scan/src"
  ],
  "cloudbuild": {
   "region": "us-west1",
   "service_account": "oa-r2-usage-builder@oa-internal-450019.iam.gserviceaccount.com",
   "staging_dir": "gs://oa-r2-usage-scratch/builds/source",
   "logging": "CLOUD_LOGGING_ONLY",
-  "timeout": "1200s",
+  "timeout": "1800s",
   "tags": [
    "disky",
    "oa-r2",

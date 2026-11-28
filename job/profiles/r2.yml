@@ -38,8 +38,10 @@ skip: [bucket-check, index-gc, over-time]
 # `access-r2`: marin-na's read recency from the access collector (infra/cf/r2-access) for the read lens; `retire`
 # (specs/lean-scans.md §2): each run deletes the `path` sort of every scan but the newest once both stores hold it;
 # `cf-usage`: the Cloudflare usage snapshot (`snapshots/usage/<date>.json`, `/admin/usage`); `gcp-cost`: the day's GCP
-# cost snapshot (`/admin/cost/gcp`); both never fatal
-steps: [access-r2, age-store, retire, cf-usage, gcp-cost, run-cost]
+# cost snapshot (`/admin/cost/gcp`); both never fatal; `vm-pack`: VM mode's pack of the interval store
+# (`vm-pack/<gen>/<manifest>.fsb` + `vm-pack/CURRENT.json` on R2), built in the post task (r2's pack is under 1 GB: no
+# Batch job of its own), which the VM pilot's box syncs (specs/vm-pilot.md)
+steps: [access-r2, age-store, retire, cf-usage, gcp-cost, run-cost, vm-pack]
 secrets:
   R2_ACCESS_KEY_ID: oa-r2-index-access-key-id
   R2_SECRET_ACCESS_KEY: oa-r2-index-secret-access-key
