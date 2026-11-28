@@ -35,6 +35,31 @@ fn fixtures() -> Vec<PathBuf> {
     v
 }
 
+/// The fixtures' class columns. Each branch cuts them under its own: cloud's `c2`..`c4` (what the pins are of), gcs's
+/// names for the same classes (the same data, read with gcs's `-C`), or another deployment's (hf: `private_bytes`,
+/// `git_bytes`: other classes, where the pins don't apply; the tests say so and pass).
+#[derive(Clone, Copy, PartialEq)]
+enum Fixtures {
+    Cloud,
+    Gcs,
+    Other,
+}
+
+fn fixture_columns(fx: &[PathBuf]) -> Fixtures {
+    let p = fx[0].join("served/path.parquet");
+    let b = ParquetRecordBatchReaderBuilder::try_new(File::open(&p).unwrap()).unwrap();
+    let names: Vec<String> = b.schema().fields().iter().map(|f| f.name().clone()).collect();
+    let has = |cols: [&str; 3]| cols.iter().all(|c| names.iter().any(|n| n == c));
+    if has(GCS_NAMES.map(|(c, _)| c)) {
+        Fixtures::Cloud
+    } else if has(GCS_NAMES.map(|(_, g)| g)) {
+        Fixtures::Gcs
+    } else {
+        eprintln!("{}: neither cloud's nor gcs's class columns ({names:?}); the pinned packs are of those", p.display());
+        Fixtures::Other
+    }
+}
+
 /// A fresh scratch dir under cargo's per-target tmp.
 fn scratch(name: &str) -> PathBuf {
     let d = Path::new(env!("CARGO_TARGET_TMPDIR")).join(name);
@@ -97,13 +122,6 @@ fn digest(pack: &Path) -> String {
     hex::encode(d.finalize())
 }
 
-/// Whether a fixture generation's class columns are already gcs's names: gcs's branch cuts its fixtures under its
-/// `CLASS_COLS`, `cloud`'s are `c2`..`c4`. Either way its packs are the same bytes.
-fn gcs_named(gen: &Path) -> bool {
-    let b = ParquetRecordBatchReaderBuilder::try_new(File::open(gen.join("served/path.parquet")).unwrap()).unwrap();
-    b.schema().field_with_name(GCS_NAMES[0].1).is_ok()
-}
-
 /// `gen`'s slim pack (`-C`: `named`), written to `out`: its digest.
 fn slim_pack(gen: &Path, named: Option<&str>, out: &Path) -> String {
     let cs = named.map(|s| classes::parse(s).unwrap());
@@ -114,13 +132,17 @@ fn slim_pack(gen: &Path, named: Option<&str>, out: &Path) -> String {
 
 #[test]
 fn fixture_slim_packs() {
+    let fx = fixtures();
+    let kind = fixture_columns(&fx);
+    if kind == Fixtures::Other {
+        return;
+    }
     let tmp = scratch("fixture-slim-packs");
     let mut got: BTreeMap<String, String> = BTreeMap::new();
-    for g in fixtures() {
+    for g in fx {
         let n = g.file_name().unwrap().to_string_lossy().into_owned();
-        let named = gcs_named(&g);
-        let plain = slim_pack(&g, named.then_some(GCS), &tmp.join(format!("{n}.fsb")));
-        if !named {
+        let plain = slim_pack(&g, (kind == Fixtures::Gcs).then_some(GCS), &tmp.join(format!("{n}.fsb")));
+        if kind == Fixtures::Cloud {
             assert_eq!(slim_pack(&g, Some("2=c2,3=c3,4=c4"), &tmp.join(format!("{n}-named.fsb"))), plain, "{n}: its class columns named");
         }
         let gcs = tmp.join(format!("{n}-gcs"));
@@ -139,8 +161,11 @@ fn fixture_slim_packs() {
 /// A store in gcs's names without its `-C`: the columns have no class ids, and the load says so (it never drops them).
 #[test]
 fn gcs_names_need_their_classes_named() {
-    let tmp = scratch("gcs-unnamed");
     let fx = fixtures();
+    if fixture_columns(&fx) == Fixtures::Other {
+        return;
+    }
+    let tmp = scratch("gcs-unnamed");
     renamed_copy(&fx[0], &tmp.join("g"), &GCS_NAMES);
     let e = load(&store::open(&tmp.join("g")).unwrap(), None).err().unwrap().to_string();
     assert_eq!(
