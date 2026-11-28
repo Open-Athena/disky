@@ -179,7 +179,18 @@ def test_gcp_stack(monkeypatch: pytest.MonkeyPatch):
             ("gcp:cloudrunv2/serviceIamMember:ServiceIamMember", "hf-scan-events-invoker"),
             ("gcp:serviceaccount/iAMMember:IAMMember", "hf-scan-events-pubsub-token"),
             ("gcp:pubsub/subscription:Subscription", "hf-scan-events"),
+            ("disky:gcp:TaskLogBucket", "hf-task-logs"),
+            ("gcp:logging/projectBucketConfig:ProjectBucketConfig", "hf-task-logs-bucket"),
+            ("gcp:logging/projectSink:ProjectSink", "hf-task-logs-sink"),
+            ("disky:gcp:TaskLogView", "hf-task-log-view"),
+            ("gcp:logging/logView:LogView", "hf-task-log-view-view"),
+            ("gcp:logging/logViewIamMember:LogViewIamMember", "hf-task-log-view-reader"),
         ])
+        # hf's task logs: its own bucket (a year), fed by its label; the job account reads them through the view
+        logs_filter = 'log_id("batch_task_logs") AND labels.deployment = "hf"'
+        assert (m.inputs("hf-task-logs-bucket")["retentionDays"], m.inputs("hf-task-logs-sink")["filter"]) == (365, logs_filter)
+        assert (m.inputs("hf-task-log-view-view")["filter"], m.inputs("hf-task-log-view-reader")["member"]) == (
+            logs_filter, f"serviceAccount:{sa}")
         # Batch events: the scan head's state changes → `batch-events serve`, as the job account, with the scan's D1
         events_tpl = m.inputs("hf-scan-events", "gcp:cloudrunv2/service:Service")["template"]
         [ec] = events_tpl["containers"]

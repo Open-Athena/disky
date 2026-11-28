@@ -18,6 +18,7 @@ import pulumi_gcp as gcp
 import yaml
 
 from gcp_jobs import Adopt, BatchCron, BatchEvents, BatchSubmitCron, JobAccount, Secrets, SiteDispatcher, cost_labels, labeled_provider
+from task_logs import TaskLogBucket, TaskLogView
 
 cfg = pulumi.Config()
 gcp_cfg = pulumi.Config("gcp")
@@ -245,6 +246,14 @@ meta = BatchCron(
     adopt=adopt,
     depends_on=[job, secrets, images_reader, submit_grant, data_admin],
 )
+
+# hf's own Batch task logs (specs/per-deployment-task-logs.md): every hf job's, by its `deployment` label, kept a year
+# beside `_Default`'s 30 days; the job account reads them (its helpers') through the view (`$DT_TASK_LOG_VIEW`)
+task_log_bucket = TaskLogBucket("hf-task-logs", project=project, location="global", bucket_id="hf-task-logs", retention_days=365,
+                                deployment="hf")
+task_log_view = TaskLogView("hf-task-log-view", project=project, location="global", bucket="hf-task-logs", view_id="hf",
+                            deployment="hf", reader=job.member, opts=pulumi.ResourceOptions(depends_on=[task_log_bucket]))
+pulumi.export("task_log_view", task_log_view.path)
 
 pulumi.export("job_account", job.email)
 pulumi.export("scheduler_account", scheduler.email)
