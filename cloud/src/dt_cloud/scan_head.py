@@ -43,6 +43,7 @@ from .scan_backend import Backend, Run
 from .scan_dag import ScanDag
 from .scan_dag_nf import render
 from .scan_profile import PRIMARY_STORE, Disk, Machine, ScanProfile
+from .scan_rerun import RECOVERS_ENV
 from .scan_steps import DATA_MOUNT_ENV, PROFILE_JSON_ENV, profile_env_value
 
 
@@ -407,17 +408,17 @@ RUN_FACTS = {"DT_RUN_KIND": "-k", "DT_RUN_MACHINE": "-m", "DT_RUN_REGION": "-R",
 
 
 def start_args(profile: ScanProfile, gen: str, scan: str, run_id: str, batch: bool = True, image: str | None = None,
-               env: Mapping[str, str] | None = None) -> list[str]:
+               env: Mapping[str, str] | None = None, recovers: str | None = None) -> list[str]:
     """`scan-run start`'s arguments: the run id (`-r`, the one every task records into), the head's Batch job's facts
     (`-B`, when the head is one; else `RUN_FACTS` and `DT_RUN_SPOT=1` from `env`), the generation, a store other than
-    the primary (`-K`: the run's `store`, which `finish` and every task's phase keep), and the image the tasks run (`-i`,
-    when the head pins one)."""
+    the primary (`-K`: the run's `store`, which `finish` and every task's phase keep), the image the tasks run (`-i`,
+    when the head pins one), and for a re-run of a scan's steps the run it recovers (`-k phase-recovery -p <run>`)."""
     env = env or {}
     facts = [] if batch else [a for k, o in RUN_FACTS.items() if (env.get(k) or "").strip() for a in (o, env[k].strip())]
     if not batch and env.get("DT_RUN_SPOT", "").strip() == "1":
         facts.append("--spot")
     return ["-r", run_id, *(["-B"] if batch else []), *facts, "-g", gen, *([] if profile.primary else ["-K", profile.store]),
-            *(["-i", image] if image else []), scan]
+            *(["-i", image] if image else []), *(["-k", "phase-recovery", "-p", recovers] if recovers else []), scan]
 
 
 def pre_phases(env: Mapping[str, str]) -> list[tuple[str, list[str]]]:
@@ -679,9 +680,12 @@ def head(profile_path: Path, nf_dir: Path, launch: Path | None, *, reproc: bool 
     deployment_labels(dict(env))
     if reproc:
         env.update(REPROC="1", DT_RECORD="off")
-    if only:
-        # a re-run of the scan's steps (specs/scan-step-rerun.md): unrecorded, as `--reproc` is, until the scan's own
-        # run can take their phases
+    # a re-run of the scan's steps (specs/scan-step-rerun.md): recorded as a `phase-recovery` child of the run it
+    # recovers (`$DT_RECOVERS`, `scan-run rerun`), else not at all (as `--reproc`)
+    recovers = (env.get(RECOVERS_ENV) or "").strip() or None
+    if recovers and not only:
+        raise SystemExit(f"scan head: ${RECOVERS_ENV} ({recovers}) re-runs steps of that run: name them (--only)")
+    if only and not recovers:
         env["DT_RECORD"] = "off"
     batch = bool(env.get("BATCH_JOB_UID"))
     if not run_id and env.get(PROFILE_ENV) and env.get("DT_RECORD") != "off":
@@ -708,7 +712,9 @@ def head(profile_path: Path, nf_dir: Path, launch: Path | None, *, reproc: bool 
         return 0
     recording = bool(env.get(PROFILE_ENV))
     if recording:
-        _record(start_cmd, start_args(profile, gen, scan, run_id, batch, image, env))
+        if recovers and run_id == recovers:
+            raise SystemExit(f"scan head: a re-run is a run of its own, not {recovers} (unset $DT_RUN_ID)")
+        _record(start_cmd, start_args(profile, gen, scan, run_id, batch, image, env, recovers=recovers))
         for began, ended in pre_phases(env):
             _record(phase_begin_cmd, began)
             _record(phase_end_cmd, ended)

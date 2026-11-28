@@ -689,8 +689,8 @@ class FakeBackend(Backend):
         return run.launch / "fake.dag"
 
 
-def _drive(tmp_path, monkeypatch, fake: FakeBackend, **kw) -> tuple[int, list[tuple[str, list[str]]]]:
-    """`scan head` over `fake` on a one-source profile: its exit code and what it recorded."""
+def _drive(tmp_path, monkeypatch, fake: FakeBackend, extra_env: dict | None = None, **kw) -> tuple[int, list[tuple[str, list[str]]]]:
+    """`scan head` over `fake` on a one-source profile (its env plus ``extra_env``): its exit code and what it recorded."""
     prof = tmp_path / "p.yml"
     prof.write_text(f"deployment: fix\nexecutor: {{kind: local}}\nwork: {tmp_path}/nf\ndata: {tmp_path}/data\n"
                     "layout: {layer2: 'l2/{scan}/', snapshots: ''}\nsources: [s3://a]\noptions: {list: {import: true}}\n"
@@ -699,7 +699,7 @@ def _drive(tmp_path, monkeypatch, fake: FakeBackend, **kw) -> tuple[int, list[tu
     records: list[tuple[str, list[str]]] = []
     monkeypatch.setattr(H, "_record", lambda cmd, args: records.append((cmd.name, args)))
     env = {**LABELS, "DT_RUN_ID": "run-1", "SNAP_ID": "2026-10-16T1200", "GEN": "G1", "DT_JOB_START": "1",
-           "SCAN_RUNS_PROFILE": str(tmp_path / "scan-runs.json"), "DT_SUPERVISE": "1"}
+           "SCAN_RUNS_PROFILE": str(tmp_path / "scan-runs.json"), "DT_SUPERVISE": "1", **(extra_env or {})}
     return H.head(prof, NF, tmp_path / "launch", env=env, **kw), records
 
 
@@ -735,6 +735,25 @@ def test_only_runs_the_cut_dag_unrecorded(tmp_path, monkeypatch):
     assert _drive(tmp_path, monkeypatch, fake, only=("index-rows",))[0] == 0
     assert ([(n.name, n.deps, [str(c) for c in n.calls]) for n in fake.run.dag.nodes], fake.run.env["DT_RECORD"]) == (
         [("index_rows", (), ["index-rows"])], "off")
+
+
+def test_a_rerun_records_a_phase_recovery_child(tmp_path, monkeypatch):
+    """`--only` with `$DT_RECOVERS` (`scan-run rerun`'s job): the head records itself, its own run, as that run's
+    `phase-recovery` child (`-k phase-recovery -p`), recording on; the steps record their phases into it."""
+    fake = CapturingBackend(0)
+    got, records = _drive(tmp_path, monkeypatch, fake, extra_env={"DT_RECOVERS": "head-0"}, only=("index-rows",))
+    assert (got, records[0], fake.run.env.get("DT_RECORD")) == (
+        0, ("start", ["-r", "run-1", "-g", "G1", "-k", "phase-recovery", "-p", "head-0", "2026-10-16T1200"]), None)
+
+
+@pytest.mark.parametrize("extra, kw, why", [
+    ({"DT_RECOVERS": "head-0"}, {}, "scan head: $DT_RECOVERS (head-0) re-runs steps of that run: name them (--only)"),
+    ({"DT_RECOVERS": "run-1"}, {"only": ("index-rows",)}, "scan head: a re-run is a run of its own, not run-1 (unset $DT_RUN_ID)"),
+])
+def test_a_rerun_needs_its_steps_and_a_run_of_its_own(tmp_path, monkeypatch, extra, kw, why):
+    with pytest.raises(SystemExit) as e:
+        _drive(tmp_path, monkeypatch, FakeBackend(0), extra_env=extra, **kw)
+    assert str(e.value) == why
 
 
 class CountingBackend(FakeBackend):

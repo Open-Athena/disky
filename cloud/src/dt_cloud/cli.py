@@ -4131,6 +4131,9 @@ _scan_runs.add_command(_scan_cost)
 from .scan_tasks import task_cmd as _scan_task  # noqa: E402
 
 _scan_runs.add_command(_scan_task)
+from .scan_rerun import rerun_cmd as _scan_rerun  # noqa: E402
+
+_scan_runs.add_command(_scan_rerun)
 
 from .scan_started import stamp_started as _stamp_started  # noqa: E402
 
