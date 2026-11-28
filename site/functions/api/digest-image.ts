@@ -16,7 +16,7 @@ import { type Env, requireViewer } from '../_lib/auth.js'
 import { ivRefusal, ivRetry, storeReady, withPathStore } from '../_lib/index.js'
 import { ATTEN_DEFAULT, buildDiff, MIN_AREA_DEFAULT } from '../_lib/view.js'
 import { digestSvg, DIGEST_W, mapSvg, poolsSvg, tiersSvg } from '../_lib/og/digestCard.js'
-import { parseDigestRequest } from '../_lib/og/digestRequest.js'
+import { type DigestRequest, parseDigestRequest } from '../_lib/og/digestRequest.js'
 import { ensureWasm, svgToPng } from '../_lib/og/render.js'
 import { fonts, type OgEnv } from '../_lib/og/serve.js'
 import RESVG from '../_lib/og/vendor/resvg.wasm'
@@ -26,19 +26,17 @@ export const ZOOM = 1.5
 const MAP_W = DIGEST_W - 48
 const MAP_H = 440
 
-export const onRequestPost = async (ctx0: { request: Request; env: OgEnv }): Promise<Response> => {
-  const ctx = (await withPathStore(ctx0 as { request: Request; env: Env })) as { request: Request; env: OgEnv }
-  const gated = await requireViewer(ctx)
-  if (gated instanceof Response) return gated
-  const req = parseDigestRequest(await ctx.request.json().catch(() => null))
-  if (typeof req === 'string') return new Response(req, { status: 400 })
+/** The digest image for a parsed request (`parseDigestRequest`), drawn as the route draws it: the PNG, `null` when a
+ *  map part has nothing to draw, or the refusal to answer with (a 503 while the store is unready or a scan was cut
+ *  out). The route and the Workers converge (`_lib/digestConverge.ts`) both call it; ``env`` is past `withPathStore`. */
+export async function renderDigestImage(env: OgEnv, origin: string, req: DigestRequest): Promise<Uint8Array | null | Response> {
   let diff = null
   if (req.diff && req.part !== 'chart') {
     const { from: f, to: t, path, title } = req.diff
-    if (!storeReady(ctx.env)) return new Response('diff not configured (missing index store creds)', { status: 503 })
+    if (!storeReady(env as unknown as Env)) return new Response('diff not configured (missing index store creds)', { status: 503 })
     let data
     try {
-      data = await ivRetry(() => buildDiff(ctx.env, { from: f, to: t, path, w: MAP_W, h: MAP_H, minArea: MIN_AREA_DEFAULT, atten: ATTEN_DEFAULT, top: 500 }))
+      data = await ivRetry(() => buildDiff(env as unknown as Env, { from: f, to: t, path, w: MAP_W, h: MAP_H, minArea: MIN_AREA_DEFAULT, atten: ATTEN_DEFAULT, top: 500 }))
     } catch (e) {
       // A scan a broken interval-store run cut out: 503 + `Retry-After`, the job retries.
       const r = ivRefusal(e)
@@ -52,8 +50,19 @@ export const onRequestPost = async (ctx0: { request: Request; env: OgEnv }): Pro
     ? (diff ? mapSvg({ ...req, diff }) : null)
     : req.kind === 'tiers' ? tiersSvg({ ...req, diff }) : req.kind === 'pools' ? poolsSvg({ ...req, diff }) : digestSvg({ ...req, diff })
   // the map part of an interval with nothing to draw: no image (the job attaches the chart alone)
-  if (svg === null) return new Response('no diff map for this interval', { status: 404 })
+  if (svg === null) return null
   await ensureWasm(RESVG)
-  const png = svgToPng(svg, await fonts(ctx.env, new URL(ctx.request.url).origin), ZOOM)
+  return svgToPng(svg, await fonts(env, origin), ZOOM)
+}
+
+export const onRequestPost = async (ctx0: { request: Request; env: OgEnv }): Promise<Response> => {
+  const ctx = (await withPathStore(ctx0 as { request: Request; env: Env })) as { request: Request; env: OgEnv }
+  const gated = await requireViewer(ctx)
+  if (gated instanceof Response) return gated
+  const req = parseDigestRequest(await ctx.request.json().catch(() => null))
+  if (typeof req === 'string') return new Response(req, { status: 400 })
+  const png = await renderDigestImage(ctx.env, new URL(ctx.request.url).origin, req)
+  if (png instanceof Response) return png
+  if (png === null) return new Response('no diff map for this interval', { status: 404 })
   return new Response(png, { headers: { 'content-type': 'image/png', 'cache-control': 'no-store', 'x-digest-part': req.part } })
 }

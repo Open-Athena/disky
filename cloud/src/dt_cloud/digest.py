@@ -756,6 +756,32 @@ def cfg_json(cfg: DigestConfig) -> dict:
     }
 
 
+#: `converge_config`'s format (the site's `functions/_lib/digestConverge.ts` reads it): bump on any change of shape.
+CONVERGE_CONFIG_VERSION = 1
+
+
+def converge_config(tpl: Template, root: str) -> dict:
+    """What a Worker's converge of this deployment's Slack thread reads (specs/slack-in-workers.md), resolved: the OP
+    renderer's config (`cfg_json`) and params, the replies' (`Template.reply_json` without the month's triggers, which
+    it reads from D1), and the converge's own settings (the snapshots ``root``, the state and preview templates, the
+    variants, the OP's sender, pinning). The site's `DIGEST_CONFIG` var holds it, `dt-cloud digest-config` prints it, and
+    a test checks the two agree. What phase 1 doesn't converge (the cost template, a provisional reply, the quota alert,
+    the split reply, Discord) is carried as is: the Worker refuses a config using it, by name."""
+    cfg = tpl.cfg
+    reply = {"quota_marks": cfg.quota_marks, "total_headline": cfg.total_headline, **({"reply_lines": True} if cfg.reply_lines else {}),
+             "reply_hour": cfg.reply_hour, "provisional": cfg.provisional, "alert_pct": cfg.alert_pct, "op_sender": cfg.op_sender()}
+    if cfg.template == "quota":
+        from .digest_quota import AVATAR_REV
+
+        reply["avatar_rev"] = AVATAR_REV
+    return {
+        "version": CONVERGE_CONFIG_VERSION, "template": cfg.template, "cfg": cfg_json(cfg), "params": cfg.params, "reply": reply,
+        "root": root, "state": cfg.state, "preview": cfg.preview, "variant": cfg.variant, "variants": list(tpl.variants),
+        "edited_variants": list(tpl.edited_variants), "track_scan": tpl.track_scan, "pin": cfg.pin, "split_reply": cfg.split_reply,
+        "discord": cfg.discord_webhook_env is not None, "title": cfg.title, "op_sender": cfg.op_sender(),
+    }
+
+
 def site_render(cfg: DigestConfig, rows: dict, month: dt.date, plot_url: str | None = None, prev_url: str | None = None,
                 next_url: str | None = None) -> dict:
     """`POST /api/digest-op`: the month's OP ``text`` and plot ``image`` request, rendered by the site from ``rows``

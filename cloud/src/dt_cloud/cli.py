@@ -3758,6 +3758,21 @@ def _month_range(spec: str) -> list[dt.date]:
     return out
 
 
+@main.command("digest-config")
+@option("-C", "--config", "config_path", type=Path, help="The deployment's digest config (as `digest -C`)")
+@option("-r", "--root", help="Snapshots root (default the config's `root`)")
+@option("-T", "--template", type=Choice(["cost", "quota", "gcs", "cw"]), default="cost", help="The digest's template + preset config, as `digest -T`")
+def digest_config(config_path: Path | None, root: str | None, template: str) -> None:
+    """Print the converge config a Worker's digest converge reads (`digest.converge_config`, specs/slack-in-workers.md):
+    the site's `DIGEST_CONFIG` var is this, one line of JSON."""
+    import json
+
+    from . import digest as dg
+
+    cfg = dg.load_config(template, config_path)
+    print(json.dumps(dg.converge_config(dg.template(cfg), root or cfg.root), separators=(",", ":")))
+
+
 @main.command("digest-relink")
 @option("-c", "--channel", help="Slack channel id (default $SLACK_CHANNEL)")
 @option("-C", "--config", "config_path", type=Path, help="The deployment's digest config (as `digest -C`): where the threads' states live")
