@@ -82,6 +82,7 @@ def test_recovery_controller_waits_for_success_and_pins_child_image():
         "CLOUDFLARE_ACCOUNT_ID": "74981a43be0de7712369306c7b19133d",
         "R2_ENDPOINT": "https://74981a43be0de7712369306c7b19133d.r2.cloudflarestorage.com",
         "SCAN_ID": "2026-10-12T1042",
+        "DT_TASK_LOG_VIEW": "projects/oa-internal-450019/locations/global/buckets/gcs-task-logs/views/gcs",
     }}
     assert task["runnables"][0]["container"]["commands"] == ["-c", "set -euo pipefail; BATCH_REGION=us-east1 dt-cloud job watch -L -i 30 drill-job && cd /app && STATIC_NAMES_IMAGE=registry@sha256:test STATIC_NAMES_SPOT=0 dt-cloud static-names runs add -c -M 2026-10-12T1042"]
     assert (task["maxRetryCount"], spec["allocationPolicy"]["instances"][0]["policy"]["machineType"], spec["allocationPolicy"]["instances"][0]["policy"]["provisioningModel"]) == (0, "n2-highmem-4", "STANDARD")
