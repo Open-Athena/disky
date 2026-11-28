@@ -39,6 +39,9 @@ MEASURE_COLS = "q VARCHAR, k INTEGER, dir VARCHAR, rows BIGINT"
 #: Input rows (base measurement, run headers and counts) per `q` range `measure_kind` joins and writes at a time: cw's
 #: 2026-11-22..25 compactions, joining every range at once over `gov_reports`' growth, ran DuckDB out of 251 GiB.
 MEASURE_CHUNK_ROWS = 50_000_000
+#: `$DT_MEASURE_VERIFY=N`: N ranges (evenly spaced) of a cut measurement also joined the uncut way, over the whole
+#: tables, and compared row for row (a mismatch raises): the cut checked on real data, at ~one uncut range's cost apiece.
+MEASURE_VERIFY_ENV = "DT_MEASURE_VERIFY"
 #: The sampled `q` values the ranges are cut from
 RANGE_SAMPLE_ROWS = 100_000
 #: DuckDB's Arrow batch (`to_arrow_table`'s, `to_arrow_reader`'s default) and pyarrow's default row group: `write_sorted`
@@ -59,6 +62,18 @@ def q_ranges(con, tables: list[str], target: int) -> list[tuple[str | None, str 
     cuts = sorted({sample[len(sample) * i // parts] for i in range(1, parts)})
     bounds = [None, *cuts, None]
     return list(zip(bounds[:-1], bounds[1:]))
+
+
+def range_index_sql(col: str, cuts: list[str]) -> str:
+    """The index of the `q_ranges` range `col` falls in, given their inner bounds `cuts` (sorted): the number of cuts
+    ≤ `col`, so range `i` is `[cuts[i-1], cuts[i])` as `q_range_sql` reads it. A balanced tree of comparisons (⌈log2⌉ of
+    them per row), not one per cut."""
+    def go(lo: int, hi: int) -> str:
+        if lo == hi:
+            return str(lo)
+        mid = (lo + hi) // 2
+        return f"(CASE WHEN {col} < {q(cuts[mid])} THEN {go(lo, mid)} ELSE {go(mid + 1, hi)} END)"
+    return go(0, len(cuts))
 
 
 def q_range_sql(col: str, lo: str | None, hi: str | None) -> str:
@@ -312,31 +327,78 @@ def measure_kind(con, tiers: list[sd.Tier], meas: Path, kind: str, out: Path, *,
     # the whole set's, sorted, without holding it. A short literal's base count (`bx.c`) is its own `q`; a member's is its
     # base canonical's (`im_mt.c0`), so a long range reads the counts of its members' canonicals.
     ranges = q_ranges(con, ["im_h", "im_b", "im_d"], MEASURE_CHUNK_ROWS)
+    out.mkdir(parents=True, exist_ok=True)
+    split = Path(tempfile.mkdtemp(prefix=f"measure-{kind}-", dir=out.parent)) if len(ranges) > 1 else None
+    if split is not None:
+        # Each table cut by range once, in one parallel pass apiece (`PARTITION_BY` the range's index): a range's join
+        # then reads its own files, never the whole tables (cw's 2026-11-27 fold rescanned ~5B run counts and 2.0B base
+        # counts for each of ~150 ranges, 5.5 min apiece; sorting them instead took 2h17m and its join ran out of disk).
+        # The base counts go to every range holding a member whose canonical they are.
+        bounds = [lo for lo, _ in ranges[1:]]
+        rix = range_index_sql("q", bounds)
+        cuts = {"im_h": f"SELECT *, {rix} AS r FROM im_h", "im_b": f"SELECT *, {rix} AS r FROM im_b",
+                "im_d": f"SELECT *, {rix} AS r FROM im_d"}
+        if long:
+            cuts["im_mt"] = f"SELECT *, {rix} AS r FROM im_mt"
+            cuts["im_bx"] = f"SELECT bx.*, cr.r FROM im_bx AS bx JOIN (SELECT DISTINCT c0 AS c, {rix} AS r FROM im_mt) AS cr USING (c)"
+        else:
+            cuts["im_bx"] = f"SELECT *, {range_index_sql('c', bounds)} AS r FROM im_bx"
+        # a file per range open at once (the default 100 would close and reopen them, cutting each range into many files)
+        opened = con.execute("SELECT current_setting('partitioned_write_max_open_files')").fetchone()[0]
+        con.execute(f"SET partitioned_write_max_open_files = {max(int(opened), len(ranges) + 1)}")
+        try:
+            for t, sql in cuts.items():
+                set_stage(f"measure {kind}: {t} cut into {len(ranges)} q ranges")
+                t1 = monotonic()
+                con.execute(f"COPY ({sql}) TO {q(str(split / t))} (FORMAT parquet, PARTITION_BY (r))")
+                err(f"measure {kind}: {t} cut into {len(ranges)} q ranges in {fmt_secs(monotonic() - t1)}")
+        finally:
+            con.execute(f"SET partitioned_write_max_open_files = {opened}")
 
-    def part(lo: str | None, hi: str | None) -> str:
+    def part(i: int, lo: str | None, hi: str | None, uncut: bool = False) -> str:
         def of(t: str, col: str = "q") -> str:
-            return f"(SELECT * FROM {t} WHERE {q_range_sql(col, lo, hi)})"
-        bx = (f"(SELECT * FROM im_bx SEMI JOIN (SELECT c0 AS c FROM im_mt WHERE {q_range_sql('q', lo, hi)}) USING (c))" if long
+            if split is None or uncut:
+                return f"(SELECT * FROM {t} WHERE {q_range_sql(col, lo, hi)})"
+            files = sorted(str(f) for f in (split / t / f"r={i}").glob("*.parquet"))
+            return f"(SELECT * FROM read_parquet({_files(files)}, hive_partitioning = false))" if files else f"(SELECT * FROM {t} LIMIT 0)"
+        bx = (of("im_bx") if split is not None and not uncut else
+              f"(SELECT * FROM im_bx SEMI JOIN (SELECT c0 AS c FROM im_mt WHERE {q_range_sql('q', lo, hi)}) USING (c))" if long
               else of("im_bx", "c"))
         return f"""SELECT q::VARCHAR AS q, len(string_split(dir, '/'))::INTEGER AS k, dir::VARCHAR AS dir, rows::BIGINT AS rows FROM (
                 SELECT q, dir, rows FROM {of("im_h")}
                 UNION ALL SELECT x.q, x.dir, coalesce(b.rows, bx.rows, 0) + coalesce(d.rows, 0) AS rows
                 FROM (SELECT q, dir FROM {of("im_b")} UNION SELECT q, dir FROM {of("im_d")}) AS x ANTI JOIN {of("im_h")} AS h USING (q, dir)
-                LEFT JOIN {of("im_b")} AS b USING (q, dir) LEFT JOIN {of("im_d")} AS d USING (q, dir) {"JOIN im_mt AS mt USING (q)" if long else ""}
+                LEFT JOIN {of("im_b")} AS b USING (q, dir) LEFT JOIN {of("im_d")} AS d USING (q, dir) {f"JOIN {of('im_mt')} AS mt USING (q)" if long else ""}
                 LEFT JOIN {bx} AS bx ON bx.c = {bc} AND bx.dir = x.dir)
             WHERE rows >= {floor} ORDER BY q, k, dir"""
 
+    n_verify = int(os.environ.get(MEASURE_VERIFY_ENV) or 0) if split is not None else 0
+    verify = {round(j * (len(ranges) - 1) / max(1, n_verify - 1)) for j in range(n_verify)} if n_verify > 1 else ({len(ranges) // 2} if n_verify else set())
+
     def batches():
         prog = Progress(f"measure {kind}", len(ranges), unit="q ranges")
-        for lo, hi in ranges:
-            yield from con.execute(part(lo, hi)).to_arrow_reader(ARROW_BATCH_ROWS)
+        for i, (lo, hi) in enumerate(ranges):
+            if i in verify:
+                cut = con.execute(part(i, lo, hi)).to_arrow_table()
+                set_stage(f"measure {kind}: range {i} checked uncut")
+                t1 = monotonic()
+                whole = con.execute(part(i, lo, hi, uncut=True)).to_arrow_table()
+                if not cut.equals(whole):
+                    raise RuntimeError(f"measure {kind}: range {i} [{lo}, {hi}) cut ({cut.num_rows:,} rows) differs from uncut ({whole.num_rows:,})")
+                err(f"measure {kind}: range {i} [{lo}, {hi}): cut = uncut, {cut.num_rows:,} rows (uncut in {fmt_secs(monotonic() - t1)})")
+                yield from cut.to_batches(ARROW_BATCH_ROWS)
+            else:
+                yield from con.execute(part(i, lo, hi)).to_arrow_reader(ARROW_BATCH_ROWS)
             prog.tick()
         prog.done()
 
-    out.mkdir(parents=True, exist_ok=True)
     con.execute(f"CREATE OR REPLACE TEMP TABLE im_out ({MEASURE_COLS})")
     empty = con.execute("SELECT * FROM im_out").to_arrow_table()
-    written = write_sorted(batches(), empty, out / "s0000.parquet")
+    try:
+        written = write_sorted(batches(), empty, out / "s0000.parquet")
+    finally:
+        if split is not None:
+            shutil.rmtree(split, ignore_errors=True)
     doc = {k: con.execute(f"SELECT count(*) FROM {t}").fetchone()[0] for k, t in (("headers", "im_h"), ("dcount", "im_d"), ("base", "im_b"))}
     doc["rows"] = written
     doc["base_counted"] = n
