@@ -22,6 +22,7 @@ import yaml
 
 from gcp_jobs import Adopt, BatchCron, BatchEvents, BatchSubmitCron, JobAccount, Secrets, SiteDispatcher, cost_labels, grant_bucket, grant_secret, labeled_provider
 from cw_isolation import prepare_credentials, prepare_isolation
+from task_logs import TaskLogBucket, TaskLogView
 
 cfg = pulumi.Config()
 gcp_cfg = pulumi.Config("gcp")
@@ -98,6 +99,15 @@ site_dispatch = SiteDispatcher(
         "sweep-read": [URN + "gcp:storage/bucketIAMMember:BucketIAMMember::cw-isolation-data-dispatch-reader"],
     },
 )
+
+# cw's own Batch task logs (specs/per-deployment-task-logs.md): every cw job's, by its `deployment` label, kept a year
+# beside `_Default`'s 30 days; the job account reads them (its helpers') through the view, `$DT_TASK_LOG_VIEW` in the
+# submitters (`job/cw-batch-submit.sh`, `job/static-names.env`)
+task_log_bucket = TaskLogBucket("cw-task-logs", project=project, location="global", bucket_id="cw-task-logs", retention_days=365,
+                                deployment="cw")
+task_log_view = TaskLogView("cw-task-log-view", project=project, location="global", bucket="cw-task-logs", view_id="cw",
+                            deployment="cw", reader=job.member, opts=pulumi.ResourceOptions(depends_on=[task_log_bucket]))
+pulumi.export("task_log_view", task_log_view.path)
 
 CW_SECRETS = [
     "cw-s3-access-key-id",
