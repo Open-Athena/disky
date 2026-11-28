@@ -1,7 +1,8 @@
 /**
  * The staged-deletion review loop in Slack (specs/done/staged-slack.md): one thread
- * per staged plan in the deployment's staged channel (`stagedChannel`: `SLACK_STAGED_CHANNEL`, else
- * `SLACK_ADMIN_CHANNEL`; the only place a channel comes from). The parent message is re-rendered on
+ * per staged plan: a new thread in the deployment's staged channel (`stagedChannel`: `SLACK_STAGED_CHANNEL`, else
+ * `SLACK_ADMIN_CHANNEL`), a plan's thread staying in the channel it started in (a moved `SLACK_STAGED_CHANNEL` takes
+ * the threads that start after it, not the ones already running). The parent message is re-rendered on
  * every event (counts, size, the latest dry-run, whether it still matches the
  * plan, the action buttons); each event is a reply. A stager's stages within
  * `COALESCE_S` of their reply's last update edit that one reply in place. A ✅
@@ -905,8 +906,9 @@ const SETTLE_ROUNDS = 3
  * none) and, with `event`, reply in its thread. Before replying, a thread
  * whose parent carries a ✅ (or a stage into an emptied queue) moves the plan
  * to a new thread: a new parent, a pointer in the old thread, and the old
- * parent marked done. A thread in another channel than `stagedChannel`
- * is left alone and a new one starts there. Best-effort; never throws.
+ * parent marked done. The plan's thread stays in its channel; a new thread (a new plan's, or one continuing a thread
+ * that ended) starts in `stagedChannel`, its pointer and the old parent's close in the old thread's channel.
+ * Best-effort; never throws.
  * Returns the event reply's id (`<channel>/<ts>`) when it posted, else null. */
 export async function notifyPlan(env: NotifyEnv, db: D1Database, planId: number, siteUrl: string, ev?: Event | StageArgs | RunArgs, opts: { now?: number; quiet?: boolean } = {}): Promise<string | null> {
   if (!slackReady(env)) return null
@@ -956,14 +958,14 @@ export async function notifyPlan(env: NotifyEnv, db: D1Database, planId: number,
       ? { text: runEvent(runEv.run, runEv.phase, { via: runEv.via, names, siteUrl, reason: runEv.reason, outcome: runEv.outcome, expected: runEv.expected, undoUnavailable: runUndo?.unavailable }), ...(by ? { sender: personSender(by, people[by.toLowerCase()], runEv.phase, runEv.run.mode) } : {}) }
       : said ? { ...said, text: typeof said.text === 'function' ? said.text(who(said.by?.email ?? '', names)) : said.text, ...(said.by ? { sender: personSender(said.by.email, people[said.by.email.toLowerCase()], said.by.verb) } : {}) }
       : undefined
-    const channel = stagedChannel(env)
+    // The plan's thread stays where it started (Ryan, 2026-11-28: moving `SLACK_STAGED_CHANNEL` takes the threads that
+    // start after it; old ones stay); a new thread starts in the staged channel.
+    const staged = stagedChannel(env)
+    let channel = v.slack_ts && v.slack_channel ? v.slack_channel : staged
     let ts = v.slack_ts
-    if (ts && v.slack_channel !== channel) {
-      const d = await detach(db, planId, ts)
-      ts = d.won || d.channel !== channel ? null : d.ts
-    }
-    // The thread this event ends, and why (`ended`).
+    // The thread this event ends, why (`ended`), and its channel (`oldChannel`: its pointer and closed parent go there).
     let old: string | null = null
+    let oldChannel = channel
     let ended = ''
     if (ts && ev) {
       const stats = at ? Object.fromEntries(Object.entries(at.stats).map(([p, s]) => [p, s.bytes])) : null
@@ -971,6 +973,8 @@ export async function notifyPlan(env: NotifyEnv, db: D1Database, planId: number,
       else if (await parentDone(env, channel, ts)) ended = ':white_check_mark: Marked done.'
       if (ended) {
         const d = await detach(db, planId, ts)
+        oldChannel = channel
+        channel = staged
         if (d.won) { old = ts; ts = null } else ts = d.channel === channel ? d.ts : null
       }
     }
@@ -1008,9 +1012,9 @@ export async function notifyPlan(env: NotifyEnv, db: D1Database, planId: number,
       // `chat.getPermalink` can fail (its scope, a rate limit); the workspace-free form still opens the new parent.
       const pl = await slackApi(env, 'chat.getPermalink', { channel, message_ts: ts }).catch(() => null)
       const link = pl?.ok && typeof pl.permalink === 'string' ? pl.permalink : slackPermalink(channel, ts)
-      await slackApi(env, 'chat.postMessage', { channel, thread_ts: old, text: `${ended} Continued in ${link ? `<${link}|a new thread>` : 'a new thread'}.`, ...PLAN_SENDER, unfurl_links: false })
+      await slackApi(env, 'chat.postMessage', { channel: oldChannel, thread_ts: old, text: `${ended} Continued in ${link ? `<${link}|a new thread>` : 'a new thread'}.`, ...PLAN_SENDER, unfurl_links: false })
       const oldImage = await stagedCardUrl(env, db, siteUrl, v.digest, now, `c${now}`, { since: Math.floor(Number(old)), until: now }) ?? undefined
-      await slackApi(env, 'chat.update', { channel, ts: old, ...closedParent(planId, siteUrl, link, summary, oldImage) })
+      await slackApi(env, 'chat.update', { channel: oldChannel, ts: old, ...closedParent(planId, siteUrl, link, summary, oldImage) })
     }
     const { edits, bands } = await planHistory(db, planId)
     const running = v.runs.some(r => r.finished_ts == null)
@@ -1051,20 +1055,19 @@ export async function notifyPlan(env: NotifyEnv, db: D1Database, planId: number,
   return replied
 }
 
-/** Re-render stage replies in place (`chat.update`: no one is notified): the
- *  coalesced ones (`replyIds`; all of the plan's posted ones in this channel
- *  when omitted) and pre-coalescing single-batch ones (`legacy`: batch id →
- *  reply ts). Returns each one's outcome. */
+/** Re-render stage replies in place (`chat.update`: no one is notified), each in its own channel: the
+ *  coalesced ones (`replyIds`; all of the plan's posted ones when omitted) and pre-coalescing single-batch ones
+ *  (`legacy`: batch id → reply ts, in the plan's thread's channel). Returns each one's outcome. */
 export async function updateReplies(env: NotifyEnv, db: D1Database, planId: number, siteUrl: string, { replyIds, legacy = {} }: { replyIds?: number[]; legacy?: Record<number, string> } = {}): Promise<{ replies: Record<string, string>; coalesced: Record<string, string> }> {
   const out = { replies: {} as Record<string, string>, coalesced: {} as Record<string, string> }
   if (!slackReady(env)) return out
-  const channel = stagedChannel(env)
   const rows = replyIds
     ? (await db.prepare(`SELECT id, channel, slack_ts FROM stage_replies WHERE plan_id = ? AND id IN (${replyIds.map(() => '?').join(',') || 'NULL'})`).bind(planId, ...replyIds).all<{ id: number; channel: string; slack_ts: string | null }>()).results
     : (await db.prepare('SELECT id, channel, slack_ts FROM stage_replies WHERE plan_id = ? AND slack_ts IS NOT NULL').bind(planId).all<{ id: number; channel: string; slack_ts: string | null }>()).results
-  const posted = rows.filter((r): r is typeof r & { slack_ts: string } => r.slack_ts != null && r.channel === channel)
+  const posted = rows.filter((r): r is typeof r & { slack_ts: string } => r.slack_ts != null)
   const plan = await db.prepare('SELECT slack_channel FROM plans WHERE id = ?').bind(planId).first<{ slack_channel: string | null }>()
-  const legacyTs = plan?.slack_channel === channel ? Object.entries(legacy) : []
+  const legacyChannel = plan?.slack_channel ?? null
+  const legacyTs = legacyChannel ? Object.entries(legacy) : []
   if (!posted.length && !legacyTs.length) return out
   const items = (await db.prepare('SELECT prefix, added_by FROM plan_items WHERE plan_id = ?').bind(planId).all<{ prefix: string; added_by: string }>()).results
   const batchBy = (await db.prepare('SELECT created_by FROM stage_batches WHERE plan_id = ?').bind(planId).all<{ created_by: string }>()).results.map(b => b.created_by)
@@ -1078,13 +1081,13 @@ export async function updateReplies(env: NotifyEnv, db: D1Database, planId: numb
   for (const r of posted) {
     const m = await renderReply(db, ctx, { replyId: r.id })
     if (!m) { out.coalesced[r.id] = 'no batches'; continue }
-    const u = await slackApi(env, 'chat.update', { channel, ts: r.slack_ts, ...m })
+    const u = await slackApi(env, 'chat.update', { channel: r.channel, ts: r.slack_ts, ...m })
     out.coalesced[r.id] = u.ok ? 'updated' : (u.error ?? 'failed')
   }
   for (const [batch, ts] of legacyTs) {
     const m = await renderReply(db, ctx, { batchId: Number(batch) })
     if (!m) { out.replies[batch] = 'no such batch'; continue }
-    const u = await slackApi(env, 'chat.update', { channel, ts, ...m })
+    const u = await slackApi(env, 'chat.update', { channel: legacyChannel!, ts, ...m })
     out.replies[batch] = u.ok ? 'updated' : (u.error ?? 'failed')
   }
   return out
@@ -1097,8 +1100,8 @@ export async function updateReplies(env: NotifyEnv, db: D1Database, planId: numb
 export async function refreshThread(env: NotifyEnv, db: D1Database, planId: number, siteUrl: string, replies: Record<number, string>): Promise<{ parent: boolean; replies: Record<string, string>; coalesced: Record<string, string> }> {
   const out = { parent: false, replies: {} as Record<string, string>, coalesced: {} as Record<string, string> }
   if (!slackReady(env)) return out
-  const plan = await db.prepare('SELECT slack_ts, slack_channel FROM plans WHERE id = ?').bind(planId).first<{ slack_ts: string | null; slack_channel: string | null }>()
-  if (!plan?.slack_ts || plan.slack_channel !== stagedChannel(env)) return out
+  const plan = await db.prepare('SELECT slack_ts FROM plans WHERE id = ?').bind(planId).first<{ slack_ts: string | null }>()
+  if (!plan?.slack_ts) return out
   await notifyPlan(env, db, planId, siteUrl)
   out.parent = true
   return { ...out, ...await updateReplies(env, db, planId, siteUrl, { legacy: replies }) }
@@ -1157,14 +1160,14 @@ export async function refreshClosed(env: NotifyEnv, db: D1Database, planId: numb
 }
 
 /** A new scan has landed, and only an event re-renders the card: the job's post-scan ping (`dt-cloud staged-card`) brings the
- *  open plan's card up to it. An edit in place and nothing else: no card without a thread yet, none in another channel, no
- *  reply for a batch a died notify left unshown. Says whether it edited. */
+ *  open plan's card up to it, in its thread's own channel. An edit in place and nothing else: no card without a thread yet,
+ *  no reply for a batch a died notify left unshown. Says whether it edited. */
 export async function refreshStagedCard(env: NotifyEnv, db: D1Database, siteUrl: string): Promise<boolean> {
   if (!slackReady(env)) return false
   const id = await openPlanId(db)
   if (id == null) return false
-  const plan = await db.prepare('SELECT slack_ts, slack_channel FROM plans WHERE id = ?').bind(id).first<{ slack_ts: string | null; slack_channel: string | null }>()
-  if (!plan?.slack_ts || plan.slack_channel !== stagedChannel(env)) return false
+  const plan = await db.prepare('SELECT slack_ts FROM plans WHERE id = ?').bind(id).first<{ slack_ts: string | null }>()
+  if (!plan?.slack_ts) return false
   await notifyPlan(env, db, id, siteUrl, undefined, { quiet: true })
   return true
 }
