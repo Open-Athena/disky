@@ -2,7 +2,7 @@
  * resumed after a step's budget runs out, and run as a shadow, over an in-memory store and a fake Slack. */
 import { describe, expect, it } from 'vitest'
 import type { SlackClient } from '@open-athena/thrds'
-import { Converger, type ConvergeConfig, type ConvergeDeps, relinkText, stateKey, type ThreadState } from './digestConverge'
+import { Converger, type ConvergeConfig, type ConvergeDeps, dataBase, leaseKey, relinkText, stateKey, type ThreadState } from './digestConverge'
 import type { SnapshotStore } from './digestStore'
 import type { QuotaRows, QuotaScan } from '../../src/digest/quota'
 import { Budget, OutOfBudget } from './slackJobs'
@@ -77,8 +77,9 @@ const KEY = stateKey(CFG, 'C1', 'weekly', '2026-12')
 const writes = (calls: Call[]) => calls.filter(c => c.method !== 'chat.getPermalink').map(c => [c.method, c.body['ts'] ?? c.body['thread_ts'] ?? null, c.body['username'] ?? null])
 
 describe('the Workers digest converge', () => {
-  it('keys state as the job does', () => {
-    expect(KEY).toBe('digest/r2/C1/weekly/2026-12.json')
+  it('keys state and the lease as the job does', () => {
+    expect([KEY, leaseKey(CFG, 'C1', '2026-12'), stateKey({ ...CFG, root: 'gs://d/snapshots/cw' }, 'C1', 'body', '2026-12'), dataBase('gs://d/x/snapshots/cw')])
+      .toEqual(['digest/r2/C1/weekly/2026-12.json', 'digest/r2/C1/2026-12.lease.json', 'digest/cw/C1/body/2026-12.json', 'x'])
   })
 
   it('posts the OP and a weekly reply, then edits only what a new scan changes', async () => {
@@ -128,7 +129,7 @@ describe('the Workers digest converge', () => {
       ['pins.add', null, null],
       ['pins.remove', null, null],
     ])
-    expect([slack.calls[1].body['timestamp'], slack.calls[2].body['timestamp']]).toEqual(['100.000001', '90.000001'])
+    expect(slack.calls.filter(c => c.method.startsWith('pins.')).map(c => c.body['timestamp'])).toEqual(['100.000001', '90.000001'])
     // November's thread (another style) is linked from December's OP
     const op = slack.calls.find(c => c.method === 'chat.postMessage')!.body['text'] as string
     expect(op.split('\n').filter(l => l.includes('November'))).toEqual(['<https://slack.example.org/archives/C1/p90000001|← November>'])

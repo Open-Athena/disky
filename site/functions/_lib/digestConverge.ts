@@ -96,20 +96,25 @@ export const priorMonth = (m: string): string => { const t = new Date(monthOf(m)
 export const nextMonth = (m: string): string => { const t = new Date(monthOf(m)); t.setUTCMonth(t.getUTCMonth() + 1); return t.toISOString().slice(0, 7) }
 const monthName = (m: string): string => `${MONTHS[Number(m.slice(5, 7)) - 1]} ${m.slice(0, 4)}`
 
+/** The key prefix the digest's state lives under: the root's path before its last `/snapshots` (`digest.state_path`:
+ *  ``root.rsplit("/snapshots", 1)[0]``), `''` for a root at the bucket's `snapshots/`. */
+export function dataBase(root: string): string {
+  const { prefix } = parseRoot(root)
+  const path = `/${prefix}`
+  const at = path.lastIndexOf('/snapshots')
+  return (at >= 0 ? path.slice(0, at) : path).replace(/^\//, '')
+}
+
 /** The key of ``month``'s state for ``variant`` in ``channel`` (`digest.state_path`: beside the root's `snapshots/`). */
 export function stateKey(c: ConvergeConfig, channel: string, variant: string, month: string): string {
-  const { prefix } = parseRoot(c.root)
-  const at = prefix.lastIndexOf('/snapshots')
-  const base = at >= 0 ? prefix.slice(0, at) : prefix
+  const base = dataBase(c.root)
   const dir = c.state.replaceAll('{channel}', channel).replaceAll('{variant}', variant)
   return [base, dir, `${month}.json`].filter(Boolean).join('/')
 }
 
 /** The thread lease's key (`digest_switch.lease_url`): the state dir without its variant, `<YYYY-MM>.lease.json`. */
 export function leaseKey(c: ConvergeConfig, channel: string, month: string): string {
-  const { prefix } = parseRoot(c.root)
-  const at = prefix.lastIndexOf('/snapshots')
-  const base = at >= 0 ? prefix.slice(0, at) : prefix
+  const base = dataBase(c.root)
   const dir = c.state.replaceAll('{channel}', channel).replaceAll('{variant}', '').split('/').filter(Boolean).join('/')
   return [base, dir, `${month}.lease.json`].filter(Boolean).join('/')
 }
