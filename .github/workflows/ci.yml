@@ -353,14 +353,16 @@ jobs:
 
   focused-cloud-test:
     if: github.event_name == 'workflow_dispatch'
-    name: Focused cloud tests (${{ matrix.python-version }})
+    name: Hang catch (${{ matrix.python-version }}, ${{ matrix.attempt }})
     runs-on: ubuntu-latest
+    timeout-minutes: 55
     permissions:
       contents: read
     strategy:
       fail-fast: false
       matrix:
-        python-version: ['3.12', '3.13']
+        python-version: ['3.13']
+        attempt: [1, 2, 3, 4]
     steps:
       - uses: actions/checkout@v4
         with:
@@ -368,11 +370,33 @@ jobs:
       - uses: astral-sh/setup-uv@v4
       - run: uv python install '${{ matrix.python-version }}'
       - run: uv sync --frozen --all-packages --all-extras --all-groups
-      - name: Run selected tests
+      - run: uv tool install py-spy
+      - name: Run, dumping every Python process's stack once the log stops moving
         working-directory: cloud
         env:
           CLOUD_TESTS: ${{ inputs.cloud_tests }}
         run: |
           read -r -a selected <<< "$CLOUD_TESTS"
-          test "${#selected[@]}" -gt 0
-          uv run --no-sync pytest "${selected[@]}" -v --durations=10
+          spy=$(command -v py-spy)
+          uv run --no-sync pytest "${selected[@]}" > ../pytest.log 2>&1 &
+          pid=$!
+          last=-1; idle=0
+          while kill -0 "$pid" 2>/dev/null; do
+            sleep 20
+            n=$(wc -l < ../pytest.log)
+            if [ "$n" = "$last" ]; then idle=$((idle + 20)); else idle=0; last=$n; fi
+            if [ "$idle" -ge 240 ]; then
+              echo "no output for ${idle}s; last lines:"; tail -15 ../pytest.log
+              ps -eo pid,ppid,etime,stat,args --forest | grep -v ' \[' | cut -c1-220
+              for p in $(pgrep -f python); do
+                echo "::group::pid $p $(tr '\0' ' ' < /proc/$p/cmdline | cut -c1-160)"
+                sudo "$spy" dump --native --locals --pid "$p" || true
+                echo "::endgroup::"
+              done
+              kill -9 "$pid"; sudo pkill -9 -f python || true
+              exit 1
+            fi
+          done
+          wait "$pid"; rc=$?
+          tail -25 ../pytest.log
+          exit "$rc"
