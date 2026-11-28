@@ -107,7 +107,7 @@ Why there: a `shared` stack per provider, each its own Pulumi project in its own
 
 ### What it makes
 
-- **GCP** (22 resources, `pulumi preview`): the account `disky-vm-pilot@oa-internal-450019.iam.gserviceaccount.com` with `logging.logWriter`, `secretAccessor` on its own three containers (below), and `iam.serviceAccountTokenCreator` on exactly `oa-r2-usage-job@oa-internal-450019.iam.gserviceaccount.com` and `hf-usage-job@oa-internal-450019.iam.gserviceaccount.com`: nothing else. Everything the box does for a tenant (its jobs, its images, its pack sync's store credentials) it does as that tenant's job account, which already holds its deployment's secrets, data bucket and images; no grant is needed for the box as itself (the pack sync's R2 reads use the tenant's R2 keys, read as its job account). The VPC `disky-vm-pilot` (subnet 10.64.0.0/24 in us-west1, Private Google Access) with one firewall rule, IAP's 35.235.240.0/20 to TCP 22, so the default network's `0.0.0.0/0` rules never apply; a Cloud NAT for egress (no external address). The instance `disky-vm-pilot` (e2-standard-4, us-west1-b, Debian 12, 20 GB pd-balanced boot disk, shielded, OS Login) and its 50 GB pd-balanced data disk `disky-vm-pilot-data`. Labels: `app=disky`, `deployment=shared` (the provider's defaults) and `component=vm-pilot` on the instance, both disks and the secrets; networks, firewall rules, routers, NAT and IAM members take no labels in GCP.
+- **GCP** (23 resources; applied 2026-11-28 04:31Z): the account `disky-vm-pilot@oa-internal-450019.iam.gserviceaccount.com` with `logging.logWriter` and `monitoring.metricWriter` (the Ops Agent's host metrics; without it the agent's self-metrics fail every few seconds), `secretAccessor` on its own three containers (below), and `iam.serviceAccountTokenCreator` on exactly each tenant's narrow VM account, owned by its own deployment's stack (Ryan, 2026-11-27: never the full job account): `oa-r2-usage-vm@oa-internal-450019.iam.gserviceaccount.com` (a scan's runtime secrets, no Pages edit or search token) and `hf-usage-vm@oa-internal-450019.iam.gserviceaccount.com` (a read-only R2 key for the pack pull only): nothing else. Everything the box does for a tenant (its jobs, its images, its pack sync's store credentials) it does as that tenant's job account, which already holds its deployment's secrets, data bucket and images; no grant is needed for the box as itself (the pack sync's R2 reads use the tenant's R2 keys, read as its job account). The VPC `disky-vm-pilot` (subnet 10.64.0.0/24 in us-west1, Private Google Access) with one firewall rule, IAP's 35.235.240.0/20 to TCP 22, so the default network's `0.0.0.0/0` rules never apply; a Cloud NAT for egress (no external address). The instance `disky-vm-pilot` (e2-standard-4, us-west1-b, Debian 12, 20 GB pd-balanced boot disk, shielded, OS Login) and its 50 GB pd-balanced data disk `disky-vm-pilot-data`. Labels: `app=disky`, `deployment=shared` (the provider's defaults) and `component=vm-pilot` on the instance, both disks and the secrets; networks, firewall rules, routers, NAT and IAM members take no labels in GCP.
 - **Cloudflare** (3 resources): the remotely managed tunnel `disky-vm-pilot`; its config, one route `vmd-pilot.oa.dev` → `http://localhost:7340` and a 404 for anything else; a proxied CNAME `vmd-pilot.oa.dev` → `<tunnel id>.cfargotunnel.com`. No page links to the hostname; `vmd` answers `/healthz` unsigned and every `/v1/*` only under a tenant's HMAC.
 - **Cost:** ~$98/month for the e2-standard-4 (on demand, us-west1), ~$7 for 70 GB of pd-balanced, ~$1 for the NAT plus $0.045/GB through it (packs, the Hub, R2; Google APIs bypass it). The tunnel is free.
 
@@ -173,11 +173,13 @@ From anywhere, through the tunnel: `curl -s https://vmd-pilot.oa.dev/healthz` (`
 
 ```bash
 sudo systemd-run --wait --pipe --slice=scan.slice /usr/local/lib/disky/with-secrets \
-  -i oa-r2-usage-job@oa-internal-450019.iam.gserviceaccount.com \
+  -i oa-r2-usage-vm@oa-internal-450019.iam.gserviceaccount.com \
   AWS_ACCESS_KEY_ID=oa-r2-index-access-key-id AWS_SECRET_ACCESS_KEY=oa-r2-index-secret-access-key -- \
   env DISKY_R2_ENDPOINT_URL=<r2's endpoint> AWS_DEFAULT_REGION=auto \
   dt-cloud vm-pack build -o r2://oa-r2-usage-index -w /var/lib/disky/work/vm-pack
 ```
+
+The box's checkout is `cloud`'s, so `vm-pack build` names the store's class columns from `cloud`'s `interval_store.CLASS_COLS` (`c2`..`c4`: r2's too). hf's store names its own: build hf's first pack with `-C 5=private_bytes,6=git_bytes` (specs/vm-mode.md §6.1; without it the pack is refused, `no column for class 2`).
 
 ### Teardown
 
