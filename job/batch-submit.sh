@@ -96,6 +96,9 @@ v = {
     # the stack's cost labels (PIN keeps them: `submitter_spec` passes them through), so the
     # jobs this one submits (the listing fan-out, the static-names chain) carry them too
     "DISKY_LABELS": os.environ.get("DISKY_LABELS", ""),
+    # gcs's own Batch task logs (infra/gcp `gcs-task-logs`, specs/per-deployment-task-logs.md): the scan's jobs read
+    # their helpers' through it
+    "DT_TASK_LOG_VIEW": "projects/oa-internal-450019/locations/global/buckets/gcs-task-logs/views/gcs",
     # what started the scan (`scan_runs.trigger`, the scan's `trigger.json`): the cron body is the PIN spec;
     # everything else is a hand submit
     "DT_TRIGGER": "schedule" if pin else os.environ.get("DT_TRIGGER", "manual"),
