@@ -3,7 +3,7 @@ config:
   gcp:region: us-west1
   r2:dailyEnabled: "true"
   r2:scanEvents: "true"
-  r2:scanImage: us-west1-docker.pkg.dev/oa-internal-450019/oa-r2-usage/scan@sha256:7d5f77ba3daa481447ac169acf4e8549b6179ef6dc030653f33b216f81532935
+  r2:scanImage: us-west1-docker.pkg.dev/oa-internal-450019/oa-r2-usage/scan@sha256:d6a2e268e1098753d160f899fc7ddeb838a212046357cff85b2a46a1f263c044
   r2:heads:
     - profile: r2.yml
       schedule: "15 7 * * *"
