@@ -6,8 +6,8 @@ buckets) authenticates as the job's account, with tokens refreshed for as long a
 The local job backend (`job_backend.Local`) starts one per job, bound to the gateway of the job's own Docker network,
 and points the job's containers at it (`$GCE_METADATA_HOST`, `$GCE_METADATA_IP`, `$GCE_METADATA_ROOT`: the variables
 Python's, Go's and C++'s clients read). It answers only requests from that network's subnet and from the host's own
-address toward it (`host_source`: the kernel's source address for the gateway, which is the host's primary address, not
-the gateway's, while the bridge has no container; on the box, 2026-11-28, gcsfuse's first token request came from it) carrying `Metadata-Flavor: Google`, so another job's
+addresses (`local_addresses`: the host's gcsfuse mounts reached it from the VM's primary address, not the gateway's,
+on the box, 2026-11-28) carrying `Metadata-Flavor: Google`, so another job's
 containers, on networks of their own, get 403. The host's real metadata server stays closed to every container
 (`deploy/vm-pilot/docker-no-metadata.conf`).
 
@@ -156,14 +156,17 @@ def _handler(server: MetadataServer) -> type[BaseHTTPRequestHandler]:
     return Handler
 
 
-def host_source(gateway: str) -> str | None:
-    """The address this host's own connections to `gateway` come from (a UDP `connect` picks the route; nothing is sent),
-    or None when there is no route. With the job's bridge still empty, that is the host's primary address."""
-    import socket
+def local_addresses(ip_json: str | None = None) -> list[str]:
+    """Every IPv4 address this host owns (`ip -j -4 addr`'s `local`s), loopback included; `ip_json` instead of running
+    `ip`. The job's metadata server answers them all: the host's own processes (its gcsfuse mounts) reach the gateway
+    from whichever one the kernel picks, which on the box was the primary address, not the gateway (2026-11-28), and
+    only this host's processes can use them; another job's containers come from their own subnets."""
+    import json as _json
+    import subprocess
 
-    try:
-        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
-            s.connect((gateway, 9))
-            return s.getsockname()[0]
-    except OSError:
-        return None
+    if ip_json is None:
+        try:
+            ip_json = subprocess.run(["ip", "-j", "-4", "addr"], capture_output=True, text=True, check=True).stdout
+        except (OSError, subprocess.CalledProcessError):
+            return []
+    return [a["local"] for i in _json.loads(ip_json or "[]") for a in i.get("addr_info", []) if a.get("family") == "inet"]

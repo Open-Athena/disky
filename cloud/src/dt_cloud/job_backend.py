@@ -728,7 +728,7 @@ class Local:
         """The job's dirs, its network, its metadata server on the network's gateway (answering only the network's
         subnet), and its gcsfuse mounts (as the job's account, through that server); yields the server. Everything is
         taken down after, in reverse, whatever happened."""
-        from .job_metadata import MetadataServer, host_source
+        from .job_metadata import MetadataServer, local_addresses
 
         d = self.dir(job_id)
         for p in [*job["dirs"], *job.get("keep", [])]:
@@ -740,8 +740,8 @@ class Local:
         mounted: list[tuple[Mapping, object]] = []
         try:
             gateway, subnet = self._network(job["engine"], net, job_id)
-            # the job's containers, and this host's own processes (its gcsfuse mounts) by their source address
-            allow = [subnet, *([f"{src}/32"] if (src := host_source(gateway)) else [])]
+            # the job's containers, and this host's own processes (its gcsfuse mounts), from any of the host's addresses
+            allow = [subnet, *(f"{a}/32" for a in local_addresses())]
             meta = MetadataServer(sa, sa_project(sa) or "", lambda s: self.identity.access_token(sa, s), bind=gateway,
                                   allow=allow, lifetime_s=lifetime, clock=self.clock)
             meta.start()

@@ -71,11 +71,16 @@ def test_it_also_answers_the_hosts_own_address():
     assert (answers, len(minted)) == ([200, 200, 403, 403], 1)
 
 
-def test_host_source_is_the_local_address_toward_a_gateway():
-    """A UDP connect's source is a local address (no packet sent); no route at all reads None."""
-    from dt_cloud.job_metadata import host_source
+def test_local_addresses_are_every_ipv4_the_host_owns():
+    """`ip -j -4 addr`'s inet `local`s, every interface (loopback, the VM's primary, docker bridges)."""
+    from dt_cloud.job_metadata import local_addresses
 
-    assert host_source("127.0.0.1") == "127.0.0.1"
+    ip_json = json.dumps([
+        {"ifname": "lo", "addr_info": [{"family": "inet", "local": "127.0.0.1", "prefixlen": 8}]},
+        {"ifname": "ens4", "addr_info": [{"family": "inet", "local": "10.64.0.2", "prefixlen": 32}]},
+        {"ifname": "br-1", "addr_info": [{"family": "inet", "local": "172.19.0.1", "prefixlen": 16}]},
+    ])
+    assert local_addresses(ip_json) == ["127.0.0.1", "10.64.0.2", "172.19.0.1"]
 
 
 def test_a_token_is_reused_until_it_nears_its_expiry():
